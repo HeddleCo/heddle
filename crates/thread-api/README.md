@@ -261,3 +261,12 @@ nonce and a 60-second clock window. Hosts separately bind that authority to the
 account/resource and consume the verified nonce durably. `replication::opening`
 shares negotiation of known-Thread scope, transport endpoints, formats and
 budgets across device and hosted adapters.
+
+### Stream lifetime and progress
+
+The generated RPC `live_stream` contract selects Iroh idle behavior. Observations
+and Thread replication may be quiet between complete frames; finite content reads
+and resumable uploads retain progress deadlines. All streams bound their initial
+response and incomplete frames. Cancellation preserves a partial frame's original
+deadline as well as its bytes. Callers can impose an overall wait and cancel an
+observation independently; connection liveness remains Iroh's responsibility.

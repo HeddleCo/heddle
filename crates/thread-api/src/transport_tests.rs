@@ -45,13 +45,7 @@ async fn cancelling_next_preserves_a_partially_consumed_frame() {
     let (mut send, _) = outgoing.open_bi().await.expect("stream");
     send.write_all(&[0, 0]).await.expect("partial header");
     let (_, recv) = incoming.accept_bi().await.expect("receive");
-    let mut reader = Reader {
-        recv,
-        frame_limit: 1024,
-        timeout: Duration::from_secs(5),
-        done: false,
-        buffer: vec![],
-    };
+    let mut reader = Reader::new(recv, 1024, Duration::from_secs(5));
     assert!(
         tokio::time::timeout(Duration::from_millis(50), reader.next())
             .await
@@ -100,13 +94,7 @@ async fn exchange_receives_before_request_fin_and_half_close_keeps_responses_ali
             .expect("complete prelude");
         assert_eq!(prelude.method, rpc::SyncServiceReplicateThread::METHOD.path);
         assert!(prelude.context.client_operation_id.is_empty());
-        let mut requests = Reader {
-            recv,
-            frame_limit: 4096,
-            timeout: Duration::from_secs(5),
-            done: false,
-            buffer: vec![],
-        };
+        let mut requests = Reader::new(recv, 4096, Duration::from_secs(5));
         let open = requests
             .next()
             .await
@@ -202,7 +190,12 @@ async fn a_quiet_live_stream_stays_open_past_the_frame_progress_timeout() {
         .await
         .expect("opening response");
     let (_, recv) = incoming.accept_bi().await.expect("receive");
-    let mut reader = Reader::new(recv, 1024, Duration::from_millis(80));
+    let mut reader = Reader::for_method(
+        recv,
+        1024,
+        Duration::from_millis(80),
+        rpc::ThreadServiceObserveThread::METHOD,
+    );
     assert_eq!(reader.next().await.expect("initial frame"), Some(vec![1]));
     assert!(
         tokio::time::timeout(Duration::from_millis(240), reader.next())
@@ -230,7 +223,12 @@ async fn partial_frame_deadline_survives_canceling_and_resuming_next() {
         .await
         .expect("opening response");
     let (_, recv) = incoming.accept_bi().await.expect("receive");
-    let mut reader = Reader::new(recv, 1024, Duration::from_millis(250));
+    let mut reader = Reader::for_method(
+        recv,
+        1024,
+        Duration::from_millis(250),
+        rpc::ThreadServiceObserveThread::METHOD,
+    );
     assert_eq!(reader.next().await.expect("first frame"), Some(vec![1]));
     send.write_all(&[0, 0]).await.expect("start next frame");
     assert!(
@@ -264,8 +262,46 @@ async fn the_initial_stream_response_still_requires_timely_progress() {
         .accept_bi()
         .await
         .expect("server holds response open");
-    let mut reader = Reader::new(recv, 1024, Duration::from_millis(80));
-    assert!(matches!(reader.next().await, Err(Error::Timeout)));
+    let mut reader = Reader::for_method(
+        recv,
+        1024,
+        Duration::from_millis(80),
+        rpc::ThreadServiceObserveThread::METHOD,
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), reader.next())
+            .await
+            .expect("initial response wait is bounded"),
+        Err(Error::Timeout)
+    ));
+    local.close().await;
+    server.close().await;
+}
+
+#[tokio::test]
+async fn finite_content_streams_keep_progress_deadlines_between_frames() {
+    let (server, local, outgoing, incoming) = endpoints().await;
+    let (mut send, _) = outgoing.open_bi().await.expect("stream");
+    send.write_all(&framing::encode_stream_message(&[1]).expect("frame"))
+        .await
+        .expect("content frame");
+    let (_, recv) = incoming.accept_bi().await.expect("receive");
+    let mut reader = Reader::for_method(
+        recv,
+        1024,
+        Duration::from_millis(80),
+        rpc::ContentServiceReadContent::METHOD,
+    );
+    assert_eq!(
+        reader.next().await.expect("first content frame"),
+        Some(vec![1])
+    );
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(1), reader.next())
+            .await
+            .expect("finite content stream deadline"),
+        Err(Error::Timeout)
+    ));
     local.close().await;
     server.close().await;
 }

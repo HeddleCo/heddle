@@ -199,7 +199,12 @@ impl Peer {
         let context = tokio::time::timeout(TIMEOUT, opening)
             .await
             .map_err(|_| transport::Error::Timeout)??;
-        let mut reader = Reader::new(recv, FRAME_LIMIT, TIMEOUT);
+        let mut reader = Reader::for_method(
+            recv,
+            FRAME_LIMIT,
+            TIMEOUT,
+            rpc::SyncServiceReplicateThread::METHOD,
+        );
         let bytes = reader
             .next()
             .await?

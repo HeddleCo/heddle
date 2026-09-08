@@ -62,7 +62,7 @@ impl<A: Authorize> IrohTransport<A> {
             .map_err(|_| Error::Timeout)?
             .map_err(io)?;
         let mut writer = Writer::new(send, self.frame_limit, self.progress_timeout);
-        let reader = Reader::new(recv, self.frame_limit, self.progress_timeout);
+        let reader = Reader::for_method(recv, self.frame_limit, self.progress_timeout, method);
         let frame = if exchange {
             framing::encode_request_prelude(method.path, &context)?
         } else {
@@ -126,6 +126,9 @@ pub struct Reader {
     timeout: Duration,
     done: bool,
     buffer: Vec<u8>,
+    opening: bool,
+    live: bool,
+    frame_deadline: Option<tokio::time::Instant>,
 }
 
 impl Reader {
@@ -136,11 +139,36 @@ impl Reader {
             timeout,
             done: false,
             buffer: Vec::with_capacity(5),
+            opening: true,
+            live: false,
+            frame_deadline: None,
         }
     }
 
+    pub(crate) fn for_method(
+        recv: RecvStream,
+        frame_limit: usize,
+        timeout: Duration,
+        method: &MethodDescriptor,
+    ) -> Self {
+        let mut reader = Self::new(recv, frame_limit, timeout);
+        reader.live = method.live_stream;
+        reader
+    }
+
     async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, Error> {
+        if (!self.live || self.opening) && self.frame_deadline.is_none() {
+            self.frame_deadline = Some(tokio::time::Instant::now() + self.timeout);
+        }
         loop {
+            // Keep a started frame's deadline on Reader, just like its bytes.
+            // Cancellation and a later next() cannot restart that deadline.
+            if self
+                .frame_deadline
+                .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+            {
+                return Err(Error::Timeout);
+            }
             let needed = if self.buffer.len() < 5 {
                 5
             } else {
@@ -163,14 +191,32 @@ impl Reader {
                 if kind == 1 {
                     return Err(Error::Remote(CallFailure::decode(frame.as_slice())?.into()));
                 }
+                self.opening = false;
+                self.frame_deadline = None;
                 return Ok(Some(frame));
             }
             // Partial framing lives on Reader, so selecting another future while
             // next() waits cannot discard a consumed header or body prefix.
             let mut chunk = [0; 8192];
             let size = (needed - self.buffer.len()).min(chunk.len());
-            match self.recv.read(&mut chunk[..size]).await.map_err(io)? {
-                Some(n) => self.buffer.extend_from_slice(&chunk[..n]),
+            let read = match self.frame_deadline {
+                Some(deadline) => {
+                    tokio::time::timeout_at(deadline, self.recv.read(&mut chunk[..size]))
+                        .await
+                        .map_err(|_| Error::Timeout)?
+                        .map_err(io)?
+                }
+                // A live stream may have no new records for hours. Iroh owns
+                // connection liveness; callers own cancellation/overall waits.
+                None => self.recv.read(&mut chunk[..size]).await.map_err(io)?,
+            };
+            match read {
+                Some(n) => {
+                    if self.frame_deadline.is_none() {
+                        self.frame_deadline = Some(tokio::time::Instant::now() + self.timeout);
+                    }
+                    self.buffer.extend_from_slice(&chunk[..n]);
+                }
                 None if self.buffer.is_empty() => {
                     self.done = true;
                     return Ok(None);
@@ -187,8 +233,7 @@ impl MessageReader for Reader {
         if self.done {
             return Ok(None);
         }
-        let result = tokio::time::timeout(self.timeout, self.read_frame()).await;
-        let result = result.map_err(|_| Error::Timeout).and_then(|r| r);
+        let result = self.read_frame().await;
         if result.is_err() {
             self.cancel();
         }
@@ -198,6 +243,7 @@ impl MessageReader for Reader {
         if !self.done {
             let _ = self.recv.stop(0u32.into());
             self.done = true;
+            self.buffer = Vec::new();
         }
     }
 }
