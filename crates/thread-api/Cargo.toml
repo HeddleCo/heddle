@@ -30,6 +30,8 @@ replication = ["signing", "dep:heddle-object-model", "dep:tokio"]
 signing = ["dep:crypto", "dep:hex", "dep:uuid"]
 # Opt-in host-side extraction; ordinary browser/operator clients stay parser-free.
 semantic-analysis = ["dep:semantic"]
+# Portable endpoint/root binding; no repository, Iroh, storage or parser graph.
+root-attachment = ["signing", "dep:biscuit-verifier", "dep:base64", "dep:chrono"]
 
 [dependencies]
 base64 = { workspace = true, optional = true }
