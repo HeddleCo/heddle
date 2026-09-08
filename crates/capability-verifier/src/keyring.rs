@@ -40,6 +40,70 @@ impl VerifiedCloneKeyring {
         &self.owner_genesis
     }
 
+    /// Bind a verified current account state to this resource's signed handoffs.
+    /// Later owner-key rotations are valid only within that same root and history.
+    pub fn verify_current_owner(
+        &self,
+        current: &VerifiedOwnerState,
+        now_unix_seconds: i64,
+        limits: VerificationLimits,
+    ) -> Result<()> {
+        if current
+            .signed_root()
+            .root
+            .as_ref()
+            .is_none_or(|root| root.account_uuid.as_slice() != self.current_owner_uuid)
+        {
+            return Err(Error::BrokenChain(
+                "current account does not own pinned spool".to_owned(),
+            ));
+        }
+        let historical = if let Some(last) = self.wire.ownership_transfers.last() {
+            let handoff = last
+                .transfer
+                .as_ref()
+                .and_then(|transfer| transfer.acceptance.as_ref())
+                .and_then(|acceptance| acceptance.signed_handoff.as_ref())
+                .and_then(|signed| signed.handoff.as_ref())
+                .ok_or_else(|| Error::BrokenChain("verified transfer has no handoff".to_owned()))?;
+            let witness = self
+                .wire
+                .transfer_owner_histories
+                .iter()
+                .find(|history| {
+                    history.state_hash == handoff.destination_owner_key_state_hash
+                        && history.root.as_ref() == Some(current.signed_root())
+                })
+                .ok_or_else(|| {
+                    Error::BrokenChain("current owner has no pinned transfer witness".to_owned())
+                })?;
+            let root = witness
+                .root
+                .as_ref()
+                .ok_or_else(|| Error::BrokenChain("missing witness root".to_owned()))?;
+            let mut state = verify_owner_root(root)?;
+            for transition in &witness.accepted_transitions {
+                state = apply_accepted_transition(&state, transition, now_unix_seconds, limits)?;
+            }
+            state
+        } else {
+            verify_owner_root(self.owner_state.signed_root())?
+        };
+        if !current.extends(&historical) {
+            return Err(Error::BrokenChain(
+                "current authority diverges from pinned spool owner history".to_owned(),
+            ));
+        }
+        // With no transfer, the entire accepted original-owner history remains
+        // the authority floor, not just its immutable root.
+        if self.wire.ownership_transfers.is_empty() && !current.extends(&self.owner_state) {
+            return Err(Error::BrokenChain(
+                "current authority rolls back pinned spool owner history".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Sole owner UUID after every verified ownership re-anchor.
     #[must_use]
     pub const fn current_owner_uuid(&self) -> [u8; 16] {

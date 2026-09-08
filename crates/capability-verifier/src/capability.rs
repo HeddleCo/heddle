@@ -12,7 +12,7 @@ use crate::{
     Error, Result, VerificationLimits,
     canonical::{OWNER_CAPABILITY_DOMAIN, capability_body, capability_without_id, digest, key_id},
     crypto::verify_signature,
-    owner::{VerifiedOwnerState, apply_transition, verify_owner_root},
+    owner::{VerifiedOwnerState, apply_accepted_transition, apply_transition, verify_owner_root},
     wire::{
         AuthorizationKeyAlgorithm, CapabilityPrincipalKind, OwnerAuthorizationBundle,
         OwnerCapability, SignedOwnerCapability, SpoolCapabilityAction, SpoolCapabilityGrant,
@@ -389,6 +389,28 @@ pub fn verify_authorization_bundle(
     now_unix_seconds: i64,
     limits: VerificationLimits,
 ) -> Result<VerifiedAuthorizationBundle> {
+    verify_bundle(bundle, None, now_unix_seconds, limits)
+}
+
+/// Verify capabilities against a caller's independently accepted owner state.
+/// Only history ending at this exact committed hash is replayed at its signed
+/// activation time. Capability lifetime is always checked at the current time.
+/// Never derive `accepted_state_hash` from the bundle being authorized.
+pub fn verify_authorization_bundle_for_state(
+    bundle: &OwnerAuthorizationBundle,
+    accepted_state_hash: &[u8; 32],
+    now_unix_seconds: i64,
+    limits: VerificationLimits,
+) -> Result<VerifiedAuthorizationBundle> {
+    verify_bundle(bundle, Some(accepted_state_hash), now_unix_seconds, limits)
+}
+
+fn verify_bundle(
+    bundle: &OwnerAuthorizationBundle,
+    accepted_state_hash: Option<&[u8; 32]>,
+    now_unix_seconds: i64,
+    limits: VerificationLimits,
+) -> Result<VerifiedAuthorizationBundle> {
     if bundle.encoded_len() > limits.max_bundle_bytes() {
         return Err(Error::TooLarge {
             limit: limits.max_bundle_bytes(),
@@ -406,7 +428,16 @@ pub fn verify_authorization_bundle(
             .ok_or_else(|| Error::Invalid("authorization bundle has no owner root".to_owned()))?,
     )?;
     for transition in &bundle.owner_state_chain {
-        state = apply_transition(&state, transition, now_unix_seconds, limits)?;
+        state = if accepted_state_hash.is_some() {
+            apply_accepted_transition(&state, transition, now_unix_seconds, limits)?
+        } else {
+            apply_transition(&state, transition, now_unix_seconds, limits)?
+        };
+    }
+    if accepted_state_hash.is_some_and(|expected| *expected != state.state_hash()) {
+        return Err(Error::BrokenChain(
+            "bundle does not end at the caller's current owner state".to_owned(),
+        ));
     }
     let capability =
         verify_capability_chain(&state, &bundle.capability_chain, now_unix_seconds, limits)?;

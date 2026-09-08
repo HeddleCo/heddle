@@ -6,7 +6,9 @@ use sha2::{Digest, Sha256};
 use crate::{
     Decision, Denial, Error, Result, VerificationLimits,
     canonical::{Encoder, PURGE_OPERATION_DOMAIN},
-    capability::{capability_allows_purge, validate_path_segments, verify_authorization_bundle},
+    capability::{
+        capability_allows_purge, validate_path_segments, verify_authorization_bundle_for_state,
+    },
     crypto::verify_signature,
     owner::verify_spool_owner_genesis,
     wire::{PurgeOperationSigningBody, SidecarAuthorization, SignedSpoolOwnerGenesis},
@@ -69,6 +71,7 @@ fn decision_result(
     body: &PurgeOperationSigningBody,
     raw_payload: &[u8],
     context: &PurgeContext<'_>,
+    ownership: Option<&crate::VerifiedCloneKeyring>,
 ) -> Result<Decision> {
     if raw_payload.len() > context.limits.max_payload_bytes() {
         return Err(Error::TooLarge {
@@ -96,8 +99,26 @@ fn decision_result(
         .capability
         .as_ref()
         .ok_or_else(|| Error::CapabilityDenied("purge capability is absent".to_owned()))?;
-    let verified = verify_authorization_bundle(bundle, context.now_unix_seconds, context.limits)?;
-    if !verified
+    let verified = verify_authorization_bundle_for_state(
+        bundle,
+        context.current_owner_state_hash,
+        context.now_unix_seconds,
+        context.limits,
+    )?;
+    if let Some(ownership) = ownership {
+        if ownership.owner_genesis().signed() != context.owner_genesis
+            || ownership.wire().canonical_spool_path_segments != context.spool_path_segments
+        {
+            return Err(Error::BrokenChain(
+                "resource history differs from pinned spool genesis or path".to_owned(),
+            ));
+        }
+        ownership.verify_current_owner(
+            verified.owner_state(),
+            context.now_unix_seconds,
+            context.limits,
+        )?;
+    } else if !verified
         .owner_state()
         .contains_authority_key(genesis.owner_public_key())
     {
@@ -175,7 +196,25 @@ pub fn verify_purge_authorization(
     raw_payload: &[u8],
     context: &PurgeContext<'_>,
 ) -> Decision {
-    match decision_result(authorization, body, raw_payload, context) {
+    match decision_result(authorization, body, raw_payload, context, None) {
+        Ok(decision) => decision,
+        Err(error) => Decision::Deny(denial(&error)),
+    }
+}
+
+/// Verify purge against complete, caller-pinned resource ownership evidence.
+/// This permits the destination of a signed handoff while retaining the original
+/// spool genesis as the immutable trust anchor. The current state hash must be
+/// independently pinned by the caller, never copied from the submitted bundle.
+#[must_use]
+pub fn verify_resource_purge_authorization(
+    authorization: &SidecarAuthorization,
+    body: &PurgeOperationSigningBody,
+    raw_payload: &[u8],
+    context: &PurgeContext<'_>,
+    ownership: &crate::VerifiedCloneKeyring,
+) -> Decision {
+    match decision_result(authorization, body, raw_payload, context, Some(ownership)) {
         Ok(decision) => decision,
         Err(error) => Decision::Deny(denial(&error)),
     }

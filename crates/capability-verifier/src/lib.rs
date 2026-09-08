@@ -23,7 +23,7 @@ pub mod conformance;
 
 pub use capability::{
     VerifiedAuthorizationBundle, VerifiedCapability, verify_authorization_bundle,
-    verify_capability_chain,
+    verify_authorization_bundle_for_state, verify_capability_chain,
 };
 pub use decision::{Decision, Denial};
 pub use error::{Error, Result};
@@ -31,7 +31,7 @@ pub use keyring::{VerifiedCloneKeyring, verify_clone_keyring, verify_clone_keyri
 pub use limits::VerificationLimits;
 pub use operation::{
     PurgeContext, canonical_purge_operation, verify_purge_authorization,
-    verify_purge_authorization_bytes,
+    verify_purge_authorization_bytes, verify_resource_purge_authorization,
 };
 pub use owner::{
     DEFAULT_RECOVERY_WINDOW_SECS, VerifiedOwnerBinding, VerifiedOwnerState,

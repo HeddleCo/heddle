@@ -5,14 +5,14 @@ use std::fs;
 
 use anyhow::{Context, Result};
 use api::heddle::api::v2alpha1::{
-    AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey,
+    AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey, OwnerState,
     PurgeOperationSigningBody, PurgeSidecarIdentity, SidecarAuthorization, SignedSpoolOwnerGenesis,
     SpoolOwnerGenesis,
 };
 use crypto::Signer;
 use heddleco_capability_verifier::{
-    Decision, PurgeContext, VerificationLimits, verify_authorization_bundle,
-    verify_purge_authorization, verify_spool_owner_genesis,
+    Decision, PurgeContext, VerificationLimits, verify_authorization_bundle_for_state,
+    verify_resource_purge_authorization, verify_spool_owner_genesis,
 };
 use objects::{fs_atomic::write_file_atomic, lock::RepositoryLockExt};
 use prost::Message;
@@ -70,6 +70,7 @@ struct PinnedOwnerGenesis {
     owner_public_key: Vec<u8>,
     canonical_spool_path_segments: Vec<String>,
     signed_genesis: Vec<u8>,
+    owner_observation: Option<Vec<u8>>,
 }
 
 impl Repository {
@@ -88,6 +89,9 @@ impl Repository {
 
     fn read_owner_genesis_pin(&self) -> Result<PinnedOwnerGenesis> {
         let path = self.owner_genesis_pin_path();
+        if fs::metadata(&path)?.len() > verifier_limits()?.max_bundle_bytes() as u64 + 4096 {
+            anyhow::bail!("persisted owner authorization exceeds proof bound");
+        }
         let bytes = fs::read(&path)
             .with_context(|| format!("read owner genesis pin '{}'", path.display()))?;
         let pin: PinnedOwnerGenesis = rmp_serde::from_slice(&bytes)
@@ -131,6 +135,7 @@ impl Repository {
             owner_public_key: verified.owner_public_key().public_key.clone(),
             canonical_spool_path_segments: canonical_spool_path_segments.to_vec(),
             signed_genesis: signed.encode_to_vec(),
+            owner_observation: None,
         };
 
         let _lock = self.locker().write()?;
@@ -153,6 +158,99 @@ impl Repository {
             .with_context(|| format!("TOFU-pin owner genesis '{}'", path.display()))
     }
 
+    /// Persist independently observed ownership before accepting remote sidecars.
+    /// The first root is TOFU; subsequent observations must extend the pinned
+    /// signed ownership log and compatible authority history. Purge bundles
+    /// cannot call this path or supply their own current authority floor.
+    pub fn verify_and_pin_owner_observation(
+        &self,
+        genesis: &SignedSpoolOwnerGenesis,
+        observed: &OwnerState,
+        spool_uuid: uuid::Uuid,
+        canonical_path: &[String],
+        now_unix_seconds: i64,
+    ) -> Result<()> {
+        let limits = verifier_limits()?;
+        if observed.encoded_len() > limits.max_bundle_bytes() {
+            anyhow::bail!("owner observation exceeds proof bound");
+        }
+        let verified =
+            crate::verify_spool_owner_observation(genesis, observed, spool_uuid, now_unix_seconds)?;
+        let next = verified.wire();
+        if next.canonical_spool_path_segments != canonical_path {
+            anyhow::bail!("owner observation differs from canonical spool path");
+        }
+        let mut candidate = PinnedOwnerGenesis {
+            protocol_version: OWNER_AUTHORIZATION_PROTOCOL_VERSION,
+            spool_uuid: *spool_uuid.as_bytes(),
+            owner_public_key: verified
+                .owner_genesis()
+                .owner_public_key()
+                .public_key
+                .clone(),
+            canonical_spool_path_segments: canonical_path.to_vec(),
+            signed_genesis: genesis.encode_to_vec(),
+            owner_observation: None,
+        };
+        let _lock = self.locker().write()?;
+        let path = self.owner_genesis_pin_path();
+        if path.exists() {
+            let previous = self.read_owner_genesis_pin()?;
+            if previous.spool_uuid != candidate.spool_uuid
+                || previous.signed_genesis != candidate.signed_genesis
+                || previous.canonical_spool_path_segments != candidate.canonical_spool_path_segments
+            {
+                anyhow::bail!("owner observation differs from immutable clone pin");
+            }
+            if let Some(bytes) = previous.owner_observation {
+                let old = OwnerState::decode(bytes.as_slice())
+                    .context("decode pinned owner observation")?;
+                let old_verified = crate::verify_spool_owner_observation(
+                    genesis,
+                    &old,
+                    spool_uuid,
+                    now_unix_seconds,
+                )?;
+                let old_keyring = old_verified.wire();
+                if next.owner_root != old_keyring.owner_root
+                    || !next
+                        .accepted_transitions
+                        .starts_with(&old_keyring.accepted_transitions)
+                    || !next
+                        .ownership_transfers
+                        .starts_with(&old_keyring.ownership_transfers)
+                {
+                    anyhow::bail!("owner observation rolls back or forks pinned ownership history");
+                }
+                if observed.owner == old.owner {
+                    if observed.root != old.root
+                        || !observed
+                            .accepted_transitions
+                            .starts_with(&old.accepted_transitions)
+                    {
+                        anyhow::bail!("owner observation rolls back or forks current authority");
+                    }
+                } else {
+                    let compatible = next.transfer_owner_histories.iter().any(|witness| {
+                        witness.root == old.root
+                            && (witness
+                                .accepted_transitions
+                                .starts_with(&old.accepted_transitions)
+                                || old
+                                    .accepted_transitions
+                                    .starts_with(&witness.accepted_transitions))
+                    });
+                    if !compatible {
+                        anyhow::bail!("owner handoff does not preserve pinned authority history");
+                    }
+                }
+            }
+        }
+        candidate.owner_observation = Some(observed.encode_to_vec());
+        write_file_atomic(&path, &rmp_serde::to_vec_named(&candidate)?)
+            .context("persist verified owner observation")
+    }
+
     /// Verify a purge authorization against the clone-pinned genesis and the
     /// complete owner-signed root/transition chain carried by its evidence.
     pub fn verify_owner_purge_authorization(
@@ -171,14 +269,35 @@ impl Repository {
         let bundle = authorization.capability.as_ref().ok_or_else(|| {
             HeddleError::InvalidObject("owner purge capability is absent".to_owned())
         })?;
-        let verified_bundle = verify_authorization_bundle(bundle, now_unix_seconds, limits)
-            .context("verify owner purge transition and capability chain")?;
+        let observed = OwnerState::decode(
+            pin.owner_observation
+                .as_deref()
+                .context("purge requires an independently pinned current owner observation")?,
+        )
+        .context("decode pinned owner observation")?;
+        let ownership = crate::verify_spool_owner_observation(
+            &signed_genesis,
+            &observed,
+            uuid::Uuid::from_bytes(pin.spool_uuid),
+            now_unix_seconds,
+        )?;
+        let current_owner_state_hash: [u8; 32] = observed
+            .version
+            .as_slice()
+            .try_into()
+            .context("pinned current owner state must be 32 bytes")?;
+        let verified_bundle = verify_authorization_bundle_for_state(
+            bundle,
+            &current_owner_state_hash,
+            now_unix_seconds,
+            limits,
+        )
+        .context("verify owner purge transition and capability chain")?;
         let leaf_capability_id = verified_bundle
             .capability()
             .capability()
             .capability_id
             .clone();
-        let current_owner_state_hash = verified_bundle.owner_state().state_hash();
         let body = PurgeOperationSigningBody {
             format_version: OWNER_AUTHORIZATION_PROTOCOL_VERSION,
             spool_uuid: pin.spool_uuid.to_vec(),
@@ -188,7 +307,7 @@ impl Repository {
             payload_sha256: Sha256::digest(raw_payload).to_vec(),
             leaf_capability_id,
         };
-        let decision = verify_purge_authorization(
+        let decision = verify_resource_purge_authorization(
             authorization,
             &body,
             raw_payload,
@@ -200,6 +319,7 @@ impl Repository {
                 now_unix_seconds,
                 limits,
             },
+            &ownership,
         );
         match decision {
             Decision::Purge => Ok(()),

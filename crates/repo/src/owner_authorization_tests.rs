@@ -34,6 +34,55 @@ fn pinned_repository() -> (TempDir, Repository, ConformanceFixture) {
     let repo = Repository::init_default(temp.path()).expect("init repo");
     repo.verify_and_pin_owner_genesis(2, Some(&genesis), &valid.spool_path_segments)
         .expect("pin fixture genesis");
+    // Fixture-owned authoritative snapshot is installed before any submitted
+    // sidecar is evaluated. Individual matrix cases cannot replace this pin.
+    let authorization: SidecarAuthorization = decode(&valid.authorization_hex);
+    let bundle = authorization.capability.as_ref().expect("fixture bundle");
+    let root = bundle.owner_root.clone().expect("fixture root");
+    let initial = heddleco_capability_verifier::verify_owner_root(&root).expect("root");
+    let account = uuid::Uuid::from_slice(&root.root.as_ref().expect("root body").account_uuid)
+        .expect("account");
+    let state_hash =
+        hex::decode(&valid.current_owner_state_hash_hex).expect("authoritative fixture state");
+    let observed = api::heddle::api::v2alpha1::OwnerState {
+        owner: Some(api::heddle::api::v2alpha1::PrincipalRef {
+            id: account.to_string(),
+        }),
+        root: Some(root.clone()),
+        accepted_transitions: bundle.owner_state_chain.clone(),
+        version: state_hash.clone(),
+        resource_keyring: Some(api::heddle::api::v2alpha1::CloneAuthorizationKeyring {
+            format_version: 1,
+            spool_uuid: genesis
+                .genesis
+                .as_ref()
+                .expect("genesis")
+                .spool_uuid
+                .clone(),
+            canonical_spool_path_segments: valid.spool_path_segments.clone(),
+            pin: Some(api::heddle::api::v2alpha1::CloneOwnerPin {
+                kind: api::heddle::api::v2alpha1::CloneOwnerPinKind::CloneTofu as i32,
+                expected_owner_id: initial.owner_id().to_vec(),
+                first_seen_unix_seconds: valid.now_unix_seconds,
+            }),
+            owner_root: Some(root),
+            accepted_transitions: bundle.owner_state_chain.clone(),
+            accepted_state_hash: state_hash,
+            owner_genesis: Some(genesis.clone()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let spool = uuid::Uuid::from_slice(&genesis.genesis.as_ref().expect("genesis").spool_uuid)
+        .expect("spool");
+    repo.verify_and_pin_owner_observation(
+        &genesis,
+        &observed,
+        spool,
+        &valid.spool_path_segments,
+        valid.now_unix_seconds,
+    )
+    .expect("pin independent owner observation");
     (temp, repo, fixture)
 }
 
@@ -242,6 +291,38 @@ fn clone_pin_rejects_forged_and_later_first_seen_genesis() {
         .expect_err("a later first-seen valid genesis must not replace the TOFU pin");
     assert!(
         error.to_string().contains("first-operation trust"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn submitted_purge_bundle_cannot_establish_current_owner_authority() {
+    let fixture = purge_fixture();
+    let valid = fixture
+        .cases
+        .iter()
+        .find(|case| case.name == "owner-anchored-purge")
+        .expect("valid fixture");
+    let genesis: SignedSpoolOwnerGenesis = decode(&valid.owner_genesis_hex);
+    let authorization: SidecarAuthorization = decode(&valid.authorization_hex);
+    let body: PurgeOperationSigningBody = decode(&valid.operation_body_hex);
+    let payload = hex::decode(&valid.payload_hex).expect("payload");
+    let temp = TempDir::new().expect("repo");
+    let repo = Repository::init_default(temp.path()).expect("repo");
+    repo.verify_and_pin_owner_genesis(2, Some(&genesis), &valid.spool_path_segments)
+        .expect("genesis alone is sufficient for metadata");
+    let error = repo
+        .verify_owner_purge_authorization(
+            &body.purge_identity.expect("identity").blob_hash,
+            &payload,
+            Some(&authorization),
+            valid.now_unix_seconds,
+        )
+        .expect_err("valid incoming bundle is not an independently observed authority floor");
+    assert!(
+        error
+            .to_string()
+            .contains("independently pinned current owner"),
         "{error:#}"
     );
 }

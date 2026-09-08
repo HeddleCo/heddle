@@ -1545,6 +1545,62 @@ fn portable_transfer_histories_select_exact_historical_states() {
     let verified = verify_clone_keyring(keyring.clone(), NOW, limits(), &[])
         .expect("portable historical transfer proofs");
     assert_eq!(verified.current_owner_uuid(), [0x33; 16]);
+    let proof = artifact_for_state(
+        destination.signed_root(),
+        keyring.owner_genesis.clone().expect("genesis"),
+        Vec::new(),
+        &destination,
+        &destination_key,
+        &TestKey::new(5),
+        SPOOL,
+        SpoolCapabilityAction::Purge as i32,
+        NOW - 10,
+        NOW + 100,
+    );
+    let context = PurgeContext {
+        owner_genesis: &proof.owner_genesis,
+        current_owner_state_hash: &destination.state_hash(),
+        spool_uuid: &SPOOL,
+        spool_path_segments: &proof.path,
+        now_unix_seconds: NOW,
+        limits: limits(),
+    };
+    assert_eq!(
+        verify_resource_purge_authorization(
+            &proof.authorization,
+            &proof.body,
+            &proof.payload,
+            &context,
+            &verified,
+        ),
+        Decision::Purge,
+        "signed handoff grants the current destination authority"
+    );
+    let bundle = proof.authorization.capability.as_ref().expect("bundle");
+    assert!(
+        matches!(verify_authorization_bundle_for_state(bundle, &source.state_hash(), NOW, limits()),
+        Err(Error::BrokenChain(message)) if message.contains("current owner state")),
+        "incoming bundle cannot select its own accepted authority"
+    );
+    assert!(
+        matches!(
+            verify_authorization_bundle_for_state(
+                bundle,
+                &destination.state_hash(),
+                NOW + 101,
+                limits()
+            ),
+            Err(Error::Expired)
+        ),
+        "accepted history never extends a live capability lifetime"
+    );
+    assert!(
+        verified
+            .verify_current_owner(&source, NOW, limits())
+            .is_err(),
+        "previous resource owner loses authority after handoff"
+    );
+
     let mut missing = keyring.clone();
     missing.transfer_owner_histories.remove(0);
     assert!(matches!(

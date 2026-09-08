@@ -582,6 +582,34 @@ fn spool_genesis_requires_current_authority_and_verifiable_history() {
         crate::verify_spool_owner_observation(&genesis, &observation, spool, NOW + 1).is_err(),
         "different advertised genesis rejected"
     );
+    let temp = tempfile::TempDir::new().expect("owner pin repository");
+    let repo = crate::Repository::init_default(temp.path()).expect("repository");
+    let path = vec!["test".to_owned()];
+    repo.verify_and_pin_owner_observation(&old_genesis, &observation, spool, &path, late)
+        .expect("pin accepted historical ownership");
+    let stored =
+        std::fs::read(repo.heddle_dir().join("owner-authorization.bin")).expect("pin bytes");
+    let mut rollback = observation.clone();
+    rollback.accepted_transitions.clear();
+    rollback.version = initial.state_hash().to_vec();
+    let rollback_keyring = rollback.resource_keyring.as_mut().expect("keyring");
+    rollback_keyring.accepted_transitions.clear();
+    rollback_keyring.accepted_state_hash = initial.state_hash().to_vec();
+    assert!(
+        repo.verify_and_pin_owner_observation(&old_genesis, &rollback, spool, &path, late)
+            .expect_err("accepted current authority cannot roll back")
+            .to_string()
+            .contains("rolls back")
+    );
+    assert_eq!(
+        std::fs::read(repo.heddle_dir().join("owner-authorization.bin")).expect("pin"),
+        stored,
+        "failed observation never replaces stored authority"
+    );
+    let reopened = crate::Repository::open(temp.path()).expect("reopened repository");
+    reopened
+        .verify_and_pin_owner_observation(&old_genesis, &observation, spool, &path, late)
+        .expect("identical accepted state is idempotent across restart");
     observation.resource_keyring = None;
     assert!(
         crate::verify_spool_owner_observation(&old_genesis, &observation, spool, NOW + 1).is_err(),
