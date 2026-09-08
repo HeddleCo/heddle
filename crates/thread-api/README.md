@@ -246,3 +246,14 @@ Negative checks temporarily disabled the frame-size and exact-revision guards
 and confirmed their specific integration tests failed. Disabling API descriptor
 operation-ID extraction also made its contract test fail. All changes were
 restored before the passing runs.
+
+
+The `signing` feature exposes the shared v2 request proof verifier without
+Tokio, Iroh, Biscuit evaluation, or a repository. Hosts first verify the Biscuit
+and determine its effective PoP key, then call `request_proof::verify` with the
+exact method/body and current time. The signing identity is
+`principal:device-key:<lowercase Ed25519 key hex>`; proofs use a fresh 16-byte
+nonce and a 60-second clock window. Hosts separately bind that authority to the
+account/resource and consume the verified nonce durably. `replication::opening`
+shares negotiation of known-Thread scope, transport endpoints, formats and
+budgets across device and hosted adapters.

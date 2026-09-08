@@ -10,6 +10,7 @@ use heddle_object_model::object::{
 };
 #[cfg(feature = "native")]
 pub mod native;
+pub mod opening;
 pub mod store;
 use store::ReplicaStore;
 

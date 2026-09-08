@@ -11,6 +11,8 @@ pub mod observation;
 pub mod replication;
 #[cfg(all(feature = "native", feature = "iroh"))]
 pub mod replication_rpc;
+#[cfg(feature = "signing")]
+pub mod request_proof;
 pub mod transport;
 
 use api::v2::client::{Client, ClientError, RpcTransport};

@@ -23,7 +23,9 @@ native = [
 # An Iroh adapter for the transport-neutral client and replication driver.
 iroh = ["dep:iroh", "dep:tokio"]
 # Causal protocol and async stream driver, without a local repository or Iroh.
-replication = ["dep:crypto", "dep:heddle-object-model", "dep:tokio"]
+replication = ["signing", "dep:heddle-object-model", "dep:tokio"]
+# Portable exact-request verification; hosts retain authority and nonce storage.
+signing = ["dep:crypto", "dep:hex"]
 
 [dependencies]
 api.workspace = true

@@ -37,6 +37,7 @@ jobs:
           cases = [
               ("", {"heddle-repo", "heddle-objects", "heddleco-iroh", "biscuit-auth", "tokio"}),
               ("native", {"heddleco-iroh"}),
+              ("signing", {"heddle-repo", "heddle-objects", "heddleco-iroh", "biscuit-auth", "tokio"}),
               ("replication", {"heddle-repo", "heddle-objects", "heddleco-iroh", "biscuit-auth"}),
               ("iroh", {"heddle-repo", "heddle-objects", "biscuit-auth"}),
           ]
@@ -52,6 +53,7 @@ jobs:
               print(f"{features or 'core'}: dependency boundary holds")
           PYCODE
       - run: cargo test --locked -p heddle-thread-api
+      - run: cargo test --locked -p heddle-thread-api --no-default-features --features signing --lib
       - run: cargo check --locked -p heddle-thread-api --no-default-features --features replication --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features native --lib
@@ -61,6 +63,7 @@ jobs:
       - run: cargo clippy --locked -p heddle-thread-api --all-targets -- -D warnings
       - run: cargo clippy --locked -p heddle-thread-api --no-default-features --all-targets -- -D warnings
       - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features native --all-targets -- -D warnings
+      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features signing --lib -- -D warnings
       - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features replication --lib -- -D warnings
       - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features iroh --all-targets -- -D warnings
       - run: cargo run --locked -p heddle-thread-api --example thread

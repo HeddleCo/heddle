@@ -44,45 +44,17 @@ impl RootAuthority {
     ) -> Result<VerifiedCall, Error> {
         let now = Utc::now();
         let facts = self.check(context, method, right, now)?;
-        let proof = context
-            .request_proof
-            .as_ref()
-            .ok_or(Error::Protocol("request PoP required"))?;
-        if proof.algorithm != "ed25519"
-            || proof.nonce.len() != 16
-            || (now
-                .timestamp_millis()
-                .saturating_sub(proof.timestamp_millis))
-            .unsigned_abs()
-                > 60_000
-        {
-            return Err(Error::Protocol("invalid or expired request PoP"));
-        }
         let cnf = facts
             .cnf
             .as_deref()
             .ok_or(Error::Protocol("Biscuit must bind a request signing key"))?;
-        let key = hex::decode(cnf).map_err(|_| Error::Protocol("invalid Biscuit proof key"))?;
-        let identity = format!("principal:device-key:{cnf}");
-        if proof.signing_identity != identity {
-            return Err(Error::Protocol(
-                "request signing identity differs from Biscuit",
-            ));
-        }
-        Ed25519Signer::verify_with_public_key(
-            &api::signing::unary_bytes(
-                &identity,
-                method.path,
-                proof.timestamp_millis,
-                &proof.nonce,
-                body,
-            ),
-            &key,
-            &proof.signature,
-        )
-        .map_err(|_| Error::Protocol("invalid request signature"))?;
+        let mut key = [0; 32];
+        hex::decode_to_slice(cnf, &mut key)
+            .map_err(|_| Error::Protocol("invalid Biscuit proof key"))?;
+        let proof =
+            crate::request_proof::verify(context, method, body, &key, now.timestamp_millis())?;
         if !registry
-            .claim_request_nonce(&identity, &proof.nonce, now.timestamp_millis())
+            .claim_request_nonce(proof.identity(), proof.nonce(), now.timestamp_millis())
             .map_err(|e| Error::Io(e.to_string()))?
         {
             return Err(Error::Protocol("request nonce already consumed"));

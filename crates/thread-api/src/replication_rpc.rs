@@ -21,12 +21,15 @@ use crate::{
     authority::RootAuthority,
     contract::*,
     live_replication::{self, Feed, Side},
-    replication::{self, Session, native::LocalReplica},
+    replication::{
+        self, Session,
+        native::LocalReplica,
+        opening::{self, FRAME_LIMIT, validate_endpoint},
+    },
     rpc,
     transport::{self, Authorize, IrohTransport, Reader, Writer},
 };
 
-const FRAME_LIMIT: usize = 512 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A resolved local Thread, with the admission scope chosen by its host.
@@ -129,35 +132,13 @@ impl Peer {
         let Some(replicate_thread_response::Body::Ready(ready)) = response.body else {
             return Err(transport::Error::Protocol("replication requires Ready").into());
         };
-        if ready.endpoint.as_ref() != Some(&destination)
-            || ready.thread.as_ref() != Some(&thread)
-            || ready.record_formats != [OPERATION_FORMAT]
-        {
-            return Err(transport::Error::Protocol(
-                "replication Ready binding differs from opening",
-            )
-            .into());
-        }
-        let facets = parse_facets(&ready.facets)?;
-        if facets.is_empty() || !facets.is_subset(&self.facets) {
-            return Err(
-                transport::Error::Protocol("replication Ready widened admission scope").into(),
-            );
-        }
-        let budget = ready.budget.ok_or(transport::Error::Protocol(
-            "replication Ready requires budget",
-        ))?;
-        if budget.max_items == 0
-            || budget.max_items > 64
-            || budget.max_frame_bytes != FRAME_LIMIT as u32
-        {
-            return Err(transport::Error::Protocol("unsupported replication Ready budget").into());
-        }
+        let (facets, max_items) =
+            opening::validate_ready(&ready, &thread, &destination, &self.facets, 64)?;
         let session = Session::new(
             LocalReplica::new(self.replica.clone(), store),
             remote_key,
             facets,
-            budget.max_items as usize,
+            max_items,
         )?;
         live_replication::run(session, reader, writer, Side::Initiator, feed, authorize).await
     }
@@ -220,7 +201,22 @@ impl Peer {
             let Some(replicate_thread_request::Body::Open(open)) = request.body else {
                 return Err(transport::Error::Protocol("replication requires Open"));
             };
-            peer.validate_open(&open, remote_key)?;
+            let (_, version) = peer.replica.sharing(&remote_key).map_err(store_error)?;
+            let ready = opening::accept(
+                &open,
+                &peer.reference()?,
+                &peer.endpoint,
+                remote_key,
+                &peer.facets,
+                version.map(|v| v.as_bytes().to_vec()).unwrap_or_default(),
+            )?;
+            let (facets, max_items) = opening::validate_ready(
+                &ready,
+                &peer.reference()?,
+                &peer.endpoint,
+                &peer.facets,
+                64,
+            )?;
             let verified = verifier.verify(
                 &context,
                 rpc::SyncServiceReplicateThread::METHOD,
@@ -228,38 +224,6 @@ impl Peer {
                 "write",
                 &peer.replica,
             )?;
-            let facets = parse_facets(&open.facets)?
-                .intersection(&peer.facets)
-                .copied()
-                .collect::<BTreeSet<_>>();
-            if facets.is_empty() {
-                return Err(transport::Error::Protocol(
-                    "no authorized replication facets",
-                ));
-            }
-            let requested = open.budget.unwrap_or_default();
-            let max_items = if requested.max_items == 0 {
-                64
-            } else {
-                requested.max_items.min(64)
-            };
-            let (_, version) = peer.replica.sharing(&remote_key).map_err(store_error)?;
-            let ready = ReplicationReady {
-                endpoint: Some(peer.endpoint.clone()),
-                thread: Some(peer.reference()?),
-                facets: facets
-                    .iter()
-                    .copied()
-                    .map(replication::wire_facet)
-                    .collect(),
-                sharing_policy_version: version.map(|v| v.as_bytes().to_vec()).unwrap_or_default(),
-                budget: Some(ReadBudget {
-                    max_items,
-                    max_frame_bytes: FRAME_LIMIT as u32,
-                    max_snapshot_bytes: 0,
-                }),
-                record_formats: vec![OPERATION_FORMAT.into()],
-            };
             Ok((verified, facets, max_items, ready))
         })
         .await
@@ -289,84 +253,15 @@ impl Peer {
             LocalReplica::new(self.replica.clone(), store),
             remote_key,
             facets,
-            max_items as usize,
+            max_items,
         )?;
         live_replication::run(session, reader, writer, Side::Acceptor, feed, move || {
             std::future::ready(authority.recheck(&verified))
         })
         .await
     }
-
-    fn validate_open(
-        &self,
-        open: &ReplicationOpen,
-        remote_key: [u8; 32],
-    ) -> Result<(), transport::Error> {
-        if open.thread.as_ref() != Some(&self.reference()?) || open.thread_genesis.is_some() {
-            return Err(transport::Error::Protocol(
-                "replication requires an already resolved Thread",
-            ));
-        }
-        let source = open.source.as_ref().ok_or(transport::Error::Protocol(
-            "opening requires source endpoint",
-        ))?;
-        validate_endpoint(source)?;
-        if source.public_key != remote_key || open.destination.as_ref() != Some(&self.endpoint) {
-            return Err(transport::Error::Protocol(
-                "opening endpoints differ from Iroh connection",
-            ));
-        }
-        if open.session_nonce.len() != 16
-            || !open.record_formats.iter().any(|f| f == OPERATION_FORMAT)
-        {
-            return Err(transport::Error::Protocol(
-                "unsupported replication session or format",
-            ));
-        }
-        // Native operations are indivisible. This first implementation supports
-        // one advertised frame size rather than silently exceeding a small cap.
-        if open
-            .budget
-            .as_ref()
-            .is_some_and(|b| b.max_frame_bytes != 0 && b.max_frame_bytes != FRAME_LIMIT as u32)
-        {
-            return Err(transport::Error::Protocol(
-                "unsupported replication frame budget",
-            ));
-        }
-        Ok(())
-    }
 }
 
-fn parse_facets(values: &[i32]) -> Result<BTreeSet<ThreadFacet>, transport::Error> {
-    if values.is_empty() || values.len() > 2 {
-        return Err(transport::Error::Protocol(
-            "replication requires one or two distinct facets",
-        ));
-    }
-    let facets = values
-        .iter()
-        .map(|v| {
-            replication::native_facet(*v)
-                .map_err(|_| transport::Error::Protocol("unsupported replication facet"))
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    if facets.len() != values.len() {
-        return Err(transport::Error::Protocol("duplicate replication facet"));
-    }
-    Ok(facets)
-}
-fn validate_endpoint(endpoint: &EndpointRef) -> Result<(), transport::Error> {
-    if endpoint.public_key.len() != 32
-        || !matches!(
-            EndpointKind::try_from(endpoint.kind),
-            Ok(EndpointKind::Device | EndpointKind::Weft)
-        )
-    {
-        return Err(transport::Error::Protocol("invalid replication endpoint"));
-    }
-    Ok(())
-}
 fn io_error(error: impl std::fmt::Display) -> transport::Error {
     transport::Error::Io(error.to_string())
 }
