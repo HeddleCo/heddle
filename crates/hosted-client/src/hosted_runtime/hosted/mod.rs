@@ -196,7 +196,7 @@ impl HostedClient {
             thread_api::transport::IrohTransport::new(
                 self.connection.connection.clone(),
                 credentials.clone(),
-                256 * 1024,
+                thread_api::replication::opening::FRAME_LIMIT,
                 std::time::Duration::from_secs(30),
             )
         };
