@@ -650,7 +650,7 @@ fn checkout_creation_rejects_a_revision_outside_its_thread_before_writing_files(
         &replica,
         &destination,
         unrelated.id(),
-        &crate::AudienceTier::Private,
+        &crate::AudienceTier::Internal,
     );
     assert!(
         result.is_err(),

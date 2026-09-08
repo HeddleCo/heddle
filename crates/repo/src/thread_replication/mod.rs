@@ -68,8 +68,9 @@ impl ThreadReplica {
         let connection = this.connect()?;
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS threads(id BLOB PRIMARY KEY, genesis BLOB NOT NULL, generation INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT);
+            CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT, capture_state BLOB);
             CREATE INDEX IF NOT EXISTS operations_thread_status ON operations(thread,status);
+            CREATE INDEX IF NOT EXISTS operations_capture ON operations(thread,capture_state,status,id);
             CREATE TABLE IF NOT EXISTS parents(child BLOB NOT NULL, parent BLOB NOT NULL, PRIMARY KEY(child,parent));
             CREATE INDEX IF NOT EXISTS parents_parent ON parents(parent);
             CREATE TABLE IF NOT EXISTS request_nonces(identity TEXT NOT NULL, nonce BLOB NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(identity,nonce));
@@ -116,6 +117,54 @@ impl ThreadReplica {
         )?)
     }
 
+    /// Indexed membership lookup, independent of repository object presence.
+    /// Pending or rejected captures cannot authorize content or checkout reads.
+    pub fn accepted_capture(&self, revision: StateId) -> Result<Option<State>> {
+        let bytes: Option<Vec<u8>> = self.connect()?.query_row(
+            "SELECT canonical FROM operations WHERE thread=?1 AND capture_state=?2 AND status=1 ORDER BY id LIMIT 1",
+            params![self.thread.as_bytes(), revision.as_bytes()], |row| row.get(0),
+        ).optional()?;
+        bytes
+            .map(|bytes| {
+                let operation = ThreadOperation::decode(&bytes)?;
+                let ThreadOperationBody::Capture(bytes) = operation.body else {
+                    return Err(Error::Invalid("capture index names a non-capture".into()));
+                };
+                let state = State::decode_current_msgpack(&bytes)?;
+                if operation.thread != self.thread || state.id() != revision {
+                    return Err(Error::Invalid(
+                        "capture index differs from canonical identity".into(),
+                    ));
+                }
+                Ok(state)
+            })
+            .transpose()
+    }
+
+    /// Matching causal parents without scanning or decoding unrelated history.
+    pub fn capture_operation_page(
+        &self,
+        revision: StateId,
+        after: Option<ContentHash>,
+        limit: usize,
+    ) -> Result<Vec<ContentHash>> {
+        if !(1..=1024).contains(&limit) {
+            return Err(Error::Invalid("page size must be 1..1024".into()));
+        }
+        let connection = self.connect()?;
+        let mut query = connection.prepare("SELECT id FROM operations WHERE thread=?1 AND capture_state=?2 AND status=1 AND (?3 IS NULL OR id>?3) ORDER BY id LIMIT ?4")?;
+        let rows = query.query_map(
+            params![
+                self.thread.as_bytes(),
+                revision.as_bytes(),
+                after.map(|id| id.as_bytes().to_vec()),
+                limit as u32
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+        rows.map(|row| hash(&row?)).collect()
+    }
+
     /// Persist a verified operation and admit newly complete causal descendants.
     /// The caller's authorization is evaluated before any private bytes persist.
     /// Native capture objects become durable before the acceptance transaction.
@@ -133,8 +182,12 @@ impl ThreadReplica {
         let id = operation.id()?;
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let inserted = tx.execute("INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature) VALUES(?1,?2,?3,?4,?5)",
-            params![id.as_bytes(), self.thread.as_bytes(), facet_number(operation.facet()), signed.canonical, signed.signature])?;
+        let capture_state = match &operation.body {
+            ThreadOperationBody::Capture(bytes) => Some(State::decode_current_msgpack(bytes)?.id()),
+            ThreadOperationBody::Discussion(_) => None,
+        };
+        let inserted = tx.execute("INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,capture_state) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![id.as_bytes(), self.thread.as_bytes(), facet_number(operation.facet()), signed.canonical, signed.signature, capture_state.map(|id| id.as_bytes().to_vec())])?;
         if inserted > 0 {
             for parent in &operation.parents {
                 tx.execute(

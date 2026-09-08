@@ -45,7 +45,7 @@ impl ThreadReplica {
             ));
         }
         let connection = self.connect()?;
-        let mut query = connection.prepare("SELECT h.operation,o.status FROM peer_heads h LEFT JOIN operations o ON o.id=h.operation WHERE h.thread=?1 AND h.peer=?2 AND (o.status IS NULL OR o.status=0) AND ((h.facet=1 AND ?3) OR (h.facet=2 AND ?4)) ORDER BY h.operation LIMIT ?5")?;
+        let mut query = connection.prepare("SELECT h.operation,o.status FROM peer_heads h LEFT JOIN operations o ON o.id=h.operation AND o.thread=h.thread WHERE h.thread=?1 AND h.peer=?2 AND (o.status IS NULL OR o.status=0) AND ((h.facet=1 AND ?3) OR (h.facet=2 AND ?4)) ORDER BY h.operation LIMIT ?5")?;
         let heads = query
             .query_map(
                 params![

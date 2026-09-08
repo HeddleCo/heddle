@@ -66,6 +66,11 @@ impl ThreadCheckout {
         if path.exists() {
             return Err(Error::Invalid("checkout destination already exists".into()));
         }
+        if revision != replica.genesis()?.base && replica.accepted_capture(revision)?.is_none() {
+            return Err(Error::Invalid(
+                "checkout source is not admitted in this Thread".into(),
+            ));
+        }
         let state = source
             .store()
             .get_state(&revision)?
@@ -337,22 +342,12 @@ impl ThreadCheckout {
         if expected != replica.genesis()?.base {
             let mut cursor = None;
             loop {
-                let page = replica.accepted_page(
-                    objects::object::thread_replication::ThreadFacet::Source,
-                    cursor,
-                    128,
-                )?;
+                let page = replica.capture_operation_page(expected, cursor, 128)?;
                 if page.is_empty() {
                     break;
                 }
-                for (id, signed) in page {
-                    cursor = Some(id);
-                    if let ThreadOperationBody::Capture(bytes) = signed.verify()?.body
-                        && objects::object::State::decode_current_msgpack(&bytes)?.id() == expected
-                    {
-                        parents.insert(id);
-                    }
-                }
+                cursor = page.last().copied();
+                parents.extend(page);
             }
             if parents.is_empty() {
                 return Err(Error::Invalid(
