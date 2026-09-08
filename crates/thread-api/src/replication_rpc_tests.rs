@@ -4,9 +4,9 @@ use crypto::{Ed25519Signer, Signer, thread_operation::SignedOperation};
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 use objects::object::{
     Attribution, ContentHash, Principal, State, Tree,
-    thread_replication::{ThreadGenesis, ThreadOperation, ThreadOperationBody},
+    thread_replication::{Admission, ThreadGenesis, ThreadOperation, ThreadOperationBody},
 };
-use repo::{Repository, thread_replication::Admission};
+use repo::Repository;
 
 use super::*;
 use crate::authority::CredentialSigner;

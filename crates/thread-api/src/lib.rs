@@ -4,10 +4,10 @@
 #[cfg(feature = "native")]
 pub mod authority;
 pub mod content;
-#[cfg(feature = "native")]
+#[cfg(feature = "replication")]
 pub mod live_replication;
 pub mod observation;
-#[cfg(feature = "native")]
+#[cfg(feature = "replication")]
 pub mod replication;
 #[cfg(all(feature = "native", feature = "iroh"))]
 pub mod replication_rpc;

@@ -16,7 +16,9 @@ use objects::{
     object::{
         CollaborationOperationEnvelope, ContentHash, MaterializedRepositoryCollaboration, State,
         StateId, materialize_repository_collaboration,
-        thread_replication::{ThreadFacet, ThreadGenesis, ThreadOperation, ThreadOperationBody},
+        thread_replication::{
+            Admission, ThreadFacet, ThreadGenesis, ThreadOperation, ThreadOperationBody,
+        },
     },
     store::ObjectStore,
 };
@@ -39,12 +41,6 @@ pub enum Error {
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Admission {
-    Accepted,
-    Pending,
-    Rejected(String),
-}
 #[derive(Clone, Debug)]
 pub struct ThreadView {
     pub generation: i64,

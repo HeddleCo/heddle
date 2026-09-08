@@ -2813,6 +2813,7 @@ dependencies = [
  "heddle-api",
  "heddle-biscuit-verifier",
  "heddle-crypto",
+ "heddle-object-model",
  "heddle-objects",
  "heddle-repo",
  "heddleco-iroh",

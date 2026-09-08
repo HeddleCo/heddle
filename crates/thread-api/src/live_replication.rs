@@ -5,8 +5,9 @@
 use std::{sync::Arc, time::Duration};
 
 use api::v2::client::{MessageReader, MessageWriter};
-use objects::{object::ContentHash, store::ObjectStore};
+use heddle_object_model::object::ContentHash;
 use prost::Message;
+#[cfg(feature = "native")]
 use repo::thread_replication::ThreadReplica;
 use tokio::{
     sync::{mpsc, watch},
@@ -15,18 +16,18 @@ use tokio::{
 
 use crate::{
     contract::*,
-    replication::{Frame, Outbound, Session},
+    replication::{Frame, Outbound, Session, store::ReplicaStore},
     transport,
 };
 
 #[derive(Debug, thiserror::Error)]
-pub enum Error {
+pub enum Error<E: std::error::Error + 'static> {
     #[error(transparent)]
     Transport(#[from] transport::Error),
+    #[error("replica store: {0}")]
+    Store(#[source] E),
     #[error(transparent)]
-    Replication(#[from] crate::replication::Error),
-    #[error(transparent)]
-    Store(#[from] repo::thread_replication::Error),
+    Protocol(#[from] crate::replication::Error),
     #[error("replication worker: {0}")]
     Worker(String),
     #[error("replication response budget exhausted; reopen from durable state")]
@@ -34,7 +35,16 @@ pub enum Error {
     #[error("Thread change feed stopped")]
     FeedClosed,
 }
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T, E> = std::result::Result<T, Error<E>>;
+
+impl<E: std::error::Error + 'static> From<crate::replication::StoreError<E>> for Error<E> {
+    fn from(error: crate::replication::StoreError<E>) -> Self {
+        match error {
+            crate::replication::StoreError::Store(error) => Self::Store(error),
+            crate::replication::StoreError::Protocol(error) => Self::Protocol(error),
+        }
+    }
+}
 
 struct AbortOnDrop(AbortHandle);
 impl Drop for AbortOnDrop {
@@ -49,15 +59,29 @@ impl Drop for AbortOnDrop {
 pub struct Feed {
     thread: ContentHash,
     changes: watch::Receiver<Option<i64>>,
-    _task: Arc<AbortOnDrop>,
+    _task: Option<Arc<AbortOnDrop>>,
 }
 impl Feed {
-    pub async fn new(replica: ThreadReplica) -> Result<Self> {
+    /// The host shares one durable-generation watcher per Thread. Subscribe
+    /// before the initial announcement; missed notifications trigger a fresh
+    /// generation check, never an assumed accepted frontier.
+    pub fn from_changes(thread: ContentHash, changes: watch::Receiver<Option<i64>>) -> Self {
+        Self {
+            thread,
+            changes,
+            _task: None,
+        }
+    }
+
+    #[cfg(feature = "native")]
+    pub async fn new(
+        replica: ThreadReplica,
+    ) -> std::result::Result<Self, crate::replication::native::Error> {
         let thread = replica.thread_id();
         let initial = replica.clone();
         let generation = tokio::task::spawn_blocking(move || initial.generation())
             .await
-            .map_err(worker)??;
+            .map_err(crate::replication::native::Error::from)??;
         let (sender, changes) = watch::channel(Some(generation));
         let task = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(200));
@@ -89,7 +113,7 @@ impl Feed {
         Ok(Self {
             thread,
             changes,
-            _task: Arc::new(AbortOnDrop(task.abort_handle())),
+            _task: Some(Arc::new(AbortOnDrop(task.abort_handle()))),
         })
     }
 }
@@ -100,7 +124,7 @@ pub enum Side {
     Acceptor,
 }
 impl Side {
-    fn decode(self, bytes: &[u8]) -> Result<Frame> {
+    fn decode<E: std::error::Error + 'static>(self, bytes: &[u8]) -> Result<Frame, E> {
         Ok(match self {
             Self::Initiator => Frame::from_response(
                 ReplicateThreadResponse::decode(bytes).map_err(transport::Error::from)?,
@@ -128,17 +152,16 @@ enum Event {
 /// `authorize` rechecks the live host permission, including expiry/revocation.
 /// It runs before every admission and output, including queued output. Readers
 /// must enforce the negotiated frame bound before allocating message bodies.
-pub async fn run<S, R, W, G>(
-    mut session: Session,
-    store: Arc<S>,
+pub async fn run<B, R, W, G>(
+    mut session: Session<B>,
     mut reader: R,
     mut writer: W,
     side: Side,
     feed: &Feed,
     authorize: G,
-) -> Result<()>
+) -> Result<(), B::Error>
 where
-    S: ObjectStore + Send + Sync + 'static,
+    B: ReplicaStore,
     R: MessageReader<Error = transport::Error>,
     W: MessageWriter<Error = transport::Error> + 'static,
     G: Fn() -> std::result::Result<(), transport::Error> + Clone + Send + Sync + 'static,
@@ -151,34 +174,29 @@ where
     let (queue, mut outgoing) = mpsc::channel::<Outbound>(256);
     let sender_session = session.clone();
     let sender_authorize = authorize.clone();
-    let mut sender: JoinHandle<Result<()>> = tokio::spawn(async move {
+    let mut sender: JoinHandle<Result<(), B::Error>> = tokio::spawn(async move {
         while let Some(item) = outgoing.recv().await {
             let session = sender_session.clone();
             let gate = sender_authorize.clone();
-            let frame = tokio::task::spawn_blocking(move || -> Result<Frame> {
-                gate()?;
-                Ok(match item {
-                    Outbound::Operation(id) => session.export_operation(id)?,
-                    Outbound::Frame(frame) => {
-                        if let Frame::Have(have) = &frame {
-                            let allowed = session.export_facets()?;
-                            for frontier in &have.frontiers {
-                                if !allowed
-                                    .contains(&crate::replication::native_facet(frontier.facet)?)
-                                {
-                                    return Err(transport::Error::Protocol(
-                                        "sharing policy changed before disclosure",
-                                    )
-                                    .into());
-                                }
+            gate()?;
+            let frame = match item {
+                Outbound::Operation(id) => session.export_operation(id).await?,
+                Outbound::Frame(frame) => {
+                    if let Frame::Have(have) = &frame {
+                        let allowed = session.export_facets().await?;
+                        for frontier in &have.frontiers {
+                            if !allowed.contains(&crate::replication::native_facet(frontier.facet)?)
+                            {
+                                return Err(transport::Error::Protocol(
+                                    "sharing policy changed before disclosure",
+                                )
+                                .into());
                             }
                         }
-                        frame
                     }
-                })
-            })
-            .await
-            .map_err(worker)??;
+                    frame
+                }
+            };
             writer.send(side.encode(frame)).await?;
         }
         writer.finish().await?;
@@ -208,35 +226,22 @@ where
                 Event::Maintain
             }
         };
-        let store = store.clone();
-        let gate = authorize.clone();
-        let (next, output, still_announcing) = tokio::task::spawn_blocking(move || {
-            let mut still_announcing = None;
-            let result = (|| -> Result<Vec<Outbound>> {
-                gate()?;
-                match event {
-                    Event::Incoming(frame) => Ok(session.handle(frame, store.as_ref())?),
-                    Event::Announce => {
-                        let frame = session.announcement()?;
-                        still_announcing = Some(frame.is_some());
-                        Ok(frame.into_iter().map(Outbound::Frame).collect())
-                    }
-                    Event::Maintain => Ok(session
-                        .control()?
-                        .into_iter()
-                        .map(Outbound::Frame)
-                        .collect()),
-                }
-            })();
-            (session, result, still_announcing)
-        })
-        .await
-        .map_err(worker)?;
-        session = next;
-        if let Some(value) = still_announcing {
-            announce = value;
-        }
-        for item in output? {
+        authorize()?;
+        let output = match event {
+            Event::Incoming(frame) => session.handle(frame).await?,
+            Event::Announce => {
+                let frame = session.announcement().await?;
+                announce = frame.is_some();
+                frame.into_iter().map(Outbound::Frame).collect()
+            }
+            Event::Maintain => session
+                .control()
+                .await?
+                .into_iter()
+                .map(Outbound::Frame)
+                .collect(),
+        };
+        for item in output {
             queue.try_send(item).map_err(|_| Error::Backpressure)?;
         }
     }
@@ -244,6 +249,6 @@ where
     sender.await.map_err(worker)?
 }
 
-fn worker(error: tokio::task::JoinError) -> Error {
+fn worker<E: std::error::Error + 'static>(error: tokio::task::JoinError) -> Error<E> {
     Error::Worker(error.to_string())
 }

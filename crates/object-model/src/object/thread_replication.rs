@@ -62,6 +62,14 @@ pub enum ThreadFacet {
     Discussion,
 }
 
+/// Durable causal admission. Receiving bytes alone does not accept an operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Admission {
+    Accepted,
+    Pending,
+    Rejected(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "canonical", rename_all = "snake_case")]
 pub enum ThreadOperationBody {

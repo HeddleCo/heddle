@@ -1,17 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::Arc};
 
 use crypto::{Ed25519Signer, Signer};
 use objects::object::{
     Attribution, Principal, State, Tree,
     thread_replication::{ThreadGenesis, ThreadOperation, ThreadOperationBody},
 };
-use repo::Repository;
+use repo::{Repository, thread_replication::ThreadReplica};
 
-use super::*;
+use super::{native::LocalReplica, *};
 
-#[test]
-fn reconnect_finds_missing_ancestors_through_already_pending_parents() {
+#[tokio::test]
+async fn reconnect_finds_missing_ancestors_through_already_pending_parents() {
     let temp = tempfile::TempDir::new().expect("repository directory");
     let repository = Repository::init_default(temp.path()).expect("repository");
     let signer = Ed25519Signer::generate().expect("publisher");
@@ -55,18 +55,21 @@ fn reconnect_finds_missing_ancestors_through_already_pending_parents() {
         );
     }
     let reopened = ThreadReplica::open(repository.heddle_dir(), &genesis).expect("restart");
-    let mut session =
-        Session::new(reopened, [2; 32], BTreeSet::from([ThreadFacet::Source]), 8).expect("session");
+    let mut session = Session::new(
+        LocalReplica::new(reopened, Arc::new(repository.store().clone())),
+        [2; 32],
+        BTreeSet::from([ThreadFacet::Source]),
+        8,
+    )
+    .expect("session");
     let response = session
-        .handle(
-            Frame::Have(ReplicationHave {
-                frontiers: vec![CausalFrontier {
-                    facet: SharedFacet::Source as i32,
-                    heads: vec![previous.expect("head").as_bytes().to_vec()],
-                }],
-            }),
-            repository.store(),
-        )
+        .handle(Frame::Have(ReplicationHave {
+            frontiers: vec![CausalFrontier {
+                facet: SharedFacet::Source as i32,
+                heads: vec![previous.expect("head").as_bytes().to_vec()],
+            }],
+        }))
+        .await
         .expect("repair request");
     let needed: Vec<_> = response
         .into_iter()
@@ -89,8 +92,8 @@ fn reconnect_finds_missing_ancestors_through_already_pending_parents() {
     );
 }
 
-#[test]
-fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
+#[tokio::test]
+async fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
     let left_dir = tempfile::TempDir::new().expect("left directory");
     let right_dir = tempfile::TempDir::new().expect("right directory");
     let left_repo = Repository::init_default(left_dir.path()).expect("left repository");
@@ -148,12 +151,25 @@ fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
     let signed = SignedOperation::sign(&merge_operation, &signer).expect("signed merge");
     left.receive(&signed, left_repo.store(), |_| Ok(()))
         .expect("local integration");
-    let mut a = Session::new(left.clone(), [2; 32], facets.clone(), 2).expect("source session");
-    let mut b =
-        Session::new(right.clone(), [1; 32], facets.clone(), 2).expect("destination session");
-    let frame = a.export_operation(merged_id).expect("integrated head");
-    b.handle(frame, right_repo.store())
-        .expect("receive head before parents");
+    let mut a = Session::new(
+        LocalReplica::new(left.clone(), Arc::new(left_repo.store().clone())),
+        [2; 32],
+        facets.clone(),
+        2,
+    )
+    .expect("source session");
+    let mut b = Session::new(
+        LocalReplica::new(right.clone(), Arc::new(right_repo.store().clone())),
+        [1; 32],
+        facets.clone(),
+        2,
+    )
+    .expect("destination session");
+    let frame = a
+        .export_operation(merged_id)
+        .await
+        .expect("integrated head");
+    b.handle(frame).await.expect("receive head before parents");
     assert_eq!(
         right
             .operation(&merged_id)
@@ -166,10 +182,19 @@ fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
     // must refill the window without requiring any fresh mutation at the source.
     drop(b);
     let reopened = ThreadReplica::open(right_repo.heddle_dir(), &genesis).expect("restart");
-    let mut b = Session::new(reopened, [1; 32], facets, 2).expect("resumed destination");
+    let mut b = Session::new(
+        LocalReplica::new(reopened, Arc::new(right_repo.store().clone())),
+        [1; 32],
+        facets,
+        2,
+    )
+    .expect("resumed destination");
     let mut queue = VecDeque::from([(
         false,
-        b.control().expect("repair").expect("needed ancestors"),
+        b.control()
+            .await
+            .expect("repair")
+            .expect("needed ancestors"),
     )]);
     let mut delivered = 0;
     while let Some((from_a, frame)) = queue.pop_front() {
@@ -178,17 +203,14 @@ fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
             delivered < 500,
             "exchange must settle, not repeat receipts indefinitely"
         );
-        let (receiver, store) = if from_a {
-            (&mut b, right_repo.store())
-        } else {
-            (&mut a, left_repo.store())
-        };
-        let outgoing = receiver.handle(frame, store).expect("causal exchange");
+        let receiver = if from_a { &mut b } else { &mut a };
+        let outgoing = receiver.handle(frame).await.expect("causal exchange");
         for item in outgoing {
             let frame = match item {
                 Outbound::Frame(frame) => frame,
                 Outbound::Operation(id) => receiver
                     .export_operation(id)
+                    .await
                     .expect("export under current policy"),
             };
             if let Frame::Need(need) = &frame {
@@ -216,26 +238,24 @@ fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
         Some(Admission::Accepted)
     );
     let queued = a
-        .handle(
-            Frame::Need(ReplicationNeed {
-                operation_ids: vec![merged_id.as_bytes().to_vec()],
-            }),
-            left_repo.store(),
-        )
+        .handle(Frame::Need(ReplicationNeed {
+            operation_ids: vec![merged_id.as_bytes().to_vec()],
+        }))
+        .await
         .expect("queue an export");
     assert!(matches!(queued.first(), Some(Outbound::Operation(_))));
     left.set_sharing([2; 32], &BTreeSet::new())
         .expect("revoke sharing before writer sends");
     assert!(matches!(
-        a.export_operation(merged_id),
-        Err(Error::Protocol(
+        a.export_operation(merged_id).await,
+        Err(StoreError::Protocol(Error::Protocol(
             "operation is outside current sharing policy"
-        ))
+        )))
     ));
 }
 
-#[test]
-fn paged_announcement_restarts_when_a_write_lands_behind_its_cursor() {
+#[tokio::test]
+async fn paged_announcement_restarts_when_a_write_lands_behind_its_cursor() {
     let dir = tempfile::TempDir::new().expect("repository directory");
     let repository = Repository::init_default(dir.path()).expect("repository");
     let signer = Ed25519Signer::generate().expect("publisher");
@@ -278,9 +298,15 @@ fn paged_announcement_restarts_when_a_write_lands_behind_its_cursor() {
         .expect("first write");
     let facets = BTreeSet::from([ThreadFacet::Source]);
     replica.set_sharing([2; 32], &facets).expect("opt-in");
-    let mut session = Session::new(replica.clone(), [2; 32], facets, 1).expect("session");
+    let mut session = Session::new(
+        LocalReplica::new(replica.clone(), Arc::new(repository.store().clone())),
+        [2; 32],
+        facets,
+        1,
+    )
+    .expect("session");
     assert!(matches!(
-        session.announcement().expect("first page"),
+        session.announcement().await.expect("first page"),
         Some(Frame::Have(_))
     ));
     replica
@@ -288,7 +314,11 @@ fn paged_announcement_restarts_when_a_write_lands_behind_its_cursor() {
         .expect("concurrent write sorts behind consumed cursor");
     let mut seen = BTreeSet::new();
     let mut pages = 0;
-    while let Some(frame) = session.announcement().expect("continue paged announcement") {
+    while let Some(frame) = session
+        .announcement()
+        .await
+        .expect("continue paged announcement")
+    {
         pages += 1;
         assert!(pages < 10, "announcement must settle");
         if let Frame::Have(have) = frame {

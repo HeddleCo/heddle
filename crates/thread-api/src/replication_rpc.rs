@@ -21,7 +21,7 @@ use crate::{
     authority::RootAuthority,
     contract::*,
     live_replication::{self, Feed, Side},
-    replication::{self, Session},
+    replication::{self, Session, native::LocalReplica},
     rpc,
     transport::{self, Authorize, IrohTransport, Reader, Writer},
 };
@@ -76,7 +76,7 @@ impl Peer {
         store: Arc<S>,
         feed: &Feed,
         authorize: G,
-    ) -> live_replication::Result<()>
+    ) -> live_replication::Result<(), replication::native::Error>
     where
         S: ObjectStore + Send + Sync + 'static,
         A: Authorize,
@@ -89,7 +89,7 @@ impl Peer {
         };
         validate_endpoint(&destination)?;
         let thread = self.reference()?;
-        let (_, version) = self.replica.sharing(&remote_key)?;
+        let (_, version) = self.replica.sharing(&remote_key).map_err(store_error)?;
         let opening = ReplicationOpen {
             thread: Some(thread.clone()),
             facets: self
@@ -153,21 +153,12 @@ impl Peer {
             return Err(transport::Error::Protocol("unsupported replication Ready budget").into());
         }
         let session = Session::new(
-            self.replica.clone(),
+            LocalReplica::new(self.replica.clone(), store),
             remote_key,
             facets,
             budget.max_items as usize,
         )?;
-        live_replication::run(
-            session,
-            store,
-            reader,
-            writer,
-            Side::Initiator,
-            feed,
-            authorize,
-        )
-        .await
+        live_replication::run(session, reader, writer, Side::Initiator, feed, authorize).await
     }
 
     /// Accept exactly one ReplicateThread RPC. The connection must be routed
@@ -178,7 +169,7 @@ impl Peer {
         authority: Arc<RootAuthority>,
         store: Arc<S>,
         feed: &Feed,
-    ) -> live_replication::Result<()>
+    ) -> live_replication::Result<(), replication::native::Error>
     where
         S: ObjectStore + Send + Sync + 'static,
     {
@@ -293,16 +284,15 @@ impl Peer {
                 .encode_to_vec(),
             )
             .await?;
-        let session = Session::new(self.replica.clone(), remote_key, facets, max_items as usize)?;
-        live_replication::run(
-            session,
-            store,
-            reader,
-            writer,
-            Side::Acceptor,
-            feed,
-            move || authority.recheck(&verified),
-        )
+        let session = Session::new(
+            LocalReplica::new(self.replica.clone(), store),
+            remote_key,
+            facets,
+            max_items as usize,
+        )?;
+        live_replication::run(session, reader, writer, Side::Acceptor, feed, move || {
+            authority.recheck(&verified)
+        })
         .await
     }
 

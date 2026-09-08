@@ -28,11 +28,16 @@ heddle-thread-api = { version = "0.21.0", default-features = false }
 | --- | --- |
 | None | Typed client and committed observations over a caller-provided transport |
 | `iroh` | Iroh connection adapter and cancellation-safe stream framing |
-| `native` | Durable Thread replication, shared change feed, and host Biscuit authorization |
+| `replication` | Async causal exchange and stream driver over a caller-provided durable store |
+| `native` | Replication with a SQLite/object-store adapter, local change feed, and host Biscuit authorization |
 | Both (default) | Native replication RPC over Iroh, plus the client above |
 
-Weft can enable `native` and implement the stream traits using its own transport
-stack. Heddle's normal configuration enables both features. Fixtures and examples
+Weft enables `replication`, implements `ReplicaStore` with PostgreSQL, and supplies
+the stream traits using its own transport stack. It shares the causal protocol
+without importing local checkout storage or Heddle's Iroh version. The host
+provides one `Feed::from_changes` watcher per Thread; notification loss prompts
+durable frontier reconciliation. Heddle's normal configuration enables `native`
+and `iroh`. Fixtures and examples
 require `iroh`; the native replication integration requires both. CI checks the
 dependency boundaries and tests every combination, so a default workspace build
 cannot hide an accidental dependency between the two features. The core also

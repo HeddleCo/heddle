@@ -4,27 +4,36 @@
 use std::collections::BTreeSet;
 
 use crypto::thread_operation::SignedOperation;
-use objects::{
-    object::{
-        ContentHash,
-        thread_replication::{OPERATION_FORMAT, ThreadFacet},
-    },
-    store::ObjectStore,
+use heddle_object_model::object::{
+    ContentHash,
+    thread_replication::{Admission, OPERATION_FORMAT, ThreadFacet},
 };
-use repo::thread_replication::{Admission, ThreadReplica};
+#[cfg(feature = "native")]
+pub mod native;
+pub mod store;
+use store::ReplicaStore;
 
 use crate::contract::*;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Store(#[from] repo::thread_replication::Error),
+    Operation(#[from] heddle_object_model::error::HeddleError),
     #[error(transparent)]
     Signature(#[from] crypto::thread_operation::Error),
     #[error("replication protocol: {0}")]
     Protocol(&'static str),
 }
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError<E: std::error::Error + 'static> {
+    #[error("replica store: {0}")]
+    Store(#[source] E),
+    #[error(transparent)]
+    Protocol(#[from] Error),
+}
+pub type StoreResult<T, E> = std::result::Result<T, StoreError<E>>;
 
 /// Internal frames carry the same typed payloads in both directions.
 pub enum Frame {
@@ -84,8 +93,8 @@ pub enum Outbound {
 }
 
 #[derive(Clone)]
-pub struct Session {
-    pub replica: ThreadReplica,
+pub struct Session<B: ReplicaStore> {
+    pub replica: B,
     destination: [u8; 32],
     facets: BTreeSet<ThreadFacet>,
     max_items: usize,
@@ -95,11 +104,11 @@ pub struct Session {
     announce_facet: usize,
     after: Option<ContentHash>,
 }
-impl Session {
+impl<B: ReplicaStore> Session<B> {
     /// `facets` is the intersection of authenticated admission scope and the
     /// negotiated opening. Local export still checks current sharing policy.
     pub fn new(
-        replica: ThreadReplica,
+        replica: B,
         destination: [u8; 32],
         facets: BTreeSet<ThreadFacet>,
         max_items: usize,
@@ -119,14 +128,18 @@ impl Session {
             after: None,
         })
     }
-    pub fn export_facets(&self) -> Result<BTreeSet<ThreadFacet>> {
-        let (sharing, _) = self.replica.sharing(&self.destination)?;
+    pub async fn export_facets(&self) -> StoreResult<BTreeSet<ThreadFacet>, B::Error> {
+        let sharing = self
+            .replica
+            .sharing(self.destination)
+            .await
+            .map_err(StoreError::Store)?;
         Ok(sharing.intersection(&self.facets).copied().collect())
     }
     /// At most one bounded frontier page. Call again until None. A generation
     /// change during a paged announcement starts another round, closing gaps.
-    pub fn announcement(&mut self) -> Result<Option<Frame>> {
-        let current = self.replica.generation()?;
+    pub async fn announcement(&mut self) -> StoreResult<Option<Frame>, B::Error> {
+        let current = self.replica.generation().await.map_err(StoreError::Store)?;
         if self.generation == current && self.announce_generation < 0 {
             return Ok(None);
         }
@@ -135,7 +148,7 @@ impl Session {
             self.announce_facet = 0;
             self.after = None;
         }
-        let sharing = self.export_facets()?;
+        let sharing = self.export_facets().await?;
         let facets = [ThreadFacet::Source, ThreadFacet::Discussion];
         while self.announce_facet < facets.len() {
             let facet = facets[self.announce_facet];
@@ -146,7 +159,9 @@ impl Session {
             }
             let page = self
                 .replica
-                .frontier_page(facet, self.after, self.max_items)?;
+                .frontier_page(facet, self.after, self.max_items)
+                .await
+                .map_err(StoreError::Store)?;
             if page.is_empty() {
                 self.announce_facet += 1;
                 self.after = None;
@@ -165,10 +180,12 @@ impl Session {
         // A watcher may already have delivered a mutation that happened while
         // this round was being paged. Keep the caller draining until a fresh
         // round covers it; None must mean the announcement is caught up.
-        Ok((self.replica.generation()? != self.generation)
-            .then(|| Frame::Have(ReplicationHave::default())))
+        Ok(
+            (self.replica.generation().await.map_err(StoreError::Store)? != self.generation)
+                .then(|| Frame::Have(ReplicationHave::default())),
+        )
     }
-    pub fn handle(&mut self, frame: Frame, store: &impl ObjectStore) -> Result<Vec<Outbound>> {
+    pub async fn handle(&mut self, frame: Frame) -> StoreResult<Vec<Outbound>, B::Error> {
         let mut responses = Vec::new();
         match frame {
             Frame::Have(have) => {
@@ -180,15 +197,21 @@ impl Session {
                 for frontier in have.frontiers {
                     let facet = native_facet(frontier.facet)?;
                     if !self.facets.contains(&facet) {
-                        return Err(Error::Protocol("unnegotiated facet"));
+                        return Err(Error::Protocol("unnegotiated facet").into());
                     }
                     for bytes in frontier.heads {
                         let id = hash(&bytes)?;
-                        if let Some((record, status)) = self.replica.operation(&id)? {
-                            if record.verify()?.facet() != facet {
+                        if let Some((record, status)) = self
+                            .replica
+                            .operation(id)
+                            .await
+                            .map_err(StoreError::Store)?
+                        {
+                            if record.verify().map_err(Error::from)?.facet() != facet {
                                 return Err(Error::Protocol(
                                     "advertised frontier has the wrong facet",
-                                ));
+                                )
+                                .into());
                             }
                             match status {
                                 Admission::Accepted => receipt.accepted_operation_ids.push(bytes),
@@ -202,24 +225,32 @@ impl Session {
                         }
                     }
                 }
-                self.replica.remember_peer_heads(self.destination, &heads)?;
+                self.replica
+                    .remember_peer_heads(self.destination, heads)
+                    .await
+                    .map_err(StoreError::Store)?;
                 if !receipt.accepted_operation_ids.is_empty() || !receipt.rejected.is_empty() {
                     responses.push(Outbound::Frame(Frame::Receipt(receipt)));
                 }
             }
             Frame::Need(need) => {
                 self.check_count(need.operation_ids.len())?;
-                let sharing = self.export_facets()?;
+                let sharing = self.export_facets().await?;
                 for bytes in need.operation_ids {
                     let id = hash(&bytes)?;
-                    let Some((record, Admission::Accepted)) = self.replica.operation(&id)? else {
-                        return Err(Error::Protocol("requested operation unavailable"));
+                    let Some((record, Admission::Accepted)) = self
+                        .replica
+                        .operation(id)
+                        .await
+                        .map_err(StoreError::Store)?
+                    else {
+                        return Err(Error::Protocol("requested operation unavailable").into());
                     };
-                    let operation = record.verify()?;
+                    let operation = record.verify().map_err(Error::from)?;
                     if !sharing.contains(&operation.facet()) {
-                        return Err(Error::Protocol(
-                            "operation is outside current sharing policy",
-                        ));
+                        return Err(
+                            Error::Protocol("operation is outside current sharing policy").into(),
+                        );
                     }
                     responses.push(Outbound::Operation(id));
                 }
@@ -229,24 +260,30 @@ impl Session {
                 let mut receipt = ReplicationReceipt::default();
                 for record in batch.operations {
                     let signed = decode_record(record)?;
-                    let operation = signed.verify()?;
-                    let id = operation
-                        .id()
-                        .map_err(repo::thread_replication::Error::from)?;
+                    let operation = signed.verify().map_err(Error::from)?;
+                    let id = operation.id().map_err(Error::from)?;
                     if !self.facets.contains(&operation.facet()) {
-                        return Err(Error::Protocol("operation is outside admission scope"));
+                        return Err(Error::Protocol("operation is outside admission scope").into());
                     }
                     self.in_flight.remove(&id);
-                    match self.replica.receive(&signed, store, |_| Ok(()))? {
+                    match self
+                        .replica
+                        .receive(signed)
+                        .await
+                        .map_err(StoreError::Store)?
+                    {
                         Admission::Accepted => {
                             receipt.accepted_operation_ids.push(id.as_bytes().to_vec())
                         }
                         Admission::Pending => {
                             receipt.pending_operation_ids.push(id.as_bytes().to_vec());
-                            self.replica.remember_peer_heads(
-                                self.destination,
-                                &[(operation.facet(), id)],
-                            )?;
+                            self.replica
+                                .remember_peer_heads(
+                                    self.destination,
+                                    vec![(operation.facet(), id)],
+                                )
+                                .await
+                                .map_err(StoreError::Store)?;
                         }
                         Admission::Rejected(message) => {
                             receipt.rejected.push(rejection(id, message));
@@ -262,31 +299,32 @@ impl Session {
                         + receipt.rejected.len(),
                 )?;
                 for bytes in receipt.accepted_operation_ids {
-                    self.replica.record_peer_receipt(
-                        self.destination,
-                        hash(&bytes)?,
-                        &Admission::Accepted,
-                    )?;
+                    self.replica
+                        .record_peer_receipt(self.destination, hash(&bytes)?, Admission::Accepted)
+                        .await
+                        .map_err(StoreError::Store)?;
                 }
                 for bytes in receipt.pending_operation_ids {
-                    self.replica.record_peer_receipt(
-                        self.destination,
-                        hash(&bytes)?,
-                        &Admission::Pending,
-                    )?;
+                    self.replica
+                        .record_peer_receipt(self.destination, hash(&bytes)?, Admission::Pending)
+                        .await
+                        .map_err(StoreError::Store)?;
                 }
                 for rejected in receipt.rejected {
-                    self.replica.record_peer_receipt(
-                        self.destination,
-                        hash(&rejected.operation_id)?,
-                        &Admission::Rejected(
-                            rejected.failure.map(|f| f.message).unwrap_or_default(),
-                        ),
-                    )?;
+                    self.replica
+                        .record_peer_receipt(
+                            self.destination,
+                            hash(&rejected.operation_id)?,
+                            Admission::Rejected(
+                                rejected.failure.map(|f| f.message).unwrap_or_default(),
+                            ),
+                        )
+                        .await
+                        .map_err(StoreError::Store)?;
                 }
             }
         }
-        if let Some(repair) = self.control()? {
+        if let Some(repair) = self.control().await? {
             responses.push(Outbound::Frame(repair));
         }
         Ok(responses)
@@ -294,10 +332,12 @@ impl Session {
 
     /// One bounded dependency window, refilled after each received operation.
     /// Peer frontiers are durable; outstanding requests are session-local.
-    pub fn control(&mut self) -> Result<Option<Frame>> {
-        let settled =
-            self.replica
-                .settled_peer_heads(self.destination, &self.facets, self.max_items)?;
+    pub async fn control(&mut self) -> StoreResult<Option<Frame>, B::Error> {
+        let settled = self
+            .replica
+            .settled_peer_heads(self.destination, self.facets.clone(), self.max_items)
+            .await
+            .map_err(StoreError::Store)?;
         if !settled.is_empty() {
             let mut receipt = ReplicationReceipt::default();
             for (id, admission) in settled {
@@ -316,9 +356,11 @@ impl Session {
         if available == 0 {
             return Ok(None);
         }
-        let candidates =
-            self.replica
-                .needed_from_peer(self.destination, &self.facets, self.max_items)?;
+        let candidates = self
+            .replica
+            .needed_from_peer(self.destination, self.facets.clone(), self.max_items)
+            .await
+            .map_err(StoreError::Store)?;
         let ids: Vec<_> = candidates
             .into_iter()
             .filter(|id| !self.in_flight.contains(id))
@@ -334,15 +376,18 @@ impl Session {
 
     /// Resolve payload only when the writer is ready. Pending output queues
     /// contain IDs, and policy is checked again immediately before disclosure.
-    pub fn export_operation(&self, id: ContentHash) -> Result<Frame> {
-        let Some((record, Admission::Accepted)) = self.replica.operation(&id)? else {
-            return Err(Error::Protocol("requested operation unavailable"));
+    pub async fn export_operation(&self, id: ContentHash) -> StoreResult<Frame, B::Error> {
+        let Some((record, Admission::Accepted)) = self
+            .replica
+            .operation(id)
+            .await
+            .map_err(StoreError::Store)?
+        else {
+            return Err(Error::Protocol("requested operation unavailable").into());
         };
-        let operation = record.verify()?;
-        if !self.export_facets()?.contains(&operation.facet()) {
-            return Err(Error::Protocol(
-                "operation is outside current sharing policy",
-            ));
+        let operation = record.verify().map_err(Error::from)?;
+        if !self.export_facets().await?.contains(&operation.facet()) {
+            return Err(Error::Protocol("operation is outside current sharing policy").into());
         }
         Ok(Frame::Operations(ReplicationOperations {
             operations: vec![SignedRecord {
@@ -411,6 +456,6 @@ fn hash(bytes: &[u8]) -> Result<ContentHash> {
     })?))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[path = "replication_tests.rs"]
 mod tests;
