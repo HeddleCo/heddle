@@ -700,6 +700,134 @@ mod tests {
     use super::*;
 
     #[test]
+    fn agent_delegation_inherits_identity_authority_until_a_caveat_narrows_it() {
+        let root = biscuit_auth::KeyPair::new();
+        let signing = SigningKey::from_bytes(
+            &root
+                .private()
+                .to_bytes()
+                .as_slice()
+                .try_into()
+                .expect("Ed25519 root seed"),
+        );
+        let now = Utc::now();
+        let expires = now + chrono::Duration::minutes(10);
+        let mut token = Biscuit::builder()
+            .code(
+                format!(
+                    r#"
+                user("identity-owner"); session("identity-session");
+                device_pop_key("{}"); root_established(true);
+                expires_at({}); check if time($now), expires_at($end), $now < $end;
+                right("spool", "org/allowed", "admin");
+            "#,
+                    hex::encode(signing.verifying_key().as_bytes()),
+                    expires.to_rfc3339()
+                )
+                .as_str(),
+            )
+            .expect("human authority")
+            .build(&root)
+            .expect("signed authority");
+        let mut parent_signer = signing;
+        for seed in [41, 42] {
+            let child = SigningKey::from_bytes(&[seed; 32]);
+            let parent_id = token
+                .revocation_identifiers()
+                .last()
+                .expect("parent block")
+                .to_vec();
+            let child_key = child.verifying_key().to_bytes();
+            let signature = parent_signer.sign(&pop_delegation_payload(&parent_id, &child_key));
+            token = token
+                .append(
+                    BlockBuilder::new()
+                        .code(
+                            format!(
+                                r#"
+                agent("agent-{seed}");
+                pop_delegation("{}", "{}", "{}");
+                check if time($now), $now < {};
+            "#,
+                                hex::encode(parent_id),
+                                hex::encode(child_key),
+                                hex::encode(signature.to_bytes()),
+                                expires.to_rfc3339()
+                            )
+                            .as_str(),
+                        )
+                        .expect("delegated key and expiry"),
+                )
+                .expect("derive agent offline");
+            let encoded = token.to_base64().expect("credential");
+            let facts = verify_at_with_resource(
+                &encoded,
+                &[root.public()],
+                &[],
+                "ObserveIdentity",
+                None,
+                now,
+            )
+            .expect("delegated identity access");
+            assert!(
+                facts.root_established,
+                "the human's authority remains the root"
+            );
+            assert!(
+                !facts.limits_identity_disclosure,
+                "delegation alone must not remove account authority"
+            );
+            assert_eq!(
+                facts.delegation_agent_id.as_deref(),
+                Some(format!("agent-{seed}").as_str())
+            );
+            assert!(facts.rights.contains(&Right::spool_admin("org/allowed")));
+            parent_signer = child;
+        }
+        let parent_id = token
+            .revocation_identifiers()
+            .last()
+            .expect("parent block")
+            .to_vec();
+        let child_key = parent_signer.verifying_key().to_bytes();
+        let signature = parent_signer.sign(&pop_delegation_payload(&parent_id, &child_key));
+        let narrowed = token.append(BlockBuilder::new().code(format!(r#"
+            pop_delegation("{}", "{}", "{}");
+            check if operation("ObserveIdentity") or operation("ReadContent");
+            check if operation("ObserveIdentity") or resource($kind,$path), $kind=="spool", $path=="org/allowed";
+        "#, hex::encode(parent_id), hex::encode(child_key), hex::encode(signature.to_bytes())).as_str()).expect("explicit work ceilings"))
+            .expect("narrow the existing chain").to_base64().expect("credential");
+        let facts = verify_at_with_resource(
+            &narrowed,
+            &[root.public()],
+            &[],
+            "ObserveIdentity",
+            None,
+            now,
+        )
+        .expect("self-introspection survives explicit ceilings");
+        assert!(
+            facts.limits_identity_disclosure,
+            "explicit ceilings retain the limited self view"
+        );
+        for (operation, resource, at) in [
+            ("PublishContent", Some(("spool", "org/allowed")), now),
+            ("ReadContent", Some(("spool", "org/other")), now),
+            (
+                "ObserveIdentity",
+                None,
+                expires + chrono::Duration::seconds(1),
+            ),
+        ] {
+            assert!(
+                verify_at_with_resource(&narrowed, &[root.public()], &[], operation, resource, at)
+                    .is_err(),
+                "delegation never removes a parent's operation, resource or lifetime ceiling"
+            );
+        }
+    }
+
+    #[test]
     fn identity_observation_disclosure_respects_operation_and_resource_ceilings() {
         let root = biscuit_auth::KeyPair::new();
         let now = Utc::now();
