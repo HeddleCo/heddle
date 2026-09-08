@@ -12,6 +12,7 @@ mod pack_index;
 mod pack_reader;
 mod repack;
 mod shared;
+mod source_pack;
 mod streaming_builder;
 pub(crate) mod varint;
 mod versioned_header;

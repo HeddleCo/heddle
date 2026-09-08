@@ -114,20 +114,21 @@ fn publication_rejects_unindexed_bytes_even_when_selected_objects_are_complete()
     for (id, kind, data) in entries {
         builder.add_id(id, kind, data);
     }
+    let (mut pack, index, _) = builder.build().expect("pack");
     let secret = Blob::new(b"private transcript".to_vec());
-    let secret_id = PackObjectId::Hash(secret.hash());
-    builder.add_id(secret_id, ObjectType::Blob, secret.into_content());
-    let (pack, index, _) = builder.build().expect("pack");
-    let original = PackIndex::from_bytes(&index).expect("index");
-    let mut partial = PackIndex::new();
-    for entry in original.entries().expect("entries") {
-        if entry.id != secret_id {
-            partial.add(entry.id, entry.offset);
-        }
-    }
-    partial.sort();
+    pack.truncate(pack.len() - PACK_CHECKSUM_LEN);
+    encode_tagged_entry_parts(
+        &mut pack,
+        PackObjectId::Hash(secret.hash()),
+        ObjectType::Blob,
+        secret.size(),
+        None,
+        secret.content(),
+    )
+    .expect("unindexed record");
+    append_container_checksum(&mut pack);
     let reader =
-        PackReader::from_bytes(pack, partial.to_bytes()).expect("well-formed partial index");
+        PackReader::from_bytes(pack, index).expect("well-formed container with trailing record");
     assert!(
         reader.validate_source_closure(&state, 16, 65536).is_err(),
         "an unindexed record must not cross the selected disclosure boundary"
