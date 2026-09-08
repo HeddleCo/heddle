@@ -346,3 +346,7 @@ fn hash(bytes: &[u8]) -> Result<ContentHash> {
         Error::Protocol("operation ID must be 32 bytes")
     })?))
 }
+
+#[cfg(test)]
+#[path = "replication_tests.rs"]
+mod tests;

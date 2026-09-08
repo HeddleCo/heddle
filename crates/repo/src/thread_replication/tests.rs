@@ -414,3 +414,16 @@ fn two_native_checkouts_capture_one_thread_without_rewriting_each_other() {
         "right work"
     );
 }
+
+#[test]
+fn rejected_causal_parent_rejects_its_pending_descendants() {
+    let (_temp, repo, genesis, signer, replica) = setup();
+    let parent = capture(&genesis, &signer, &[], vec![]);
+    let child = capture(&genesis, &signer, &[&parent], vec![state_id(&parent)]);
+    let child_id = child.verify().expect("child").id().expect("ID");
+    assert_eq!(replica.receive(&child, repo.store(), |_| Ok(())).expect("pending child"), Admission::Pending);
+    assert!(matches!(replica.receive(&parent, repo.store(), |_| Ok(())).expect("invalid root"), Admission::Rejected(_)));
+    assert_eq!(replica.operation(&child_id).expect("child status").expect("stored child").1, Admission::Rejected("causal parent was rejected".into()));
+    assert!(replica.view().expect("view").pending.is_empty());
+    assert!(repo.store().get_state(&state_id(&child)).expect("state lookup").is_none());
+}
