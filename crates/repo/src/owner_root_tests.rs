@@ -498,6 +498,45 @@ fn spool_genesis_requires_current_authority_and_verifiable_history() {
         version: state.state_hash().to_vec(),
         ..Default::default()
     };
+    let late = NOW + crate::CLAIMABLE_DEFERRED_HUMAN_TTL_SECS + 1;
+    let initial = verify_owner_root(owner.root.as_ref().expect("original root")).expect("root");
+    let accepted = &owner.accepted_transitions[0];
+    assert!(
+        apply_transition(
+            &initial,
+            accepted,
+            late,
+            VerificationLimits::new(30 * 24 * 60 * 60).expect("limits")
+        )
+        .is_err(),
+        "late new claim remains inadmissible"
+    );
+    assert!(
+        matches!(
+            heddleco_capability_verifier::apply_accepted_transition(
+                &initial,
+                accepted,
+                NOW,
+                VerificationLimits::new(30 * 24 * 60 * 60).expect("limits")
+            ),
+            Err(heddleco_capability_verifier::Error::NotYetValid)
+        ),
+        "future activation cannot enter accepted history"
+    );
+    let replayed = heddleco_capability_verifier::apply_accepted_transition(
+        &initial,
+        accepted,
+        late,
+        VerificationLimits::new(30 * 24 * 60 * 60).expect("limits"),
+    )
+    .expect("accepted claim remains verifiable after original deadline");
+    assert_eq!(
+        replayed.state_hash(),
+        state.state_hash(),
+        "replay retains the exact authority state"
+    );
+    crate::sign_current_spool_owner_genesis(&current, uuid::Uuid::now_v7(), &owner, late)
+        .expect("current authority remains usable after original agent claim deadline");
     let spool = uuid::Uuid::now_v7();
     let genesis = crate::sign_current_spool_owner_genesis(&current, spool, &owner, NOW + 1)
         .expect("current authority can create spool");

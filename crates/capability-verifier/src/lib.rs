@@ -35,9 +35,9 @@ pub use operation::{
 };
 pub use owner::{
     DEFAULT_RECOVERY_WINDOW_SECS, VerifiedOwnerBinding, VerifiedOwnerState,
-    VerifiedSpoolOwnerGenesis, apply_transition, apply_transition_with_timelock,
-    effective_recovery_window, verify_owner_key_binding, verify_owner_root,
-    verify_spool_owner_genesis, verify_transition_timelock,
+    VerifiedSpoolOwnerGenesis, apply_accepted_transition, apply_transition,
+    apply_transition_with_timelock, effective_recovery_window, verify_owner_key_binding,
+    verify_owner_root, verify_spool_owner_genesis, verify_transition_timelock,
 };
 pub use transfer::{
     TransferOwner, VerifiedResourceTransfer, verify_resource_transfer, verify_transfer_audit_chain,

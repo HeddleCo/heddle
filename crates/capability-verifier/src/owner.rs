@@ -78,6 +78,11 @@ impl VerifiedOwnerState {
         &self.recovery_policy
     }
 
+    /// Both states must belong to one immutable root and one linear history.
+    pub(crate) fn extends(&self, previous: &Self) -> bool {
+        self.owner_id == previous.owner_id && self.issuers.contains_key(&previous.state_hash)
+    }
+
     /// Original signed root.
     #[must_use]
     pub const fn signed_root(&self) -> &SignedOwnerRoot {
@@ -744,4 +749,25 @@ pub fn verify_owner_key_binding(
         binding: binding.clone(),
         initial_state: initial_state.clone(),
     })
+}
+
+/// Replay a transition already admitted into durable owner history. Historical
+/// claim deadlines and key overlap are evaluated at its signed activation time;
+/// future activations still fail. This MUST NOT admit a new proposal: admission
+/// uses [`apply_transition`] with the actual clock and the host's veto hold.
+pub fn apply_accepted_transition(
+    state: &VerifiedOwnerState,
+    signed: &crate::wire::SignedOwnerKeyTransition,
+    now_unix_seconds: i64,
+    limits: crate::VerificationLimits,
+) -> crate::Result<VerifiedOwnerState> {
+    let activation = signed
+        .transition
+        .as_ref()
+        .ok_or_else(|| crate::Error::Invalid("accepted transition body missing".to_owned()))?
+        .valid_from_unix_seconds;
+    if activation > now_unix_seconds {
+        return Err(crate::Error::NotYetValid);
+    }
+    apply_transition(state, signed, activation, limits)
 }

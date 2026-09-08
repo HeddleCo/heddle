@@ -682,8 +682,13 @@ fn verify_observed_owner(
     let limits = VerificationLimits::new(30 * 24 * 60 * 60)?;
     let mut verified = verify_owner_root(signed_root).context("verify owner root")?;
     for transition in &observed.accepted_transitions {
-        verified = apply_transition(&verified, transition, now_unix_seconds, limits)
-            .context("verify accepted owner transition")?;
+        verified = heddleco_capability_verifier::apply_accepted_transition(
+            &verified,
+            transition,
+            now_unix_seconds,
+            limits,
+        )
+        .context("verify accepted owner transition")?;
     }
     if observed.version != verified.state_hash() {
         bail!("observed owner version differs from verified current authority");

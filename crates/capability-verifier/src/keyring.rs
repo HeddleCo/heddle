@@ -6,8 +6,8 @@ use crate::{
     Error, Result, VerificationLimits,
     capability::validate_path_segments,
     owner::{
-        VerifiedOwnerState, VerifiedSpoolOwnerGenesis, apply_transition, verify_owner_root,
-        verify_spool_owner_genesis,
+        VerifiedOwnerState, VerifiedSpoolOwnerGenesis, apply_accepted_transition,
+        verify_owner_root, verify_spool_owner_genesis,
     },
     transfer::{TransferOwner, verify_transfer_audit_chain},
     wire::{CloneAuthorizationKeyring, CloneOwnerPinKind},
@@ -125,7 +125,7 @@ pub fn verify_clone_keyring(
     )?;
     verify_pin(&keyring, &state)?;
     for transition in &keyring.accepted_transitions {
-        state = apply_transition(&state, transition, now_unix_seconds, limits)?;
+        state = apply_accepted_transition(&state, transition, now_unix_seconds, limits)?;
     }
     // Creation may follow an owner-key rotation. Verify its key against the
     // complete signed history, while the accepted state still determines
@@ -166,7 +166,7 @@ pub fn verify_clone_keyring(
             Error::BrokenChain("transfer history has no signed owner root".to_owned())
         })?)?;
         for transition in &history.accepted_transitions {
-            owner = apply_transition(&owner, transition, now_unix_seconds, limits)?;
+            owner = apply_accepted_transition(&owner, transition, now_unix_seconds, limits)?;
         }
         if history.state_hash.as_slice() != owner.state_hash() {
             return Err(Error::BrokenChain(
@@ -199,6 +199,43 @@ pub fn verify_clone_keyring(
         stable_owner_uuid: uuid,
         state,
     }));
+    if owners.len() > VerificationLimits::MAX_TRANSITIONS {
+        return Err(Error::TooLarge {
+            limit: VerificationLimits::MAX_TRANSITIONS,
+        });
+    }
+    // A UUID is a routing identifier, not a substitute for root authority.
+    // Historical witnesses cannot introduce a second root or a fork midway
+    // through a transfer chain, including when a previous owner receives it back.
+    for (index, owner) in owners.iter().enumerate() {
+        if owner
+            .state
+            .signed_root()
+            .root
+            .as_ref()
+            .map(|root| root.account_uuid.as_slice())
+            != Some(owner.stable_owner_uuid.as_slice())
+        {
+            return Err(Error::BrokenChain(
+                "transfer owner UUID differs from its signed root".to_owned(),
+            ));
+        }
+        if owner.stable_owner_uuid == &initial_owner_uuid && !state.extends(owner.state) {
+            return Err(Error::BrokenChain(
+                "initial owner witness is outside the pinned root history".to_owned(),
+            ));
+        }
+        for previous in &owners[..index] {
+            if previous.stable_owner_uuid == owner.stable_owner_uuid
+                && !previous.state.extends(owner.state)
+                && !owner.state.extends(previous.state)
+            {
+                return Err(Error::BrokenChain(
+                    "transfer owner witnesses contain unrelated roots or history forks".to_owned(),
+                ));
+            }
+        }
+    }
     let current_owner_uuid = verify_transfer_audit_chain(
         &spool_uuid,
         &initial_owner_uuid,

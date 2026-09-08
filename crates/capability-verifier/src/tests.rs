@@ -1559,6 +1559,43 @@ fn portable_transfer_histories_select_exact_historical_states() {
         verify_clone_keyring(duplicate, NOW, limits(), &[]),
         Err(Error::BrokenChain(_))
     ));
+    let mut unrelated = keyring.clone();
+    let unrelated_key = TestKey::new(21);
+    let unrelated_root = signed_root(
+        OWNER_UUID,
+        &unrelated_key,
+        &[
+            (&TestKey::new(22), RecoveryGuardianKind::Paper),
+            (&TestKey::new(23), RecoveryGuardianKind::Social),
+        ],
+    );
+    let unrelated_state =
+        verify_owner_root(&unrelated_root).expect("different self-signed root with same UUID");
+    unrelated.transfer_owner_histories[0] = OwnerHistory {
+        root: Some(unrelated_root),
+        accepted_transitions: Vec::new(),
+        state_hash: unrelated_state.state_hash().to_vec(),
+    };
+    unrelated.ownership_transfers[0].transfer = Some(signed_transfer(
+        OWNER_UUID,
+        &unrelated_state,
+        &unrelated_key,
+        [0x33; 16],
+        &destination,
+        &destination_key,
+    ));
+    unrelated.ownership_transfers[0].audit_record_hash = digest(
+        TRANSFER_AUDIT_DOMAIN,
+        &transfer_audit_body(&unrelated.ownership_transfers[0]).expect("audit"),
+    )
+    .to_vec();
+    assert!(
+        matches!(
+            verify_clone_keyring(unrelated, NOW, limits(), &[]),
+            Err(Error::BrokenChain(_))
+        ),
+        "a different root cannot inherit resource authority merely by naming the same UUID"
+    );
     let mut tampered = keyring;
     tampered.transfer_owner_histories[0].state_hash[0] ^= 1;
     assert!(matches!(
