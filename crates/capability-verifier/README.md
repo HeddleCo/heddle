@@ -17,8 +17,9 @@ continues to use the purge-only rules below.
 
 ## Contract
 
-Version 0.17 consumes `heddle-api = "0.28"` and implements the purge-only v2
-contract:
+Version 0.17 consumes `heddle-api = "0.28"`. Public proof types come from
+`heddle.api.v2alpha1`; the durable signing formats keep their own versions.
+The verifier implements the purge-only owner contract:
 
 - `verify_spool_owner_genesis` verifies the owner signature over
   `SHA-256(owner_public_key.public_key || spool_uuid)` and returns the exact
@@ -34,9 +35,13 @@ contract:
 - clone keyrings reverify genesis, root, all accepted transitions, the accepted
   state hash, and any ownership-transfer continuation when loaded.
 
-There is no service or release key in the spool trust path. The genesis owner
-key is the root, and subsequent authority keys are learned only through its
-self-verifying transition chain.
+The signed owner root and complete accepted transition history must prove the
+genesis key. Creation can use the current key after rotation, and later rotation
+preserves that immutable genesis. The host must compare the creation key with
+current account authority atomically with creation. Historical membership alone
+does not authorize new creation or capability issuance; issuer retirement and
+current purge authority remain independently enforced. A caller constructs its
+own local TOFU pin after verifying the evidence.
 
 ## Using the verifier
 
