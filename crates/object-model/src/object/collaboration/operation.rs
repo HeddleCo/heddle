@@ -218,6 +218,7 @@ impl CollaborationOperationBodyV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollaborationOperationEnvelope {
+    pub metadata: Option<super::CollaborationMetadata>,
     pub discussion_id: DiscussionRecordId,
     pub parents: Vec<CollabOpId>,
     pub idempotency_key: CollaborationIdempotencyKey,
@@ -238,6 +239,7 @@ impl CollaborationOperationEnvelope {
         parents.sort();
         parents.dedup();
         let operation = Self {
+            metadata: None,
             discussion_id,
             parents,
             idempotency_key,
@@ -247,6 +249,16 @@ impl CollaborationOperationEnvelope {
         };
         operation.validate()?;
         Ok(operation)
+    }
+
+    /// Attach durable identity and references before signing the canonical record.
+    pub fn with_metadata(
+        mut self,
+        metadata: super::CollaborationMetadata,
+    ) -> Result<Self, CollaborationCodecError> {
+        metadata.validate()?;
+        self.metadata = Some(metadata);
+        Ok(self)
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, CollaborationCodecError> {
@@ -260,6 +272,9 @@ impl CollaborationOperationEnvelope {
     }
 
     pub(crate) fn validate(&self) -> Result<(), CollaborationCodecError> {
+        if let Some(metadata) = &self.metadata {
+            metadata.validate()?;
+        }
         if self.parents.windows(2).any(|ids| ids[0] >= ids[1]) {
             return Err(CollaborationCodecError::Invalid(
                 "parent operation ids must be sorted and unique".to_string(),

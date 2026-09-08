@@ -113,6 +113,14 @@ impl ThreadOperation {
             }
             ThreadOperationBody::Discussion(bytes) => {
                 let decoded = CollaborationOperationEnvelope::decode(bytes).map_err(invalid)?;
+                if decoded
+                    .operation
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|m| m.scope.thread != Some(self.thread))
+                {
+                    return Err(invalid("collaboration metadata belongs to another Thread"));
+                }
                 if decoded.operation.encode().map_err(invalid)? != *bytes {
                     return Err(invalid("non-canonical discussion operation"));
                 }
@@ -183,6 +191,14 @@ impl ThreadOperation {
             }
             ThreadOperationBody::Discussion(bytes) => {
                 let operation = CollaborationOperationEnvelope::decode(bytes).map_err(invalid)?;
+                if operation
+                    .operation
+                    .metadata
+                    .as_ref()
+                    .is_some_and(|m| m.scope.spool.to_string() != genesis.spool)
+                {
+                    return Err(invalid("collaboration metadata belongs to another spool"));
+                }
                 let mut discussion_parents = BTreeSet::new();
                 for parent in parents {
                     let ThreadOperationBody::Discussion(bytes) = &parent.body else {

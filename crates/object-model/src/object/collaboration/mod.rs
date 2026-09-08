@@ -3,6 +3,7 @@
 mod codec;
 mod ids;
 mod materialize;
+mod metadata;
 mod operation;
 
 pub use codec::{CollaborationCodecError, DecodedCollaborationOperation};
@@ -14,10 +15,14 @@ pub use materialize::{
     HostedCollaborationSet, MaterializedDiscussion, MaterializedRepositoryCollaboration,
     materialize_repository_collaboration,
 };
+pub use metadata::{
+    CollaborationActor, CollaborationMention, CollaborationMetadata, CollaborationRecordKind,
+    CollaborationScope,
+};
 pub use operation::{
     CollaborationAnchor, CollaborationAnchorStatus, CollaborationOperationBodyV1,
     CollaborationOperationEnvelope, CollaborationResolution, DiscussionTurnV1,
     LegacyDiscussionResolutionV1,
 };
 
-pub const COLLABORATION_OPERATION_SCHEMA_VERSION: u16 = 1;
+pub const COLLABORATION_OPERATION_SCHEMA_VERSION: u16 = 2;

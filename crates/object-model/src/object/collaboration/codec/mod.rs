@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-mod v1;
+mod v2;
 
 use serde::Deserialize;
 
@@ -33,7 +33,7 @@ pub(crate) fn encode(
     operation: &CollaborationOperationEnvelope,
 ) -> Result<Vec<u8>, CollaborationCodecError> {
     operation.validate()?;
-    v1::encode(operation)
+    v2::encode(operation)
 }
 
 pub(crate) fn decode(
@@ -41,12 +41,12 @@ pub(crate) fn decode(
 ) -> Result<DecodedCollaborationOperation, CollaborationCodecError> {
     let probe: VersionProbe = rmp_serde::from_slice(bytes)
         .map_err(|error| CollaborationCodecError::Decoding(error.to_string()))?;
-    if probe.schema_version != 1 {
+    if probe.schema_version != super::COLLABORATION_OPERATION_SCHEMA_VERSION {
         return Err(CollaborationCodecError::UnsupportedVersion(
             probe.schema_version,
         ));
     }
-    let operation = v1::decode(bytes)?;
+    let operation = v2::decode(bytes)?;
     operation.validate()?;
     Ok(DecodedCollaborationOperation {
         operation_id: CollabOpId::for_bytes(bytes),
@@ -76,13 +76,13 @@ mod tests {
     #[test]
     fn unsupported_version_is_rejected_before_body_decode() {
         let bytes = rmp_serde::to_vec_named(&Unsupported {
-            schema_version: 2,
+            schema_version: 3,
             body: &[0xc1],
         })
         .unwrap();
         assert!(matches!(
             decode(&bytes),
-            Err(CollaborationCodecError::UnsupportedVersion(2))
+            Err(CollaborationCodecError::UnsupportedVersion(3))
         ));
     }
 
@@ -265,79 +265,79 @@ mod tests {
     }
 
     #[test]
-    fn v1_full_variant_msgpack_vectors_are_frozen() {
+    fn v2_full_variant_msgpack_vectors_are_frozen() {
         let expected = [
             (
                 "open_repository",
-                "6c4929bfebf65a906406b48957440c591eb8c4f0f7306aea37aca01016c7c256",
+                "f9214075818b1039339a16d9482b6fbae90d2def24623ac96be7c945261e7711",
             ),
             (
                 "open_state",
-                "3733767e55beab34c5add4fa6ad514846320151cab84b8c077ee31456db14e94",
+                "196fd4cd1058139ae0f36fa9d73ec8a837a31ca9122f79336b131768bee15c69",
             ),
             (
                 "open_change",
-                "0504854868da192b823626573c041b53394217db9a1adb3eb290e913e2471c29",
+                "3dc64cf9c798e2d1e992c746254beba2d5008034091aac867bdd969134794539",
             ),
             (
                 "open_path",
-                "39e55ce36dbc40d6bcad094825366eb962fe5e6170bf7a8a53b0a972679cc4ae",
+                "07341819d8ccd19fc862d757031d1ced169a7063954cc172a44db334d3140cb2",
             ),
             (
                 "open_symbol",
-                "a3ec2abb9288b42ab57cb2b1095ebb4b87fcf51bce6e7d57ec60838908fb81e4",
+                "7e59bc78ce16efb74354a958516756ee5cc9dcc374299d664685a9b02b399cf4",
             ),
             (
                 "append_turn",
-                "b542d7f781fed9266dd557a8a422af1f3fce98b4fd834c0e88cc867787e32d1f",
+                "777d8164d530fe27545685f23b283765a3b912f96a262dbad836faba498a9279",
             ),
             (
                 "rebind_anchor",
-                "105cff08ce66523d98a47a8f384aa4f2a3e91eada886e11c8c7a45a6d4a7aca6",
+                "e548683d8c7f20c8550627886f196a81b91e6ae52b8cdaadbfdd8944ceda1f8d",
             ),
             (
                 "resolve_state",
-                "7646fc4ed8e8975805491f7760c652514191bd07b7b15eabdcf6b5c8f068439f",
+                "7063d23abba098f608b13f2b807892bf7a5b61cb7b8487897ba84e95ff519dc9",
             ),
             (
                 "resolve_change",
-                "e5021f4da168fef2bb26297c6fe554cc545a3a3b7dd5a056a23d0de2bdda38b0",
+                "bcaa6bd96243624dcfe25942e92f59104d08291b2daf5dfd4c8d68f6fbd98472",
             ),
             (
                 "resolve_dismissed",
-                "e81909c0875c57ac3920109d2291aec767595952f883b4ca4390e0af61bce9f3",
+                "4277710d09ae7043616335695b98fc89ce15583fd90437b28587c310492fe8f0",
             ),
             (
                 "resolve_annotation",
-                "9ca40f41cc72bbf6208a22f9dcbfeaa3773d1669366864b704e2251fd012bb39",
+                "c4eee97f235a3b534e423f20159ddba3077f9e0079ebc0697fa6c2426b394827",
             ),
             (
                 "resolve_into_annotation",
-                "b3319a3a18c77c52dbf748dba14fdd06542555b7cd89b228b2938ef88888beb7",
+                "e1470222f139ff1e6e06480996a7c27c2ef9d162eed2405ad3d838304d94d73e",
             ),
             (
                 "reopen",
-                "2b997fdd5a1011255a4b85aa4f3cca3f2d0f97b2ce35d7cdcbb76a5349eeffd0",
+                "fa59e9c396a77ce07e57cb7b312f76438c3a002a1a4f053d1da13d9d10e03f7d",
             ),
             (
                 "resolve_conflict",
-                "01e63b8dbb33f11e1fa8b630e045f73030ff99db66a628fe13e84d5f9e9007b2",
+                "d4c76d8ff078907d528613f7811151797d204f01216876623aecd675e9466606",
             ),
             (
                 "legacy_open",
-                "ada646a3ab1feb54cb0b70a682079a8af0a603930f73ae0716cb861107fc4af3",
+                "56e355d619b3db940a4cce75d525dac493d7e925c3e37cf85e1a789c6454713b",
             ),
             (
                 "legacy_state",
-                "83a69502c2aa2d32606c2d1d5b568ddc4c555933960921e4a4f8b2e375a70e66",
+                "44281502243244c40fc8be8b1fa452e3fd4491a455271462cb1236bac5b8136d",
             ),
             (
                 "legacy_dismissed",
-                "69cb8998b89d44d77e9851d2eaa619dd550ecf78e6212b07b18c3c1fd5d47989",
+                "c9dd8f6850af3fce3797bb2ce853414dee066d29821756cbb8e2c6627ed56688",
             ),
             (
                 "legacy_annotation",
-                "368a60c692b5e50bfb542f5654eccc3c62a4f65442e7404c48734386da141d32",
+                "8148359eab1c913a5a1b98debc9aa9f2a455cbbbc7b376b43b80b59c0b709331",
             ),
         ];
         let actual = golden_vectors()

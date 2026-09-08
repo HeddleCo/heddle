@@ -14,8 +14,9 @@ use crate::object::{
 };
 
 #[derive(Serialize, Deserialize)]
-struct WireOperationV1 {
+struct WireOperationV2 {
     schema_version: u16,
+    metadata: Option<crate::object::CollaborationMetadata>,
     discussion_id: DiscussionRecordId,
     parents: Vec<CollabOpId>,
     idempotency_key: CollaborationIdempotencyKey,
@@ -135,8 +136,9 @@ enum WireBodyV1 {
 pub(super) fn encode(
     operation: &CollaborationOperationEnvelope,
 ) -> Result<Vec<u8>, CollaborationCodecError> {
-    let wire = WireOperationV1 {
+    let wire = WireOperationV2 {
         schema_version: COLLABORATION_OPERATION_SCHEMA_VERSION,
+        metadata: operation.metadata.clone(),
         discussion_id: operation.discussion_id,
         parents: operation.parents.clone(),
         idempotency_key: operation.idempotency_key.clone(),
@@ -151,9 +153,10 @@ pub(super) fn encode(
 pub(super) fn decode(
     bytes: &[u8],
 ) -> Result<CollaborationOperationEnvelope, CollaborationCodecError> {
-    let wire: WireOperationV1 = rmp_serde::from_slice(bytes)
+    let wire: WireOperationV2 = rmp_serde::from_slice(bytes)
         .map_err(|error| CollaborationCodecError::Decoding(error.to_string()))?;
     Ok(CollaborationOperationEnvelope {
+        metadata: wire.metadata,
         discussion_id: wire.discussion_id,
         parents: wire.parents,
         idempotency_key: wire.idempotency_key,

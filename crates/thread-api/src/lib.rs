@@ -5,6 +5,8 @@
 pub mod authority;
 #[cfg(feature = "semantic-analysis")]
 pub mod behavior;
+#[cfg(feature = "replication")]
+pub mod collaboration;
 pub mod content;
 #[cfg(feature = "replication")]
 pub mod creation;
