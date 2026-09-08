@@ -5,13 +5,15 @@ import subprocess
 
 def check(package: str, tree: str) -> None:
     names = {line.split()[0] for line in tree.splitlines() if line.strip()}
-    required = {package, "ed25519-dalek"}
-    forbidden = {"heddle-objects", "heddle-repo", "heddle-pack", "heddle-fs-prims"}
+    required = {package}
+    forbidden = {"heddle-objects", "heddle-repo", "heddle-pack", "heddle-fs-prims", "sley", "sley-odb", "sley-transport"}
     if package == "heddleco-capability-verifier":
-        required.add("biscuit-auth")
+        required |= {"biscuit-auth", "ed25519-dalek"}
         forbidden |= {"wasm-bindgen", "js-sys", "web-sys"}
+    elif package == "heddle-object-model":
+        required |= {"heddle-format", "sley-core", "sley-object"}
     else:
-        required.add("heddle-object-model")
+        required |= {"heddle-object-model", "ed25519-dalek"}
     if not required <= names:
         raise ValueError(f"{package}: incomplete dependency inventory")
     if names & forbidden:
@@ -19,7 +21,7 @@ def check(package: str, tree: str) -> None:
 
 
 if __name__ == "__main__":
-    for package in ("heddle-crypto", "heddleco-capability-verifier"):
+    for package in ("heddle-object-model", "heddle-crypto", "heddleco-capability-verifier"):
         tree = subprocess.check_output(
             ["cargo", "tree", "--locked", "-p", package, "--edges", "normal",
              "--prefix", "none", "--format", "{p}"],

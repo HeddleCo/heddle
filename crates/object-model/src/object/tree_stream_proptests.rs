@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use proptest::prelude::*;
-use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
+use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use crate::object::{
     ContentHash, SpoolId, StateId, Tree, TreeEntry, TreeStreamError, is_canonical_tree,

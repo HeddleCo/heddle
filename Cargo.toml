@@ -70,6 +70,7 @@ getrandom = { version = "0.4", features = ["sys_rng"] }
 sley = { version = "0.10.0", features = ["remote", "history-editing", "mmap", "fast-sha1"] }
 sley-config = "0.10.0"
 sley-core = "0.10.0"
+sley-object = "0.10.0"
 sley-odb = "0.10.0"
 sley-pack = "0.10.0"
 sley-refs = "0.10.0"

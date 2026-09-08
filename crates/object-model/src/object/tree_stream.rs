@@ -2,7 +2,7 @@
 //! Streaming Tree entry reader with persistable resume cursors.
 
 use serde::{Deserialize, Serialize};
-use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
+use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
     ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeError,
