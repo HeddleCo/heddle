@@ -1822,7 +1822,7 @@ async fn provision_personal_hosted_path(
     mut create: impl AsyncFnMut(
         &str,
         &str,
-        wire::HostedSpoolKind,
+        bool,
     ) -> std::result::Result<wire::HostedSpoolInfo, ProtocolError>,
 ) -> std::result::Result<AutoProvisionedHostedRepo, ProtocolError> {
     if relative_path
@@ -1836,11 +1836,7 @@ async fn provision_personal_hosted_path(
     let mut provisioned = AutoProvisionedHostedRepo::Existing(personal_root.to_string());
     let mut components = relative_path.split('/').peekable();
     while let Some(slug) = components.next() {
-        let kind = if components.peek().is_some() {
-            wire::HostedSpoolKind::Org
-        } else {
-            wire::HostedSpoolKind::Project
-        };
+        let kind = components.peek().is_none();
         let path = format!("{}/{slug}", provisioned.full_path());
         provisioned = match create(provisioned.full_path(), slug, kind).await {
             Ok(created) => AutoProvisionedHostedRepo::Created(created.full_path),
@@ -2109,13 +2105,8 @@ mod tests {
                 Ok(wire::HostedSpoolInfo {
                     spool_id: full_path.clone(),
                     full_path,
-                    kind: if kind.is_repo() {
-                        "repository"
-                    } else {
-                        "namespace"
-                    }
-                    .to_string(),
-                    is_repo: kind.is_repo(),
+                    kind: "spool".to_string(),
+                    is_repo: kind,
                     display_name: None,
                 })
             },
@@ -2128,17 +2119,9 @@ mod tests {
         assert_eq!(
             calls,
             [
-                ("alice".into(), "team".into(), wire::HostedSpoolKind::Org),
-                (
-                    "alice/team".into(),
-                    "nested".into(),
-                    wire::HostedSpoolKind::Org
-                ),
-                (
-                    "alice/team/nested".into(),
-                    "repo".into(),
-                    wire::HostedSpoolKind::Project
-                ),
+                ("alice".into(), "team".into(), false),
+                ("alice/team".into(), "nested".into(), false),
+                ("alice/team/nested".into(), "repo".into(), true),
             ]
         );
     }
