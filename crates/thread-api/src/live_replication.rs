@@ -1,0 +1,249 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Continuous, bounded replication on caller-authenticated protobuf streams.
+//! One feed is shared by every observer/replicator of a local Thread. Incoming
+//! metadata writes never move a checkout or install unrequested source blobs.
+use std::{sync::Arc, time::Duration};
+
+use api::v2::client::{MessageReader, MessageWriter};
+use objects::{object::ContentHash, store::ObjectStore};
+use prost::Message;
+use repo::thread_replication::ThreadReplica;
+use tokio::{
+    sync::{mpsc, watch},
+    task::{AbortHandle, JoinHandle},
+};
+
+use crate::{
+    contract::*,
+    replication::{Frame, Outbound, Session},
+    transport,
+};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Transport(#[from] transport::Error),
+    #[error(transparent)]
+    Replication(#[from] crate::replication::Error),
+    #[error(transparent)]
+    Store(#[from] repo::thread_replication::Error),
+    #[error("replication worker: {0}")]
+    Worker(String),
+    #[error("replication response budget exhausted; reopen from durable state")]
+    Backpressure,
+    #[error("Thread change feed stopped")]
+    FeedClosed,
+}
+pub type Result<T> = std::result::Result<T, Error>;
+
+struct AbortOnDrop(AbortHandle);
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Create once per Thread, then clone. This observes writes from other local
+/// processes using the durable generation; it does not poll once per stream.
+#[derive(Clone)]
+pub struct Feed {
+    thread: ContentHash,
+    changes: watch::Receiver<Option<i64>>,
+    _task: Arc<AbortOnDrop>,
+}
+impl Feed {
+    pub async fn new(replica: ThreadReplica) -> Result<Self> {
+        let thread = replica.thread_id();
+        let initial = replica.clone();
+        let generation = tokio::task::spawn_blocking(move || initial.generation())
+            .await
+            .map_err(worker)??;
+        let (sender, changes) = watch::channel(Some(generation));
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(200));
+            loop {
+                interval.tick().await;
+                if sender.is_closed() {
+                    break;
+                }
+                let replica = replica.clone();
+                let result = tokio::task::spawn_blocking(move || replica.generation()).await;
+                match result {
+                    Ok(Ok(generation)) => {
+                        sender.send_if_modified(|old| {
+                            if *old == Some(generation) {
+                                false
+                            } else {
+                                *old = Some(generation);
+                                true
+                            }
+                        });
+                    }
+                    _ => {
+                        let _ = sender.send(None);
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(Self {
+            thread,
+            changes,
+            _task: Arc::new(AbortOnDrop(task.abort_handle())),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum Side {
+    Initiator,
+    Acceptor,
+}
+impl Side {
+    fn decode(self, bytes: &[u8]) -> Result<Frame> {
+        Ok(match self {
+            Self::Initiator => Frame::from_response(
+                ReplicateThreadResponse::decode(bytes).map_err(transport::Error::from)?,
+            )?,
+            Self::Acceptor => Frame::from_request(
+                ReplicateThreadRequest::decode(bytes).map_err(transport::Error::from)?,
+            )?,
+        })
+    }
+    fn encode(self, frame: Frame) -> Vec<u8> {
+        match self {
+            Self::Initiator => frame.request().encode_to_vec(),
+            Self::Acceptor => frame.response().encode_to_vec(),
+        }
+    }
+}
+
+enum Event {
+    Incoming(Frame),
+    Announce,
+    Maintain,
+}
+
+/// Call after validating the opening, endpoint bindings, Thread, and facets.
+/// `authorize` rechecks the live host permission, including expiry/revocation.
+/// It runs before every admission and output, including queued output. Readers
+/// must enforce the negotiated frame bound before allocating message bodies.
+pub async fn run<S, R, W, G>(
+    mut session: Session,
+    store: Arc<S>,
+    mut reader: R,
+    mut writer: W,
+    side: Side,
+    feed: &Feed,
+    authorize: G,
+) -> Result<()>
+where
+    S: ObjectStore + Send + Sync + 'static,
+    R: MessageReader<Error = transport::Error>,
+    W: MessageWriter<Error = transport::Error> + 'static,
+    G: Fn() -> std::result::Result<(), transport::Error> + Clone + Send + Sync + 'static,
+{
+    if feed.thread != session.replica.thread_id() {
+        return Err(transport::Error::Protocol("change feed belongs to another Thread").into());
+    }
+    authorize()?;
+    let mut changes = feed.changes.clone();
+    let (queue, mut outgoing) = mpsc::channel::<Outbound>(256);
+    let sender_session = session.clone();
+    let sender_authorize = authorize.clone();
+    let mut sender: JoinHandle<Result<()>> = tokio::spawn(async move {
+        while let Some(item) = outgoing.recv().await {
+            let session = sender_session.clone();
+            let gate = sender_authorize.clone();
+            let frame = tokio::task::spawn_blocking(move || -> Result<Frame> {
+                gate()?;
+                Ok(match item {
+                    Outbound::Operation(id) => session.export_operation(id)?,
+                    Outbound::Frame(frame) => {
+                        if let Frame::Have(have) = &frame {
+                            let allowed = session.export_facets()?;
+                            for frontier in &have.frontiers {
+                                if !allowed
+                                    .contains(&crate::replication::native_facet(frontier.facet)?)
+                                {
+                                    return Err(transport::Error::Protocol(
+                                        "sharing policy changed before disclosure",
+                                    )
+                                    .into());
+                                }
+                            }
+                        }
+                        frame
+                    }
+                })
+            })
+            .await
+            .map_err(worker)??;
+            writer.send(side.encode(frame)).await?;
+        }
+        writer.finish().await?;
+        Ok(())
+    });
+    // Dropping a JoinHandle detaches it. Abort explicitly so cancellation drops
+    // the transport writer too, including while its peer is applying pressure.
+    let _sender_guard = AbortOnDrop(sender.abort_handle());
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+    let mut announce = true;
+    loop {
+        let event = tokio::select! {
+            result = &mut sender => return result.map_err(worker)?,
+            result = reader.next() => match result? {
+                Some(bytes) => Event::Incoming(side.decode(&bytes)?),
+                None => break,
+            },
+            result = changes.changed() => {
+                result.map_err(|_| Error::FeedClosed)?;
+                if changes.borrow_and_update().is_none() { return Err(Error::FeedClosed); }
+                announce = true;
+                Event::Maintain
+            },
+            _ = std::future::ready(()), if announce && queue.capacity() > 128 => Event::Announce,
+            _ = heartbeat.tick() => {
+                queue.try_send(Outbound::Frame(Frame::Have(ReplicationHave::default()))).map_err(|_| Error::Backpressure)?;
+                Event::Maintain
+            }
+        };
+        let store = store.clone();
+        let gate = authorize.clone();
+        let (next, output, still_announcing) = tokio::task::spawn_blocking(move || {
+            let mut still_announcing = None;
+            let result = (|| -> Result<Vec<Outbound>> {
+                gate()?;
+                match event {
+                    Event::Incoming(frame) => Ok(session.handle(frame, store.as_ref())?),
+                    Event::Announce => {
+                        let frame = session.announcement()?;
+                        still_announcing = Some(frame.is_some());
+                        Ok(frame.into_iter().map(Outbound::Frame).collect())
+                    }
+                    Event::Maintain => Ok(session
+                        .control()?
+                        .into_iter()
+                        .map(Outbound::Frame)
+                        .collect()),
+                }
+            })();
+            (session, result, still_announcing)
+        })
+        .await
+        .map_err(worker)?;
+        session = next;
+        if let Some(value) = still_announcing {
+            announce = value;
+        }
+        for item in output? {
+            queue.try_send(item).map_err(|_| Error::Backpressure)?;
+        }
+    }
+    drop(queue);
+    sender.await.map_err(worker)?
+}
+
+fn worker(error: tokio::task::JoinError) -> Error {
+    Error::Worker(error.to_string())
+}

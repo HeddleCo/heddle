@@ -145,6 +145,16 @@ impl RootAuthority {
         self.check(&call.context, call.method, &call.right, Utc::now())
             .map(|_| ())
     }
+
+    /// Replace the application's current root attachments. An empty set revokes
+    /// all ongoing calls as well as future openings at the next recheck.
+    pub fn replace_roots(&self, roots: Vec<PublicKey>) -> Result<(), Error> {
+        *self
+            .roots
+            .write()
+            .map_err(|_| Error::Protocol("root registry unavailable"))? = roots;
+        Ok(())
+    }
 }
 
 #[derive(Clone)]

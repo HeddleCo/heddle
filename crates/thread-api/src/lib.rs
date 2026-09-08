@@ -3,8 +3,10 @@
 //! discovery belong to the application; this crate never obtains a Weft token.
 pub mod authority;
 pub mod content;
+pub mod live_replication;
 pub mod observation;
 pub mod replication;
+pub mod replication_rpc;
 pub mod transport;
 
 use api::v2::client::{Client, ClientError, RpcTransport};

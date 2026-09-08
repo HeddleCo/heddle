@@ -196,6 +196,16 @@ pub struct Reader {
 }
 
 impl Reader {
+    pub(crate) fn new(recv: RecvStream, frame_limit: usize, timeout: Duration) -> Self {
+        Self {
+            recv,
+            frame_limit,
+            timeout,
+            done: false,
+            buffer: Vec::with_capacity(5),
+        }
+    }
+
     async fn read_frame(&mut self) -> Result<Option<Vec<u8>>, Error> {
         loop {
             let needed = if self.buffer.len() < 5 {
@@ -271,6 +281,21 @@ pub struct Writer {
     poisoned: bool,
 }
 impl Writer {
+    pub(crate) fn new(send: SendStream, frame_limit: usize, timeout: Duration) -> Self {
+        Self {
+            send: Some(send),
+            frame_limit,
+            timeout,
+            poisoned: false,
+        }
+    }
+
+    pub(crate) async fn fail(&mut self, failure: &CallFailure) -> Result<(), Error> {
+        self.write(&framing::encode_stream_failure(failure)?)
+            .await?;
+        self.finish().await
+    }
+
     async fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
         let send = self
             .send

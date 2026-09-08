@@ -260,6 +260,18 @@ fn bad_signatures_and_denied_scope_never_persist_and_cross_facet_parents_are_rej
         matches!(replica.receive(&cross,repo.store(), |_|Ok(())).expect("reject graph"),Admission::Rejected(message) if message.contains("disclosure facet"))
     );
     assert!(replica.view().expect("view").source_heads.is_empty());
+    let unseen = discussion(&genesis, &signer, &[], "unseen private root");
+    let pending = discussion(&genesis, &signer, &[&unseen], "private descendant");
+    assert_eq!(
+        replica
+            .receive(&pending, repo.store(), |_| Ok(()))
+            .expect("pending discussion"),
+        Admission::Pending
+    );
+    let cross_pending = capture(&genesis, &signer, &[&pending], vec![genesis.base]);
+    assert!(
+        matches!(replica.receive(&cross_pending, repo.store(), |_| Ok(())).expect("reject pending scope mismatch"), Admission::Rejected(message) if message.contains("disclosure facet"))
+    );
 }
 
 #[test]
@@ -412,6 +424,80 @@ fn two_native_checkouts_capture_one_thread_without_rewriting_each_other() {
     assert_eq!(
         std::fs::read_to_string(right.repository.root().join("work.txt")).expect("right bytes"),
         "right work"
+    );
+    std::fs::write(left.repository.root().join("work.txt"), "left next").expect("next left edit");
+    std::fs::write(right.repository.root().join("work.txt"), "right next")
+        .expect("next right edit");
+    let start = std::sync::Barrier::new(2);
+    let (left_next, right_next) = std::thread::scope(|scope| {
+        let left_task = scope.spawn(|| {
+            start.wait();
+            left.capture(
+                &replica,
+                CaptureInput {
+                    lease: &left_writer.lease.lease_id,
+                    token: &left_writer.token,
+                    operation_id: "capture-a-next",
+                    expected: state_id(&left_capture),
+                    summary: "left next",
+                    attribution: author(),
+                },
+                &signer,
+            )
+            .expect("concurrent left capture")
+        });
+        let right_task = scope.spawn(|| {
+            start.wait();
+            right
+                .capture(
+                    &replica,
+                    CaptureInput {
+                        lease: &right_writer.lease.lease_id,
+                        token: &right_writer.token,
+                        operation_id: "capture-b-next",
+                        expected: state_id(&right_capture),
+                        summary: "right next",
+                        attribution: author(),
+                    },
+                    &signer,
+                )
+                .expect("concurrent right capture")
+        });
+        (
+            left_task.join().expect("left worker"),
+            right_task.join().expect("right worker"),
+        )
+    });
+    assert_eq!(
+        replica
+            .view()
+            .expect("independent source heads")
+            .source_heads,
+        BTreeSet::from([state_id(&left_next), state_id(&right_next)])
+    );
+    let old_retry = left
+        .capture(
+            &replica,
+            CaptureInput {
+                lease: &left_writer.lease.lease_id,
+                token: &left_writer.token,
+                operation_id: "capture-a",
+                expected: genesis.base,
+                summary: "left work",
+                attribution: author(),
+            },
+            &signer,
+        )
+        .expect("retry an older command after newer work");
+    assert_eq!(old_retry, left_capture);
+    assert_eq!(
+        left.repository.head().expect("left HEAD"),
+        Some(state_id(&left_next)),
+        "retry must not rewind newer work"
+    );
+    assert_eq!(
+        right.repository.head().expect("right HEAD"),
+        Some(state_id(&right_next))
     );
 }
 

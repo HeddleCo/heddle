@@ -3,6 +3,7 @@
 //! Endpoint adapters must authorize the exact Thread and disclosure facets before
 //! calling receive/export. Signatures prove the publisher, not spool membership.
 pub mod checkout;
+mod peers;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -111,6 +112,8 @@ impl ThreadReplica {
             CREATE TABLE IF NOT EXISTS parents(child BLOB NOT NULL, parent BLOB NOT NULL, PRIMARY KEY(child,parent));
             CREATE INDEX IF NOT EXISTS parents_parent ON parents(parent);
             CREATE TABLE IF NOT EXISTS request_nonces(identity TEXT NOT NULL, nonce BLOB NOT NULL, expires INTEGER NOT NULL, PRIMARY KEY(identity,nonce));
+            CREATE TABLE IF NOT EXISTS peer_heads(thread BLOB NOT NULL, peer BLOB NOT NULL, operation BLOB NOT NULL, facet INTEGER NOT NULL, PRIMARY KEY(thread,peer,operation));
+            CREATE TABLE IF NOT EXISTS peer_receipts(thread BLOB NOT NULL, peer BLOB NOT NULL, operation BLOB NOT NULL, status INTEGER NOT NULL, reason TEXT, PRIMARY KEY(thread,peer,operation));
             CREATE TABLE IF NOT EXISTS sharing(thread BLOB NOT NULL, destination BLOB NOT NULL, source INTEGER NOT NULL, discussion INTEGER NOT NULL, version BLOB NOT NULL, PRIMARY KEY(thread,destination));")?;
         connection.execute(
             "INSERT OR IGNORE INTO threads(id,genesis) VALUES(?1,?2)",
@@ -197,7 +200,7 @@ impl ThreadReplica {
         )?;
         let genesis = ThreadGenesis::decode(&genesis_bytes)?;
         loop {
-            let ready: Vec<Vec<u8>> = tx.prepare("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.status=0 AND (EXISTS (SELECT 1 FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND a.status=2) OR NOT EXISTS (SELECT 1 FROM parents p LEFT JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.id IS NULL OR a.status<>1))) ORDER BY o.id LIMIT 128")?
+            let ready: Vec<Vec<u8>> = tx.prepare("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.status=0 AND (EXISTS (SELECT 1 FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.status=2 OR a.thread<>o.thread OR a.facet<>o.facet)) OR NOT EXISTS (SELECT 1 FROM parents p LEFT JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.id IS NULL OR a.status<>1))) ORDER BY o.id LIMIT 128")?
                 .query_map([self.thread.as_bytes()], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?;
             if ready.is_empty() {
                 break;
@@ -205,13 +208,16 @@ impl ThreadReplica {
             for bytes in ready {
                 let operation = ThreadOperation::decode(&bytes)?;
                 let id = operation.id()?;
-                let parent_rejected: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=?1 AND a.status=2)",
-                    [id.as_bytes()],
+                let parent_failure: Option<String> = tx.query_row(
+                    "SELECT CASE WHEN a.thread<>?2 OR a.facet<>?3 THEN 'causal parents cross Thread or disclosure facet' ELSE 'causal parent was rejected' END FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=?1 AND (a.status=2 OR a.thread<>?2 OR a.facet<>?3) ORDER BY a.id LIMIT 1",
+                    params![id.as_bytes(), self.thread.as_bytes(), facet_number(operation.facet())],
                     |r| r.get(0),
-                )?;
-                if parent_rejected {
-                    tx.execute("UPDATE operations SET status=2,reason='causal parent was rejected' WHERE id=?1", [id.as_bytes()])?;
+                ).optional()?;
+                if let Some(reason) = parent_failure {
+                    tx.execute(
+                        "UPDATE operations SET status=2,reason=?2 WHERE id=?1",
+                        params![id.as_bytes(), reason],
+                    )?;
                     tx.execute(
                         "UPDATE threads SET generation=generation+1 WHERE id=?1",
                         [self.thread.as_bytes()],

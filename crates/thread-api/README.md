@@ -6,13 +6,54 @@ and uses the resulting call sites to test the API design.
 
 The public `heddle-thread-api` crate lives in Heddle's main workspace. It contains
 native v2 transport, committed observations, ordinary Biscuit authorization,
-and a transport-neutral replication state machine backed by the native Thread
-store. The production CLI still uses `crates/hosted-client`; its command adapters
+and continuous replication backed by the native Thread store. The production
+CLI still uses `crates/hosted-client`; its command adapters
 and hosted Weft routing have not completed their v2 cutover.
 
 The owner-capability verifier and ordinary Biscuit verifier are public leaf
 crates next to this crate. Neither depends on repository or transport code.
 Browser consumers can build the owner verifier directly as WASM.
+
+## Live native replication
+
+`replication_rpc::Peer` opens one `SyncService.ReplicateThread` exchange for a
+known Thread. `live_replication::Feed` is shared across streams for that Thread;
+it detects writes from other processes through the durable database generation.
+Source and discussion operations have separate causal graphs and sharing facets.
+Each destination remains private by default until its Thread sharing policy opts
+in. Adding or revoking that policy takes effect on an already open stream.
+
+```rust,ignore
+let feed = Feed::new(replica.clone()).await?; // share with this Thread's streams
+let peer = Peer::new(replica, local_endpoint, authorized_facets)?;
+peer.connect(connection, EndpointKind::Weft, credential, store, &feed,
+    recheck_local_permission).await?;
+```
+
+The accepting host supplies its resolved `RootAuthority`; the opening proves
+possession of the Biscuit-bound key and signs the Thread, facets, and both Iroh
+identities. Durable nonce claims prevent replay across restart. Root attachment
+changes and token checks are reevaluated throughout the exchange. This adapter
+assumes the host has already resolved the correct owner/account and spool. It
+does not replace Weft's grant registry, account attachment, or revocation checks.
+
+Admission receipts distinguish accepted, missing-parent pending, and rejected
+records. Peer frontiers and receipts persist, while each session keeps a bounded
+dependency-request window. Reopening repairs interrupted and out-of-order
+delivery. An accepted record is metadata with accepted causal closure; it does
+not assert that all referenced source blobs have been downloaded.
+
+`ThreadCheckout` uses native captures and a checkout-local writer lease. Separate
+checkouts can capture the same Thread concurrently. Their source heads remain
+concurrent until explicit integration, and receiving metadata never changes a
+checkout's HEAD. A retried capture returns its original durable receipt without
+rewinding later work.
+
+The native Iroh integration test verifies writes made after opening, ongoing
+opt-in, live root detachment, and reconnect repair. State-machine tests exercise
+reordered ancestry through a two-item window, durable acceptance, and writes
+that sort behind a frontier cursor while it is being paged. Those are separate
+from the fixture-based observation/content examples below.
 
 ## Try the client
 
@@ -141,14 +182,18 @@ The remaining view reducer must validate typed record keys and apply section
 replacement/removal semantics; this experiment deliberately returns committed
 typed changes rather than claiming it has materialized every Thread section.
 
-Finishing the actual CLI cutover also requires adapting local Thread persistence,
+Finishing the actual CLI cutover also requires adapting existing local Thread selectors,
 the object-store hydrator, publication/fetch installation, and all current hosted
-command callers. Exact genesis and transfer-proof formats need implementation;
-the bidirectional test exercises framing and half-close, not pack validation or
-durable publication. Portable root attachment verification and multi-device
+command callers. The canonical genesis hash and durable native operation format
+are implemented; signed unknown-Thread creation and source-pack installation
+remain. The native replication RPC currently accepts already resolved Threads.
+Portable root attachment verification and multi-device
 writer handoff remain separate implementation/design work. The old API service
 schemas and production hosted-client code must be removed as part of that full
 cutover; this experiment does not mark that work complete.
+
+The discussion/context assessment and proposed next agent-facing work are in
+[the design note](../../docs/THREAD_AGENT_EXPERIENCE.md).
 
 ## Evidence
 

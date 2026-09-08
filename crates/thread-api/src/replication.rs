@@ -86,6 +86,7 @@ pub struct Session {
     destination: [u8; 32],
     facets: BTreeSet<ThreadFacet>,
     max_items: usize,
+    in_flight: BTreeSet<ContentHash>,
     generation: i64,
     announce_generation: i64,
     announce_facet: usize,
@@ -108,6 +109,7 @@ impl Session {
             destination,
             facets,
             max_items,
+            in_flight: BTreeSet::new(),
             generation: -1,
             announce_generation: -1,
             announce_facet: 0,
@@ -157,7 +159,11 @@ impl Session {
         }
         self.generation = self.announce_generation;
         self.announce_generation = -1;
-        Ok(None)
+        // A watcher may already have delivered a mutation that happened while
+        // this round was being paged. Keep the caller draining until a fresh
+        // round covers it; None must mean the announcement is caught up.
+        Ok((self.replica.generation()? != self.generation)
+            .then(|| Frame::Have(ReplicationHave::default())))
     }
     pub fn handle(&mut self, frame: Frame, store: &impl ObjectStore) -> Result<Vec<Outbound>> {
         let mut responses = Vec::new();
@@ -165,7 +171,9 @@ impl Session {
             Frame::Have(have) => {
                 let count: usize = have.frontiers.iter().map(|f| f.heads.len()).sum();
                 self.check_count(count)?;
-                let mut need = BTreeSet::new();
+                self.check_count(have.frontiers.len())?;
+                let mut heads = Vec::new();
+                let mut receipt = ReplicationReceipt::default();
                 for frontier in have.frontiers {
                     let facet = native_facet(frontier.facet)?;
                     if !self.facets.contains(&facet) {
@@ -173,21 +181,27 @@ impl Session {
                     }
                     for bytes in frontier.heads {
                         let id = hash(&bytes)?;
-                        match self.replica.operation(&id)? {
-                            Some((_, Admission::Pending)) => {
-                                need.extend(self.replica.missing_ancestors(id, self.max_items)?);
+                        if let Some((record, status)) = self.replica.operation(&id)? {
+                            if record.verify()?.facet() != facet {
+                                return Err(Error::Protocol(
+                                    "advertised frontier has the wrong facet",
+                                ));
                             }
-                            Some((_, Admission::Accepted | Admission::Rejected(_))) => {}
-                            None => {
-                                need.insert(id);
+                            match status {
+                                Admission::Accepted => receipt.accepted_operation_ids.push(bytes),
+                                Admission::Rejected(message) => {
+                                    receipt.rejected.push(rejection(id, message))
+                                }
+                                Admission::Pending => heads.push((facet, id)),
                             }
+                        } else {
+                            heads.push((facet, id));
                         }
                     }
                 }
-                for ids in need.into_iter().collect::<Vec<_>>().chunks(self.max_items) {
-                    responses.push(Outbound::Frame(Frame::Need(ReplicationNeed {
-                        operation_ids: ids.iter().map(|id| id.as_bytes().to_vec()).collect(),
-                    })));
+                self.replica.remember_peer_heads(self.destination, &heads)?;
+                if !receipt.accepted_operation_ids.is_empty() || !receipt.rejected.is_empty() {
+                    responses.push(Outbound::Frame(Frame::Receipt(receipt)));
                 }
             }
             Frame::Need(need) => {
@@ -219,31 +233,20 @@ impl Session {
                     if !self.facets.contains(&operation.facet()) {
                         return Err(Error::Protocol("operation is outside admission scope"));
                     }
+                    self.in_flight.remove(&id);
                     match self.replica.receive(&signed, store, |_| Ok(()))? {
                         Admission::Accepted => {
                             receipt.accepted_operation_ids.push(id.as_bytes().to_vec())
                         }
                         Admission::Pending => {
                             receipt.pending_operation_ids.push(id.as_bytes().to_vec());
-                            let missing = self.replica.missing_ancestors(id, self.max_items)?;
-                            for ids in missing.chunks(self.max_items) {
-                                responses.push(Outbound::Frame(Frame::Need(ReplicationNeed {
-                                    operation_ids: ids
-                                        .iter()
-                                        .map(|id| id.as_bytes().to_vec())
-                                        .collect(),
-                                })));
-                            }
+                            self.replica.remember_peer_heads(
+                                self.destination,
+                                &[(operation.facet(), id)],
+                            )?;
                         }
                         Admission::Rejected(message) => {
-                            receipt.rejected.push(ReplicationRejection {
-                                operation_id: id.as_bytes().to_vec(),
-                                failure: Some(api::heddle::api::v1alpha1::CallFailure {
-                                    code: 9,
-                                    message,
-                                    ..Default::default()
-                                }),
-                            })
+                            receipt.rejected.push(rejection(id, message));
                         }
                     }
                 }
@@ -255,18 +258,77 @@ impl Session {
                         + receipt.pending_operation_ids.len()
                         + receipt.rejected.len(),
                 )?;
-                // A peer receipt is a destination assertion, never local
-                // acceptance or proof that source blobs are available.
                 for bytes in receipt.accepted_operation_ids {
-                    let id = hash(&bytes)?;
-                    if !matches!(self.replica.operation(&id)?, Some((_, Admission::Accepted))) {
-                        return Err(Error::Protocol("receipt names an unknown local operation"));
-                    }
+                    self.replica.record_peer_receipt(
+                        self.destination,
+                        hash(&bytes)?,
+                        &Admission::Accepted,
+                    )?;
+                }
+                for bytes in receipt.pending_operation_ids {
+                    self.replica.record_peer_receipt(
+                        self.destination,
+                        hash(&bytes)?,
+                        &Admission::Pending,
+                    )?;
+                }
+                for rejected in receipt.rejected {
+                    self.replica.record_peer_receipt(
+                        self.destination,
+                        hash(&rejected.operation_id)?,
+                        &Admission::Rejected(
+                            rejected.failure.map(|f| f.message).unwrap_or_default(),
+                        ),
+                    )?;
                 }
             }
         }
+        if let Some(repair) = self.control()? {
+            responses.push(Outbound::Frame(repair));
+        }
         Ok(responses)
     }
+
+    /// One bounded dependency window, refilled after each received operation.
+    /// Peer frontiers are durable; outstanding requests are session-local.
+    pub fn control(&mut self) -> Result<Option<Frame>> {
+        let settled =
+            self.replica
+                .settled_peer_heads(self.destination, &self.facets, self.max_items)?;
+        if !settled.is_empty() {
+            let mut receipt = ReplicationReceipt::default();
+            for (id, admission) in settled {
+                self.in_flight.remove(&id);
+                match admission {
+                    Admission::Accepted => {
+                        receipt.accepted_operation_ids.push(id.as_bytes().to_vec())
+                    }
+                    Admission::Rejected(message) => receipt.rejected.push(rejection(id, message)),
+                    Admission::Pending => {}
+                }
+            }
+            return Ok(Some(Frame::Receipt(receipt)));
+        }
+        let available = self.max_items.saturating_sub(self.in_flight.len());
+        if available == 0 {
+            return Ok(None);
+        }
+        let candidates =
+            self.replica
+                .needed_from_peer(self.destination, &self.facets, self.max_items)?;
+        let ids: Vec<_> = candidates
+            .into_iter()
+            .filter(|id| !self.in_flight.contains(id))
+            .take(available)
+            .collect();
+        self.in_flight.extend(ids.iter().copied());
+        Ok((!ids.is_empty()).then(|| {
+            Frame::Need(ReplicationNeed {
+                operation_ids: ids.into_iter().map(|id| id.as_bytes().to_vec()).collect(),
+            })
+        }))
+    }
+
     /// Resolve payload only when the writer is ready. Pending output queues
     /// contain IDs, and policy is checked again immediately before disclosure.
     pub fn export_operation(&self, id: ContentHash) -> Result<Frame> {
@@ -297,6 +359,17 @@ impl Session {
         } else {
             Ok(())
         }
+    }
+}
+
+fn rejection(id: ContentHash, message: String) -> ReplicationRejection {
+    ReplicationRejection {
+        operation_id: id.as_bytes().to_vec(),
+        failure: Some(api::heddle::api::v1alpha1::CallFailure {
+            code: 9,
+            message,
+            ..Default::default()
+        }),
     }
 }
 
