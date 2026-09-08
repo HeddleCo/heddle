@@ -31,7 +31,32 @@ heddle-thread-api = { version = "0.21.0", default-features = false }
 | `signing` | Public, bearer-only and Ed25519 request credentials without local storage |
 | `replication` | Async causal exchange and stream driver over a caller-provided durable store |
 | `native` | Replication with a SQLite/object-store adapter, local change feed, and host Biscuit authorization |
-| Both (default) | Native replication RPC over Iroh, plus the client above |
+| `native` + `iroh` (default) | Native replication RPC over Iroh, plus the client above |
+| `semantic-analysis` | Shared Rust conditional-value extraction/projection for hosts; optional and not part of client defaults |
+
+## Semantic review data
+
+`remote.observe_analysis(request, resume)` delivers committed typed analysis
+batches with page information through the same checkpoint implementation as
+Thread views. It supports behavior maps, coverage, replacements and removals;
+FIN without Complete remains an interrupted observation. The request pins base
+and source revisions and selects paths/symbols. Rendering and optional summaries
+belong to the caller, not the parser or transport.
+
+With `semantic-analysis`, `behavior::BehaviorAnalyzer::new(base, source)?.compare`
+projects exact source bytes into the same v2 records for local or hosted use.
+`heddle-semantic::behavior::compare_file` owns extraction and correspondence,
+reusing the existing parsed-file cache, symbol visitor, token normalization and
+lexical scope index. No parser enters a portable client build.
+
+The first slice supports field initializers and assignments introducing or
+changing Rust `if/else` values. It preserves one old origin shared by branch
+comparisons, exact source references, predicate binding dependencies, explicit
+ambiguity and omitted scope. It emits structural facts, not inferred effects or
+test approval. The full #1718 capture source pair is checked in as a navigation
+fixture. The device daemon's analysis RPC is not yet wired; the shared projection
+is available to its embedding host. Full diffs and file inventories remain
+independent surfaces.
 
 Weft enables `replication`, implements `ReplicaStore` with PostgreSQL, and supplies
 the stream traits using its own transport stack. It shares the causal protocol

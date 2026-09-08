@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'crates/thread-api/**'
+      - 'crates/semantic/**'
       - 'crates/repo/src/thread_replication/**'
       - 'crates/object-model/src/object/thread_replication.rs'
       - 'crates/objects/src/store/writer_lease.rs'
@@ -42,6 +43,8 @@ jobs:
               ("iroh", {"heddle-repo", "heddle-objects", "biscuit-auth"}),
           ]
           for features, forbidden in cases:
+              if features != "native":
+                  forbidden |= {"heddle-semantic", "tree-sitter"}
               command = ["cargo", "tree", "--locked", "-p", "heddle-thread-api",
                          "--no-default-features", "--edges", "normal",
                          "--prefix", "none", "--format", "{p}"]
@@ -58,6 +61,9 @@ jobs:
       - run: cargo test --locked -p heddle-thread-api --no-default-features --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features native --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features iroh
+      - run: cargo test --locked -p heddle-semantic --lib
+      - run: cargo test --locked -p heddle-thread-api --no-default-features --features semantic-analysis --test behavior_analysis
+      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features semantic-analysis --all-targets -- -D warnings
       - run: HEDDLE_PROFILE=1 cargo test --locked -p heddle-thread-api --no-default-features --features iroh --test transport_observation -- --ignored --nocapture
       - run: cargo test --locked -p heddle-repo --no-default-features --features native,git-overlay thread_replication -- --nocapture
       - run: cargo test --locked -p heddle-objects writer_lease -- --nocapture

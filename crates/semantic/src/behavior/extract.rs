@@ -41,6 +41,12 @@ fn text<'a>(node: Node<'_>, source: &'a str) -> &'a str {
     &source[node.byte_range()]
 }
 
+fn spelling(node: Node<'_>, source: &str) -> String {
+    let mut result = String::new();
+    walk_non_comment_leaves(node, |leaf| result.push_str(text(leaf, source)));
+    result
+}
+
 struct Builder<'a> {
     parsed: &'a ParsedFile,
     side: Side,
@@ -202,6 +208,40 @@ impl Builder<'_> {
 
     fn resolve(&mut self, occurrence: Node<'_>, occurrence_id: &str, depth: usize) {
         if occurrence.kind() != "identifier" {
+            for nested in descendants(occurrence) {
+                if matches!(
+                    nested.kind(),
+                    "if_expression"
+                        | "match_expression"
+                        | "block"
+                        | "closure_expression"
+                        | "macro_invocation"
+                ) {
+                    self.limit(Limitation::Syntax);
+                }
+                if nested.kind() == "identifier" {
+                    match lookup_binding(
+                        nested,
+                        text(nested, self.parsed.source()),
+                        self.parsed.source(),
+                    ) {
+                        Lookup::Local { .. } => {
+                            let id = self.expression(nested);
+                            self.resolve(nested, &id, depth);
+                        }
+                        Lookup::Unsupported => self.limit(Limitation::Syntax),
+                        Lookup::External => {}
+                    }
+                }
+            }
+            return;
+        }
+        if self
+            .change
+            .bindings
+            .iter()
+            .any(|b| b.occurrence_id == occurrence_id)
+        {
             return;
         }
         let name = text(occurrence, self.parsed.source()).to_owned();
@@ -326,7 +366,7 @@ fn lookup_binding<'a>(occurrence: Node<'a>, name: &str, source: &str) -> Lookup<
         ) {
             return Lookup::Unsupported;
         }
-        if parent.kind() == "if_expression"
+        if matches!(parent.kind(), "if_expression" | "while_expression")
             && parent.child_by_field_name("condition").is_some_and(|n| {
                 matches!(n.kind(), "let_condition" | "let_chain")
                     && pattern_mentions(n, name, source)
@@ -414,12 +454,16 @@ pub(super) fn extract(
                         .and_then(|n| n.child_by_field_name("name"));
                     match owner {
                         Some(owner) => {
-                            format!("{}.{}", text(owner, source), text(target_node, source))
+                            format!(
+                                "{}.{}",
+                                spelling(owner, source),
+                                spelling(target_node, source)
+                            )
                         }
                         None => text(target_node, source).into(),
                     }
                 } else {
-                    text(target_node, source).split_whitespace().collect()
+                    spelling(target_node, source)
                 };
                 let seed = hash(&[
                     path.as_bytes(),

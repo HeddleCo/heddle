@@ -197,19 +197,43 @@ fn expression<'a>(change: &'a Change, id: &str) -> Option<&'a Expression> {
     change.expressions.iter().find(|e| e.id == id)
 }
 
-fn resolved_hash(change: &Change, id: &str) -> Option<ContentHash> {
-    let mut current = id;
-    for _ in 0..=16 {
-        let binding = change.bindings.iter().find(|b| b.occurrence_id == current);
-        match binding {
-            Some(binding) if binding.support == Support::Supported => {
-                current = binding.value_id.as_deref()?;
-            }
-            Some(binding) if binding.limitations != [Limitation::UnresolvedBinding] => return None,
-            _ => return expression(change, current).map(|e| e.normalized_hash),
-        }
+fn resolved_hash(change: &Change, id: &str, depth: usize) -> Option<ContentHash> {
+    if depth > 32 {
+        return None;
     }
-    None
+    let value = expression(change, id)?;
+    if let Some(binding) = change.bindings.iter().find(|b| b.occurrence_id == id) {
+        if binding.support == Support::Supported {
+            return resolved_hash(change, binding.value_id.as_deref()?, depth + 1);
+        }
+        return (binding.limitations == [Limitation::UnresolvedBinding])
+            .then_some(value.normalized_hash);
+    }
+    let mut children = change
+        .bindings
+        .iter()
+        .filter_map(|b| {
+            let occurrence = expression(change, &b.occurrence_id)?;
+            (occurrence.source.side == value.source.side
+                && occurrence.source.span.start >= value.source.span.start
+                && occurrence.source.span.end <= value.source.span.end)
+                .then_some((occurrence.source.span.start, b.occurrence_id.as_str()))
+        })
+        .collect::<Vec<_>>();
+    children.sort();
+    if children.is_empty() {
+        return Some(value.normalized_hash);
+    }
+    let mut hashes = vec![value.normalized_hash];
+    for (_, child) in children {
+        hashes.push(resolved_hash(change, child, depth + 1)?);
+    }
+    Some(extract::hash(
+        &hashes
+            .iter()
+            .map(|h| h.as_bytes().as_slice())
+            .collect::<Vec<_>>(),
+    ))
 }
 
 fn equivalent(a: &Change, b: &Change) -> bool {
@@ -240,26 +264,7 @@ fn equivalent(a: &Change, b: &Change) -> bool {
 }
 
 fn predicate_hash(change: &Change, id: &str) -> Option<ContentHash> {
-    let predicate = expression(change, id)?;
-    if change.bindings.iter().any(|b| b.occurrence_id == id) {
-        return resolved_hash(change, id);
-    }
-    let mut hashes = vec![predicate.normalized_hash];
-    for binding in &change.bindings {
-        let occurrence = expression(change, &binding.occurrence_id)?;
-        if occurrence.source.side == predicate.source.side
-            && occurrence.source.span.start >= predicate.source.span.start
-            && occurrence.source.span.end <= predicate.source.span.end
-        {
-            hashes.push(resolved_hash(change, &binding.occurrence_id)?);
-        }
-    }
-    Some(extract::hash(
-        &hashes
-            .iter()
-            .map(|h| h.as_bytes().as_slice())
-            .collect::<Vec<_>>(),
-    ))
+    resolved_hash(change, id, 0)
 }
 
 fn push(

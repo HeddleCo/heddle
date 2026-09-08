@@ -389,8 +389,15 @@ fn predicate_binding_dependencies_include_local_expressions_transitively() {
     let base = "fn f() { let kind = A; let enabled = kind == A; let p = P { v: if enabled { X } else { Y } }; }";
     let source = base.replace("let kind = A", "let kind = B");
     let result = compare_file("source.rs", Some(base), Some(&source), &[]);
-    assert_eq!(result.changes.len(), 1, "a dependency of the resolved predicate changed");
-    assert_eq!(result.changes[0].correspondences[0].kind, CorrespondenceKind::Replaced);
+    assert_eq!(
+        result.changes.len(),
+        1,
+        "a dependency of the resolved predicate changed"
+    );
+    assert_eq!(
+        result.changes[0].correspondences[0].kind,
+        CorrespondenceKind::Replaced
+    );
     assert!(result.changes[0].bindings.iter().any(|b| b.name == "kind"));
 }
 
@@ -400,5 +407,18 @@ fn unsupported_while_pattern_does_not_resolve_an_outer_homonym() {
     let source = base.replace("p.v = A", "p.v = if x { B } else { A }");
     let result = compare_file("source.rs", Some(base), Some(&source), &[]);
     assert!(result.changes[0].limitations.contains(&Limitation::Syntax));
-    assert_eq!(result.changes[0].correspondences[0].kind, CorrespondenceKind::Unmatched);
+    assert_eq!(
+        result.changes[0].correspondences[0].kind,
+        CorrespondenceKind::Unmatched
+    );
+}
+
+#[test]
+fn generic_target_formatting_does_not_invent_added_or_removed_assignments() {
+    let base = SOURCE.replace("SavePlan", "SavePlan::<u8>");
+    let source = base.replace("SavePlan::<u8>", "SavePlan :: < /* type */ u8 >");
+    let result = compare_file("save.rs", Some(&base), Some(&source), &[]);
+    assert!(result.changes.is_empty());
+    assert!(result.omitted.is_empty());
+    assert!(!result.analyzed.is_empty());
 }
