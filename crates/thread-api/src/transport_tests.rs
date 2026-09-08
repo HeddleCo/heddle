@@ -95,8 +95,8 @@ async fn exchange_receives_before_request_fin_and_half_close_keeps_responses_ali
         let (prelude, _) = framing::decode_request_prelude(&bytes)
             .expect("decode prelude")
             .expect("complete prelude");
-        assert_eq!(prelude.method, rpc::SyncServicePublish::METHOD.path);
-        assert_eq!(prelude.context.client_operation_id, "transfer-1");
+        assert_eq!(prelude.method, rpc::SyncServiceReplicateThread::METHOD.path);
+        assert!(prelude.context.client_operation_id.is_empty());
         let mut requests = Reader {
             recv,
             frame_limit: 4096,
@@ -109,15 +109,17 @@ async fn exchange_receives_before_request_fin_and_half_close_keeps_responses_ali
             .await
             .expect("opening frame")
             .expect("opening");
-        let opening = PublishClientFrame::decode(open.as_slice()).expect("opening protobuf");
+        let opening = ReplicateThreadRequest::decode(open.as_slice()).expect("opening protobuf");
         assert!(matches!(
             opening.body,
-            Some(publish_client_frame::Body::Open(_))
+            Some(replicate_thread_request::Body::Open(_))
         ));
         send.write_all(
             &framing::encode_stream_message(
-                &PublishServerFrame {
-                    body: Some(publish_server_frame::Body::Ready(TransferReady::default())),
+                &ReplicateThreadResponse {
+                    body: Some(replicate_thread_response::Body::Ready(
+                        ReplicationReady::default(),
+                    )),
                 }
                 .encode_to_vec(),
             )
@@ -125,25 +127,23 @@ async fn exchange_receives_before_request_fin_and_half_close_keeps_responses_ali
         )
         .await
         .expect("ready before client FIN");
-        let commit = requests
-            .next()
-            .await
-            .expect("commit frame")
-            .expect("commit");
+        let have = requests.next().await.expect("have frame").expect("have");
         assert!(matches!(
-            PublishClientFrame::decode(commit.as_slice())
-                .expect("commit protobuf")
+            ReplicateThreadRequest::decode(have.as_slice())
+                .expect("have protobuf")
                 .body,
-            Some(publish_client_frame::Body::Commit(_))
+            Some(replicate_thread_request::Body::Have(_))
         ));
         assert!(requests.next().await.expect("half-close").is_none());
         send.write_all(
             &framing::encode_stream_message(
-                &PublishServerFrame {
-                    body: Some(publish_server_frame::Body::Receipt(PublicationReceipt {
-                        client_operation_id: "transfer-1".into(),
-                        ..Default::default()
-                    })),
+                &ReplicateThreadResponse {
+                    body: Some(replicate_thread_response::Body::Receipt(
+                        ReplicationReceipt {
+                            accepted_operation_ids: vec![vec![1; 32]],
+                            ..Default::default()
+                        },
+                    )),
                 }
                 .encode_to_vec(),
             )
@@ -157,28 +157,33 @@ async fn exchange_receives_before_request_fin_and_half_close_keeps_responses_ali
     });
     let transport = IrohTransport::new(outgoing, FixtureContext, 4096, Duration::from_secs(5))
         .expect("transport");
-    let client = Client::new(transport, [rpc::SyncServicePublish::METHOD.path.into()]);
+    let client = Client::new(
+        transport,
+        [rpc::SyncServiceReplicateThread::METHOD.path.into()],
+    );
     let (mut input, mut output) = client
-        .exchange::<rpc::SyncServicePublish>(&PublishClientFrame {
-            client_operation_id: "transfer-1".into(),
-            body: Some(publish_client_frame::Body::Open(PublishOpen::default())),
+        .exchange::<rpc::SyncServiceReplicateThread>(&ReplicateThreadRequest {
+            body: Some(replicate_thread_request::Body::Open(
+                ReplicationOpen::default(),
+            )),
         })
         .await
         .expect("exchange");
     assert!(matches!(
         output.next().await.expect("ready").expect("message").body,
-        Some(publish_server_frame::Body::Ready(_))
+        Some(replicate_thread_response::Body::Ready(_))
     ));
     input
-        .send(&PublishClientFrame {
-            client_operation_id: String::new(),
-            body: Some(publish_client_frame::Body::Commit(TransferCommit::default())),
+        .send(&ReplicateThreadRequest {
+            body: Some(replicate_thread_request::Body::Have(
+                ReplicationHave::default(),
+            )),
         })
         .await
-        .expect("commit");
+        .expect("have");
     input.finish().await.expect("request FIN");
     assert!(
-        matches!(output.next().await.expect("receipt").expect("message").body, Some(publish_server_frame::Body::Receipt(receipt)) if receipt.client_operation_id == "transfer-1")
+        matches!(output.next().await.expect("receipt").expect("message").body, Some(replicate_thread_response::Body::Receipt(receipt)) if receipt.accepted_operation_ids == vec![vec![1; 32]])
     );
     assert!(output.next().await.expect("server FIN").is_none());
     service.await.expect("contract peer task");

@@ -81,6 +81,8 @@ env:
   # 403'd on crates.io (new-crate permission) and blocked the 0.19
   # release for the 29 crates below, none of which depend on it.
   PUBLISHABLE_CRATES: |
+    heddleco-capability-verifier
+    heddle-biscuit-verifier
     heddle-format
     heddle-object-model
     heddle-fs-prims
@@ -95,6 +97,7 @@ env:
     heddle-semantic-recovery
     heddle-wire
     heddle-repo
+    heddle-thread-api
     heddle-state-review
     heddle-config
     heddle-ingest

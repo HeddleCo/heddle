@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native v2 client design. Endpoint ownership, credentials and connection
 //! discovery belong to the application; this crate never obtains a Weft token.
-pub mod replication;
 pub mod authority;
 pub mod content;
 pub mod observation;
+pub mod replication;
 pub mod transport;
 
 use api::v2::client::{Client, ClientError, RpcTransport};

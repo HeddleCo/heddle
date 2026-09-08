@@ -58,9 +58,12 @@ async fn main() -> Result<()> {
         update.replace
     );
 
+    let [revision] = overview.source_heads.as_slice() else {
+        anyhow::bail!("select a source head before reading content");
+    };
     let blobs = remote
         .read_blobs(
-            overview.tip.context("exact observed tip")?,
+            revision.clone(),
             vec![
                 BlobSource::Path("README.md".into()),
                 BlobSource::ObjectHash(vec![9; 32]),

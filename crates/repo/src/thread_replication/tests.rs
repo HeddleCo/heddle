@@ -374,13 +374,15 @@ fn two_native_checkouts_capture_one_thread_without_rewriting_each_other() {
     // A stop after the durable receipt but before finalizing the active
     // journal must not leave the checkout unable to start another capture.
     let journal_path = left.repository.root().join(".heddle/capture-journal.json");
-    let mut journal: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&journal_path).expect("capture journal"),
-    )
-    .expect("journal JSON");
+    let mut journal: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&journal_path).expect("capture journal"))
+            .expect("journal JSON");
     journal["resulting"] = serde_json::Value::Null;
-    std::fs::write(&journal_path, serde_json::to_vec(&journal).expect("journal bytes"))
-        .expect("simulate interrupted finalization");
+    std::fs::write(
+        &journal_path,
+        serde_json::to_vec(&journal).expect("journal bytes"),
+    )
+    .expect("simulate interrupted finalization");
     let recovered = left
         .capture(
             &replica,
@@ -396,11 +398,13 @@ fn two_native_checkouts_capture_one_thread_without_rewriting_each_other() {
         )
         .expect("retry completed command after restart");
     assert_eq!(left_capture, recovered);
-    let repaired: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(&journal_path).expect("repaired journal"),
-    )
-    .expect("repaired JSON");
-    assert!(!repaired["resulting"].is_null(), "retry must finish the active journal");
+    let repaired: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&journal_path).expect("repaired journal"))
+            .expect("repaired JSON");
+    assert!(
+        !repaired["resulting"].is_null(),
+        "retry must finish the active journal"
+    );
     assert_eq!(
         std::fs::read_to_string(left.repository.root().join("work.txt")).expect("left bytes"),
         "left work"

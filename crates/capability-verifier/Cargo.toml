@@ -50,3 +50,8 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 all = "warn"
+
+# Current Rust emits bulk-memory instructions. Keep wasm-pack's optimizer
+# aligned with the target features of the binary it validates.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "--enable-bulk-memory"]

@@ -205,6 +205,21 @@ impl ThreadCheckout {
                 .store()
                 .get_state(&state_id)?
                 .ok_or_else(|| Error::Invalid("captured state unavailable".into()))?;
+            // The receipt is written first. Recover a stop between the two
+            // durable writes, without disturbing a later command's journal.
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let active: CaptureJournal = serde_json::from_slice(&bytes)
+                        .map_err(|e| Error::Invalid(e.to_string()))?;
+                    if active.operation_id == completed.operation_id {
+                        write_journal(&path, &completed)?;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    write_journal(&path, &completed)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
             return SignedOperation::sign(
                 &ThreadOperation {
                     version: 1,

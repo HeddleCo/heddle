@@ -1,22 +1,27 @@
-# Heddle as a Thread API client
+# Heddle Thread API
 
 This executable design starts from Heddle main `2a67bcaf` (the merged #1718
 local-operations cutover). It exercises native v2 calls over real Iroh streams
 and uses the resulting call sites to test the API design.
 
-The experiment lives in its own Cargo workspace. The production CLI still uses
-`crates/hosted-client`; replacing its command adapters, identity persistence and
-sync engine is not implemented here. This is a runnable candidate for that
-replacement, with no v1 RPC dispatch or fallback in the candidate client.
+The public `heddle-thread-api` crate lives in Heddle's main workspace. It contains
+native v2 transport, committed observations, ordinary Biscuit authorization,
+and a transport-neutral replication state machine backed by the native Thread
+store. The production CLI still uses `crates/hosted-client`; its command adapters
+and hosted Weft routing have not completed their v2 cutover.
+
+The owner-capability verifier and ordinary Biscuit verifier are public leaf
+crates next to this crate. Neither depends on repository or transport code.
+Browser consumers can build the owner verifier directly as WASM.
 
 ## Try the client
 
-From this directory:
+From the Heddle workspace root:
 
 ```sh
-cargo run --locked --example thread
-cargo test --locked
-cargo run --locked --example multiplex -- 1024
+cargo run --locked -p heddle-thread-api --example thread
+cargo test --locked -p heddle-thread-api
+cargo run --locked -p heddle-thread-api --example multiplex -- 1024
 ```
 
 Both examples start a loopback contract peer. They need local UDP socket access;
@@ -26,8 +31,8 @@ It supplies fixture Thread/content records. It does not verify Biscuits or root
 attachments, authorize real resources, or publish durable data.
 
 The API dependency is pinned to the companion API PR. **Merge API #222 first.**
-This client experiment then needs its pin updated to the merged API revision or
-release before integration into Heddle's main workspace.
+The live-sync follow-up also depends on the companion API replication contract.
+Update its immutable dependency pin to the merged revision or release before landing.
 
 ## The call sites
 
@@ -109,7 +114,7 @@ flowchart LR
   Device -->|"Thread sharing policy; user opt-in"| Weft
 ```
 
-An endpoint is one source of the combined Thread. Its tip/version/checkouts must
+An endpoint is one source of the combined Thread. Its source heads/version/checkouts must
 remain source-qualified; arrival order cannot make a device overwrite hosted
 state. Hosted review and landing target Weft directly. Capture, resolve and local
 landing target an explicit checkout on its owning device. `Authorize` is the

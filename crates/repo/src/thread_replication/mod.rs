@@ -353,14 +353,19 @@ impl ThreadReplica {
         let mut accepted = BTreeMap::new();
         let mut pending = BTreeSet::new();
         let mut rejected = BTreeMap::new();
-        let rows: Vec<(Vec<u8>, Vec<u8>, i32, Option<String>)> = tx
+        let rows = tx
             .prepare(
                 "SELECT id,canonical,status,reason FROM operations WHERE thread=?1 ORDER BY id",
             )?
             .query_map([self.thread.as_bytes()], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, i32>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
             })?
-            .collect::<std::result::Result<_, _>>()?;
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         for (id, bytes, status, reason) in rows {
             let id = hash(&id)?;
             match status {
