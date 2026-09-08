@@ -36,7 +36,9 @@ impl ThreadGenesis {
         {
             return Err(invalid("invalid Thread genesis"));
         }
-        Ok(rmp_serde::to_vec_named(self)?)
+        let bytes = rmp_serde::to_vec_named(self)?;
+        bounded(&bytes)?;
+        Ok(bytes)
     }
 
     pub fn id(&self) -> Result<ContentHash> {
@@ -194,7 +196,7 @@ impl ThreadOperation {
 
 fn bounded(bytes: &[u8]) -> Result<()> {
     if bytes.len() > MAX_OPERATION_BYTES {
-        return Err(invalid("Thread operation exceeds the durable record bound"));
+        return Err(invalid("Thread record exceeds the durable record bound"));
     }
     Ok(())
 }

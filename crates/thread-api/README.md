@@ -14,6 +14,31 @@ The owner-capability verifier and ordinary Biscuit verifier are public leaf
 crates next to this crate. Neither depends on repository or transport code.
 Browser consumers can build the owner verifier directly as WASM.
 
+## Choose the implementation dependencies
+
+The client, committed observations, content reads, credential interface, and
+typed errors are transport-neutral. Consumers can disable default features to
+use them without repository storage, Tokio, or an Iroh implementation:
+
+```toml
+heddle-thread-api = { version = "0.21.0", default-features = false }
+```
+
+| Features | Additional implementation |
+| --- | --- |
+| None | Typed client and committed observations over a caller-provided transport |
+| `iroh` | Iroh connection adapter and cancellation-safe stream framing |
+| `native` | Durable Thread replication, shared change feed, and host Biscuit authorization |
+| Both (default) | Native replication RPC over Iroh, plus the client above |
+
+Weft can enable `native` and implement the stream traits using its own transport
+stack. Heddle's normal configuration enables both features. Fixtures and examples
+require `iroh`; the native replication integration requires both. CI checks the
+dependency boundaries and tests every combination, so a default workspace build
+cannot hide an accidental dependency between the two features. The core also
+compiles for `wasm32-unknown-unknown`; a browser transport adapter remains the
+consumer's responsibility.
+
 ## Live native replication
 
 `replication_rpc::Peer` opens one `SyncService.ReplicateThread` exchange for a
@@ -179,7 +204,7 @@ API creation need the same canonical genesis format before either ships.
 The stream lifecycle and bookmark plumbing demonstrated here belongs in a shared
 SDK once the shape is accepted. Heddle and Tapestry should share those semantics.
 The remaining view reducer must validate typed record keys and apply section
-replacement/removal semantics; this experiment deliberately returns committed
+replacement/removal semantics; this client currently returns committed
 typed changes rather than claiming it has materialized every Thread section.
 
 Finishing the actual CLI cutover also requires adapting existing local Thread selectors,
@@ -190,7 +215,7 @@ remain. The native replication RPC currently accepts already resolved Threads.
 Portable root attachment verification and multi-device
 writer handoff remain separate implementation/design work. The old API service
 schemas and production hosted-client code must be removed as part of that full
-cutover; this experiment does not mark that work complete.
+cutover; this client does not mark that work complete.
 
 The discussion/context assessment and proposed next agent-facing work are in
 [the design note](../../docs/THREAD_AGENT_EXPERIENCE.md).

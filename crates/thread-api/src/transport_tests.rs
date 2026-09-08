@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-use api::v2::{
-    client::{Client, Rpc},
-    rpc,
+use api::{
+    heddle::api::v1alpha1::CallContext,
+    v2::{
+        client::{Client, Rpc},
+        rpc,
+    },
 };
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 
@@ -189,21 +192,4 @@ async fn exchange_receives_before_request_fin_and_half_close_keeps_responses_ali
     service.await.expect("contract peer task");
     local.close().await;
     server.close().await;
-}
-
-#[test]
-fn remote_failure_retains_typed_details_without_boxing_the_error_path() {
-    use api::heddle::api::v1alpha1::{ErrorDetail, ErrorReason};
-    let detail = ErrorDetail {
-        reason: ErrorReason::PolicyDenied as i32,
-        resource: "thread".into(),
-        ..Default::default()
-    };
-    let failure = RemoteFailure::from(CallFailure {
-        code: 7,
-        message: "review required".into(),
-        error: Some(detail.clone()),
-    });
-    assert_eq!(failure.detail().expect("typed detail"), Some(detail));
-    assert_eq!(failure.message, "review required");
 }

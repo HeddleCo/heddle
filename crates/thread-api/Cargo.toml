@@ -6,25 +6,53 @@ description = "Native Thread clients and durable peer replication over Iroh"
 license.workspace = true
 repository.workspace = true
 
+[features]
+default = ["native", "iroh"]
+# Durable replication and the host's ordinary Biscuit authorization boundary.
+native = [
+    "dep:repo",
+    "dep:objects",
+    "dep:crypto",
+    "dep:biscuit-verifier",
+    "dep:chrono",
+    "dep:uuid",
+    "dep:hex",
+    "dep:tokio",
+]
+# An Iroh adapter for the transport-neutral client and replication driver.
+iroh = ["dep:iroh", "dep:tokio"]
+
 [dependencies]
 api.workspace = true
-repo = { workspace = true, features = ["native", "git-overlay"] }
-objects.workspace = true
-crypto.workspace = true
-biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.21.0" }
-biscuit-auth.workspace = true
-chrono.workspace = true
-uuid.workspace = true
+repo = { workspace = true, optional = true, features = ["native", "git-overlay"] }
+objects = { workspace = true, optional = true }
+crypto = { workspace = true, optional = true }
+biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.21.0", optional = true }
+chrono = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 blake3.workspace = true
-hex.workspace = true
-iroh = { package = "heddleco-iroh", version = "=0.1.0", default-features = false, features = ["tls-ring"] }
+hex = { workspace = true, optional = true }
+iroh = { package = "heddleco-iroh", version = "=0.1.0", default-features = false, features = ["tls-ring"], optional = true }
 prost = "=0.14.1"
 thiserror = "=2.0.18"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util"] }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = "1"
+biscuit-auth.workspace = true
 ed25519-dalek = "3"
 getrandom = "0.4"
+hex.workspace = true
 tempfile.workspace = true
 
+[[example]]
+name = "thread"
+required-features = ["iroh"]
+
+[[example]]
+name = "multiplex"
+required-features = ["iroh"]
+
+[[test]]
+name = "thread_workflow"
+required-features = ["iroh"]
