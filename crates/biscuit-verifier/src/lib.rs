@@ -40,7 +40,9 @@ pub const CI_VERDICT_WRITE_OPERATION: &str = "CiVerdictWrite";
 /// Marker predicate carried by the exact server-signed presence block shape.
 pub(crate) const PRESENCE_ATTENUATION_FACT: &str = "weft_presence_attenuation_v1";
 
-const WHO_AM_I_OPERATION_FACT: &str = r#"operation("WhoAmI")"#;
+/// Caller-bound observation exempted only from delegated work ceilings.
+/// Hosts must apply `limits_identity_disclosure` before composing account data.
+pub const SELF_OBSERVATION_OPERATION: &str = "ObserveIdentity";
 const HEDDLE_RULES: &str = include_str!("rules.biscuit");
 
 #[derive(Debug, Error)]
@@ -115,7 +117,7 @@ pub fn presence_attenuation_block(
         .check(format!("check if time($now), $now < {}", expires_at.to_rfc3339()).as_str())
         .internal_ctx("add presence expiry check")?
         .check(
-            format!("check if {WHO_AM_I_OPERATION_FACT} or operation($op), $op == \"presence\"")
+            format!(r#"check if operation("{SELF_OBSERVATION_OPERATION}") or operation($op), $op == "presence""#)
                 .as_str(),
         )
         .internal_ctx("add presence operation check")
@@ -712,7 +714,7 @@ mod tests {
                 check if time($now), expires_at($end), $now < $end;
                 right("spool", "org/allowed", "admin");
                 check if operation("ObserveIdentity") or operation("ReadContent");
-                check if operation("ObserveIdentity") or resource("spool", "org/allowed/sub");
+                check if operation("ObserveIdentity") or resource($kind, $path), $kind == "spool", $path == "org/allowed/sub";
             "#,
                     expires.to_rfc3339()
                 )
@@ -727,10 +729,10 @@ mod tests {
         let facts = verify_at_with_resource(&token, &trust, &[], "ObserveIdentity", None, now)
             .expect("self-observation does not select a work resource");
         assert!(
-            facts.limits_whoami_disclosure,
+            facts.limits_identity_disclosure,
             "an identity exception cannot disclose the authority block's broader scope"
         );
-        assert_eq!(facts.bounded_whoami_scope, "spool:org/allowed/sub read");
+        assert_eq!(facts.bounded_identity_scope, "spool:org/allowed/sub read");
         verify_at_with_resource(
             &token,
             &trust,

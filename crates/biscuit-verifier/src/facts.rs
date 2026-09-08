@@ -50,8 +50,8 @@ fn facts_with(rights: Vec<Right>, is_staff: bool) -> BiscuitFacts {
         subject_user_uuid_str: None,
         signup_bootstrap_email: None,
         bootstrap_session: false,
-        limits_whoami_disclosure: false,
-        bounded_whoami_scope: String::new(),
+        limits_identity_disclosure: false,
+        bounded_identity_scope: String::new(),
         request_signed_session: false,
         root_established: false,
     }
@@ -269,18 +269,18 @@ pub struct BiscuitFacts {
     pub signup_bootstrap_email: Option<String>,
     /// `bootstrap_session(true)` marker before recovery setup (weft#182).
     pub bootstrap_session: bool,
-    /// Whether WhoAmI must return the least-privileged self-introspection
+    /// Whether ObserveIdentity must return the least-privileged self-introspection
     /// shape because the bearer is attenuated or carries a route ceiling.
     ///
-    /// `pub` (was `pub(crate)`) so the WhoAmI handler in `weft-server` can read
+    /// `pub` (was `pub(crate)`) so the ObserveIdentity handler in `weft-server` can read
     /// it across the weft#719 phase 3 crate boundary. Set only by
     /// [`BiscuitFacts`]'s own extraction — there is no public constructor.
-    pub limits_whoami_disclosure: bool,
+    pub limits_identity_disclosure: bool,
     /// Authority scope intersected with every resource ceiling that exempts
-    /// the WhoAmI route. Used only when `limits_whoami_disclosure` is true.
+    /// the ObserveIdentity route. Used only when `limits_identity_disclosure` is true.
     ///
-    /// `pub` for the same cross-crate reason as `limits_whoami_disclosure`.
-    pub bounded_whoami_scope: String,
+    /// `pub` for the same cross-crate reason as `limits_identity_disclosure`.
+    pub bounded_identity_scope: String,
     /// Authority-scoped `request_signed_session(true)` marker (web
     /// PoP-binding Option C). When set, this `cnf`-bound browser session
     /// enforces per-request PoP through the request-signature middleware
@@ -521,7 +521,8 @@ impl BiscuitFacts {
         // `staff_marker_any_block` is NOT consulted here — it exists only for
         // the client-mint fence.
         let is_staff = authority_staff_marker(authorizer)?;
-        let whoami_bounds = whoami_bounds(biscuit.block_count(), &checks, &rights, is_staff);
+        let identity_observation_bounds =
+            identity_observation_bounds(biscuit.block_count(), &checks, &rights, is_staff);
 
         // Render a scope `scope` string for the legacy consumers
         // that haven't been swung over to the BiscuitFacts helpers
@@ -560,8 +561,8 @@ impl BiscuitFacts {
             subject_user_uuid_str,
             signup_bootstrap_email,
             bootstrap_session,
-            limits_whoami_disclosure: whoami_bounds.limited,
-            bounded_whoami_scope: whoami_bounds.scope,
+            limits_identity_disclosure: identity_observation_bounds.limited,
+            bounded_identity_scope: identity_observation_bounds.scope,
             request_signed_session,
             root_established,
         })
@@ -697,7 +698,7 @@ impl BiscuitFacts {
 ///
 /// The ONE inheritance walk (weft#1130). Both callers that need it —
 /// [`BiscuitFacts::has_action_through_inheritance`], which gates real reads and
-/// writes, and [`authority_can_read`], which bounds a limited WhoAmI scope —
+/// writes, and [`authority_can_read`], which bounds a limited ObserveIdentity scope —
 /// route through here, so the two can no longer drift apart. They previously
 /// hand-rolled the same loop with different quantifier nesting; the answers
 /// agreed, but nothing held them to it.
@@ -1193,31 +1194,31 @@ fn authority_date_secs(authorizer: &mut Authorizer, predicate: &str) -> Result<i
         .unwrap_or(0))
 }
 
-struct WhoAmIBounds {
+struct IdentityObservationBounds {
     limited: bool,
     scope: String,
 }
 
-/// Derive the least-privileged scope WhoAmI may disclose. The route-specific
-/// exemption makes WhoAmI callable through an otherwise restrictive caveat,
+/// Derive the least-privileged scope ObserveIdentity may disclose. The route-specific
+/// exemption makes ObserveIdentity callable through an otherwise restrictive caveat,
 /// so the response cannot simply echo the authority block's broader scope.
-fn whoami_bounds(
+fn identity_observation_bounds(
     block_count: usize,
     checks: &[Check],
     rights: &[Right],
     is_staff: bool,
-) -> WhoAmIBounds {
+) -> IdentityObservationBounds {
     let mut limited = block_count > 1;
     let mut resource_ceiling_groups: Vec<Vec<Rule>> = Vec::new();
 
     for check in checks {
-        if !check.queries.iter().any(is_whoami_route_query) {
+        if !check.queries.iter().any(is_identity_observation_query) {
             continue;
         }
         let ceiling_queries = check
             .queries
             .iter()
-            .filter(|query| !is_whoami_route_query(query))
+            .filter(|query| !is_identity_observation_query(query))
             .cloned()
             .collect::<Vec<_>>();
         if ceiling_queries.iter().any(|query| {
@@ -1243,13 +1244,13 @@ fn whoami_bounds(
     }
 
     if !limited {
-        return WhoAmIBounds {
+        return IdentityObservationBounds {
             limited,
             scope: render_scope_string(rights, is_staff),
         };
     }
     if resource_ceiling_groups.is_empty() {
-        return WhoAmIBounds {
+        return IdentityObservationBounds {
             limited,
             scope: if is_staff {
                 "spool:*".to_string()
@@ -1297,7 +1298,7 @@ fn whoami_bounds(
         scope_tokens.push("read".to_string());
     }
     let scope = scope_tokens.join(" ");
-    WhoAmIBounds { limited, scope }
+    IdentityObservationBounds { limited, scope }
 }
 
 fn collect_ceiling_strings(ops: &[Op], candidates: &mut std::collections::BTreeSet<String>) {
@@ -1316,14 +1317,14 @@ fn collect_ceiling_strings(ops: &[Op], candidates: &mut std::collections::BTreeS
     }
 }
 
-fn is_whoami_route_query(query: &Rule) -> bool {
+fn is_identity_observation_query(query: &Rule) -> bool {
     query.body.iter().any(|predicate| {
         predicate.name == "operation"
-            && matches!(predicate.terms.as_slice(), [Term::Str(value)] if value == "WhoAmI")
+            && matches!(predicate.terms.as_slice(), [Term::Str(value)] if value == crate::SELF_OBSERVATION_OPERATION)
     })
 }
 
-/// `BiscuitFacts::can_read` over a raw `&[Right]`, for the WhoAmI-scope bound
+/// `BiscuitFacts::can_read` over a raw `&[Right]`, for the ObserveIdentity-scope bound
 /// that runs before a `BiscuitFacts` exists. Shares the one inheritance walk
 /// (weft#1130) so the disclosed scope can never claim more — or less — than the
 /// read gate would actually allow.

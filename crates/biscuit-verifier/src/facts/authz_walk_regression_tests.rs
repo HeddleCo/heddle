@@ -4,7 +4,7 @@
 //! this resource?" by walking [`crate::resource::resolve_parent`]. That walk
 //! exists in TWO places today: [`BiscuitFacts::has_action_through_inheritance`]
 //! (the `can_read`/`can_write`/`is_admin_on` gate) and the
-//! free-standing `authority_can_read` used to bound a limited WhoAmI scope.
+//! free-standing `authority_can_read` used to bound a limited ObserveIdentity scope.
 //! weft#1130 collapses them onto one helper.
 //!
 //! `spool` is the sole resource fact vocabulary for both container and project
@@ -144,7 +144,7 @@ fn inherited_capabilities_are_pinned_for_every_shape() {
 }
 
 /// The two walks must ALREADY agree — this is the premise the collapse rests
-/// on. `authority_can_read` bounds a limited WhoAmI scope over a raw
+/// on. `authority_can_read` bounds a limited ObserveIdentity scope over a raw
 /// `&[Right]`; `can_read` gates real reads over the same rights. They quantify
 /// differently (one walks once checking three actions per node, the other
 /// walks three times) and must still decide identically.
@@ -195,7 +195,7 @@ fn the_two_inheritance_walks_agree_on_every_probe() {
             assert_eq!(
                 authority_can_read(&built, *is_staff, kind, path),
                 gate.can_read(kind, path),
-                "{label}: the WhoAmI-bound walk and the read gate disagree on {kind}:{path}",
+                "{label}: the ObserveIdentity-bound walk and the read gate disagree on {kind}:{path}",
             );
         }
     }

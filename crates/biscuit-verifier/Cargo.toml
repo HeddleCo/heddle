@@ -27,6 +27,9 @@ uuid = { version = "1", default-features = false }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 biscuit-auth = { workspace = true, features = ["wasm"] }
 chrono = { workspace = true, features = ["wasmbind"] }
+# Biscuit's wasm feature supplies bindings but does not select its entropy
+# backend. This leaf must build without a sibling enabling getrandom's JS path.
+getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 heddle-api = { package = "heddle-api", version = "0.28.0" }
