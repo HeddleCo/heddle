@@ -1,13 +1,12 @@
 use std::{ffi::OsString, sync::MutexGuard};
 
-use api::heddle::api::v1alpha1::CreateAgentAccountResponse;
 use config::credentials;
 use crypto::{Ed25519Signer, Signer as _};
 use repo::seq0_authority_public_key;
 use tempfile::TempDir;
 
 use super::{
-    auth_login_agent::finish_invite_create_from_response,
+    auth_login_agent::{finish_invite_create_from_response, provision_response_for_test},
     hosted::{CallContextFactory, HostedError},
     identity_state,
     owner_root::load_recorded_root,
@@ -68,12 +67,7 @@ fn invite_create_mints_a_claimable_seq0_root_on_the_agent_proof_key() {
     let server = "api.owner-root.test";
     let output = finish_invite_create_from_response(
         server,
-        CreateAgentAccountResponse {
-            account_id: "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28".into(),
-            pet_name: "quiet-otter".into(),
-            agent_capability: Vec::new(),
-            web_origin: String::new(),
-        },
+        provision_response_for_test("7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28", "quiet-otter", ""),
     )
     .expect("invite create");
     let state = identity_state::load()
@@ -101,12 +95,7 @@ fn create_spool_genesis_refuses_a_key_that_is_not_seq0() {
     let _home = IsolatedHome::new();
     finish_invite_create_from_response(
         "api.seq0-mismatch.test",
-        CreateAgentAccountResponse {
-            account_id: "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28".into(),
-            pet_name: "quiet-otter".into(),
-            agent_capability: Vec::new(),
-            web_origin: String::new(),
-        },
+        provision_response_for_test("7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28", "quiet-otter", ""),
     )
     .expect("signup");
     let other = Ed25519Signer::generate().expect("other key");
@@ -139,12 +128,7 @@ fn create_spool_genesis_matches_the_stored_seq0_proof_key() {
     let _home = IsolatedHome::new();
     finish_invite_create_from_response(
         "api.seq0-match.test",
-        CreateAgentAccountResponse {
-            account_id: "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28".into(),
-            pet_name: "quiet-otter".into(),
-            agent_capability: Vec::new(),
-            web_origin: String::new(),
-        },
+        provision_response_for_test("7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28", "quiet-otter", ""),
     )
     .expect("signup");
     let pem = credentials::get_server_credential("api.seq0-match.test")

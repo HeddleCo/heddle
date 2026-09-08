@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+#[cfg(test)]
 use config::credentials;
 use crypto::{Ed25519Signer, Signer as _};
 use objects::{HeddleError, RecoveryDetails};
@@ -152,6 +153,7 @@ fn fail_closed(server: &str) -> Result<AuthLoginOutcome> {
     )))
 }
 
+#[cfg(test)]
 pub(crate) fn store_agent_root(
     server: &str,
     token: String,

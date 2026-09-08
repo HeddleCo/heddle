@@ -696,6 +696,34 @@ fn verify_observed_owner(
     Ok(verified)
 }
 
+/// Verify an account observation's original binding and exact accepted state.
+/// The caller still establishes which account is expected for its request.
+pub fn verify_account_owner_observation(
+    observed: &api::heddle::api::v2alpha1::OwnerState,
+    now_unix_seconds: i64,
+) -> Result<heddleco_capability_verifier::VerifiedOwnerState> {
+    let current = verify_observed_owner(observed, now_unix_seconds)?;
+    let root = current.signed_root();
+    let initial = verify_owner_root(root)?;
+    let account: [u8; 16] = root
+        .root
+        .as_ref()
+        .context("owner root body missing")?
+        .account_uuid
+        .as_slice()
+        .try_into()
+        .context("owner account UUID must be 16 bytes")?;
+    heddleco_capability_verifier::verify_owner_key_binding(
+        observed
+            .binding
+            .as_ref()
+            .context("original owner binding missing")?,
+        &initial,
+        &account,
+    )?;
+    Ok(current)
+}
+
 /// Verify portable immutable resource ownership before source materialization.
 /// Current account authority and historical transfer witnesses must agree; a
 /// host observation alone cannot establish or replace an owner root.

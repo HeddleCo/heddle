@@ -92,13 +92,6 @@ impl HostedRoutes<'_> {
         ListSignupInvitesResponse
     );
     unary_method!(
-        create_agent_account,
-        "IdentityService",
-        "CreateAgentAccount",
-        CreateAgentAccountRequest,
-        CreateAgentAccountResponse
-    );
-    unary_method!(
         who_am_i,
         "IdentityService",
         "WhoAmI",

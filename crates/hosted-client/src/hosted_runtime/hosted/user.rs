@@ -1,9 +1,8 @@
 use api::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, BootstrapOwnerRootRequest,
     BootstrapOwnerRootResponse, CheckMergeEligibilityRequest, CheckMergeEligibilityResponse,
-    CreateAgentAccountRequest, CreateAgentAccountResponse, CreateGrantRequest,
-    CreateInvitationRequest, CreateServiceAccountRequest, CreateSignupInviteRequest,
-    CreateSignupInviteResponse, DeleteGrantRequest, DeleteSpoolRequest,
+    CreateGrantRequest, CreateInvitationRequest, CreateServiceAccountRequest,
+    CreateSignupInviteRequest, CreateSignupInviteResponse, DeleteGrantRequest, DeleteSpoolRequest,
     GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse, GetCurrentUserSpoolRequest,
     GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
     IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
@@ -60,16 +59,6 @@ macro_rules! workflow_call {
 }
 
 impl HostedClient {
-    pub async fn create_agent_account(
-        &mut self,
-        request: CreateAgentAccountRequest,
-    ) -> Result<CreateAgentAccountResponse, ProtocolError> {
-        self.routes()
-            .create_agent_account(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
-    }
-
     /// Resolve the acting identity for the bound bearer (subject, staff/service
     /// markers, session, server-side scope, and directly-held resource roles).
     /// Read-only; drives `heddle whoami`.
