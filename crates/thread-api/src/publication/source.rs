@@ -85,6 +85,22 @@ impl SourcePack {
         })
     }
 
+    /// Whole, independently hashed artifacts in transmission order. Source
+    /// preparation bounds the decoded closure before producing this inventory.
+    pub fn artifacts(&self) -> &[PackExtent; 2] {
+        &self.artifacts
+    }
+
+    /// Open the exact prepared artifacts without buffering their bodies. Keep
+    /// this SourcePack alive until the readers finish; dropping it removes its
+    /// temporary files, including after a cancelled transfer.
+    pub async fn open_artifacts(&self) -> Result<[tokio::fs::File; 2], Error> {
+        Ok([
+            tokio::fs::File::open(self.directory.path().join("source.pack")).await?,
+            tokio::fs::File::open(self.directory.path().join("source.idx")).await?,
+        ])
+    }
+
     pub fn revision(&self) -> StateId {
         self.revision
     }
@@ -155,8 +171,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
                 },
             )),
         };
-        let pack = tokio::fs::File::open(source.directory.path().join("source.pack")).await?;
-        let index = tokio::fs::File::open(source.directory.path().join("source.idx")).await?;
+        let [pack, index] = source.open_artifacts().await?;
         self.remote.publish_content(&opening, [pack, index]).await
     }
 }
