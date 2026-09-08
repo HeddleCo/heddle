@@ -488,4 +488,26 @@ mod tests {
             .as_bytes()
         );
     }
+
+    #[cfg(feature = "native")]
+    #[tokio::test]
+    async fn thread_publication_prepares_only_selected_source_and_binds_its_revision() {
+        use objects::{object::{Attribution, Blob, Principal, State, Tree, TreeEntry}, store::{FsStore, ObjectStore}};
+        let root = tempfile::tempdir().expect("local source scratch");
+        let store = FsStore::new(root.path().join("objects"));
+        store.init().expect("store");
+        let blob = Blob::new(vec![1; 128 * 1024]);
+        store.put_blob(&blob).expect("source");
+        let tree = Tree::from_entries(vec![TreeEntry::file("source.rs", blob.hash(), false).expect("entry")]);
+        store.put_tree(&tree).expect("tree");
+        let state = State::new_snapshot(tree.hash(), vec![], Attribution::human(Principal::new("user", "user@example.test")));
+        let prepared = SourcePack::prepare(&store, &state, root.path(), SourceBudget { max_objects: 16, max_decoded_bytes: 256 * 1024 }).expect("prepare exact source");
+        let (remote, _, _) = fixture(false);
+        let thread = ThreadRef { spool: Some(SpoolRef { id: "spool-test".into() }), id: Some(ThreadId { value: vec![1; 32] }) };
+        let receipt = remote.thread(thread.clone()).publish_source(&prepared, PublicationOptions {
+            client_operation_id: "source-upload".into(), source: EndpointRef { public_key: vec![2; 32], kind: EndpointKind::Device as i32 }, sharing_policy_version: vec![3; 32], checkpoint: None,
+        }).await.expect("one Thread-bound publication");
+        assert_eq!(receipt.thread, Some(thread.clone()));
+        assert_eq!(receipt.revision, Some(RevisionRef { spool: thread.spool, revision: Some(revision_ref::Revision::State(api::heddle::api::v1alpha1::StateId { value: state.id().as_bytes().to_vec() })) }));
+    }
 }
