@@ -26,8 +26,8 @@ struct Work {
 }
 impl ActivityGuard for Work {
     type Retained = Option<Count>;
-    fn finish(self) -> Self::Retained {
-        self.buffer
+    fn finish(self, _: usize) -> std::result::Result<Self::Retained, transport::Error> {
+        Ok(self.buffer)
     }
 }
 struct QuietReader;
@@ -149,8 +149,8 @@ impl MessageReader for InputReader {
 struct MemoryGuard(Option<tokio::sync::OwnedSemaphorePermit>);
 impl ActivityGuard for MemoryGuard {
     type Retained = Option<tokio::sync::OwnedSemaphorePermit>;
-    fn finish(self) -> Self::Retained {
-        self.0
+    fn finish(self, _: usize) -> std::result::Result<Self::Retained, transport::Error> {
+        Ok(self.0)
     }
 }
 

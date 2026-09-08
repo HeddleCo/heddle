@@ -48,8 +48,10 @@ consumer's responsibility.
 
 `live_replication::run` asks the host for an `ActivityGuard` before each store
 step and disclosure check. `Activity::Check` needs no output-memory reservation;
-`Activity::Work` may produce a bounded frame. `finish` releases work slots and
-returns the memory lease retained through delivery. Idle waits hold neither.
+`Activity::Receive` uses the input memory already accounted for by the reader,
+and advances bounded control queues without waiting for producer memory.
+`Activity::Work` may produce a bounded frame. `finish(encoded_bytes)` releases
+work slots and unused memory, returning the lease retained through delivery. Idle waits hold neither.
 A device can keep returning `()`; a hosted scheduler can queue work separately
 from its idle subscription allowance. Cancellation releases both leases.
 

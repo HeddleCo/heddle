@@ -153,6 +153,11 @@ enum Event {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
     Check,
+    /// Advance input admission and bounded control queues. The reader already
+    /// accounts for the input; waiting for output memory here could deadlock
+    /// every receiver while it holds the memory needed by those producers.
+    Receive,
+    /// Load and encode one output frame, retaining its memory through delivery.
     Work,
 }
 
@@ -161,11 +166,13 @@ pub enum Activity {
 /// Devices without a shared work scheduler can keep returning `()`.
 pub trait ActivityGuard: Send {
     type Retained: Send;
-    fn finish(self) -> Self::Retained;
+    fn finish(self, encoded_bytes: usize) -> std::result::Result<Self::Retained, transport::Error>;
 }
 impl ActivityGuard for () {
     type Retained = ();
-    fn finish(self) {}
+    fn finish(self, _: usize) -> std::result::Result<(), transport::Error> {
+        Ok(())
+    }
 }
 
 /// Call after validating the opening, endpoint bindings, Thread, and facets.
@@ -220,9 +227,10 @@ where
                 }
             };
             // Store reads can yield; verify live rights again at disclosure.
-            let retained = activity.finish();
+            let encoded = side.encode(frame);
+            let retained = activity.finish(encoded.len())?;
             drop(gate(Activity::Check).await?);
-            writer.send(side.encode(frame)).await?;
+            writer.send(encoded).await?;
             drop(retained);
         }
         writer.finish().await?;
@@ -252,7 +260,7 @@ where
                 Event::Maintain
             }
         };
-        let activity = authorize(Activity::Work).await?;
+        let activity = authorize(Activity::Receive).await?;
         let output = match event {
             Event::Incoming(frame) => session.handle(frame).await?,
             Event::Announce => {
