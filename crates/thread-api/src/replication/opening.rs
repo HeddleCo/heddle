@@ -151,6 +151,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn first_publication_retains_signed_genesis_and_rejects_changed_identity() {
+        use crypto::{Ed25519Signer, Signer};
+        use heddle_object_model::object::{StateId, thread_replication::{ThreadGenesis, GENESIS_FORMAT}};
+        let signer = Ed25519Signer::from_seed(&[23;32]).expect("origin device");
+        let genesis = ThreadGenesis { version: 1, spool: "spool".into(), parent: None,
+            base: StateId::from_bytes([1;32]), name: "original".into(), intent: "publish once".into(),
+            creator: signer.public_key().try_into().expect("public key"), nonce: vec![2;16] };
+        let canonical = genesis.encode().expect("canonical genesis");
+        let mut signing = GENESIS_FORMAT.as_bytes().to_vec(); signing.push(0); signing.extend(&canonical);
+        let signed = SignedRecord { format: GENESIS_FORMAT.into(), canonical_record: canonical,
+            signatures: vec![RecordSignature { public_key: signer.public_key().to_vec(), signature: signer.sign(&signing).expect("origin signature") }] };
+        let thread = ThreadRef { spool: Some(SpoolRef { id: genesis.spool.clone() }), id: Some(ThreadId { value: genesis.id().expect("Thread ID").as_bytes().to_vec() }) };
+        let local = EndpointRef { public_key: vec![7;32], kind: EndpointKind::Weft as i32 };
+        let open = ReplicationOpen { thread: Some(thread.clone()), thread_genesis: Some(signed),
+            source: Some(EndpointRef { public_key: vec![8;32], kind: EndpointKind::Device as i32 }), destination: Some(local.clone()),
+            facets: vec![SharedFacet::Source as i32], session_nonce: vec![9;16], record_formats: vec![OPERATION_FORMAT.into()], ..Default::default() };
+        let facets = BTreeSet::from([ThreadFacet::Source]);
+        assert!(accept(&open, &thread, &local, [8;32], &facets, vec![]).is_ok(), "first publication must accept the original signed genesis");
+        let mut changed = open.clone();
+        changed.thread_genesis.as_mut().expect("genesis").signatures[0].signature[0] ^= 1;
+        assert!(accept(&changed, &thread, &local, [8;32], &facets, vec![]).is_err());
+        changed = open.clone();
+        changed.thread.as_mut().expect("Thread").id.as_mut().expect("ID").value[0] ^= 1;
+        let claimed = changed.thread.clone().expect("claimed Thread");
+        assert!(accept(&changed, &claimed, &local, [8;32], &facets, vec![]).is_err());
+        changed = open;
+        changed.thread.as_mut().expect("Thread").spool.as_mut().expect("spool").id = "another".into();
+        let claimed = changed.thread.clone().expect("claimed Thread");
+        assert!(accept(&changed, &claimed, &local, [8;32], &facets, vec![]).is_err());
+    }
+
+    #[test]
     fn opening_binds_both_endpoints_thread_formats_and_negotiated_limits() {
         let thread = ThreadRef {
             spool: Some(SpoolRef { id: "spool".into() }),
