@@ -56,6 +56,8 @@ jobs:
         run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
       - name: Build Worker target
         run: cargo build --locked -p heddleco-capability-verifier --target wasm32-unknown-unknown --lib
+      - name: Check ordinary verifier independently
+        run: cargo check --locked -p heddle-biscuit-verifier --target wasm32-unknown-unknown --lib
       - name: Run the full fixture matrix in WASM
         env:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
