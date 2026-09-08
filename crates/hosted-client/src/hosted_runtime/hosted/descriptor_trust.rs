@@ -88,9 +88,7 @@ pub fn descriptor_trust_path() -> PathBuf {
 }
 
 pub fn canonical_server_authority(server: &str) -> Result<String> {
-    let candidate = if let Some(authority) = server.strip_prefix("heddle://") {
-        format!("https://{authority}")
-    } else if server.starts_with("https://") {
+    let candidate = if server.starts_with("https://") {
         server.to_string()
     } else if server.contains("://") {
         bail!("native hosted bootstrap requires an HTTPS server authority");
@@ -362,7 +360,7 @@ mod tests {
         for alias in [
             "API.Example",
             "https://api.example",
-            "heddle://api.example:443",
+            "https://api.example:443",
         ] {
             assert_eq!(
                 canonical_server_authority(alias).unwrap(),
@@ -506,7 +504,7 @@ mod tests {
     fn report_distinguishes_explicit_and_automatic_trust() {
         with_isolated_home(|_| {
             insert_verified_pin("https://api.example", "automatic-id", &[0x77; 32]).unwrap();
-            let automatic = trust_report("heddle://API.example:443", None).unwrap();
+            let automatic = trust_report("https://API.example:443", None).unwrap();
             assert_eq!(automatic.source, DescriptorTrustSource::Automatic);
             assert_eq!(automatic.key_id, "automatic-id");
 

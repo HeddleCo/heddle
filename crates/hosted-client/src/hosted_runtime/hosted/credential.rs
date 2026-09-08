@@ -142,7 +142,6 @@ pub(crate) fn server_keys_match(left: &str, right: &str) -> bool {
         value
             .strip_prefix("http://")
             .or_else(|| value.strip_prefix("https://"))
-            .or_else(|| value.strip_prefix("heddle://"))
             .unwrap_or(value)
     }
     without_scheme(left) == without_scheme(right)

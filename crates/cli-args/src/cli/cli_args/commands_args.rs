@@ -1236,13 +1236,13 @@ pub struct PullArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
-  Clones native Heddle or Git repositories. Native clones follow the remote default thread; `--thread` overrides. Git clones check out the selected default branch. Git transport runs through Sley and does not require a Git executable. Never prompts. Full details: `heddle help clone`.
+  URLs ending in `.git` clone Git repositories; other HTTPS URLs clone hosted Heddle spools. Native clones follow the remote default thread; `--thread` overrides. Git clones check out the selected default branch. Git transport runs through Sley and does not require a Git executable. Never prompts. Full details: `heddle help clone`.
 
 Advanced/planned flags: see `heddle help clone`.
 
 Examples:
   heddle clone ../native-repo ./clone                # local native Heddle repository
-  heddle clone heddle://host/repo ./clone --depth 1   # shallow Heddle clone: tip plus immediate parents
+  heddle clone https://host/repo ./clone --depth 1   # shallow Heddle clone: tip plus immediate parents
 ")]
 pub struct CloneArgs {
     /// Remote repository path.

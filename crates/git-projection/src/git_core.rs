@@ -2119,11 +2119,11 @@ fn git_projection_signature() -> Vec<u8> {
 
 fn local_path_from_url(url: &str) -> GitProjectionResult<Option<PathBuf>> {
     // Hosted URLs belong to native hosted sync, never a local/Git transport
-    // classifier. Rejecting the scheme here keeps note hydration and explicit
+    // classifier. Rejecting hosted URLs here keeps note hydration and explicit
     // Git maintenance paths from accidentally treating it as an ordinary URL.
-    if url.starts_with("heddle://") {
+    if url.starts_with("https://") && !url.ends_with(".git") {
         return Err(GitProjectionError::Git(format!(
-            "remote '{url}' uses the hosted heddle:// scheme, which cannot be pushed via the git-overlay exporter; hosted pushes must go through the native hosted-sync path"
+            "remote '{url}' is a hosted URL (no .git suffix), which cannot be pushed via the git-overlay exporter; hosted pushes must go through the native hosted-sync path"
         )));
     }
     let Some(raw_path) = url.strip_prefix("file://") else {
@@ -3623,15 +3623,15 @@ mod tests {
     }
 
     #[test]
-    fn local_path_from_url_rejects_hosted_heddle_scheme() {
-        // A `heddle://` hosted remote that reaches local/Git transport
+    fn local_path_from_url_rejects_hosted_url_without_git_suffix() {
+        // A `https://` hosted remote that reaches local/Git transport
         // classification must fail loudly; only native hosted sync speaks it.
-        let err = local_path_from_url("heddle://weft.local:8421/org/repo")
-            .expect_err("heddle:// must be rejected by the git exporter classifier");
+        let err = local_path_from_url("https://weft.local:8421/org/repo")
+            .expect_err("hosted URL must be rejected by the git exporter classifier");
         let msg = err.to_string();
         assert!(
-            msg.contains("heddle://") && msg.contains("hosted"),
-            "error should explain the hosted scheme cannot be pushed via the git-overlay exporter, got: {msg}"
+            msg.contains("https://") && msg.contains("hosted"),
+            "error should explain the hosted URL cannot be pushed via the git-overlay exporter, got: {msg}"
         );
     }
 
