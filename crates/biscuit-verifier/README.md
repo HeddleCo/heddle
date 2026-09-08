@@ -14,6 +14,14 @@ Owner authority, recovery, transfer, and purge use the adjacent
 `heddleco-capability-verifier`. Ordinary spool write/admin capabilities do not
 substitute for owner purge authorization.
 
+`delegation::AgentAttenuation` constructs the shared agent restriction block.
+`time_bounded` preserves the parent's scope; explicit operation/resource lists
+narrow it, and an empty list denies work. The caller adds the signed child-key
+binding before appending the block. Key delegation alone preserves the human's
+account authority; a self-observation exception through explicit work ceilings
+still returns only the limited self-view. Hosts continue to enforce every
+ancestor caveat and revocation dependency.
+
 Run from the Heddle workspace:
 
 ```sh
