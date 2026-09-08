@@ -1,0 +1,29 @@
+[package]
+name = "heddle-thread-client"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Executable Heddle client design for the clean Thread API cutover"
+
+# Keep this design experiment independently runnable while the main CLI still
+# depends on the old hosted implementation. There is no v1 route or fallback here.
+[workspace]
+
+[dependencies]
+api = { package = "heddle-api", git = "https://github.com/HeddleCo/api.git", rev = "2201ea1f9c11baeefe0d7f06b4a10f380be1da7f" }
+iroh = { package = "heddleco-iroh", version = "=0.1.0", default-features = false, features = ["tls-ring"] }
+prost = "=0.14.1"
+thiserror = "=2.0.18"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "io-util"] }
+
+[dev-dependencies]
+anyhow = "1"
+ed25519-dalek = "3"
+getrandom = "0.4"
+hex = "0.4"
+
+[profile.dev]
+debug = 0
+
+[profile.test]
+debug = 0
