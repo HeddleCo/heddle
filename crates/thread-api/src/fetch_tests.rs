@@ -3,7 +3,7 @@ use objects::object::{StateId, thread_replication::ThreadGenesis};
 
 use super::*;
 
-fn fixture() -> (FetchOpen, TransferReady, EndpointRef, [Vec<u8>; 2]) {
+pub(super) fn fixture() -> (FetchOpen, TransferReady, EndpointRef, [Vec<u8>; 2]) {
     let signer = Ed25519Signer::from_seed(&[61; 32]).expect("test creator");
     let spool_id = uuid::Uuid::from_u128(0x01980000000070008000000000000001);
     let genesis = ThreadGenesis {

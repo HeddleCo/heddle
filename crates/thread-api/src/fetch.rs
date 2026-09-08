@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native source downloads retain original Thread identities and causal proofs.
 //! Pack chunks are staging bytes: install only after the verified Complete frame.
+#[cfg(feature = "native")]
+mod native;
+mod staging;
 use api::v2::client::{ClientError, MessageReader, Messages, RpcTransport};
 use prost::Message;
+pub use staging::StagedSource;
 
 use crate::{Remote, contract::*, replication, rpc, transport};
 
@@ -14,6 +18,10 @@ pub enum Error {
     Transport(#[from] transport::Error),
     #[error(transparent)]
     Replication(#[from] replication::Error),
+    #[error("source download I/O: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("source preparation: {0}")]
+    Preparation(String),
     #[error("invalid source download: {0}")]
     Invalid(&'static str),
 }
