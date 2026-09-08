@@ -2,7 +2,7 @@
 //! Known-Thread replication on a directly authenticated Iroh connection.
 //! The host supplies its resolved owner/account authority and admission facets.
 //! Unknown Thread creation and source-object transfer have separate boundaries.
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, future::Future, sync::Arc, time::Duration};
 
 use api::{
     framing,
@@ -68,7 +68,7 @@ impl Peer {
 
     /// Drives one RPC until cancellation, transport failure, or live authority
     /// revocation. Reopen with the same replica to repair from durable frontiers.
-    pub async fn connect<S, A, G>(
+    pub async fn connect<S, A, G, F>(
         &self,
         connection: Connection,
         destination: EndpointKind,
@@ -80,7 +80,8 @@ impl Peer {
     where
         S: ObjectStore + Send + Sync + 'static,
         A: Authorize,
-        G: Fn() -> Result<(), transport::Error> + Clone + Send + Sync + 'static,
+        G: Fn() -> F + Clone + Send + Sync + 'static,
+        F: Future<Output = Result<(), transport::Error>> + Send,
     {
         let remote_key = *connection.remote_id().as_bytes();
         let destination = EndpointRef {
@@ -291,7 +292,7 @@ impl Peer {
             max_items as usize,
         )?;
         live_replication::run(session, reader, writer, Side::Acceptor, feed, move || {
-            authority.recheck(&verified)
+            std::future::ready(authority.recheck(&verified))
         })
         .await
     }

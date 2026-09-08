@@ -211,7 +211,10 @@ async fn irohs_open_stream_syncs_later_writes_honors_opt_in_and_stops_on_root_de
                 signer,
                 store,
                 &feed,
-                || async { tokio::task::yield_now().await; Ok(()) },
+                || async {
+                    tokio::task::yield_now().await;
+                    Ok(())
+                },
             )
             .await
         }
@@ -283,10 +286,17 @@ async fn irohs_open_stream_syncs_later_writes_honors_opt_in_and_stops_on_root_de
         let feed = left_feed;
         let signer = credential(&root);
         async move {
-            peer.connect(outgoing, EndpointKind::Device, signer, store, &feed, || async {
-                tokio::task::yield_now().await;
-                Ok(())
-            })
+            peer.connect(
+                outgoing,
+                EndpointKind::Device,
+                signer,
+                store,
+                &feed,
+                || async {
+                    tokio::task::yield_now().await;
+                    Ok(())
+                },
+            )
             .await
         }
     });

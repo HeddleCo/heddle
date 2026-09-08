@@ -2,7 +2,7 @@
 //! Continuous, bounded replication on caller-authenticated protobuf streams.
 //! One feed is shared by every observer/replicator of a local Thread. Incoming
 //! metadata writes never move a checkout or install unrequested source blobs.
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 
 use api::v2::client::{MessageReader, MessageWriter};
 use heddle_object_model::object::ContentHash;
@@ -152,7 +152,7 @@ enum Event {
 /// `authorize` rechecks the live host permission, including expiry/revocation.
 /// It runs before every admission and output, including queued output. Readers
 /// must enforce the negotiated frame bound before allocating message bodies.
-pub async fn run<B, R, W, G>(
+pub async fn run<B, R, W, G, F>(
     mut session: Session<B>,
     mut reader: R,
     mut writer: W,
@@ -164,12 +164,13 @@ where
     B: ReplicaStore,
     R: MessageReader<Error = transport::Error>,
     W: MessageWriter<Error = transport::Error> + 'static,
-    G: Fn() -> std::result::Result<(), transport::Error> + Clone + Send + Sync + 'static,
+    G: Fn() -> F + Clone + Send + Sync + 'static,
+    F: Future<Output = std::result::Result<(), transport::Error>> + Send,
 {
     if feed.thread != session.replica.thread_id() {
         return Err(transport::Error::Protocol("change feed belongs to another Thread").into());
     }
-    authorize()?;
+    authorize().await?;
     let mut changes = feed.changes.clone();
     let (queue, mut outgoing) = mpsc::channel::<Outbound>(256);
     let sender_session = session.clone();
@@ -178,7 +179,7 @@ where
         while let Some(item) = outgoing.recv().await {
             let session = sender_session.clone();
             let gate = sender_authorize.clone();
-            gate()?;
+            gate().await?;
             let frame = match item {
                 Outbound::Operation(id) => session.export_operation(id).await?,
                 Outbound::Frame(frame) => {
@@ -197,6 +198,8 @@ where
                     frame
                 }
             };
+            // Store reads can yield; verify live rights again at disclosure.
+            gate().await?;
             writer.send(side.encode(frame)).await?;
         }
         writer.finish().await?;
@@ -226,7 +229,7 @@ where
                 Event::Maintain
             }
         };
-        authorize()?;
+        authorize().await?;
         let output = match event {
             Event::Incoming(frame) => session.handle(frame).await?,
             Event::Announce => {
