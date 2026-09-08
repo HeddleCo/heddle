@@ -734,6 +734,11 @@ fn api_v2_operation_and_genesis_vectors_match() {
         ),
         "f37d8edea82fdda544f8c338d34f3433512231421a0a39771d5cf33b454318bebd7011d7e192e6b548618f9f3aae4835c092af3f8a9a074206ff51046409fb0e"
     );
+    // The public verifier accepts the same generated type as v2 RPC callers.
+    let genesis = heddle_api::heddle::api::v2alpha1::SignedSpoolOwnerGenesis::decode(
+        genesis.encode_to_vec().as_slice(),
+    )
+    .expect("v2 portable genesis");
     let verified = verify_spool_owner_genesis(&genesis).expect("verified genesis vector");
     assert_eq!(verified.spool_uuid(), body.spool_uuid.as_slice());
 }
