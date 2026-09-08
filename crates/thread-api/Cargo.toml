@@ -27,7 +27,7 @@ iroh = ["dep:iroh", "dep:tokio", "dep:heddle-perf-contract"]
 # Causal protocol and async stream driver, without a local repository or Iroh.
 replication = ["signing", "dep:heddle-object-model", "dep:tokio"]
 # Portable exact-request verification; hosts retain authority and nonce storage.
-signing = ["dep:crypto", "dep:hex"]
+signing = ["dep:crypto", "dep:hex", "dep:uuid"]
 
 [dependencies]
 base64 = { workspace = true, optional = true }

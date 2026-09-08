@@ -6,6 +6,8 @@ pub mod authority;
 pub mod content;
 #[cfg(feature = "replication")]
 pub mod creation;
+#[cfg(feature = "signing")]
+pub mod credentials;
 #[cfg(feature = "replication")]
 pub mod live_replication;
 pub mod observation;

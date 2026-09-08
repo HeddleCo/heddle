@@ -2,21 +2,14 @@
 //! The same client-minted Biscuit rules at device and hosted boundaries. The
 //! application supplies roots already attached to the owner/account and a
 //! resolved spool path. No key or authority is minted by this verifier.
-use std::{
-    sync::RwLock,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::RwLock;
 
-use api::{
-    heddle::api::v1alpha1::{CallContext, RequestProof},
-    v2::MethodDescriptor,
-};
+use api::{heddle::api::v1alpha1::CallContext, v2::MethodDescriptor};
 use base64::Engine as _;
 use biscuit_verifier::{BiscuitFacts, PublicKey};
 use chrono::{DateTime, Utc};
-use crypto::{Ed25519Signer, Signer};
 
-use crate::transport::{Authorize, Error};
+use crate::transport::Error;
 
 pub struct RootAuthority {
     roots: RwLock<Vec<PublicKey>>,
@@ -137,54 +130,4 @@ pub struct VerifiedCall {
     method: &'static MethodDescriptor,
     right: String,
     pub principal: String,
-}
-
-/// A caller-owned credential and signer. Browser/device-root attachment is
-/// supplied by the application, exactly as it is for a Weft request.
-pub struct CredentialSigner {
-    pub signer: Ed25519Signer,
-    /// Raw serialized Biscuit, directly usable from IssuedCredential.biscuit.
-    pub bearer: Vec<u8>,
-    pub grant_envelope: Vec<u8>,
-}
-impl Authorize for CredentialSigner {
-    async fn context(
-        &self,
-        method: &'static MethodDescriptor,
-        body: &[u8],
-    ) -> Result<CallContext, Error> {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| Error::Io(e.to_string()))?
-            .as_millis();
-        let timestamp = i64::try_from(timestamp).map_err(|_| Error::Protocol("invalid clock"))?;
-        let identity = format!(
-            "principal:device-key:{}",
-            hex::encode(self.signer.public_key())
-        );
-        // UUID v4 is an OS-random nonce; there is no authority generation here.
-        let nonce = uuid::Uuid::new_v4().as_bytes().to_vec();
-        let signature = self
-            .signer
-            .sign(&api::signing::unary_bytes(
-                &identity,
-                method.path,
-                timestamp,
-                &nonce,
-                body,
-            ))
-            .map_err(|e| Error::Io(e.to_string()))?;
-        Ok(CallContext {
-            bearer_capability: self.bearer.clone(),
-            bearer_grant_envelope: self.grant_envelope.clone(),
-            request_proof: Some(RequestProof {
-                algorithm: "ed25519".into(),
-                signing_identity: identity,
-                timestamp_millis: timestamp,
-                nonce,
-                signature,
-            }),
-            ..Default::default()
-        })
-    }
 }

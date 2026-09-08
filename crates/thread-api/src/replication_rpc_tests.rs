@@ -9,7 +9,7 @@ use objects::object::{
 use repo::Repository;
 
 use super::*;
-use crate::authority::CredentialSigner;
+use crate::credentials::CredentialSigner;
 
 fn credential(root: &KeyPair) -> CredentialSigner {
     let signer = Ed25519Signer::from_seed(&[17; 32]).expect("test signer");
