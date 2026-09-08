@@ -9,9 +9,9 @@ use objects::object::{
 use repo::Repository;
 
 use super::*;
-use crate::credentials::CredentialSigner;
+use crate::credentials::Credentials;
 
-fn credential(root: &KeyPair) -> CredentialSigner {
+fn credential(root: &KeyPair) -> Credentials {
     let signer = Ed25519Signer::from_seed(&[17; 32]).expect("test signer");
     let token = Biscuit::builder()
         .fact("user(\"owner\")")
@@ -24,9 +24,9 @@ fn credential(root: &KeyPair) -> CredentialSigner {
         .expect("proof key")
         .build(root)
         .expect("owner-minted Biscuit");
-    CredentialSigner {
-        signer,
-        bearer: token.to_vec().expect("token encoding"),
+    Credentials::Signed {
+        signer: Arc::new(signer),
+        biscuit: token.to_vec().expect("token encoding"),
         grant_envelope: vec![],
     }
 }

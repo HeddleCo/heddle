@@ -28,6 +28,7 @@ heddle-thread-api = { version = "0.21.0", default-features = false }
 | --- | --- |
 | None | Typed client and committed observations over a caller-provided transport |
 | `iroh` | Iroh connection adapter and cancellation-safe stream framing |
+| `signing` | Public, bearer-only and Ed25519 request credentials without local storage |
 | `replication` | Async causal exchange and stream driver over a caller-provided durable store |
 | `native` | Replication with a SQLite/object-store adapter, local change feed, and host Biscuit authorization |
 | Both (default) | Native replication RPC over Iroh, plus the client above |
@@ -43,6 +44,14 @@ dependency boundaries and tests every combination, so a default workspace build
 cannot hide an accidental dependency between the two features. The core also
 compiles for `wasm32-unknown-unknown`; a browser transport adapter remains the
 consumer's responsibility.
+
+`credentials::Credentials` accepts a public caller, a bearer-only credential,
+or a caller-owned Ed25519 signer with raw Biscuit bytes and an optional grant
+envelope. Request identity derives from the signing key; a mutable handle is
+never an independent signing input. Each retry keeps its operation ID and gets
+a fresh nonce. The returned context binds the operation even when used by a
+transport other than Iroh. This requires only the `signing` feature; host-side
+Biscuit verification and durable nonce consumption remain under `native`.
 
 The Iroh adapter counts application bytes at each successful stream read/write,
 including framing, remote failures, and partial reads or writes before cancellation.
