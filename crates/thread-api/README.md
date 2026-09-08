@@ -46,6 +46,20 @@ consumer's responsibility.
 
 ## Live native replication
 
+Prepare `creation::ThreadCreation::sign(operation_id, &genesis, &signer)` once
+and persist its original signed record for retries. The genesis uses the spool's
+stable UUID, including for private local work; a later rename or publication
+does not change Thread identity. `remote.start_thread(&creation)` returns the
+mutation receipt and resulting overview in one call. Bind later operations with
+`remote.thread(creation.reference().clone())` without a lookup. `from_signed`
+relays an existing creator's record without replacing its signature. First
+replication accepts that same record. The SDK rejects responses for a different
+operation, endpoint or Thread, and an applied response missing its overview.
+
+The checked-in genesis vector is shared with the API TypeScript tests. It
+covers canonical bytes, typed BLAKE3 identity, Ed25519 signature and protobuf
+relay; browser-side canonical construction remains separate.
+
 `replication_rpc::Peer` opens one `SyncService.ReplicateThread` exchange for a
 Thread. Attach its original creation record with `Peer::with_genesis` and
 `replication::opening::sign_genesis` for first publication: an authorized hosted

@@ -221,7 +221,7 @@ mod tests {
         let signer = Ed25519Signer::from_seed(&[23; 32]).expect("origin device");
         let genesis = ThreadGenesis {
             version: 1,
-            spool: "spool".into(),
+            spool: "01980000-0000-7000-8000-000000000001".into(),
             parent: None,
             base: StateId::from_bytes([1; 32]),
             name: "original".into(),

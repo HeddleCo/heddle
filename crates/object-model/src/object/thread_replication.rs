@@ -18,6 +18,8 @@ pub const MAX_OPERATION_BYTES: usize = 256 * 1024;
 #[serde(deny_unknown_fields)]
 pub struct ThreadGenesis {
     pub version: u16,
+    /// Canonical non-nil UUID shared by local and hosted replicas. Mutable
+    /// namespace/name addresses and native spool-link locators are not identity.
     pub spool: String,
     pub parent: Option<ContentHash>,
     pub base: StateId,
@@ -30,7 +32,8 @@ pub struct ThreadGenesis {
 impl ThreadGenesis {
     pub fn encode(&self) -> Result<Vec<u8>> {
         if self.version != 1
-            || self.spool.is_empty()
+            || !uuid::Uuid::parse_str(&self.spool)
+                .is_ok_and(|id| !id.is_nil() && id.to_string() == self.spool)
             || self.name.is_empty()
             || self.nonce.len() > 64
         {

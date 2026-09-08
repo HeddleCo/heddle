@@ -87,3 +87,23 @@ fn creation_rejects_mutable_or_noncanonical_spool_identity() {
         );
     }
 }
+
+#[test]
+fn signed_genesis_matches_the_cross_language_vector() {
+    let signer = Ed25519Signer::from_seed(&[11; 32]).expect("public test seed");
+    let genesis = genesis(&signer);
+    let creation = ThreadCreation::sign("01980000-0000-7000-8000-000000000002", &genesis, &signer)
+        .expect("creation");
+    let record = creation.request().thread_genesis.as_ref().expect("record");
+    let values: std::collections::BTreeMap<_, _> = include_str!("fixtures/thread-genesis-v1.txt")
+        .lines()
+        .map(|line| line.split_once('=').expect("vector entry"))
+        .collect();
+    assert_eq!(hex::encode(&record.canonical_record), values["canonical"]);
+    assert_eq!(
+        hex::encode(&record.signatures[0].signature),
+        values["signature"]
+    );
+    assert_eq!(hex::encode(genesis.creator), values["key"]);
+    assert_eq!(genesis.id().expect("ID").to_hex(), values["id"]);
+}

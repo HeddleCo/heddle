@@ -90,9 +90,12 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
             .api
             .call::<rpc::ThreadServiceStartThread>(creation.request())
             .await?;
-        let receipt = response.receipt.as_ref().ok_or_else(|| {
-            ClientError::Transport(Error::Protocol("Thread creation response has no receipt"))
-        })?;
+        let receipt = response
+            .receipt
+            .as_ref()
+            .ok_or(ClientError::Transport(Error::Protocol(
+                "Thread creation response has no receipt",
+            )))?;
         if receipt.client_operation_id != creation.request.client_operation_id
             || receipt.endpoint != self.description.endpoint
             || receipt.outcome.is_none()

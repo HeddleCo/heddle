@@ -34,7 +34,7 @@ fn credential(root: &KeyPair) -> CredentialSigner {
 fn genesis(repository: &Repository) -> ThreadGenesis {
     ThreadGenesis {
         version: 1,
-        spool: "owned".into(),
+        spool: "01980000-0000-7000-8000-000000000001".into(),
         parent: None,
         base: repository.head().expect("HEAD").expect("base"),
         name: "live".into(),

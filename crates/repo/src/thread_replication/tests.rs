@@ -45,7 +45,7 @@ fn setup() -> (
     let signer = Ed25519Signer::generate().expect("test publisher");
     let genesis = ThreadGenesis {
         version: 1,
-        spool: "spool-test".into(),
+        spool: "01980000-0000-7000-8000-000000000001".into(),
         parent: None,
         base: repo.head().expect("head").expect("initial state"),
         name: "shared".into(),

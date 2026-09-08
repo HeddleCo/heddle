@@ -17,7 +17,7 @@ async fn reconnect_finds_missing_ancestors_through_already_pending_parents() {
     let signer = Ed25519Signer::generate().expect("publisher");
     let genesis = ThreadGenesis {
         version: 1,
-        spool: "owned".into(),
+        spool: "01980000-0000-7000-8000-000000000001".into(),
         parent: None,
         base: repository.head().expect("HEAD").expect("initial state"),
         name: "offline".into(),
@@ -101,7 +101,7 @@ async fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
     let signer = Ed25519Signer::generate().expect("publisher");
     let genesis = ThreadGenesis {
         version: 1,
-        spool: "owned".into(),
+        spool: "01980000-0000-7000-8000-000000000001".into(),
         parent: None,
         base: left_repo.head().expect("HEAD").expect("initial state"),
         name: "wide".into(),
@@ -261,7 +261,7 @@ async fn paged_announcement_restarts_when_a_write_lands_behind_its_cursor() {
     let signer = Ed25519Signer::generate().expect("publisher");
     let genesis = ThreadGenesis {
         version: 1,
-        spool: "owned".into(),
+        spool: "01980000-0000-7000-8000-000000000001".into(),
         parent: None,
         base: repository.head().expect("HEAD").expect("base"),
         name: "paged".into(),
