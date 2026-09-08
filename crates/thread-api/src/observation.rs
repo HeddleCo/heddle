@@ -91,9 +91,13 @@ impl Resume {
     }
 }
 
-pub struct CommittedThreadBatch {
+pub type CommittedThreadBatch = CommittedBatch<thread_event::Payload>;
+pub type CommittedAnalysisBatch = CommittedBatch<analysis_event::Payload>;
+
+pub struct CommittedBatch<P> {
     pub replace: bool,
-    pub changes: Vec<thread_event::Payload>,
+    pub changes: Vec<P>,
+    pub page: Option<PageInfo>,
     pub resume: Resume,
 }
 
@@ -132,8 +136,54 @@ pub fn budget(description: &DescribeEndpointResponse) -> Result<ReadBudget, Erro
     })
 }
 
-pub struct ThreadObservation<R: MessageReader<Error = transport::Error>> {
-    messages: Messages<R, ThreadEvent>,
+pub type ThreadObservation<R> = Observation<R, ThreadEvent>;
+pub type AnalysisObservation<R> = Observation<R, AnalysisEvent>;
+
+/// Typed payload access; the checkpoint/budget state machine is shared.
+pub trait ObservedEvent: prost::Message + Default {
+    type Payload;
+    fn frame(&self) -> Option<&StreamFrame>;
+    fn has_payload(&self) -> bool;
+    fn take_payload(&mut self) -> Option<Self::Payload>;
+    fn is_removal(&self) -> bool;
+}
+
+impl ObservedEvent for ThreadEvent {
+    type Payload = thread_event::Payload;
+    fn frame(&self) -> Option<&StreamFrame> {
+        self.frame.as_ref()
+    }
+    fn has_payload(&self) -> bool {
+        self.payload.is_some()
+    }
+    fn take_payload(&mut self) -> Option<Self::Payload> {
+        self.payload.take()
+    }
+    fn is_removal(&self) -> bool {
+        matches!(self.payload, Some(thread_event::Payload::Removal(_)))
+    }
+}
+impl ObservedEvent for AnalysisEvent {
+    type Payload = analysis_event::Payload;
+    fn frame(&self) -> Option<&StreamFrame> {
+        self.frame.as_ref()
+    }
+    fn has_payload(&self) -> bool {
+        self.payload.is_some()
+    }
+    fn take_payload(&mut self) -> Option<Self::Payload> {
+        self.payload.take()
+    }
+    fn is_removal(&self) -> bool {
+        matches!(
+            self.payload,
+            Some(analysis_event::Payload::Removal(_) | analysis_event::Payload::BehaviorRemoval(_))
+        )
+    }
+}
+
+pub struct Observation<R: MessageReader<Error = transport::Error>, E: ObservedEvent> {
+    messages: Messages<R, E>,
     state: Option<ObservationState>,
     binding: Option<[u8; 32]>,
     source: EndpointRef,
@@ -142,15 +192,15 @@ pub struct ThreadObservation<R: MessageReader<Error = transport::Error>> {
     max_batch_bytes: u64,
     resume: Option<Resume>,
     query: Vec<u8>,
-    pending: Vec<thread_event::Payload>,
+    pending: Vec<E::Payload>,
     pending_bytes: u64,
     snapshot: bool,
     done: bool,
 }
 
-impl<R: MessageReader<Error = transport::Error>> ThreadObservation<R> {
+impl<R: MessageReader<Error = transport::Error>, E: ObservedEvent> Observation<R, E> {
     pub(crate) fn new(
-        messages: Messages<R, ThreadEvent>,
+        messages: Messages<R, E>,
         description: &DescribeEndpointResponse,
         requested: ReadBudget,
         resume: Option<Resume>,
@@ -191,7 +241,7 @@ impl<R: MessageReader<Error = transport::Error>> ThreadObservation<R> {
         self.done = true;
     }
 
-    pub async fn next_commit(&mut self) -> Result<Option<CommittedThreadBatch>, Error> {
+    pub async fn next_commit(&mut self) -> Result<Option<CommittedBatch<E::Payload>>, Error> {
         let result = self.next_inner().await;
         if result.is_err() {
             self.cancel();
@@ -199,23 +249,20 @@ impl<R: MessageReader<Error = transport::Error>> ThreadObservation<R> {
         result
     }
 
-    async fn next_inner(&mut self) -> Result<Option<CommittedThreadBatch>, Error> {
+    async fn next_inner(&mut self) -> Result<Option<CommittedBatch<E::Payload>>, Error> {
         if self.done {
             return Ok(None);
         }
         loop {
-            let event = self.messages.next().await?.ok_or(Error::Interrupted)?;
+            let mut event = self.messages.next().await?.ok_or(Error::Interrupted)?;
             let size = prost::Message::encoded_len(&event) as u64;
             if size > u64::from(self.accepted.max_frame_bytes) {
                 return Err(Error::Invalid("frame budget exceeded"));
             }
-            let frame = event
-                .frame
-                .as_ref()
-                .ok_or(Error::Invalid("missing frame"))?;
+            let frame = event.frame().ok_or(Error::Invalid("missing frame"))?;
             if self.state.is_none() {
                 if let Some(stream_frame::Body::Reset(reset)) = &frame.body {
-                    if frame.sequence != 1 || event.payload.is_some() {
+                    if frame.sequence != 1 || event.has_payload() {
                         return Err(Error::Invalid("malformed initial reset"));
                     }
                     return Err(Error::Reset(reset.reason));
@@ -257,13 +304,11 @@ impl<R: MessageReader<Error = transport::Error>> ThreadObservation<R> {
                 .state
                 .as_mut()
                 .ok_or(Error::Invalid("missing observation state"))?;
-            match state.accept(frame, event.payload.is_some())? {
+            match state.accept(frame, event.has_payload())? {
                 ObservationAction::BeginSnapshot => self.snapshot = true,
                 ObservationAction::Resumed => self.snapshot = false,
                 ObservationAction::Stage(kind) => {
-                    if matches!(event.payload, Some(thread_event::Payload::Removal(_)))
-                        != (kind == StreamDataKind::Remove)
-                    {
+                    if event.is_removal() != (kind == StreamDataKind::Remove) {
                         return Err(Error::Invalid("removal payload/kind mismatch"));
                     }
                     let ceiling = if self.snapshot {
@@ -279,7 +324,7 @@ impl<R: MessageReader<Error = transport::Error>> ThreadObservation<R> {
                     self.pending_bytes += size;
                     self.pending.push(
                         event
-                            .payload
+                            .take_payload()
                             .ok_or(Error::Invalid("missing data payload"))?,
                     );
                 }
@@ -293,7 +338,11 @@ impl<R: MessageReader<Error = transport::Error>> ThreadObservation<R> {
                         source: self.source.clone(),
                         query: self.query.clone(),
                     };
-                    let batch = CommittedThreadBatch {
+                    let batch = CommittedBatch {
+                        page: match &frame.body {
+                            Some(stream_frame::Body::Checkpoint(c)) => c.page.clone(),
+                            _ => None,
+                        },
                         replace: self.snapshot,
                         changes: std::mem::take(&mut self.pending),
                         resume: resume.clone(),

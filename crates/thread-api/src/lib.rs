@@ -3,6 +3,8 @@
 //! discovery belong to the application; this crate never obtains a Weft token.
 #[cfg(feature = "native")]
 pub mod authority;
+#[cfg(feature = "semantic-analysis")]
+pub mod behavior;
 pub mod content;
 #[cfg(feature = "replication")]
 pub mod creation;
@@ -69,6 +71,32 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
         }
         let api = Client::new(transport, description.implemented_methods.clone());
         Ok(Self { api, description })
+    }
+
+    /// Observe typed results for one pinned revision pair. Pagination and live
+    /// replacement use the same atomic checkpoint client as Thread views.
+    pub async fn observe_analysis(
+        &self,
+        mut request: contract::ObserveAnalysisRequest,
+        resume: Option<observation::Resume>,
+    ) -> Result<observation::AnalysisObservation<T::Reader>, observation::Error> {
+        let budget = observation::budget(&self.description)?;
+        let options = request.observe.get_or_insert_default();
+        options.budget = Some(budget);
+        options.after_cursor.clear();
+        let query = prost::Message::encode_to_vec(&request);
+        observation::validate_resume(&resume, &self.description, &query)?;
+        if let Some(options) = request.observe.as_mut() {
+            options.after_cursor = resume
+                .as_ref()
+                .map(|r| r.cursor.clone())
+                .unwrap_or_default();
+        }
+        let messages = self
+            .api
+            .observe::<rpc::AnalysisServiceObserveAnalysis>(&request)
+            .await?;
+        observation::AnalysisObservation::new(messages, &self.description, budget, resume, query)
     }
 
     /// Binding a Thread is local and costs no RPC. Persist this stable reference

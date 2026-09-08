@@ -2156,7 +2156,7 @@ dependencies = [
 [[package]]
 name = "heddle-api"
 version = "0.28.0"
-source = "git+https://github.com/HeddleCo/api.git?rev=267355b8d27169819446218f7d97f41ed6523090#267355b8d27169819446218f7d97f41ed6523090"
+source = "git+https://github.com/HeddleCo/api.git?rev=02f1ddbaab3cb33ba545e1a995bd462c0280178b#02f1ddbaab3cb33ba545e1a995bd462c0280178b"
 dependencies = [
  "blake3",
  "bytes",
@@ -2819,6 +2819,7 @@ dependencies = [
  "heddle-objects",
  "heddle-perf-contract",
  "heddle-repo",
+ "heddle-semantic",
  "heddleco-iroh",
  "hex",
  "prost 0.14.1",

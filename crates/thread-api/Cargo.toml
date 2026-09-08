@@ -28,10 +28,13 @@ iroh = ["dep:iroh", "dep:tokio", "dep:heddle-perf-contract"]
 replication = ["signing", "dep:heddle-object-model", "dep:tokio"]
 # Portable exact-request verification; hosts retain authority and nonce storage.
 signing = ["dep:crypto", "dep:hex", "dep:uuid"]
+# Opt-in host-side extraction; ordinary browser/operator clients stay parser-free.
+semantic-analysis = ["dep:semantic"]
 
 [dependencies]
 base64 = { workspace = true, optional = true }
 api.workspace = true
+semantic = { workspace = true, optional = true }
 repo = { workspace = true, optional = true, features = ["native", "git-overlay"] }
 objects = { workspace = true, optional = true }
 crypto = { workspace = true, optional = true }
