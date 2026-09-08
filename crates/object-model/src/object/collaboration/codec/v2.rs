@@ -28,6 +28,9 @@ struct WireOperationV2 {
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 enum WireAnchorV1 {
+    Source {
+        source: crate::object::CollaborationSourceAnchor,
+    },
     Repository,
     State {
         state_id: StateId,
@@ -170,6 +173,7 @@ pub(super) fn decode(
 impl From<CollaborationAnchor> for WireAnchorV1 {
     fn from(value: CollaborationAnchor) -> Self {
         match value {
+            CollaborationAnchor::Source { source } => Self::Source { source },
             CollaborationAnchor::Repository => Self::Repository,
             CollaborationAnchor::State { state_id } => Self::State { state_id },
             CollaborationAnchor::Change { change_id } => Self::Change { change_id },
@@ -190,6 +194,7 @@ impl From<CollaborationAnchor> for WireAnchorV1 {
 impl From<WireAnchorV1> for CollaborationAnchor {
     fn from(value: WireAnchorV1) -> Self {
         match value {
+            WireAnchorV1::Source { source } => Self::Source { source },
             WireAnchorV1::Repository => Self::Repository,
             WireAnchorV1::State { state_id } => Self::State { state_id },
             WireAnchorV1::Change { change_id } => Self::Change { change_id },

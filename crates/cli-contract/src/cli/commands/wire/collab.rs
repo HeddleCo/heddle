@@ -25,6 +25,14 @@ pub struct DiscussionOutput {
 #[derive(Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AnchorOutput {
+    Source {
+        state_id: Option<String>,
+        git_commit_oid: Option<String>,
+        path: String,
+        symbol_id: String,
+        start_line: Option<u32>,
+        end_line: Option<u32>,
+    },
     Repository,
     State {
         state_id: String,

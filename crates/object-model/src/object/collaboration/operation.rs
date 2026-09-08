@@ -11,6 +11,9 @@ use crate::object::{AnnotationKind, Attribution, ChangeId, ContentHash, StateId,
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationAnchor {
+    Source {
+        source: super::CollaborationSourceAnchor,
+    },
     Repository,
     State {
         state_id: StateId,
@@ -309,6 +312,7 @@ impl CollaborationOperationEnvelope {
 
 pub(super) fn validate_anchor(anchor: &CollaborationAnchor) -> Result<(), CollaborationCodecError> {
     match anchor {
+        CollaborationAnchor::Source { source } => source.validate(),
         CollaborationAnchor::Path { path, .. } => require_text(path, "anchor path"),
         CollaborationAnchor::Symbol { path, symbol, .. } => {
             require_text(path, "anchor path")?;

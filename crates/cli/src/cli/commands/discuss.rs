@@ -335,11 +335,13 @@ fn run_list(
 
 #[cfg(feature = "client")]
 async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) -> Result<()> {
-    use hosted_client::client::discussion_live::{
-        DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventOutcome, load_scoped_cursor,
-        paired_thread_scope, save_scoped_cursor, wait_reconnect_backoff,
+    use hosted_client::client::{
+        HostedAuthMode, HostedClient,
+        discussion_live::{
+            DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventOutcome,
+            load_scoped_cursor, paired_thread_scope, save_scoped_cursor, wait_reconnect_backoff,
+        },
     };
-    use hosted_client::client::{HostedAuthMode, HostedClient};
 
     use super::remote::resolve_default_remote_name;
     use crate::remote::{RemoteTarget, resolve_remote_with_key_and_insecure};
@@ -772,6 +774,24 @@ fn visibility_token(value: &VisibilityTier) -> String {
 
 fn anchor_output(value: &CollaborationAnchor) -> AnchorOutput {
     match value {
+        CollaborationAnchor::Source { source } => {
+            let (state_id, git_commit_oid) = match &source.revision {
+                objects::object::CollaborationRevision::State { state_id } => {
+                    (Some(state_id.to_string_full()), None)
+                }
+                objects::object::CollaborationRevision::GitCommit { oid } => {
+                    (None, Some(oid.clone()))
+                }
+            };
+            AnchorOutput::Source {
+                state_id,
+                git_commit_oid,
+                path: source.path.clone(),
+                symbol_id: source.symbol_id.clone(),
+                start_line: source.start_line,
+                end_line: source.end_line,
+            }
+        }
         CollaborationAnchor::Repository => AnchorOutput::Repository,
         CollaborationAnchor::State { state_id } => AnchorOutput::State {
             state_id: state_id.to_string_full(),
@@ -830,12 +850,17 @@ fn anchor_state(value: &CollaborationAnchor) -> Option<&StateId> {
         CollaborationAnchor::State { state_id }
         | CollaborationAnchor::Path { state_id, .. }
         | CollaborationAnchor::Symbol { state_id, .. } => Some(state_id),
+        CollaborationAnchor::Source { source } => match &source.revision {
+            objects::object::CollaborationRevision::State { state_id } => Some(state_id),
+            objects::object::CollaborationRevision::GitCommit { .. } => None,
+        },
         CollaborationAnchor::Repository | CollaborationAnchor::Change { .. } => None,
     }
 }
 
 fn anchor_path(value: &CollaborationAnchor) -> Option<&str> {
     match value {
+        CollaborationAnchor::Source { source } => Some(&source.path),
         CollaborationAnchor::Path { path, .. } | CollaborationAnchor::Symbol { path, .. } => {
             Some(path)
         }

@@ -6,6 +6,7 @@ mod ids;
 mod materialize;
 mod metadata;
 mod operation;
+mod source;
 
 pub use codec::{CollaborationCodecError, DecodedCollaborationOperation};
 pub use context::{CONTEXT_FORMAT, ContextRevision};
@@ -26,5 +27,6 @@ pub use operation::{
     CollaborationOperationEnvelope, CollaborationResolution, DiscussionTurnV1,
     LegacyDiscussionResolutionV1,
 };
+pub use source::{CollaborationRevision, CollaborationSourceAnchor};
 
 pub const COLLABORATION_OPERATION_SCHEMA_VERSION: u16 = 2;
