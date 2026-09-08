@@ -559,3 +559,105 @@ fn rejected_causal_parent_rejects_its_pending_descendants() {
             .is_none()
     );
 }
+
+#[test]
+fn revision_lookup_requires_accepted_capture_in_the_selected_thread() {
+    let (_dir, repo, genesis, signer, replica) = setup();
+    let root = capture(&genesis, &signer, &[], vec![genesis.base]);
+    let child = capture(&genesis, &signer, &[&root], vec![state_id(&root)]);
+    let revision = state_id(&child);
+    assert_eq!(
+        replica
+            .receive(&child, repo.store(), |_| Ok(()))
+            .expect("pending capture"),
+        Admission::Pending
+    );
+    assert!(
+        replica
+            .accepted_capture(revision)
+            .expect("pending lookup")
+            .is_none()
+    );
+    replica
+        .receive(&root, repo.store(), |_| Ok(()))
+        .expect("complete ancestry");
+    assert_eq!(
+        replica
+            .accepted_capture(revision)
+            .expect("accepted lookup")
+            .expect("accepted capture")
+            .id(),
+        revision
+    );
+    let mut other_genesis = genesis.clone();
+    other_genesis.nonce = vec![2];
+    let other =
+        ThreadReplica::open(repo.heddle_dir(), &other_genesis).expect("other Thread, same store");
+    assert!(
+        other
+            .accepted_capture(revision)
+            .expect("scoped lookup")
+            .is_none(),
+        "repository object presence is not Thread membership"
+    );
+    let invalid = capture(&genesis, &signer, &[], vec![revision]);
+    assert!(matches!(
+        replica
+            .receive(&invalid, repo.store(), |_| Ok(()))
+            .expect("rejected ancestry"),
+        Admission::Rejected(_)
+    ));
+    assert!(
+        replica
+            .accepted_capture(state_id(&invalid))
+            .expect("rejected lookup")
+            .is_none()
+    );
+}
+
+#[test]
+fn peer_repair_does_not_treat_another_threads_operation_as_present() {
+    let (_dir, repo, genesis, signer, replica) = setup();
+    let root = capture(&genesis, &signer, &[], vec![genesis.base]);
+    replica
+        .receive(&root, repo.store(), |_| Ok(()))
+        .expect("accepted capture");
+    let operation_id = root.verify().expect("signature").id().expect("ID");
+    let mut other_genesis = genesis;
+    other_genesis.nonce = vec![2];
+    let other = ThreadReplica::open(repo.heddle_dir(), &other_genesis).expect("other Thread");
+    other
+        .remember_peer_heads([8; 32], &[(ThreadFacet::Source, operation_id)])
+        .expect("untrusted claim");
+    assert_eq!(
+        other
+            .needed_from_peer([8; 32], &BTreeSet::from([ThreadFacet::Source]), 16)
+            .expect("scope-bound repair"),
+        vec![operation_id],
+        "a record in another Thread cannot settle this peer's claim"
+    );
+}
+
+#[test]
+fn checkout_creation_rejects_a_revision_outside_its_thread_before_writing_files() {
+    let (dir, repo, _genesis, _signer, replica) = setup();
+    let unrelated = repo
+        .snapshot(Some("another Thread".into()), None)
+        .expect("local revision");
+    let destination = dir.path().join("selected-checkout");
+    let result = checkout::ThreadCheckout::create(
+        &repo,
+        &replica,
+        &destination,
+        unrelated.id(),
+        &crate::AudienceTier::Private,
+    );
+    assert!(
+        result.is_err(),
+        "materialization must require Thread membership"
+    );
+    assert!(
+        !destination.exists(),
+        "scope validation must precede filesystem writes"
+    );
+}
