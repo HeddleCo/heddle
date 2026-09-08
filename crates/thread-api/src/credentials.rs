@@ -11,6 +11,9 @@ use crate::transport::{Authorize, Error};
 
 /// Caller-selected authority. No variant discovers credentials or mints a key.
 /// Bearer-only service and anonymous tiers stay distinct from signed callers.
+/// Public-readable methods still carry proof for Signed callers. Only the host
+/// may classify a verified bearer as anonymous; this client never strips an
+/// account credential or retries it as public after authorization fails.
 #[derive(Clone)]
 pub enum Credentials {
     Public,
@@ -202,6 +205,70 @@ mod tests {
             ready(Credentials::Public.context(method, &[])),
             Err(Error::Protocol("request requires an operation ID"))
         ));
+    }
+
+    #[test]
+    fn public_catalog_preserves_unsigned_and_account_proof_boundaries() {
+        let method = crate::rpc::WorkspaceServiceObserveCatalog::METHOD;
+        assert_eq!(
+            method.signing_tier,
+            api::heddle::api::v1alpha1::SigningTier::ProofIfAuthenticated
+        );
+        let mut request = crate::contract::ObserveCatalogRequest::default();
+        crate::observation::ObservationRequest::options_mut(&mut request).mode =
+            crate::contract::ObservationMode::Once as i32;
+        let body = request.encode_to_vec();
+        let public = ready(Credentials::Public.context(method, &body)).expect("public context");
+        assert!(public.request_proof.is_none());
+        assert!(public.bearer_capability.is_empty());
+        let bearer = ready(
+            Credentials::Bearer {
+                biscuit: vec![7],
+                grant_envelope: vec![],
+            }
+            .context(method, &body),
+        )
+        .expect("opaque bearer context");
+        assert_eq!(bearer.bearer_capability, [7]);
+        assert!(
+            bearer.request_proof.is_none(),
+            "host classifies bearer authority"
+        );
+        let signer = Ed25519Signer::from_seed(&[18; 32]).expect("fixture signer");
+        let key = signer.public_key().try_into().expect("public key");
+        let account = ready(
+            Credentials::Signed {
+                signer: std::sync::Arc::new(signer),
+                biscuit: vec![8],
+                grant_envelope: vec![],
+            }
+            .context(method, &body),
+        )
+        .expect("signed public read");
+        assert_eq!(account.bearer_capability, [8]);
+        let now = account
+            .request_proof
+            .as_ref()
+            .expect("account still proves key")
+            .timestamp_millis;
+        crate::request_proof::verify(&account, method, &body, &key, now)
+            .expect("valid account proof");
+        let mut missing = account;
+        missing.request_proof = None;
+        assert!(
+            matches!(
+                crate::request_proof::verify(&missing, method, &body, &key, now),
+                Err(Error::Protocol("request PoP required"))
+            ),
+            "strict verifier never downgrades account reads"
+        );
+        let event = crate::contract::CatalogEvent {
+            frame: None,
+            payload: Some(crate::contract::catalog_event::Payload::Removal(
+                Default::default(),
+            )),
+        };
+        assert!(crate::observation::ObservedEvent::is_removal(&event));
     }
 
     fn ready<T>(future: impl Future<Output = T>) -> T {
