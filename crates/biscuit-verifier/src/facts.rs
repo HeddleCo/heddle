@@ -1,6 +1,6 @@
 //! Extracted facts shared by native Weft and Worker WASM verification.
 //!
-//! After [`crate::biscuit::authorize`] runs the authorizer, callers
+//! After [`crate::authorize_at`] runs the authorizer, callers
 //! need to read the principal subject, the session id (= revocation
 //! id), the granted rights, and a handful of metadata facts (device,
 //! agent provider, service-account id) to render `whoami` and
@@ -97,7 +97,7 @@ impl Right {
 
     /// Thread-scoped grants. The `path` is the canonical
     /// `<repo_path>/threads/<thread_name>` produced by
-    /// [`crate::access::resource::thread_path`].
+    /// [`crate::resource::thread_path`].
     pub fn thread_read(path: impl Into<String>) -> Self {
         Self::new("thread", path, "read")
     }
@@ -123,7 +123,7 @@ impl Right {
 
     /// Context-stream grants. The `path` is the parent repo's path
     /// (1:1 with the repo); use
-    /// [`crate::access::resource::context_path`] for clarity at
+    /// [`crate::resource::context_path`] for clarity at
     /// call sites.
     pub fn context_read(path: impl Into<String>) -> Self {
         Self::new("context", path, "read")
@@ -221,7 +221,7 @@ pub struct BiscuitFacts {
     /// `staff(true)` fact (HeddleCo/weft#102 Codex r1: P1 #1). Distinct
     /// from [`Self::is_staff`], which trusts only the authority-block marker.
     /// Used by
-    /// [`super::verify_client_minted`] to reject client-minted tokens
+    /// [`crate::verify_client_minted_at_with_resource`] to reject client-minted tokens
     /// that try to smuggle an operator marker past the envelope's
     /// `right(...)`-only subset check — the literal staff fact is not
     /// constrained by the envelope's `rights` field today, so the
@@ -230,7 +230,7 @@ pub struct BiscuitFacts {
     /// Hex-encoded Ed25519 device public key used as the stable
     /// rate-limit / revocation identity. Set to the envelope-bound
     /// device key on the envelope verify path, or to the registered
-    /// biscuit-root public key that matched on [`super::verify`] /
+    /// biscuit-root public key that matched on [`crate::verify_at_with_resource`] /
     /// registered-root verify. The token's own `session()` fact is
     /// client-chosen and therefore not safe to use as a unique
     /// abuse-rate-limit bucket or revocation handle.
@@ -258,9 +258,8 @@ pub struct BiscuitFacts {
     /// is `"user"`. Separate from [`Self::subject_str`] (Anon path)
     /// so the envelope-binding `user($username)` fact and the
     /// verifier's `Subject::User` UUID don't have to be the same
-    /// string — see [`crate::biscuit::MintParams::subject_user_uuid`]
-    /// for the motivation. The client-minted verify path forbids the
-    /// fact via [`crate::biscuit::client_minted_identity_violation`]
+    /// string. The client-minted verify path forbids the
+    /// fact via [`crate::client_minted_identity_violation`]
     /// because the envelope can't constrain it; server-minted tokens
     /// (legacy verify entry) are trusted by construction.
     pub subject_user_uuid_str: Option<String>,
@@ -323,7 +322,7 @@ pub struct BiscuitFacts {
 // between the authority block and an attacker block: probabilistically
 // forgeable. The per-query Datalog cost the walk was avoiding is a
 // non-issue now that `authorizer_limits()` sets `max_iterations: 100` /
-// `max_time: 1h` (see [`crate::biscuit::authorizer_limits`]), so the
+// `max_time: 1h` (see [`crate::authorize_atr_limits`]), so the
 // ~dozen scoped queries below evaluate well within budget.
 
 impl BiscuitFacts {

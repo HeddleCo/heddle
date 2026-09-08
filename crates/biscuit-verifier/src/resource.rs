@@ -15,7 +15,7 @@
 //!
 //! `namespace` and `repo` are product facets, not authorization kinds. Every
 //! container and content-bearing project is a `spool`, and its parent step is
-//! [`spool_parent`]: strip the trailing `/`-delimited segment. The one walk
+//! `spool_parent`: strip the trailing `/`-delimited segment. The one walk
 //! ([`walk_to_root`]) is shared by every caller that needs inheritance.
 //!
 //! Path shape conventions:

@@ -39,7 +39,7 @@
 //!
 //! This module owns the envelope shape, its canonical signing
 //! payload, and the sign / verify primitives. The dual-path verifier
-//! that consumes it lives in [`crate::biscuit::verify_client_minted`].
+//! that consumes it lives in [`crate::verify_client_minted_at_with_resource`].
 //!
 //! # Wire format
 //!

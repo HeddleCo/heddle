@@ -29,6 +29,10 @@ jobs:
         run: cargo test --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- --nocapture
       - name: Clippy
         run: cargo clippy --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- -D warnings
+      - name: Public crate documentation
+        env:
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+        run: cargo doc --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --no-deps
 
   wasm:
     name: Worker WASM build and parity
