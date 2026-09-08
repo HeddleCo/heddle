@@ -8,6 +8,8 @@ pub mod behavior;
 #[cfg(feature = "replication")]
 pub mod collaboration;
 pub mod content;
+#[cfg(feature = "native")]
+pub mod fetch;
 #[cfg(feature = "replication")]
 pub mod creation;
 #[cfg(feature = "signing")]
