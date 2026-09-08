@@ -68,7 +68,7 @@ fn sign_initiation_binding(
     subject: &impl Signer,
     endpoint: Option<&impl Signer>,
 ) -> Result<BeginPairingRequest, Error> {
-    let canonical_record = binding.encode_to_vec();
+    let canonical_record = initiation_bytes(&binding);
     let payload = [DOMAIN, canonical_record.as_slice()].concat();
     let mut signatures = vec![RecordSignature {
         public_key: subject.public_key().to_vec(),
@@ -101,6 +101,36 @@ fn sign_initiation_binding(
         }),
     })
 }
+/// Normative signed format: ascending protobuf tags, preserving oneof presence.
+/// Prost emits a oneof at its declaration position whereas protobuf-es emits
+/// tag order; ordinary RPC bodies need not agree, but signed records must.
+pub fn initiation_bytes(binding: &PairingInitiationBinding) -> Vec<u8> {
+    use prost::encoding::{bytes, int64, message, string};
+    let mut encoded = Vec::new();
+    if let Some(host) = &binding.host {
+        message::encode(1, host, &mut encoded);
+    }
+    if !binding.client_operation_id.is_empty() {
+        string::encode(2, &binding.client_operation_id, &mut encoded);
+    }
+    if let Some(pairing_initiation_binding::Receiver::Device(device)) = &binding.receiver {
+        message::encode(3, device, &mut encoded);
+    }
+    if !binding.subject_public_key.is_empty() {
+        bytes::encode(4, &binding.subject_public_key, &mut encoded);
+    }
+    if binding.not_before_unix_seconds != 0 {
+        int64::encode(5, &binding.not_before_unix_seconds, &mut encoded);
+    }
+    if binding.expires_at_unix_seconds != 0 {
+        int64::encode(6, &binding.expires_at_unix_seconds, &mut encoded);
+    }
+    if let Some(pairing_initiation_binding::Receiver::Browser(browser)) = &binding.receiver {
+        message::encode(7, browser, &mut encoded);
+    }
+    encoded
+}
+
 /// A fresh exact RPC proof and host-side nonce admission remain mandatory.
 pub fn verify_initiation(
     request: &BeginPairingRequest,
@@ -123,7 +153,7 @@ pub fn verify_initiation(
             pairing_initiation_binding::Receiver::Browser(*value)
         }
     });
-    if binding.encode_to_vec() != record.canonical_record
+    if initiation_bytes(&binding) != record.canonical_record
         || binding.host.as_ref() != Some(host)
         || host.public_key.len() != 32
         || host.kind != EndpointKind::Weft as i32
