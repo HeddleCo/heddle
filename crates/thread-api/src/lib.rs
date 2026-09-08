@@ -8,7 +8,7 @@ pub mod behavior;
 #[cfg(feature = "replication")]
 pub mod collaboration;
 pub mod content;
-#[cfg(feature = "native")]
+#[cfg(feature = "source-transfer")]
 pub mod fetch;
 #[cfg(feature = "replication")]
 pub mod creation;

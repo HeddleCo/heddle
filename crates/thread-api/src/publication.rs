@@ -7,9 +7,9 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{Remote, contract::*, rpc, transport};
 
-#[cfg(feature = "native")]
+#[cfg(feature = "source-transfer")]
 mod source;
-#[cfg(feature = "native")]
+#[cfg(feature = "source-transfer")]
 pub use source::{PublicationOptions, SourceBudget, SourcePack};
 
 #[derive(Debug, thiserror::Error)]
@@ -494,7 +494,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "native")]
+    #[cfg(feature = "source-transfer")]
     #[tokio::test]
     async fn thread_publication_prepares_only_selected_source_and_binds_its_revision() {
         use objects::{

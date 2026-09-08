@@ -8,13 +8,8 @@ use std::{
 };
 
 use api::v2::client::RpcTransport;
-use objects::{
-    object::{State, StateId},
-    store::{
-        ObjectSource,
-        pack::{StreamingPackBuilder, build_source_pack},
-    },
-};
+use heddle_object_model::object::{ObjectSource, State, StateId};
+use heddle_pack::store::pack::{StreamingPackBuilder, build_source_pack};
 
 use super::{Error, typed_digest};
 use crate::{Thread, contract::*, transport};
