@@ -876,6 +876,51 @@ mod tests {
             facts.limits_identity_disclosure,
             "explicit ceilings retain the limited self view"
         );
+        let narrowed_parent =
+            Biscuit::from_base64(&narrowed, |_| Ok(root.public())).expect("narrowed parent");
+        let parent_id = narrowed_parent
+            .revocation_identifiers()
+            .last()
+            .expect("parent block")
+            .to_vec();
+        let signature = parent_signer.sign(&pop_delegation_payload(&parent_id, &child_key));
+        let descendant = narrowed_parent
+            .append(
+                delegation::AgentAttenuation {
+                    agent_id: "identity-descendant".into(),
+                    expires_at: expires,
+                    allowed_operations: Some(vec!["ObserveIdentity".into()]),
+                    allowed_resources: None,
+                }
+                .block()
+                .expect("requested identity permission")
+                .fact(
+                    format!(
+                        "pop_delegation(\"{}\", \"{}\", \"{}\")",
+                        hex::encode(parent_id),
+                        hex::encode(child_key),
+                        hex::encode(signature.to_bytes())
+                    )
+                    .as_str(),
+                )
+                .expect("proof key"),
+            )
+            .expect("append to constrained parent")
+            .to_base64()
+            .expect("credential");
+        let descendant_facts = verify_at_with_resource(
+            &descendant,
+            &[root.public()],
+            &[],
+            "ObserveIdentity",
+            None,
+            now,
+        )
+        .expect("inherited self view");
+        assert!(
+            descendant_facts.limits_identity_disclosure,
+            "a child cannot turn its parent's self-introspection exception into account authority"
+        );
         for (operation, resource, at) in [
             ("PublishContent", Some(("spool", "org/allowed")), now),
             ("ReadContent", Some(("spool", "org/other")), now),

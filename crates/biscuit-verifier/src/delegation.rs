@@ -88,9 +88,16 @@ fn agent_attenuation_block(restrictions: &AgentAttenuation) -> Result<BlockBuild
         // ObserveIdentity is caller-bound self-introspection, not an operation on an
         // attenuated resource. It remains subject to signature, expiry, and
         // every non-operation caveat, but never to the delegated work ceiling.
-        let check = format!(
-            "check if operation(\"{SELF_OBSERVATION_OPERATION}\") or operation($op), {pred}"
-        );
+        // An explicit identity permission grants the inherited account view.
+        // Add the limited self-introspection exception only to work-only lists;
+        // hosts must be able to distinguish that exception from full permission.
+        let check = if ops.iter().any(|op| op == SELF_OBSERVATION_OPERATION) {
+            format!("check if operation($op), {pred}")
+        } else {
+            format!(
+                "check if operation(\"{SELF_OBSERVATION_OPERATION}\") or operation($op), {pred}"
+            )
+        };
         block = block
             .check(check.as_str())
             .internal_ctx("attenuate operation check")?;
