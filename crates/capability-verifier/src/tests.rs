@@ -997,6 +997,118 @@ fn keyring_recomputes_genesis_ids_hashes_and_linear_chain() {
     assert!(verify_clone_keyring(unknown_version, NOW, limits(), &[]).is_err());
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn new_spool_genesis_can_be_signed_by_the_rotated_owner_key() {
+    let (mut keyring, _) = base_keyring();
+    keyring.owner_genesis = Some(signed_genesis(SPOOL, &TestKey::new(7)));
+    let verified = verify_clone_keyring(keyring.clone(), NOW, limits(), &[])
+        .expect("the creation key is proven by the signed owner rotation");
+    assert_eq!(verified.owner_state().sequence(), 1);
+
+    let mut missing_history = keyring.clone();
+    missing_history.accepted_transitions.clear();
+    missing_history.accepted_state_hash =
+        verify_owner_root(missing_history.owner_root.as_ref().expect("original root"))
+            .expect("root")
+            .state_hash()
+            .to_vec();
+    assert!(matches!(
+        verify_clone_keyring(missing_history, NOW, limits(), &[]),
+        Err(Error::BrokenChain(_))
+    ));
+    keyring.owner_genesis = Some(signed_genesis(SPOOL, &TestKey::new(11)));
+    assert!(matches!(
+        verify_clone_keyring(keyring, NOW, limits(), &[]),
+        Err(Error::BrokenChain(_))
+    ));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn rotated_spool_genesis_preserves_current_purge_authority() {
+    let (keyring, _) = base_keyring();
+    let root = keyring.owner_root.as_ref().expect("original owner root");
+    let current = apply_transition(
+        &verify_owner_root(root).expect("root"),
+        &keyring.accepted_transitions[0],
+        NOW,
+        limits(),
+    )
+    .expect("rotation");
+    let mut proof = artifact_for_state(
+        root,
+        signed_genesis(SPOOL, &TestKey::new(7)),
+        keyring.accepted_transitions.clone(),
+        &current,
+        &TestKey::new(7),
+        &TestKey::new(5),
+        SPOOL,
+        SpoolCapabilityAction::Purge as i32,
+        NOW - 10,
+        NOW + 100,
+    );
+    assert_eq!(decide(&proof), Decision::Purge);
+    proof.owner_genesis = signed_genesis(SPOOL, &TestKey::new(11));
+    assert_eq!(decide(&proof), Decision::Deny(Denial::GenesisBinding));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn later_rotation_retains_genesis_history_without_retaining_old_purge_authority() {
+    let (mut keyring, _) = base_keyring();
+    let original_root = keyring.owner_root.clone().expect("original root");
+    let middle_key = TestKey::new(7);
+    let current_key = TestKey::new(9);
+    let middle = apply_transition(
+        &verify_owner_root(&original_root).expect("root"),
+        &keyring.accepted_transitions[0],
+        NOW,
+        limits(),
+    )
+    .expect("first rotation");
+    let mut next = rotation(&middle, &middle_key, &current_key);
+    next.transition
+        .as_mut()
+        .expect("second rotation")
+        .previous_key_valid_until_unix_seconds = 0;
+    let body = transition_body(next.transition.as_ref().expect("second rotation")).expect("body");
+    next.authorizations = vec![middle_key.sign(OWNER_TRANSITION_DOMAIN, &body)];
+    next.next_authority_key_proof = Some(current_key.sign(OWNER_TRANSITION_DOMAIN, &body));
+    let current = apply_transition(&middle, &next, NOW, limits()).expect("second rotation");
+    keyring.accepted_transitions.push(next);
+    keyring.accepted_state_hash = current.state_hash().to_vec();
+    keyring.owner_genesis = Some(signed_genesis(SPOOL, &middle_key));
+    verify_clone_keyring(keyring.clone(), NOW, limits(), &[])
+        .expect("a previously created spool retains its proven genesis key");
+    let proof = artifact_for_state(
+        &original_root,
+        keyring.owner_genesis.clone().expect("genesis"),
+        keyring.accepted_transitions.clone(),
+        &current,
+        &current_key,
+        &TestKey::new(5),
+        SPOOL,
+        SpoolCapabilityAction::Purge as i32,
+        NOW - 10,
+        NOW + 100,
+    );
+    assert_eq!(decide(&proof), Decision::Purge);
+    let retired_proof = artifact_for_state(
+        &original_root,
+        keyring.owner_genesis.expect("genesis"),
+        keyring.accepted_transitions,
+        &middle,
+        &middle_key,
+        &TestKey::new(5),
+        SPOOL,
+        SpoolCapabilityAction::Purge as i32,
+        NOW - 10,
+        NOW + 100,
+    );
+    assert_eq!(decide(&retired_proof), Decision::Deny(Denial::Time));
+}
+
 fn signed_transfer(
     source_uuid: [u8; 16],
     source_state: &VerifiedOwnerState,
