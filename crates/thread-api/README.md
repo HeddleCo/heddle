@@ -46,6 +46,13 @@ consumer's responsibility.
 
 ## Live native replication
 
+`live_replication::run` asks the host for an `ActivityGuard` before each store
+step and disclosure check. `Activity::Check` needs no output-memory reservation;
+`Activity::Work` may produce a bounded frame. `finish` releases work slots and
+returns the memory lease retained through delivery. Idle waits hold neither.
+A device can keep returning `()`; a hosted scheduler can queue work separately
+from its idle subscription allowance. Cancellation releases both leases.
+
 Prepare `creation::ThreadCreation::sign(operation_id, &genesis, &signer)` once
 and persist its original signed record for retries. The genesis uses the spool's
 stable UUID, including for private local work; a later rename or publication

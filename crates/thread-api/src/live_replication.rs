@@ -148,11 +148,31 @@ enum Event {
     Maintain,
 }
 
+/// A permission-only recheck must not wait for an output memory reservation
+/// already retained by this stream. Work may produce one bounded output frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activity {
+    Check,
+    Work,
+}
+
+/// Hosts can charge database work and output memory separately. Finishing the
+/// work releases execution slots while the returned lease covers delivery.
+/// Devices without a shared work scheduler can keep returning `()`.
+pub trait ActivityGuard: Send {
+    type Retained: Send;
+    fn finish(self) -> Self::Retained;
+}
+impl ActivityGuard for () {
+    type Retained = ();
+    fn finish(self) {}
+}
+
 /// Call after validating the opening, endpoint bindings, Thread, and facets.
 /// `authorize` rechecks the live host permission, including expiry/revocation.
 /// It runs before every admission and output, including queued output. Readers
 /// must enforce the negotiated frame bound before allocating message bodies.
-pub async fn run<B, R, W, G, F>(
+pub async fn run<B, R, W, G, F, A>(
     mut session: Session<B>,
     mut reader: R,
     mut writer: W,
@@ -164,13 +184,14 @@ where
     B: ReplicaStore,
     R: MessageReader<Error = transport::Error>,
     W: MessageWriter<Error = transport::Error> + 'static,
-    G: Fn() -> F + Clone + Send + Sync + 'static,
-    F: Future<Output = std::result::Result<(), transport::Error>> + Send,
+    G: Fn(Activity) -> F + Clone + Send + Sync + 'static,
+    F: Future<Output = std::result::Result<A, transport::Error>> + Send,
+    A: ActivityGuard,
 {
     if feed.thread != session.replica.thread_id() {
         return Err(transport::Error::Protocol("change feed belongs to another Thread").into());
     }
-    authorize().await?;
+    drop(authorize(Activity::Check).await?);
     let mut changes = feed.changes.clone();
     let (queue, mut outgoing) = mpsc::channel::<Outbound>(256);
     let sender_session = session.clone();
@@ -179,7 +200,7 @@ where
         while let Some(item) = outgoing.recv().await {
             let session = sender_session.clone();
             let gate = sender_authorize.clone();
-            gate().await?;
+            let activity = gate(Activity::Work).await?;
             let frame = match item {
                 Outbound::Operation(id) => session.export_operation(id).await?,
                 Outbound::Frame(frame) => {
@@ -199,8 +220,10 @@ where
                 }
             };
             // Store reads can yield; verify live rights again at disclosure.
-            gate().await?;
+            let retained = activity.finish();
+            drop(gate(Activity::Check).await?);
             writer.send(side.encode(frame)).await?;
+            drop(retained);
         }
         writer.finish().await?;
         Ok(())
@@ -229,7 +252,7 @@ where
                 Event::Maintain
             }
         };
-        authorize().await?;
+        let activity = authorize(Activity::Work).await?;
         let output = match event {
             Event::Incoming(frame) => session.handle(frame).await?,
             Event::Announce => {
@@ -244,6 +267,7 @@ where
                 .map(Outbound::Frame)
                 .collect(),
         };
+        drop(activity);
         for item in output {
             queue.try_send(item).map_err(|_| Error::Backpressure)?;
         }

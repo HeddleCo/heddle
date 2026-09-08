@@ -152,7 +152,10 @@ impl Peer {
             facets,
             max_items,
         )?;
-        live_replication::run(session, reader, writer, Side::Initiator, feed, authorize).await
+        live_replication::run(session, reader, writer, Side::Initiator, feed, move |_| {
+            authorize()
+        })
+        .await
     }
 
     /// Accept exactly one ReplicateThread RPC. The connection must be routed
@@ -273,7 +276,7 @@ impl Peer {
             facets,
             max_items,
         )?;
-        live_replication::run(session, reader, writer, Side::Acceptor, feed, move || {
+        live_replication::run(session, reader, writer, Side::Acceptor, feed, move |_| {
             std::future::ready(authority.recheck(&verified))
         })
         .await
