@@ -255,3 +255,7 @@ where
 fn worker<E: std::error::Error + 'static>(error: tokio::task::JoinError) -> Error<E> {
     Error::Worker(error.to_string())
 }
+
+#[cfg(all(test, feature = "native"))]
+#[path = "live_replication_tests.rs"]
+mod tests;
