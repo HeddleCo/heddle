@@ -121,7 +121,7 @@ pub fn resolve_credential_for_server(server_key: &str) -> Result<Option<ServerCr
     }
 
     // Try with scheme prefixes (auth login stores the full --server URL as the key).
-    for prefix in &["http://", "https://", "heddle://"] {
+    for prefix in &["http://", "https://"] {
         let prefixed = format!("{prefix}{server_key}");
         if let Some(cred) = store.servers.get(&prefixed) {
             return Ok(Some(cred.clone()));
@@ -131,8 +131,7 @@ pub fn resolve_credential_for_server(server_key: &str) -> Result<Option<ServerCr
     // Try stripping scheme prefixes (in case the key has a scheme but the store doesn't).
     let stripped = server_key
         .strip_prefix("http://")
-        .or_else(|| server_key.strip_prefix("https://"))
-        .or_else(|| server_key.strip_prefix("heddle://"));
+        .or_else(|| server_key.strip_prefix("https://"));
     if let Some(bare) = stripped
         && let Some(cred) = store.servers.get(bare)
     {

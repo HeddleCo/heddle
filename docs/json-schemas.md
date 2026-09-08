@@ -1156,7 +1156,7 @@ verification.
   "success": true,
   "cloned": true,
   "transport": "heddle",
-  "remote": "heddle://example.com/team/repo",
+  "remote": "https://example.com/team/repo",
   "local": "work",
   "branch": "main",
   "repository_capability": "native-heddle",
@@ -1174,7 +1174,7 @@ verification.
   "remotes": [
     {
       "name": "origin",
-      "url": "heddle://example.com/team/repo",
+      "url": "https://example.com/team/repo",
       "source": "heddle",
       "is_default": true
     }
@@ -1188,7 +1188,7 @@ verification.
 {
   "output_kind": "remote_show",
   "name": "origin",
-  "url": "heddle://example.com/team/repo",
+  "url": "https://example.com/team/repo",
   "source": "heddle",
   "is_default": true
 }
@@ -1202,7 +1202,7 @@ verification.
   "status": "completed",
   "action": "remote_add",
   "name": "origin",
-  "url": "heddle://example.com/team/repo",
+  "url": "https://example.com/team/repo",
   "default": null,
   "message": "Added remote",
   "verification": {"verified":true,"status":"clean","repository_mode":"native-heddle","heddle_initialized":true,"git_branch":null,"heddle_thread":"main","worktree_dirty":false,"worktree_state":"clean","import_state":"not_applicable","mapping_state":"not_applicable","remote_drift":"clean","active_operation":null,"default_remote":"origin","clone_verification":"not_applicable","machine_contract":"available","workflow_status":"idle","workflow_summary":"No ready thread is waiting to merge","summary":"Repository is healthy","recommended_action":null,"recommended_action_template":null,"recovery_commands":[],"recovery_action_templates":[],"checks":[]}

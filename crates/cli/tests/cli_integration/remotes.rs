@@ -372,7 +372,7 @@ fn native_remote_add_rejects_local_git_remote_before_configuring_default() {
     );
     assert!(
         envelope["hint"].as_str().is_some_and(|hint| {
-            hint.contains("https://<host>/<repo>") && hint.contains("heddle://<host>:<port>/<repo>")
+            hint.contains("https://<host>/<repo>") && hint.contains(".git")
         }),
         "Git remote mismatch should name the HTTPS and explicit-port native forms: {envelope}"
     );
@@ -382,35 +382,17 @@ fn native_remote_add_rejects_local_git_remote_before_configuring_default() {
     assert!(remotes.default_name().is_none());
 }
 
-/// Field study 2026-08-19 on native 0.12.0: `remote add` used to store
-/// `heddle://api.heddle.sh/...`, then `push`/`pull` printed
-/// `invalid remote url` and exited 74. Hosted remotes now use that
-/// scheme, so add must persist the URL and later push/pull must route
-/// as hosted — never the invalid-url rejection.
+/// The cutover removes the old scheme instead of preserving an alias.
 #[test]
-fn field_study_heddle_scheme_is_accepted_at_add_and_routed_on_push() {
+fn removed_heddle_scheme_is_rejected_at_remote_add() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
-    let repo = Repository::open(temp.path()).expect("open native repo");
     let url = "heddle://api.heddle.sh/luke/tiny-notes";
-
-    heddle(&["remote", "add", "origin", url], Some(temp.path()))
-        .expect("hosted heddle:// remote add");
-    let stored = RemoteConfig::open(&repo)
-        .expect("open remotes")
-        .get("origin")
-        .expect("origin stored");
-    assert_eq!(stored.url, url, "hosted heddle:// URL must be persisted");
-
-    for command in ["push", "pull"] {
-        let output = heddle_output(&[command], Some(temp.path()))
-            .unwrap_or_else(|err| panic!("invoke heddle {command}: {err}"));
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !stderr.contains(&format!("invalid remote url: {url}")),
-            "{command} must route the stored hosted URL, not reject it as invalid: {stderr}"
-        );
-    }
+    let output = heddle_output(&["remote", "add", "origin", url], Some(temp.path())).unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid remote url"));
+    let repo = Repository::open(temp.path()).unwrap();
+    assert!(RemoteConfig::open(&repo).unwrap().list().is_empty());
 }
 
 /// Field study: `remote add origin https://github.com/…` probed GitHub as a
@@ -420,7 +402,7 @@ fn field_study_github_https_is_not_a_heddle_descriptor_server() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     let repo = Repository::open(temp.path()).expect("open native repo");
-    let url = "https://github.com/luke/tiny-notes";
+    let url = "https://github.com/luke/tiny-notes.git";
 
     let add = heddle_output(&["remote", "add", "origin", url], Some(temp.path()))
         .expect("invoke field-study GitHub remote add");
@@ -565,10 +547,10 @@ fn native_push_and_pull_reject_direct_git_remote_before_native_sync() {
     }
 }
 
-/// Regression (push-routing silent no-op): a `heddle://` HOSTED remote on a
+/// Regression (push-routing silent no-op): a `https://` HOSTED remote on a
 /// git-overlay repo whose `[hosted]` config block is EMPTY must route to the
 /// native hosted-sync path, NOT the local git-overlay refs exporter. The bug:
-/// the exporter treats `heddle://` as a generic git network URL, "reconciles"
+/// the exporter treats `https://` as a generic git network URL, "reconciles"
 /// refs locally, and returns `{"transport":"git","success":true,"refs_written":[]}`
 /// without ever contacting the server — a silent no-op reported as success.
 ///
@@ -578,7 +560,7 @@ fn native_push_and_pull_reject_direct_git_remote_before_native_sync() {
 /// envelope. We accept any loud failure (or a non-git transport) and reject the
 /// silent-git-success signature specifically.
 #[test]
-fn git_overlay_push_to_heddle_scheme_routes_to_hosted_not_git_exporter() {
+fn git_overlay_push_to_hosted_url_routes_to_hosted_not_git_exporter() {
     let source = TempDir::new().unwrap();
 
     // Build a direct Git overlay with an empty hosted configuration.
@@ -593,13 +575,13 @@ fn git_overlay_push_to_heddle_scheme_routes_to_hosted_not_git_exporter() {
     git_ok(&["commit", "-m", "seed"], source.path());
     initialize_direct_git_overlay(source.path());
 
-    // A hosted heddle:// remote pointing at a port nothing is listening on,
+    // A hosted https:// remote pointing at a port nothing is listening on,
     // exercised through BOTH invocation forms that resolve to it:
-    //   1. inline URL:        `heddle push heddle://...`
-    //   2. named remote:      `heddle push origin`  (origin -> heddle://)
+    //   1. inline URL:        `heddle push https://...`
+    //   2. named remote:      `heddle push origin`  (origin -> https://)
     // The named-remote form is the common real-world repro and resolves the
     // URL via RemoteConfig, so it must route identically.
-    let hosted_url = "heddle://127.0.0.1:1/org/repo";
+    let hosted_url = "https://127.0.0.1:1/org/repo";
     heddle(
         &["remote", "add", "origin", hosted_url],
         Some(source.path()),
@@ -616,7 +598,7 @@ fn git_overlay_push_to_heddle_scheme_routes_to_hosted_not_git_exporter() {
         // The exact bug signature: a SUCCESS via the git exporter. If the push
         // routed to the git-overlay exporter, stdout carries
         // {"transport":"git","success":true,...}. That must never happen for a
-        // heddle:// remote regardless of how it was named.
+        // https:// remote regardless of how it was named.
         if let Ok(envelope) = serde_json::from_str::<Value>(stdout.trim()) {
             let transport = envelope["transport"].as_str().unwrap_or_default();
             let success = envelope["success"].as_bool().unwrap_or(false);
@@ -649,7 +631,7 @@ fn git_overlay_push_to_heddle_scheme_routes_to_hosted_not_git_exporter() {
 /// bug fails on the exporter's scheme rejection. We reject that specific
 /// scheme-rejection signature and accept any connection-flavoured failure.
 #[test]
-fn git_overlay_pull_heddle_scheme_routes_to_hosted_not_git_exporter() {
+fn git_overlay_pull_hosted_url_routes_to_hosted_not_git_exporter() {
     let source = TempDir::new().unwrap();
 
     // Real direct Git overlay with an empty hosted configuration.
@@ -664,10 +646,10 @@ fn git_overlay_pull_heddle_scheme_routes_to_hosted_not_git_exporter() {
     git_ok(&["commit", "-m", "seed"], source.path());
     initialize_direct_git_overlay(source.path());
 
-    // A hosted heddle:// remote pointing at a port nothing is listening on,
+    // A hosted https:// remote pointing at a port nothing is listening on,
     // exercised through both invocation forms that resolve to it (inline URL
     // and named remote), each of which must route identically.
-    let hosted_url = "heddle://127.0.0.1:1/org/repo";
+    let hosted_url = "https://127.0.0.1:1/org/repo";
     heddle(
         &["remote", "add", "origin", hosted_url],
         Some(source.path()),
@@ -683,7 +665,7 @@ fn git_overlay_pull_heddle_scheme_routes_to_hosted_not_git_exporter() {
         let combined = format!("{stdout}{stderr}");
 
         // The exact bug signature: the git-overlay exporter rejecting the
-        // heddle:// scheme. That message must never appear for a fetch — a
+        // https:// scheme. That message must never appear for a fetch — a
         // fetch that reaches the git-overlay exporter is mis-routed.
         assert!(
             !combined.contains("cannot be pushed via the git-overlay exporter"),
@@ -708,7 +690,7 @@ fn git_overlay_pull_heddle_scheme_routes_to_hosted_not_git_exporter() {
 /// authority. This preserves a mixed local-Git/hosted remote configuration
 /// without retaining the removed batch-fetch surface.
 #[test]
-fn git_overlay_named_pulls_route_mixed_remotes_per_scheme() {
+fn git_overlay_named_pulls_route_mixed_remotes_per_suffix() {
     let temp = TempDir::new().unwrap();
     let source = temp.path().join("source.git");
     let work = temp.path().join("work");
@@ -723,8 +705,8 @@ fn git_overlay_named_pulls_route_mixed_remotes_per_scheme() {
     // Clone from the local git remote — `origin` now points at the bare repo.
     heddle(&["clone", source_arg, work_arg], Some(temp.path())).expect("clone succeeds");
 
-    // Add a SECOND, hosted heddle:// remote alongside the git `origin`.
-    let hosted_url = "heddle://127.0.0.1:1/org/repo";
+    // Add a SECOND, hosted https:// remote alongside the git `origin`.
+    let hosted_url = "https://127.0.0.1:1/org/repo";
     heddle(&["remote", "add", "hosted", hosted_url], Some(&work)).expect("add hosted remote");
 
     heddle(&["pull", "origin"], Some(&work)).expect("pull reachable Git remote");
@@ -2283,7 +2265,7 @@ fn clone_network_validates_tls_config_before_creating_destination() {
     let output = heddle_output_with_env(
         &[
             "clone",
-            "heddle://127.0.0.1:1/owner/repo",
+            "https://127.0.0.1:1/owner/repo",
             local_arg.as_str(),
         ],
         Some(temp.path()),
@@ -2320,7 +2302,7 @@ fn clone_network_removes_self_created_destination_after_later_failure() {
     let output = heddle_output(
         &[
             "clone",
-            "heddle://127.0.0.1:1/owner/repo",
+            "https://127.0.0.1:1/owner/repo",
             local_arg.as_str(),
         ],
         Some(temp.path()),
@@ -3772,7 +3754,7 @@ fn push_bootstrap_validates_tls_config_before_creating_state() {
 
     let config = config_path.to_string_lossy().to_string();
     let output = heddle_output_with_env(
-        &["push", "heddle://127.0.0.1:1/owner/repo"],
+        &["push", "https://127.0.0.1:1/owner/repo"],
         Some(source.path()),
         &[("HEDDLE_CONFIG", &config)],
     )
@@ -3876,7 +3858,7 @@ fn push_network_validates_valid_config_before_bootstrapping_state() {
 
     let config = config_path.to_string_lossy().to_string();
     let output = heddle_output_with_env(
-        &["push", "heddle://127.0.0.1:1/owner/repo"],
+        &["push", "https://127.0.0.1:1/owner/repo"],
         Some(source.path()),
         &[("HEDDLE_CONFIG", &config)],
     )

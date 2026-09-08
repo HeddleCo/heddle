@@ -13,7 +13,7 @@ spool, then uses the full auto-provisioned URL for the remaining lifecycle.
 For example:
 
 ```sh
-export HEDDLE_E2E_WEFT_URL='heddle://weft.example.test:443'
+export HEDDLE_E2E_WEFT_URL='https://weft.example.test:443'
 export HEDDLE_CREDENTIAL='/absolute/path/to/live-weft-agent.hcred'
 
 cargo test -p heddle-cli --test live_weft_client_flow -- \

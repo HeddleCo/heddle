@@ -81,7 +81,7 @@ impl RepoEventClient {
     /// Connect using Heddle's standard credential resolution and descriptor trust.
     ///
     /// `server` accepts the same native network forms as a Heddle remote, such
-    /// as `heddle://host:8421/owner/repo` or
+    /// as `https://host:8421/owner/repo` or
     /// `https://host/owner/repo`. Credentials are resolved from the active
     /// environment credential or Heddle's credential store.
     pub async fn connect(server: &str) -> Result<Self, RepoEventError> {
