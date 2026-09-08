@@ -197,7 +197,7 @@ impl ThreadReplica {
         )?;
         let genesis = ThreadGenesis::decode(&genesis_bytes)?;
         loop {
-            let ready: Vec<Vec<u8>> = tx.prepare("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.status=0 AND NOT EXISTS (SELECT 1 FROM parents p LEFT JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.id IS NULL OR a.status<>1)) ORDER BY o.id LIMIT 128")?
+            let ready: Vec<Vec<u8>> = tx.prepare("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.status=0 AND (EXISTS (SELECT 1 FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND a.status=2) OR NOT EXISTS (SELECT 1 FROM parents p LEFT JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.id IS NULL OR a.status<>1))) ORDER BY o.id LIMIT 128")?
                 .query_map([self.thread.as_bytes()], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?;
             if ready.is_empty() {
                 break;
@@ -205,6 +205,19 @@ impl ThreadReplica {
             for bytes in ready {
                 let operation = ThreadOperation::decode(&bytes)?;
                 let id = operation.id()?;
+                let parent_rejected: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=?1 AND a.status=2)",
+                    [id.as_bytes()],
+                    |r| r.get(0),
+                )?;
+                if parent_rejected {
+                    tx.execute("UPDATE operations SET status=2,reason='causal parent was rejected' WHERE id=?1", [id.as_bytes()])?;
+                    tx.execute(
+                        "UPDATE threads SET generation=generation+1 WHERE id=?1",
+                        [self.thread.as_bytes()],
+                    )?;
+                    continue;
+                }
                 let mut parents = Vec::new();
                 for parent in &operation.parents {
                     let bytes: Vec<u8> = tx.query_row(
@@ -258,6 +271,30 @@ impl ThreadReplica {
         )?;
         tx.commit()?;
         Ok(inserted == 1)
+    }
+
+    /// Find a bounded page of unknown ancestors below a persisted pending
+    /// operation. Known pending parents are traversed after reconnect; accepted
+    /// history is already closed and never needs to be walked again.
+    pub fn missing_ancestors(&self, root: ContentHash, limit: usize) -> Result<Vec<ContentHash>> {
+        if limit == 0 || limit > 1024 {
+            return Err(Error::Invalid("page size must be 1..1024".into()));
+        }
+        let connection = self.connect()?;
+        let mut query = connection.prepare(
+            "WITH RECURSIVE unresolved(id) AS (
+                SELECT id FROM operations WHERE id=?1 AND thread=?2 AND status=0
+                UNION
+                SELECT p.parent FROM unresolved u JOIN operations o ON o.id=u.id AND o.status=0 AND o.thread=?2 JOIN parents p ON p.child=o.id
+            ) SELECT u.id FROM unresolved u LEFT JOIN operations o ON o.id=u.id WHERE o.id IS NULL ORDER BY u.id LIMIT ?3"
+        )?;
+        query
+            .query_map(
+                params![root.as_bytes(), self.thread.as_bytes(), limit as u32],
+                |r| r.get::<_, Vec<u8>>(0),
+            )?
+            .map(|row| hash(&row?))
+            .collect()
     }
 
     pub fn frontier_page(

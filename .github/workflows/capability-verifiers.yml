@@ -42,6 +42,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Install Worker target for the workspace toolchain
+        # Heddle pins a toolchain in rust-toolchain.toml. A target installed
+        # for the action's stable toolchain does not install it for that pin.
+        run: rustup target add wasm32-unknown-unknown
       - name: Install the WASM test runner
         run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
       - name: Build Worker target

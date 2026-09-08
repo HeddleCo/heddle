@@ -174,12 +174,8 @@ impl Session {
                     for bytes in frontier.heads {
                         let id = hash(&bytes)?;
                         match self.replica.operation(&id)? {
-                            Some((record, Admission::Pending)) => {
-                                for parent in record.verify()?.parents {
-                                    if self.replica.operation(&parent)?.is_none() {
-                                        need.insert(parent);
-                                    }
-                                }
+                            Some((_, Admission::Pending)) => {
+                                need.extend(self.replica.missing_ancestors(id, self.max_items)?);
                             }
                             Some((_, Admission::Accepted | Admission::Rejected(_))) => {}
                             None => {
@@ -229,15 +225,7 @@ impl Session {
                         }
                         Admission::Pending => {
                             receipt.pending_operation_ids.push(id.as_bytes().to_vec());
-                            let missing: Vec<_> = operation
-                                .parents
-                                .into_iter()
-                                .filter_map(|id| match self.replica.operation(&id) {
-                                    Ok(None) => Some(Ok(id)),
-                                    Ok(Some(_)) => None,
-                                    Err(error) => Some(Err(error)),
-                                })
-                                .collect::<std::result::Result<_, _>>()?;
+                            let missing = self.replica.missing_ancestors(id, self.max_items)?;
                             for ids in missing.chunks(self.max_items) {
                                 responses.push(Outbound::Frame(Frame::Need(ReplicationNeed {
                                     operation_ids: ids

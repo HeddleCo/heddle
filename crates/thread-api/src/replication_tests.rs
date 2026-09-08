@@ -46,22 +46,43 @@ fn reconnect_finds_missing_ancestors_through_already_pending_parents() {
     }
     for record in &records[1..] {
         assert_eq!(
-            replica.receive(record, repository.store(), |_| Ok(())).expect("pending"),
+            replica
+                .receive(record, repository.store(), |_| Ok(()))
+                .expect("pending"),
             Admission::Pending,
         );
     }
     let reopened = ThreadReplica::open(repository.heddle_dir(), &genesis).expect("restart");
-    let mut session = Session::new(reopened, [2; 32], BTreeSet::from([ThreadFacet::Source]), 8)
-        .expect("session");
-    let response = session.handle(Frame::Have(ReplicationHave {
-        frontiers: vec![CausalFrontier {
-            facet: SharedFacet::Source as i32,
-            heads: vec![previous.expect("head").as_bytes().to_vec()],
-        }],
-    }), repository.store()).expect("repair request");
-    let needed: Vec<_> = response.into_iter().flat_map(|frame| match frame {
-        Outbound::Frame(Frame::Need(need)) => need.operation_ids,
-        _ => vec![],
-    }).collect();
-    assert_eq!(needed, vec![records[0].verify().expect("root").id().expect("root ID").as_bytes().to_vec()]);
+    let mut session =
+        Session::new(reopened, [2; 32], BTreeSet::from([ThreadFacet::Source]), 8).expect("session");
+    let response = session
+        .handle(
+            Frame::Have(ReplicationHave {
+                frontiers: vec![CausalFrontier {
+                    facet: SharedFacet::Source as i32,
+                    heads: vec![previous.expect("head").as_bytes().to_vec()],
+                }],
+            }),
+            repository.store(),
+        )
+        .expect("repair request");
+    let needed: Vec<_> = response
+        .into_iter()
+        .flat_map(|frame| match frame {
+            Outbound::Frame(Frame::Need(need)) => need.operation_ids,
+            _ => vec![],
+        })
+        .collect();
+    assert_eq!(
+        needed,
+        vec![
+            records[0]
+                .verify()
+                .expect("root")
+                .id()
+                .expect("root ID")
+                .as_bytes()
+                .to_vec()
+        ]
+    );
 }
