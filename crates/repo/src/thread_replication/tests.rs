@@ -11,6 +11,27 @@ use crate::Repository;
 fn author() -> Attribution {
     Attribution::human(Principal::new("Agent", "agent@example.test"))
 }
+
+#[test]
+fn genesis_creation_and_reopen_share_the_same_record_bound() {
+    let (_dir, repository, mut genesis, _signer, _replica) = setup();
+    genesis.intent = "x".repeat(objects::object::thread_replication::MAX_OPERATION_BYTES / 2);
+    let bytes = genesis.encode().expect("bounded genesis");
+    assert_eq!(
+        ThreadGenesis::decode(&bytes).expect("reopen encoded genesis"),
+        genesis
+    );
+    genesis.intent = "x".repeat(objects::object::thread_replication::MAX_OPERATION_BYTES);
+    assert!(
+        genesis.encode().is_err(),
+        "creation must not emit a record that decode rejects"
+    );
+    assert!(
+        genesis.id().is_err(),
+        "an unpersistable genesis must not acquire a Thread ID"
+    );
+    assert!(ThreadReplica::open(repository.heddle_dir(), &genesis).is_err());
+}
 fn setup() -> (
     TempDir,
     Repository,
