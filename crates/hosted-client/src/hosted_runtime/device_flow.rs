@@ -15,397 +15,84 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use crypto::{Ed25519Signer, Signer};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AgentAuthOperationDisposition {
-    ReviewedSafe,
-    Denied,
-}
-
-/// Exhaustive agent-policy classification for `IdentityService`.
-///
-/// The exact-set test below compares this table with the shared API descriptor,
-/// so adding an identity RPC requires an explicit decision before derived-agent
-/// CI can pass.
-const AUTH_SERVICE_AGENT_POLICY: &[(&str, AgentAuthOperationDisposition)] = &[
-    (
-        "BeginWebAuthnRegistration",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    ("RegisterPublicKey", AgentAuthOperationDisposition::Denied),
-    (
-        "BeginWebAuthnAuthentication",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    ("ClaimHandle", AgentAuthOperationDisposition::Denied),
-    (
-        "FinishWebAuthnAuthentication",
-        // The WebAuthn ceremony, not an attached bearer, proves this request.
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "CreateDeviceAuthorization",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "ApproveDeviceAuthorization",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    (
-        "ExchangeDeviceAuthorization",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "WaitForDeviceAuthorization",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    ("RotateCredential", AgentAuthOperationDisposition::Denied),
-    ("RevokeCredential", AgentAuthOperationDisposition::Denied),
-    // Passkey-enrolled device-root revoke (weft#2047 C5). Modeled on
-    // RevokeCredential: derived agents must not drop a parent principal's
-    // registered device root.
-    ("RevokeDevice", AgentAuthOperationDisposition::Denied),
-    (
-        "CreateServiceAccount",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    (
-        "IssueServiceAccountCredential",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    (
-        "RevokeServiceAccount",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    ("WhoAmI", AgentAuthOperationDisposition::ReviewedSafe),
-    (
-        "IntrospectCredential",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "ListServiceAccounts",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "ListScopeCapabilities",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    ("LinkOAuthIdentity", AgentAuthOperationDisposition::Denied),
-    ("StoreProviderToken", AgentAuthOperationDisposition::Denied),
-    // Registering a verified GitHub installation binds external account
-    // authority to the caller and must remain a parent-principal operation.
-    (
-        "RegisterGitHubInstallation",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    // Starting an App-installation ceremony can bind external authority to
-    // the caller, so a derived agent cannot mint its setup challenge.
-    (
-        "MintGitHubAppSetupChallenge",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    // Installation repository discovery is a caller-bound read and does not
-    // register an installation or import a repository.
-    (
-        "ListInstallationRepositories",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "VerifySignupEmail",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "BindSignupInviteEmail",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    // Everyday account-root capability (heddle#1592 lock 2026-08-28). Off the
-    // deny floor so the unclaimed agent-rooted login root can mint. Derived
-    // children stay unable to mint because this is not in SAFE_AGENT_OPERATIONS.
-    (
-        "CreateSignupInvite",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    // The server derives the owner from the caller and returns no claimer
-    // identity, making invite listing a caller-bound read.
-    (
-        "ListSignupInvites",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    // Invite claim registers a client-minted signup root; derived agents
-    // must not consume invite codes on behalf of a parent principal.
-    ("ClaimSignupInvite", AgentAuthOperationDisposition::Denied),
-    // Public drop selection accepts an optional verified agent subject only
-    // to choose the subject-scoped anti-abuse budget.
-    (
-        "ClaimNextDropCode",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "RemainingDropCodes",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "IssueSignupEmailChallenge",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    // Consumes a human invite to open an unclaimed placeholder account;
-    // provisioning stays parent-only even though the RPC is public.
-    ("CreateAgentAccount", AgentAuthOperationDisposition::Denied),
-    // Claim promotion is authorized by the browser's verified passkey and the
-    // agent's dedicated Iroh consent, never by an attached derived bearer.
-    ("PromoteAgentAccount", AgentAuthOperationDisposition::Denied),
-    (
-        "ResolveSignupInvite",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "GetInvitationSummary",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    (
-        "GetHandleStatus",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    ("ListSessions", AgentAuthOperationDisposition::ReviewedSafe),
-    ("RevokeSession", AgentAuthOperationDisposition::Denied),
-    ("RequestHeldName", AgentAuthOperationDisposition::Denied),
-    ("ResolveHandle", AgentAuthOperationDisposition::ReviewedSafe),
-    // Presence currently re-mints an authority token instead of preserving
-    // the caller's complete attenuation chain, so agents must not invoke it.
-    ("IssuePresenceToken", AgentAuthOperationDisposition::Denied),
-    ("MintAnonBiscuit", AgentAuthOperationDisposition::Denied),
-    (
-        "DeclareRecoveryMethod",
-        AgentAuthOperationDisposition::Denied,
-    ),
-    // Recovery execution is authorized by public, independent proof material
-    // and the veto-window state rather than by an attached derived bearer.
-    ("BeginRecovery", AgentAuthOperationDisposition::ReviewedSafe),
-    (
-        "SubmitRecoveryProof",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-    ("VetoRecovery", AgentAuthOperationDisposition::ReviewedSafe),
-    (
-        "CompleteRecovery",
-        AgentAuthOperationDisposition::ReviewedSafe,
-    ),
-];
-
-/// Non-auth methods that remain mandatory denials for every attenuated token
-/// (the restricted account root and every derived child), even when the caller
-/// constructs [`AgentAttenuation`] directly without an allowlist.
-///
-/// `BootstrapOwnerRoot` is here so no on-disk credential can install an owner
-/// root at the Biscuit layer (weft#2041, Option C): the owner-root pin is
-/// performed only by the FULL, unrestricted client-minted root, which is minted
-/// in memory from the node identity seed and never persisted as a `.hcred`. The
-/// full root does not pass through attenuation, so it is unaffected by this
-/// floor. This deliberately supersedes the earlier heddle#1600 grant that put
-/// `BootstrapOwnerRoot` in the derive-agent child ceiling: because children
-/// attenuate from the restricted account root, they could never widen past this
-/// floor anyway, and no in-tree flow installs an owner root from a derived
-/// child. Owner-root reads (`GetCurrentOwnerKeyring`) stay in the ceiling.
-const NON_AUTH_AGENT_OPERATION_DENY_FLOOR: &[&str] = &["DeleteSpool", "BootstrapOwnerRoot"];
-
-fn mandatory_agent_denied_operations() -> impl Iterator<Item = &'static str> {
-    NON_AUTH_AGENT_OPERATION_DENY_FLOOR.iter().copied().chain(
-        AUTH_SERVICE_AGENT_POLICY
-            .iter()
-            .filter_map(|(operation, disposition)| {
-                (*disposition == AgentAuthOperationDisposition::Denied).then_some(*operation)
-            }),
-    )
-}
-
-/// Scope token and authority-right action parsed by weft-authz.
+/// Request-time CI verdict action, narrower than general review decisions.
 pub const CI_VERDICT_WRITE_ACTION: &str = "ci-verdict:write";
-/// Request-time operation injected by weft's CI-verdict authorization gate.
 pub const CI_VERDICT_WRITE_OPERATION: &str = "CiVerdictWrite";
 
-/// Curated W1 operation ceiling for `heddle auth derive-agent`.
-///
-/// This is the derive-agent child ceiling only. The unclaimed agent-rooted
-/// login root is the account: `restrict_agent_account_root` applies the deny
-/// floor without this allowlist.
-///
-/// `--allow` may select a subset of these methods. Parent and child blocks are
-/// both evaluated by the server, so sub-derivation computes an intersection
-/// and cannot widen an ancestor's selection.
-pub const SAFE_AGENT_OPERATIONS: &[&str] = &[
-    // CI runners submit signed verdicts without receiving source-write
-    // authority. Weft gates this operation on the distinct authority action
-    // `ci-verdict:write` for the request's spool.
-    CI_VERDICT_WRITE_OPERATION,
-    // Hosted push and pull.
-    "Push",
-    "Pull",
-    "ListRefs",
-    "UpdateRef",
-    // Personal spool discovery + provisioning. Host-only auto-provision push
-    // (`auto_provision_hosted_repo`) resolves the caller's own spool and, when
-    // the target child spool is absent, creates it under the agent's own
-    // handle. Without these the client aborts before the RPCs are ever sent,
-    // so an unclaimed agent-rooted account cannot `heddle push <host>`. weft
-    // admits both for unclaimed agent-rooted accounts (weft#1852/#1853).
-    "GetCurrentUserSpool",
-    "CreateSpool",
-    // Read the installed owner keyring (heddle#1600). Owner-root *install*
-    // (BootstrapOwnerRoot) is intentionally NOT in the agent ceiling: it is
-    // performed only by the full unrestricted root minted in memory at
-    // login/claim (weft#2041), never by the restricted account credential or a
-    // derived child (see NON_AUTH_AGENT_OPERATION_DENY_FLOOR).
-    "GetCurrentOwnerKeyring",
-    // Repository reads.
-    "GetRefs",
-    "ListStates",
-    "GetState",
-    "GetBlame",
-    "ListProvenanceSummaries",
-    "GetTree",
-    "GetBlob",
-    "GetCompare",
-    "GetDiff",
-    "GetSemanticHotSpots",
-    "ListActions",
-    "SubscribeRepoEvents",
-    // Context reads and writes.
-    "ListContext",
-    "GetContextHistory",
-    "ListContextSuggestions",
-    "SetContext",
-    "ReviseContext",
-    "SupersedeContext",
-    // Discussions.
-    "OpenDiscussion",
-    "AppendTurn",
-    "ResolveDiscussion",
-    "ListByState",
-    "ListBySymbol",
-    "GetDiscussion",
-    // Session identity.
-    "WhoAmI",
-];
-
-/// Read-only RPCs shared by every derived-agent template. Every entry is a
-/// member of [`SAFE_AGENT_OPERATIONS`]; the `templates_stay_within_safe_ceiling`
-/// test enforces that invariant.
 const TEMPLATE_READ_OPERATIONS: &[&str] = &[
-    "GetRefs",
-    "ListRefs",
-    "ListStates",
-    "GetState",
-    "GetBlame",
-    "ListProvenanceSummaries",
-    "GetTree",
-    "GetBlob",
-    "GetCompare",
-    "GetDiff",
-    "GetSemanticHotSpots",
-    "ListActions",
-    "SubscribeRepoEvents",
-    "ListContext",
-    "GetContextHistory",
-    "ListContextSuggestions",
-    "GetDiscussion",
-    "ListByState",
-    "ListBySymbol",
-    // Read of the caller's own spool; paired with CreateSpool in the
-    // contributor writes for host-only auto-provision push.
-    "GetCurrentUserSpool",
-    "WhoAmI",
-    // Read of the installed owner keyring after BootstrapOwnerRoot (heddle#1600).
-    "GetCurrentOwnerKeyring",
+    "DescribeEndpoint",
+    "ResolveResources",
+    "Fetch",
+    "ObserveIdentity",
+    "ObserveOwnership",
+    "ObserveWorkspace",
+    "ObserveSpool",
+    "ObserveThreads",
+    "ObserveThread",
+    "ObserveCollaboration",
+    "ObserveAnalysis",
+    "ReadContent",
+    "ReadArtifact",
+    "ObserveCheckouts",
+    "ObserveRuns",
+    "ObserveAttention",
 ];
-
-/// Collaboration writes a `contributor` adds on top of the read set.
 const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
-    CI_VERDICT_WRITE_OPERATION,
-    "Push",
-    "UpdateRef",
-    "SetContext",
-    "ReviseContext",
-    "SupersedeContext",
+    "StartThread",
+    "RenameThread",
+    "ChangeLifecycle",
+    "PublishContent",
+    "LandThread",
+    "PutContext",
     "OpenDiscussion",
     "AppendTurn",
     "ResolveDiscussion",
-    // Provision the caller's own child spool (host-only auto-provision push).
+    "RecordReview",
     "CreateSpool",
+    "Capture",
+    "Refresh",
+    "Resolve",
+    "LandCheckout",
+    "ClaimCheckoutWriter",
+    "ReleaseCheckoutWriter",
+    CI_VERDICT_WRITE_OPERATION,
 ];
-
-/// The push/pull/ref-move set a CI lander needs to run `ready`/`land`.
-const TEMPLATE_CI_LANDING_WRITES: &[&str] = &["Push", "UpdateRef"];
-
-/// The sole write capability a human delegates to a CI runner.
+const TEMPLATE_CI_LANDING_WRITES: &[&str] = &["LandThread", "PublishContent"];
 const TEMPLATE_RUNNER_WRITES: &[&str] = &[CI_VERDICT_WRITE_OPERATION];
 
-/// Preset operation ceilings for `heddle auth derive-agent --template`.
-///
-/// A template is pure sugar over `--allow`: it expands to a curated subset of
-/// [`SAFE_AGENT_OPERATIONS`]. An explicit `--allow` combined with a template
-/// may only *narrow* the template's set (the two intersect), never widen it.
+/// Optional named restrictions. Omitting a template inherits parent authority.
+/// Explicit operations may narrow a chosen template; no preset expands a parent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentTemplate {
-    /// Read + review: every read RPC plus `Pull`. No writes, no ref moves.
     Reviewer,
-    /// Read + collaboration writes: reviewer plus `Push`/`UpdateRef`, context
-    /// writes, and discussion writes. No repo/namespace admin.
-    ///
-    /// This is intentionally the **full safe agent ceiling** — its operation
-    /// set equals [`SAFE_AGENT_OPERATIONS`], so `--template contributor` is
-    /// the named, self-documenting form of "everything an agent may safely do"
-    /// (equivalent to deriving with no `--template`/`--allow`). Every op in
-    /// `SAFE_AGENT_OPERATIONS` is either a read or one of the collaboration
-    /// writes a contributor holds; there is nothing safe left to withhold.
-    /// `contributor_ceiling_equals_safe_agent_operations` pins this: if the
-    /// safe ceiling ever grows, that test fails and forces a conscious
-    /// decision about whether the new op belongs to `contributor`.
     Contributor,
-    /// Read + `Pull` + the `Push`/`UpdateRef` a CI lander needs to run
-    /// `ready`/`land`. No context or discussion writes.
     CiLanding,
-    /// CI verdict submission only. No source reads, writes, or ref moves.
     Runner,
 }
-
 impl AgentTemplate {
-    /// Every template variant. A new variant added to the enum must be added
-    /// here too — the `operations()` match already forces handling it, and the
-    /// template invariant tests iterate `ALL` so a new variant is
-    /// automatically held to the safe-ceiling checks.
     #[cfg(test)]
-    pub const ALL: [AgentTemplate; 4] = [
-        AgentTemplate::Reviewer,
-        AgentTemplate::Runner,
-        AgentTemplate::CiLanding,
-        AgentTemplate::Contributor,
+    pub const ALL: [Self; 4] = [
+        Self::Reviewer,
+        Self::Runner,
+        Self::CiLanding,
+        Self::Contributor,
     ];
-
-    /// Stable lower-kebab name used on the CLI and in metadata.
     pub fn as_str(&self) -> &'static str {
         match self {
-            AgentTemplate::Reviewer => "reviewer",
-            AgentTemplate::Contributor => "contributor",
-            AgentTemplate::CiLanding => "ci-landing",
-            AgentTemplate::Runner => "runner",
+            Self::Reviewer => "reviewer",
+            Self::Contributor => "contributor",
+            Self::CiLanding => "ci-landing",
+            Self::Runner => "runner",
         }
     }
-
-    /// The sorted, deduplicated operation set this template grants. Every
-    /// entry is guaranteed to be within [`SAFE_AGENT_OPERATIONS`].
     pub fn operations(&self) -> Vec<String> {
-        let mut set: std::collections::BTreeSet<&'static str> =
+        let mut set: std::collections::BTreeSet<&str> =
             TEMPLATE_READ_OPERATIONS.iter().copied().collect();
-        // `Pull` is a server-side read (fetch); every template can sync.
-        set.insert("Pull");
         match self {
-            AgentTemplate::Reviewer => {}
-            AgentTemplate::Contributor => {
-                set.extend(TEMPLATE_CONTRIBUTOR_WRITES.iter().copied());
-            }
-            AgentTemplate::CiLanding => {
-                set.extend(TEMPLATE_CI_LANDING_WRITES.iter().copied());
-            }
-            AgentTemplate::Runner => {
+            Self::Reviewer => {}
+            Self::Contributor => set.extend(TEMPLATE_CONTRIBUTOR_WRITES.iter().copied()),
+            Self::CiLanding => set.extend(TEMPLATE_CI_LANDING_WRITES.iter().copied()),
+            Self::Runner => {
                 set.clear();
                 set.extend(TEMPLATE_RUNNER_WRITES.iter().copied());
             }
@@ -470,17 +157,9 @@ impl AgentAttenuation {
     }
 }
 
-/// Narrow a client-minted agent account root with the deny floor that
-/// `heddle auth derive-agent` applies. The login-minted root IS the account:
-/// it keeps human-like everyday ops, including minting signup invites.
-/// [`SAFE_AGENT_OPERATIONS`] is the derive-agent child ceiling only — do not
-/// apply it here. The leaf PoP stays the registered Iroh key (self-delegation)
-/// so `auth login` can remint from that seed after expiry.
-///
-/// The deny floor now includes `BootstrapOwnerRoot` (weft#2041, Option C), so
-/// this persisted credential genuinely cannot install an owner root. The pin is
-/// performed only by the full unrestricted root, minted in memory from the same
-/// node seed at login/claim and never stored.
+/// Bind the persisted account credential to the local proof key and lifetime.
+/// Account authority remains inherited; account state and signed owner transitions
+/// are checked by the host rather than hidden mandatory agent denials.
 pub(crate) fn restrict_agent_account_root(
     root_token: &str,
     signer: &Ed25519Signer,
@@ -704,103 +383,13 @@ fn decode_fixed_hex(value: &str, expected_len: usize, label: &str) -> Result<Vec
 fn build_attenuation_block(
     restrictions: &AgentAttenuation,
 ) -> Result<biscuit_auth::builder::BlockBuilder> {
-    // Fail closed on characters that could break out of a Biscuit string
-    // literal or inject operators into the DSL before we assemble the block.
-    validate_biscuit_token_string("agent_id", &restrictions.agent_id)?;
-    if let Some(ops) = &restrictions.allowed_operations {
-        for op in ops {
-            validate_biscuit_token_string("allowed_operations entry", op)?;
-        }
-    }
-    if let Some(resources) = &restrictions.allowed_resources {
-        for (kind, path) in resources {
-            validate_biscuit_token_string("resource kind", kind)?;
-            validate_biscuit_token_string("resource path", path)?;
-        }
-    }
-    for (kind, path) in &restrictions.declared_scopes {
-        validate_biscuit_token_string("scope kind", kind)?;
-        validate_biscuit_token_string("scope path", path)?;
-    }
-
-    let mut block = biscuit_auth::builder::BlockBuilder::new();
-    block = block
-        .fact(format!("agent({})", biscuit_string(&restrictions.agent_id)).as_str())
-        .context("agent fact")?;
-    block = block
-        .fact(format!("agent_expires_at({})", restrictions.expires_at.to_rfc3339()).as_str())
-        .context("agent expiry fact")?;
-    block = block
-        .check(
-            format!(
-                "check if time($now), $now < {}",
-                restrictions.expires_at.to_rfc3339()
-            )
-            .as_str(),
-        )
-        .context("expiry check")?;
-    // These independent checks are deliberately present even when the caller
-    // supplies no operation allowlist. They are the mandatory auth-trust,
-    // credential, recovery-enrollment, presence, and destructive-operation
-    // floor for every token from this primitive.
-    for denied in mandatory_agent_denied_operations() {
-        block = block
-            .check(format!("check if operation($op), $op != {}", biscuit_string(denied)).as_str())
-            .context("agent operation deny floor")?;
-    }
-    if let Some(ops) = &restrictions.allowed_operations {
-        let pred = if ops.is_empty() {
-            // A syntactically valid predicate that no real hosted method can
-            // match. `Some(vec![])` therefore means deny all, not unrestricted.
-            "$op == \"__heddle_no_agent_operations__\"".to_string()
-        } else {
-            ops.iter()
-                .map(|op| format!("$op == {}", biscuit_string(op)))
-                .collect::<Vec<_>>()
-                .join(" || ")
-        };
-        block = block
-            .check(format!("check if operation($op), {pred}").as_str())
-            .context("operation allowlist check")?;
-    }
-    if let Some(resources) = &restrictions.allowed_resources
-        && !resources.is_empty()
-    {
-        let mut clauses = Vec::new();
-        for (kind, path) in resources {
-            let prefix = format!("{path}/");
-            match kind.as_str() {
-                // A namespace grant authorizes the whole repo subtree under it.
-                // The server only ever injects `resource("repo", <repo_path>)`
-                // facts (weft#644) — it never emits a `resource("namespace", …)`
-                // fact — so a `$k == "namespace"` caveat would match no fact and
-                // reject EVERY repo RPC. Encode the namespace scope as a repo-path
-                // PREFIX caveat against `<namespace>/` so the injected repo fact
-                // and this caveat compare like-for-like.
-                "namespace" | "ns" => {
-                    clauses.push(format!(
-                        "($k == \"repo\" && $p.starts_with({prefix_lit}))",
-                        prefix_lit = biscuit_string(&prefix),
-                    ));
-                }
-                // A repo grant matches that exact repo, or any nested path under
-                // it (monorepo subtree). Kind is preserved so a future non-repo
-                // resource kind cannot be satisfied by a repo fact.
-                _ => {
-                    clauses.push(format!(
-                        "($k == {kind_lit} && ($p == {path_lit} || $p.starts_with({prefix_lit})))",
-                        kind_lit = biscuit_string(kind),
-                        path_lit = biscuit_string(path),
-                        prefix_lit = biscuit_string(&prefix),
-                    ));
-                }
-            }
-        }
-        let pred = clauses.join(" || ");
-        block = block
-            .check(format!("check if resource($k, $p), {pred}").as_str())
-            .context("resource allowlist check")?;
-    }
+    let shared = biscuit_verifier::delegation::AgentAttenuation {
+        agent_id: restrictions.agent_id.clone(),
+        expires_at: restrictions.expires_at,
+        allowed_operations: restrictions.allowed_operations.clone(),
+        allowed_resources: restrictions.allowed_resources.clone(),
+    };
+    let mut block = shared.block().context("shared agent attenuation")?;
     for (kind, path) in &restrictions.declared_scopes {
         block = block
             .fact(
@@ -814,28 +403,6 @@ fn build_attenuation_block(
             .context("forward-compatible resource scope")?;
     }
     Ok(block)
-}
-
-/// Allowlist for values interpolated into Biscuit DSL string literals.
-///
-/// Restricted to `[A-Za-z0-9._/@:+-]` so quotes, newlines, `$`, `|`, and
-/// other DSL/metacharacters cannot inject facts or checks. Paths may use
-/// `/`; operation names and agent ids are alphanumeric-plus-punctuation.
-fn validate_biscuit_token_string(field: &str, value: &str) -> Result<()> {
-    if value.is_empty() {
-        anyhow::bail!("{field} must not be empty");
-    }
-    for ch in value.chars() {
-        if !matches!(
-            ch,
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '/' | '@' | ':' | '+' | '-'
-        ) {
-            anyhow::bail!(
-                "{field} contains forbidden character {ch:?}; allowed: [A-Za-z0-9._/@:+-]"
-            );
-        }
-    }
-    Ok(())
 }
 
 fn biscuit_string(s: &str) -> String {
@@ -919,39 +486,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn templates_stay_within_safe_ceiling() {
-        let safe: BTreeSet<&str> = SAFE_AGENT_OPERATIONS.iter().copied().collect();
+    fn templates_name_real_native_operations() {
+        let methods: BTreeSet<&str> = api::v2::ALL_METHODS
+            .iter()
+            .filter_map(|method| method.path.rsplit('/').next())
+            .collect();
         for template in AgentTemplate::ALL {
             for operation in template.operations() {
                 assert!(
-                    safe.contains(operation.as_str()),
-                    "template {:?} operation {operation:?} escapes SAFE_AGENT_OPERATIONS",
-                    template.as_str()
+                    operation == CI_VERDICT_WRITE_OPERATION || methods.contains(operation.as_str()),
+                    "unknown native operation: {operation}"
                 );
             }
         }
-    }
-
-    #[test]
-    fn contributor_ceiling_equals_safe_agent_operations() {
-        // `contributor` is intentionally the full safe agent ceiling. Pin the
-        // equivalence so it can't silently drift: if `SAFE_AGENT_OPERATIONS`
-        // grows a new op, this fails and forces a conscious decision about
-        // whether the new op belongs to `contributor` (or should be withheld
-        // from it, at which point contributor becomes a genuine proper subset).
-        let contributor: BTreeSet<String> = AgentTemplate::Contributor
-            .operations()
-            .into_iter()
-            .collect();
-        let safe: BTreeSet<String> = SAFE_AGENT_OPERATIONS
-            .iter()
-            .map(|op| (*op).to_string())
-            .collect();
-        assert_eq!(
-            contributor, safe,
-            "contributor template must equal SAFE_AGENT_OPERATIONS; update the \
-             template (or SAFE_AGENT_OPERATIONS) and this assertion together"
-        );
     }
 
     #[test]
@@ -1152,39 +699,6 @@ mod tests {
     }
 
     #[test]
-    fn identity_service_agent_policy_exactly_matches_the_shared_descriptor() {
-        use prost::Message;
-
-        let descriptor = prost_types::FileDescriptorSet::decode(api::FILE_DESCRIPTOR_SET)
-            .expect("the shared API descriptor must decode");
-        let proto_operations = descriptor
-            .file
-            .iter()
-            .filter(|file| file.package.as_deref() == Some("heddle.api.v1alpha1"))
-            .flat_map(|file| &file.service)
-            .find(|service| service.name.as_deref() == Some("IdentityService"))
-            .expect("the shared descriptor must define IdentityService")
-            .method
-            .iter()
-            .map(|method| method.name.as_deref().expect("RPC method name"))
-            .collect::<BTreeSet<_>>();
-        let policy_operations = AUTH_SERVICE_AGENT_POLICY
-            .iter()
-            .map(|(operation, _)| *operation)
-            .collect::<BTreeSet<_>>();
-
-        assert_eq!(
-            policy_operations.len(),
-            AUTH_SERVICE_AGENT_POLICY.len(),
-            "the agent auth policy must classify each RPC exactly once"
-        );
-        assert_eq!(
-            policy_operations, proto_operations,
-            "every IdentityService RPC must be explicitly classified for derived agents"
-        );
-    }
-
-    #[test]
     fn every_public_derivation_entrypoint_rejects_the_wrong_parent_signer() {
         let (parent, _root, _parent_pop) = fresh_parent_token();
         let wrong_parent_pop = Ed25519Signer::generate().expect("wrong parent PoP key");
@@ -1318,10 +832,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_injection_in_allowed_operations() {
-        let (parent, _kp, parent_pop) = fresh_parent_token();
+    fn operation_values_are_literals_and_cannot_broaden_authority() {
+        let (parent, root, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
-        let err = attenuate_for_agent(
+        let child = attenuate_for_agent(
             &parent,
             AgentAttenuation {
                 agent_id: "agent-1".to_string(),
@@ -1333,12 +847,13 @@ mod tests {
             &parent_pop,
             child_pop.public_key(),
         )
-        .expect_err("injection payload must be rejected");
-        let message = format!("{err:#}");
-        assert!(
-            message.contains("forbidden character") || message.contains("allowed_operations"),
-            "unexpected error: {message}"
-        );
+        .expect("shared builder safely quotes literal operation values");
+        for operation in ["x", "y", "DeleteSpool"] {
+            assert!(
+                server_authorizes(&child, &root, operation, Utc::now()).is_err(),
+                "literal operation cannot grant {operation}"
+            );
+        }
     }
 
     #[test]
@@ -1361,48 +876,24 @@ mod tests {
     }
 
     #[test]
-    fn server_accepts_allowed_operation_and_rejects_the_mandatory_operation_floor() {
+    fn unscoped_child_inherits_delegated_admin_authority() {
         let (parent, root, parent_pop) = fresh_parent_token();
-        let child_pop = Ed25519Signer::generate().expect("child PoP key");
+        let child_pop = Ed25519Signer::generate().expect("child");
         let child = attenuate_for_agent(
             &parent,
-            AgentAttenuation {
-                agent_id: "agent-safe".to_string(),
-                expires_at: Utc::now() + chrono::Duration::hours(1),
-                allowed_operations: Some(
-                    SAFE_AGENT_OPERATIONS
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect(),
-                ),
-                allowed_resources: None,
-                declared_scopes: vec![("repo".to_string(), "acme/heddle".to_string())],
-            },
+            AgentAttenuation::time_bounded("admin-agent", Utc::now() + chrono::Duration::hours(1)),
             &parent_pop,
             child_pop.public_key(),
         )
-        .expect("derive safe child");
-
-        let parent_authority = biscuit_auth::UnverifiedBiscuit::from_base64(parent.as_bytes())
-            .expect("parse parent")
-            .print_block_source(0)
-            .expect("parent authority");
-        let child_authority = biscuit_auth::UnverifiedBiscuit::from_base64(child.as_bytes())
-            .expect("parse child")
-            .print_block_source(0)
-            .expect("child authority");
-        assert_eq!(
-            child_authority, parent_authority,
-            "offline attenuation must leave the root-human authority block unchanged"
-        );
-
-        server_authorizes(&child, &root, "Push", Utc::now())
-            .expect("server accepts an allowlisted push");
-        for denied in mandatory_agent_denied_operations() {
-            assert!(
-                server_authorizes(&child, &root, denied, Utc::now()).is_err(),
-                "server must reject hard-denied operation {denied}"
-            );
+        .expect("derived child");
+        for operation in [
+            "CreateInvite",
+            "SetMembership",
+            "RevokeCredential",
+            "BootstrapOwnership",
+        ] {
+            server_authorizes(&child, &root, operation, Utc::now())
+                .expect("parent authority inherited");
         }
     }
 
@@ -1509,15 +1000,6 @@ mod tests {
         assert!(child_source.contains("agent_scope(\"repo\", \"acme/heddle/subdir\")"));
     }
 
-    #[test]
-    fn validate_biscuit_token_string_allowlist() {
-        assert!(validate_biscuit_token_string("op", "GetState").is_ok());
-        assert!(validate_biscuit_token_string("path", "org/acme/heddle").is_ok());
-        assert!(validate_biscuit_token_string("op", r#"x" || true"#).is_err());
-        assert!(validate_biscuit_token_string("op", "a$b").is_err());
-        assert!(validate_biscuit_token_string("op", "").is_err());
-    }
-
     /// Like `server_authorizes` but also injects the per-request
     /// `resource(kind, path)` fact the weft verifier adds (weft#644), so
     /// resource-scope caveats are actually exercised end-to-end.
@@ -1606,7 +1088,7 @@ mod tests {
     }
 
     #[test]
-    fn namespace_scope_caveat_is_a_repo_prefix_not_a_namespace_kind() {
+    fn spool_scope_includes_descendants_and_excludes_siblings() {
         let (parent, root, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let child = attenuate_for_agent(
@@ -1614,45 +1096,29 @@ mod tests {
             AgentAttenuation {
                 agent_id: "agent-ns".to_string(),
                 expires_at: Utc::now() + chrono::Duration::hours(1),
-                allowed_operations: Some(vec!["GetState".to_string()]),
-                allowed_resources: Some(vec![("namespace".to_string(), "alice".to_string())]),
-                declared_scopes: vec![("namespace".to_string(), "alice".to_string())],
+                allowed_operations: Some(vec!["ObserveThread".to_string()]),
+                allowed_resources: Some(vec![("spool".to_string(), "alice".to_string())]),
+                declared_scopes: vec![("spool".to_string(), "alice".to_string())],
             },
             &parent_pop,
             child_pop.public_key(),
         )
         .expect("derive namespace-scoped child");
 
-        // The caveat is encoded against `resource("repo", …)` as a path prefix —
-        // NOT `resource("namespace", …)`, which would match no injected fact and
-        // brick every repo RPC.
-        let block = biscuit_auth::UnverifiedBiscuit::from_base64(child.as_bytes())
-            .expect("parse child")
-            .print_block_source(1)
-            .expect("child block");
-        assert!(
-            block.contains("$k == \"repo\" && $p.starts_with(\"alice/\")"),
-            "namespace scope must emit a repo-path prefix caveat: {block}"
-        );
-        assert!(
-            !block.contains("$k == \"namespace\""),
-            "namespace scope must not emit a resource(\"namespace\", …) caveat: {block}"
-        );
-
         // Every repo under the namespace is reachable; a repo outside is not.
         server_authorizes_resource(
             &child,
             &root,
-            "GetState",
-            ("repo", "alice/repoA"),
+            "ObserveThread",
+            ("spool", "alice/repoA"),
             Utc::now(),
         )
         .expect("repoA under the namespace is admitted");
         server_authorizes_resource(
             &child,
             &root,
-            "GetState",
-            ("repo", "alice/repoB"),
+            "ObserveThread",
+            ("spool", "alice/repoB"),
             Utc::now(),
         )
         .expect("repoB under the namespace is admitted");
@@ -1660,8 +1126,8 @@ mod tests {
             server_authorizes_resource(
                 &child,
                 &root,
-                "GetState",
-                ("repo", "bob/repoC"),
+                "ObserveThread",
+                ("spool", "bob/repoC"),
                 Utc::now()
             )
             .is_err(),

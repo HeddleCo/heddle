@@ -322,6 +322,56 @@ pub(super) fn hosted_to_protocol_error(error: HostedError) -> ProtocolError {
     }
 }
 
+/// Preserve the shared failure envelope at the native client boundary. Callers
+/// can distinguish retryable conflicts, missing resources and revoked authority.
+pub(super) fn native_client_error(
+    error: api::v2::client::ClientError<thread_api::transport::Error>,
+) -> ProtocolError {
+    use api::v2::client::ClientError;
+    use thread_api::transport::Error;
+    match error {
+        ClientError::Transport(Error::Remote(failure)) => {
+            let detail = match failure.detail() {
+                Ok(detail) => detail,
+                Err(error) => return ProtocolError::Serialization(error.to_string()),
+            };
+            let code = api::heddle::api::v1alpha1::CallFailureCode::try_from(failure.code)
+                .unwrap_or(api::heddle::api::v1alpha1::CallFailureCode::Unknown);
+            if detail.is_none() {
+                match code {
+                    api::heddle::api::v1alpha1::CallFailureCode::AlreadyExists => {
+                        return ProtocolError::AlreadyExists(failure.message);
+                    }
+                    api::heddle::api::v1alpha1::CallFailureCode::NotFound => {
+                        return ProtocolError::ObjectNotFound(failure.message);
+                    }
+                    _ => {}
+                }
+            }
+            ProtocolError::RemoteFailure {
+                code: remote_failure_code(code),
+                message: failure.message,
+                details: detail.into_iter().map(remote_failure_detail).collect(),
+            }
+        }
+        ClientError::Decode(error) => ProtocolError::Serialization(error.to_string()),
+        ClientError::Transport(Error::Io(message)) => {
+            ProtocolError::Io(std::io::Error::other(message))
+        }
+        ClientError::Transport(Error::Timeout) => ProtocolError::RemoteFailure {
+            code: wire::RemoteFailureCode::DeadlineExceeded,
+            message: "native request made no progress before its deadline".into(),
+            details: Vec::new(),
+        },
+        ClientError::NotImplemented(method) => ProtocolError::RemoteFailure {
+            code: wire::RemoteFailureCode::Unimplemented,
+            message: format!("endpoint does not implement {method}"),
+            details: Vec::new(),
+        },
+        error => ProtocolError::InvalidState(error.to_string()),
+    }
+}
+
 fn remote_failure_code(
     code: api::heddle::api::v1alpha1::CallFailureCode,
 ) -> wire::RemoteFailureCode {

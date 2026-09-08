@@ -4,9 +4,12 @@ use std::{
 };
 
 use api::{
-    heddle::api::v1alpha1::{
-        BearerProof, CallContext, HumanVerification, RepositoryRef, RequestProof,
-        SignedSpoolOwnerGenesis, StreamOpeningProof, TraceContext, repository_ref,
+    heddle::api::{
+        v1alpha1::{
+            BearerProof, CallContext, HumanVerification, RepositoryRef, RequestProof,
+            StreamOpeningProof, TraceContext, repository_ref,
+        },
+        v2alpha1::SignedSpoolOwnerGenesis,
     },
     signing,
 };
@@ -70,6 +73,28 @@ impl Default for CallContextFactory {
 }
 
 impl CallContextFactory {
+    pub(super) fn native_credentials(&self) -> Result<thread_api::credentials::Credentials> {
+        let biscuit = if self.bearer_capability.is_empty() {
+            Vec::new()
+        } else {
+            biscuit_auth::UnverifiedBiscuit::from_base64(&self.bearer_capability)
+                .and_then(|token| token.to_vec())
+                .map_err(|error| HostedError::Framing(format!("invalid stored Biscuit: {error}")))?
+        };
+        Ok(match &self.signer {
+            Some(signer) => thread_api::credentials::Credentials::Signed {
+                signer: Arc::clone(signer),
+                biscuit,
+                grant_envelope: self.bearer_grant_envelope.clone(),
+            },
+            None if biscuit.is_empty() => thread_api::credentials::Credentials::Public,
+            None => thread_api::credentials::Credentials::Bearer {
+                biscuit,
+                grant_envelope: self.bearer_grant_envelope.clone(),
+            },
+        })
+    }
+
     pub fn bearer_capability(&self) -> &[u8] {
         &self.bearer_capability
     }
@@ -86,36 +111,24 @@ impl CallContextFactory {
         self.signer.as_deref()
     }
 
-    /// Mint CreateSpool genesis with the same device/proof key used for PoP.
-    ///
-    /// A generated-per-spool key would pass CreateSpool and fail later
-    /// purge/claim: `genesis.owner_public_key` must be the account owner-root.
-    /// When a sequence-0 owner-root public key is already stored, refuse a
-    /// different genesis key so purge/claim stay bound to the account root.
-    pub(crate) fn mint_spool_owner_genesis(&self) -> Result<SignedSpoolOwnerGenesis> {
+    /// The caller supplies a fresh, authenticated owner observation. The shared
+    /// verifier proves the full history and rejects a retired or unrelated key.
+    pub(crate) fn mint_spool_owner_genesis(
+        &self,
+        spool_uuid: uuid::Uuid,
+        owner: &api::heddle::api::v2alpha1::OwnerState,
+    ) -> Result<SignedSpoolOwnerGenesis> {
         let signer = self
             .signer
             .as_ref()
             .ok_or(HostedError::SigningIdentityRequired)?;
-        if let Some(seq0) = crate::hosted_runtime::owner_root::stored_seq0_public_key()
-            .map_err(|error| HostedError::Framing(error.to_string()))?
-            && seq0 != signer.public_key()
-        {
-            return Err(HostedError::Framing(
-                "CreateSpool genesis owner key does not match the account sequence-0 owner root"
-                    .to_owned(),
-            ));
-        }
-        let spool_uuid = uuid::Uuid::now_v7();
-        let signed = repo::sign_spool_owner_genesis(signer.as_ref(), *spool_uuid.as_bytes())
-            .map_err(HostedError::from)?;
-        if let Some(seq0) = crate::hosted_runtime::owner_root::stored_seq0_public_key()
-            .map_err(|error| HostedError::Framing(error.to_string()))?
-        {
-            repo::require_genesis_matches_seq0(&signed, &seq0)
-                .map_err(|error| HostedError::Framing(error.to_string()))?;
-        }
-        Ok(signed)
+        repo::sign_current_spool_owner_genesis(
+            signer.as_ref(),
+            spool_uuid,
+            owner,
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(|error| HostedError::Framing(error.to_string()))
     }
 
     pub fn with_bearer_capability(mut self, capability: impl Into<Vec<u8>>) -> Self {
@@ -642,7 +655,10 @@ mod tests {
     #[test]
     fn mint_spool_owner_genesis_requires_the_device_proof_key() {
         let error = CallContextFactory::default()
-            .mint_spool_owner_genesis()
+            .mint_spool_owner_genesis(
+                uuid::Uuid::now_v7(),
+                &api::heddle::api::v2alpha1::OwnerState::default(),
+            )
             .expect_err("CreateSpool must not invent a throwaway owner key");
         assert!(matches!(error, HostedError::SigningIdentityRequired));
     }
@@ -714,7 +730,12 @@ mod tests {
         let factory = CallContextFactory::default()
             .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
             .unwrap();
-        let signed = factory.mint_spool_owner_genesis().unwrap();
+        let signed = factory
+            .mint_spool_owner_genesis(
+                uuid::Uuid::now_v7(),
+                &crate::hosted_runtime::owner_root_tests::observed_owner(&signer),
+            )
+            .unwrap();
         let genesis = signed.genesis.expect("signed genesis payload");
         let spool_uuid: [u8; 16] = genesis
             .spool_uuid

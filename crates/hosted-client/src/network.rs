@@ -8,26 +8,8 @@
 //! address survives process restarts — the acceptance clause the
 //! browser claim link depends on (heddle#1620).
 //!
-//! ## Seam for piece 3 (heddle#1620)
-//!
-//! [`bind_persistent_endpoint`] returns the raw [`Endpoint`] and this
-//! module re-exports iroh's [`Router`], so the claim protocol can be
-//! mounted on the running endpoint without reaching into this crate's
-//! internals:
-//!
-//! ```ignore
-//! use hosted_client::network::{bind_persistent_endpoint, default_relay_mode, Router};
-//!
-//! let endpoint = bind_persistent_endpoint(default_relay_mode()).await?;
-//! // piece 3: mount the claim ALPN on the live endpoint
-//! let router = Router::builder(endpoint.clone())
-//!     .accept(CLAIM_ALPN_V1, claim_protocol)
-//!     .spawn();
-//! ```
-//!
-//! The surface is deliberately narrow: bind, read the node id, choose
-//! a relay mode, and (via the re-exports) attach a router. Everything
-//! else about the endpoint stays private to the hosted runtime.
+//! The daemon mounts native v2 endpoint and account-claim methods on this
+//! endpoint and advertises its actual relay for browser links.
 
 #[cfg(feature = "client")]
 pub use iroh::protocol::Router;
@@ -76,4 +58,72 @@ pub async fn bind_persistent_endpoint(relay_mode: RelayMode) -> anyhow::Result<E
 #[cfg(feature = "client")]
 pub fn persisted_node_id() -> anyhow::Result<Option<EndpointId>> {
     crate::hosted_runtime::net_endpoint::persisted_node_id()
+}
+
+/// Locally advertised browser route, learned from the running endpoint.
+#[cfg(feature = "client")]
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DeviceReachability {
+    node_id: String,
+    relay_url: Option<String>,
+    pid: u32,
+}
+
+#[cfg(feature = "client")]
+fn reachability_path(heddle_home: &std::path::Path) -> std::path::PathBuf {
+    repo::daemon::box_state_dir_in(heddle_home).join("heddle-netd.reachability.json")
+}
+
+/// Keep claim-link relay metadata current as the device's home relay changes.
+/// The daemon owns this task and aborts it before removing its discovery files.
+#[cfg(feature = "client")]
+pub async fn advertise_reachability(
+    endpoint: Endpoint,
+    heddle_home: std::path::PathBuf,
+) -> anyhow::Result<()> {
+    use futures::StreamExt as _;
+    use n0_watcher::Watcher as _;
+    let mut addresses = endpoint.watch_addr().stream();
+    let path = reachability_path(&heddle_home);
+    while let Some(address) = addresses.next().await {
+        let metadata = DeviceReachability {
+            node_id: endpoint.id().to_string(),
+            relay_url: address.relay_urls().next().map(ToString::to_string),
+            pid: std::process::id(),
+        };
+        let bytes = serde_json::to_vec(&metadata)?;
+        objects::fs_atomic::write_file_atomic_secret(&path, &bytes)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "client")]
+pub(crate) fn claim_relay_url(node_id: &str) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    let path = reachability_path(&repo::identity::heddle_home_dir());
+    let metadata: DeviceReachability =
+        serde_json::from_slice(&std::fs::read(&path).context(
+            "device reachability unavailable; start `heddle netd` and wait for its relay",
+        )?)?;
+    if metadata.node_id != node_id || !repo::daemon::pid_alive(metadata.pid) {
+        anyhow::bail!("device reachability belongs to a different or stopped daemon");
+    }
+    metadata
+        .relay_url
+        .context("device has no reachable relay yet; wait for its relay connection")
+}
+
+#[cfg(feature = "client")]
+pub fn remove_reachability(heddle_home: &std::path::Path) -> anyhow::Result<()> {
+    let path = reachability_path(heddle_home);
+    let data = match std::fs::read(&path) {
+        Ok(data) => data,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata: DeviceReachability = serde_json::from_slice(&data)?;
+    if metadata.pid == std::process::id() {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
 }

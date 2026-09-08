@@ -3,7 +3,7 @@ use api::heddle::api::v1alpha1::{
     BootstrapOwnerRootResponse, CheckMergeEligibilityRequest, CheckMergeEligibilityResponse,
     CreateAgentAccountRequest, CreateAgentAccountResponse, CreateGrantRequest,
     CreateInvitationRequest, CreateServiceAccountRequest, CreateSignupInviteRequest,
-    CreateSignupInviteResponse, CreateSpoolRequest, DeleteGrantRequest, DeleteSpoolRequest,
+    CreateSignupInviteResponse, DeleteGrantRequest, DeleteSpoolRequest,
     GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse, GetCurrentUserSpoolRequest,
     GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
     IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
@@ -11,7 +11,7 @@ use api::heddle::api::v1alpha1::{
     ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
     ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
     ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
-    UpdateSpoolRequest, Visibility, grant_target_ref::Target as GrantTargetKind,
+    UpdateSpoolRequest, grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
@@ -210,29 +210,108 @@ impl HostedClient {
         is_repo: bool,
         display_name: Option<String>,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateSpool");
-        let owner_genesis = Some(
-            self.context
-                .mint_spool_owner_genesis()
-                .map_err(hosted_to_protocol_error)?,
-        );
-        let spool = authed_call!(
-            self,
-            create_spool,
-            "CreateSpool",
-            CreateSpoolRequest {
-                parent_path: parent_path.to_string(),
-                slug: slug.to_string(),
-                is_repo,
-                display_name,
-                visibility: Visibility::Private as i32,
-                client_operation_id: operation_id.to_wire(),
-                settings: None,
-                owner_genesis,
-            }
-        );
-        Ok(to_protocol_spool(spool))
+        self.create_spool_with_id(
+            parent_path,
+            slug,
+            is_repo,
+            display_name,
+            uuid::Uuid::now_v7(),
+        )
+        .await
+    }
+
+    /// Publishing an existing local spool retains its original UUID, so every
+    /// already signed Thread and capture keeps the same identity remotely.
+    pub async fn create_spool_with_id(
+        &mut self,
+        parent_path: &str,
+        slug: &str,
+        is_repo: bool,
+        display_name: Option<String>,
+        spool_uuid: uuid::Uuid,
+    ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+        use api::heddle::api::v2alpha1 as contract;
+        let parent = if parent_path.is_empty() {
+            None
+        } else {
+            Some(self.resolve_spool_ref(parent_path).await?)
+        };
+        let operation_id = ClientOperationId::fresh("heddle.api.v2alpha1.SpoolService/CreateSpool");
+        let owner = self.current_owner_state().await?;
+        let genesis = self
+            .context
+            .mint_spool_owner_genesis(spool_uuid, &owner)
+            .map_err(hosted_to_protocol_error)?;
+        let new_id = genesis
+            .genesis
+            .as_ref()
+            .ok_or_else(|| ProtocolError::InvalidState("new spool genesis is absent".into()))?
+            .spool_uuid
+            .clone();
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let request = contract::CreateSpoolRequest {
+            client_operation_id: operation_id.to_wire(),
+            parent: parent.clone(),
+            slug: slug.into(),
+            settings: Some(contract::SpoolSettings {
+                audience: contract::Audience::Private as i32,
+                default_state_audience: contract::Audience::Members as i32,
+                ..Default::default()
+            }),
+            ownership: Some(contract::create_spool_request::Ownership::OwnerGenesis(
+                genesis.clone(),
+            )),
+            display_name,
+        };
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServiceCreateSpool>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        let receipt = response
+            .receipt
+            .ok_or_else(|| ProtocolError::InvalidState("spool creation receipt absent".into()))?;
+        if receipt.client_operation_id != request.client_operation_id
+            || receipt.endpoint != remote.description.endpoint
+            || !matches!(
+                receipt.outcome,
+                Some(contract::mutation_receipt::Outcome::Applied(_))
+            )
+        {
+            return Err(ProtocolError::InvalidState(
+                "spool creation was not applied to the requested endpoint".into(),
+            ));
+        }
+        let spool = response
+            .spool
+            .ok_or_else(|| ProtocolError::InvalidState("created spool absent".into()))?;
+        let reference = spool
+            .r#ref
+            .as_ref()
+            .ok_or_else(|| ProtocolError::InvalidState("created spool identity absent".into()))?;
+        if uuid::Uuid::parse_str(&reference.id)
+            .map_err(native_protocol_error)?
+            .as_bytes()
+            != new_id.as_slice()
+            || spool.owner_genesis.as_ref() != Some(&genesis)
+            || spool.parent != parent
+            || spool.slug != slug
+        {
+            return Err(ProtocolError::InvalidState(
+                "created spool differs from signed request".into(),
+            ));
+        }
+        Ok(wire::HostedSpoolInfo {
+            spool_id: reference.id.clone(),
+            full_path: if parent_path.is_empty() {
+                slug.into()
+            } else {
+                format!("{}/{slug}", parent_path.trim_end_matches('/'))
+            },
+            kind: "spool".into(),
+            is_repo,
+            display_name: (!spool.name.is_empty()).then_some(spool.name),
+        })
     }
 
     pub async fn create_invitation(
@@ -996,4 +1075,8 @@ mod tests {
             "auto-provision must issue CreateSpool without BootstrapOwnerRoot"
         );
     }
+}
+
+fn native_protocol_error(error: impl std::fmt::Display) -> ProtocolError {
+    ProtocolError::InvalidState(error.to_string())
 }

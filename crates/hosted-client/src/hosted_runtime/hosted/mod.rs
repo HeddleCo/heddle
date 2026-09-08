@@ -179,16 +179,58 @@ impl std::fmt::Debug for HostedClient {
 }
 
 impl HostedClient {
+    /// Discover the native contract once, then retain this typed client for the
+    /// command. Connection, descriptor trust and credentials come from the same
+    /// assembled session; no legacy request/response is translated here.
+    pub async fn native(
+        &self,
+    ) -> anyhow::Result<
+        thread_api::Remote<
+            thread_api::transport::IrohTransport<thread_api::credentials::Credentials>,
+        >,
+    > {
+        let credentials = self.context.native_credentials()?;
+        let transport = || {
+            thread_api::transport::IrohTransport::new(
+                self.connection.connection.clone(),
+                credentials.clone(),
+                256 * 1024,
+                std::time::Duration::from_secs(30),
+            )
+        };
+        let description = self
+            .connection
+            .native_description
+            .get_or_try_init(|| async {
+                let remote = thread_api::Remote::discover(
+                    transport()?,
+                    *self.connection.connection.remote_id().as_bytes(),
+                    api::heddle::api::v2alpha1::EndpointKind::Weft,
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(remote.description)
+            })
+            .await?
+            .clone();
+        Ok(thread_api::Remote {
+            api: api::v2::client::Client::new(
+                transport()?,
+                description.implemented_methods.clone(),
+            ),
+            description,
+        })
+    }
+
+    pub(crate) fn claim_authority_token(&self) -> &[u8] {
+        self.context.bearer_capability()
+    }
+
     pub fn routes(&self) -> HostedRoutes<'_> {
         HostedRoutes::new(self)
     }
 
     pub(crate) fn claim_proof_signer(&self) -> Option<&crypto::Ed25519Signer> {
         self.context.proof_signer()
-    }
-
-    pub(crate) fn enrolling_device_context(&self) -> Result<CallContextFactory> {
-        self.context.as_enrolling_device_key()
     }
 
     pub async fn connect(descriptor: &VerifiedEndpointDescriptor) -> Result<Self> {

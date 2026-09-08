@@ -19,8 +19,8 @@ use super::{
     auth_requests::{AuthCommand, AuthOptions, AuthTrustCommand},
     credential_file::{self, CredentialKind, CredentialProvenance, VerifiedCredential},
     device_flow::{
-        AgentAttenuation, AgentTemplate, CI_VERDICT_WRITE_ACTION, SAFE_AGENT_OPERATIONS,
-        attenuate_for_agent, effective_pop_public_key_hex,
+        AgentAttenuation, AgentTemplate, CI_VERDICT_WRITE_ACTION, attenuate_for_agent,
+        effective_pop_public_key_hex,
     },
     hosted::{
         CallContextFactory, HostedAuthMode, HostedClient, HostedError, HostedSession,
@@ -156,7 +156,7 @@ pub struct DerivedAgent {
     pub parent_source: String,
     pub expires_at: String,
     pub template: Option<AgentTemplate>,
-    pub allowed_operations: Vec<String>,
+    pub allowed_operations: Option<Vec<String>>,
     pub scopes: Vec<String>,
     pub rendered_scope: Option<String>,
     pub destination: AgentCredentialDestination,
@@ -491,7 +491,7 @@ pub(crate) fn derive_agent(
         AgentAttenuation {
             agent_id: agent_id.clone(),
             expires_at,
-            allowed_operations: Some(allowed_operations.clone()),
+            allowed_operations: allowed_operations.clone(),
             // W3 (weft#644): the server injects a `resource("repo", <path>)`
             // fact per request, so emit the ENFORCEABLE resource caveat. A
             // `namespace:` scope is encoded client-side as a repo-path prefix
@@ -522,7 +522,7 @@ pub(crate) fn derive_agent(
                     .map(|(kind, path)| format!("{kind}:{path}"))
                     .collect()
             }),
-            allowed_operations: Some(allowed_operations.clone()),
+            allowed_operations: allowed_operations.clone(),
             agent_id: Some(agent_id.clone()),
         };
         let verified = VerifiedCredential {
@@ -595,48 +595,37 @@ fn rendered_agent_scope(
     Some(tokens.join(" "))
 }
 
-/// Resolve the final operation ceiling for a derived agent.
-///
-/// The base set is the template's curated subset (when `--template` is given)
-/// or the full [`SAFE_AGENT_OPERATIONS`] ceiling otherwise. An explicit
-/// `--allow` may only *narrow* that base: every requested operation must be a
-/// member of the base set, and the result is their intersection. This keeps
-/// `--template` pure sugar over `--allow` — it can never widen the ceiling.
+/// Templates and explicit allowlists narrow inherited authority. No hidden
+/// catalog strips admin or identity work from a human-derived agent.
 fn resolve_agent_operations(
     template: Option<AgentTemplate>,
     requested: Vec<String>,
-) -> Result<Vec<String>> {
-    let base: BTreeSet<String> = match template {
-        Some(template) => template.operations().into_iter().collect(),
-        None => SAFE_AGENT_OPERATIONS
-            .iter()
-            .map(|operation| (*operation).to_string())
-            .collect(),
-    };
-
+) -> Result<Option<Vec<String>>> {
+    let preset =
+        template.map(|template| template.operations().into_iter().collect::<BTreeSet<_>>());
     if requested.is_empty() {
-        return Ok(base.into_iter().collect());
+        return Ok(preset.map(|operations| operations.into_iter().collect()));
     }
-
     let mut selected = BTreeSet::new();
     for operation in requested {
-        if !base.contains(&operation) {
-            let ceiling = match template {
-                Some(template) => format!("the {:?} template's operation set", template.as_str()),
-                None => "the safe agent operation ceiling".to_string(),
-            };
+        if preset
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&operation))
+        {
             bail!(
-                "operation {operation:?} is outside {ceiling}; --allow can only narrow the {} set",
-                if template.is_some() {
-                    "template"
-                } else {
-                    "default"
-                }
+                "operation {operation:?} is outside the selected template; --allow can only narrow it"
             );
+        }
+        if !api::v2::ALL_METHODS
+            .iter()
+            .any(|method| method.path.rsplit('/').next() == Some(operation.as_str()))
+            && operation != super::device_flow::CI_VERDICT_WRITE_OPERATION
+        {
+            bail!("unknown v2 operation {operation:?}");
         }
         selected.insert(operation);
     }
-    Ok(selected.into_iter().collect())
+    Ok(Some(selected.into_iter().collect()))
 }
 
 fn parse_agent_scopes(scopes: Vec<String>) -> Result<Vec<(String, String)>> {
@@ -2162,7 +2151,7 @@ mod tests {
                 Some("agent-parent".to_string()),
                 3600,
                 vec!["repo:acme/heddle".to_string()],
-                vec!["Push".to_string()],
+                vec!["PublishContent".to_string()],
                 None,
                 None,
             )
@@ -2210,7 +2199,7 @@ mod tests {
                 Some("agent-child".to_string()),
                 600,
                 vec!["repo:acme/heddle/subtree".to_string()],
-                vec!["Push".to_string()],
+                vec!["PublishContent".to_string()],
                 None,
                 None,
             )
@@ -2248,7 +2237,7 @@ mod tests {
                 Some("agent-widening".to_string()),
                 300,
                 vec!["repo:acme".to_string()],
-                vec!["Push".to_string()],
+                vec!["PublishContent".to_string()],
                 None,
                 None,
             )
@@ -2270,7 +2259,7 @@ mod tests {
                 Some("agent-export".to_string()),
                 3600,
                 vec!["repo:acme/heddle".to_string()],
-                vec!["Push".to_string()],
+                vec!["PublishContent".to_string()],
                 None,
                 Some(&out),
             )
@@ -2297,7 +2286,7 @@ mod tests {
             );
             assert_eq!(
                 provenance.allowed_operations.as_deref(),
-                Some(["Push".to_string()].as_slice())
+                Some(["PublishContent".to_string()].as_slice())
             );
 
             let child_signer =
@@ -2317,7 +2306,7 @@ mod tests {
                 Some("agent-export-again".to_string()),
                 3600,
                 vec!["repo:acme/heddle".to_string()],
-                vec!["Push".to_string()],
+                vec!["PublishContent".to_string()],
                 None,
                 Some(&out),
             )
@@ -2396,7 +2385,7 @@ mod tests {
                 .as_deref(),
                 Some("spool:org/acme ci-verdict:write")
             );
-            for forbidden in ["Push", "UpdateRef", "CreateSpool", "spool:write"] {
+            for forbidden in ["PublishContent", "LandThread", "CreateSpool", "spool:write"] {
                 assert!(
                     !operations.iter().any(|operation| operation == forbidden),
                     "runner .hcred must not carry source-write operation {forbidden}"
@@ -2425,22 +2414,24 @@ mod tests {
     }
 
     #[test]
-    fn derive_agent_allow_flag_cannot_select_unsafe_operations() {
+    fn derive_agent_can_inherit_or_explicitly_delegate_admin_operations() {
+        assert_eq!(
+            resolve_agent_operations(None, Vec::new()).expect("inherited"),
+            None
+        );
         for operation in [
-            "CreateServiceAccount",
-            "IssueServiceAccountCredential",
+            "CreateSignupInvitation",
             "DeleteSpool",
-            "CreateSignupInvite",
-            "ListSignupInvites",
+            "RevokeSession",
+            "PutGrant",
+            "BootstrapOwnership",
         ] {
-            let error = resolve_agent_operations(None, vec![operation.to_string()])
-                .expect_err("unsafe operation must be outside CLI ceiling");
-            assert!(
-                error
-                    .to_string()
-                    .contains("outside the safe agent operation ceiling")
+            assert_eq!(
+                resolve_agent_operations(None, vec![operation.into()]).expect("explicit authority"),
+                Some(vec![operation.into()])
             );
         }
+        assert!(resolve_agent_operations(None, vec!["InventedOperation".into()]).is_err());
     }
 
     #[test]
@@ -2476,45 +2467,52 @@ mod tests {
     #[test]
     fn template_expands_to_a_curated_allow_set() {
         let reviewer = resolve_agent_operations(Some(AgentTemplate::Reviewer), Vec::new())
-            .expect("reviewer template resolves");
-        assert!(reviewer.contains(&"GetState".to_string()));
-        assert!(reviewer.contains(&"Pull".to_string()));
+            .expect("reviewer template resolves")
+            .expect("template restrictions");
+        assert!(reviewer.contains(&"ReadContent".to_string()));
+        assert!(reviewer.contains(&"Fetch".to_string()));
         // Reviewer grants no writes / ref moves.
-        assert!(!reviewer.contains(&"Push".to_string()));
-        assert!(!reviewer.contains(&"UpdateRef".to_string()));
-        assert!(!reviewer.contains(&"SetContext".to_string()));
+        assert!(!reviewer.contains(&"PublishContent".to_string()));
+        assert!(!reviewer.contains(&"LandThread".to_string()));
+        assert!(!reviewer.contains(&"PutContext".to_string()));
 
         let contributor = resolve_agent_operations(Some(AgentTemplate::Contributor), Vec::new())
-            .expect("contributor template resolves");
-        assert!(contributor.contains(&"Push".to_string()));
-        assert!(contributor.contains(&"SetContext".to_string()));
+            .expect("contributor template resolves")
+            .expect("template restrictions");
+        assert!(contributor.contains(&"PublishContent".to_string()));
+        assert!(contributor.contains(&"PutContext".to_string()));
         assert!(contributor.contains(&"OpenDiscussion".to_string()));
-        assert!(!contributor.contains(&"CreateSignupInvite".to_string()));
-        assert!(!contributor.contains(&"ListSignupInvites".to_string()));
+        assert!(!contributor.contains(&"CreateSignupInvitation".to_string()));
+        assert!(contributor.contains(&"ObserveIdentity".to_string()));
 
         let ci = resolve_agent_operations(Some(AgentTemplate::CiLanding), Vec::new())
-            .expect("ci-landing template resolves");
-        assert!(ci.contains(&"Push".to_string()));
-        assert!(ci.contains(&"UpdateRef".to_string()));
-        assert!(ci.contains(&"Pull".to_string()));
+            .expect("ci-landing template resolves")
+            .expect("template restrictions");
+        assert!(ci.contains(&"PublishContent".to_string()));
+        assert!(ci.contains(&"LandThread".to_string()));
+        assert!(ci.contains(&"ReadContent".to_string()));
         // CI landing grants no collaboration writes.
         assert!(!ci.contains(&"OpenDiscussion".to_string()));
-        assert!(!ci.contains(&"SetContext".to_string()));
-        assert!(!ci.contains(&"CreateSignupInvite".to_string()));
+        assert!(!ci.contains(&"PutContext".to_string()));
+        assert!(!ci.contains(&"CreateSignupInvitation".to_string()));
     }
 
     #[test]
     fn explicit_allow_only_narrows_a_template() {
         // `--allow GetState` intersects the reviewer set: result is just GetState.
-        let narrowed =
-            resolve_agent_operations(Some(AgentTemplate::Reviewer), vec!["GetState".to_string()])
-                .expect("narrowing within the template is allowed");
-        assert_eq!(narrowed, vec!["GetState".to_string()]);
+        let narrowed = resolve_agent_operations(
+            Some(AgentTemplate::Reviewer),
+            vec!["ReadContent".to_string()],
+        )
+        .expect("narrowing within the template is allowed");
+        assert_eq!(narrowed, Some(vec!["ReadContent".to_string()]));
 
         // `--allow Push` is outside the reviewer set, so it cannot widen it.
-        let error =
-            resolve_agent_operations(Some(AgentTemplate::Reviewer), vec!["Push".to_string()])
-                .expect_err("a template cannot be widened by --allow");
+        let error = resolve_agent_operations(
+            Some(AgentTemplate::Reviewer),
+            vec!["PublishContent".to_string()],
+        )
+        .expect_err("a template cannot be widened by --allow");
         assert!(error.to_string().contains("outside"));
     }
 

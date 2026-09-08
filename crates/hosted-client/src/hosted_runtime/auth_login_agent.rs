@@ -1,5 +1,13 @@
 //! Node-key remint and invite-create for `heddle auth login`.
 
+use anyhow::{Context, Result, bail};
+use api::heddle::api::{
+    v1alpha1::{CreateAgentAccountRequest, CreateAgentAccountResponse},
+    v2alpha1::SignedOwnerRoot,
+};
+use config::UserConfig;
+use crypto::{Ed25519Signer, Signer as _};
+
 use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
     auth::{AgentAccountCreated, AuthLoginOutcome, headless_token_metadata},
@@ -9,12 +17,6 @@ use super::{
     identity_state::{self, ClaimState},
     root_mint::{is_local_agent_root, mint_agent_root},
 };
-use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::{
-    CreateAgentAccountRequest, CreateAgentAccountResponse, SignedOwnerRoot,
-};
-use config::UserConfig;
-use crypto::{Ed25519Signer, Signer as _};
 
 pub(crate) async fn remint(server: &str) -> Result<AuthLoginOutcome> {
     let stored = mint_restricted_agent_root()?;
@@ -60,7 +62,7 @@ fn claimable_root_for_stored_account(
     let Some(mut state) = identity_state::load()? else {
         return Ok(None);
     };
-    if !super::hosted::server_keys_match(&state.server, server) || state.is_claimed() {
+    if !super::hosted::server_keys_match(&state.server, server) || state.consent_issued() {
         return Ok(None);
     }
     let signer = Ed25519Signer::from_pem(private_key_pem)

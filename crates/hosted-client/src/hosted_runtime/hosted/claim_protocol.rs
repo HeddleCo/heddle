@@ -1,9 +1,8 @@
 //! Inbound Iroh protocol seam for browser-to-agent claim calls.
 //!
-//! Claim request and response messages land with the account flow. This module
-//! owns the transport invariant they depend on now: a dedicated versioned
-//! ALPN, the same call framing used by Weft's Iroh surface, and a fail-closed
-//! claim-secret gate before a method-specific handler can observe a body.
+//! Uses the shared framed native RPC transport. Public endpoint discovery is
+//! separated from claim methods, which require exact browser proof and an
+//! expiring local claim secret before foreground signing.
 
 // `CallFailure` carries structured error detail and intentionally crosses the
 // protocol/handler seam by value, matching Weft's native Iroh dispatcher.
@@ -13,8 +12,8 @@ use std::sync::Arc;
 
 use api::{
     framing::{
-        MAX_CALL_CONTEXT, MAX_CONTROL_BODY, MAX_METHOD_PATH, decode_request_frame,
-        encode_failure_response, encode_success_response,
+        MAX_CALL_CONTEXT, MAX_METHOD_PATH, decode_request_frame, encode_failure_response,
+        encode_success_response,
     },
     heddle::api::v1alpha1::{CallContext, CallFailure, CallFailureCode},
 };
@@ -23,18 +22,22 @@ use iroh::{
     protocol::{AcceptError, ProtocolHandler},
 };
 
-pub(crate) const CLAIM_ALPN_V1: &[u8] = b"heddle-claim/1";
-pub(crate) const CLAIM_RESOLVE_METHOD: &str = "/heddle.claim.v1.ClaimService/Resolve";
-pub(crate) const CLAIM_CONSENT_METHOD: &str = "/heddle.claim.v1.ClaimService/Consent";
-pub(crate) const CLAIM_OWNER_ROOT_METHOD: &str = "/heddle.claim.v1.ClaimService/ClaimOwnerRoot";
+pub(crate) const NATIVE_ALPN: &[u8] = api::HOSTED_ALPN_V1;
+pub(crate) const CLAIM_PREPARE_METHOD: &str =
+    "/heddle.api.v2alpha1.OwnerAuthorizationService/PrepareAccountClaim";
+pub(crate) const CLAIM_SIGN_METHOD: &str =
+    "/heddle.api.v2alpha1.OwnerAuthorizationService/SignAccountClaim";
+const DESCRIBE_METHOD: &str = "/heddle.api.v2alpha1.EndpointService/DescribeEndpoint";
 
-const MAX_REQUEST_FRAME: usize = 6 + MAX_METHOD_PATH + MAX_CALL_CONTEXT + MAX_CONTROL_BODY;
+const MAX_REQUEST_BODY: usize = 256 * 1024;
+const MAX_REQUEST_FRAME: usize = 6 + MAX_METHOD_PATH + MAX_CALL_CONTEXT + MAX_REQUEST_BODY;
 
 /// The account identity established by a valid short-lived claim secret.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VerifiedClaimPrincipal {
     pub(crate) subject: String,
     pub(crate) authorization_hash: String,
+    pub(crate) browser_public_key: Vec<u8>,
 }
 
 pub(crate) trait ClaimSecretVerifier: Send + Sync + std::fmt::Debug + 'static {
@@ -67,11 +70,18 @@ pub(crate) trait ClaimHandler: Send + Sync + std::fmt::Debug + 'static {
 pub(crate) struct ClaimProtocol<V, H> {
     verifier: Arc<V>,
     handler: Arc<H>,
+    endpoint_key: [u8; 32],
+    permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl<V, H> ClaimProtocol<V, H> {
-    pub(crate) fn new(verifier: Arc<V>, handler: Arc<H>) -> Self {
-        Self { verifier, handler }
+    pub(crate) fn new(verifier: Arc<V>, handler: Arc<H>, endpoint_key: [u8; 32]) -> Self {
+        Self {
+            verifier,
+            handler,
+            endpoint_key,
+            permits: Arc::new(tokio::sync::Semaphore::new(32)),
+        }
     }
 }
 
@@ -88,10 +98,19 @@ where
                     let Ok((send, recv)) = incoming else {
                         break;
                     };
+                    let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() else {
+                        drop((send, recv));
+                        continue;
+                    };
+                    let endpoint_key = self.endpoint_key;
                     let verifier = Arc::clone(&self.verifier);
                     let handler = Arc::clone(&self.handler);
                     calls.spawn(async move {
-                        handle_call(verifier.as_ref(), handler.as_ref(), send, recv).await
+                        {
+                            let _permit = permit;
+                            tokio::time::timeout(std::time::Duration::from_secs(30), handle_call(verifier.as_ref(), handler.as_ref(), endpoint_key, send, recv)).await
+                                .map_err(ClaimProtocolError::transport)?
+                        }
                     });
                 }
                 completed = calls.join_next(), if !calls.is_empty() => {
@@ -120,6 +139,7 @@ where
 async fn handle_call<V, H>(
     verifier: &V,
     handler: &H,
+    endpoint_key: [u8; 32],
     mut send: SendStream,
     mut recv: RecvStream,
 ) -> Result<(), ClaimProtocolError>
@@ -127,12 +147,20 @@ where
     V: ClaimSecretVerifier,
     H: ClaimHandler,
 {
-    let request = recv
-        .read_to_end(MAX_REQUEST_FRAME + 1)
-        .await
-        .map_err(ClaimProtocolError::transport)?;
+    let request = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        recv.read_to_end(MAX_REQUEST_FRAME + 1),
+    )
+    .await
+    .map_err(ClaimProtocolError::transport)?
+    .map_err(ClaimProtocolError::transport)?;
     let mut successful_call = None;
     let response = match decode_request_frame(&request) {
+        Ok(frame) if frame.body.len() > MAX_REQUEST_BODY => Err(failure(
+            CallFailureCode::InvalidArgument,
+            "claim request exceeds the body budget",
+        )),
+        Ok(frame) if frame.method == DESCRIBE_METHOD => describe(endpoint_key, frame.body),
         Ok(frame) => match validate_auth_shape(frame.method, &frame.context) {
             Ok(()) => match verifier
                 .verify(frame.method, &frame.context, frame.body)
@@ -173,19 +201,16 @@ where
 }
 
 fn validate_auth_shape(method: &str, context: &CallContext) -> Result<(), CallFailure> {
-    if !matches!(
-        method,
-        CLAIM_RESOLVE_METHOD | CLAIM_CONSENT_METHOD | CLAIM_OWNER_ROOT_METHOD
-    ) {
+    if !matches!(method, CLAIM_PREPARE_METHOD | CLAIM_SIGN_METHOD) {
         return Err(failure(
             CallFailureCode::Unimplemented,
             "unknown claim method",
         ));
     }
-    if context.bearer_capability.is_empty() {
+    if context.request_proof.is_none() {
         return Err(failure(
             CallFailureCode::Unauthenticated,
-            "a claim secret is required",
+            "browser request proof is required",
         ));
     }
     Ok(())
@@ -213,238 +238,34 @@ impl ClaimProtocolError {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::{
-        net::Ipv4Addr,
-        sync::atomic::{AtomicUsize, Ordering},
+fn describe(endpoint_key: [u8; 32], body: &[u8]) -> Result<Vec<u8>, CallFailure> {
+    use api::heddle::api::v2alpha1::*;
+    use prost::Message;
+    DescribeEndpointRequest::decode(body)
+        .map_err(|_| failure(CallFailureCode::InvalidArgument, "invalid endpoint request"))?;
+    let description = DescribeEndpointResponse {
+        endpoint: Some(EndpointRef {
+            public_key: endpoint_key.to_vec(),
+            kind: EndpointKind::Device as i32,
+        }),
+        supported_packages: vec!["heddle.api.v2alpha1".into()],
+        implemented_methods: vec![
+            DESCRIBE_METHOD.into(),
+            CLAIM_PREPARE_METHOD.into(),
+            CLAIM_SIGN_METHOD.into(),
+        ],
+        default_read_budget: Some(ReadBudget {
+            max_items: 100,
+            max_frame_bytes: 256 * 1024,
+            max_snapshot_bytes: 1024 * 1024,
+        }),
+        max_pending_batch_bytes: 1024 * 1024,
+        ..Default::default()
     };
-
-    use api::{
-        framing::{ResponseFrame, decode_response_frame, encode_request_frame},
-        heddle::api::v1alpha1::CallContext,
-    };
-    use iroh::{Endpoint, RelayMode, endpoint::presets, protocol::Router};
-
-    use super::*;
-
-    #[derive(Debug)]
-    struct ExactSecretVerifier {
-        calls: AtomicUsize,
-    }
-
-    impl ClaimSecretVerifier for ExactSecretVerifier {
-        async fn verify(
-            &self,
-            method: &str,
-            context: &CallContext,
-            body: &[u8],
-        ) -> Result<VerifiedClaimPrincipal, CallFailure> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            if context.bearer_capability != b"valid-secret" {
-                return Err(failure(
-                    CallFailureCode::Unauthenticated,
-                    "invalid claim secret",
-                ));
-            }
-            assert_eq!(method, CLAIM_RESOLVE_METHOD);
-            assert_eq!(body, b"resolve");
-            Ok(VerifiedClaimPrincipal {
-                subject: "agent:test".to_string(),
-                authorization_hash: "test-generation".to_string(),
-            })
-        }
-    }
-
-    #[derive(Debug)]
-    struct EchoClaimHandler {
-        calls: AtomicUsize,
-    }
-
-    impl ClaimHandler for EchoClaimHandler {
-        async fn call(
-            &self,
-            method: &str,
-            principal: VerifiedClaimPrincipal,
-            body: &[u8],
-        ) -> Result<Vec<u8>, CallFailure> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok([
-                principal.subject.as_bytes(),
-                b":",
-                method.as_bytes(),
-                b":",
-                body,
-            ]
-            .concat())
-        }
-    }
-
-    fn context(bearer: &[u8]) -> CallContext {
-        CallContext {
-            bearer_capability: bearer.to_vec(),
-            ..CallContext::default()
-        }
-    }
-
-    async fn request(
-        client: &Endpoint,
-        server: iroh::EndpointAddr,
-        alpn: &[u8],
-        context: CallContext,
-    ) -> Result<Vec<u8>, String> {
-        let connection = client
-            .connect(server, alpn)
-            .await
-            .map_err(|error| error.to_string())?;
-        let (mut send, mut recv) = connection
-            .open_bi()
-            .await
-            .map_err(|error| error.to_string())?;
-        let frame = encode_request_frame(CLAIM_RESOLVE_METHOD, &context, b"resolve")
-            .map_err(|error| error.to_string())?;
-        send.write_all(&frame)
-            .await
-            .map_err(|error| error.to_string())?;
-        send.finish().map_err(|error| error.to_string())?;
-        recv.read_to_end(MAX_CONTROL_BODY + 1)
-            .await
-            .map_err(|error| error.to_string())
-    }
-
-    async fn endpoints(
-        verifier: Arc<ExactSecretVerifier>,
-        handler: Arc<EchoClaimHandler>,
-    ) -> (Router, Endpoint, iroh::EndpointAddr) {
-        let server = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))
-            .expect("server bind addr")
-            .bind()
-            .await
-            .expect("server bind");
-        let address = server.addr();
-        let router = Router::builder(server)
-            .accept(CLAIM_ALPN_V1, ClaimProtocol::new(verifier, handler))
-            .spawn();
-        let client = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))
-            .expect("client bind addr")
-            .bind()
-            .await
-            .expect("client bind");
-        (router, client, address)
-    }
-
-    #[tokio::test]
-    async fn claim_alpn_routes_authenticated_calls() {
-        let verifier = Arc::new(ExactSecretVerifier {
-            calls: AtomicUsize::new(0),
-        });
-        let handler = Arc::new(EchoClaimHandler {
-            calls: AtomicUsize::new(0),
-        });
-        let (router, client, address) =
-            endpoints(Arc::clone(&verifier), Arc::clone(&handler)).await;
-
-        let response = request(&client, address, CLAIM_ALPN_V1, context(b"valid-secret"))
-            .await
-            .expect("authenticated claim call");
-        let ResponseFrame::Success(body) = decode_response_frame(&response).expect("response")
-        else {
-            panic!("expected success response");
-        };
-        assert_eq!(
-            body,
-            [
-                b"agent:test:".as_slice(),
-                CLAIM_RESOLVE_METHOD.as_bytes(),
-                b":resolve",
-            ]
-            .concat()
-        );
-        assert_eq!(verifier.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
-
-        client.close().await;
-        router.shutdown().await.expect("router shutdown");
-    }
-
-    #[tokio::test]
-    async fn missing_secret_never_reaches_verifier_or_handler() {
-        let verifier = Arc::new(ExactSecretVerifier {
-            calls: AtomicUsize::new(0),
-        });
-        let handler = Arc::new(EchoClaimHandler {
-            calls: AtomicUsize::new(0),
-        });
-        let (router, client, address) =
-            endpoints(Arc::clone(&verifier), Arc::clone(&handler)).await;
-
-        let response = request(&client, address, CLAIM_ALPN_V1, context(b""))
-            .await
-            .expect("claim refusal response");
-        let ResponseFrame::Failure(failure) =
-            decode_response_frame(&response).expect("failure response")
-        else {
-            panic!("expected authentication failure");
-        };
-        assert_eq!(failure.code, CallFailureCode::Unauthenticated as i32);
-        assert_eq!(verifier.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(handler.calls.load(Ordering::SeqCst), 0);
-
-        client.close().await;
-        router.shutdown().await.expect("router shutdown");
-    }
-
-    #[tokio::test]
-    async fn rejected_secret_never_reaches_handler() {
-        let verifier = Arc::new(ExactSecretVerifier {
-            calls: AtomicUsize::new(0),
-        });
-        let handler = Arc::new(EchoClaimHandler {
-            calls: AtomicUsize::new(0),
-        });
-        let (router, client, address) =
-            endpoints(Arc::clone(&verifier), Arc::clone(&handler)).await;
-
-        let response = request(&client, address, CLAIM_ALPN_V1, context(b"forged-secret"))
-            .await
-            .expect("claim refusal response");
-        let ResponseFrame::Failure(failure) =
-            decode_response_frame(&response).expect("failure response")
-        else {
-            panic!("expected authentication failure");
-        };
-        assert_eq!(failure.code, CallFailureCode::Unauthenticated as i32);
-        assert_eq!(verifier.calls.load(Ordering::SeqCst), 1);
-        assert_eq!(handler.calls.load(Ordering::SeqCst), 0);
-
-        client.close().await;
-        router.shutdown().await.expect("router shutdown");
-    }
-
-    #[tokio::test]
-    async fn unrelated_alpn_is_rejected_before_dispatch() {
-        let verifier = Arc::new(ExactSecretVerifier {
-            calls: AtomicUsize::new(0),
-        });
-        let handler = Arc::new(EchoClaimHandler {
-            calls: AtomicUsize::new(0),
-        });
-        let (router, client, address) =
-            endpoints(Arc::clone(&verifier), Arc::clone(&handler)).await;
-
-        let error = client
-            .connect(address, b"not-heddle-claim")
-            .await
-            .expect_err("wrong ALPN must be rejected");
-        assert!(!error.to_string().is_empty());
-        assert_eq!(verifier.calls.load(Ordering::SeqCst), 0);
-        assert_eq!(handler.calls.load(Ordering::SeqCst), 0);
-
-        client.close().await;
-        router.shutdown().await.expect("router shutdown");
-    }
+    encode_success_response(&description.encode_to_vec()).map_err(|_| {
+        failure(
+            CallFailureCode::Internal,
+            "cannot encode endpoint description",
+        )
+    })
 }

@@ -384,7 +384,11 @@ fn write_derived_agent(writer: &mut impl Write, outcome: DerivedAgent) -> Result
             writeln!(
                 writer,
                 "Allowed operations: {}",
-                outcome.allowed_operations.join(", ")
+                outcome
+                    .allowed_operations
+                    .as_ref()
+                    .map(|operations| operations.join(", "))
+                    .unwrap_or_else(|| "inherited from parent".into())
             )?;
             if let Some(scope) = outcome.rendered_scope {
                 writeln!(writer, "Scope: {scope}")?;
@@ -404,7 +408,11 @@ fn write_derived_agent(writer: &mut impl Write, outcome: DerivedAgent) -> Result
             writeln!(
                 writer,
                 "Allowed operations: {}",
-                outcome.allowed_operations.join(", ")
+                outcome
+                    .allowed_operations
+                    .as_ref()
+                    .map(|operations| operations.join(", "))
+                    .unwrap_or_else(|| "inherited from parent".into())
             )?;
             if outcome.scopes.is_empty() {
                 writeln!(
@@ -483,8 +491,8 @@ pub async fn cmd_hosted_claim(args: ClaimArgs) -> Result<()> {
     )
     .await?;
     match outcome {
-        ClaimOutcome::Claimed => {
-            println!("Claim complete. This agent account now has a human owner.")
+        ClaimOutcome::ConsentIssued => {
+            println!("Owner consent signed. Complete the account claim in your browser.")
         }
         ClaimOutcome::Expired => println!("Claim offer expired without changing the account."),
         ClaimOutcome::Interrupted => {
@@ -793,9 +801,8 @@ mod tests {
         whoami::{CaptureActor as HostedCaptureActor, WhoamiRole as HostedWhoamiRole},
     };
 
-    use crate::cli::{AuthTrustReplaceArgs, AuthTrustShowArgs};
-
     use super::*;
+    use crate::cli::{AuthTrustReplaceArgs, AuthTrustShowArgs};
 
     fn rendered(outcome: AuthOutcome, json: bool) -> String {
         let mut bytes = Vec::new();
@@ -861,7 +868,7 @@ mod tests {
             parent_source: "device".into(),
             expires_at: "2030-01-01T00:00:00Z".into(),
             template: Some(AgentTemplate::Reviewer),
-            allowed_operations: vec!["Pull".into(), "WhoAmI".into()],
+            allowed_operations: Some(vec!["ReadContent".into(), "ObserveIdentity".into()]),
             scopes: vec!["repo:heddle/heddle".into()],
             rendered_scope: Some("repo:heddle/heddle".into()),
             destination,

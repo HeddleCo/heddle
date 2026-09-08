@@ -1702,6 +1702,7 @@ impl HostedClient {
         initializer: Option<PullRepositoryInitializer<'a>>,
     ) -> Result<(PullExchange, Option<Repository>), ProtocolError> {
         let exchange_start = Instant::now();
+        let owner_genesis = self.native_spool_genesis(repo_path).await?;
         let mut exclude_states = Vec::new();
         // Whether the head comes from an explicit `--local-thread` or is
         // inferred from the bare remote thread, it is advertised as
@@ -1846,8 +1847,8 @@ impl HostedClient {
             .map(str::to_owned)
             .collect::<Vec<_>>();
         repo.verify_and_pin_owner_genesis(
-            ready.owner_authorization_protocol_version,
-            ready.owner_genesis.as_ref(),
+            2,
+            Some(&owner_genesis),
             &spool_path_segments,
         )
         .map_err(|error| {
@@ -2087,35 +2088,10 @@ impl HostedClient {
                     let decode_elapsed = decode_start.elapsed();
                     profile.store_receive_object += decode_elapsed;
                 }
-                Some(pull_server_frame::Frame::Purge(transfer)) => {
-                    wire::check_received_transfer_blob_size(
-                        transfer.redactions_blob.len(),
-                        wire::MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
-                        "purge",
-                    )?;
-                    profile.bytes_received = profile
-                        .bytes_received
-                        .saturating_add(transfer.redactions_blob.len());
-                    profile.object_mix.record(ObjectType::Purge);
-                    let blob = ContentHash::from_hex(&transfer.blob_hash).map_err(|err| {
-                        ProtocolError::InvalidState(format!(
-                            "PurgeTransfer.blob_hash is not a valid content hash: {err}"
-                        ))
-                    })?;
-                    let decode_start = Instant::now();
-                    repo.accept_wire_purge(
-                        blob,
-                        &transfer.redactions_blob,
-                        transfer.authorization.as_ref(),
-                        chrono::Utc::now().timestamp(),
-                    )
-                    .map_err(|err| {
-                        ProtocolError::InvalidState(format!(
-                            "accept_wire_purge for blob {}: {err}",
-                            transfer.blob_hash
-                        ))
-                    })?;
-                    profile.store_receive_object += decode_start.elapsed();
+                Some(pull_server_frame::Frame::Purge(_)) => {
+                    return Err(ProtocolError::InvalidState(
+                        "purge requires a native FetchContent sidecar with portable owner authorization".into(),
+                    ));
                 }
                 Some(pull_server_frame::Frame::StateVisibility(transfer)) => {
                     wire::check_received_transfer_blob_size(

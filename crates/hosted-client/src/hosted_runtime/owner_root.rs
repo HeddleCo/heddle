@@ -1,41 +1,15 @@
-//! Claimable deferred-human owner-root mint for agent login / provision / claim.
-
+//! Local claimable roots and native ownership bootstrap.
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::{
-    AccessTokenResponse, AuthorizationSignature, AuthorizationVerificationKey,
-    BootstrapOwnerRootRequest, BootstrapOwnerRootResponse, OwnerKeyBinding, RecoveryPolicy,
-    RegisterPublicKeyRequest, SignedOwnerKeyTransition, SignedOwnerRoot,
+use api::heddle::api::v2alpha1::{
+    BootstrapOwnershipRequest, PrincipalRef, SignedOwnerRoot, mutation_receipt,
 };
 use crypto::{Ed25519Signer, Signer as _};
 use prost::Message;
 use repo::{
-    ClaimDeferredHuman, seq0_authority_public_key, sign_agent_claim_binding,
-    sign_claim_deferred_human, sign_claimable_deferred_human_root,
+    seq0_authority_public_key, sign_agent_claim_binding, sign_claimable_deferred_human_root,
 };
 
-use super::{
-    hosted::{HostedClient, HostedError, operation_id::ClientOperationId},
-    identity_state::{self, ClaimState},
-};
-
-const BOOTSTRAP_OWNER_ROOT: &str =
-    "/heddle.api.v1alpha1.OwnerAuthorizationService/BootstrapOwnerRoot";
-const REGISTER_PUBLIC_KEY: &str = "/heddle.api.v1alpha1.IdentityService/RegisterPublicKey";
-
-/// Additive weft#1863 field on the raw BootstrapOwnerRoot request.
-#[derive(Clone, PartialEq, Message)]
-pub struct BootstrapOwnerRootExtension {
-    #[prost(message, optional, tag = "5")]
-    pub owner_key_binding: Option<OwnerKeyBinding>,
-}
-
-/// Additive weft#1863 field on the raw RegisterPublicKey request.
-#[derive(Clone, PartialEq, Message)]
-pub struct RegisterPublicKeyClaimExtension {
-    #[prost(message, optional, tag = "16")]
-    pub claim_deferred_human: Option<SignedOwnerKeyTransition>,
-}
-
+use super::{hosted::HostedClient, identity_state::ClaimState};
 pub(crate) fn mint_and_record_claimable_root(
     state: &mut ClaimState,
     signer: &Ed25519Signer,
@@ -73,185 +47,38 @@ pub(crate) fn load_recorded_root(state: &ClaimState) -> Result<Option<SignedOwne
     Ok(Some(signed))
 }
 
-pub(crate) fn stored_seq0_public_key() -> Result<Option<Vec<u8>>> {
-    Ok(identity_state::load()?.and_then(|state| state.seq0_public_key()))
-}
-
-pub(crate) fn encode_bootstrap_owner_root(
-    request: &BootstrapOwnerRootRequest,
-    binding: &OwnerKeyBinding,
-) -> Vec<u8> {
-    let mut encoded = request.encode_to_vec();
-    encoded.extend_from_slice(
-        &BootstrapOwnerRootExtension {
-            owner_key_binding: Some(binding.clone()),
-        }
-        .encode_to_vec(),
-    );
-    encoded
-}
-
-#[allow(deprecated)]
-pub(crate) fn encode_register_public_key_claim(
-    request: &RegisterPublicKeyRequest,
-    transition: &SignedOwnerKeyTransition,
-) -> Result<Vec<u8>> {
-    if request.owner_root.is_some()
-        || request.owner_root_proof_of_possession.is_some()
-        || request.owner_key_binding.is_some()
-    {
-        bail!(
-            "RegisterPublicKey claim must not send owner_root, owner_root_proof_of_possession, or owner_key_binding; those replace sequence-0"
-        );
-    }
-    if !request.device_public_key.is_empty() {
-        bail!(
-            "RegisterPublicKey must not send device_public_key; send only device_proof_public_key"
-        );
-    }
-    if !request.biscuit_authority_public_key.is_empty() {
-        bail!(
-            "RegisterPublicKey must not send biscuit_authority_public_key; send only device_proof_public_key"
-        );
-    }
-    if request.device_proof_public_key.len() != 32 {
-        bail!("RegisterPublicKey device_proof_public_key must be 32 bytes");
-    }
-    let kind = transition
-        .transition
-        .as_ref()
-        .context("ClaimDeferredHuman has no body")?
-        .kind();
-    if kind != api::heddle::api::v1alpha1::OwnerKeyTransitionKind::ClaimDeferredHuman {
-        bail!("RegisterPublicKey claim extension must be ClaimDeferredHuman, got {kind:?}");
-    }
-    let mut encoded = request.encode_to_vec();
-    encoded.extend_from_slice(
-        &RegisterPublicKeyClaimExtension {
-            claim_deferred_human: Some(transition.clone()),
-        }
-        .encode_to_vec(),
-    );
-    Ok(encoded)
-}
-
 pub(crate) async fn upload_claimable_root(
     client: &mut HostedClient,
     signer: &Ed25519Signer,
     signed: SignedOwnerRoot,
 ) -> Result<()> {
-    let operation_id = ClientOperationId::fresh(BOOTSTRAP_OWNER_ROOT);
-    let binding = sign_agent_claim_binding(signer, &signed, operation_id.as_str())
-        .context("signing AgentClaim owner-key binding for BootstrapOwnerRoot")?;
-    let request = BootstrapOwnerRootRequest {
-        owner_root: Some(signed),
-        approval: None,
-        client_operation_id: operation_id.to_wire(),
-        // Additive api 0.21.0 field (tag 5). This client carries its
-        // UUID-to-key binding in the appended AgentClaim extension
-        // (`encode_bootstrap_owner_root`), so the inline binding stays empty,
-        // which preserves prior bootstrap behavior.
-        owner_key_binding: None,
-    };
-    let encoded = encode_bootstrap_owner_root(&request, &binding);
-    match client
-        .call_unary_encoded::<BootstrapOwnerRootResponse>(BOOTSTRAP_OWNER_ROOT, &encoded)
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(HostedError::Call {
-            code: api::heddle::api::v1alpha1::CallFailureCode::AlreadyExists,
-            ..
-        }) => Ok(()),
-        Err(HostedError::Call { message, .. }) if already_installed(&message) => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-/// Build ClaimDeferredHuman. Do not send this as ClaimAgentOwner / a
-/// replacement sequence-0 OwnerRootInstall — those rewrite genesis.
-#[derive(Clone, Debug)]
-pub(crate) struct BrowserClaimDeferredHuman {
-    pub(crate) next_authority_key: AuthorizationVerificationKey,
-    pub(crate) next_authority_key_proof: AuthorizationSignature,
-    pub(crate) next_recovery_policy: RecoveryPolicy,
-    pub(crate) next_recovery_key_proofs: Vec<AuthorizationSignature>,
-    pub(crate) valid_from_unix_seconds: i64,
-    pub(crate) nonce: [u8; 32],
-}
-
-pub(crate) fn build_claim_deferred_human(
-    agent: &Ed25519Signer,
-    signed_root: &SignedOwnerRoot,
-    browser: BrowserClaimDeferredHuman,
-) -> Result<SignedOwnerKeyTransition> {
-    sign_claim_deferred_human(ClaimDeferredHuman {
-        current_authority: agent,
-        signed_root,
-        next_authority_key: browser.next_authority_key,
-        next_authority_key_proof: browser.next_authority_key_proof,
-        next_recovery_policy: browser.next_recovery_policy,
-        next_recovery_key_proofs: browser.next_recovery_key_proofs,
-        valid_from_unix_seconds: browser.valid_from_unix_seconds,
-        nonce: browser.nonce,
-    })
-}
-
-pub(crate) fn prepare_register_public_key_claim(
-    state: &mut ClaimState,
-    request: RegisterPublicKeyRequest,
-    transition: SignedOwnerKeyTransition,
-) -> Result<()> {
-    let encoded = encode_register_public_key_claim(&request, &transition)?;
-    state.record_pending_register_public_key(&encoded);
-    Ok(())
-}
-
-pub(crate) async fn send_pending_register_public_key_claim(
-    client: &mut HostedClient,
-) -> Result<Option<AccessTokenResponse>> {
-    let encoded = {
-        let _guard = identity_state::write_lock()?;
-        let Some(mut state) = identity_state::load_while_locked()? else {
-            return Ok(None);
-        };
-        let Some(encoded) = state.take_pending_register_public_key()? else {
-            return Ok(None);
-        };
-        identity_state::store_while_locked(&state)?;
-        encoded
-    };
-    let signer = client
-        .claim_proof_signer()
-        .context("RegisterPublicKey requires this device's proof key")?;
-    require_enrolling_device_proof_key(&encoded, signer)?;
-    let enrollment = client
-        .enrolling_device_context()
-        .context("signing RegisterPublicKey as the enrolling device key")?;
-    Ok(Some(
-        client
-            .call_unary_encoded_with(&enrollment, REGISTER_PUBLIC_KEY, &encoded)
-            .await?,
-    ))
-}
-
-#[allow(deprecated)]
-pub(crate) fn require_enrolling_device_proof_key(
-    encoded: &[u8],
-    signer: &Ed25519Signer,
-) -> Result<()> {
-    let request = RegisterPublicKeyRequest::decode(encoded)
-        .context("decode pending RegisterPublicKey claim")?;
-    if !request.device_public_key.is_empty() || !request.biscuit_authority_public_key.is_empty() {
-        bail!("RegisterPublicKey must send only device_proof_public_key");
-    }
-    if request.device_proof_public_key != signer.public_key() {
-        bail!("RegisterPublicKey device_proof_public_key must be this device's proof key");
+    let operation_id = uuid::Uuid::now_v7().to_string();
+    let binding = sign_agent_claim_binding(signer, &signed, &operation_id)?;
+    let owner_id = uuid::Uuid::from_slice(
+        &signed
+            .root
+            .as_ref()
+            .context("missing owner root")?
+            .account_uuid,
+    )?
+    .to_string();
+    let native = client.native().await?;
+    let result = native
+        .api
+        .call::<thread_api::rpc::OwnerAuthorizationServiceBootstrapOwnership>(
+            &BootstrapOwnershipRequest {
+                client_operation_id: operation_id,
+                owner: Some(PrincipalRef { id: owner_id }),
+                root: Some(signed),
+                binding: Some(binding),
+            },
+        )
+        .await?;
+    if !matches!(
+        result.receipt.and_then(|receipt| receipt.outcome),
+        Some(mutation_receipt::Outcome::Applied(_))
+    ) {
+        bail!("owner bootstrap did not apply");
     }
     Ok(())
-}
-
-fn already_installed(message: &str) -> bool {
-    let lowered = message.to_ascii_lowercase();
-    lowered.contains("already") && (lowered.contains("owner") || lowered.contains("root"))
 }
