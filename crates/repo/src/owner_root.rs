@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Client mint for protocol-1 owner roots and ClaimDeferredHuman.
 //!
-//! Weft verifies; it does not hold the owner private key. Sequence-0 of a
+//! Self-rooted users retain their keys; custodial users have dedicated account keys.
+//! Sequence-0 of a
 //! claimable deferred-human root is the same device/proof key CreateSpool
 //! pins as spool genesis. Claim advances authority with ClaimDeferredHuman
 //! and must not mint a replacement human sequence-0.
@@ -74,6 +75,85 @@ pub fn sign_claimable_deferred_human_root(
     };
     verify_owner_root(&signed).context("minted claimable owner root failed local verify")?;
     Ok(signed)
+}
+
+/// Establish a new server-rooted human account using its two dedicated keys.
+/// The caller must persist both keys in that account's isolated custody before
+/// committing the root. Existing accounts must replay their original root.
+pub fn sign_custodial_owner_root(
+    authority: &impl Signer,
+    recovery: &impl Signer,
+    account_uuid: [u8; 16],
+    nonce: [u8; 32],
+) -> Result<SignedOwnerRoot> {
+    use api::heddle::api::v2alpha1::{RecoveryGuardian, RecoveryGuardianKind};
+    if authority.public_key() == recovery.public_key() {
+        bail!("custodial recovery requires a dedicated account guardian key");
+    }
+    let mut root = OwnerRoot {
+        format_version: OWNER_ROOT_FORMAT_VERSION,
+        account_uuid: account_uuid.to_vec(),
+        authority_key: Some(ed25519_verification_key(authority.public_key())?),
+        recovery_policy: Some(RecoveryPolicy {
+            threshold: 1,
+            guardians: vec![RecoveryGuardian {
+                kind: RecoveryGuardianKind::Weft as i32,
+                key: Some(ed25519_verification_key(recovery.public_key())?),
+            }],
+            window_secs: Some(DEFAULT_RECOVERY_WINDOW_SECS),
+        }),
+        nonce: nonce.to_vec(),
+        ..Default::default()
+    };
+    root.owner_id = domain_digest(OWNER_ROOT_DOMAIN, &owner_root_without_id(&root)?).to_vec();
+    let body = owner_root_body(&root)?;
+    let signed = SignedOwnerRoot {
+        root: Some(root),
+        authority_proof: Some(sign_canonical(authority, OWNER_ROOT_DOMAIN, &body)?),
+        recovery_key_proofs: vec![sign_canonical(recovery, OWNER_ROOT_DOMAIN, &body)?],
+    };
+    verify_owner_root(&signed).context("custodial owner root failed local verification")?;
+    Ok(signed)
+}
+
+/// Bind an original server-rooted owner to its stable account, using the exact
+/// nonce retained by the admitted signup ceremony. No host attestation is added.
+pub fn sign_custodial_owner_binding(
+    authority: &impl Signer,
+    signed_root: &SignedOwnerRoot,
+    challenge_nonce: [u8; 32],
+) -> Result<OwnerKeyBinding> {
+    let state = verify_owner_root(signed_root).context("verify original custodial root")?;
+    let root = signed_root
+        .root
+        .as_ref()
+        .context("custodial root has no body")?;
+    if root.claimable_deferred_human || state.authority_key().public_key != authority.public_key() {
+        bail!("custodial binding must use the original account authority");
+    }
+    let account: [u8; 16] = root
+        .account_uuid
+        .as_slice()
+        .try_into()
+        .context("owner account UUID")?;
+    let mut binding = OwnerKeyBinding {
+        format_version: OWNER_ROOT_FORMAT_VERSION,
+        stable_owner_uuid: account.to_vec(),
+        root_public_key: Some(ed25519_verification_key(authority.public_key())?),
+        root_state_hash: state.state_hash().to_vec(),
+        kind: OwnerKeyBindingKind::ServerRootedCustody as i32,
+        binding_epoch: 1,
+        challenge_nonce: challenge_nonce.to_vec(),
+        root_proof_of_possession: None,
+    };
+    binding.root_proof_of_possession = Some(sign_canonical(
+        authority,
+        OWNER_BINDING_DOMAIN,
+        &owner_binding_body(&binding)?,
+    )?);
+    verify_owner_key_binding(&binding, &state, &account)
+        .context("custodial binding failed local verification")?;
+    Ok(binding)
 }
 
 /// Browser proof material for a ClaimDeferredHuman transition.

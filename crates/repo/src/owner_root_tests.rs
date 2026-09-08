@@ -625,3 +625,35 @@ fn spool_genesis_requires_current_authority_and_verifiable_history() {
     changed.owner.as_mut().expect("owner").id = uuid::Uuid::now_v7().to_string();
     assert!(crate::sign_current_spool_owner_genesis(&current, spool, &changed, NOW + 1).is_err());
 }
+
+#[test]
+fn custodial_roots_preserve_dedicated_account_authority_and_recovery() {
+    let authority = crypto::Ed25519Signer::from_seed(&[131; 32]).expect("account authority");
+    let recovery = crypto::Ed25519Signer::from_seed(&[132; 32]).expect("dedicated recovery");
+    let root = crate::sign_custodial_owner_root(&authority, &recovery, ACCOUNT, [133; 32])
+        .expect("custodial root");
+    let state = verify_owner_root(&root).expect("portable verification");
+    assert_eq!(state.authority_key().public_key, authority.public_key());
+    assert_eq!(state.recovery_policy().threshold, 1);
+    assert_eq!(state.recovery_policy().window_secs, Some(604800));
+    assert_eq!(
+        state.recovery_policy().guardians[0]
+            .key
+            .as_ref()
+            .expect("guardian")
+            .public_key,
+        recovery.public_key()
+    );
+    let binding =
+        crate::sign_custodial_owner_binding(&authority, &root, [134; 32]).expect("account binding");
+    verify_owner_key_binding(&binding, &state, &ACCOUNT).expect("exact stable account");
+    assert!(verify_owner_key_binding(&binding, &state, &[9; 16]).is_err());
+    assert!(crate::sign_custodial_owner_binding(&recovery, &root, [134; 32]).is_err());
+    assert!(crate::sign_custodial_owner_root(&authority, &authority, ACCOUNT, [133; 32]).is_err());
+    let mut changed = root;
+    changed.recovery_key_proofs[0].signature[0] ^= 1;
+    assert!(
+        verify_owner_root(&changed).is_err(),
+        "guardian actually proves its dedicated key"
+    );
+}

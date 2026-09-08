@@ -60,8 +60,8 @@ pub use owner_root::{
     genesis_owner_public_key, owner_key_transition_body, registration_binding_nonce,
     require_genesis_matches_seq0, seq0_authority_public_key, sign_agent_claim_binding,
     sign_canonical, sign_claim_deferred_human, sign_claimable_deferred_human_root,
-    sign_current_spool_owner_genesis, sign_proposed_account_claim,
-    verify_account_owner_observation, verify_spool_owner_observation,
+    sign_current_spool_owner_genesis, sign_custodial_owner_binding, sign_custodial_owner_root,
+    sign_proposed_account_claim, verify_account_owner_observation, verify_spool_owner_observation,
 };
 mod repository;
 mod repository_key_binding;
