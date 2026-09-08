@@ -402,3 +402,32 @@ fn agent_claim_binding_uses_registration_nonce_and_verifies_against_the_root() {
     let state = verify_owner_root(&signed).expect("root");
     verify_owner_key_binding(&binding, &state, &ACCOUNT).expect("weft verifies the binding");
 }
+
+#[test]
+fn proposed_claim_binds_entire_transition_and_browser_registration_key() {
+    let agent = crypto::Ed25519Signer::generate().expect("agent");
+    let human = crypto::Ed25519Signer::generate().expect("human");
+    let g1 = crypto::Ed25519Signer::generate().expect("guardian one");
+    let g2 = crypto::Ed25519Signer::generate().expect("guardian two");
+    let root = sign_claimable_deferred_human_root(&agent, ACCOUNT, [5; 32], NOW).expect("root");
+    let policy = paper_policy(&g1, &g2);
+    let (key, proof, guardians) = browser_claim_proofs(&root, &human, &policy, &[g1, g2], NOW + 1, [8; 32]);
+    let proposed = api::heddle::api::v2alpha1::SignedOwnerKeyTransition {
+        transition: Some(crate::claim_deferred_human_transition(&root, key, policy, NOW + 1, [8; 32]).expect("body")),
+        authorizations: vec![],
+        next_authority_key_proof: Some(proof),
+        next_recovery_key_proofs: guardians,
+    };
+    let signed = crate::sign_proposed_account_claim(&agent, &root, &proposed, human.public_key()).expect("cosign exact proposal");
+    assert_eq!(signed.transition, proposed.transition);
+    assert_eq!(signed.authorizations.len(), 1);
+    assert_eq!(signed.next_authority_key_proof, proposed.next_authority_key_proof);
+    assert!(crate::sign_proposed_account_claim(&agent, &root, &proposed, agent.public_key()).expect_err("registration key substitution").to_string().contains("registration"));
+    let mut changed = proposed.clone();
+    changed.transition.as_mut().expect("body").sequence = 2;
+    assert!(crate::sign_proposed_account_claim(&agent, &root, &changed, human.public_key()).expect_err("sequence substitution").to_string().contains("exact"));
+    let mut changed = proposed.clone();
+    changed.transition.as_mut().expect("body").owner_id = [7;32].to_vec();
+    assert!(crate::sign_proposed_account_claim(&agent, &root, &changed, human.public_key()).expect_err("owner substitution").to_string().contains("exact"));
+    assert!(crate::sign_proposed_account_claim(&agent, &root, &signed, human.public_key()).expect_err("already authorized proposal").to_string().contains("authorizations"));
+}
