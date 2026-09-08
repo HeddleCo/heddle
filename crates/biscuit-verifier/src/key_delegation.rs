@@ -189,6 +189,140 @@ mod tests {
         );
     }
     #[test]
+    fn device_delegation_browser_third_party_fixture() {
+        let (parent, signer, child, now) = fixture();
+        let token =
+            Biscuit::from_base64(&parent, |_| Ok(key(11).public())).expect("original fixture");
+        let parent_id = token.revocation_identifiers()[0].to_vec();
+        let retain_key = signer.verifying_key().to_bytes();
+        let retain_signature = signer
+            .sign(&statement(&parent, &retain_key).expect("retained-key statement"))
+            .to_bytes();
+        let external = key(15);
+        let external_block = token
+            .third_party_request()
+            .expect("third-party request")
+            .create_block(
+                &external.private(),
+                BlockBuilder::new()
+                    .fact(
+                        format!(
+                            "pop_delegation(\"{}\", \"{}\", \"{}\")",
+                            hex::encode(parent_id),
+                            hex::encode(retain_key),
+                            hex::encode(retain_signature)
+                        )
+                        .as_str(),
+                    )
+                    .expect("signed same-key delegation")
+                    .fact("external_marker(\"fixture\")")
+                    .expect("external fact"),
+            )
+            .expect("signed external block");
+        let parent = token
+            .append_third_party_with_keypair(external.public(), external_block, key(16))
+            .expect("signature-v1 parent")
+            .to_base64()
+            .expect("parent bytes");
+        let payload = statement(&parent, &child.verifying_key().to_bytes()).expect("statement");
+        let signature = signer.sign(&payload).to_bytes();
+        let delegated = append(
+            &parent,
+            &child.verifying_key().to_bytes(),
+            &signature,
+            device_restrictions(now + chrono::Duration::minutes(5)).expect("expiry"),
+        )
+        .expect("delegation");
+        let facts = crate::verify_any_at_with_resource(
+            &delegated,
+            None,
+            &[key(11).public()],
+            &[],
+            "ObserveIdentity",
+            None,
+            now,
+        )
+        .expect("full signature-v1 child verification");
+        assert_eq!(
+            facts.cnf,
+            Some(hex::encode(child.verifying_key().as_bytes()))
+        );
+        assert!(facts.rights.iter().any(|right| right.action == "admin"));
+        let vector = format!(
+            "parent={}\nparent_public_key={}\nchild_public_key={}\nstatement={}\nsignature={}\nexpires_at={}\n",
+            parent,
+            hex::encode(signer.verifying_key().as_bytes()),
+            hex::encode(child.verifying_key().as_bytes()),
+            hex::encode(payload),
+            hex::encode(signature),
+            (now + chrono::Duration::minutes(5)).to_rfc3339()
+        );
+        assert_eq!(
+            vector,
+            include_str!("../tests/fixtures/device_delegation_third_party_v1.txt")
+        );
+    }
+
+    #[test]
+    fn browser_generated_device_child_passes_full_verifier() {
+        let (original, _, child_key, now) = fixture();
+        for (encoded, expected_parent) in [
+            (
+                include_str!("../tests/fixtures/browser_device_delegation_v1.txt"),
+                original.as_str(),
+            ),
+            (
+                include_str!("../tests/fixtures/browser_device_delegation_third_party_v1.txt"),
+                include_str!("../tests/fixtures/device_delegation_third_party_v1.txt")
+                    .lines()
+                    .next()
+                    .expect("parent line")
+                    .strip_prefix("parent=")
+                    .expect("parent prefix"),
+            ),
+        ] {
+            let field = |name: &str| {
+                encoded
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .expect("fixture field")
+            };
+            let parent = field("parent=");
+            let child = field("child=");
+            assert_eq!(parent, expected_parent);
+            require_descendant(parent, child).expect("browser preserves original signed blocks");
+            let facts = crate::verify_any_at_with_resource(
+                child,
+                None,
+                &[key(11).public()],
+                &[],
+                "ObserveIdentity",
+                None,
+                now,
+            )
+            .expect("browser-produced credential has valid full chain");
+            assert_eq!(
+                facts.cnf,
+                Some(hex::encode(child_key.verifying_key().as_bytes()))
+            );
+            assert!(facts.rights.iter().any(|right| right.action == "admin"));
+            assert!(
+                crate::verify_any_at_with_resource(
+                    child,
+                    None,
+                    &[key(11).public()],
+                    &[],
+                    "ObserveIdentity",
+                    None,
+                    now + chrono::Duration::minutes(5)
+                )
+                .is_err(),
+                "browser strict expiry boundary is enforced by Rust"
+            );
+        }
+    }
+
+    #[test]
     fn device_delegation_browser_statement_fixture() {
         let (parent, signer, child, now) = fixture();
         let payload = statement(&parent, &child.verifying_key().to_bytes()).expect("statement");
