@@ -14,6 +14,31 @@ fn author() -> Attribution {
 }
 
 #[test]
+fn local_creation_retains_creator_proof_and_reopens_by_id_without_the_key() {
+    use crypto::thread_operation::SignedGenesis;
+    let (_dir, repo, mut genesis, signer, _replica) = setup();
+    genesis.nonce.push(93);
+    let signed = SignedGenesis::sign(&genesis, &signer).expect("original proof");
+    let created = ThreadReplica::create(repo.heddle_dir(), &signed).expect("signed creation");
+    let id = created.thread_id();
+    drop(created);
+    drop(signer);
+    let reopened = ThreadReplica::open(repo.heddle_dir(), id).expect("reopen by stable ID");
+    assert_eq!(reopened.signed_genesis().expect("durable original proof"), signed);
+    let relay = TempDir::new().expect("another device");
+    let copied = ThreadReplica::create(relay.path(), &reopened.signed_genesis().expect("relay proof")).expect("no creator key needed");
+    assert_eq!(copied.thread_id(), id);
+    assert_eq!(copied.signed_genesis().expect("unchanged proof"), signed);
+    let missing = TempDir::new().expect("empty device");
+    assert!(ThreadReplica::open(missing.path(), id).is_err());
+    assert!(!missing.path().join("thread-replication.sqlite3").exists(), "a lookup cannot create storage");
+    let mut invalid = signed;
+    invalid.signature[0] ^= 1;
+    assert!(ThreadReplica::create(missing.path(), &invalid).is_err());
+    assert!(!missing.path().join("thread-replication.sqlite3").exists(), "invalid proof must fail before storage creation");
+}
+
+#[test]
 fn genesis_creation_and_reopen_share_the_same_record_bound() {
     let (_dir, repository, mut genesis, _signer, _replica) = setup();
     genesis.intent = "x".repeat(objects::object::thread_replication::MAX_OPERATION_BYTES / 2);
