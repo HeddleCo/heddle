@@ -20,6 +20,7 @@ native = [
     "dep:uuid",
     "dep:hex",
     "dep:tokio",
+    "dep:tempfile",
 ]
 # An Iroh adapter for the transport-neutral client and replication driver.
 iroh = ["dep:iroh", "dep:tokio"]
@@ -44,6 +45,7 @@ iroh = { package = "heddleco-iroh", version = "=0.1.0", default-features = false
 prost = "=0.14.1"
 thiserror = "=2.0.18"
 tokio = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = "1"
