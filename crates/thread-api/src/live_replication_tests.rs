@@ -128,3 +128,116 @@ async fn stalled_delivery_retains_memory_releases_work_and_refunds_on_cancellati
         .expect("all work and memory allowances refunded");
     }
 }
+
+struct InputReader {
+    frame: Option<Vec<u8>>,
+    input_memory: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+impl MessageReader for InputReader {
+    type Error = transport::Error;
+    async fn next(&mut self) -> std::result::Result<Option<Vec<u8>>, Self::Error> {
+        if let Some(frame) = self.frame.take() {
+            return Ok(Some(frame));
+        }
+        self.input_memory.take();
+        std::future::pending().await
+    }
+    fn cancel(&mut self) {
+        self.input_memory.take();
+    }
+}
+struct MemoryGuard(Option<tokio::sync::OwnedSemaphorePermit>);
+impl ActivityGuard for MemoryGuard {
+    type Retained = Option<tokio::sync::OwnedSemaphorePermit>;
+    fn finish(self) -> Self::Retained {
+        self.0
+    }
+}
+
+#[tokio::test]
+async fn admitted_input_can_finish_while_the_output_memory_pool_is_full() {
+    let directory = tempfile::TempDir::new().expect("local replica");
+    let repo = Repository::init_default(directory.path()).expect("repository");
+    let signer = Ed25519Signer::from_seed(&[17; 32]).expect("creator");
+    let genesis = ThreadGenesis {
+        version: 1,
+        spool: "01980000-0000-7000-8000-000000000001".into(),
+        parent: None,
+        base: repo.head().expect("HEAD").expect("initial state"),
+        name: "stream".into(),
+        intent: "separate work from delivery".into(),
+        creator: signer.public_key().try_into().expect("key"),
+        nonce: vec![91],
+    };
+    let replica = ThreadReplica::create(
+        repo.heddle_dir(),
+        &SignedGenesis::sign(&genesis, &signer).expect("proof"),
+    )
+    .expect("replica");
+    let feed = Feed::new(replica.clone()).await.expect("shared feed");
+    let session = Session::new(
+        LocalReplica::new(replica, Arc::new(repo.store().clone())),
+        [7; 32],
+        [ThreadFacet::Source].into(),
+        1,
+    )
+    .expect("session");
+
+    let memory = Arc::new(tokio::sync::Semaphore::new(1));
+    let reader = InputReader {
+        frame: Some(
+            ReplicateThreadRequest {
+                body: Some(replicate_thread_request::Body::Have(
+                    ReplicationHave::default(),
+                )),
+            }
+            .encode_to_vec(),
+        ),
+        input_memory: Some(
+            memory
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("admitted input memory"),
+        ),
+    };
+    let sent = Arc::new(Notify::new());
+    let writer = StalledWriter(sent.clone());
+    let activity_memory = memory.clone();
+    let task = tokio::spawn(async move {
+        run(
+            session,
+            reader,
+            writer,
+            Side::Acceptor,
+            &feed,
+            move |activity| {
+                let memory = activity_memory.clone();
+                async move {
+                    let reservation = if activity == Activity::Work {
+                        Some(
+                            memory
+                                .acquire_owned()
+                                .await
+                                .map_err(|_| transport::Error::Protocol("memory closed"))?,
+                        )
+                    } else {
+                        None
+                    };
+                    Ok(MemoryGuard(reservation))
+                }
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), sent.notified()).await.expect("input processing must release its existing memory before output needs another reservation");
+    task.abort();
+    assert!(task.await.expect_err("cancelled").is_cancelled());
+    tokio::time::timeout(Duration::from_millis(300), async {
+        while memory.available_permits() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("input and output memory returned after cancellation");
+}
