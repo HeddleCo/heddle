@@ -2,7 +2,8 @@
 //!
 //! This crate is the single authorization implementation shared by native
 //! Weft and the Cloudflare provider Worker. It deliberately owns no storage,
-//! networking, runtime, environment, or token-minting concerns.
+//! networking, runtime, environment, or root-minting concerns.
+//! Existing capabilities may be narrowed offline using [`delegation`].
 
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use thiserror::Error;
 
+pub mod delegation;
 pub mod edge;
 pub mod envelope;
 pub mod facts;
@@ -741,22 +743,19 @@ mod tests {
             let signature = parent_signer.sign(&pop_delegation_payload(&parent_id, &child_key));
             token = token
                 .append(
-                    BlockBuilder::new()
-                        .code(
+                    delegation::AgentAttenuation::time_bounded(format!("agent-{seed}"), expires)
+                        .block()
+                        .expect("inherited scope")
+                        .fact(
                             format!(
-                                r#"
-                agent("agent-{seed}");
-                pop_delegation("{}", "{}", "{}");
-                check if time($now), $now < {};
-            "#,
+                                "pop_delegation(\"{}\", \"{}\", \"{}\")",
                                 hex::encode(parent_id),
                                 hex::encode(child_key),
-                                hex::encode(signature.to_bytes()),
-                                expires.to_rfc3339()
+                                hex::encode(signature.to_bytes())
                             )
                             .as_str(),
                         )
-                        .expect("delegated key and expiry"),
+                        .expect("delegated proof key"),
                 )
                 .expect("derive agent offline");
             let encoded = token.to_base64().expect("credential");
@@ -791,12 +790,30 @@ mod tests {
             .to_vec();
         let child_key = parent_signer.verifying_key().to_bytes();
         let signature = parent_signer.sign(&pop_delegation_payload(&parent_id, &child_key));
-        let narrowed = token.append(BlockBuilder::new().code(format!(r#"
-            pop_delegation("{}", "{}", "{}");
-            check if operation("ObserveIdentity") or operation("ReadContent");
-            check if operation("ObserveIdentity") or resource($kind,$path), $kind=="spool", $path=="org/allowed";
-        "#, hex::encode(parent_id), hex::encode(child_key), hex::encode(signature.to_bytes())).as_str()).expect("explicit work ceilings"))
-            .expect("narrow the existing chain").to_base64().expect("credential");
+        let narrowed = token
+            .append(
+                delegation::AgentAttenuation {
+                    agent_id: "scoped-agent".into(),
+                    expires_at: expires,
+                    allowed_operations: Some(vec!["ReadContent".into()]),
+                    allowed_resources: Some(vec![("spool".into(), "org/allowed".into())]),
+                }
+                .block()
+                .expect("explicit work ceilings")
+                .fact(
+                    format!(
+                        "pop_delegation(\"{}\", \"{}\", \"{}\")",
+                        hex::encode(parent_id),
+                        hex::encode(child_key),
+                        hex::encode(signature.to_bytes())
+                    )
+                    .as_str(),
+                )
+                .expect("delegated proof key"),
+            )
+            .expect("narrow the existing chain")
+            .to_base64()
+            .expect("credential");
         let facts = verify_at_with_resource(
             &narrowed,
             &[root.public()],
