@@ -2156,7 +2156,7 @@ dependencies = [
 [[package]]
 name = "heddle-api"
 version = "0.29.0"
-source = "git+https://github.com/HeddleCo/api.git?rev=031c47666bd0d9698295baec23c804a1ce6f1abd#031c47666bd0d9698295baec23c804a1ce6f1abd"
+source = "git+https://github.com/HeddleCo/api.git?rev=320b12c90149f03af58b3f4fa9ed66d405114112#320b12c90149f03af58b3f4fa9ed66d405114112"
 dependencies = [
  "blake3",
  "bytes",
