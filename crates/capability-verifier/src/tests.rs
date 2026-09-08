@@ -4,7 +4,6 @@ use biscuit_auth::{Biscuit, KeyPair, PrivateKey, builder::Algorithm};
 use ed25519_dalek::{Signer, SigningKey};
 use prost::Message;
 use sha2::{Digest, Sha256};
-
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_test::wasm_bindgen_test;
 

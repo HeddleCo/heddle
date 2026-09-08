@@ -7,7 +7,7 @@
 //! and must not mint a replacement human sequence-0.
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::{
+use api::heddle::api::v2alpha1::{
     AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey,
     OwnerKeyBinding, OwnerKeyBindingKind, OwnerKeyTransition, OwnerKeyTransitionKind, OwnerRoot,
     RecoveryPolicy, SignedOwnerKeyTransition, SignedOwnerRoot, SignedSpoolOwnerGenesis,
@@ -444,7 +444,7 @@ fn verification_key(encoder: &mut Encoder, key: &AuthorizationVerificationKey) -
 
 fn guardian(
     encoder: &mut Encoder,
-    guardian: &api::heddle::api::v1alpha1::RecoveryGuardian,
+    guardian: &api::heddle::api::v2alpha1::RecoveryGuardian,
 ) -> Result<()> {
     encoder.i32(guardian.kind);
     let key = guardian

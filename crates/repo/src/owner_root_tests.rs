@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use api::heddle::api::v1alpha1::{
+use api::heddle::api::v2alpha1::{
     AuthorizationSignature, AuthorizationVerificationKey, OwnerKeyBindingKind, OwnerKeyTransition,
     OwnerKeyTransitionKind, RecoveryGuardian, RecoveryGuardianKind, RecoveryPolicy,
     SignedOwnerRoot,
