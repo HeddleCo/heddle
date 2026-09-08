@@ -240,11 +240,19 @@ impl ThreadOperation {
                 if context.metadata.scope.spool.to_string() != genesis.spool {
                     return Err(invalid("context belongs to another spool"));
                 }
+                if parents.is_empty() && context.extracted_from.is_some() {
+                    return Err(invalid(
+                        "context extraction requires a signed discussion resolution",
+                    ));
+                }
                 for parent in parents {
                     let parent = parent.context_revision()?.ok_or_else(|| {
                         invalid("context parent is not a context revision or extraction")
                     })?;
-                    if parent.id != context.id || parent.metadata.scope != context.metadata.scope {
+                    if parent.id != context.id
+                        || parent.metadata.scope != context.metadata.scope
+                        || parent.extracted_from != context.extracted_from
+                    {
                         return Err(invalid("context parents belong to another record or scope"));
                     }
                 }

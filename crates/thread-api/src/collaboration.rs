@@ -161,6 +161,11 @@ pub fn sign_context(
     let thread = context.metadata.scope.thread.ok_or(Error::Protocol(
         "Thread context requires native Thread scope",
     ))?;
+    if parents.is_empty() && context.extracted_from.is_some() {
+        return Err(Error::Protocol(
+            "context extraction requires a signed discussion resolution",
+        ));
+    }
     let mut ids = BTreeSet::new();
     for record in parents {
         let parent = verify(record)?;
@@ -173,6 +178,7 @@ pub fn sign_context(
         if parent.thread != thread
             || previous.id != context.id
             || previous.metadata.scope != context.metadata.scope
+            || previous.extracted_from != context.extracted_from
         {
             return Err(Error::Protocol(
                 "context parent belongs to another record or scope",
@@ -419,18 +425,34 @@ mod tests {
             .validate_parents(&genesis, &[extracted_operation])
             .expect("context retains discussion extraction as causal root");
         let mut detached = verify(&revision).expect("context operation");
-        let mut detached_context = detached.context_revision().expect("decode").expect("context");
+        let mut detached_context = detached
+            .context_revision()
+            .expect("decode")
+            .expect("context");
         detached_context.extracted_from = None;
         detached.body = ThreadOperationBody::Context(detached_context.encode().expect("context"));
-        assert!(detached.validate_parents(&genesis, &[verify(&extracted).expect("original extraction")]).is_err(),
-            "context revision cannot strip its extraction provenance");
+        assert!(
+            detached
+                .validate_parents(
+                    &genesis,
+                    &[verify(&extracted).expect("original extraction")]
+                )
+                .is_err(),
+            "context revision cannot strip its extraction provenance"
+        );
         let mut invented_root = verify(&revision).expect("context operation");
-        let mut invented_context = invented_root.context_revision().expect("decode").expect("context");
+        let mut invented_context = invented_root
+            .context_revision()
+            .expect("decode")
+            .expect("context");
         invented_context.parents.clear();
         invented_root.parents.clear();
-        invented_root.body = ThreadOperationBody::Context(invented_context.encode().expect("context"));
-        assert!(invented_root.validate_parents(&genesis, &[]).is_err(),
-            "extraction requires an original signed discussion resolution");
+        invented_root.body =
+            ThreadOperationBody::Context(invented_context.encode().expect("context"));
+        assert!(
+            invented_root.validate_parents(&genesis, &[]).is_err(),
+            "extraction requires an original signed discussion resolution"
+        );
         context.metadata.actor.principal_id = Uuid::from_u128(10);
         assert!(
             make(CollaborationOperationBodyV1::Resolve {
@@ -519,7 +541,9 @@ mod tests {
         revision.content = "Refined extracted rationale".into();
         let extracted_revision = sign_context(revision, std::slice::from_ref(&extraction), &signer)
             .expect("extracted context revision");
-        let context = sign_context(context, &[], &signer).expect("context");
+        let mut standalone_context = context;
+        standalone_context.extracted_from = None;
+        let context = sign_context(standalone_context, &[], &signer).expect("context");
         let source_record = |revision| {
             command(
                 discussion,
