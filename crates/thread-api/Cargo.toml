@@ -27,7 +27,7 @@ iroh = ["dep:iroh", "dep:tokio", "dep:heddle-perf-contract"]
 # Causal protocol and async stream driver, without a local repository or Iroh.
 replication = ["signing", "dep:heddle-object-model", "dep:tokio"]
 # Portable exact-request verification; hosts retain authority and nonce storage.
-signing = ["dep:crypto", "dep:hex", "dep:uuid"]
+signing = ["dep:crypto", "dep:hex", "dep:uuid", "dep:getrandom"]
 # Opt-in host-side extraction; ordinary browser/operator clients stay parser-free.
 semantic-analysis = ["dep:semantic"]
 # Portable endpoint/root binding; no repository, Iroh, storage or parser graph.
@@ -52,6 +52,10 @@ prost = "=0.14.1"
 thiserror = "=2.0.18"
 tokio = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"], optional = true }
+uuid = { workspace = true, features = ["js"], optional = true }
 
 [dev-dependencies]
 anyhow = "1"

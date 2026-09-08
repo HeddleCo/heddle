@@ -31,6 +31,7 @@ jobs:
         run: |
           rustup target add wasm32-unknown-unknown
           cargo check --locked -p heddle-thread-api --no-default-features --target wasm32-unknown-unknown --lib
+          cargo check --locked -p heddle-thread-api --no-default-features --features root-attachment --target wasm32-unknown-unknown --lib
       - name: Keep client and backend dependencies separate
         run: |
           python3 - <<'PYCODE'
@@ -38,6 +39,7 @@ jobs:
           cases = [
               ("", {"heddle-repo", "heddle-objects", "heddleco-iroh", "biscuit-auth", "tokio"}),
               ("native", {"heddleco-iroh"}),
+              ("root-attachment", {"heddle-repo", "heddle-objects", "heddleco-iroh", "tokio"}),
               ("signing", {"heddle-repo", "heddle-objects", "heddleco-iroh", "biscuit-auth", "tokio"}),
               ("replication", {"heddle-repo", "heddle-objects", "heddleco-iroh", "biscuit-auth"}),
               ("iroh", {"heddle-repo", "heddle-objects", "biscuit-auth"}),
@@ -57,6 +59,8 @@ jobs:
           PYCODE
       - run: cargo test --locked -p heddle-thread-api
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features signing --lib
+      - run: cargo test --locked -p heddle-thread-api --no-default-features --features root-attachment --test root_attachment
+      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features root-attachment --all-targets -- -D warnings
       - run: cargo check --locked -p heddle-thread-api --no-default-features --features replication --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features native --lib

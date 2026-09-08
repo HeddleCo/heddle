@@ -342,3 +342,12 @@ checkouts, runs, attention, notifications, integrations and durable operations
 use the same bounded atomic checkpoint reader as Thread and analysis views.
 Bookmarks bind the authenticated endpoint, exact method and selected projection;
 identical protobuf request bytes on different methods cannot exchange bookmarks.
+
+The portable `root-attachment` feature verifies a subject-signed Iroh endpoint
+binding against an independently trusted root and the original private Biscuit.
+The public record carries only its digest. Its verifier checks the complete
+proof-key chain, exact endpoint/canonical bytes, subject signature and credential
+lifetime. Retained evidence must be reverified when used; an attachment never
+replaces authorization or revocation checks on a later request. New attenuation
+keeps the original root association and is verified as a separate current call.
+This feature builds for WASM without repository, Iroh, storage or parser crates.

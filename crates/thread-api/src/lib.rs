@@ -21,6 +21,8 @@ pub mod replication;
 pub mod replication_rpc;
 #[cfg(feature = "signing")]
 pub mod request_proof;
+#[cfg(feature = "root-attachment")]
+pub mod root_attachment;
 pub mod transport;
 
 use api::v2::client::{Client, ClientError, RpcTransport};
