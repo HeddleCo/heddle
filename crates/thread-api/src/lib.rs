@@ -12,6 +12,8 @@ pub mod content;
 pub mod creation;
 #[cfg(feature = "signing")]
 pub mod credentials;
+#[cfg(feature = "replication")]
+pub mod evidence;
 #[cfg(feature = "source-transfer")]
 pub mod fetch;
 #[cfg(feature = "replication")]

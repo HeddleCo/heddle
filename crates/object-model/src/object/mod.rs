@@ -10,6 +10,7 @@ mod action_struct;
 mod annotated_tag;
 mod audience_tier;
 mod blob;
+pub mod check_evidence;
 pub mod collaboration;
 mod diff;
 mod discussion;
