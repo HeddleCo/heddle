@@ -31,6 +31,7 @@ impl SourceFileCore {
                 symbol_id: String::new(),
                 start_line: None,
                 end_line: None,
+                target: None,
             },
         }
         .validate()
@@ -57,6 +58,7 @@ impl SourceTargetCore {
             symbol_id: String::new(),
             start_line: None,
             end_line: None,
+            target: None,
         }
         .validate()
         .map_err(|error| SourceTargetError::Invalid(error.to_string()))?;
@@ -91,6 +93,31 @@ pub enum SourceSelector {
 pub struct SourceTargetReference {
     pub target: ContentHash,
     pub binding: SourceTargetBinding,
+}
+
+impl SourceTargetReference {
+    pub fn validate(&self) -> Result<(), SourceTargetError> {
+        match &self.binding {
+            SourceTargetBinding::ViewedThread => Ok(()),
+            SourceTargetBinding::NamedThread { scope } => {
+                self.binding.scope(scope)?;
+                Ok(())
+            }
+            SourceTargetBinding::PinnedRevision { scope, revision } => {
+                self.binding.scope(scope)?;
+                CollaborationSourceAnchor {
+                    revision: revision.clone(),
+                    path: String::new(),
+                    symbol_id: String::new(),
+                    start_line: None,
+                    end_line: None,
+                    target: None,
+                }
+                .validate()
+                .map_err(|error| invalid(&error.to_string()))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

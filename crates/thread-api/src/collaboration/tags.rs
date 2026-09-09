@@ -87,6 +87,11 @@ pub fn annotation_source(
             symbol_id: source.symbol_id.clone(),
             start_line: source.start_line,
             end_line: source.end_line,
+            target: source
+                .target
+                .as_ref()
+                .map(super::references::source_target)
+                .transpose()?,
         },
     };
     reference.validate().map_err(invalid)?;
@@ -117,6 +122,11 @@ pub fn annotation_source_ref(
             symbol_id: value.source.symbol_id.clone(),
             start_line: value.source.start_line,
             end_line: value.source.end_line,
+            target: value
+                .source
+                .target
+                .as_ref()
+                .map(super::references::source_target_ref),
             thread: value.scope.thread.map(|id| api::ThreadRef {
                 spool,
                 id: Some(api::ThreadId {

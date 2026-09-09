@@ -17,6 +17,7 @@ fn source(path: &str, start: u32, end: u32) -> AnnotationSourceReference {
             symbol_id: String::new(),
             start_line: Some(start),
             end_line: Some(end),
+            target: None,
         },
     }
 }

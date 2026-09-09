@@ -196,6 +196,129 @@ pub fn mention_ref(value: &Mention) -> EntityRef {
     }
 }
 
+pub(super) fn source_target(
+    value: &SourceTargetReference,
+) -> Result<heddle_object_model::object::source_target::SourceTargetReference, Error> {
+    use heddle_object_model::object::{
+        CollaborationRevision, CollaborationScope,
+        source_target::{SourceTargetBinding, SourceTargetReference as Target},
+    };
+    fn named(value: &ThreadRef) -> Result<CollaborationScope, Error> {
+        Ok(CollaborationScope {
+            spool: spool(value.spool.as_ref())?,
+            thread: Some(ContentHash::from_bytes(key(&value
+                .id
+                .as_ref()
+                .ok_or(Error::Protocol("target requires Thread ID"))?
+                .value)?)),
+        })
+    }
+    let binding = match value
+        .binding
+        .as_ref()
+        .ok_or(Error::Protocol("explicit source target binding required"))?
+    {
+        source_target_reference::Binding::ViewedThread(true) => SourceTargetBinding::ViewedThread,
+        source_target_reference::Binding::ViewedThread(false) => {
+            return Err(Error::Protocol("viewed Thread binding must be true"));
+        }
+        source_target_reference::Binding::NamedThread(value) => SourceTargetBinding::NamedThread {
+            scope: named(value)?,
+        },
+        source_target_reference::Binding::PinnedRevision(value) => {
+            let revision = value
+                .revision
+                .as_ref()
+                .ok_or(Error::Protocol("pinned target requires revision"))?;
+            let spool = spool(revision.spool.as_ref())?;
+            let scope = match &value.thread {
+                Some(thread) => {
+                    let scope = named(thread)?;
+                    if scope.spool != spool {
+                        return Err(Error::Protocol(
+                            "pinned target Thread belongs to another Spool",
+                        ));
+                    }
+                    scope
+                }
+                None => CollaborationScope {
+                    spool,
+                    thread: None,
+                },
+            };
+            let revision = match revision
+                .revision
+                .as_ref()
+                .ok_or(Error::Protocol("pinned target requires exact revision"))?
+            {
+                revision_ref::Revision::State(id) => CollaborationRevision::State {
+                    state_id: StateId::from_bytes(key(&id.value)?),
+                },
+                revision_ref::Revision::GitCommitOid(oid) => {
+                    CollaborationRevision::GitCommit { oid: oid.clone() }
+                }
+            };
+            SourceTargetBinding::PinnedRevision { scope, revision }
+        }
+    };
+    let target = Target {
+        target: ContentHash::from_bytes(key(&value.target_id)?),
+        binding,
+    };
+    target
+        .validate()
+        .map_err(|_| Error::Protocol("invalid source target binding"))?;
+    Ok(target)
+}
+pub(super) fn source_target_ref(
+    value: &heddle_object_model::object::source_target::SourceTargetReference,
+) -> SourceTargetReference {
+    use heddle_object_model::object::{
+        CollaborationRevision, CollaborationScope, source_target::SourceTargetBinding,
+    };
+    fn thread(scope: &CollaborationScope) -> Option<ThreadRef> {
+        scope.thread.map(|id| ThreadRef {
+            spool: wire_spool(scope.spool),
+            id: Some(ThreadId {
+                value: id.as_bytes().to_vec(),
+            }),
+        })
+    }
+    let binding = match &value.binding {
+        SourceTargetBinding::ViewedThread => source_target_reference::Binding::ViewedThread(true),
+        SourceTargetBinding::NamedThread { scope } => {
+            source_target_reference::Binding::NamedThread(ThreadRef {
+                spool: wire_spool(scope.spool),
+                id: scope.thread.map(|id| ThreadId {
+                    value: id.as_bytes().to_vec(),
+                }),
+            })
+        }
+        SourceTargetBinding::PinnedRevision { scope, revision } => {
+            source_target_reference::Binding::PinnedRevision(PinnedSourceTargetRevision {
+                thread: thread(scope),
+                revision: Some(RevisionRef {
+                    spool: wire_spool(scope.spool),
+                    revision: Some(match revision {
+                        CollaborationRevision::State { state_id } => {
+                            revision_ref::Revision::State(api::heddle::api::v1alpha1::StateId {
+                                value: state_id.as_bytes().to_vec(),
+                            })
+                        }
+                        CollaborationRevision::GitCommit { oid } => {
+                            revision_ref::Revision::GitCommitOid(oid.clone())
+                        }
+                    }),
+                }),
+            })
+        }
+    };
+    SourceTargetReference {
+        target_id: value.target.as_bytes().to_vec(),
+        binding: Some(binding),
+    }
+}
+
 /// Bind an API anchor to the canonical scope before signing or admitting it.
 pub fn anchor(
     value: &CollaborationAnchor,
@@ -272,6 +395,7 @@ pub fn anchor(
                         symbol_id: value.symbol_id.clone(),
                         start_line: value.start_line,
                         end_line: value.end_line,
+                        target: value.target.as_ref().map(source_target).transpose()?,
                     },
                 }
             }
@@ -359,6 +483,7 @@ pub fn anchor_ref(
             symbol_id: source.symbol_id.clone(),
             start_line: source.start_line,
             end_line: source.end_line,
+            target: source.target.as_ref().map(source_target_ref),
             thread,
         },
         Anchor::State { state_id }
@@ -382,6 +507,7 @@ pub fn anchor_ref(
             },
             start_line: None,
             end_line: None,
+            target: None,
             thread,
         },
         Anchor::Change { .. } => {
@@ -398,6 +524,103 @@ pub fn anchor_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn explicit_target_bindings_round_trip_and_reject_incomplete_identity() {
+        use heddle_object_model::object::{
+            CollaborationRevision, CollaborationScope,
+            source_target::{SourceTargetBinding, SourceTargetReference as Target},
+        };
+        let scope = CollaborationScope {
+            spool: Uuid::from_u128(1),
+            thread: Some(ContentHash::from_bytes([2; 32])),
+        };
+        for binding in [
+            SourceTargetBinding::ViewedThread,
+            SourceTargetBinding::NamedThread {
+                scope: scope.clone(),
+            },
+            SourceTargetBinding::PinnedRevision {
+                scope: scope.clone(),
+                revision: CollaborationRevision::GitCommit {
+                    oid: "a".repeat(40),
+                },
+            },
+            SourceTargetBinding::PinnedRevision {
+                scope: CollaborationScope {
+                    thread: None,
+                    ..scope.clone()
+                },
+                revision: CollaborationRevision::State {
+                    state_id: StateId::from_bytes([5; 32]),
+                },
+            },
+        ] {
+            let target = Target {
+                target: ContentHash::from_bytes([6; 32]),
+                binding,
+            };
+            assert_eq!(
+                source_target(&source_target_ref(&target)).expect("lossless binding"),
+                target
+            );
+            let source = heddle_object_model::object::CollaborationSourceAnchor {
+                revision: CollaborationRevision::State {
+                    state_id: StateId::from_bytes([5; 32]),
+                },
+                path: "src/main.rs".into(),
+                symbol_id: "run".into(),
+                start_line: Some(12),
+                end_line: Some(18),
+                target: Some(target),
+            };
+            let original = heddle_object_model::object::CollaborationAnchor::Source {
+                source: source.clone(),
+            };
+            assert_eq!(
+                anchor(&anchor_ref(&original, &scope).expect("wire anchor"), &scope)
+                    .expect("canonical anchor"),
+                original
+            );
+            let reference = heddle_object_model::object::AnnotationSourceReference {
+                scope: scope.clone(),
+                source,
+            };
+            assert_eq!(
+                super::super::annotation_source(&super::super::annotation_source_ref(&reference))
+                    .expect("canonical tag reference"),
+                reference
+            );
+        }
+        for binding in [
+            None,
+            Some(source_target_reference::Binding::ViewedThread(false)),
+            Some(source_target_reference::Binding::NamedThread(ThreadRef {
+                spool: wire_spool(Uuid::from_u128(1)),
+                id: None,
+            })),
+            Some(source_target_reference::Binding::PinnedRevision(
+                PinnedSourceTargetRevision {
+                    revision: None,
+                    thread: None,
+                },
+            )),
+        ] {
+            assert!(
+                source_target(&SourceTargetReference {
+                    target_id: vec![6; 32],
+                    binding
+                })
+                .is_err()
+            );
+        }
+        assert!(
+            source_target(&SourceTargetReference {
+                target_id: vec![6; 31],
+                binding: Some(source_target_reference::Binding::ViewedThread(true))
+            })
+            .is_err()
+        );
+    }
     #[test]
     fn every_native_mention_retains_kind_scope_and_identity() {
         let spool = Uuid::from_u128(1);
@@ -496,6 +719,7 @@ mod tests {
             symbol_id: "run".into(),
             start_line: Some(12),
             end_line: Some(18),
+            target: None,
             thread: Some(thread),
         };
         let value = CollaborationAnchor {

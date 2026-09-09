@@ -17,9 +17,18 @@ pub struct CollaborationSourceAnchor {
     pub symbol_id: String,
     pub start_line: Option<u32>,
     pub end_line: Option<u32>,
+    /// Original coordinates remain evidence. Without an explicit target this
+    /// is an exact location, never an implicitly tracking reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<crate::object::source_target::SourceTargetReference>,
 }
 impl CollaborationSourceAnchor {
     pub(crate) fn validate(&self) -> Result<(), CollaborationCodecError> {
+        if let Some(target) = &self.target {
+            target
+                .validate()
+                .map_err(|error| CollaborationCodecError::Invalid(error.to_string()))?;
+        }
         if let CollaborationRevision::GitCommit { oid } = &self.revision {
             if !matches!(oid.len(), 40 | 64)
                 || !oid
@@ -71,6 +80,7 @@ mod tests {
             symbol_id: "run".into(),
             start_line: Some(12),
             end_line: Some(18),
+            target: None,
         };
         let record = CollaborationOperationEnvelope::new(
             DiscussionRecordId::generate(),

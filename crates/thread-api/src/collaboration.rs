@@ -549,7 +549,7 @@ mod tests {
         let mut standalone_context = context;
         standalone_context.extracted_from = None;
         let context = sign_context(standalone_context, &[], &signer).expect("context");
-        let source_record = |revision| {
+        let source_record = |revision, target| {
             command(
                 discussion,
                 CollaborationOperationBodyV1::Open {
@@ -563,6 +563,7 @@ mod tests {
                             symbol_id: "run".into(),
                             start_line: Some(12),
                             end_line: Some(18),
+                            target,
                         },
                     },
                     turn: DiscussionTurnV1::new("Check these lines").expect("turn"),
@@ -572,14 +573,17 @@ mod tests {
             .sign(&[], &signer)
             .expect("source root")
         };
-        let source_state =
-            source_record(heddle_object_model::object::CollaborationRevision::State {
+        let source_state = source_record(
+            heddle_object_model::object::CollaborationRevision::State {
                 state_id: StateId::from_bytes([5; 32]),
-            });
+            },
+            None,
+        );
         let source_git = source_record(
             heddle_object_model::object::CollaborationRevision::GitCommit {
                 oid: "a".repeat(40),
             },
+            None,
         );
         let mut structured = verify(&context)
             .expect("context proof")
@@ -600,6 +604,7 @@ mod tests {
                         symbol_id: "auth::authorize".into(),
                         start_line: Some(12),
                         end_line: Some(18),
+                        target: None,
                     },
                 }),
             },
@@ -627,6 +632,78 @@ mod tests {
         ];
         let structured_context =
             sign_context(structured, &[], &signer).expect("structured context");
+        use heddle_object_model::object::{
+            AnnotationSourceReference, AnnotationTag, CollaborationRevision, CollaborationScope,
+            CollaborationSourceAnchor,
+            source_target::{SourceTargetBinding, SourceTargetReference},
+        };
+        let mut tracked = Vec::new();
+        for (name, tag_name, binding) in [
+            (
+                "target_viewed",
+                "tag_viewed",
+                SourceTargetBinding::ViewedThread,
+            ),
+            (
+                "target_named",
+                "tag_named",
+                SourceTargetBinding::NamedThread {
+                    scope: CollaborationScope {
+                        spool: Uuid::from_u128(1),
+                        thread: Some(ContentHash::from_bytes([8; 32])),
+                    },
+                },
+            ),
+            (
+                "target_pinned",
+                "tag_pinned",
+                SourceTargetBinding::PinnedRevision {
+                    scope: CollaborationScope {
+                        spool: Uuid::from_u128(1),
+                        thread: None,
+                    },
+                    revision: CollaborationRevision::State {
+                        state_id: StateId::from_bytes([5; 32]),
+                    },
+                },
+            ),
+        ] {
+            let target = SourceTargetReference {
+                target: ContentHash::from_bytes([6; 32]),
+                binding,
+            };
+            let record = source_record(
+                CollaborationRevision::State {
+                    state_id: StateId::from_bytes([5; 32]),
+                },
+                Some(target.clone()),
+            );
+            let mut revision = verify(&context)
+                .expect("context proof")
+                .context_revision()
+                .expect("decode")
+                .expect("context");
+            revision.tags = vec![AnnotationTag::Source {
+                target: AnnotationSourceReference {
+                    scope: revision.metadata.scope.clone(),
+                    source: CollaborationSourceAnchor {
+                        revision: CollaborationRevision::State {
+                            state_id: StateId::from_bytes([5; 32]),
+                        },
+                        path: "src/main.rs".into(),
+                        symbol_id: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        target: Some(target),
+                    },
+                },
+            }];
+            tracked.push((name, record));
+            tracked.push((
+                tag_name,
+                sign_context(revision, &[], &signer).expect("tracked context"),
+            ));
+        }
         let mut vectors = String::new();
         for (name, record) in [
             ("open", open),
@@ -639,7 +716,10 @@ mod tests {
             ("source_git", source_git),
             ("extract_context", extraction),
             ("extracted_revision", extracted_revision),
-        ] {
+        ]
+        .into_iter()
+        .chain(tracked)
+        {
             vectors.push_str(&format!(
                 "{} {} {} {} {}\n",
                 name,
