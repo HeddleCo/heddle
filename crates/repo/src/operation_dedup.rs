@@ -9,31 +9,25 @@
 //! body or verb differs, the server returns `FailedPrecondition` so the caller
 //! can detect the bug.
 //!
-//! This module owns the local file-backed store. Persisted layout:
-//! `<heddle_dir>/state/operation_dedup.bin` — rmp-serde encoded
-//! [`DedupStore`]. A periodic compaction pass (run from the maintenance
-//! routine) prunes entries older than the configured retention window.
-//!
-//! The hosted server uses a Postgres table with the same logical schema; see
-//! Weft's hosted idempotency implementation for that
-//! adapter (W2). Both share the [`DedupOutcome`] return type so the
-//! middleware code is identical regardless of backend.
+//! Local repositories use the shared metadata SQLite database. Bootstrap
+//! commands use an explicit separate database before a repository exists.
+//! Completed receipts retain seven days by default; pending reservations require
+//! explicit cancellation and are never expired underneath running work.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::{Path, PathBuf},
+    collections::BTreeSet,
+    path::Path,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use objects::{
     error::{HeddleError, Result},
-    fs_atomic::write_file_atomic,
-    lock::{RepoLock, WriteLockGuard},
     object::OperationId,
     sync::LockExt,
 };
 use oplog::IsolationKey;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -41,11 +35,8 @@ use crate::{
     atomic::{AtomicMutation, Compensator, EagerMutation, StagedCommit, Tx, execute},
 };
 
-const DEDUP_FORMAT_VERSION: u8 = 1;
-const DEDUP_FILE_NAME: &str = "operation_dedup.bin";
-const DEDUP_LOCK_FILE_NAME: &str = "operation_dedup.lock";
-/// Default retention. Configurable via `[idempotency] retention_days` in
-/// repo config; that wiring lives in the server crate.
+const COMPACTION_BATCH: usize = 256;
+/// Default retention for completed local receipts. Pending work does not expire.
 pub const DEFAULT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 
 /// One persisted dedup entry. Identity is `(operation_id, verb)`.
@@ -73,21 +64,7 @@ pub struct DedupEntry {
     /// reservation is held. Cleared by `record` (when the response is
     /// persisted) or [`OperationDedupStore::cancel`] (on execute failure).
     ///
-    /// `#[serde(default)]` so existing on-disk dedup files (which never had
-    /// this field) decode as `pending = false` — the entries they describe
-    /// are completed records.
-    #[serde(default)]
     pub pending: bool,
-}
-
-/// On-disk root of the dedup store. Wrapped by [`OperationDedupStore`].
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct DedupFile {
-    format_version: u8,
-    /// Keyed by `format!("{verb}/{operation_id}")` for compatibility with
-    /// existing on-disk stores. New reservations still enforce operation-id
-    /// uniqueness across verbs by scanning values before claiming a new key.
-    entries: BTreeMap<String, DedupEntry>,
 }
 
 /// Result of a [`OperationDedupStore::reserve`] call.
@@ -278,144 +255,140 @@ fn reserve_transaction_id(operation_id: OperationId, verb: &str, request_hash: [
     format!("op-id-reserve/{verb}/{operation_id}/{hash}")
 }
 
-/// File-backed dedup store.
-///
-/// Concurrency uses two layers:
-/// - An in-process [`Mutex`] serializes calls from threads sharing the same
-///   `OperationDedupStore` handle. Without it, two threads inside one process
-///   could interleave the load → decide → persist sequence.
-/// - An OS-level exclusive file lock on `<heddle_dir>/state/operation_dedup.lock`
-///   serializes *different* `OperationDedupStore` instances — including those
-///   in separate CLI processes. Without it, two concurrent `heddle …
-///   --op-id <same>` invocations would each open their own store, each read
-///   an empty `operation_dedup.bin`, each reserve, and each execute the
-///   child command before either pending entry was visible to the other.
-///   The file lock plus a reload-from-disk inside every read/modify/write
-///   method closes that cross-process race.
+/// SQLite serializes short reservation transitions across handles/processes.
+/// No transaction remains open while the caller executes its command.
 pub struct OperationDedupStore {
-    path: PathBuf,
-    lock: RepoLock,
-    inner: Mutex<DedupFile>,
+    connection: Mutex<Connection>,
 }
 
+pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch("CREATE TABLE operation_receipts (
+      operation_id TEXT PRIMARY KEY, verb TEXT NOT NULL,
+      request_hash BLOB NOT NULL CHECK(length(request_hash)=32), response BLOB NOT NULL,
+      created_at INTEGER NOT NULL, pending INTEGER NOT NULL CHECK(pending IN(0,1)),
+      CHECK(pending=0 OR length(response)=0));
+      CREATE INDEX operation_receipts_completed ON operation_receipts(created_at,operation_id) WHERE pending=0;")
+}
+fn database_error(error: impl std::fmt::Display) -> HeddleError {
+    HeddleError::InvalidObject(format!("operation receipt database: {error}"))
+}
 impl OperationDedupStore {
-    /// Open (or initialise) the store at `<heddle_dir>/state/operation_dedup.bin`.
     pub fn open(heddle_dir: impl AsRef<Path>) -> Result<Self> {
-        let state_dir = heddle_dir.as_ref().join("state");
-        let path = state_dir.join(DEDUP_FILE_NAME);
-        let lock_path = state_dir.join(DEDUP_LOCK_FILE_NAME);
-        let inner = Self::load_or_init(&path)?;
         Ok(Self {
-            path,
-            lock: RepoLock::at(lock_path),
-            inner: Mutex::new(inner),
+            connection: Mutex::new(
+                crate::local_metadata::open(heddle_dir.as_ref()).map_err(database_error)?,
+            ),
         })
     }
-
-    fn load_or_init(path: &Path) -> Result<DedupFile> {
-        if !path.exists() {
-            return Ok(DedupFile {
-                format_version: DEDUP_FORMAT_VERSION,
-                entries: BTreeMap::new(),
-            });
+    /// Explicit scope for init/clone receipts, never implicitly selected by a
+    /// missing repository. No legacy file is read or written.
+    pub fn open_bootstrap(directory: impl AsRef<Path>) -> Result<Self> {
+        let directory = directory.as_ref();
+        objects::fs_atomic::create_private_dir_all(directory)?;
+        let path = directory.join("operation-receipts.sqlite3");
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
-        let bytes = std::fs::read(path).map_err(HeddleError::from)?;
-        let file: DedupFile = rmp_serde::from_slice(&bytes).map_err(|err| {
-            HeddleError::InvalidObject(format!(
-                "operation_dedup.bin at {} is malformed: {err}",
-                path.display()
-            ))
-        })?;
-        if file.format_version > DEDUP_FORMAT_VERSION {
-            return Err(HeddleError::InvalidObject(format!(
-                "operation dedup format version {} > supported {}",
-                file.format_version, DEDUP_FORMAT_VERSION
-            )));
+        match options.open(&path) {
+            Ok(file) => drop(file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
         }
-        Ok(file)
-    }
-
-    /// Acquire the OS-level exclusive lock on the sibling `.lock` file.
-    /// Held across each read-modify-write so concurrent `OperationDedupStore`
-    /// instances (in this or other processes) cannot interleave reads and
-    /// writes against the same `operation_dedup.bin`.
-    fn acquire_file_lock(&self) -> Result<WriteLockGuard> {
-        self.lock.write().map_err(|err| {
-            HeddleError::InvalidObject(format!("acquire operation dedup file lock: {err}"))
+        let mut connection = Connection::open(path).map_err(database_error)?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(database_error)?;
+        let mode: String = connection
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .map_err(database_error)?;
+        if mode != "wal" {
+            return Err(database_error("WAL mode unavailable"));
+        }
+        connection
+            .execute_batch("PRAGMA synchronous=FULL;")
+            .map_err(database_error)?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let version: i64 = tx
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(database_error)?;
+        match version {
+            0 => {
+                initialize_schema(&tx).map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 1)
+                    .map_err(database_error)?;
+            }
+            1 => {}
+            other => {
+                return Err(database_error(format!(
+                    "unsupported bootstrap schema {other}"
+                )));
+            }
+        }
+        tx.commit().map_err(database_error)?;
+        Ok(Self {
+            connection: Mutex::new(connection),
         })
     }
-
-    /// Refresh the in-memory cache from disk. MUST be called while holding
-    /// the file lock — otherwise a concurrent writer could persist between
-    /// the read and the subsequent decision.
-    fn reload_under_lock(&self, inner: &mut DedupFile) -> Result<()> {
-        *inner = Self::load_or_init(&self.path)?;
-        Ok(())
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+        self.connection
+            .lock()
+            .map_err(|_| database_error("connection guard poisoned"))
     }
-
-    /// Probe the store and atomically claim a slot if no entry exists.
-    ///
-    /// This collapses the old `check` + `execute` + `record` flow's race
-    /// window: previously two concurrent retries with the same
-    /// `client_operation_id` could both observe `Fresh`, both execute, and
-    /// both apply side effects before either persisted a record. `reserve`
-    /// inserts a [`DedupEntry`] with `pending = true` under the same
-    /// `Mutex` that gates `record`, so subsequent callers see
-    /// [`DedupOutcome::InFlight`] (matching body) or
-    /// [`DedupOutcome::Conflict`] (mismatched body).
-    ///
-    /// An operation id is unique within the store. Reusing it for a different
-    /// verb is a conflict even if the request body hash happens to match.
-    ///
-    /// Caller contract: when [`DedupOutcome::Reserved`] is returned, the
-    /// caller MUST follow up with either [`Self::record`] (on success) or
-    /// [`Self::cancel`] (on failure) — otherwise the slot remains held
-    /// until the next compaction sweep.
     pub fn reserve(
         &self,
         operation_id: OperationId,
         verb: &str,
         request_hash: [u8; 32],
     ) -> Result<DedupOutcome> {
-        let key = key_for(verb, operation_id);
-        let mut inner = self.inner.lock_or_poisoned();
-        let _file_guard = self.acquire_file_lock()?;
-        self.reload_under_lock(&mut inner)?;
-        match inner.entries.get(&key) {
-            Some(existing) if existing.pending && existing.request_hash == request_hash => {
-                Ok(DedupOutcome::InFlight)
+        let mut connection = self.lock()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        prune(&tx, now_secs().saturating_sub(DEFAULT_RETENTION_SECS))?;
+        // Direct expiry of the requested completed key remains correct even if
+        // more than a cleanup batch has accumulated since the last command.
+        tx.execute(
+            "DELETE FROM operation_receipts WHERE operation_id=?1 AND pending=0 AND created_at<?2",
+            params![
+                operation_id.to_string(),
+                now_secs().saturating_sub(DEFAULT_RETENTION_SECS)
+            ],
+        )
+        .map_err(database_error)?;
+        let prior = entry(&tx, operation_id)?;
+        let outcome = match prior {
+            Some(prior) if prior.verb != verb || prior.request_hash != request_hash => {
+                DedupOutcome::Conflict
             }
-            Some(existing) if existing.request_hash == request_hash => Ok(DedupOutcome::Replay {
-                response: existing.response.clone(),
-            }),
-            Some(_) => Ok(DedupOutcome::Conflict),
+            Some(prior) if prior.pending => DedupOutcome::InFlight,
+            Some(prior) => DedupOutcome::Replay {
+                response: prior.response,
+            },
             None => {
-                if inner
-                    .entries
-                    .values()
-                    .any(|entry| entry.operation_id == operation_id)
-                {
-                    return Ok(DedupOutcome::Conflict);
-                }
-                let entry = DedupEntry {
-                    operation_id,
-                    verb: verb.to_string(),
-                    request_hash,
-                    response: Vec::new(),
-                    created_at_secs: now_secs(),
-                    pending: true,
-                };
-                inner.entries.insert(key, entry);
-                self.persist(&inner)?;
-                Ok(DedupOutcome::Reserved)
+                tx.execute(
+                    "INSERT INTO operation_receipts VALUES(?1,?2,?3,x'',?4,1)",
+                    params![
+                        operation_id.to_string(),
+                        verb,
+                        request_hash.as_slice(),
+                        now_secs()
+                    ],
+                )
+                .map_err(database_error)?;
+                DedupOutcome::Reserved
             }
-        }
+        };
+        tx.commit().map_err(database_error)?;
+        Ok(outcome)
     }
-
-    /// Persist the response for an executed request, finalising a
-    /// [`DedupOutcome::Reserved`] slot. Idempotent: rewriting an existing
-    /// entry with identical body is a no-op (`created_at_secs` updates if
-    /// the new write is later).
+    /// Finalization preserves the first completed response and timestamp.
+    /// Direct recording is supported, but may not overwrite a conflicting slot.
     pub fn record(
         &self,
         operation_id: OperationId,
@@ -423,118 +396,84 @@ impl OperationDedupStore {
         request_hash: [u8; 32],
         response: Vec<u8>,
     ) -> Result<()> {
-        let key = key_for(verb, operation_id);
-        let entry = DedupEntry {
-            operation_id,
-            verb: verb.to_string(),
-            request_hash,
-            response,
-            created_at_secs: now_secs(),
-            pending: false,
-        };
-        let mut inner = self.inner.lock_or_poisoned();
-        let _file_guard = self.acquire_file_lock()?;
-        self.reload_under_lock(&mut inner)?;
-        inner.entries.insert(key, entry);
-        self.persist(&inner)
-    }
-
-    /// Release a reservation without persisting a response. Called when
-    /// the caller's `execute` step fails — the slot needs to be freed so
-    /// retries can claim it. No-op if no reservation exists or the entry
-    /// has already been finalised by [`Self::record`].
-    pub fn cancel(&self, operation_id: OperationId, verb: &str) -> Result<()> {
-        let key = key_for(verb, operation_id);
-        let mut inner = self.inner.lock_or_poisoned();
-        let _file_guard = self.acquire_file_lock()?;
-        self.reload_under_lock(&mut inner)?;
-        if let Some(existing) = inner.entries.get(&key)
-            && existing.pending
-        {
-            inner.entries.remove(&key);
-            self.persist(&inner)?;
+        let mut connection = self.lock()?;
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        if let Some(prior) = entry(&tx, operation_id)? {
+            if prior.verb != verb
+                || prior.request_hash != request_hash
+                || (!prior.pending && prior.response != response)
+            {
+                return Err(HeddleError::Conflict(
+                    "operation receipt does not match reserved or completed command".into(),
+                ));
+            }
+            if !prior.pending {
+                return Ok(());
+            }
+            tx.execute("UPDATE operation_receipts SET response=?2,pending=0,created_at=?3 WHERE operation_id=?1 AND pending=1",params![operation_id.to_string(),response,now_secs()]).map_err(database_error)?;
+        } else {
+            tx.execute(
+                "INSERT INTO operation_receipts VALUES(?1,?2,?3,?4,?5,0)",
+                params![
+                    operation_id.to_string(),
+                    verb,
+                    request_hash.as_slice(),
+                    response,
+                    now_secs()
+                ],
+            )
+            .map_err(database_error)?;
         }
+        prune(&tx, now_secs().saturating_sub(DEFAULT_RETENTION_SECS))?;
+        tx.commit().map_err(database_error)?;
         Ok(())
     }
-
-    /// Drop entries older than `retention_secs`. Returns the number of
-    /// pruned entries.
+    pub fn cancel(&self, operation_id: OperationId, verb: &str) -> Result<()> {
+        self.lock()?
+            .execute(
+                "DELETE FROM operation_receipts WHERE operation_id=?1 AND verb=?2 AND pending=1",
+                params![operation_id.to_string(), verb],
+            )
+            .map_err(database_error)?;
+        Ok(())
+    }
+    /// One bounded cleanup batch; pending commands never expire automatically.
     pub fn compact(&self, retention_secs: i64) -> Result<usize> {
-        let cutoff = now_secs() - retention_secs;
-        let mut inner = self.inner.lock_or_poisoned();
-        let _file_guard = self.acquire_file_lock()?;
-        self.reload_under_lock(&mut inner)?;
-        let before = inner.entries.len();
-        inner.entries.retain(|_, e| e.created_at_secs >= cutoff);
-        let pruned = before - inner.entries.len();
-        if pruned > 0 {
-            self.persist(&inner)?;
-        }
-        Ok(pruned)
+        let connection = self.lock()?;
+        prune(&connection, now_secs().saturating_sub(retention_secs))
     }
-
-    /// Total entries currently stored. Mostly useful for tests. Reloads
-    /// from disk under the file lock so writes from sibling processes are
-    /// reflected.
-    pub fn len(&self) -> usize {
-        let mut inner = self.inner.lock_or_poisoned();
-        let _file_guard = match self.acquire_file_lock() {
-            Ok(guard) => guard,
-            Err(_) => return inner.entries.len(),
-        };
-        if self.reload_under_lock(&mut inner).is_err() {
-            return inner.entries.len();
-        }
-        inner.entries.len()
+    pub fn len(&self) -> Result<usize> {
+        let count: i64 = self
+            .lock()?
+            .query_row("SELECT COUNT(*) FROM operation_receipts", [], |row| {
+                row.get(0)
+            })
+            .map_err(database_error)?;
+        usize::try_from(count).map_err(database_error)
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    pub fn is_empty(&self) -> Result<bool> {
+        Ok(self.len()? == 0)
     }
-
-    /// Return safe metadata for a previously reserved or completed slot.
     pub fn metadata_for(
         &self,
         operation_id: OperationId,
-        verb: &str,
-    ) -> Option<DedupConflictMetadata> {
-        let key = key_for(verb, operation_id);
-        let mut inner = self.inner.lock_or_poisoned();
-        if let Ok(_file_guard) = self.acquire_file_lock() {
-            let _ = self.reload_under_lock(&mut inner);
-        }
-        inner
-            .entries
-            .get(&key)
-            .or_else(|| {
-                inner
-                    .entries
-                    .values()
-                    .find(|entry| entry.operation_id == operation_id)
-            })
-            .map(|entry| DedupConflictMetadata {
-                operation_id: entry.operation_id,
-                verb: entry.verb.clone(),
-                request_hash: entry.request_hash,
-                created_at_secs: entry.created_at_secs,
-                pending: entry.pending,
-            })
-    }
-
-    fn persist(&self, inner: &DedupFile) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(HeddleError::from)?;
-        }
-        let bytes = rmp_serde::to_vec(inner).map_err(|err| {
-            HeddleError::InvalidObject(format!("failed to encode operation dedup file: {err}"))
-        })?;
-        write_file_atomic(&self.path, &bytes)?;
-        Ok(())
+        _verb: &str,
+    ) -> Result<Option<DedupConflictMetadata>> {
+        let connection = self.lock()?;
+        connection.query_row("SELECT verb,request_hash,created_at,pending FROM operation_receipts WHERE operation_id=?1 AND (pending=1 OR created_at>=?2)",params![operation_id.to_string(),now_secs().saturating_sub(DEFAULT_RETENTION_SECS)],|row| Ok(DedupConflictMetadata {
+            operation_id,verb:row.get(0)?,request_hash:row.get(1)?,created_at_secs:row.get(2)?,pending:row.get(3)?,
+        })).optional().map_err(database_error)
     }
 }
-
-fn key_for(verb: &str, operation_id: OperationId) -> String {
-    format!("{verb}/{operation_id}")
+fn entry(connection: &Connection, operation_id: OperationId) -> Result<Option<DedupEntry>> {
+    connection.query_row("SELECT verb,request_hash,response,created_at,pending FROM operation_receipts WHERE operation_id=?1",[operation_id.to_string()],|row| Ok(DedupEntry {
+        operation_id,verb:row.get(0)?,request_hash:row.get(1)?,response:row.get(2)?,created_at_secs:row.get(3)?,pending:row.get(4)?,
+    })).optional().map_err(database_error)
+}
+fn prune(connection: &Connection, cutoff: i64) -> Result<usize> {
+    connection.execute("DELETE FROM operation_receipts WHERE operation_id IN (SELECT operation_id FROM operation_receipts WHERE pending=0 AND created_at<?1 ORDER BY created_at,operation_id LIMIT ?2)",params![cutoff,COMPACTION_BATCH as i64]).map_err(database_error)
 }
 
 fn now_secs() -> i64 {
@@ -653,7 +592,7 @@ mod tests {
             assert_eq!(b.join().unwrap(), DedupOutcome::Reserved);
         });
 
-        assert_eq!(store.len(), 2);
+        assert_eq!(store.len().expect("count"), 2);
     }
 
     #[test]
@@ -755,6 +694,7 @@ mod tests {
         );
         let metadata = store
             .metadata_for(op, "merge")
+            .expect("metadata read")
             .expect("cross-verb conflict should expose recorded metadata");
         assert_eq!(metadata.verb, "capture");
     }
@@ -783,13 +723,13 @@ mod tests {
         let op = OperationId::new();
         let hash = hash_request_body(b"x");
         store.record(op, "capture", hash, b"r".to_vec()).unwrap();
-        assert_eq!(store.len(), 1);
+        assert_eq!(store.len().expect("count"), 1);
         // Retain only entries newer than 0 seconds — everything older than
         // "now" is technically fair game. We pick a tiny retention to force
         // compaction while still inside the test.
         let pruned = store.compact(-1).unwrap();
         assert_eq!(pruned, 1);
-        assert_eq!(store.len(), 0);
+        assert_eq!(store.len().expect("count"), 0);
     }
 
     #[test]
@@ -805,13 +745,7 @@ mod tests {
         );
     }
 
-    /// Two `OperationDedupStore` handles pointing at the same `.heddle` dir
-    /// stand in for two CLI processes opening the same store. Without the
-    /// OS-level file lock + reload-from-disk, both handles read an empty
-    /// `operation_dedup.bin` from their own in-memory cache, both reserve,
-    /// and the second `reserve` returns `Reserved` instead of seeing the
-    /// first's pending entry. With the file lock + reload, the second
-    /// reload sees the first handle's pending write and returns `InFlight`.
+    /// Independent connections must see each other's committed reservations.
     #[test]
     fn second_store_handle_sees_first_handles_reservation() {
         let temp = TempDir::new().unwrap();
@@ -888,6 +822,134 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sqlite_receipts_preserve_completion_and_bound_cleanup_without_expiring_pending() {
+        let (_temp, store) = make_store();
+        let pending = OperationId::new();
+        let completed = OperationId::new();
+        let hash = hash_request_body(b"body");
+        store.reserve(pending, "capture", hash).expect("reserve");
+        store
+            .record(completed, "capture", hash, b"exact".to_vec())
+            .expect("record");
+        assert!(
+            store
+                .record(completed, "capture", hash, b"different".to_vec())
+                .is_err()
+        );
+        assert!(
+            store
+                .record(completed, "other", hash, b"exact".to_vec())
+                .is_err()
+        );
+        assert!(
+            store
+                .record(pending, "capture", hash_request_body(b"other"), Vec::new())
+                .is_err()
+        );
+        store
+            .lock()
+            .expect("db")
+            .execute("UPDATE operation_receipts SET created_at=1", [])
+            .expect("age");
+        store
+            .record(completed, "capture", hash, b"exact".to_vec())
+            .expect("exact retry");
+        assert_eq!(
+            entry(&store.lock().expect("database"), completed)
+                .expect("stored receipt")
+                .expect("receipt")
+                .created_at_secs,
+            1,
+            "retry never extends original retention"
+        );
+        assert_eq!(store.compact(DEFAULT_RETENTION_SECS).expect("cleanup"), 1);
+        assert_eq!(
+            store
+                .reserve(pending, "capture", hash)
+                .expect("old pending"),
+            DedupOutcome::InFlight
+        );
+        let mut connection = store.lock().expect("db");
+        let tx = connection.transaction().expect("batch");
+        for index in 0..COMPACTION_BATCH + 3 {
+            tx.execute(
+                "INSERT INTO operation_receipts VALUES(?1,'capture',zeroblob(32),x'',1,0)",
+                [format!("batch-{index}")],
+            )
+            .expect("old completion");
+        }
+        tx.commit().expect("batch commit");
+        drop(connection);
+        assert_eq!(
+            store
+                .compact(DEFAULT_RETENTION_SECS)
+                .expect("bounded cleanup"),
+            COMPACTION_BATCH
+        );
+        assert_eq!(store.len().expect("remaining"), 4);
+        store
+            .reserve(OperationId::new(), "capture", hash)
+            .expect("automatic cleanup on reserve");
+        assert_eq!(store.len().expect("remaining after automatic cleanup"), 2);
+    }
+
+    #[test]
+    fn bootstrap_receipts_are_explicit_private_and_isolated_from_repository() {
+        let directory = TempDir::new().expect("home");
+        let bootstrap = directory.path().join("bootstrap/scope");
+        let store =
+            OperationDedupStore::open_bootstrap(&bootstrap).expect("bootstrap before repo exists");
+        let operation = OperationId::new();
+        let hash = hash_request_body(b"init");
+        store
+            .record(operation, "init", hash, b"created".to_vec())
+            .expect("record");
+        drop(store);
+        let store = OperationDedupStore::open_bootstrap(&bootstrap).expect("reopen");
+        assert_eq!(
+            store.reserve(operation, "init", hash).expect("replay"),
+            DedupOutcome::Replay {
+                response: b"created".to_vec()
+            }
+        );
+        let tables: i64 = store
+            .lock()
+            .expect("db")
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='threads'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("bootstrap schema");
+        assert_eq!(tables, 0, "bootstrap is not a pretend repository");
+        assert!(
+            !bootstrap
+                .join(crate::local_metadata::DATABASE_NAME)
+                .exists()
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(bootstrap.join("operation-receipts.sqlite3"))
+                    .expect("metadata")
+                    .permissions()
+                    .mode()
+                    & 0o077,
+                0
+            );
+        }
+        let repository = directory.path().join("repo");
+        std::fs::create_dir(&repository).expect("repository root");
+        let repo = OperationDedupStore::open(&repository).expect("repo metadata");
+        assert_eq!(
+            repo.reserve(operation, "capture", hash)
+                .expect("independent scope"),
+            DedupOutcome::Reserved
+        );
+    }
+
     struct ReserveThenConflictOnce {
         store: Arc<OperationDedupStore>,
         op: OperationId,
@@ -957,6 +1019,10 @@ mod tests {
             DedupOutcome::InFlight,
             "retrying the same op-id reserve must observe the first attempt's pending slot"
         );
-        assert_eq!(store.len(), 1, "the retry must not create a second slot");
+        assert_eq!(
+            store.len().expect("count"),
+            1,
+            "the retry must not create a second slot"
+        );
     }
 }

@@ -823,8 +823,8 @@ returns a typed conflict.\n\
 advertise `persists_op_id: true` and can save a generated id across an\n\
 interrupted retry loop. Commands with `op_id_behavior: none` reject --op-id.\n\
 \n\
-The dedup store is file-backed locally (`.heddle/state/operation_dedup.bin`,\n\
-rmp-serde, 7-day default retention) and Postgres-backed in hosted deployments.\n\
+The dedup store uses local SQLite (`.heddle/metadata.sqlite3`,\n\
+7-day completed-receipt retention) and Postgres in hosted deployments.\n\
 \n\
 Without an id, dedup is bypassed and the call executes normally. For the\n\
 authoritative per-command contract, use `heddle help --output json`.\n";

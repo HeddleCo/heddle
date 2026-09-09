@@ -62,6 +62,8 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
             crate::thread_replication::initialize_schema(&tx)?;
             crate::device_runs::initialize_schema(&tx)?;
             crate::device_artifacts::initialize_schema(&tx)?;
+            crate::reference_projection::initialize_schema(&tx)?;
+            crate::operation_dedup::initialize_schema(&tx)?;
             initialize_changes(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }

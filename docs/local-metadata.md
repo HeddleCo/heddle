@@ -27,9 +27,12 @@ The existing device observers now watch the common database marker. Their v2
 section cursors remain distinct from the local database change cursor.
 
 This is the common persistence foundation, not a claim that every local store has
-already moved. Actor-presence file scans and older serialized operation-dedup
-maps still require conversion. Typed annotation/reference projections and FTS
-indexes belong here. Cross-subsystem operations must explicitly share a
+already moved. Actor-presence file scans still require conversion. Command receipts now use
+indexed SQLite storage, with an explicit separate bootstrap database for commands
+that run before a repository exists. Completed receipts have bounded seven-day
+cleanup; pending reservations require explicit cancellation. Rebuildable shared
+reference roots and typed-property equality indexes also live here; capture
+publication, richer predicates and FTS integration remain pending. Cross-subsystem operations must explicitly share a
 transaction; merely sharing the database filename does not combine separate
 method calls into an atomic operation.
 

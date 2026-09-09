@@ -52,6 +52,7 @@ mod owner_authorization;
 #[cfg(test)]
 mod owner_authorization_tests;
 mod owner_root;
+pub mod reference_projection;
 mod spool_creation;
 pub use spool_creation::{
     SpoolCreationIntent, admit_fresh_spool_creation, sign_delegated_spool_creation,
