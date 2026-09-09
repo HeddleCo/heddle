@@ -150,7 +150,7 @@ impl DeviceAuthority {
             return Ok(());
         }
         for signed in &self.mint_roots {
-            if heddleco_capability_verifier::creation::verify_mint_root_attachment(
+            if heddleco_capability_verifier::creation::verify_retained_mint_root_attachment(
                 signed,
                 &current,
                 &account.account_uuid,
@@ -199,7 +199,32 @@ pub fn publish(home: &Path, authority: &DeviceAuthority, now: i64) -> Result<()>
         .root
         .as_ref()
         .context("owner root missing")?;
+    let previous = if directory.join("authority.bin").try_exists()? {
+        let previous = read(home)?;
+        validate(&previous, now)?;
+        let old = previous.owner.as_ref().context("pinned owner missing")?;
+        if owner.owner != old.owner
+            || owner.root != old.root
+            || owner.binding != old.binding
+            || !owner
+                .accepted_transitions
+                .starts_with(&old.accepted_transitions)
+        {
+            bail!("device account observation rolls back or forks admitted authority");
+        }
+        Some(previous)
+    } else {
+        None
+    };
     for signed in mint_roots {
+        // A matching durable admission is evidence of the original enrollment;
+        // a backdated certificate presented for the first time is not.
+        if previous
+            .as_ref()
+            .is_some_and(|old| old.mint_roots.contains(signed))
+        {
+            continue;
+        }
         let key = signed
             .attachment
             .as_ref()
@@ -213,27 +238,15 @@ pub fn publish(home: &Path, authority: &DeviceAuthority, now: i64) -> Result<()>
             now,
         )?;
     }
-    if directory.join("authority.bin").try_exists()? {
-        let previous = read(home)?;
-        validate(&previous, now)?;
-        let old = previous.owner.context("pinned owner missing")?;
-        if owner.owner != old.owner
-            || owner.root != old.root
-            || owner.binding != old.binding
-            || !owner
-                .accepted_transitions
-                .starts_with(&old.accepted_transitions)
-        {
-            bail!("device account observation rolls back or forks admitted authority");
-        }
+    if let Some(previous) = previous {
         next.revoked_ids.extend(previous.revoked_ids);
         next.revoked_mint_roots.extend(previous.revoked_mint_roots);
         next.revoked_publishers.extend(previous.revoked_publishers);
-        if owner.version == old.version {
-            for attachment in previous.mint_roots {
-                if !next.mint_roots.contains(&attachment) {
-                    next.mint_roots.push(attachment);
-                }
+        // Retained certificates are historical admissions. Actual use checks
+        // expiry, recovery, key retirement and cumulative explicit revocations.
+        for attachment in previous.mint_roots {
+            if !next.mint_roots.contains(&attachment) {
+                next.mint_roots.push(attachment);
             }
         }
     }
@@ -362,5 +375,109 @@ mod tests {
         assert!(stored.is_revoked(Revocation::Publisher(&publisher)));
         assert!(!stored.is_revoked(Revocation::Credential(&hex::encode(mint))));
         assert!(!stored.is_revoked(Revocation::Publisher(&mint)));
+    }
+    #[test]
+    fn paired_independent_device_survives_rotation_but_backdated_enrollment_does_not() {
+        use api::heddle::api::v2alpha1::{
+            OwnerKeyTransition, OwnerKeyTransitionKind, SignedOwnerKeyTransition,
+        };
+        let home = tempfile::tempdir().expect("home");
+        let (original, old_key) = owner(85);
+        let device = Ed25519Signer::from_seed(&[87; 32]).expect("independent device");
+        let certificate = crate::sign_mint_root_attachment(
+            &old_key,
+            &original,
+            device.public_key(),
+            10,
+            1000,
+            [1; 32],
+        )
+        .expect("original enrollment");
+        publish(
+            home.path(),
+            &original,
+            std::slice::from_ref(&certificate),
+            &[],
+            20,
+        )
+        .expect("enroll device before rotation");
+        let previous = crate::verify_account_owner_observation(&original, 100).expect("owner");
+        let next_key = Ed25519Signer::from_seed(&[88; 32]).expect("next owner");
+        let transition = OwnerKeyTransition {
+            format_version: 1,
+            owner_id: previous.owner_id().to_vec(),
+            previous_state_hash: previous.state_hash().to_vec(),
+            sequence: 1,
+            kind: OwnerKeyTransitionKind::Rotate as i32,
+            next_authority_key: Some(
+                crate::ed25519_verification_key(next_key.public_key()).expect("next key"),
+            ),
+            next_recovery_policy: Some(previous.recovery_policy().clone()),
+            valid_from_unix_seconds: 99,
+            previous_key_valid_until_unix_seconds: 100,
+            nonce: vec![2; 32],
+        };
+        let body = crate::owner_key_transition_body(&transition).expect("transition bytes");
+        let signed = SignedOwnerKeyTransition {
+            transition: Some(transition),
+            authorizations: vec![
+                crate::sign_canonical(&old_key, crate::OWNER_TRANSITION_DOMAIN, &body)
+                    .expect("previous owner"),
+            ],
+            next_authority_key_proof: Some(
+                crate::sign_canonical(&next_key, crate::OWNER_TRANSITION_DOMAIN, &body)
+                    .expect("new owner"),
+            ),
+            next_recovery_key_proofs: vec![],
+        };
+        let current = heddleco_capability_verifier::apply_accepted_transition(
+            &previous,
+            &signed,
+            101,
+            heddleco_capability_verifier::VerificationLimits::new(30 * 24 * 60 * 60)
+                .expect("limits"),
+        )
+        .expect("verified rotation");
+        let mut rotated = original.clone();
+        rotated.accepted_transitions.push(signed);
+        rotated.version = current.state_hash().to_vec();
+        publish(home.path(), &rotated, &[], &[], 101)
+            .expect("publish current owner without recertifying devices");
+        let stored = load(home.path(), 101).expect("persisted current owner");
+        assert_eq!(
+            stored.mint_roots,
+            vec![certificate.clone()],
+            "prior admission survives observation rotation"
+        );
+        stored
+            .verify_mint_root(device.public_key(), 101)
+            .expect("paired device still works offline");
+        assert!(
+            stored.verify_mint_root(old_key.public_key(), 101).is_err(),
+            "retired owner direct mint is not a retained device"
+        );
+        let backdated = crate::sign_mint_root_attachment(
+            &old_key,
+            &original,
+            device.public_key(),
+            10,
+            1000,
+            [3; 32],
+        )
+        .expect("valid signature with false historical claim");
+        assert!(
+            publish(home.path(), &rotated, &[backdated], &[], 101).is_err(),
+            "new record cannot borrow another certificate's retained admission"
+        );
+        let fresh = tempfile::tempdir().expect("unpaired device");
+        assert!(
+            publish(fresh.path(), &rotated, &[certificate], &[], 101).is_err(),
+            "historical signature alone is not earlier admission"
+        );
+        let stored = load(home.path(), 101).expect("failed publication kept prior pin");
+        assert_eq!(stored.owner, rotated);
+        stored
+            .verify_mint_root(device.public_key(), 101)
+            .expect("failed new admission cannot remove existing device");
     }
 }

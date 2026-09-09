@@ -23,6 +23,8 @@ pub const DEFAULT_RECOVERY_WINDOW_SECS: u64 = 604_800;
 
 #[derive(Clone)]
 struct HistoricalAuthority {
+    sequence: u64,
+    retained_mint_authority: bool,
     key: AuthorizationVerificationKey,
     valid_until: Option<i64>,
 }
@@ -87,6 +89,26 @@ impl VerifiedOwnerState {
     #[must_use]
     pub const fn signed_root(&self) -> &SignedOwnerRoot {
         &self.signed_root
+    }
+
+    /// Historical signatures may preserve already admitted independent devices,
+    /// never establish a fresh attachment. Recovery invalidates prior admissions.
+    pub(crate) fn retained_mint_issuer(
+        &self,
+        state_hash: &[u8],
+        sequence: u64,
+    ) -> Result<&AuthorizationVerificationKey> {
+        let hash: [u8; 32] = state_hash
+            .try_into()
+            .map_err(|_| Error::Invalid("attachment issuer state must be 32 bytes".into()))?;
+        let issuer = self
+            .issuers
+            .get(&hash)
+            .filter(|issuer| issuer.sequence == sequence && issuer.retained_mint_authority)
+            .ok_or_else(|| {
+                Error::BrokenChain("attachment issuer is unknown or recovered".into())
+            })?;
+        Ok(&issuer.key)
     }
 
     pub(crate) fn issuer_at(
@@ -367,6 +389,8 @@ pub fn verify_owner_root(signed: &SignedOwnerRoot) -> Result<VerifiedOwnerState>
     issuers.insert(
         state_hash,
         HistoricalAuthority {
+            sequence: 0,
+            retained_mint_authority: true,
             key: authority.clone(),
             valid_until: None,
         },
@@ -560,9 +584,16 @@ pub fn apply_transition(
         .get_mut(&state.state_hash())
         .expect("verified current issuer")
         .valid_until = Some(transition.previous_key_valid_until_unix_seconds);
+    if kind == OwnerKeyTransitionKind::Recover {
+        for issuer in next.issuers.values_mut() {
+            issuer.retained_mint_authority = false;
+        }
+    }
     next.issuers.insert(
         next_hash,
         HistoricalAuthority {
+            sequence: transition.sequence,
+            retained_mint_authority: true,
             key: next_authority.clone(),
             valid_until: None,
         },

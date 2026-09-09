@@ -98,6 +98,21 @@ pub fn verify(
     context: Context<'_>,
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<VerifiedAuthor> {
+    verify_with_retained_mint_roots(bytes, context, &[], is_revoked)
+}
+
+/// As [`verify`], with exact certificates from independently trusted durable
+/// admission. These survive ordinary owner rotation without recertification;
+/// matching only a certificate's key or author-supplied timestamp is insufficient.
+pub fn verify_with_retained_mint_roots(
+    bytes: &[u8],
+    context: Context<'_>,
+    admitted_mint_roots: &[SignedMintRootAttachment],
+    is_revoked: impl Fn(Revocation<'_>) -> bool,
+) -> Result<VerifiedAuthor> {
+    if admitted_mint_roots.len() > 256 {
+        return Err(invalid("retained mint certificate inventory exceeds bound"));
+    }
     if bytes.len() > MAX_BYTES {
         return Err(Error::TooLarge { limit: MAX_BYTES });
     }
@@ -134,12 +149,12 @@ pub fn verify(
         .root
         .as_ref()
         .ok_or_else(|| invalid("owner root missing"))?;
-    if original.state_hash() != context.owner.state_hash()
+    if !context.owner.extends(&original)
         || original.owner_id() != context.owner.owner_id()
         || root.account_uuid != context.account_uuid
     {
         return Err(invalid(
-            "Thread author history differs from independently admitted current account authority",
+            "Thread author history is not a verified prefix of independently admitted current account authority",
         ));
     }
     if envelope.mint_root_public_key != context.owner.authority_key().public_key {
@@ -147,13 +162,23 @@ pub fn verify(
             .mint_root_attachment
             .as_ref()
             .ok_or_else(|| invalid("mint root requires current owner attachment"))?;
-        crate::creation::verify_mint_root_attachment(
-            attachment,
-            context.owner,
-            context.account_uuid,
-            &envelope.mint_root_public_key,
-            context.now,
-        )?;
+        if admitted_mint_roots.contains(attachment) {
+            crate::creation::verify_retained_mint_root_attachment(
+                attachment,
+                context.owner,
+                context.account_uuid,
+                &envelope.mint_root_public_key,
+                context.now,
+            )?;
+        } else {
+            crate::creation::verify_mint_root_attachment(
+                attachment,
+                context.owner,
+                context.account_uuid,
+                &envelope.mint_root_public_key,
+                context.now,
+            )?;
+        }
     } else if envelope.mint_root_attachment.is_some() {
         return Err(invalid(
             "direct owner mint root must not carry an unrelated attachment",

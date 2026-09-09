@@ -175,6 +175,47 @@ pub fn verify_mint_root_attachment(
     )
 }
 
+/// Re-verify an exact mint certificate independently admitted before rotation.
+///
+/// The caller MUST match this record against its trusted durable admission.
+/// A historical signature or backdated not-before time cannot prove admission.
+/// Fresh, user-supplied certificates use [`verify_mint_root_attachment`] instead.
+pub fn verify_retained_mint_root_attachment(
+    signed: &SignedMintRootAttachment,
+    current: &VerifiedOwnerState,
+    expected_account_uuid: &[u8],
+    expected_mint_root_key: &[u8],
+    now: i64,
+) -> Result<()> {
+    let attachment = required(&signed.attachment, "mint-root attachment")?;
+    let body = canonical_mint_root_attachment(attachment)?;
+    let root = required(&current.signed_root().root, "current owner root")?;
+    let mint = required(&attachment.mint_root_key, "mint root")?;
+    let issuer =
+        current.retained_mint_issuer(&attachment.owner_state_hash, attachment.owner_sequence)?;
+    if attachment.account_uuid != expected_account_uuid
+        || attachment.account_uuid != root.account_uuid
+        || attachment.owner_key.as_ref() != Some(issuer)
+        || mint.public_key != expected_mint_root_key
+        || (mint != current.authority_key() && current.contains_authority_key(mint))
+    {
+        return Err(invalid(
+            "retained mint certificate differs from admitted account or historical issuer",
+        ));
+    }
+    if now < attachment.not_before_unix_seconds || now >= attachment.expires_at_unix_seconds {
+        return Err(invalid(
+            "retained mint-root attachment is not currently valid",
+        ));
+    }
+    verify_signature(
+        issuer,
+        required(&signed.owner_signature, "mint-root signature")?,
+        MINT_ROOT_DOMAIN,
+        &body,
+    )
+}
+
 /// Exact final narrowing block. The creator appends the existing standard
 /// same-key PoP delegation fact before sealing; no fresh bearer is minted.
 pub fn creation_restrictions(statement: &SpoolCreationStatement) -> Result<BlockBuilder> {

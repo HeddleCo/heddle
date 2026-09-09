@@ -213,3 +213,101 @@ fn thread_authority_requires_current_independent_mint_attachment() {
             .contains("independently admitted")
     );
 }
+
+#[test]
+fn retained_device_certificate_and_cached_proof_survive_rotation_without_new_authority() {
+    let (bytes, previous, publisher) = fixture_mint(false, true);
+    let owner_key = TestKey::new(91);
+    let next_key = TestKey::new(96);
+    let rotated = apply_accepted_transition(
+        &previous,
+        &rotation(&previous, &owner_key, &next_key),
+        NOW,
+        VerificationLimits::new(30 * 24 * 60 * 60).expect("limits"),
+    )
+    .expect("accepted rotation");
+    let envelope = crate::wire::ThreadControlAuthority::decode(bytes.as_slice()).expect("proof");
+    let retained = envelope
+        .mint_root_attachment
+        .clone()
+        .expect("admitted certificate");
+    assert!(
+        proof::verify(&bytes, context(&rotated, &publisher), |_| false).is_err(),
+        "a historical signature alone cannot prove earlier enrollment"
+    );
+    proof::verify_with_retained_mint_roots(
+        &bytes,
+        context(&rotated, &publisher),
+        std::slice::from_ref(&retained),
+        |_| false,
+    )
+    .expect("independently admitted device and cached owner prefix survive rotation");
+    let mut backdated = envelope;
+    let attachment = backdated
+        .mint_root_attachment
+        .as_mut()
+        .expect("certificate");
+    attachment.attachment.as_mut().expect("body").nonce[0] ^= 1;
+    attachment.owner_signature = Some(
+        owner_key.sign_digest(
+            &crate::creation::mint_root_signing_digest(
+                attachment.attachment.as_ref().expect("body"),
+            )
+            .expect("digest"),
+        ),
+    );
+    assert!(
+        proof::verify_with_retained_mint_roots(
+            &backdated.encode_to_vec(),
+            context(&rotated, &publisher),
+            std::slice::from_ref(&retained),
+            |_| false
+        )
+        .is_err(),
+        "even a valid backdated certificate from the retired owner needs its own earlier admission"
+    );
+    let (direct, _, direct_publisher) = fixture(false);
+    assert!(
+        proof::verify_with_retained_mint_roots(
+            &direct,
+            context(&rotated, &direct_publisher),
+            std::slice::from_ref(&retained),
+            |_| false
+        )
+        .is_err(),
+        "retired direct owner root cannot mint fresh authority"
+    );
+    assert!(
+        proof::verify_with_retained_mint_roots(
+            &bytes,
+            context(&rotated, &publisher),
+            std::slice::from_ref(&retained),
+            |kind| matches!(kind, Revocation::MintRoot(_))
+        )
+        .is_err(),
+        "retained admission cannot override explicit revocation"
+    );
+    let recovered = apply_accepted_transition(
+        &previous,
+        &recovery_transition(
+            &previous,
+            &[&TestKey::new(93), &TestKey::new(94)],
+            &next_key,
+            previous.recovery_policy().clone(),
+            NOW - 1,
+        ),
+        NOW,
+        VerificationLimits::new(30 * 24 * 60 * 60).expect("limits"),
+    )
+    .expect("accepted recovery");
+    assert!(
+        proof::verify_with_retained_mint_roots(
+            &bytes,
+            context(&recovered, &publisher),
+            &[retained],
+            |_| false
+        )
+        .is_err(),
+        "recovery invalidates previously admitted independent roots"
+    );
+}
