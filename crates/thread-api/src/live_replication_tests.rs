@@ -560,3 +560,94 @@ async fn idle_clock_enforces_local_expiration_without_inbound_or_store_work() {
         "empty replica never emits a fabricated heartbeat"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replication_sender_preserves_rpc_subscriber_and_span() {
+    use tracing::{Instrument, instrument::WithSubscriber};
+    use tracing_subscriber::{Layer, layer::SubscriberExt};
+
+    struct SenderEvents {
+        observed: Arc<AtomicUsize>,
+        parented: Arc<AtomicUsize>,
+    }
+    impl<S> Layer<S> for SenderEvents
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            context: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if event.metadata().target() != "replication_sender_oracle" {
+                return;
+            }
+            self.observed.fetch_add(1, Ordering::SeqCst);
+            if context.event_scope(event).is_some_and(|scope| {
+                scope
+                    .from_root()
+                    .any(|span| span.name() == "replication_rpc_oracle")
+            }) {
+                self.parented.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    let (_directory, repository, replica) = fixture(1);
+    let (_changes, receiver) = watch::channel(Some(1));
+    let feed = Feed::from_changes(replica.thread_id(), receiver);
+    let session = Session::new(
+        LocalReplica::new(replica, Arc::new(repository.store().clone())),
+        [7; 32],
+        [ThreadFacet::Source].into(),
+        1,
+    )
+    .expect("session");
+    let observed = Arc::new(AtomicUsize::new(0));
+    let parented = Arc::new(AtomicUsize::new(0));
+    let subscriber = tracing_subscriber::registry().with(SenderEvents {
+        observed: observed.clone(),
+        parented: parented.clone(),
+    });
+    let dispatch = tracing::Dispatch::new(subscriber);
+    let span = tracing::dispatcher::with_default(&dispatch, || {
+        tracing::info_span!("replication_rpc_oracle")
+    });
+    let (writer, mut frames) = mpsc::channel(4);
+    let task = tokio::spawn(
+        async move {
+            run(
+                session,
+                QuietReader,
+                RecordingWriter(writer),
+                Side::Acceptor,
+                &feed,
+                |activity| {
+                    // Work only executes in the separately spawned sender.
+                    if activity == Activity::Work {
+                        tracing::info!(target: "replication_sender_oracle", "export work");
+                    }
+                    std::future::ready(Ok(()))
+                },
+            )
+            .await
+        }
+        .instrument(span)
+        .with_subscriber(dispatch),
+    );
+    tokio::time::timeout(Duration::from_secs(2), frames.recv())
+        .await
+        .expect("initial frontier delivered")
+        .expect("frame");
+    task.abort();
+    assert!(task.await.expect_err("cancelled").is_cancelled());
+    assert!(
+        observed.load(Ordering::SeqCst) > 0,
+        "sender lost the RPC subscriber"
+    );
+    assert_eq!(
+        parented.load(Ordering::SeqCst),
+        observed.load(Ordering::SeqCst),
+        "sender work must remain inside the originating RPC span"
+    );
+}
