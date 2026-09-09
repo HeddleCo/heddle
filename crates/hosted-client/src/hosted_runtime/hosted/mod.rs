@@ -23,7 +23,6 @@ pub(crate) mod operation_id;
 mod provider_pull;
 mod provider_transport;
 mod resolver;
-mod root_attestation;
 mod session;
 #[cfg(test)]
 mod session_tests;
@@ -40,6 +39,8 @@ mod user;
 
 #[cfg(test)]
 mod descriptor_trust_acceptance;
+#[cfg(test)]
+mod descriptor_trust_conformance;
 
 use std::sync::Arc;
 
@@ -70,7 +71,6 @@ use iroh::{Endpoint, EndpointAddr};
 pub use methods::HostedRoutes;
 use objects::{NoopWarnings, Warning, WarningSink};
 use prost::Message;
-pub use root_attestation::root_attestation_bytes;
 pub use session::{HostedAuthMode, HostedSession};
 pub use spool_path::{
     HostedReadPath, canonicalize_spool_path, is_root_level_spool_path, plan_personal_first_read,

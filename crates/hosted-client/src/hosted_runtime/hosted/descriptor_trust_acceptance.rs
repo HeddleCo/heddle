@@ -5,13 +5,21 @@ use std::{
     time::Duration,
 };
 
+use api::{
+    HOSTED_ALPN_V1,
+    descriptor_trust::{
+        AttestedEndpointDescriptorEntry, EndpointDescriptorSetDocument, ephemeral_attestation_bytes,
+    },
+    heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
+    signing::endpoint_descriptor_bytes,
+};
 use crypto::{Ed25519Signer, Signer};
 use futures::FutureExt;
+use prost::Message;
 
 use super::{
     descriptor_trust::load_automatic_pin,
     resolver::resolve_and_verify_endpoint_descriptor,
-    root_attestation::{RawEphemeralEntry, root_attestation_bytes},
     test_https::{TestHttpsServer, TestResponse},
 };
 
@@ -155,8 +163,9 @@ async fn invalid_key_documents_and_unverified_candidates_never_pin() {
 async fn unattested_and_tampered_entries_are_never_dialed() {
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
-        let mut entry = attested_entry(&root, "live", [0x42; 32], "hel");
-        entry.signature = "00".repeat(64);
+        let ephemeral = Ed25519Signer::generate().unwrap();
+        let mut entry = attested_entry(&root, &ephemeral, "live", "hel");
+        entry.attestation_signature = "00".repeat(64);
         let server = TestHttpsServer::start(HashMap::from([
             (
                 KEY_PATH.to_string(),
@@ -188,8 +197,10 @@ async fn unattested_and_tampered_entries_are_never_dialed() {
 async fn ephemeral_rotation_under_the_pinned_root_does_not_change_the_pin() {
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
-        let first = attested_entry(&root, "ephemeral-a", [0x11; 32], "hel");
-        let rotated = attested_entry(&root, "ephemeral-b", [0x22; 32], "sjc");
+        let first_ephemeral = Ed25519Signer::generate().unwrap();
+        let rotated_ephemeral = Ed25519Signer::generate().unwrap();
+        let first = attested_entry(&root, &first_ephemeral, "ephemeral-a", "hel");
+        let rotated = attested_entry(&root, &rotated_ephemeral, "ephemeral-b", "sjc");
         let server = TestHttpsServer::start(HashMap::from([
             (
                 KEY_PATH.to_string(),
@@ -228,8 +239,10 @@ async fn served_set_cannot_swap_the_pinned_root() {
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let other = Ed25519Signer::generate().unwrap();
-        let first = attested_entry(&root, "ephemeral-a", [0x11; 32], "hel");
-        let swapped = attested_entry(&other, "ephemeral-b", [0x22; 32], "hel");
+        let first_ephemeral = Ed25519Signer::generate().unwrap();
+        let swapped_ephemeral = Ed25519Signer::generate().unwrap();
+        let first = attested_entry(&root, &first_ephemeral, "ephemeral-a", "hel");
+        let swapped = attested_entry(&other, &swapped_ephemeral, "ephemeral-b", "hel");
         let server = TestHttpsServer::start(HashMap::from([
             (
                 KEY_PATH.to_string(),
@@ -278,11 +291,14 @@ async fn expired_and_not_yet_valid_entries_are_excluded() {
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let now = chrono::Utc::now().timestamp_millis();
-        let expired = attested_entry_window(&root, "old", [0x11; 32], "hel", now - 10_000, now);
+        let expired_ephemeral = Ed25519Signer::generate().unwrap();
+        let pending_ephemeral = Ed25519Signer::generate().unwrap();
+        let expired =
+            attested_entry_window(&root, &expired_ephemeral, "old", "hel", now - 10_000, now);
         let pending = attested_entry_window(
             &root,
+            &pending_ephemeral,
             "next",
-            [0x22; 32],
             "hel",
             now + 60_000,
             now + 120_000,
@@ -318,8 +334,10 @@ async fn expired_and_not_yet_valid_entries_are_excluded() {
 async fn region_preference_selects_local_then_falls_back_to_remote() {
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
-        let remote = attested_entry(&root, "remote", [0x11; 32], "sjc");
-        let local = attested_entry(&root, "local", [0x22; 32], "hel");
+        let remote_ephemeral = Ed25519Signer::generate().unwrap();
+        let local_ephemeral = Ed25519Signer::generate().unwrap();
+        let remote = attested_entry(&root, &remote_ephemeral, "remote", "sjc");
+        let local = attested_entry(&root, &local_ephemeral, "local", "hel");
         let server = TestHttpsServer::start(HashMap::from([
             (
                 KEY_PATH.to_string(),
@@ -338,13 +356,17 @@ async fn region_preference_selects_local_then_falls_back_to_remote() {
         let verified = resolve_and_verify_endpoint_descriptor(server.authority(), &config)
             .await
             .unwrap();
-        assert_eq!(verified.document().endpoint_id, hex::encode([0x22; 32]));
+        assert_eq!(
+            verified.document().endpoint_id,
+            hex::encode(local_ephemeral.public_key())
+        );
     })
     .await;
 
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
-        let remote = attested_entry(&root, "remote", [0x33; 32], "sjc");
+        let remote_ephemeral = Ed25519Signer::generate().unwrap();
+        let remote = attested_entry(&root, &remote_ephemeral, "remote", "sjc");
         let server = TestHttpsServer::start(HashMap::from([
             (
                 KEY_PATH.to_string(),
@@ -363,7 +385,10 @@ async fn region_preference_selects_local_then_falls_back_to_remote() {
         let verified = resolve_and_verify_endpoint_descriptor(server.authority(), &config)
             .await
             .unwrap();
-        assert_eq!(verified.document().endpoint_id, hex::encode([0x33; 32]));
+        assert_eq!(
+            verified.document().endpoint_id,
+            hex::encode(remote_ephemeral.public_key())
+        );
     })
     .await;
 }
@@ -421,8 +446,8 @@ async fn explicit_pair_skips_discovery_and_old_server_failure_is_actionable() {
             DESCRIPTOR_PATH.to_string(),
             VecDeque::from([TestResponse::json(set_document(&[attested_entry(
                 &root,
+                &Ed25519Signer::generate().unwrap(),
                 "explicit-ephemeral",
-                [0x44; 32],
                 "hel",
             )]))]),
         )]));
@@ -494,7 +519,8 @@ fn routes_for_root(
     attestor: &Ed25519Signer,
     descriptor_count: usize,
 ) -> HashMap<String, VecDeque<TestResponse>> {
-    let entry = attested_entry(attestor, "ephemeral-1", [0x42; 32], "hel");
+    let ephemeral = Ed25519Signer::generate().unwrap();
+    let entry = attested_entry(attestor, &ephemeral, "ephemeral-1", "hel");
     HashMap::from([
         (
             KEY_PATH.to_string(),
@@ -522,25 +548,26 @@ fn key_document(version: u32, key_id: &str, public_key: &[u8]) -> Vec<u8> {
     .unwrap()
 }
 
-fn set_document(entries: &[RawEphemeralEntry]) -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
-        "version": 2,
-        "entries": entries,
-    }))
+fn set_document(entries: &[AttestedEndpointDescriptorEntry]) -> Vec<u8> {
+    serde_json::to_vec(&EndpointDescriptorSetDocument {
+        version: 1,
+        root_key_id: "test-root".to_string(),
+        entries: entries.to_vec(),
+    })
     .unwrap()
 }
 
 fn attested_entry(
     root: &Ed25519Signer,
+    ephemeral: &Ed25519Signer,
     key_id: &str,
-    public_key: [u8; 32],
     region: &str,
-) -> RawEphemeralEntry {
+) -> AttestedEndpointDescriptorEntry {
     let now = chrono::Utc::now().timestamp_millis();
     attested_entry_window(
         root,
+        ephemeral,
         key_id,
-        public_key,
         region,
         now - NOW_SKEW_BEFORE,
         now + NOW_SKEW_AFTER,
@@ -549,14 +576,33 @@ fn attested_entry(
 
 fn attested_entry_window(
     root: &Ed25519Signer,
+    ephemeral: &Ed25519Signer,
     key_id: &str,
-    public_key: [u8; 32],
     region: &str,
     not_before: i64,
     not_after: i64,
-) -> RawEphemeralEntry {
-    let signature = root
-        .sign(&root_attestation_bytes(
+) -> AttestedEndpointDescriptorEntry {
+    let public_key: [u8; 32] = ephemeral.public_key().try_into().unwrap();
+    let descriptor = EndpointDescriptor {
+        version: 1,
+        endpoint_id: hex::encode(public_key),
+        relay_urls: Vec::new(),
+        direct_addresses: vec!["127.0.0.1:9".to_string()],
+        supported_alpns: vec![HOSTED_ALPN_V1.to_vec()],
+        issued_at_unix_millis: not_before,
+        expires_at_unix_millis: not_after,
+        rotation: None,
+    };
+    let descriptor_signature = ephemeral
+        .sign(&endpoint_descriptor_bytes(&descriptor))
+        .unwrap();
+    let signed = SignedEndpointDescriptor {
+        descriptor: Some(descriptor),
+        key_id: key_id.to_string(),
+        signature: descriptor_signature,
+    };
+    let attestation_signature = root
+        .sign(&ephemeral_attestation_bytes(
             key_id,
             &public_key,
             not_before,
@@ -564,15 +610,14 @@ fn attested_entry_window(
             region,
         ))
         .unwrap();
-    RawEphemeralEntry {
+    AttestedEndpointDescriptorEntry {
         ephemeral_key_id: key_id.to_string(),
         ephemeral_public_key: hex::encode(public_key),
-        not_before,
-        not_after,
+        not_before_unix_millis: not_before,
+        not_after_unix_millis: not_after,
         region: region.to_string(),
-        signature: hex::encode(signature),
-        relay_urls: Vec::new(),
-        direct_addresses: vec!["127.0.0.1:9".to_string()],
+        attestation_signature: hex::encode(attestation_signature),
+        signed_descriptor: hex::encode(signed.encode_to_vec()),
     }
 }
 

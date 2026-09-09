@@ -1,9 +1,10 @@
 //! Shared descriptor-trust resolution for every native hosted entry point.
 //!
 //! The pin is the deployment descriptor ROOT. The live set of ephemeral
-//! endpoints is fetched over web-PKI TLS and accepted only when a root
-//! attestation verifies against that pin.
+//! endpoints is fetched over web-PKI TLS and accepted only when the shared
+//! `heddle_api::descriptor_trust` two-layer verify succeeds against that pin.
 
+use api::descriptor_trust::{EntryReject, VerifiedEndpoint, trusted_live_entries};
 use config::ClientConfig;
 
 use super::{
@@ -13,7 +14,6 @@ use super::{
         validate_descriptor_pair,
     },
     fetch_descriptor_key_document, fetch_ephemeral_descriptor_set,
-    root_attestation::{fail_if_none_trusted, order_for_dial, trusted_live_entries},
 };
 
 pub(super) async fn resolve_and_verify_endpoint_descriptor(
@@ -100,7 +100,69 @@ async fn verify_live_set_against_root(
     let selected = ordered.first().ok_or_else(|| {
         HostedError::InvalidDescriptor("no currently valid root-attested endpoint".to_string())
     })?;
-    VerifiedEndpointDescriptor::from_attested_entry(selected, now)
+    VerifiedEndpointDescriptor::from_verified_endpoint(selected, now)
+}
+
+/// Fail closed when the served set has no currently valid two-layer-verified
+/// endpoint. Maps shared `EntryReject` values onto the existing hosted errors.
+pub(super) fn fail_if_none_trusted(
+    trusted: &[VerifiedEndpoint],
+    rejects: &[EntryReject],
+) -> Result<()> {
+    if !trusted.is_empty() {
+        return Ok(());
+    }
+    if rejects.is_empty() {
+        return Err(HostedError::EndpointDescriptorUnavailable);
+    }
+    if rejects.iter().all(|reject| {
+        matches!(
+            reject,
+            EntryReject::Expired
+                | EntryReject::NotYetValid
+                | EntryReject::InvalidWindow
+                | EntryReject::DescriptorExpired
+                | EntryReject::DescriptorNotYetValid
+        )
+    }) {
+        return Err(HostedError::DescriptorOutsideValidityWindow);
+    }
+    if rejects.iter().any(|reject| {
+        matches!(
+            reject,
+            EntryReject::Unattested
+                | EntryReject::InvalidSignature
+                | EntryReject::MissingSignature
+                | EntryReject::InvalidDescriptorSignature
+        )
+    }) {
+        return Err(HostedError::InvalidDescriptorSignature);
+    }
+    Err(HostedError::InvalidDescriptor(
+        "no currently valid root-attested endpoint".to_string(),
+    ))
+}
+
+/// Prefer same-`region` entries, then fall back to the rest in served order.
+/// Never drops a trusted remote entry.
+pub(super) fn order_for_dial<'a>(
+    entries: &'a [VerifiedEndpoint],
+    preferred_region: Option<&str>,
+) -> Vec<&'a VerifiedEndpoint> {
+    let Some(preferred) = preferred_region.filter(|region| !region.is_empty()) else {
+        return entries.iter().collect();
+    };
+    let mut local = Vec::new();
+    let mut remote = Vec::new();
+    for entry in entries {
+        if entry.region == preferred {
+            local.push(entry);
+        } else {
+            remote.push(entry);
+        }
+    }
+    local.extend(remote);
+    local
 }
 
 fn descriptor_url(canonical_server: &str) -> String {
@@ -121,7 +183,79 @@ fn now_unix_millis() -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{canonical_server_authority, descriptor_key_url, descriptor_url};
+    use api::{
+        descriptor_trust::{EntryReject, VerifiedEndpoint},
+        heddle::api::v1alpha1::EndpointDescriptor,
+    };
+
+    use super::{
+        canonical_server_authority, descriptor_key_url, descriptor_url, fail_if_none_trusted,
+        order_for_dial,
+    };
+    use crate::hosted_runtime::hosted::HostedError;
+
+    fn verified(region: &str, key: [u8; 32]) -> VerifiedEndpoint {
+        VerifiedEndpoint {
+            ephemeral_public_key: key,
+            endpoint_descriptor: EndpointDescriptor {
+                version: 1,
+                endpoint_id: hex::encode(key),
+                relay_urls: Vec::new(),
+                direct_addresses: vec!["127.0.0.1:9".to_string()],
+                supported_alpns: vec![api::HOSTED_ALPN_V1.to_vec()],
+                issued_at_unix_millis: 1,
+                expires_at_unix_millis: 2,
+                rotation: None,
+            },
+            not_before_unix_millis: 1,
+            not_after_unix_millis: 2,
+            region: region.to_string(),
+        }
+    }
+
+    #[test]
+    fn empty_set_fails_closed_as_unavailable() {
+        let error = fail_if_none_trusted(&[], &[]).unwrap_err();
+        assert!(matches!(error, HostedError::EndpointDescriptorUnavailable));
+    }
+
+    #[test]
+    fn all_window_rejects_fail_as_outside_window() {
+        let error = fail_if_none_trusted(
+            &[],
+            &[
+                EntryReject::Expired,
+                EntryReject::NotYetValid,
+                EntryReject::DescriptorExpired,
+            ],
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            HostedError::DescriptorOutsideValidityWindow
+        ));
+    }
+
+    #[test]
+    fn unattested_or_invalid_signature_fails_closed_as_invalid_signature() {
+        let error = fail_if_none_trusted(&[], &[EntryReject::Unattested]).unwrap_err();
+        assert!(matches!(error, HostedError::InvalidDescriptorSignature));
+        let error =
+            fail_if_none_trusted(&[], &[EntryReject::InvalidDescriptorSignature]).unwrap_err();
+        assert!(matches!(error, HostedError::InvalidDescriptorSignature));
+    }
+
+    #[test]
+    fn region_preference_does_not_drop_remote_entries() {
+        let hel = verified("hel", [0x11; 32]);
+        let sjc = verified("sjc", [0x22; 32]);
+        let trusted = [sjc, hel];
+        let ordered = order_for_dial(&trusted, Some("hel"));
+        assert_eq!(ordered[0].region, "hel");
+        assert_eq!(ordered[1].region, "sjc");
+        let remote_only = order_for_dial(&trusted, Some("iad"));
+        assert_eq!(remote_only.len(), 2);
+    }
 
     #[test]
     fn descriptor_bootstrap_is_https_and_well_known() {

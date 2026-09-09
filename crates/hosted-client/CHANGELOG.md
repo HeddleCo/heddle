@@ -11,10 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Native bootstrap pins the deployment descriptor **root** and trusts a
   live set of root-attested ephemeral endpoints from
-  `/.well-known/heddle/iroh-endpoint` (heddle#1566). Entries whose
-  attestation does not verify, whose validity window has not started or
-  has expired, or that arrive over a failed TLS chain are rejected; a
-  served document cannot rotate the root pin.
+  `/.well-known/heddle/iroh-endpoint` (heddle#1566). Verification uses
+  `heddle_api::descriptor_trust` (set version 1, two-layer attestation
+  plus signed `EndpointDescriptor`). Entries whose attestation does not
+  verify, whose validity window has not started or has expired, or that
+  arrive over a failed TLS chain are rejected; a served document cannot
+  rotate the root pin. Dial uses the signed descriptor, never unsigned
+  address hints.
 - `GetSpool` / `PromoteSpool` client routes and personal-first read
   resolution for a bare hosted path (heddle#1728).
 

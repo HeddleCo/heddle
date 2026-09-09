@@ -6,6 +6,10 @@ use std::{
 
 use api::{
     HOSTED_ALPN_V1,
+    descriptor_trust::{
+        DescriptorSetError, EndpointDescriptorSetDocument, VerifiedEndpoint,
+        parse_endpoint_descriptor_set,
+    },
     heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
     signing::endpoint_descriptor_bytes,
 };
@@ -19,10 +23,7 @@ use reqwest::{
 };
 use serde::Deserialize;
 
-use super::{
-    HostedError, Result,
-    root_attestation::{TrustedEphemeralEntry, parse_ephemeral_descriptor_set},
-};
+use super::{HostedError, Result};
 
 const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
 const MAX_DESCRIPTOR_KEY_DOCUMENT_BYTES: usize = 4 * 1024;
@@ -156,25 +157,28 @@ impl VerifiedEndpointDescriptor {
         &self.0
     }
 
-    /// Construct a verified descriptor from a root-attested ephemeral entry.
+    /// Construct a verified descriptor from a two-layer-verified endpoint.
     ///
-    /// The caller must already have verified the root attestation. Addressing
-    /// fields are dial hints; identity is the attested public key.
-    pub(super) fn from_attested_entry(
-        entry: &TrustedEphemeralEntry,
+    /// Dial addresses come from the attested ephemeral key's signed
+    /// `EndpointDescriptor`. Unsigned well-known hints are never used.
+    pub(super) fn from_verified_endpoint(
+        endpoint: &VerifiedEndpoint,
         now_unix_millis: i64,
     ) -> Result<Self> {
-        if now_unix_millis < entry.not_before || now_unix_millis >= entry.not_after {
+        if now_unix_millis < endpoint.not_before_unix_millis
+            || now_unix_millis >= endpoint.not_after_unix_millis
+        {
             return Err(HostedError::DescriptorOutsideValidityWindow);
         }
-        Ok(Self(entry.to_endpoint_descriptor()))
+        validate_descriptor(&endpoint.endpoint_descriptor, now_unix_millis)?;
+        Ok(Self(endpoint.endpoint_descriptor.clone()))
     }
 }
 
 pub async fn fetch_ephemeral_descriptor_set(
     url: &str,
     config: &ClientConfig,
-) -> Result<super::root_attestation::EphemeralDescriptorSet> {
+) -> Result<EndpointDescriptorSetDocument> {
     if !url.starts_with("https://") {
         return Err(HostedError::InvalidDescriptor(
             "endpoint descriptor URL must use HTTPS".to_string(),
@@ -207,7 +211,14 @@ pub async fn fetch_ephemeral_descriptor_set(
         ));
     }
     let body = bounded_response_body(response, MAX_DESCRIPTOR_BYTES, "endpoint descriptor").await?;
-    parse_ephemeral_descriptor_set(&body)
+    parse_endpoint_descriptor_set(&body).map_err(|error| match error {
+        DescriptorSetError::Malformed(message) => HostedError::InvalidDescriptor(format!(
+            "ephemeral descriptor set is malformed: {message}"
+        )),
+        DescriptorSetError::UnsupportedVersion(version) => HostedError::InvalidDescriptor(format!(
+            "unsupported endpoint descriptor set version {version}"
+        )),
+    })
 }
 
 pub async fn fetch_descriptor_key_document(

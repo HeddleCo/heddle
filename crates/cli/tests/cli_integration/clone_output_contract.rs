@@ -17,13 +17,17 @@ mod fixture {
 
     use api::{
         HOSTED_ALPN_V1,
+        descriptor_trust::ephemeral_attestation_bytes,
         framing::{decode_request_prelude, encode_stream_failure},
-        heddle::api::v1alpha1::{CallFailure, CallFailureCode},
+        heddle::api::v1alpha1::{
+            CallFailure, CallFailureCode, EndpointDescriptor, SignedEndpointDescriptor,
+        },
+        signing::endpoint_descriptor_bytes,
     };
     use biscuit_auth::KeyPair;
     use crypto::{Ed25519Signer, Signer};
-    use hosted_client::hosted_runtime::hosted::root_attestation_bytes;
-    use iroh::{Endpoint, RelayMode, endpoint::presets};
+    use iroh::{Endpoint, RelayMode, SecretKey, endpoint::presets};
+    use prost::Message;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
     use rustls::{
         ServerConfig, ServerConnection, StreamOwned,
@@ -101,9 +105,12 @@ mod fixture {
     #[test]
     fn clone_json_peer_disconnect_after_connection_emits_structured_error() {
         let temp = TempDir::new().expect("create clone contract fixture root");
-        let (endpoint_id, direct_address, iroh_thread) = disconnecting_iroh_server(None);
-        let signer = Ed25519Signer::generate().expect("generate descriptor signer");
-        let descriptor = signed_descriptor(&endpoint_id, &direct_address, &signer);
+        let (ephemeral_secret, endpoint_id, direct_address, iroh_thread) =
+            disconnecting_iroh_server(None);
+        let signer = Ed25519Signer::generate().expect("generate descriptor root");
+        let ephemeral = Ed25519Signer::from_seed(&ephemeral_secret.to_bytes())
+            .expect("ephemeral signer from Iroh secret");
+        let descriptor = signed_descriptor(&endpoint_id, &direct_address, &signer, &ephemeral);
         let https = TestHttpsServer::start(HashMap::from([(
             DESCRIPTOR_PATH.to_string(),
             VecDeque::from([descriptor]),
@@ -195,9 +202,12 @@ mod fixture {
         const PULL: &str = "/heddle.api.v1alpha1.RepoSyncService/Pull";
 
         let temp = TempDir::new().expect("create folded clone fixture root");
-        let (endpoint_id, direct_address, iroh_thread) = disconnecting_iroh_server(Some(PULL));
-        let signer = Ed25519Signer::generate().expect("generate descriptor signer");
-        let descriptor = signed_descriptor(&endpoint_id, &direct_address, &signer);
+        let (ephemeral_secret, endpoint_id, direct_address, iroh_thread) =
+            disconnecting_iroh_server(Some(PULL));
+        let signer = Ed25519Signer::generate().expect("generate descriptor root");
+        let ephemeral = Ed25519Signer::from_seed(&ephemeral_secret.to_bytes())
+            .expect("ephemeral signer from Iroh secret");
+        let descriptor = signed_descriptor(&endpoint_id, &direct_address, &signer, &ephemeral);
         let https = TestHttpsServer::start(HashMap::from([(
             DESCRIPTOR_PATH.to_string(),
             VecDeque::from([descriptor]),
@@ -281,7 +291,9 @@ mod fixture {
 
     fn disconnecting_iroh_server(
         expected_method: Option<&'static str>,
-    ) -> (String, String, thread::JoinHandle<()>) {
+    ) -> (SecretKey, String, String, thread::JoinHandle<()>) {
+        let secret = SecretKey::generate();
+        let endpoint_secret = secret.clone();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -292,6 +304,7 @@ mod fixture {
                 let endpoint = Endpoint::builder(presets::Minimal)
                     .alpns(vec![HOSTED_ALPN_V1.to_vec()])
                     .relay_mode(RelayMode::Disabled)
+                    .secret_key(endpoint_secret)
                     .bind_addr((std::net::Ipv4Addr::LOCALHOST, 0))
                     .expect("bind Iroh fixture address")
                     .bind()
@@ -357,13 +370,14 @@ mod fixture {
         let (endpoint_id, direct_address) = ready_rx
             .recv_timeout(Duration::from_secs(10))
             .expect("Iroh fixture starts");
-        (endpoint_id, direct_address, thread)
+        (secret, endpoint_id, direct_address, thread)
     }
 
     fn signed_descriptor(
         endpoint_id: &str,
         direct_address: &str,
-        signer: &Ed25519Signer,
+        root: &Ed25519Signer,
+        ephemeral: &Ed25519Signer,
     ) -> Vec<u8> {
         let now = chrono::Utc::now().timestamp_millis();
         let public_key: [u8; 32] = hex::decode(endpoint_id)
@@ -372,8 +386,26 @@ mod fixture {
             .expect("fixture endpoint id is 32 bytes");
         let not_before = now - 1_000;
         let not_after = now + 60_000;
-        let signature = signer
-            .sign(&root_attestation_bytes(
+        let descriptor = EndpointDescriptor {
+            version: 1,
+            endpoint_id: hex::encode(public_key),
+            relay_urls: Vec::new(),
+            direct_addresses: vec![direct_address.to_string()],
+            supported_alpns: vec![HOSTED_ALPN_V1.to_vec()],
+            issued_at_unix_millis: not_before,
+            expires_at_unix_millis: not_after,
+            rotation: None,
+        };
+        let descriptor_signature = ephemeral
+            .sign(&endpoint_descriptor_bytes(&descriptor))
+            .expect("sign fixture endpoint descriptor");
+        let signed = SignedEndpointDescriptor {
+            descriptor: Some(descriptor),
+            key_id: "clone-ephemeral".to_string(),
+            signature: descriptor_signature,
+        };
+        let attestation_signature = root
+            .sign(&ephemeral_attestation_bytes(
                 "clone-ephemeral",
                 &public_key,
                 not_before,
@@ -382,15 +414,16 @@ mod fixture {
             ))
             .expect("sign fixture root attestation");
         serde_json::to_vec(&serde_json::json!({
-            "version": 2,
+            "version": 1,
+            "root_key_id": "clone-test-key",
             "entries": [{
                 "ephemeral_key_id": "clone-ephemeral",
                 "ephemeral_public_key": hex::encode(public_key),
-                "not_before": not_before,
-                "not_after": not_after,
+                "not_before_unix_millis": not_before,
+                "not_after_unix_millis": not_after,
                 "region": "test",
-                "signature": hex::encode(signature),
-                "direct_addresses": [direct_address],
+                "attestation_signature": hex::encode(attestation_signature),
+                "signed_descriptor": hex::encode(signed.encode_to_vec()),
             }],
         }))
         .expect("encode fixture ephemeral descriptor set")

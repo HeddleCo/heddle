@@ -49,6 +49,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- **heddle 0.23.0 on heddle-api 0.30.0 and capability-verifier 0.19.0.**
+  Native bootstrap consumes the canonical `heddle_api::descriptor_trust`
+  contract (set version 1, two-layer root attestation + signed
+  `EndpointDescriptor`) instead of a local copy of that logic. Dial
+  addresses come from the attested ephemeral key's signed descriptor.
+  Workspace crates inherit 0.23.0.
+
 - **Git projection uses Sley 0.9's reader-backed push seam.** Smart-HTTP ref
   reconciliation and exact-action execution now share one receive-pack
   observation, eliminating the second discovery request while preserving
