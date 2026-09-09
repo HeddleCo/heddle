@@ -13,6 +13,7 @@ use tokio::{
     sync::{Notify, mpsc, watch},
     task::{AbortHandle, JoinHandle},
 };
+use tracing::{Instrument, instrument::WithSubscriber};
 
 use crate::{
     contract::*,
@@ -240,40 +241,45 @@ where
     let sender_progress = progress.clone();
     let sender_session = session.clone();
     let sender_authorize = authorize.clone();
-    let mut sender: JoinHandle<Result<(), B::Error>> = tokio::spawn(async move {
-        while let Some(item) = outgoing.recv().await {
-            sender_progress.notify_one();
-            let session = sender_session.clone();
-            let gate = sender_authorize.clone();
-            let activity = gate(Activity::Work).await?;
-            let frame = match item {
-                Outbound::Operation(id) => session.export_operation(id).await?,
-                Outbound::Frame(frame) => {
-                    if let Frame::Have(have) = &frame {
-                        let allowed = session.export_facets().await?;
-                        for frontier in &have.frontiers {
-                            if !allowed.contains(&crate::replication::native_facet(frontier.facet)?)
-                            {
-                                return Err(transport::Error::Protocol(
-                                    "sharing policy changed before disclosure",
-                                )
-                                .into());
+    let mut sender: JoinHandle<Result<(), B::Error>> = tokio::spawn(
+        (async move {
+            while let Some(item) = outgoing.recv().await {
+                sender_progress.notify_one();
+                let session = sender_session.clone();
+                let gate = sender_authorize.clone();
+                let activity = gate(Activity::Work).await?;
+                let frame = match item {
+                    Outbound::Operation(id) => session.export_operation(id).await?,
+                    Outbound::Frame(frame) => {
+                        if let Frame::Have(have) = &frame {
+                            let allowed = session.export_facets().await?;
+                            for frontier in &have.frontiers {
+                                if !allowed
+                                    .contains(&crate::replication::native_facet(frontier.facet)?)
+                                {
+                                    return Err(transport::Error::Protocol(
+                                        "sharing policy changed before disclosure",
+                                    )
+                                    .into());
+                                }
                             }
                         }
+                        frame
                     }
-                    frame
-                }
-            };
-            // Store reads can yield; verify live rights again at disclosure.
-            let encoded = side.encode(frame);
-            let retained = activity.finish(encoded.len())?;
-            drop(gate(Activity::Check).await?);
-            writer.send(encoded).await?;
-            drop(retained);
-        }
-        writer.finish().await?;
-        Ok(())
-    });
+                };
+                // Store reads can yield; verify live rights again at disclosure.
+                let encoded = side.encode(frame);
+                let retained = activity.finish(encoded.len())?;
+                drop(gate(Activity::Check).await?);
+                writer.send(encoded).await?;
+                drop(retained);
+            }
+            writer.finish().await?;
+            Ok(())
+        })
+        .in_current_span()
+        .with_current_subscriber(),
+    );
     // Dropping a JoinHandle detaches it. Abort explicitly so cancellation drops
     // the transport writer too, including while its peer is applying pressure.
     let _sender_guard = AbortOnDrop(sender.abort_handle());
