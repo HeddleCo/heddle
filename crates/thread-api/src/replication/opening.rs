@@ -25,9 +25,9 @@ pub fn validate_endpoint(endpoint: &EndpointRef) -> Result<(), Error> {
 }
 
 pub fn parse_facets(values: &[i32]) -> Result<BTreeSet<ThreadFacet>, Error> {
-    if values.is_empty() || values.len() > 2 {
+    if values.is_empty() || values.len() > ThreadFacet::ALL.len() {
         return Err(Error::Protocol(
-            "replication requires one or two distinct facets",
+            "replication requires a bounded set of distinct facets",
         ));
     }
     let facets = values

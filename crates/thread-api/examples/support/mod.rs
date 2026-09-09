@@ -110,15 +110,33 @@ pub fn revision() -> RevisionRef {
 }
 
 fn overview(version: u8, outcome: &str) -> ThreadOverview {
+    use heddle_object_model::object::{
+        ContentHash,
+        thread_replication::metadata::{Property, property_version},
+    };
+    let intent_version = property_version(
+        ContentHash::from_bytes([3; 32]),
+        &Property::Intent,
+        &Default::default(),
+    )
+    .expect("bounded fixture frontier")
+    .as_bytes()
+    .to_vec();
     ThreadOverview {
         r#ref: Some(thread_ref()),
         name: "api-v2-client".into(),
         version: vec![version],
         intent: Some(ThreadIntent {
             outcome: outcome.into(),
-            version: vec![version],
+            version: intent_version.clone(),
             ..Default::default()
         }),
+        metadata_frontiers: vec![ThreadPropertyFrontier {
+            property: ThreadProperty::Intent as i32,
+            record_id: String::new(),
+            version: intent_version,
+            operation_ids: vec![],
+        }],
         source_heads: vec![revision()],
         integrated_revision: Some(revision()),
         capture_count: Some(1),
@@ -135,6 +153,33 @@ pub fn read_budget() -> ReadBudget {
 }
 
 impl Peer {
+    pub fn prepare_intent(
+        &self,
+        overview: &ThreadOverview,
+        operation: uuid::Uuid,
+        outcome: &str,
+    ) -> Result<heddle_thread_api::thread_control::PreparedControl> {
+        use heddle_thread_api::thread_control::{Author, Control, Intent, PreparedControl};
+        let signer = crypto::Ed25519Signer::from_seed(&self.signer.to_bytes())?;
+        Ok(PreparedControl::sign(
+            overview,
+            Control::Intent(Intent {
+                outcome: outcome.into(),
+                acceptance_criteria: vec![],
+                origin_urls: vec![],
+                principal_approved: false,
+            }),
+            Author {
+                account: uuid::Uuid::from_u128(2),
+                agent_id: None,
+                authority_envelope:
+                    b"fixture original authority; loopback does not authorize Biscuit",
+            },
+            operation,
+            1000,
+            &signer,
+        )?)
+    }
     pub async fn start(scenario: Scenario) -> Result<Self> {
         let server = endpoint(true).await?;
         let browser = endpoint(false).await?;
@@ -318,11 +363,32 @@ async fn serve(mut send: SendStream, mut recv: RecvStream, state: Arc<State>) ->
             ensure!(request.thread == Some(thread_ref()), "mutation Thread");
             let current = state.thread.borrow().clone();
             ensure!(
-                request.expected_intent_version == current.version,
+                request.expected_intent_version
+                    == current.intent.as_ref().context("current intent")?.version,
                 "intent CAS"
             );
+            let record = request.operation.context("original signed intent")?;
+            let operation = heddle_thread_api::replication::decode_record(record)?.verify()?;
+            ensure!(
+                operation.publisher.as_slice() == state.key.as_bytes(),
+                "fixture original publisher"
+            );
             let proposed = request.proposed_intent.context("proposed intent")?;
-            let updated = overview(current.version[0] + 1, &proposed.outcome);
+            let mut updated = overview(current.version[0] + 1, &proposed.outcome);
+            use heddle_object_model::object::thread_replication::metadata::{
+                Property, property_version,
+            };
+            let id = operation.id()?;
+            let version = property_version(
+                operation.thread,
+                &Property::Intent,
+                &std::collections::BTreeSet::from([id]),
+            )?
+            .as_bytes()
+            .to_vec();
+            updated.metadata_frontiers[0].version = version.clone();
+            updated.metadata_frontiers[0].operation_ids = vec![id.as_bytes().to_vec()];
+            updated.intent.as_mut().context("intent")?.version = version;
             state.thread.send_replace(updated.clone());
             let response = ThreadMutationResponse {
                 receipt: Some(MutationReceipt {

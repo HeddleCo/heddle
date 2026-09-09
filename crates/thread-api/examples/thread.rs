@@ -33,20 +33,16 @@ async fn main() -> Result<()> {
         })
         .context("Thread overview")?;
     println!(
-        "Thread: {} ({} captures)",
+        "Thread: {} ({:?} captures)",
         overview.name, overview.capture_count
     );
 
-    let receipt = thread
-        .revise_intent(
-            "demo-revise-intent-1",
-            overview.intent.as_ref().context("observed intent")?,
-            ThreadIntent {
-                outcome: "One Thread view; exact content on demand".into(),
-                ..Default::default()
-            },
-        )
-        .await?;
+    let command = peer.prepare_intent(
+        &overview,
+        uuid::Uuid::now_v7(),
+        "One Thread view; exact content on demand",
+    )?;
+    let receipt = thread.revise_intent(&command).await?;
     println!(
         "Intent edit: {:?}",
         receipt.receipt.context("mutation receipt")?.outcome

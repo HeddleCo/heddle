@@ -8,6 +8,7 @@ mod checkout_selection;
 pub use checkout_resolution::source_conflict_version;
 mod integration;
 mod local;
+pub mod metadata;
 mod peers;
 
 use std::{
@@ -79,7 +80,7 @@ impl ThreadReplica {
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS local_thread_names(name TEXT PRIMARY KEY, thread BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS threads(id BLOB PRIMARY KEY, genesis BLOB NOT NULL, genesis_signature BLOB NOT NULL CHECK(length(genesis_signature)=64), generation INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT, source_revision BLOB);
+            CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT, source_revision BLOB, authority_admitted INTEGER NOT NULL DEFAULT 0 CHECK(authority_admitted IN(0,1)));
             CREATE INDEX IF NOT EXISTS operations_thread_status ON operations(thread,status);
             CREATE INDEX IF NOT EXISTS operations_source_revision ON operations(thread,source_revision,status,id);
             CREATE TABLE IF NOT EXISTS parents(child BLOB NOT NULL, parent BLOB NOT NULL, PRIMARY KEY(child,parent));
@@ -88,7 +89,9 @@ impl ThreadReplica {
             CREATE TABLE IF NOT EXISTS peer_heads(thread BLOB NOT NULL, peer BLOB NOT NULL, operation BLOB NOT NULL, facet INTEGER NOT NULL, PRIMARY KEY(thread,peer,operation));
             CREATE TABLE IF NOT EXISTS peer_receipts(thread BLOB NOT NULL, peer BLOB NOT NULL, operation BLOB NOT NULL, status INTEGER NOT NULL, reason TEXT, PRIMARY KEY(thread,peer,operation));
             CREATE TABLE IF NOT EXISTS hosted_executor_pins(spool TEXT NOT NULL,genesis BLOB NOT NULL CHECK(length(genesis)=32),executor BLOB NOT NULL CHECK(length(executor)=32),PRIMARY KEY(spool,executor));
-            CREATE TABLE IF NOT EXISTS sharing(thread BLOB NOT NULL, destination BLOB NOT NULL, source INTEGER NOT NULL, discussion INTEGER NOT NULL, version BLOB NOT NULL, PRIMARY KEY(thread,destination));")?;
+            CREATE TABLE IF NOT EXISTS sharing(thread BLOB NOT NULL, destination BLOB NOT NULL, facets INTEGER NOT NULL, version BLOB NOT NULL, PRIMARY KEY(thread,destination));
+            CREATE TABLE IF NOT EXISTS thread_control_heads(thread BLOB NOT NULL,property TEXT NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,property,operation));
+            CREATE TABLE IF NOT EXISTS thread_control_commands(thread BLOB NOT NULL,publisher BLOB NOT NULL,command BLOB NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,publisher,command));")?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT OR IGNORE INTO threads(id,genesis,genesis_signature) VALUES(?1,?2,?3)",
@@ -103,6 +106,7 @@ impl ThreadReplica {
             return Err(Error::Invalid("Thread genesis collision".into()));
         }
         transaction.commit()?;
+        this.notify_committed()?;
         Ok(this)
     }
 
@@ -285,15 +289,27 @@ impl ThreadReplica {
                 }
             }
         }
+        self.check_control_command(&tx, &operation, id, compare_frontier)?;
         let source_revision = match &operation.body {
             ThreadOperationBody::Capture(bytes) => Some(State::decode_current_msgpack(bytes)?.id()),
             ThreadOperationBody::Integration(_) | ThreadOperationBody::LocalIntegration(_) => {
                 operation.source_state()?.map(|state| state.id())
             }
-            ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_) => None,
+            ThreadOperationBody::Discussion(_)
+            | ThreadOperationBody::Context(_)
+            | ThreadOperationBody::Metadata(_) => None,
         };
         let inserted = tx.execute("INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,source_revision) VALUES(?1,?2,?3,?4,?5,?6)",
             params![id.as_bytes(), self.thread.as_bytes(), facet_number(operation.facet()), signed.canonical, signed.signature, source_revision.map(|id| id.as_bytes().to_vec())])?;
+        // The host's original-author gate ran before any immutable bytes were
+        // installed. Persist its successful admission in this same transaction;
+        // missing causal parents may arrive after the original credential expires.
+        if matches!(operation.body, ThreadOperationBody::Metadata(_)) {
+            tx.execute(
+                "UPDATE operations SET authority_admitted=1 WHERE id=?1 AND authority_admitted=0",
+                [id.as_bytes()],
+            )?;
+        }
         if inserted > 0 {
             for parent in &operation.parents {
                 tx.execute(
@@ -321,7 +337,7 @@ impl ThreadReplica {
         )?;
         let genesis = ThreadGenesis::decode(&genesis_bytes)?;
         loop {
-            let ready: Vec<Vec<u8>> = tx.prepare("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.status=0 AND (EXISTS (SELECT 1 FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.status=2 OR a.thread<>o.thread OR a.facet<>o.facet)) OR NOT EXISTS (SELECT 1 FROM parents p LEFT JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.id IS NULL OR a.status<>1))) ORDER BY o.id LIMIT 128")?
+            let ready: Vec<Vec<u8>> = tx.prepare("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.status=0 AND (o.facet<>3 OR o.authority_admitted=1) AND (EXISTS (SELECT 1 FROM parents p JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.status=2 OR a.thread<>o.thread OR a.facet<>o.facet)) OR NOT EXISTS (SELECT 1 FROM parents p LEFT JOIN operations a ON a.id=p.parent WHERE p.child=o.id AND (a.id IS NULL OR a.status<>1))) ORDER BY o.id LIMIT 128")?
                 .query_map([self.thread.as_bytes()], |r| r.get(0))?.collect::<std::result::Result<_,_>>()?;
             if ready.is_empty() {
                 break;
@@ -407,6 +423,7 @@ impl ThreadReplica {
                             }
                             store.put_state(&state)?;
                         }
+                        self.accept_control_heads(tx, &operation, id)?;
                         tx.execute(
                             "UPDATE operations SET status=1 WHERE id=?1",
                             [id.as_bytes()],
@@ -639,21 +656,22 @@ impl ThreadReplica {
         destination: [u8; 32],
         facets: &BTreeSet<ThreadFacet>,
     ) -> Result<ContentHash> {
-        let source = facets.contains(&ThreadFacet::Source);
-        let discussion = facets.contains(&ThreadFacet::Discussion);
+        let bits = facet_bits(facets);
         let mut bytes = self.thread.as_bytes().to_vec();
         bytes.extend(destination);
-        bytes.push(u8::from(source));
-        bytes.push(u8::from(discussion));
-        let version = ContentHash::compute_typed("thread-sharing-v1", &bytes);
+        bytes.extend(bits.to_be_bytes());
+        let version = ContentHash::compute_typed("thread-sharing-v2", &bytes);
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        tx.execute("INSERT INTO sharing(thread,destination,source,discussion,version) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(thread,destination) DO UPDATE SET source=excluded.source,discussion=excluded.discussion,version=excluded.version",params![self.thread.as_bytes(),destination,source,discussion,version.as_bytes()])?;
-        tx.execute(
-            "UPDATE threads SET generation=generation+1 WHERE id=?1",
-            [self.thread.as_bytes()],
-        )?;
+        let changed=tx.execute("INSERT INTO sharing(thread,destination,facets,version) VALUES(?1,?2,?3,?4) ON CONFLICT(thread,destination) DO UPDATE SET facets=excluded.facets,version=excluded.version WHERE sharing.version<>excluded.version",params![self.thread.as_bytes(),destination,bits,version.as_bytes()])?;
+        if changed > 0 {
+            tx.execute(
+                "UPDATE threads SET generation=generation+1 WHERE id=?1",
+                [self.thread.as_bytes()],
+            )?;
+        }
         tx.commit()?;
+        self.notify_committed()?;
         Ok(version)
     }
 
@@ -661,25 +679,24 @@ impl ThreadReplica {
         &self,
         destination: &[u8; 32],
     ) -> Result<(BTreeSet<ThreadFacet>, Option<ContentHash>)> {
-        let row: Option<(bool, bool, Vec<u8>)> = self
+        let row: Option<(i64, Vec<u8>)> = self
             .connect()?
             .query_row(
-                "SELECT source,discussion,version FROM sharing WHERE thread=?1 AND destination=?2",
+                "SELECT facets,version FROM sharing WHERE thread=?1 AND destination=?2",
                 params![self.thread.as_bytes(), destination],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let Some((source, discussion, version)) = row else {
+        let Some((bits, version)) = row else {
             return Ok((BTreeSet::new(), None));
         };
-        let mut facets = BTreeSet::new();
-        if source {
-            facets.insert(ThreadFacet::Source);
-        }
-        if discussion {
-            facets.insert(ThreadFacet::Discussion);
-        }
-        Ok((facets, Some(hash(&version)?)))
+        Ok((
+            ThreadFacet::ALL
+                .into_iter()
+                .filter(|facet| bits & (1i64 << facet_number(*facet)) != 0)
+                .collect(),
+            Some(hash(&version)?),
+        ))
     }
 }
 
@@ -699,7 +716,13 @@ fn facet_number(facet: ThreadFacet) -> u32 {
     match facet {
         ThreadFacet::Source => 1,
         ThreadFacet::Discussion => 2,
+        ThreadFacet::Metadata => 3,
     }
+}
+fn facet_bits(facets: &BTreeSet<ThreadFacet>) -> i64 {
+    facets
+        .iter()
+        .fold(0, |bits, facet| bits | (1i64 << facet_number(*facet)))
 }
 fn hash(bytes: &[u8]) -> Result<ContentHash> {
     Ok(ContentHash::from_bytes(bytes.try_into().map_err(|_| {

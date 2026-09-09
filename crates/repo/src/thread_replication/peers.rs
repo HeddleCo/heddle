@@ -45,14 +45,13 @@ impl ThreadReplica {
             ));
         }
         let connection = self.connect()?;
-        let mut query = connection.prepare("SELECT h.operation,o.status FROM peer_heads h LEFT JOIN operations o ON o.id=h.operation AND o.thread=h.thread WHERE h.thread=?1 AND h.peer=?2 AND (o.status IS NULL OR o.status=0) AND ((h.facet=1 AND ?3) OR (h.facet=2 AND ?4)) ORDER BY h.operation LIMIT ?5")?;
+        let mut query = connection.prepare("SELECT h.operation,o.status FROM peer_heads h LEFT JOIN operations o ON o.id=h.operation AND o.thread=h.thread WHERE h.thread=?1 AND h.peer=?2 AND (o.status IS NULL OR o.status=0) AND ((1<<h.facet)&?3)<>0 ORDER BY h.operation LIMIT ?4")?;
         let heads = query
             .query_map(
                 params![
                     self.thread.as_bytes(),
                     peer,
-                    facets.contains(&ThreadFacet::Source),
-                    facets.contains(&ThreadFacet::Discussion),
+                    super::facet_bits(facets),
                     limit as u32
                 ],
                 |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Option<i32>>(1)?)),
@@ -86,8 +85,8 @@ impl ThreadReplica {
             return Err(Error::Invalid("receipt page size must be 1..1024".into()));
         }
         let mut connection = self.connect()?;
-        let rows = connection.prepare("SELECT h.operation,o.status,o.reason FROM peer_heads h JOIN operations o ON o.id=h.operation AND o.thread=h.thread WHERE h.thread=?1 AND h.peer=?2 AND o.status<>0 AND ((h.facet=1 AND ?3) OR (h.facet=2 AND ?4)) ORDER BY h.operation LIMIT ?5")?
-            .query_map(params![self.thread.as_bytes(), peer, facets.contains(&ThreadFacet::Source), facets.contains(&ThreadFacet::Discussion), limit as u32], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i32>(1)?, r.get::<_, Option<String>>(2)?)))?
+        let rows = connection.prepare("SELECT h.operation,o.status,o.reason FROM peer_heads h JOIN operations o ON o.id=h.operation AND o.thread=h.thread WHERE h.thread=?1 AND h.peer=?2 AND o.status<>0 AND ((1<<h.facet)&?3)<>0 ORDER BY h.operation LIMIT ?4")?
+            .query_map(params![self.thread.as_bytes(), peer, super::facet_bits(facets), limit as u32], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, i32>(1)?, r.get::<_, Option<String>>(2)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         if rows.is_empty() {
             return Ok(Vec::new());

@@ -1,5 +1,5 @@
 //! Local SQLite adapter. Blocking work stays off the stream runtime.
-use std::{collections::BTreeSet, sync::Arc};
+use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
 use crypto::thread_operation::SignedOperation;
 use heddle_object_model::object::{
@@ -21,18 +21,30 @@ pub enum Error {
 pub struct LocalReplica<S> {
     replica: ThreadReplica,
     objects: Arc<S>,
+    authority_home: Option<PathBuf>,
 }
 impl<S> Clone for LocalReplica<S> {
     fn clone(&self) -> Self {
         Self {
             replica: self.replica.clone(),
             objects: self.objects.clone(),
+            authority_home: self.authority_home.clone(),
         }
     }
 }
 impl<S: ObjectStore + Send + Sync + 'static> LocalReplica<S> {
     pub fn new(replica: ThreadReplica, objects: Arc<S>) -> Self {
-        Self { replica, objects }
+        Self {
+            replica,
+            objects,
+            authority_home: None,
+        }
+    }
+    /// Use independently enrolled local account authority for original metadata
+    /// authors. Without this binding, new metadata admission fails closed.
+    pub fn with_device_authority(mut self, home: PathBuf) -> Self {
+        self.authority_home = Some(home);
+        self
     }
     async fn execute<T: Send + 'static>(
         &self,
@@ -75,8 +87,40 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
         self.execute(move |replica, _| replica.operation(&id)).await
     }
     async fn receive(&self, operation: SignedOperation) -> Result<Admission, Error> {
-        self.execute(move |replica, objects| replica.receive(&operation, objects, |_| Ok(())))
-            .await
+        let authority_home = self.authority_home.clone();
+        self.execute(move |replica, objects| {
+            replica.receive(&operation, objects, |native| {
+                use heddle_object_model::object::thread_replication::ThreadOperationBody;
+                if !matches!(native.body, ThreadOperationBody::Metadata(_)) {
+                    return Ok(());
+                }
+                // Durable original-author receipt remains valid while causal
+                // parents arrive later. Neither the envelope nor claimed time
+                // can synthesize the atomically retained admission marker.
+                if replica.control_authority_admitted(&operation)? {
+                    return Ok(());
+                }
+                let home = authority_home.as_ref().ok_or_else(|| {
+                    repo::thread_replication::Error::Invalid(
+                        "metadata admission requires independently enrolled account authority"
+                            .into(),
+                    )
+                })?;
+                let now = chrono::Utc::now().timestamp();
+                let authority = repo::device_authority::load(home, now).map_err(authority_error)?;
+                let genesis = replica.genesis()?;
+                let spool = genesis.spool.parse().map_err(authority_error)?;
+                let registered =
+                    repo::device_catalog::load(home, spool).map_err(authority_error)?;
+                repo::thread_replication::metadata::verify_control_authority(
+                    native,
+                    &authority,
+                    &registered.capability_path,
+                    now,
+                )
+            })
+        })
+        .await
     }
     async fn remember_peer_heads(
         &self,
@@ -113,4 +157,8 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
         self.execute(move |replica, _| replica.needed_from_peer(peer, &facets, limit))
             .await
     }
+}
+
+fn authority_error(error: impl std::fmt::Display) -> repo::thread_replication::Error {
+    repo::thread_replication::Error::Invalid(error.to_string())
 }

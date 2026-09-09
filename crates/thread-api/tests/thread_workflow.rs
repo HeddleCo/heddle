@@ -27,12 +27,9 @@ async fn a_persisted_checkpoint_resumes_committed_changes_without_replacement() 
     };
     thread
         .revise_intent(
-            "edit-2",
-            overview.intent.as_ref().expect("intent"),
-            ThreadIntent {
-                outcome: "after disconnect".into(),
-                ..Default::default()
-            },
+            &peer
+                .prepare_intent(overview, uuid::Uuid::from_u128(2), "after disconnect")
+                .expect("prepare original edit"),
         )
         .await
         .expect("edit");
@@ -85,18 +82,15 @@ async fn snapshot_edit_and_live_update_need_no_lookup_or_refetch() {
     };
     let receipt = thread
         .revise_intent(
-            "edit-1",
-            overview.intent.as_ref().expect("intent"),
-            ThreadIntent {
-                outcome: "new intent".into(),
-                ..Default::default()
-            },
+            &peer
+                .prepare_intent(overview, uuid::Uuid::from_u128(1), "new intent")
+                .expect("prepare original edit"),
         )
         .await
         .expect("edit");
     assert_eq!(
         receipt.receipt.expect("receipt").client_operation_id,
-        "edit-1"
+        uuid::Uuid::from_u128(1).to_string()
     );
     let update = view
         .next_commit()

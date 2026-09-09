@@ -13,19 +13,7 @@ use crate::{
 
 /// Maximum complete public proof, including owner history and sealed Biscuit.
 pub const MAX_BYTES: usize = 64 * 1024;
-#[derive(Clone, PartialEq, Message)]
-struct Envelope {
-    #[prost(uint32, tag = "1")]
-    format: u32,
-    #[prost(message, optional, tag = "2")]
-    owner: Option<OwnerHistory>,
-    #[prost(bytes = "vec", tag = "3")]
-    mint_root_public_key: Vec<u8>,
-    #[prost(message, optional, tag = "4")]
-    mint_root_attachment: Option<SignedMintRootAttachment>,
-    #[prost(bytes = "vec", tag = "5")]
-    sealed_biscuit: Vec<u8>,
-}
+use crate::wire::ThreadControlAuthority as Envelope;
 fn invalid(message: impl Into<String>) -> Error {
     Error::Invalid(message.into())
 }

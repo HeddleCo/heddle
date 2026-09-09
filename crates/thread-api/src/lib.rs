@@ -8,15 +8,17 @@ pub mod behavior;
 #[cfg(feature = "replication")]
 pub mod collaboration;
 pub mod content;
-#[cfg(feature = "source-transfer")]
-pub mod fetch;
 #[cfg(feature = "replication")]
 pub mod creation;
 #[cfg(feature = "signing")]
 pub mod credentials;
+#[cfg(feature = "source-transfer")]
+pub mod fetch;
 #[cfg(feature = "replication")]
 pub mod live_replication;
 pub mod observation;
+#[cfg(feature = "root-attachment")]
+pub mod pairing;
 #[cfg(any(feature = "native", feature = "replication", feature = "iroh"))]
 pub mod publication;
 #[cfg(feature = "replication")]
@@ -27,8 +29,8 @@ pub mod replication_rpc;
 pub mod request_proof;
 #[cfg(feature = "root-attachment")]
 pub mod root_attachment;
-#[cfg(feature = "root-attachment")]
-pub mod pairing;
+#[cfg(feature = "replication")]
+pub mod thread_control;
 pub mod transport;
 
 use api::v2::client::{Client, ClientError, RpcTransport};
@@ -137,27 +139,22 @@ pub struct Thread<'a, T: RpcTransport<Error = Error>> {
 }
 
 impl<T: RpcTransport<Error = Error>> Thread<'_, T> {
-    /// A stable operation ID and the observed intent version make retry and
-    /// concurrent edits explicit. A blocked receipt remains a typed outcome.
+    /// Send a locally prepared original signed intent. Preparation consumes the
+    /// existing overview's field frontier and performs no extra RPC.
+    #[cfg(feature = "replication")]
     pub async fn revise_intent(
         &self,
-        operation_id: impl Into<String>,
-        observed: &contract::ThreadIntent,
-        proposed: contract::ThreadIntent,
+        command: &thread_control::PreparedControl,
     ) -> Result<contract::ThreadMutationResponse, ClientError<Error>> {
-        if observed.version.is_empty() {
+        let request = command.revise_intent().map_err(ClientError::Transport)?;
+        if request.thread.as_ref() != Some(&self.reference) {
             return Err(ClientError::Transport(Error::Protocol(
-                "observe the intent version before editing",
+                "prepared command belongs to another Thread",
             )));
         }
         self.remote
             .api
-            .call::<rpc::ThreadServiceReviseIntent>(&contract::ReviseIntentRequest {
-                client_operation_id: operation_id.into(),
-                thread: Some(self.reference.clone()),
-                expected_intent_version: observed.version.clone(),
-                proposed_intent: Some(proposed),
-            })
+            .call::<rpc::ThreadServiceReviseIntent>(&request)
             .await
     }
 

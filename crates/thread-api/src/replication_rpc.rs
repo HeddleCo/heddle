@@ -2,7 +2,7 @@
 //! Known-Thread replication on a directly authenticated Iroh connection.
 //! The host supplies its resolved owner/account authority and admission facets.
 //! Unknown Thread creation and source-object transfer have separate boundaries.
-use std::{collections::BTreeSet, future::Future, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
 use api::{
     framing,
@@ -40,6 +40,7 @@ pub struct Peer {
     endpoint: EndpointRef,
     facets: BTreeSet<ThreadFacet>,
     genesis: SignedRecord,
+    authority_home: Option<PathBuf>,
 }
 impl Peer {
     pub fn new(
@@ -68,9 +69,26 @@ impl Peer {
             endpoint,
             facets,
             genesis,
+            authority_home: None,
         })
     }
 
+    /// Enable original metadata author admission against this account's local
+    /// independently enrolled pin; never infer account ownership from delivery.
+    pub fn with_device_authority(mut self, home: PathBuf) -> Self {
+        self.authority_home = Some(home);
+        self
+    }
+    fn local_replica<S: ObjectStore + Send + Sync + 'static>(
+        &self,
+        store: Arc<S>,
+    ) -> LocalReplica<S> {
+        let local = LocalReplica::new(self.replica.clone(), store);
+        match &self.authority_home {
+            Some(home) => local.with_device_authority(home.clone()),
+            None => local,
+        }
+    }
     fn reference(&self) -> Result<ThreadRef, transport::Error> {
         let genesis = self.replica.genesis().map_err(store_error)?;
         Ok(ThreadRef {
@@ -146,12 +164,7 @@ impl Peer {
         };
         let (facets, max_items) =
             opening::validate_ready(&ready, &thread, &destination, &self.facets, 64)?;
-        let session = Session::new(
-            LocalReplica::new(self.replica.clone(), store),
-            remote_key,
-            facets,
-            max_items,
-        )?;
+        let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?;
         live_replication::run(session, reader, writer, Side::Initiator, feed, move |_| {
             authorize()
         })
@@ -270,12 +283,7 @@ impl Peer {
                 .encode_to_vec(),
             )
             .await?;
-        let session = Session::new(
-            LocalReplica::new(self.replica.clone(), store),
-            remote_key,
-            facets,
-            max_items,
-        )?;
+        let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?;
         live_replication::run(session, reader, writer, Side::Acceptor, feed, move |_| {
             std::future::ready(authority.recheck(&verified))
         })

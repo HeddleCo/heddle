@@ -150,7 +150,7 @@ impl<B: ReplicaStore> Session<B> {
             self.after = None;
         }
         let sharing = self.export_facets().await?;
-        let facets = [ThreadFacet::Source, ThreadFacet::Discussion];
+        let facets = ThreadFacet::ALL;
         while self.announce_facet < facets.len() {
             let facet = facets[self.announce_facet];
             if !sharing.contains(&facet) {
@@ -442,6 +442,7 @@ pub fn native_facet(facet: i32) -> Result<ThreadFacet> {
     match SharedFacet::try_from(facet) {
         Ok(SharedFacet::Source) => Ok(ThreadFacet::Source),
         Ok(SharedFacet::Collaboration) => Ok(ThreadFacet::Discussion),
+        Ok(SharedFacet::Metadata) => Ok(ThreadFacet::Metadata),
         _ => Err(Error::Protocol("unsupported replication facet")),
     }
 }
@@ -449,6 +450,7 @@ pub fn wire_facet(facet: ThreadFacet) -> i32 {
     match facet {
         ThreadFacet::Source => SharedFacet::Source as i32,
         ThreadFacet::Discussion => SharedFacet::Collaboration as i32,
+        ThreadFacet::Metadata => SharedFacet::Metadata as i32,
     }
 }
 fn hash(bytes: &[u8]) -> Result<ContentHash> {

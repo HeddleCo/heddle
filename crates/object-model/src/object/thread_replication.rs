@@ -3,6 +3,7 @@
 //! discussion causality have separate graphs so selective sharing is closed.
 pub mod integration;
 pub mod local_integration;
+pub mod metadata;
 
 use std::collections::BTreeSet;
 
@@ -66,6 +67,10 @@ impl ThreadGenesis {
 pub enum ThreadFacet {
     Source,
     Discussion,
+    Metadata,
+}
+impl ThreadFacet {
+    pub const ALL: [Self; 3] = [Self::Source, Self::Discussion, Self::Metadata];
 }
 
 /// Durable causal admission. Receiving bytes alone does not accept an operation.
@@ -84,6 +89,7 @@ pub enum ThreadOperationBody {
     LocalIntegration(Vec<u8>),
     Discussion(Vec<u8>),
     Context(Vec<u8>),
+    Metadata(Vec<u8>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +110,7 @@ impl ThreadOperation {
             ThreadOperationBody::Capture(_)
             | ThreadOperationBody::Integration(_)
             | ThreadOperationBody::LocalIntegration(_) => ThreadFacet::Source,
+            ThreadOperationBody::Metadata(_) => ThreadFacet::Metadata,
             ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_) => {
                 ThreadFacet::Discussion
             }
@@ -183,6 +190,9 @@ impl ThreadOperation {
             }
             ThreadOperationBody::LocalIntegration(bytes) => {
                 local_integration::LocalIntegration::decode(bytes)?.validate_operation(self)?;
+            }
+            ThreadOperationBody::Metadata(bytes) => {
+                metadata::ThreadControl::decode(bytes)?.validate_operation(self)?;
             }
             ThreadOperationBody::Context(bytes) => {
                 let context = crate::object::ContextRevision::decode(bytes).map_err(invalid)?;
@@ -293,6 +303,9 @@ impl ThreadOperation {
                 let receipt = local_integration::LocalIntegration::decode(bytes)?;
                 receipt.validate_operation(self)?;
                 receipt.validate_parents(genesis, parents)?;
+            }
+            ThreadOperationBody::Metadata(bytes) => {
+                metadata::ThreadControl::decode(bytes)?.validate_parents(genesis, parents)?;
             }
             ThreadOperationBody::Context(bytes) => {
                 let context = crate::object::ContextRevision::decode(bytes).map_err(invalid)?;
