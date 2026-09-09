@@ -130,9 +130,7 @@ fn capture(
                 .map(|p| p.verify().expect("operation").id().expect("ID"))
                 .collect(),
             publisher: signer.public_key().try_into().expect("key"),
-            body: ThreadOperationBody::Capture(
-                state.encode_current_msgpack().expect("state").into(),
-            ),
+            body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(state.encode_current_msgpack().expect("state").into())),
         },
         signer,
     )
@@ -143,7 +141,7 @@ fn state_id(record: &SignedOperation) -> StateId {
     else {
         panic!("capture")
     };
-    State::decode_current_msgpack(&bytes.state)
+    State::decode_current_msgpack(&bytes.result.state)
         .expect("state")
         .id()
 }

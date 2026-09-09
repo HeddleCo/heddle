@@ -763,6 +763,8 @@ pub(crate) fn install_credential_file(path: &Path) -> Result<String> {
             .map_err(|error| anyhow::anyhow!("credential proof key is invalid: {error}"))?;
         repo::identity::link_device_key(signer.public_key(), &proof_key_pem, &server)
             .with_context(|| format!("registering device identity for {server}"))?;
+        let stored=credentials::get_server_credential(&server)?.context("installed device credential missing")?;
+        super::source_author::retain(&server,&stored)?;
     }
 
     Ok(subject)

@@ -39,7 +39,7 @@ struct CaptureJournal {
     attribution: Attribution,
     #[serde(default)]
     selection: Vec<String>,
-    capture: Option<objects::object::thread_replication::Capture>,
+    capture: Option<objects::object::thread_replication::AuthoredCapture>,
 }
 
 #[derive(Clone)]
@@ -242,7 +242,7 @@ impl ThreadCheckout {
             if completed
                 .capture
                 .as_ref()
-                .is_none_or(|capture| capture.state != canonical_state)
+                .is_none_or(|capture| capture.result.state != canonical_state)
             {
                 return Err(Error::Invalid(
                     "capture receipt source differs from committed State".into(),
@@ -378,7 +378,17 @@ impl ThreadCheckout {
         let capture = match &journal.capture {
             Some(capture) => capture.clone(),
             None => {
-                let capture = replica.prepare_capture(&self.repository, &state)?;
+                let capture = objects::object::thread_replication::AuthoredCapture {
+                    result: replica.prepare_capture(&self.repository, &state)?,
+                    author: self.repository.native_capture_author(
+                        &signer
+                            .public_key()
+                            .try_into()
+                            .map_err(|_| Error::Invalid("source signer length".into()))?,
+                        uuid::Uuid::parse_str(&replica.genesis()?.spool)
+                            .map_err(|error| Error::Invalid(error.to_string()))?,
+                    )?,
+                };
                 journal.capture = Some(capture.clone());
                 journal.resulting = Some(state.id());
                 write_journal(&path, &journal)?;
@@ -396,7 +406,9 @@ impl ThreadCheckout {
             body: ThreadOperationBody::Capture(capture),
         };
         let signed = SignedOperation::sign(&operation, signer)?;
-        if replica.receive_prepared_source(&signed, self.repository.store(), |_| Ok(()))? != Admission::Accepted {
+        if replica.receive_prepared_source(&signed, self.repository.store(), |_| Ok(()))?
+            != Admission::Accepted
+        {
             return Err(Error::Invalid(
                 "local capture has incomplete causal ancestry".into(),
             ));

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! A bounded, transport-neutral causal exchange shared by device and hosted
 //! endpoints. The RPC adapter supplies the verified request scope.
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crypto::thread_operation::SignedOperation;
 use heddle_object_model::object::{
@@ -12,7 +12,7 @@ use heddle_object_model::object::{
 pub mod native;
 pub mod opening;
 pub mod store;
-use store::{ReceivedOperation, ReplicaStore};
+use store::ReplicaStore;
 
 use crate::contract::*;
 
@@ -259,39 +259,23 @@ impl<B: ReplicaStore> Session<B> {
             Frame::Operations(batch) => {
                 self.check_count(batch.operations.len())?;
                 self.check_count(batch.authority_admissions.len())?;
-                let mut admissions = BTreeMap::new();
-                for record in batch.authority_admissions {
-                    let signed = crate::authority_admission::decode(&record)
-                        .map_err(|_| Error::Protocol("invalid authority admission sidecar"))?;
-                    let statement = signed.verify_signature().map_err(Error::from)?;
-                    if admissions.insert(statement.operation, signed).is_some() {
-                        return Err(Error::Protocol("duplicate authority admission sidecar").into());
-                    }
-                }
-                let mut operations = Vec::with_capacity(batch.operations.len());
-                let mut operation_ids = BTreeSet::new();
-                for record in batch.operations {
-                    let signed = decode_record(record)?;
-                    let operation = signed.verify().map_err(Error::from)?;
+                let decoded = crate::authority_admission::match_batch(&batch)
+                    .map_err(|error| match error { crate::transport::Error::Protocol(message) => Error::Protocol(message), _ => Error::Protocol("invalid original authority batch") })?;
+                let mut operations = Vec::with_capacity(decoded.len());
+                for received in decoded {
+                    let operation = received.original.verify().map_err(Error::from)?;
                     let id = operation.id().map_err(Error::from)?;
                     if !self.facets.contains(&operation.facet()) {
                         return Err(Error::Protocol("operation is outside admission scope").into());
                     }
-                    operation_ids.insert(id);
-                    operations.push((signed, operation, id));
-                }
-                if admissions.keys().any(|id| !operation_ids.contains(id)) {
-                    return Err(Error::Protocol("unmatched authority admission sidecar").into());
+                    operations.push((received, operation, id));
                 }
                 let mut receipt = ReplicationReceipt::default();
-                for (signed, operation, id) in operations {
+                for (received, operation, id) in operations {
                     self.in_flight.remove(&id);
                     match self
                         .replica
-                        .receive(ReceivedOperation {
-                            original: signed,
-                            authority_admission: admissions.remove(&id),
-                        })
+                        .receive(received)
                         .await
                         .map_err(StoreError::Store)?
                     {

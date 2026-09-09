@@ -239,3 +239,39 @@ mod tests {
         );
     }
 }
+
+/// Decode a bounded batch and match every sidecar to an exact original in that
+/// batch. This verifies signatures and immutable bindings, not issuer trust.
+/// Callers still authorize current disclosure and independently pin receipts.
+pub fn match_batch(batch: &wire::ReplicationOperations) -> Result<Vec<crate::replication::store::ReceivedOperation>, Error> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use prost::Message;
+    if batch.operations.is_empty() || batch.operations.len() > 128
+        || batch.authority_admissions.len() > 128
+        || batch.encoded_len() > 1024 * 1024
+    { return Err(Error::Protocol("original authority batch exceeds bounds")); }
+    let mut receipts = BTreeMap::new();
+    for record in &batch.authority_admissions {
+        let signed = decode(record)?;
+        let statement = signed.verify_signature().map_err(|_| Error::Protocol("invalid authority admission signature"))?;
+        if receipts.insert(statement.operation, (signed, statement)).is_some() {
+            return Err(Error::Protocol("duplicate authority admission sidecar"));
+        }
+    }
+    let mut ids = BTreeSet::new();
+    let mut output = Vec::new();
+    for record in &batch.operations {
+        let original = crate::replication::decode_record(record.clone()).map_err(|_| Error::Protocol("invalid original operation signature"))?;
+        let operation = original.verify().map_err(|_| Error::Protocol("invalid original operation signature"))?;
+        let id = operation.id().map_err(|_| Error::Protocol("invalid original operation identity"))?;
+        if !ids.insert(id) { return Err(Error::Protocol("duplicate original operation")); }
+        let receipt = if let Some((receipt, statement)) = receipts.remove(&id) {
+            statement.authorize(&operation, &TrustedHostedExecutor { spool: statement.spool, spool_genesis: statement.spool_genesis, executor: statement.executor })
+                .map_err(|_| Error::Protocol("authority receipt differs from original operation"))?;
+            Some(receipt)
+        } else { None };
+        output.push(crate::replication::store::ReceivedOperation { original, authority_admission: receipt });
+    }
+    if !receipts.is_empty() { return Err(Error::Protocol("unmatched authority admission sidecar")); }
+    Ok(output)
+}

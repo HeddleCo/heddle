@@ -186,10 +186,10 @@ impl ThreadReplica {
 
     /// Exact durable original-author admission, separate from causal readiness.
     /// Only host-authorized receive writes this bit atomically with signed bytes.
-    pub fn control_authority_admitted(&self, signed: &SignedOperation) -> Result<bool> {
+    pub fn original_authority_admitted(&self, signed: &SignedOperation) -> Result<bool> {
         let operation = signed.verify()?;
         if operation.thread != self.thread
-            || !matches!(operation.body, ThreadOperationBody::Metadata(_))
+            || !(matches!(operation.body, ThreadOperationBody::Metadata(_)) || matches!(&operation.body, ThreadOperationBody::Capture(capture) if matches!(capture.author, objects::object::thread_replication::SourceAuthor::Account { .. })))
         {
             return Ok(false);
         }

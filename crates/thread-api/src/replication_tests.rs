@@ -46,9 +46,7 @@ async fn reconnect_finds_missing_ancestors_through_already_pending_parents() {
             thread: replica.thread_id(),
             parents: previous.into_iter().collect(),
             publisher: signer.public_key().try_into().expect("publisher key"),
-            body: ThreadOperationBody::Capture(
-                state.encode_current_msgpack().expect("state").into(),
-            ),
+            body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(state.encode_current_msgpack().expect("state").into())),
         };
         previous = Some(operation.id().expect("operation ID"));
         records.push(SignedOperation::sign(&operation, &signer).expect("signed capture"));
@@ -145,9 +143,7 @@ async fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
             thread: left.thread_id(),
             parents: BTreeSet::new(),
             publisher: genesis.creator,
-            body: ThreadOperationBody::Capture(
-                state.encode_current_msgpack().expect("state").into(),
-            ),
+            body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(state.encode_current_msgpack().expect("state").into())),
         };
         parents.insert(operation.id().expect("ID"));
         let signed = SignedOperation::sign(&operation, &signer).expect("signed capture");
@@ -164,9 +160,7 @@ async fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
         thread: left.thread_id(),
         parents,
         publisher: genesis.creator,
-        body: ThreadOperationBody::Capture(
-            merge.encode_current_msgpack().expect("merge state").into(),
-        ),
+        body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(merge.encode_current_msgpack().expect("merge state").into())),
     };
     let merged_id = merge_operation.id().expect("merge ID");
     let signed = SignedOperation::sign(&merge_operation, &signer).expect("signed merge");
@@ -310,9 +304,7 @@ async fn paged_announcement_restarts_when_a_write_lands_behind_its_cursor() {
             thread: replica.thread_id(),
             parents: BTreeSet::new(),
             publisher: genesis.creator,
-            body: ThreadOperationBody::Capture(
-                state.encode_current_msgpack().expect("state").into(),
-            ),
+            body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(state.encode_current_msgpack().expect("state").into())),
         };
         records.push((
             operation.id().expect("ID"),

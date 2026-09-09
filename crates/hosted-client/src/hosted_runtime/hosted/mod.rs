@@ -402,6 +402,9 @@ impl HostedClient {
             private_key_pem: Some(private_key_pem),
             expires_at: Some(root.expires_at.to_rfc3339()),
         };
+        if let Err(error)=crate::hosted_runtime::source_author::retain(&server_key,&updated) {
+            tracing::warn!("credential rotation: failed to retain original device authority: {error}");
+        }
         if let Err(error) = config::credentials::store_server_credential(&server_key, updated) {
             tracing::warn!("credential rotation: failed to persist credential: {error}");
         }

@@ -27,6 +27,7 @@ pub struct StagedSource {
     pub(super) operations: Vec<SignedOperation>,
     pub(super) dependencies: Vec<ThreadGenesisRecord>,
     pub(super) state: State,
+    pub(super) authority_admissions: BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
 }
 impl StagedSource {
     pub fn artifact_paths(&self) -> [std::path::PathBuf; 2] {
@@ -74,6 +75,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
             tokio::fs::File::create(directory.path().join("source.idx")).await?,
         ];
         let mut operations = Vec::new();
+        let mut receipt_records = Vec::new();
         let mut dependencies = Vec::new();
         let mut metadata_bytes = 0usize;
         let mut complete = false;
@@ -92,14 +94,11 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
                     };
                     files[index].write_all(&chunk.data).await?;
                 }
-                Item::Operation(record) => {
-                    metadata_bytes = metadata_bytes
-                        .checked_add(record.encoded_len())
-                        .ok_or(Error::Invalid("source metadata length overflow"))?;
-                    if metadata_bytes > METADATA_BYTES {
-                        return Err(Error::Invalid("staged source metadata exceeds 16 MiB"));
-                    }
-                    operations.push(replication::decode_record(record)?);
+                Item::Operations(batch) => {
+                    metadata_bytes = metadata_bytes.checked_add(batch.encoded_len()).ok_or(Error::Invalid("source metadata length overflow"))?;
+                    if metadata_bytes > METADATA_BYTES { return Err(Error::Invalid("staged source metadata exceeds 16 MiB")); }
+                    for record in batch.operations { operations.push(replication::decode_record(record)?); }
+                    receipt_records.extend(batch.authority_admissions);
                 }
                 Item::ThreadGenesis(record) => {
                     metadata_bytes = metadata_bytes
@@ -123,24 +122,31 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
         }
         drop(files);
         let ready = self.state.ready;
-        tokio::task::spawn_blocking(move || validate(directory, ready, operations, dependencies))
+        tokio::task::spawn_blocking(move || validate_with_receipts(directory, ready, operations, dependencies, receipt_records))
             .await
             .map_err(|error| Error::Preparation(error.to_string()))?
     }
 }
+#[cfg(test)]
 fn validate(
     directory: tempfile::TempDir,
     ready: TransferReady,
     operations: Vec<SignedOperation>,
     dependencies: Vec<ThreadGenesisRecord>,
 ) -> Result<StagedSource, Error> {
+    validate_with_receipts(directory, ready, operations, dependencies, Vec::new())
+}
+fn validate_with_receipts(
+    directory: tempfile::TempDir, ready: TransferReady, operations: Vec<SignedOperation>,
+    dependencies: Vec<ThreadGenesisRecord>, receipt_records: Vec<SignedRecord>,
+) -> Result<StagedSource, Error> {
     let value = validate_artifacts(directory,
         ready.thread.as_ref().ok_or(Error::Invalid("Thread absent"))?,
         ready.current.as_ref().ok_or(Error::Invalid("revision absent"))?,
         ready.thread_genesis.as_ref().ok_or(Error::Invalid("original genesis absent"))?,
-        operations, dependencies)?;
+        operations, dependencies, receipt_records)?;
     Ok(StagedSource { directory: value.directory, ready, operations: value.operations,
-        dependencies: value.dependencies, state: value.state })
+        dependencies: value.dependencies, state: value.state, authority_admissions: value.authority_admissions })
 }
 /// Structurally verified original source and actual artifact closure. This is
 /// not an author, audience, executor, or sharing-policy admission decision.
@@ -150,6 +156,7 @@ pub struct ValidatedSourceArtifacts {
     genesis: ThreadGenesisRecord,
     dependencies: Vec<ThreadGenesisRecord>,
     state: State,
+    authority_admissions: BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
 }
 impl ValidatedSourceArtifacts {
     pub fn artifact_paths(&self) -> [std::path::PathBuf; 2] {
@@ -160,6 +167,7 @@ impl ValidatedSourceArtifacts {
         std::iter::once(&self.genesis).chain(&self.dependencies)
     }
     pub fn state(&self) -> &State { &self.state }
+    pub fn authority_admissions(&self) -> &BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission> { &self.authority_admissions }
 }
 pub(crate) fn validate_artifacts(
     directory: tempfile::TempDir,
@@ -168,13 +176,15 @@ pub(crate) fn validate_artifacts(
     original: &ThreadGenesisRecord,
     operations: Vec<SignedOperation>,
     dependency_records: Vec<ThreadGenesisRecord>,
+    receipt_records: Vec<SignedRecord>,
 ) -> Result<ValidatedSourceArtifacts, Error> {
-    if operations.is_empty() || operations.len() > 10_000 || dependency_records.len() >= 128 {
+    if operations.is_empty() || operations.len() > 10_000 || dependency_records.len() >= 128 || receipt_records.len() > operations.len() {
         return Err(Error::Invalid("source original graph exceeds bounds"));
     }
     let mut metadata = original.encoded_len();
     for record in &dependency_records { metadata = metadata.saturating_add(record.encoded_len()); }
     for operation in &operations { metadata = metadata.saturating_add(operation.canonical.len() + operation.signature.len()); }
+    for receipt in &receipt_records { metadata = metadata.saturating_add(receipt.encoded_len()); }
     if metadata > METADATA_BYTES { return Err(Error::Invalid("source metadata exceeds 16 MiB")); }
     if revision.spool != thread.spool { return Err(Error::Invalid("source revision crosses Spool")); }
     let genesis = super::verify_origin(original, thread)?;
@@ -227,6 +237,20 @@ pub(crate) fn validate_artifacts(
         originals.insert(id, signed.clone());
         if decoded.insert(id, operation).is_some() {
             return Err(Error::Invalid("duplicate source proof"));
+        }
+    }
+    let mut authority_admissions = BTreeMap::new();
+    for record in receipt_records {
+        let receipt = crate::authority_admission::decode(&record)?;
+        let statement = receipt.verify_signature().map_err(preparation)?;
+        let original = decoded.get(&statement.operation).ok_or(Error::Invalid("unmatched source authority receipt"))?;
+        // Match immutable claims and signatures only. This self-described key
+        // is not enrolled here; the receiver must independently pin the issuer.
+        statement.authorize(original, &heddle_object_model::object::thread_replication::integration::TrustedHostedExecutor {
+            spool: statement.spool, spool_genesis: statement.spool_genesis, executor: statement.executor,
+        }).map_err(preparation)?;
+        if authority_admissions.insert(statement.operation, receipt).is_some() {
+            return Err(Error::Invalid("duplicate source authority receipt"));
         }
     }
     let (selected_id, state) =
@@ -353,6 +377,7 @@ pub(crate) fn validate_artifacts(
         directory,
         genesis: original.clone(),
         operations: ordered,
+        authority_admissions,
         dependencies,
         state,
     })

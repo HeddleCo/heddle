@@ -196,6 +196,7 @@ fn finish(
     let path = directory.join(format!("{}.pb", blake3::hash(server.as_bytes())));
     objects::fs_atomic::write_file_atomic_secret(&path, &attachment.encode_to_vec())?;
     let subject = credential.subject.clone();
+    super::source_author::retain(server, &credential)?;
     config::credentials::store_server_credential(server, credential)?;
     Ok(AuthLoginOutcome::Authenticated {
         subject,

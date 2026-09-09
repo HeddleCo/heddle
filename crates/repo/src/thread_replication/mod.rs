@@ -18,6 +18,8 @@ mod peers;
 mod policy_sync;
 pub mod projection;
 mod source_index;
+pub mod source_authority;
+pub mod source_publication;
 mod source_possession;
 mod source_transfer;
 
@@ -468,7 +470,7 @@ impl ThreadReplica {
         self.check_control_command(&tx, &operation, id, compare_frontier)?;
         let source_revision = match &operation.body {
             ThreadOperationBody::Capture(bytes) => {
-                Some(State::decode_current_msgpack(&bytes.state)?.id())
+                Some(State::decode_current_msgpack(&bytes.result.state)?.id())
             }
             ThreadOperationBody::Integration(_)
             | ThreadOperationBody::HostedImport(_)
@@ -484,7 +486,7 @@ impl ThreadReplica {
         // The host's original-author gate ran before any immutable bytes were
         // installed. Persist its successful admission in this same transaction;
         // missing causal parents may arrive after the original credential expires.
-        if matches!(operation.body, ThreadOperationBody::Metadata(_)) {
+        if matches!(operation.body, ThreadOperationBody::Metadata(_)) || matches!(&operation.body, ThreadOperationBody::Capture(capture) if matches!(capture.author, objects::object::thread_replication::SourceAuthor::Account { .. })) {
             tx.execute(
                 "UPDATE operations SET authority_admitted=1 WHERE id=?1 AND authority_admitted=0",
                 [id.as_bytes()],

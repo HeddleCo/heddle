@@ -107,36 +107,42 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
             }
             replica.receive(&operation, objects, |native| {
                 use heddle_object_model::object::thread_replication::ThreadOperationBody;
-                if !matches!(native.body, ThreadOperationBody::Metadata(_)) {
+                if native.local_integration()?.is_some() && native.publisher != replica.genesis()?.creator {
+                    return Err(repo::thread_replication::Error::Invalid("fresh local integration requires independently admitted author authority".into()));
+                }
+                if !matches!(native.body, ThreadOperationBody::Metadata(_) | ThreadOperationBody::Capture(_)) {
                     return Ok(());
                 }
                 // Durable original-author receipt remains valid while causal
                 // parents arrive later. Neither the envelope nor claimed time
                 // can synthesize the atomically retained admission marker.
-                if replica.control_authority_admitted(&operation)? {
+                if replica.original_authority_admitted(&operation)? {
                     return Ok(());
+                }
+                let genesis = replica.genesis()?;
+                if matches!(&native.body, ThreadOperationBody::Capture(capture) if matches!(capture.author, heddle_object_model::object::thread_replication::SourceAuthor::LocalKey)) {
+                    return repo::thread_replication::source_authority::verify_local_source_owner(native, &genesis);
                 }
                 let home = authority_home.as_ref().ok_or_else(|| {
                     repo::thread_replication::Error::Invalid(
-                        "metadata admission requires independently enrolled account authority"
+                        "original operation requires independently enrolled account authority"
                             .into(),
                     )
                 })?;
                 let now = chrono::Utc::now().timestamp();
                 let authority = repo::device_authority::load(home, now).map_err(authority_error)?;
-                let genesis = replica.genesis()?;
                 if let ThreadOperationBody::Metadata(bytes) = &native.body {
                     heddle_object_model::object::thread_replication::metadata::ThreadControl::decode(bytes)?.validate_parents(&genesis, &[])?;
                 }
                 let spool = genesis.spool.parse().map_err(authority_error)?;
                 let registered =
                     repo::device_catalog::load(home, spool).map_err(authority_error)?;
-                repo::thread_replication::metadata::verify_control_authority(
-                    native,
-                    &authority,
-                    &registered.capability_path,
-                    now,
-                )
+                if matches!(native.body, ThreadOperationBody::Capture(_)) {
+                    repo::thread_replication::source_authority::verify_source_authority(native, &genesis, &authority, &registered.capability_path, now)
+                } else {
+                    repo::thread_replication::metadata::verify_control_authority(native, &authority, &registered.capability_path, now)
+                }
+
             })
         })
         .await

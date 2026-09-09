@@ -47,6 +47,9 @@ impl DeviceRpc {
         recv: RecvStream,
         budget: &mut super::super::hosted::claim_protocol::CallBudget,
     ) -> Result<()> {
+        if method == "/heddle.api.v2alpha1.SyncService/PublishContent" {
+            return self.serve_publication_stream(method, context, peer, send, recv, budget).await;
+        }
         if method == "/heddle.api.v2alpha1.SyncService/Fetch" {
             return self.serve_fetch_stream(method, context, peer, send, recv, budget).await;
         }

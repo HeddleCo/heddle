@@ -37,6 +37,16 @@ impl Repository {
         }
         Ok(false)
     }
+    /// Read the exact original signer's retained enrollment proof without any
+    /// hosted request. The caller's browser/agent credential is never substituted.
+    pub fn native_capture_author(
+        &self,
+        publisher: &[u8; 32],
+        spool: uuid::Uuid,
+    ) -> Result<objects::object::thread_replication::SourceAuthor> {
+        crate::identity::source_author::load(&crate::identity::heddle_home_dir(), publisher, spool)
+            .map_err(|error| Error::Invalid(error.to_string()))
+    }
     /// Stable local/hosted spool identity, created before the first Thread.
     pub fn native_spool_id(&self) -> Result<uuid::Uuid> {
         let _guard = self.native_identity_lock()?;
@@ -284,7 +294,19 @@ impl Repository {
                 .public_key()
                 .try_into()
                 .map_err(|_| Error::Invalid("invalid publisher key".into()))?,
-            body: ThreadOperationBody::Capture(replica.prepare_capture(self, &state)?),
+            body: ThreadOperationBody::Capture(
+                objects::object::thread_replication::AuthoredCapture {
+                    result: replica.prepare_capture(self, &state)?,
+                    author: self.native_capture_author(
+                        &signer
+                            .public_key()
+                            .try_into()
+                            .map_err(|_| Error::Invalid("source signer length".into()))?,
+                        uuid::Uuid::parse_str(&replica.genesis()?.spool)
+                            .map_err(|error| Error::Invalid(error.to_string()))?,
+                    )?,
+                },
+            ),
         };
         let signed = SignedOperation::sign(&operation, &signer)?;
         match replica.receive_prepared_source(&signed, self.store(), |_| Ok(()))? {

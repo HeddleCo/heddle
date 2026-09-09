@@ -11,7 +11,7 @@ impl ThreadReplica {
         selected: ContentHash,
         max_records: usize,
         max_bytes: usize,
-    ) -> Result<Vec<SignedOperation>> {
+    ) -> Result<Vec<super::admission::StoredOperation>> {
         if max_records == 0
             || max_records > 10_000
             || max_bytes == 0
@@ -20,7 +20,7 @@ impl ThreadReplica {
             return Err(Error::Invalid("source ancestry budget invalid".into()));
         }
         let connection = self.connect()?;
-        let mut statement=connection.prepare("WITH RECURSIVE ancestry(id) AS (SELECT ?1 UNION SELECT p.parent FROM parents p JOIN ancestry a ON p.child=a.id LIMIT ?2) SELECT o.canonical,o.signature,o.status,o.thread,o.facet FROM ancestry a JOIN operations o ON o.id=a.id")?;
+        let mut statement=connection.prepare("WITH RECURSIVE ancestry(id) AS (SELECT ?1 UNION SELECT p.parent FROM parents p JOIN ancestry a ON p.child=a.id LIMIT ?2) SELECT o.canonical,o.signature,o.status,o.thread,o.facet,o.authority_receipt_canonical,o.authority_receipt_signature FROM ancestry a JOIN operations o ON o.id=a.id")?;
         let mut rows = statement.query(params![selected.as_bytes(), (max_records + 1) as i64])?;
         let mut output = Vec::new();
         let mut bytes = 0usize;
@@ -30,8 +30,16 @@ impl ThreadReplica {
             let status: i64 = row.get(2)?;
             let thread: Vec<u8> = row.get(3)?;
             let facet: i64 = row.get(4)?;
+            let receipt_canonical: Option<Vec<u8>> = row.get(5)?;
+            let receipt_signature: Option<Vec<u8>> = row.get(6)?;
+            let receipt_bytes = receipt_canonical.as_ref().map_or(0, Vec::len) + receipt_signature.as_ref().map_or(0, Vec::len);
+            let authority_admission = match (receipt_canonical, receipt_signature) {
+                (None, None) => None,
+                (Some(canonical), Some(signature)) => Some(crypto::thread_authority_admission::SignedAuthorityAdmission { canonical, signature }),
+                _ => return Err(Error::Invalid("partial source authority receipt".into())),
+            };
             bytes = bytes
-                .checked_add(canonical.len() + signature.len() + 128)
+                .checked_add(canonical.len() + signature.len() + receipt_bytes + 128)
                 .ok_or_else(|| Error::Invalid("source ancestry byte overflow".into()))?;
             if output.len() >= max_records || bytes > max_bytes {
                 return Err(Error::Invalid(
@@ -43,10 +51,7 @@ impl ThreadReplica {
                     "source ancestry contains inadmissible dependency".into(),
                 ));
             }
-            output.push(SignedOperation {
-                canonical,
-                signature,
-            });
+            output.push(super::admission::StoredOperation { original: SignedOperation { canonical, signature }, status: super::Admission::Accepted, authority_admission });
         }
         if output.is_empty() {
             return Err(Error::Invalid(

@@ -311,7 +311,7 @@ fn original_authority_receipt_is_durable_and_required_before_pending_causality_p
         ThreadReplica::open(repository.heddle_dir(), replica.thread_id()).expect("restart");
     assert!(
         reopened
-            .control_authority_admitted(&child)
+            .original_authority_admitted(&child)
             .expect("retained original authority"),
         "pending bytes must atomically retain host-verified original authority"
     );
@@ -327,7 +327,7 @@ fn original_authority_receipt_is_durable_and_required_before_pending_causality_p
         .expect("remove receipt fixture");
     assert!(
         !reopened
-            .control_authority_admitted(&child)
+            .original_authority_admitted(&child)
             .expect("missing receipt")
     );
     reopened
@@ -364,7 +364,7 @@ fn original_authority_receipt_is_durable_and_required_before_pending_causality_p
         .expect("independently fresh reauthorization");
     assert!(
         reopened
-            .control_authority_admitted(&child)
+            .original_authority_admitted(&child)
             .expect("new durable receipt")
     );
     assert_eq!(

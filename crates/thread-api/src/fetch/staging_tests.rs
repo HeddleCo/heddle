@@ -50,9 +50,7 @@ fn fixture(
             thread: genesis.id().expect("Thread ID"),
             parents: BTreeSet::new(),
             publisher: signer.public_key().try_into().expect("key"),
-            body: ThreadOperationBody::Capture(
-                state.encode_current_msgpack().expect("State").into(),
-            ),
+            body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(state.encode_current_msgpack().expect("State").into())),
         },
         &signer,
     )
@@ -193,12 +191,10 @@ fn integrated_fixture(
         thread: source.id().expect("source Thread"),
         parents: BTreeSet::new(),
         publisher: signer.public_key().try_into().expect("key"),
-        body: ThreadOperationBody::Capture(
-            source_state
+        body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(source_state
                 .encode_current_msgpack()
                 .expect("source State")
-                .into(),
-        ),
+                .into())),
     };
     let result = State::new_merge(
         original.tree,
@@ -315,11 +311,11 @@ fn publication_fixture(scratch: &Path, extra: bool) -> (tempfile::TempDir, Publi
     }).collect();
     let originals = crate::publication::PublicationOriginals {
         geneses: vec![ready.thread_genesis.expect("original genesis")],
-        operations: operations.into_iter().map(|signed| {
+        operations: vec![ReplicationOperations { authority_admissions: vec![], operations: operations.into_iter().map(|signed| {
             let publisher = signed.verify().expect("original source").publisher;
             SignedRecord { format: heddle_object_model::object::thread_replication::OPERATION_FORMAT.into(),
                 canonical_record: signed.canonical, signatures: vec![RecordSignature { public_key: publisher.to_vec(), signature: signed.signature }] }
-        }).collect(),
+        }).collect() }],
     };
     (directory, PublishContentOpen { thread: ready.thread, revision: ready.current, packs, ..Default::default() }, originals, state)
 }
@@ -351,8 +347,36 @@ fn publication_staging_rejects_wrong_inventory_and_unsupplied_originals() {
         Err(Error::Invalid("uploaded artifact digest differs"))), "actual artifact inventory must be checked");
     assert!(!path.exists());
     let (directory, opening, mut originals, _) = publication_fixture(scratch.path(), false);
-    originals.operations[0].signatures[0].signature[0] ^= 1;
+    originals.operations[0].operations[0].signatures[0].signature[0] ^= 1;
     assert!(crate::publication::validate_source_artifacts(directory, &opening, originals).is_err(), "original source signatures are necessary");
     let (directory, opening, originals, _) = publication_fixture(scratch.path(), true);
     assert!(crate::publication::validate_source_artifacts(directory, &opening, originals).is_err(), "unselected private objects must not be staged as source");
+}
+
+#[test]
+fn publication_staging_preserves_matched_account_admission_without_trusting_issuer() {
+    use objects::object::{CollaborationActor, thread_replication::{AuthoredCapture, SourceAuthor, integration::TrustedHostedExecutor}, thread_authority_admission::ThreadAuthorityAdmission};
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (directory, opening, mut originals, state) = publication_fixture(scratch.path(), false);
+    let signer = Ed25519Signer::from_seed(&[61; 32]).expect("source author");
+    let mut operation = replication::decode_record(originals.operations[0].operations[0].clone()).expect("source").verify().expect("signature");
+    let result = operation.source_result().expect("result").expect("capture");
+    let spool = uuid::Uuid::parse_str(&opening.thread.as_ref().expect("Thread").spool.as_ref().expect("Spool").id).expect("Spool UUID");
+    let actor = CollaborationActor { principal_id: uuid::Uuid::from_u128(73), agent_id: Some("original-agent".into()) };
+    let capture = AuthoredCapture::account(result, spool, actor.clone(), b"first-admitted original author envelope".to_vec()).expect("signed author binding");
+    let SourceAuthor::Account { authority_digest, .. } = capture.author else { panic!("account author"); };
+    operation.body = ThreadOperationBody::Capture(capture);
+    let signed = SignedOperation::sign(&operation, &signer).expect("original source signature");
+    originals.operations[0].operations[0] = SignedRecord { format: objects::object::thread_replication::OPERATION_FORMAT.into(), canonical_record: signed.canonical.clone(), signatures: vec![RecordSignature { public_key: operation.publisher.to_vec(), signature: signed.signature.clone() }] };
+    let executor = Ed25519Signer::from_seed(&[74; 32]).expect("receipt issuer");
+    let statement = ThreadAuthorityAdmission { version: 1, spool, spool_genesis: ContentHash::from_bytes([75;32]), thread: operation.thread,
+        operation: operation.id().expect("operation ID"), actor, publisher: operation.publisher, authority_digest,
+        executor: executor.public_key().try_into().expect("executor key"), admitted_at_ms: 100 };
+    let receipt = crypto::thread_authority_admission::SignedAuthorityAdmission::sign(&statement, &executor).expect("historical testimony");
+    originals.operations[0].authority_admissions = vec![crate::authority_admission::encode(&receipt).expect("portable receipt")];
+    let validated = crate::publication::validate_source_artifacts(directory, &opening, originals).expect("matched structurally valid source");
+    assert_eq!(validated.state().id(), state.id());
+    assert_eq!(validated.authority_admissions().get(&statement.operation), Some(&receipt));
+    let wrong_trust = TrustedHostedExecutor { spool, spool_genesis: statement.spool_genesis, executor: [76;32] };
+    assert!(validated.authority_admissions()[&statement.operation].verify(&signed, &wrong_trust).is_err(), "structural staging never enrolls its issuer");
 }

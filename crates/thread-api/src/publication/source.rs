@@ -149,7 +149,14 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
                 .as_ref()
                 .is_none_or(|id| id.value.len() != 32)
             || options.source.public_key.len() != 32
-            || options.sharing_policy_version.len() != 32
+            || (options.sharing_policy_version.len() != 32
+                && !(options.sharing_policy_version.is_empty()
+                    && self
+                        .remote
+                        .description
+                        .endpoint
+                        .as_ref()
+                        .is_some_and(|endpoint| endpoint.kind == EndpointKind::Device as i32)))
         {
             return Err(Error::Invalid(
                 "Thread, source endpoint and sharing policy version required",

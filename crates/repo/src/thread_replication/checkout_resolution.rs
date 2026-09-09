@@ -109,7 +109,17 @@ impl ThreadCheckout {
                     .try_into()
                     .map_err(|_| Error::Invalid("invalid source publisher".into()))?,
                 body: ThreadOperationBody::Capture(
-                    replica.prepare_capture(&self.repository, &state)?,
+                    objects::object::thread_replication::AuthoredCapture {
+                        result: replica.prepare_capture(&self.repository, &state)?,
+                        author: self.repository.native_capture_author(
+                            &signer
+                                .public_key()
+                                .try_into()
+                                .map_err(|_| Error::Invalid("source signer length".into()))?,
+                            uuid::Uuid::parse_str(&replica.genesis()?.spool)
+                                .map_err(|error| Error::Invalid(error.to_string()))?,
+                        )?,
+                    },
                 ),
             };
             let journal = Resolution {
@@ -186,7 +196,9 @@ impl ThreadCheckout {
                     false,
                 )?;
         }
-        if replica.receive_prepared_source(&signed, self.repository.store(), |_| Ok(()))? != Admission::Accepted {
+        if replica.receive_prepared_source(&signed, self.repository.store(), |_| Ok(()))?
+            != Admission::Accepted
+        {
             return Err(Error::Invalid(
                 "resolution source ancestry incomplete".into(),
             ));

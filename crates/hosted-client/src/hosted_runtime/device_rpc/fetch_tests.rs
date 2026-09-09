@@ -101,7 +101,7 @@ pub(super) async fn roundtrip(
         thread: foreign.id().expect("Thread"),
         parents: BTreeSet::new(),
         publisher: foreign.creator,
-        body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("State").into()),
+        body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(state.encode_current_msgpack().expect("State").into())),
     };
     assert_eq!(
         foreign_replica

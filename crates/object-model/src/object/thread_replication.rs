@@ -9,7 +9,7 @@ pub mod source_author;
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
-pub use source_author::{AuthoredCapture, SourceAuthor};
+pub use source_author::{AuthoredCapture, SOURCE_AUTHORIZATION_METHOD, SourceAuthor};
 
 use crate::{
     error::{HeddleError, Result},

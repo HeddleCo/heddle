@@ -7,6 +7,7 @@ use crate::{BiscuitError, BiscuitFacts, authorizer_limits};
 /// result. No RPC/check permission is inferred from these inspection fields.
 pub struct InspectedCredential {
     pub asserted_account: Option<uuid::Uuid>,
+    pub agent_id: Option<String>,
     pub proof_public_key: Vec<u8>,
     pub expires_at_unix_seconds: u64,
     pub revocation_ids: Vec<String>,
@@ -41,7 +42,11 @@ pub fn inspect_verified_credential(
         .and_then(|key| hex::decode(key).ok())
         .filter(|key| key.len() == 32)
         .ok_or_else(|| BiscuitError::Invalid("verified proof key missing".into()))?;
+    let agent_id = facts.delegation_agent_id.clone().or_else(|| {
+        (facts.agent_provider.is_some() || facts.agent_model.is_some()).then(|| facts.sid.clone())
+    });
     Ok(InspectedCredential {
+        agent_id,
         asserted_account: facts.subject_user_id(),
         proof_public_key: key,
         expires_at_unix_seconds: facts.exp,

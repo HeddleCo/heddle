@@ -30,7 +30,7 @@ impl ThreadReplica {
     ) -> Result<Admission> {
         self.receive_inner(original, store, authorize, false, Some(receipt))
     }
-    pub(super) fn require_authority_admission(
+    pub fn require_authority_admission(
         &self,
         original: &SignedOperation,
         receipt: &SignedAuthorityAdmission,

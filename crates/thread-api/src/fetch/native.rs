@@ -230,6 +230,34 @@ impl StagedSource {
             }
             replicas.insert(replica.thread_id(), replica);
         }
+        // Structural source signatures are not membership proofs. Resolve all
+        // fresh source authors before installing supplied bytes. Exact accepted
+        // originals keep their durable admission without credential refresh.
+        for signed in &self.operations {
+            let operation = signed.verify().map_err(preparation)?;
+            let replica = replicas.get(&operation.thread).ok_or(Error::Invalid("source dependency replica absent"))?;
+            if let Some(receipt) = self.authority_admissions.get(&operation.id().map_err(preparation)?) {
+                replica.require_authority_admission(signed, receipt).map_err(preparation)?;
+                continue;
+            }
+            let prior = replica.operation_with_authority_admission(&operation.id().map_err(preparation)?).map_err(preparation)?;
+            if prior.is_some_and(|prior| prior.original == *signed && prior.status == objects::object::thread_replication::Admission::Accepted) {
+                continue;
+            }
+            if operation.local_integration().map_err(preparation)?.is_some() && operation.publisher != replica.genesis().map_err(preparation)?.creator {
+                return Err(Error::Invalid("fresh local integration requires independently admitted author authority"));
+            }
+            if let objects::object::thread_replication::ThreadOperationBody::Capture(capture) = &operation.body {
+                let genesis = replica.genesis().map_err(preparation)?;
+                match &capture.author {
+                    objects::object::thread_replication::SourceAuthor::LocalKey => repo::thread_replication::source_authority::verify_local_source_owner(&operation, &genesis).map_err(preparation)?,
+                    objects::object::thread_replication::SourceAuthor::Account { .. } => {
+                        let authority = authority.ok_or(Error::Invalid("fresh account source requires original author authority or retained admission"))?;
+                        repo::thread_replication::source_authority::verify_source_authority(&operation, &genesis, authority, spool_path, now).map_err(preparation)?;
+                    }
+                }
+            }
+        }
         repository
             .store()
             .install_pack_streaming(
@@ -242,9 +270,10 @@ impl StagedSource {
             let replica = replicas
                 .get(&operation.thread)
                 .ok_or(Error::Invalid("source dependency replica absent"))?;
-            if replica
-                .receive(signed, repository.store(), require_source_operation)
-                .map_err(preparation)?
+            let admission = if let Some(receipt) = self.authority_admissions.get(&operation.id().map_err(preparation)?) {
+                replica.receive_with_authority_admission(signed, receipt, repository.store(), require_source_operation)
+            } else { replica.receive(signed, repository.store(), require_source_operation) }.map_err(preparation)?;
+            if admission
                 != objects::object::thread_replication::Admission::Accepted
             {
                 return Err(Error::Invalid(
@@ -366,7 +395,7 @@ mod tests {
         );
         assert!(
             !replica
-                .control_authority_admitted(&signed)
+                .original_authority_admitted(&signed)
                 .expect("admission marker"),
             "source trust cannot manufacture author admission"
         );

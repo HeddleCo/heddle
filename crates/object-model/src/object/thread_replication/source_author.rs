@@ -10,6 +10,8 @@ use crate::{
 };
 
 pub const MAX_SOURCE_AUTHORITY_BYTES: usize = 64 * 1024;
+/// Original source-write authority, independent of the courier's transport RPC.
+pub const SOURCE_AUTHORIZATION_METHOD: &str = "/heddle.api.v2alpha1.SyncService/PublishContent";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]

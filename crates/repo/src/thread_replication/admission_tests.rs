@@ -152,7 +152,7 @@ fn retained_receipt_is_atomic_with_pending_bytes_and_survives_restart_without_or
     );
     assert!(
         !replica
-            .control_authority_admitted(&child)
+            .original_authority_admitted(&child)
             .expect("no authority marker")
     );
     replica
@@ -186,7 +186,7 @@ fn retained_receipt_is_atomic_with_pending_bytes_and_survives_restart_without_or
     );
     assert!(
         reopened
-            .control_authority_admitted(&child)
+            .original_authority_admitted(&child)
             .expect("durable original admission")
     );
     let mut later = child_receipt.verify_signature().expect("receipt");

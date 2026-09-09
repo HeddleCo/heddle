@@ -47,7 +47,7 @@ impl Default for Limits {
 /// can still have missing causal parents; the durable replica decides admission.
 pub enum Item {
     Pack(PackChunk),
-    Operation(SignedRecord),
+    Operations(ReplicationOperations),
     ThreadGenesis(ThreadGenesisRecord),
     Sidecar(TransferSidecar),
     Complete(FetchComplete),
@@ -325,30 +325,19 @@ impl Validation {
                 }
                 Ok(Item::Pack(chunk))
             }
-            fetch_server_frame::Body::Operation(record) => {
-                self.operations += 1;
-                self.metadata_bytes = self
-                    .metadata_bytes
-                    .checked_add(record.encoded_len() as u64)
-                    .ok_or(Error::Invalid("metadata size overflow"))?;
+            fetch_server_frame::Body::Operations(batch) => {
+                self.operations = self.operations.checked_add(batch.operations.len()).ok_or(Error::Invalid("operation count overflow"))?;
+                self.metadata_bytes = self.metadata_bytes.checked_add(batch.encoded_len() as u64).ok_or(Error::Invalid("metadata size overflow"))?;
                 if self.operations > self.limits.max_operations
-                    || self.metadata_bytes
-                        > self.limits.max_total_bytes.saturating_sub(self.received)
-                {
-                    return Err(Error::Invalid("causal metadata exceeds download budget"));
+                    || self.metadata_bytes > self.limits.max_total_bytes.saturating_sub(self.received)
+                { return Err(Error::Invalid("causal metadata exceeds download budget")); }
+                for received in crate::authority_admission::match_batch(&batch)? {
+                    let operation = received.original.verify().map_err(|_| Error::Invalid("invalid original operation signature"))?;
+                    if !self.threads.contains(&operation.thread) || !self.facets.contains(&replication::wire_facet(operation.facet())) {
+                        return Err(Error::Invalid("operation crosses Thread or selected facet"));
+                    }
                 }
-                let signed = replication::decode_record(record.clone())?;
-                let operation = signed
-                    .verify()
-                    .map_err(|_| Error::Invalid("invalid original operation signature"))?;
-                if !self.threads.contains(&operation.thread)
-                    || !self
-                        .facets
-                        .contains(&replication::wire_facet(operation.facet()))
-                {
-                    return Err(Error::Invalid("operation crosses Thread or selected facet"));
-                }
-                Ok(Item::Operation(record))
+                Ok(Item::Operations(batch))
             }
             fetch_server_frame::Body::ThreadGenesis(record) => {
                 self.metadata_bytes = self

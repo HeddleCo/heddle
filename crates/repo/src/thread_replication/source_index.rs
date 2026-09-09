@@ -151,9 +151,7 @@ mod tests {
                 thread: genesis.id().expect("Thread"),
                 parents,
                 publisher: signer.public_key().try_into().expect("publisher"),
-                body: ThreadOperationBody::Capture(
-                    state.encode_current_msgpack().expect("source").into(),
-                ),
+                body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(state.encode_current_msgpack().expect("source").into())),
             },
             signer,
         )
@@ -173,7 +171,7 @@ mod tests {
         let graph = replica.source_ancestry(selected, 2, 16*1024*1024).expect("exact two records");
         assert_eq!(graph.len(), 2);
         assert!(replica.source_ancestry(selected, 1, 16*1024*1024).expect_err("record bound").to_string().contains("exceeds transfer budget"));
-        let bytes: usize = graph.iter().map(|record| record.canonical.len()+record.signature.len()+128).sum();
+        let bytes: usize = graph.iter().map(|record| record.original.canonical.len()+record.original.signature.len()+128).sum();
         assert_eq!(replica.source_ancestry(selected, 2, bytes).expect("exact bytes").len(), 2);
         assert!(replica.source_ancestry(selected, 2, bytes-1).expect_err("byte bound").to_string().contains("exceeds transfer budget"));
         assert!(ThreadReplica::source_thread_candidates(repository.heddle_dir(), second_revision, None, 1).expect("signed metadata alone is not possession").is_empty());
@@ -199,7 +197,7 @@ mod tests {
         let mut operation=first.verify().expect("original");
         let mut state=operation.source_state().expect("decode").expect("capture");
         state.tree=tree.hash();
-        operation.body=ThreadOperationBody::Capture(state.encode_current_msgpack().expect("State").into());
+        operation.body=ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(state.encode_current_msgpack().expect("State").into()));
         let original=SignedOperation::sign(&operation,&signer).expect("private signature");
         victim.receive_prepared_source(&original,repository.store(),|_|Ok(())).expect("trusted local capture");
         let revision=state.id();

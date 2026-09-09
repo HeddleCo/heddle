@@ -117,6 +117,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     };
     super::artifact_tests::roundtrip(&remote, &repository, spool).await;
     super::content_tests::roundtrip(&remote, &repository, spool).await;
+    super::publication_tests::roundtrip(&remote, &repository, *browser.id().as_bytes()).await;
     super::collaboration_tests::roundtrip(&remote, &repository, &replica, spool).await;
     super::evidence_tests::roundtrip(&remote, &device, &repository, &replica, spool).await;
     #[cfg(feature = "semantic")]
@@ -569,6 +570,19 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
             "idle replication emits no empty Have heartbeat: {idle:?}"
         );
         let publisher = Ed25519Signer::from_seed(&[71; 32]).expect("browser publisher");
+        let source_now = chrono::Utc::now().timestamp();
+        let source_authority = repo::device_authority::load(home.path(), source_now)
+            .expect("independently enrolled original owner");
+        let source_token = mint_agent_root(&[71; 32]).expect("original source credential");
+        let source_mint = biscuit_verifier::PublicKey::from_bytes(
+            publisher.public_key(), biscuit_auth::Algorithm::Ed25519,
+        ).expect("original mint");
+        let source_token = biscuit_verifier::parse_token(&source_token.token, &[source_mint])
+            .expect("verified original source Biscuit");
+        let source_proof = repo::thread_replication::metadata::prepare_control_authority(
+            &source_authority, &publisher.public_key().try_into().expect("mint key"),
+            &source_token, source_now,
+        ).expect("sealed source author");
         let make_operation = |intent: &str| {
             let mut state = State::new_snapshot(
                 Tree::new().hash(),
@@ -581,13 +595,22 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
                 thread: replica.thread_id(),
                 parents: Default::default(),
                 publisher: publisher.public_key().try_into().expect("key"),
-                body: ThreadOperationBody::Capture(
-                    state.encode_current_msgpack().expect("State").into(),
-                ),
+                body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::account(
+                    state.encode_current_msgpack().expect("State").into(), spool,
+                    objects::object::CollaborationActor {
+                        principal_id: uuid::Uuid::from_bytes([9; 16]), agent_id: None,
+                    }, source_proof.clone(),
+                ).expect("signed original account author")),
             };
             SignedOperation::sign(&operation, &publisher).expect("signed source")
         };
         let incoming = make_operation("browser causal branch");
+        repo::thread_replication::source_authority::verify_source_authority(
+            &incoming.verify().expect("source original"), &replica.genesis().expect("genesis"),
+            &source_authority, &repo::device_catalog::load(home.path(), spool)
+                .expect("registered source Spool").capability_path, source_now,
+        ).expect("independently verified original source author before delivery");
+
         let incoming_id = incoming.verify().expect("proof").id().expect("ID");
         assert!(replica.operation(&incoming_id).expect("lookup").is_none());
         input
@@ -756,7 +779,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
         .expect("metadata admission deadline");
         assert!(
             replica
-                .control_authority_admitted(&signed)
+                .original_authority_admitted(&signed)
                 .expect("durable original-author receipt")
         );
         input

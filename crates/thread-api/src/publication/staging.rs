@@ -53,8 +53,15 @@ pub fn validate_source_artifacts(
             if genesis.replace(wrapper).is_some() { return Err(Error::Invalid("duplicate selected genesis")); }
         } else { dependencies.push(wrapper); }
     }
-    let operations = originals.operations.into_iter().map(replication::decode_record).collect::<Result<Vec<_>, _>>()?;
+    let mut operations = Vec::new();
+    let mut receipts = Vec::new();
+    for batch in originals.operations {
+        crate::authority_admission::match_batch(&batch)?;
+        operations.extend(batch.operations.into_iter().map(replication::decode_record).collect::<Result<Vec<_>, _>>()?);
+        receipts.extend(batch.authority_admissions);
+    }
     crate::fetch::validate_artifacts(directory, thread, revision,
-        &genesis.ok_or(Error::Invalid("original selected genesis absent"))?, operations, dependencies)
+        &genesis.ok_or(Error::Invalid("original selected genesis absent"))?, operations, dependencies, receipts)
+
 }
 fn preparation(error: impl std::fmt::Display) -> Error { Error::Preparation(error.to_string()) }

@@ -24,6 +24,8 @@
 //! key is embedded in the state and verification recomputes the content hash,
 //! so it needs neither the private key nor any registry.
 
+pub mod source_author;
+
 use std::path::{Path, PathBuf};
 
 use crypto::{Ed25519Signer, Signer, SignerError};

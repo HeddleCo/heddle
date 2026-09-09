@@ -44,6 +44,9 @@ mod observe;
 #[cfg(test)]
 mod receipt_tests;
 mod replication;
+mod publication;
+#[cfg(test)]
+mod publication_tests;
 mod stream;
 mod search;
 mod operations;
@@ -71,7 +74,7 @@ use api::heddle::api::{
 use iroh::endpoint::SendStream;
 use prost::Message;
 
-pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread", "/heddle.api.v2alpha1.SyncService/Fetch"];
+pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread", "/heddle.api.v2alpha1.SyncService/Fetch", "/heddle.api.v2alpha1.SyncService/PublishContent"];
 pub(crate) const METHODS: &[&str] = &[
     "/heddle.api.v2alpha1.AnalysisService/ObserveAnalysis",
     #[cfg(feature = "semantic")]
@@ -114,6 +117,7 @@ pub(crate) const METHODS: &[&str] = &[
     "/heddle.api.v2alpha1.ThreadService/RecordReview",
     "/heddle.api.v2alpha1.SyncService/ReplicateThread",
     "/heddle.api.v2alpha1.SyncService/Fetch",
+    "/heddle.api.v2alpha1.SyncService/PublishContent",
     "/heddle.api.v2alpha1.CheckoutService/ObserveCheckouts",
     "/heddle.api.v2alpha1.CheckoutService/Materialize",
     "/heddle.api.v2alpha1.CheckoutService/ClaimCheckoutWriter",

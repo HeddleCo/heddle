@@ -12,9 +12,9 @@ mod source;
 #[cfg(feature = "source-transfer")]
 mod staging;
 #[cfg(feature = "source-transfer")]
-pub use staging::validate_source_artifacts;
-#[cfg(feature = "source-transfer")]
 pub use source::{PublicationOptions, SourceBudget, SourcePack};
+#[cfg(feature = "source-transfer")]
+pub use staging::validate_source_artifacts;
 
 /// Exact original creator wrappers and signed source operations, including
 /// every foreign integration dependency. The receiver verifies their authority
@@ -22,7 +22,7 @@ pub use source::{PublicationOptions, SourceBudget, SourcePack};
 #[derive(Clone)]
 pub struct PublicationOriginals {
     pub geneses: Vec<ThreadGenesisRecord>,
-    pub operations: Vec<SignedRecord>,
+    pub operations: Vec<ReplicationOperations>,
 }
 impl PublicationOriginals {
     fn validate_bounds(&self) -> Result<(), Error> {
@@ -30,6 +30,16 @@ impl PublicationOriginals {
             || self.geneses.len() > 128
             || self.operations.is_empty()
             || self.operations.len() > 10_000
+            || self
+                .operations
+                .iter()
+                .map(|batch| batch.operations.len())
+                .sum::<usize>()
+                > 10_000
+            || self.operations.iter().any(|batch| {
+                batch.operations.is_empty()
+                    || batch.authority_admissions.len() > batch.operations.len()
+            })
         {
             return Err(Error::Invalid(
                 "bounded original genesis and source operations required",
@@ -58,6 +68,7 @@ impl PublicationOriginals {
         }) || self
             .operations
             .iter()
+            .flat_map(|batch| batch.operations.iter().chain(&batch.authority_admissions))
             .any(|record| record.canonical_record.is_empty() || record.signatures.is_empty())
         {
             return Err(Error::Invalid(
@@ -177,7 +188,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
                         .operations
                         .iter()
                         .cloned()
-                        .map(publish_content_client_frame::Body::Operation),
+                        .map(publish_content_client_frame::Body::Operations),
                 )
             {
                 let frame = PublishContentClientFrame {
@@ -432,10 +443,11 @@ mod tests {
                             .await
                             .expect("original checkpoint");
                         }
-                        Some(publish_content_client_frame::Body::Operation(operation)) => {
+                        Some(publish_content_client_frame::Body::Operations(batch)) => {
                             assert_eq!(lengths, [0, 0]);
-                            assert!(!operation.canonical_record.is_empty());
-                            original_counts[1] += 1;
+                            assert_eq!(batch.operations.len(), 1);
+                            assert!(!batch.operations[0].canonical_record.is_empty());
+                            original_counts[1] += batch.operations.len();
                             send(publish_content_server_frame::Body::Checkpoint(
                                 checkpoint.clone(),
                             ))
@@ -581,7 +593,10 @@ mod tests {
                 genesis: Some(record.clone()),
                 ..Default::default()
             }],
-            operations: vec![record],
+            operations: vec![ReplicationOperations {
+                operations: vec![record],
+                authority_admissions: vec![],
+            }],
         }
     }
 
@@ -598,7 +613,7 @@ mod tests {
             ))
         ));
         let mut unsigned = valid.clone();
-        unsigned.operations[0].signatures.clear();
+        unsigned.operations[0].operations[0].signatures.clear();
         assert!(matches!(
             unsigned.validate_bounds(),
             Err(Error::Invalid(
@@ -606,7 +621,7 @@ mod tests {
             ))
         ));
         let mut oversized = valid.clone();
-        oversized.operations[0].canonical_record = vec![1; 256 * 1024];
+        oversized.operations[0].operations[0].canonical_record = vec![1; 256 * 1024];
         assert!(matches!(
             oversized.validate_bounds(),
             Err(Error::Invalid(

@@ -12,7 +12,6 @@ use api::{
     heddle::api::{v1alpha1::CallContext, v2alpha1::*},
     v2::client::{MessageReader, MessageWriter},
 };
-use crypto::thread_operation::SignedOperation;
 use iroh::endpoint::{RecvStream, SendStream};
 use objects::object::{ContentHash, StateId, thread_replication::OPERATION_FORMAT};
 use prost::Message;
@@ -31,7 +30,7 @@ const RECORDS: usize = 10_000;
 pub(super) struct Prepared {
     pub(super) pack: SourcePack,
     pub(super) geneses: BTreeMap<ContentHash, ThreadGenesisRecord>,
-    pub(super) operations: Vec<SignedOperation>,
+    pub(super) operations: Vec<repo::thread_replication::admission::StoredOperation>,
     guards: Vec<(ThreadReplica, i64)>,
 }
 impl DeviceRpc {
@@ -138,7 +137,8 @@ impl DeviceRpc {
             )
             .await?;
         }
-        for signed in prepared.operations {
+        for stored in prepared.operations {
+            let signed = stored.original;
             let operation = signed.verify()?;
             let record = SignedRecord {
                 format: OPERATION_FORMAT.into(),
@@ -152,7 +152,7 @@ impl DeviceRpc {
                 &self.home,
                 &session,
                 &mut writer,
-                fetch_server_frame::Body::Operation(record),
+                fetch_server_frame::Body::Operations(ReplicationOperations { operations: vec![record], authority_admissions: stored.authority_admission.as_ref().map(thread_api::authority_admission::encode).transpose()?.into_iter().collect() }),
                 &mut charged,
                 &mut changes,
                 &prepared.guards,
@@ -304,9 +304,10 @@ pub(super) fn prepare(session: &auth::Session, thread: ContentHash, revision: St
             guards.push((replica.clone(), generation));
         }
         let remaining = RECORDS.saturating_sub(operations.len());
-        for signed in
+        for stored in
             replica.source_ancestry(id, remaining, (16 * 1024 * 1024usize).saturating_sub(bytes))?
         {
+            let signed = &stored.original;
             let operation = signed.verify()?;
             let operation_id = operation.id()?;
             if !emitted.insert((owner, operation_id)) {
@@ -316,7 +317,7 @@ pub(super) fn prepare(session: &auth::Session, thread: ContentHash, revision: St
                 bail!("source proof identity differs")
             }
             seen.insert((owner, operation_id));
-            bytes += signed.canonical.len() + signed.signature.len() + 128;
+            bytes += signed.canonical.len() + signed.signature.len() + stored.authority_admission.as_ref().map_or(0, |receipt| receipt.canonical.len() + receipt.signature.len()) + 128;
             if bytes > 16 * 1024 * 1024 || operations.len() >= RECORDS {
                 bail!("source proof metadata budget exceeded")
             }
@@ -333,7 +334,7 @@ pub(super) fn prepare(session: &auth::Session, thread: ContentHash, revision: St
             if let Some(proof) = operation.reference_proof(&genesis)? {
                 proofs.push(proof)
             }
-            operations.push(signed);
+            operations.push(stored);
         }
     }
 

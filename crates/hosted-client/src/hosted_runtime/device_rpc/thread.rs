@@ -173,7 +173,7 @@ impl DeviceRpc {
                 "signed control scope, command or method differs from request"
             );
             let current = replica.projection()?;
-            let already_admitted = replica.control_authority_admitted(&signed)?;
+            let already_admitted = replica.original_authority_admitted(&signed)?;
             let parents = operation.parents.clone();
             let prepared = PreparedControl {
                 record,

@@ -44,6 +44,12 @@ impl ThreadReplica {
         tx.commit()?;
         Ok(())
     }
+    /// Validate source executor pins before installing an incoming artifact.
+    /// A capture or local integration has no hosted executor and is a no-op here;
+    /// its original author must be checked separately.
+    pub fn verify_source_executor(&self, operation: &ThreadOperation) -> Result<()> {
+        self.require_trusted_integration(operation)
+    }
     pub(super) fn require_trusted_integration(&self, operation: &ThreadOperation) -> Result<()> {
         let Some(receipt) = operation.hosted_execution_binding()? else {
             return Ok(());
@@ -79,32 +85,41 @@ impl ThreadReplica {
         &self,
         operation: &ThreadOperation,
     ) -> Result<()> {
+        self.require_local_integration_source_in(&self.connect()?, operation)
+    }
+    pub(super) fn require_local_integration_source_in(
+        &self,
+        connection: &rusqlite::Connection,
+        operation: &ThreadOperation,
+    ) -> Result<()> {
         let Some(receipt) = operation.local_integration()? else {
             return Ok(());
         };
-        let directory = self
-            .path
-            .parent()
-            .ok_or_else(|| Error::Invalid("replica directory missing".into()))?;
-        let source = ThreadReplica::open(directory, receipt.source_thread)?;
-        if source.genesis()?.spool != receipt.spool.to_string()
-            || self.genesis()?.spool != receipt.spool.to_string()
+        let source:Option<(Vec<u8>,Vec<u8>,i32,Vec<u8>)>=connection.query_row("SELECT o.canonical,o.signature,o.status,t.genesis FROM operations o JOIN threads t ON t.id=o.thread WHERE o.thread=?1 AND o.id=?2",params![receipt.source_thread.as_bytes(),receipt.source_operation.as_bytes()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+        let (canonical, signature, status, genesis) = source.ok_or_else(|| {
+            Error::Invalid("local integration requires original source Thread operation".into())
+        })?;
+        let source_genesis = objects::object::thread_replication::ThreadGenesis::decode(&genesis)?;
+        let target: Vec<u8> = connection.query_row(
+            "SELECT genesis FROM threads WHERE id=?1",
+            [self.thread.as_bytes()],
+            |row| row.get(0),
+        )?;
+        let target_genesis = objects::object::thread_replication::ThreadGenesis::decode(&target)?;
+        if source_genesis.spool != receipt.spool.to_string()
+            || target_genesis.spool != receipt.spool.to_string()
         {
             return Err(Error::Invalid("local integration crosses Spools".into()));
         }
-        let (original, admission) =
-            source
-                .operation(&receipt.source_operation)?
-                .ok_or_else(|| {
-                    Error::Invalid(
-                        "local integration requires original source Thread operation".into(),
-                    )
-                })?;
-        if admission != super::Admission::Accepted {
+        if status != 1 {
             return Err(Error::Invalid(
                 "local integration source is not admitted".into(),
             ));
         }
+        let original = crypto::thread_operation::SignedOperation {
+            canonical,
+            signature,
+        };
         receipt.validate_source(&original.verify()?)?;
         Ok(())
     }
