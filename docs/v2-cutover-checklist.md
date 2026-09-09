@@ -49,10 +49,10 @@ No legacy adapter or migration bridge is part of the cutover.
 ## Integration, clients and local query completion (root)
 
 - [ ] Align API/Heddle/Weft Cargo pins and Tapestry vendor SDK; remove stale dependency sources.
-- [ ] Browser own-root local authoring renews locally with verified root history/attachment; never revives hosted sessions or expands delegated authority.
+- [x] Browser own-root local authoring renews locally with verified root history/attachment; never revives hosted sessions or expands delegated authority.
 - [ ] Tapestry combined hosted/device Thread pages, discussions/context/evidence, source review and checkout-targeted actions work end to end.
 - [ ] All CLI verbs/JSON/help and hosted adapters use complete v2 paths.
-- [ ] Actor/session presence scans become indexed SQLite lookups, separate from checkout writer leases.
+- [x] Actor/session presence scans become indexed SQLite lookups, separate from checkout writer leases.
 - [ ] Rich typed predicates and full-text context/discussion search use bounded indexes/projections.
 - [ ] All device observers share committed dispatch and appropriate local authority expiry handling.
 - [ ] Remaining transcript producers honor explicit retention opt-in and immutable TTLs.

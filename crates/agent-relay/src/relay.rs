@@ -1737,8 +1737,11 @@ impl HarnessBridgeRuntime {
                 .ok_or_else(|| anyhow!("registry entry disappeared during update"));
         }
 
-        if client_instance_id.is_none() && probe.native_actor_key.is_some() {
+        if client_instance_id.is_none()
+            && let Some(native_actor_key) = probe.native_actor_key.as_deref()
+        {
             let (entry, _) = registry.find_or_create_active_entry(
+                native_actor_key,
                 |entry| {
                     claude_actor_compatible(entry, probe, self.repo.root())
                         && entry.native_actor_key == probe.native_actor_key

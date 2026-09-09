@@ -19,6 +19,8 @@ pub enum Error {
     Schema(i64),
     #[error("local metadata requires WAL mode; database selected {0}")]
     WalUnavailable(String),
+    #[error("local metadata initialization lock: {0}")]
+    Initialization(String),
     #[error("change cursor has expired; reload the authoritative snapshot")]
     CursorExpired,
     #[error("invalid local change cursor or page limit")]
@@ -43,17 +45,27 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
     }
     let mut connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     configure(&connection)?;
-    let mode: String = connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
-    if mode != "wal" {
-        return Err(Error::WalUnavailable(mode));
-    }
     connection.execute_batch("PRAGMA synchronous=FULL;")?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version == SCHEMA_VERSION {
+        let mode: String = connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?;
+        if mode != "wal" {
+            return Err(Error::WalUnavailable(mode));
+        }
         return Ok(connection);
     }
     if version != 0 {
         return Err(Error::Schema(version));
+    }
+    // WAL activation itself can return SQLITE_BUSY without honoring the busy
+    // handler when two new connections race. Serialize only cold bootstrap;
+    // an initialized store never acquires this filesystem lock.
+    let _initialization = objects::lock::RepoLock::at(heddle_dir.join("metadata.initialize.lock"))
+        .write()
+        .map_err(|error| Error::Initialization(error.to_string()))?;
+    let mode: String = connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+    if mode != "wal" {
+        return Err(Error::WalUnavailable(mode));
     }
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i64 = tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -64,6 +76,7 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
             crate::device_artifacts::initialize_schema(&tx)?;
             crate::reference_projection::initialize_schema(&tx)?;
             crate::operation_dedup::initialize_schema(&tx)?;
+            crate::actor_presence::initialize_schema(&tx)?;
             initialize_changes(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -112,6 +125,7 @@ fn initialize_changes(connection: &Connection) -> rusqlite::Result<()> {
         ("run_permissions", "NEW.run", "run"),
         ("run_policies", "NEW.spool", "run_policy"),
         ("run_artifacts", "NEW.run", "run"),
+        ("actor_presence", "NEW.session_id", "actor"),
     ] {
         // All identifiers and expressions are compile-time literals above.
         for event in ["INSERT", "UPDATE", "DELETE"] {

@@ -1,20 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Durable actor presence and work-context records.
 
-use schemars::JsonSchema;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
 };
 
 use chrono::{DateTime, Utc};
+use objects::error::{HeddleError, Result};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-use objects::{
-    error::{HeddleError, Result},
-    fs_atomic::{create_dir_all_durable, write_file_atomic},
-    lock::{RepoLock, WriteLockGuard},
-};
 
 const STALE_AGENT_TTL_DAYS: i64 = 7;
 
@@ -190,428 +185,220 @@ impl From<&ActorPresence> for ActorChainNode {
     }
 }
 
-/// Manages actor presence stored in `.heddle/actor-presence/`.
+mod sqlite;
+pub(crate) use sqlite::initialize_schema;
+
+/// Actor presence in the shared object-store metadata database.
+/// Presence is independent of checkout writer leases.
 pub struct ActorPresenceStore {
-    presence_dir: PathBuf,
+    heddle_dir: PathBuf,
 }
 
 impl ActorPresenceStore {
-    /// Create a store backed by `<heddle_dir>/actor-presence/`.
     pub fn new(heddle_dir: &Path) -> Self {
         Self {
-            presence_dir: heddle_dir.join("actor-presence"),
+            heddle_dir: heddle_dir.to_path_buf(),
         }
-    }
-
-    fn entry_path(&self, session_id: &str) -> Result<PathBuf> {
-        // Only allow characters produced by generate_actor_session_id: lowercase
-        // alphanumeric and hyphens.  This makes path traversal structurally
-        // impossible: none of [a-z0-9-] can form ".." or "/".
-        if session_id.is_empty()
-            || !session_id
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        {
-            return Err(HeddleError::Config(format!(
-                "invalid session ID '{}': only lowercase alphanumeric and hyphens allowed",
-                session_id
-            )));
-        }
-        Ok(self.presence_dir.join(format!("{}.toml", session_id)))
-    }
-
-    fn lock_path(&self) -> PathBuf {
-        self.presence_dir.join(".lock")
-    }
-
-    fn write_lock(&self) -> Result<WriteLockGuard> {
-        RepoLock::at(self.lock_path()).write().map_err(|err| {
-            HeddleError::Config(format!("failed to acquire agent registry lock: {err}"))
-        })
-    }
-
-    fn write_entry_file(&self, entry: &ActorPresence) -> Result<()> {
-        create_dir_all_durable(&self.presence_dir)?;
-        let path = self.entry_path(&entry.session_id)?;
-        let content =
-            toml::to_string_pretty(entry).map_err(|e| HeddleError::Config(e.to_string()))?;
-        Ok(write_file_atomic(&path, content.as_bytes())?)
-    }
-
-    fn load_entry_from_path(&self, path: &Path) -> Result<Option<ActorPresence>> {
-        if !path.exists() {
-            return Ok(None);
-        }
-
-        let content = std::fs::read_to_string(path)?;
-        let entry = toml::from_str(&content).map_err(|e| HeddleError::Config(e.to_string()))?;
-        Ok(Some(entry))
-    }
-
-    fn is_stale_terminal_entry(&self, entry: &ActorPresence) -> bool {
-        if matches!(entry.status, ActorPresenceStatus::Active) {
-            return false;
-        }
-
-        let terminal_at = entry.completed_at.unwrap_or(entry.started_at);
-        terminal_at <= Utc::now() - chrono::Duration::days(STALE_AGENT_TTL_DAYS)
-    }
-
-    fn prune_stale_entry_path(&self, path: &Path) -> Result<()> {
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-        Ok(())
     }
 
     pub fn current_entries(&self) -> Result<Vec<ActorPresence>> {
         self.list()
     }
-
     pub fn active_entries(&self) -> Result<Vec<ActorPresence>> {
-        Ok(self
-            .current_entries()?
-            .into_iter()
-            .filter(|entry| entry.status == ActorPresenceStatus::Active)
-            .collect())
+        self.query("status='active'", &[], false)
     }
-
+    pub fn list(&self) -> Result<Vec<ActorPresence>> {
+        self.query("1=1", &[], true)
+    }
+    /// Cleanup previews are read-only and include terminal records past TTL.
+    pub fn list_without_pruning(&self) -> Result<Vec<ActorPresence>> {
+        self.query("1=1", &[], false)
+    }
+    pub fn load(&self, session_id: &str) -> Result<Option<ActorPresence>> {
+        sqlite::validate_id(session_id)?;
+        self.first("session_id=?1", &[&session_id], true)
+    }
+    pub fn save(&self, entry: &ActorPresence) -> Result<()> {
+        self.mutate(|db| sqlite::save(db, entry))
+    }
     fn create_generated_entry_with<F, G>(
         &self,
         mut generate_id: G,
-        mut build_entry: F,
+        mut build: F,
     ) -> Result<ActorPresence>
     where
         F: FnMut(&str) -> Result<ActorPresence>,
         G: FnMut() -> String,
     {
-        let _lock = self.write_lock()?;
-
-        loop {
-            let session_id = generate_id();
-            let path = self.entry_path(&session_id)?;
-            if path.exists() {
-                continue;
+        self.mutate(|db| {
+            loop {
+                let id = generate_id();
+                sqlite::validate_id(&id)?;
+                if sqlite::load(db, &id)?.is_some() {
+                    continue;
+                }
+                let entry = build(&id)?;
+                if entry.session_id != id {
+                    return Err(HeddleError::Config(
+                        "generated actor changed its session identity".into(),
+                    ));
+                }
+                sqlite::save(db, &entry)?;
+                return Ok(entry);
             }
-
-            let entry = build_entry(&session_id)?;
-            self.write_entry_file(&entry)?;
-            return Ok(entry);
-        }
+        })
     }
-
-    /// Create and persist a new agent entry with a unique generated session ID.
-    pub fn create_generated_entry<F>(&self, build_entry: F) -> Result<ActorPresence>
+    pub fn create_generated_entry<F>(&self, build: F) -> Result<ActorPresence>
     where
         F: FnMut(&str) -> Result<ActorPresence>,
     {
-        self.create_generated_entry_with(generate_actor_session_id, build_entry)
+        self.create_generated_entry_with(generate_actor_session_id, build)
     }
-
-    /// Persist an agent entry.
-    ///
-    /// Atomic write: uses write-to-temp-then-rename so a crash mid-write
-    /// never leaves the TOML file truncated or partially written.
-    pub fn save(&self, entry: &ActorPresence) -> Result<()> {
-        let _lock = self.write_lock()?;
-        self.write_entry_file(entry)
-    }
-
-    /// Load a single agent entry by session ID.
-    pub fn load(&self, session_id: &str) -> Result<Option<ActorPresence>> {
-        let path = self.entry_path(session_id)?;
-        let Some(entry) = self.load_entry_from_path(&path)? else {
-            return Ok(None);
-        };
-
-        if self.is_stale_terminal_entry(&entry) {
-            let _lock = self.write_lock()?;
-            if let Some(latest) = self.load_entry_from_path(&path)?
-                && self.is_stale_terminal_entry(&latest)
-            {
-                self.prune_stale_entry_path(&path)?;
-                return Ok(None);
-            }
-        }
-
-        Ok(Some(entry))
-    }
-
-    /// List all agent entries, most-recently-started first.
-    pub fn list(&self) -> Result<Vec<ActorPresence>> {
-        if !self.presence_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut stale_paths = Vec::new();
-        let mut entries = Vec::new();
-        for dir_entry in std::fs::read_dir(&self.presence_dir)? {
-            let dir_entry = dir_entry?;
-            let path = dir_entry.path();
-            if path.extension().map(|e| e == "toml").unwrap_or(false) {
-                let content = std::fs::read_to_string(&path)?;
-                let entry = toml::from_str::<ActorPresence>(&content).map_err(|err| {
-                    HeddleError::Config(format!(
-                        "failed to parse agent registry entry '{}': {err}",
-                        path.display()
-                    ))
-                })?;
-                if self.is_stale_terminal_entry(&entry) {
-                    stale_paths.push(path);
-                } else {
-                    entries.push(entry);
-                }
-            }
-        }
-
-        if !stale_paths.is_empty() {
-            let _lock = self.write_lock()?;
-            for path in stale_paths {
-                if let Some(entry) = self.load_entry_from_path(&path)?
-                    && self.is_stale_terminal_entry(&entry)
-                {
-                    self.prune_stale_entry_path(&path)?;
-                }
-            }
-        }
-
-        entries.sort_by_key(|a| std::cmp::Reverse(a.started_at));
-        Ok(entries)
-    }
-
-    /// List every persisted entry without pruning stale terminal records.
-    ///
-    /// Cleanup previews use this read-only view so residue detection cannot
-    /// mutate actor-presence storage as a side effect.
-    pub fn list_without_pruning(&self) -> Result<Vec<ActorPresence>> {
-        if !self.presence_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut entries = Vec::new();
-        for dir_entry in std::fs::read_dir(&self.presence_dir)? {
-            let path = dir_entry?.path();
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "toml")
-            {
-                let content = std::fs::read_to_string(&path)?;
-                entries.push(toml::from_str::<ActorPresence>(&content).map_err(|err| {
-                    HeddleError::Config(format!(
-                        "failed to parse agent registry entry '{}': {err}",
-                        path.display()
-                    ))
-                })?);
-            }
-        }
-        entries.sort_by_key(|entry| std::cmp::Reverse(entry.started_at));
-        Ok(entries)
-    }
-
-    /// Update the status of an agent entry in place.
-    pub fn update_status(&self, session_id: &str, status: ActorPresenceStatus) -> Result<()> {
-        let _lock = self.write_lock()?;
-        let path = self.entry_path(session_id)?;
-        if let Some(mut entry) = self.load_entry_from_path(&path)? {
-            entry.status = status;
-            entry.completed_at = match entry.status {
-                ActorPresenceStatus::Active => None,
-                ActorPresenceStatus::Abandoned
-                | ActorPresenceStatus::Complete
-                | ActorPresenceStatus::Merged => Some(Utc::now()),
-            };
-            self.write_entry_file(&entry)?;
-        }
-        Ok(())
-    }
-
-    /// Mutate an existing agent entry under the registry write lock.
     pub fn update_entry<F>(&self, session_id: &str, mut update: F) -> Result<Option<ActorPresence>>
     where
         F: FnMut(&mut ActorPresence),
     {
-        let _lock = self.write_lock()?;
-        let path = self.entry_path(session_id)?;
-        let Some(mut entry) = self.load_entry_from_path(&path)? else {
-            return Ok(None);
-        };
-        update(&mut entry);
-        self.write_entry_file(&entry)?;
-        Ok(Some(entry))
+        sqlite::validate_id(session_id)?;
+        self.mutate(|db| {
+            let Some(mut entry) = sqlite::load(db, session_id)? else {
+                return Ok(None);
+            };
+            update(&mut entry);
+            if entry.session_id != session_id {
+                return Err(HeddleError::Config(
+                    "actor update changed its session identity".into(),
+                ));
+            }
+            sqlite::save(db, &entry)?;
+            Ok(Some(entry))
+        })
     }
-
-    /// Under one registry write lock, reuse a matching active entry if one
-    /// exists; otherwise create a new generated entry.
+    pub fn update_status(&self, session_id: &str, status: ActorPresenceStatus) -> Result<()> {
+        self.update_entry(session_id, |entry| {
+            entry.status = status.clone();
+            entry.completed_at = if status == ActorPresenceStatus::Active {
+                None
+            } else {
+                Some(Utc::now())
+            };
+        })?;
+        Ok(())
+    }
+    /// The indexed native identity narrows candidates before the compatibility
+    /// predicate. Selection, update and creation share one write transaction.
     pub fn find_or_create_active_entry<FMatch, FUpdate, FBuild>(
         &self,
+        native_actor_key: &str,
         mut matches: FMatch,
-        mut update_existing: FUpdate,
-        mut build_entry: FBuild,
+        mut update: FUpdate,
+        mut build: FBuild,
     ) -> Result<(ActorPresence, bool)>
     where
         FMatch: FnMut(&ActorPresence) -> bool,
         FUpdate: FnMut(&mut ActorPresence),
         FBuild: FnMut(&str) -> Result<ActorPresence>,
     {
-        let _lock = self.write_lock()?;
-        create_dir_all_durable(&self.presence_dir)?;
-
-        for dir_entry in std::fs::read_dir(&self.presence_dir)? {
-            let dir_entry = dir_entry?;
-            let path = dir_entry.path();
-            if !path.extension().map(|e| e == "toml").unwrap_or(false) {
-                continue;
+        self.mutate(|db| {
+            for mut entry in sqlite::query(
+                db,
+                "status='active' AND native_actor_key=?1",
+                &[&native_actor_key],
+                false,
+            )? {
+                if matches(&entry) {
+                    let id = entry.session_id.clone();
+                    update(&mut entry);
+                    if entry.session_id != id
+                        || entry.native_actor_key.as_deref() != Some(native_actor_key)
+                    {
+                        return Err(HeddleError::Config(
+                            "actor update changed its indexed identity".into(),
+                        ));
+                    }
+                    sqlite::save(db, &entry)?;
+                    return Ok((entry, false));
+                }
             }
-            let Some(mut entry) = self.load_entry_from_path(&path)? else {
-                continue;
-            };
-            if self.is_stale_terminal_entry(&entry) {
-                self.prune_stale_entry_path(&path)?;
-                continue;
+            loop {
+                let id = generate_actor_session_id();
+                if sqlite::load(db, &id)?.is_some() {
+                    continue;
+                }
+                let entry = build(&id)?;
+                if entry.session_id != id
+                    || entry.native_actor_key.as_deref() != Some(native_actor_key)
+                {
+                    return Err(HeddleError::Config(
+                        "new actor differs from requested identity".into(),
+                    ));
+                }
+                sqlite::save(db, &entry)?;
+                return Ok((entry, true));
             }
-            if entry.status == ActorPresenceStatus::Active && matches(&entry) {
-                update_existing(&mut entry);
-                self.write_entry_file(&entry)?;
-                return Ok((entry, false));
-            }
-        }
-
-        loop {
-            let session_id = generate_actor_session_id();
-            let path = self.entry_path(&session_id)?;
-            if path.exists() {
-                continue;
-            }
-
-            let entry = build_entry(&session_id)?;
-            self.write_entry_file(&entry)?;
-            return Ok((entry, true));
-        }
+        })
     }
-
-    /// Find the active session whose visible or private execution root matches
-    /// the given worktree root.
-    pub fn find_active_by_path(&self, worktree_root: &Path) -> Result<Option<ActorPresence>> {
-        let canonical = worktree_root
-            .canonicalize()
-            .unwrap_or_else(|_| worktree_root.to_path_buf());
-        let entries = self.active_entries()?;
-        Ok(entries
-            .into_iter()
-            .find(|entry| entry_matches_root(entry, &canonical)))
+    pub fn find_active_by_path(&self, path: &Path) -> Result<Option<ActorPresence>> {
+        let path = sqlite::path_key(path);
+        self.first("status='active' AND path=?1", &[&path], false)
     }
-
-    /// Find the active registry entry associated with the given Heddle session ID.
-    pub fn find_active_by_heddle_session_id(
-        &self,
-        heddle_session_id: &str,
-    ) -> Result<Option<ActorPresence>> {
-        let entries = self.active_entries()?;
-        Ok(entries
-            .into_iter()
-            .find(|entry| entry.heddle_session_id.as_deref() == Some(heddle_session_id)))
+    pub fn find_active_by_heddle_session_id(&self, id: &str) -> Result<Option<ActorPresence>> {
+        self.first("status='active' AND heddle_session_id=?1", &[&id], false)
     }
-
-    /// Find the active registry entry associated with a stable harness-side
-    /// client instance identifier.
-    pub fn find_active_by_client_instance_id(
-        &self,
-        client_instance_id: &str,
-    ) -> Result<Option<ActorPresence>> {
-        let entries = self.active_entries()?;
-        Ok(entries
-            .into_iter()
-            .find(|entry| entry.client_instance_id.as_deref() == Some(client_instance_id)))
+    pub fn find_active_by_client_instance_id(&self, id: &str) -> Result<Option<ActorPresence>> {
+        self.first("status='active' AND client_instance_id=?1", &[&id], false)
     }
-
-    /// Find the active registry entry associated with a harness-native actor key.
-    pub fn find_active_by_native_actor_key(
-        &self,
-        native_actor_key: &str,
-    ) -> Result<Option<ActorPresence>> {
-        let entries = self.active_entries()?;
-        Ok(entries
-            .into_iter()
-            .find(|entry| entry.native_actor_key.as_deref() == Some(native_actor_key)))
+    pub fn find_active_by_native_actor_key(&self, id: &str) -> Result<Option<ActorPresence>> {
+        self.first("status='active' AND native_actor_key=?1", &[&id], false)
     }
-
-    /// Return this actor's native parent chain, ordered root to leaf.
-    ///
-    /// The lookup intentionally follows harness-native actor keys rather than
-    /// thread names: subagents may work in lightweight directories or forked
-    /// threads, but the native parent key is the stable "who spawned whom"
-    /// edge that preserves Human -> agent -> agent attribution.
-    pub fn actor_chain_for_session(&self, session_id: &str) -> Result<Vec<ActorChainNode>> {
-        let entries = self.current_entries()?;
-        let by_session: HashMap<&str, &ActorPresence> = entries
-            .iter()
-            .map(|entry| (entry.session_id.as_str(), entry))
-            .collect();
-        let by_native_key: HashMap<&str, &ActorPresence> = entries
-            .iter()
-            .filter_map(|entry| entry.native_actor_key.as_deref().map(|key| (key, entry)))
-            .collect();
-
-        let Some(mut current) = by_session.get(session_id).copied() else {
-            return Ok(Vec::new());
-        };
-        let mut leaf_to_root = vec![ActorChainNode::from(current)];
-        let mut seen = HashSet::from([current.session_id.as_str()]);
-
-        while let Some(parent_key) = current.native_parent_actor_key.as_deref() {
-            let Some(parent) = by_native_key.get(parent_key).copied() else {
-                break;
-            };
-            if !seen.insert(parent.session_id.as_str()) {
-                break;
-            }
-            leaf_to_root.push(ActorChainNode::from(parent));
-            current = parent;
-        }
-
-        leaf_to_root.reverse();
-        Ok(leaf_to_root)
-    }
-
-    /// Find the active registry entry associated with a harness-native instance
-    /// key inside the given worktree root.
     pub fn find_active_by_native_instance_key_at_path(
         &self,
-        native_instance_key: &str,
-        worktree_root: &Path,
+        id: &str,
+        path: &Path,
     ) -> Result<Option<ActorPresence>> {
-        let canonical = worktree_root
-            .canonicalize()
-            .unwrap_or_else(|_| worktree_root.to_path_buf());
-        let entries = self.active_entries()?;
-        Ok(entries.into_iter().find(|entry| {
-            entry.native_instance_key.as_deref() == Some(native_instance_key)
-                && entry_matches_root(entry, &canonical)
-        }))
+        let path = sqlite::path_key(path);
+        self.first(
+            "status='active' AND native_instance_key=?1 AND path=?2",
+            &[&id, &path],
+            false,
+        )
     }
-
-    /// Append a context query to an active session's log.
-    ///
-    /// Best-effort: silently ignored if the session no longer exists or has completed.
+    pub fn actor_chain_for_session(&self, session_id: &str) -> Result<Vec<ActorChainNode>> {
+        let Some(mut current) = self.load(session_id)? else {
+            return Ok(Vec::new());
+        };
+        let mut chain = vec![ActorChainNode::from(&current)];
+        let mut seen = HashSet::from([current.session_id.clone()]);
+        while let Some(parent_key) = current.native_parent_actor_key.as_deref() {
+            let Some(parent) = self.first("native_actor_key=?1", &[&parent_key], true)? else {
+                break;
+            };
+            if !seen.insert(parent.session_id.clone()) {
+                break;
+            }
+            chain.push(ActorChainNode::from(&parent));
+            current = parent;
+        }
+        chain.reverse();
+        Ok(chain)
+    }
     pub fn log_context_query(&self, session_id: &str, query: ContextQueryEntry) -> Result<()> {
-        let _lock = self.write_lock()?;
-        let path = self.entry_path(session_id)?;
-        if let Some(mut entry) = self.load_entry_from_path(&path)?
-            && entry.status == ActorPresenceStatus::Active
-        {
-            entry.context_queries.push(query);
-            self.write_entry_file(&entry)?;
-        }
+        self.update_entry(session_id, |entry| {
+            if entry.status == ActorPresenceStatus::Active {
+                entry.context_queries.push(query.clone());
+            }
+        })?;
         Ok(())
     }
-
-    /// Delete an agent entry.
     pub fn delete(&self, session_id: &str) -> Result<()> {
-        let path = self.entry_path(session_id)?;
-        if path.exists() {
-            std::fs::remove_file(path)?;
-        }
-        Ok(())
+        sqlite::validate_id(session_id)?;
+        self.mutate(|db| {
+            db.execute(
+                "DELETE FROM actor_presence WHERE session_id=?1",
+                [session_id],
+            )
+            .map_err(sqlite::error)?;
+            Ok(())
+        })
     }
 }
 
@@ -625,14 +412,6 @@ pub fn generate_actor_session_id() -> String {
         "agent-{}",
         base32::encode(base32::Alphabet::Rfc4648 { padding: false }, &random_bytes).to_lowercase()
     )
-}
-
-fn entry_matches_root(entry: &ActorPresence, canonical: &Path) -> bool {
-    entry
-        .path
-        .as_ref()
-        .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()) == canonical)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -694,6 +473,7 @@ mod tests {
         let store = ActorPresenceStore::new(temp.path());
         let (first, created) = store
             .find_or_create_active_entry(
+                "codex:thread:one",
                 |_| false,
                 |_| {},
                 |session_id| {
@@ -707,6 +487,7 @@ mod tests {
 
         let (second, created) = store
             .find_or_create_active_entry(
+                "codex:thread:one",
                 |entry| entry.native_actor_key.as_deref() == Some("codex:thread:one"),
                 |_| {},
                 |_| panic!("matching presence should be reused"),
@@ -726,5 +507,191 @@ mod tests {
 
         let loaded = store.load("agent-done").unwrap().unwrap();
         assert_eq!(loaded.status, ActorPresenceStatus::Complete);
+    }
+
+    #[test]
+    fn independent_connections_reuse_one_actor_and_preserve_updates() {
+        let temp = TempDir::new().expect("temporary metadata store");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let root = temp.path().to_path_buf();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let store = ActorPresenceStore::new(&root);
+                    barrier.wait();
+                    let (entry, _) = store
+                        .find_or_create_active_entry(
+                            "codex:shared",
+                            |_| true,
+                            |_| {},
+                            |id| {
+                                let mut entry = presence(id, ActorPresenceStatus::Active);
+                                entry.native_actor_key = Some("codex:shared".into());
+                                Ok(entry)
+                            },
+                        )
+                        .expect("atomic actor reuse");
+                    for _ in 0..16 {
+                        store
+                            .update_entry(&entry.session_id, |entry| {
+                                entry.usage_summary.tool_calls =
+                                    Some(entry.usage_summary.tool_calls.unwrap_or(0) + 1);
+                            })
+                            .expect("atomic increment");
+                    }
+                    entry.session_id
+                })
+            })
+            .collect();
+        let ids: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("actor worker"))
+            .collect();
+        assert_eq!(ids[0], ids[1]);
+        let entries = ActorPresenceStore::new(temp.path())
+            .active_entries()
+            .expect("active actors");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].usage_summary.tool_calls, Some(32));
+    }
+
+    #[test]
+    fn indexed_lookup_chooses_latest_actor_and_follows_updated_fields() {
+        let temp = TempDir::new().expect("temporary metadata store");
+        let store = ActorPresenceStore::new(temp.path());
+        let mut old = presence("agent-old", ActorPresenceStatus::Active);
+        old.native_actor_key = Some("codex:same".into());
+        old.started_at -= chrono::Duration::days(1);
+        store.save(&old).expect("old actor");
+        let mut newer = presence("agent-new", ActorPresenceStatus::Active);
+        newer.native_actor_key = old.native_actor_key.clone();
+        newer.client_instance_id = Some("client-one".into());
+        newer.heddle_session_id = Some("session-one".into());
+        newer.native_instance_key = Some("instance-one".into());
+        newer.path = Some(temp.path().to_path_buf());
+        store.save(&newer).expect("new actor");
+        assert_eq!(
+            store
+                .find_active_by_native_actor_key("codex:same")
+                .expect("lookup")
+                .expect("actor")
+                .session_id,
+            newer.session_id
+        );
+        assert!(
+            store
+                .find_active_by_client_instance_id("client-one")
+                .expect("client lookup")
+                .is_some()
+        );
+        assert!(
+            store
+                .find_active_by_heddle_session_id("session-one")
+                .expect("session lookup")
+                .is_some()
+        );
+        assert!(
+            store
+                .find_active_by_native_instance_key_at_path("instance-one", temp.path())
+                .expect("instance lookup")
+                .is_some()
+        );
+        store
+            .update_entry(&newer.session_id, |entry| {
+                entry.client_instance_id = Some("client-two".into())
+            })
+            .expect("update index");
+        assert!(
+            store
+                .find_active_by_client_instance_id("client-one")
+                .expect("old client lookup")
+                .is_none()
+        );
+        assert!(
+            store
+                .find_active_by_client_instance_id("client-two")
+                .expect("new client lookup")
+                .is_some()
+        );
+        let db = crate::local_metadata::open_existing(temp.path())
+            .expect("metadata")
+            .expect("existing");
+        let plan: String = db.query_row("EXPLAIN QUERY PLAN SELECT payload FROM actor_presence WHERE status='active' AND native_actor_key='codex:same' ORDER BY started_at DESC,session_id LIMIT 1", [], |row| row.get(3)).expect("query plan");
+        assert!(
+            plan.contains("SEARCH actor_presence USING INDEX actor_presence_native"),
+            "{plan}"
+        );
+    }
+
+    #[test]
+    fn terminal_cleanup_is_bounded_and_never_expires_active_actors() {
+        let temp = TempDir::new().expect("temporary metadata store");
+        let store = ActorPresenceStore::new(temp.path());
+        let db = crate::local_metadata::open(temp.path()).expect("metadata");
+        for number in 0..600 {
+            let mut entry = presence(
+                &format!("agent-done-{number}"),
+                ActorPresenceStatus::Complete,
+            );
+            entry.started_at -= chrono::Duration::days(9);
+            sqlite::save(&db, &entry).expect("seed terminal history");
+        }
+        assert_eq!(
+            store
+                .list_without_pruning()
+                .expect("read-only preview")
+                .len(),
+            600
+        );
+        assert!(store.list().expect("current list").is_empty());
+        assert_eq!(
+            store
+                .list_without_pruning()
+                .expect("preview remains read-only")
+                .len(),
+            600
+        );
+        let mut active = presence("agent-live", ActorPresenceStatus::Active);
+        active.started_at -= chrono::Duration::days(90);
+        store.save(&active).expect("bounded cleanup");
+        assert_eq!(
+            store.list_without_pruning().expect("retained rows").len(),
+            345
+        );
+        assert_eq!(store.active_entries().expect("active rows").len(), 1);
+    }
+
+    #[test]
+    fn failed_actor_identity_update_preserves_record_and_change_cursor() {
+        let temp = TempDir::new().expect("temporary metadata store");
+        let store = ActorPresenceStore::new(temp.path());
+        store
+            .save(&presence("agent-one", ActorPresenceStatus::Active))
+            .expect("actor");
+        let mut db = crate::local_metadata::open_existing(temp.path())
+            .expect("metadata")
+            .expect("existing");
+        let before = crate::local_metadata::changes(&mut db, 0, 1024)
+            .expect("cursor")
+            .cursor;
+        assert!(
+            store
+                .update_entry("agent-one", |entry| entry.session_id = "agent-other".into())
+                .is_err()
+        );
+        assert!(
+            store
+                .load("agent-other")
+                .expect("absent renamed actor")
+                .is_none()
+        );
+        assert_eq!(
+            crate::local_metadata::changes(&mut db, before, 1024)
+                .expect("unchanged cursor")
+                .cursor,
+            before
+        );
+        assert!(!temp.path().join("actor-presence").exists());
     }
 }
