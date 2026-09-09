@@ -15,6 +15,8 @@
 //! leaves, so reformatting and comment edits leave the hash untouched — while a
 //! one-token change perturbs exactly the symbols that contain it.
 
+mod extraction_budget;
+pub use extraction_budget::ExtractionBudgetError;
 use objects::object::{
     ContentHash, ImportEntry, OccurrenceEntry, ScopeEntry, SymbolEntry, SymbolKindTag,
     compute_file_scaffold_hash, compute_symbol_semantic_hash,
@@ -132,18 +134,36 @@ pub fn extract_semantic_file(source: &[u8], language: Language) -> Option<Extrac
     extract_parsed_file(source, language, parsed)
 }
 
+/// Bounded extraction reports expansion failures separately from unsupported or
+/// syntactically invalid files; callers must not silently turn a limit into
+/// an opaque successful analysis.
 pub fn extract_semantic_file_bounded(
     source: &[u8],
     language: Language,
     budget: &crate::parser::ParseBudget,
-) -> Option<ExtractedFile> {
-    language.parser_handle()?;
-    let parsed = ParsedFile::parse_bounded(std::str::from_utf8(source).ok()?, language, budget)?;
-    let value = extract_parsed_file(source, language, parsed)?;
+) -> Result<Option<ExtractedFile>, ExtractionBudgetError> {
     if budget.interrupted() {
-        return None;
+        return Err(ExtractionBudgetError::Interrupted);
     }
-    Some(value)
+    if source.len() > extraction_budget::MAX_SOURCE_BYTES {
+        return Err(ExtractionBudgetError::Exceeded("source bytes"));
+    }
+    let Some(source_text) = std::str::from_utf8(source).ok() else {
+        return Ok(None);
+    };
+    let parsed = ParsedFile::parse_bounded(source_text, language, budget);
+    if budget.interrupted() {
+        return Err(ExtractionBudgetError::Interrupted);
+    }
+    let Some(parsed) = parsed else {
+        return Ok(None);
+    };
+    extraction_budget::admit(parsed.root_node(), budget)?;
+    let value = extract_parsed_file(source, language, parsed);
+    if budget.interrupted() {
+        return Err(ExtractionBudgetError::Interrupted);
+    }
+    Ok(value)
 }
 
 fn extract_parsed_file(
@@ -245,6 +265,61 @@ fn symbol_semantic_hash(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn execution_budget() -> crate::parser::ParseBudget {
+        crate::parser::ParseBudget {
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+        }
+    }
+
+    #[test]
+    fn bounded_extraction_rejects_dense_fact_expansion_before_owned_index() {
+        let source = format!("fn dense() {{ {} }}", "let value = item;".repeat(12_000));
+        assert!(source.len() < extraction_budget::MAX_SOURCE_BYTES);
+        let error =
+            extract_semantic_file_bounded(source.as_bytes(), Language::Rust, &execution_budget())
+                .err()
+                .expect("dense AST must fail before allocating owned facts");
+        assert!(
+            matches!(error, ExtractionBudgetError::Exceeded("AST node count")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn bounded_extraction_rejects_nested_expansion_without_opaque_success() {
+        let source = format!(
+            "{}fn leaf() {{}}{}",
+            "mod nested {".repeat(140),
+            "}".repeat(140)
+        );
+        assert!(source.len() < extraction_budget::MAX_SOURCE_BYTES);
+        let error =
+            extract_semantic_file_bounded(source.as_bytes(), Language::Rust, &execution_budget())
+                .err()
+                .expect("nested AST must fail before allocating owned facts");
+        assert!(
+            matches!(error, ExtractionBudgetError::Exceeded("AST depth")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn bounded_extraction_preserves_actual_semantic_facts() {
+        let source = b"use crate::api::Item; fn answer(item: Item) -> u32 { item.value() }";
+        let ordinary = extract_semantic_file(source, Language::Rust).expect("ordinary parse");
+        let bounded = extract_semantic_file_bounded(source, Language::Rust, &execution_budget())
+            .expect("within budget")
+            .expect("bounded parse");
+        assert!(!bounded.symbols.is_empty());
+        assert!(!bounded.occurrences.is_empty());
+        assert_eq!(bounded.symbols, ordinary.symbols);
+        assert_eq!(bounded.scopes, ordinary.scopes);
+        assert_eq!(bounded.imports, ordinary.imports);
+        assert_eq!(bounded.occurrences, ordinary.occurrences);
+        assert_eq!(bounded.scaffold_hash, ordinary.scaffold_hash);
+    }
 
     fn extract(src: &str) -> Vec<SymbolEntry> {
         extract_semantic_file(src.as_bytes(), Language::Rust)
