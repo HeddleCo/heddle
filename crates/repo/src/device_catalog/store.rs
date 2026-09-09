@@ -19,9 +19,11 @@ CREATE TABLE IF NOT EXISTS catalog_generation(id INTEGER PRIMARY KEY CHECK(id=1)
 INSERT OR IGNORE INTO catalog_generation VALUES(1,0);
 CREATE TABLE IF NOT EXISTS spools(id TEXT PRIMARY KEY,registration BLOB NOT NULL,overview BLOB NOT NULL,capability_path TEXT NOT NULL,version INTEGER NOT NULL CHECK(version>0),deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN(0,1)),parent TEXT NOT NULL DEFAULT '',slug TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS live_spool_names ON spools(parent,slug) WHERE deleted=0;
+CREATE INDEX IF NOT EXISTS live_spool_parent_id ON spools(parent,id) WHERE deleted=0;
 CREATE UNIQUE INDEX IF NOT EXISTS live_spool_paths ON spools(capability_path) WHERE deleted=0;
 CREATE TABLE IF NOT EXISTS mounts(id TEXT PRIMARY KEY,parent TEXT NOT NULL REFERENCES spools(id),child TEXT NOT NULL REFERENCES spools(id),name TEXT NOT NULL,version INTEGER NOT NULL CHECK(version>0),deleted INTEGER NOT NULL DEFAULT 0 CHECK(deleted IN(0,1)));
 CREATE UNIQUE INDEX IF NOT EXISTS live_mount_names ON mounts(parent,name) WHERE deleted=0;
+CREATE INDEX IF NOT EXISTS mounts_parent_id ON mounts(parent,id) WHERE deleted=0;
 CREATE INDEX IF NOT EXISTS mounts_child ON mounts(child) WHERE deleted=0;
 CREATE TABLE IF NOT EXISTS bookmarks(account TEXT NOT NULL,target BLOB NOT NULL,record BLOB NOT NULL,version INTEGER NOT NULL CHECK(version>0),PRIMARY KEY(account,target));
 CREATE TABLE IF NOT EXISTS receipts(account TEXT NOT NULL,method TEXT NOT NULL,operation TEXT NOT NULL,request_hash BLOB NOT NULL,response BLOB NOT NULL,PRIMARY KEY(account,method,operation));
@@ -39,7 +41,7 @@ pub struct SpoolRecord {
 }
 #[derive(Debug)]
 pub struct Catalog {
-    connection: Connection,
+    pub(super) connection: Connection,
 }
 #[derive(Debug)]
 pub struct Page<T> {
@@ -300,7 +302,7 @@ pub fn spool_in(connection: &Connection, id: uuid::Uuid) -> Result<Option<SpoolR
     row.map(|(registration, overview, version)| decode(&registration, &overview, version))
         .transpose()
 }
-fn decode(registration: &[u8], overview: &[u8], version: i64) -> Result<SpoolRecord> {
+pub(super) fn decode(registration: &[u8], overview: &[u8], version: i64) -> Result<SpoolRecord> {
     if registration.len() > 16 * 1024 || overview.len() > MAX_RECORD_BYTES || version <= 0 {
         bail!("invalid catalog row bounds")
     }
@@ -331,3 +333,6 @@ pub fn exact_version(actual: &[u8], expected: &[u8]) -> Result<()> {
     }
     Ok(())
 }
+
+/// Borrowed local receipt transaction; handlers do not need a separate SQL dependency.
+pub type CatalogTransaction<'a> = rusqlite::Transaction<'a>;

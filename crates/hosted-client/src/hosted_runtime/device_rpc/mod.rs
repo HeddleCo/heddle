@@ -1,5 +1,15 @@
 //! Native direct browser/device RPCs. Device authority is locally admitted;
 //! no handler creates a hosted client or consults Weft to permit local work.
+mod account;
+mod account_auth;
+mod account_feed;
+mod account_identity;
+mod account_observe;
+mod account_resolve;
+mod account_spool;
+#[cfg(test)]
+mod account_tests;
+mod account_threads;
 mod auth;
 #[cfg(test)]
 mod capacity_tests;
@@ -35,6 +45,19 @@ use prost::Message;
 
 pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread"];
 pub(crate) const METHODS: &[&str] = &[
+    "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace",
+    "/heddle.api.v2alpha1.WorkspaceService/ResolveResources",
+    "/heddle.api.v2alpha1.WorkspaceService/SetBookmark",
+    "/heddle.api.v2alpha1.SpoolService/ObserveSpool",
+    "/heddle.api.v2alpha1.SpoolService/CreateSpool",
+    "/heddle.api.v2alpha1.SpoolService/ReviseSpool",
+    "/heddle.api.v2alpha1.SpoolService/DeleteSpool",
+    "/heddle.api.v2alpha1.SpoolService/SetSpoolMount",
+    "/heddle.api.v2alpha1.SpoolService/RemoveSpoolMount",
+    "/heddle.api.v2alpha1.IdentityService/ObserveIdentity",
+    "/heddle.api.v2alpha1.IdentityService/IntrospectCredential",
+    "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership",
+    "/heddle.api.v2alpha1.ThreadService/ObserveThreads",
     "/heddle.api.v2alpha1.ThreadService/ObserveThread",
     "/heddle.api.v2alpha1.ThreadService/StartThread",
     "/heddle.api.v2alpha1.ThreadService/RenameThread",
@@ -62,6 +85,7 @@ pub(crate) struct DeviceRpc {
     home: PathBuf,
     endpoint: [u8; 32],
     feeds: Arc<Mutex<BTreeMap<uuid::Uuid, Weak<observe::Feed>>>>,
+    account_feed: Arc<Mutex<Weak<account_feed::AccountFeed>>>,
 }
 impl DeviceRpc {
     pub fn new(home: PathBuf, endpoint: [u8; 32]) -> Self {
@@ -69,6 +93,7 @@ impl DeviceRpc {
             home,
             endpoint,
             feeds: Arc::new(Mutex::new(BTreeMap::new())),
+            account_feed: Arc::new(Mutex::new(Weak::new())),
         }
     }
     pub fn endpoint(&self) -> EndpointRef {
@@ -85,6 +110,11 @@ impl DeviceRpc {
         mut send: SendStream,
         budget: &mut super::hosted::claim_protocol::CallBudget,
     ) -> Result<()> {
+        if account::METHODS.contains(&method) {
+            return self
+                .serve_account(method, context, body, send, budget)
+                .await;
+        }
         let descriptor = api::v2::method_descriptor(method).context("unknown device RPC")?;
         let prepared = (|| {
             let id = request_spool(method, body)?;

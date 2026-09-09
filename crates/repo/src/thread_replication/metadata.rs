@@ -262,6 +262,7 @@ impl ThreadReplica {
                 params![self.thread.as_bytes(), property, parent.as_bytes()],
             )?;
         }
+        super::listing::refresh(tx, self.thread, &ThreadControl::decode(bytes)?.property())?;
         Ok(())
     }
 }

@@ -10,6 +10,7 @@ mod checkout_resolution;
 mod checkout_selection;
 pub use checkout_resolution::source_conflict_version;
 mod integration;
+pub mod listing;
 mod local;
 pub mod metadata;
 mod peers;
@@ -103,6 +104,7 @@ impl ThreadReplica {
             CREATE TABLE IF NOT EXISTS thread_control_heads(thread BLOB NOT NULL,property TEXT NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,property,operation));
             CREATE TABLE IF NOT EXISTS thread_control_commands(thread BLOB NOT NULL,publisher BLOB NOT NULL,command BLOB NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,publisher,command));")?;
         connection.execute_batch(source_index::SCHEMA)?;
+        connection.execute_batch(listing::SCHEMA)?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT OR IGNORE INTO threads(id,genesis,genesis_signature) VALUES(?1,?2,?3)",
@@ -116,6 +118,7 @@ impl ThreadReplica {
         if stored.0 != signed.canonical || stored.1 != signed.signature {
             return Err(Error::Invalid("Thread genesis collision".into()));
         }
+        listing::initialize(&transaction, &genesis)?;
         transaction.commit()?;
         this.notify_committed()?;
         Ok(this)

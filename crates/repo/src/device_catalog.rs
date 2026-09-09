@@ -135,3 +135,5 @@ fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>> {
     }
     Ok(bytes)
 }
+
+mod reads;

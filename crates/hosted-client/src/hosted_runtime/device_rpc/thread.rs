@@ -291,10 +291,30 @@ impl DeviceRpc {
         session: &Session,
         replica: &ThreadReplica,
     ) -> Result<ThreadOverview> {
+        let mut overview = self
+            .thread_overview_for_spool(&session.spool, replica, |method| session.permits(method))?;
+        if let Some(catalog) = repo::device_catalog::store::Catalog::read(&self.home)? {
+            overview.current_bookmark = Some(catalog.bookmark(&BookmarkRef {
+                account: Some(PrincipalRef {
+                    id: session.principal.clone(),
+                }),
+                target: Some(bookmark_ref::Target::Thread(
+                    overview.r#ref.clone().context("Thread reference")?,
+                )),
+            })?);
+        }
+        Ok(overview)
+    }
+    pub(super) fn thread_overview_for_spool(
+        &self,
+        spool: &repo::device_catalog::DeviceSpool,
+        replica: &ThreadReplica,
+        permits: impl Fn(&str) -> bool,
+    ) -> Result<ThreadOverview> {
         let view = replica.projection()?;
         let reference = ThreadRef {
             spool: Some(SpoolRef {
-                id: session.spool.id.to_string(),
+                id: spool.id.to_string(),
             }),
             id: Some(ThreadId {
                 value: replica.thread_id().as_bytes().to_vec(),
@@ -383,7 +403,7 @@ impl DeviceRpc {
                 }
             }
         }
-        let repository = repo::Repository::open(&session.spool.root)?;
+        let repository = repo::Repository::open(&spool.root)?;
         overview.review_policy_version = super::land::policy_version(&repository)?
             .as_bytes()
             .to_vec();
@@ -401,7 +421,7 @@ impl DeviceRpc {
                 .context("action property frontier")?;
             let method = format!("/heddle.api.v2alpha1.ThreadService/{suffix}");
             overview.actions.push(ActionAvailability {
-                authorized: session.permits(&method),
+                authorized: permits(&method),
                 method,
                 endpoint: Some(self.endpoint()),
                 target: Some(EntityRef {
@@ -425,7 +445,7 @@ impl DeviceRpc {
                 entity: Some(entity_ref::Entity::Thread(reference.clone())),
             }),
             implemented: true,
-            authorized: session.permits(method),
+            authorized: permits(method),
             observed_versions: vec![ExpectedVersion {
                 resource: Some(EntityRef {
                     entity: Some(entity_ref::Entity::Policy(RecordRef {

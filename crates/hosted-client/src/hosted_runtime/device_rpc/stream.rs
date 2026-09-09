@@ -10,6 +10,33 @@ use prost::Message;
 
 use super::{DeviceRpc, auth::Session, failure};
 
+/// The view writer needs current admitted authority, not a fabricated Spool.
+pub(super) trait ObservationAuthority {
+    fn binding(&self) -> Vec<u8>;
+    fn expires(&self) -> i64;
+    fn check_clock(&self) -> Result<()>;
+    fn check_current(&self, home: &std::path::Path) -> Result<()>;
+}
+impl ObservationAuthority for Session {
+    fn binding(&self) -> Vec<u8> {
+        [
+            self.actor.as_bytes(),
+            self.principal.as_bytes(),
+            self.spool.capability_path.as_bytes(),
+        ]
+        .concat()
+    }
+    fn expires(&self) -> i64 {
+        self.expires
+    }
+    fn check_clock(&self) -> Result<()> {
+        Session::check_clock(self)
+    }
+    fn check_current(&self, home: &std::path::Path) -> Result<()> {
+        Session::check_current(self, home)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("view changed while composing its snapshot")]
 pub(super) struct SnapshotChanged;
@@ -55,7 +82,31 @@ impl DeviceRpc {
         method: &str,
         normalized_query: &[u8],
         options: ObserveOptions,
+        send: SendStream,
+        snapshot: impl Fn(&ReadBudget, &[u8]) -> Result<(Vec<(String, E)>, PageInfo, Vec<u8>)>,
+        current_version: impl Fn() -> Result<Vec<u8>>,
+    ) -> Result<()> {
+        let feed = self.feed(session)?;
+        self.observe_authorized_view(
+            session,
+            method,
+            normalized_query,
+            options,
+            send,
+            feed.changes.subscribe(),
+            snapshot,
+            current_version,
+        )
+        .await
+    }
+    pub(super) async fn observe_authorized_view<E: Event>(
+        &self,
+        session: &impl ObservationAuthority,
+        method: &str,
+        normalized_query: &[u8],
+        options: ObserveOptions,
         mut send: SendStream,
+        mut changes: tokio::sync::watch::Receiver<u64>,
         snapshot: impl Fn(&ReadBudget, &[u8]) -> Result<(Vec<(String, E)>, PageInfo, Vec<u8>)>,
         current_version: impl Fn() -> Result<Vec<u8>>,
     ) -> Result<()> {
@@ -70,9 +121,7 @@ impl DeviceRpc {
         let binding = blake3::hash(
             &[
                 method.as_bytes(),
-                session.actor.as_bytes(),
-                session.principal.as_bytes(),
-                session.spool.capability_path.as_bytes(),
+                session.binding().as_slice(),
                 self.endpoint.as_slice(),
                 normalized_query,
             ]
@@ -80,8 +129,6 @@ impl DeviceRpc {
         )
         .as_bytes()
         .to_vec();
-        let feed = self.feed(session)?;
-        let mut changes = feed.changes.subscribe();
         let mut sequence = 0u64;
         let mut open = StreamOpen {
             source: Some(self.endpoint()),
@@ -89,9 +136,9 @@ impl DeviceRpc {
             accepted_budget: Some(budget),
             ..Default::default()
         };
-        if session.expires != 0 {
+        if session.expires() != 0 {
             open.authority_valid_until = Some(prost_types::Timestamp {
-                seconds: session.expires,
+                seconds: session.expires(),
                 nanos: 0,
             });
         }
@@ -322,4 +369,28 @@ async fn reset<E: Event>(
     .await?;
     send.finish()?;
     Ok(())
+}
+
+impl Event for WorkspaceEvent {
+    fn frame(&mut self, frame: StreamFrame) {
+        self.frame = Some(frame);
+    }
+}
+
+impl Event for SpoolEvent {
+    fn frame(&mut self, frame: StreamFrame) {
+        self.frame = Some(frame);
+    }
+}
+
+impl Event for IdentityEvent {
+    fn frame(&mut self, frame: StreamFrame) {
+        self.frame = Some(frame);
+    }
+}
+
+impl Event for OwnershipEvent {
+    fn frame(&mut self, frame: StreamFrame) {
+        self.frame = Some(frame);
+    }
 }

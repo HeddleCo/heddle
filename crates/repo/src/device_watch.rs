@@ -9,6 +9,10 @@ pub struct DeviceWatch {
     _watcher: RecommendedWatcher,
 }
 impl DeviceWatch {
+    pub fn add_directory(&mut self, path: &Path) -> Result<()> {
+        self._watcher.watch(path, RecursiveMode::NonRecursive)?;
+        Ok(())
+    }
     pub fn add(&mut self, path: &Path) -> Result<()> {
         self._watcher.watch(path, RecursiveMode::Recursive)?;
         Ok(())
