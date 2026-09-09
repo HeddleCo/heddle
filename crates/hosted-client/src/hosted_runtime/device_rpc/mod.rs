@@ -10,6 +10,8 @@ mod account_spool;
 #[cfg(test)]
 mod account_tests;
 mod account_threads;
+#[cfg(test)]
+mod artifact_tests;
 mod auth;
 #[cfg(test)]
 mod capacity_tests;
