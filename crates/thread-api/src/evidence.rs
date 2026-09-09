@@ -115,6 +115,7 @@ mod tests {
                 outcome: CheckOutcome::Passed,
                 detail: "42 passed".into(),
                 artifacts: Vec::new(),
+                supersedes: Vec::new(),
                 author: CheckAuthor {
                     actor: CollaborationActor {
                         principal_id: Uuid::from_u128(4),
@@ -192,6 +193,9 @@ mod tests {
         value.artifacts = vec![Uuid::from_u128(8), Uuid::from_u128(8)];
         assert!(sign_evidence(&value, &signer).is_err());
         value.artifacts.clear();
+        value.supersedes = vec![value.id];
+        assert!(sign_evidence(&value, &signer).is_err());
+        value.supersedes.clear();
         value.detail = "x".repeat(32769);
         assert!(sign_evidence(&value, &signer).is_err());
     }

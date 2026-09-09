@@ -61,6 +61,9 @@ pub struct CheckEvidence {
     pub detail: String,
     /// Independently authorized retained artifacts; a reference is no grant.
     pub artifacts: Vec<Uuid>,
+    /// Explicit prior results from this same actor/check/revision; arrival time
+    /// never decides which retry supersedes another result.
+    pub supersedes: Vec<Uuid>,
     pub author: CheckAuthor,
     pub completed_at_ms: i64,
 }
@@ -76,6 +79,12 @@ impl CheckEvidence {
             || self.artifacts.len() > 64
             || self.artifacts.iter().any(Uuid::is_nil)
             || self.artifacts.windows(2).any(|ids| ids[0] >= ids[1])
+            || self.supersedes.len() > 32
+            || self
+                .supersedes
+                .iter()
+                .any(|id| id.is_nil() || *id == self.id)
+            || self.supersedes.windows(2).any(|ids| ids[0] >= ids[1])
         {
             return Err(invalid("invalid check evidence"));
         }
