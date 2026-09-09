@@ -47,6 +47,8 @@ mod replication;
 mod publication;
 #[cfg(test)]
 mod publication_tests;
+#[cfg(test)]
+mod ownership_tests;
 mod stream;
 mod search;
 mod operations;

@@ -108,17 +108,11 @@ impl Repository {
         Err(Error::Invalid("unclaimed Thread requires its retained original owner key".into()))
     }
 
-    fn native_signer(&self) -> Result<Ed25519Signer> {
-        let pem = match crate::identity::load_device(&crate::identity::device_identity_path())? {
-            Some(device) => device.private_key_pem,
-            None => {
-                crate::identity::load_or_mint_local(
-                    &self.heddle_dir().join(crate::identity::LOCAL_IDENTITY_FILE),
-                )?
-                .private_key_pem
-            }
-        };
-        Ok(Ed25519Signer::from_pem(&pem)?)
+    fn new_local_thread_signer(&self) -> Result<Ed25519Signer> {
+        // An unclaimed Thread must outlive account enrollment and device-key
+        // rotation. Its repository-owned key remains until an explicit claim.
+        let local = crate::identity::load_or_mint_local(&self.heddle_dir().join(crate::identity::LOCAL_IDENTITY_FILE))?;
+        Ok(Ed25519Signer::from_pem(&local.private_key_pem)?)
     }
     /// Lookup never creates a Thread or invents a publisher signature.
     pub fn native_thread(&self, name: &str) -> Result<ThreadReplica> {
@@ -191,7 +185,7 @@ impl Repository {
         if self.store().get_state(&base)?.is_none() {
             return Err(Error::Invalid("Thread base state is unavailable".into()));
         }
-        let signer = self.native_signer()?;
+        let signer = self.new_local_thread_signer()?;
         let creator = signer
             .public_key()
             .try_into()

@@ -51,6 +51,16 @@ fn explicit_claim_preserves_identity_cutoff_and_conflicts_fail_closed() {
     assert_eq!(replica.source_author_for_at(&retained_signer.public_key().try_into().expect("key"),home.path()).expect("source author"),SourceAuthor::LocalKey,"enrollment must not claim local Thread authorship");
     let old=make("before claim");
     replica.receive(&old,repository.store(),|_|Ok(())).expect("local source");
+    let future_state=State::new_snapshot(tree,vec![base],Attribution::human(Principal::new("future account parent","")));
+    let future_operation=ThreadOperation {version:1,thread:replica.thread_id(),parents:Default::default(),publisher:account.public_key().try_into().expect("key"),body:ThreadOperationBody::Capture(AuthoredCapture {
+        result:future_state.encode_current_msgpack().expect("future State").into(),
+        author:crate::identity::source_author::load(home.path(),&account.public_key().try_into().expect("key"),spool).expect("account source proof"),
+    })};
+    let future_parent=SignedOperation::sign(&future_operation,&account).expect("future parent");
+    let delayed_state=State::new_snapshot(tree,vec![future_state.id()],Attribution::human(Principal::new("preclaim pending local work","")));
+    let delayed_operation=ThreadOperation {version:1,thread:replica.thread_id(),parents:[future_operation.id().expect("parent ID")].into(),publisher:genesis.creator,body:ThreadOperationBody::Capture(AuthoredCapture::local(delayed_state.encode_current_msgpack().expect("pending State").into()))};
+    let delayed=SignedOperation::sign(&delayed_operation,&local).expect("pending source");
+    assert_eq!(replica.receive(&delayed,repository.store(),|_|Ok(())).expect("pending source admitted"),objects::object::thread_replication::Admission::Pending);
     let mut claim=ThreadOwnershipClaim {version:1,thread:replica.thread_id(),prior_local_key:genesis.creator,accepting_publisher:account.public_key().try_into().expect("account key"),acceptance:acceptance(&authority,&account,spool,"ClaimThreadOwnership",true),source_frontier:[old.verify().expect("old").id().expect("id")].into()};
     let denied_acceptance=acceptance(&authority,&account,spool,"PublishContent",true);
     let mut narrowed=claim.clone();narrowed.acceptance=denied_acceptance;
@@ -58,12 +68,19 @@ fn explicit_claim_preserves_identity_cutoff_and_conflicts_fail_closed() {
     assert!(replica.claim_ownership(&narrowed,&authority,"acme/project",100).is_err(),"agent attenuation must constrain claim acceptance");
     assert_eq!(replica.effective_owner().expect("unchanged"),genesis.owner);
     let signed=SignedOwnershipClaim::sign(&claim,&local,&account).expect("dual proof");
-    let id=replica.claim_ownership(&signed,&authority,"acme/project",100).expect("delegated account acceptance");
+    let command=crate::device_operations::Command { namespace:"owner/claim-agent", id:"00000000-0000-0000-0000-000000000077".parse().expect("command"), method:objects::object::thread_replication::ownership_claim::METHOD,request_hash:[7;32] };
+    assert_eq!(replica.claim_ownership_with_command(&signed,&authority,"acme/project",100,&command,&[7]).expect("delegated account acceptance"),vec![7]);
+    let id=claim.id().expect("claim ID");
+    assert_eq!(replica.claim_ownership_with_command(&signed,&authority,"acme/project",100,&command,&[8]).expect("exact request reuses original receipt"),vec![7]);
     assert_eq!(replica.thread_id(),genesis.id().expect("immutable ID"));
     assert_eq!(replica.genesis().expect("immutable genesis"),genesis);
     assert_eq!(replica.effective_owner().expect("account owner"),GenesisOwner::Account(uuid::Uuid::from_bytes([9;16])));
     assert!(replica.local_source_author_allowed(&old.verify().expect("old")).expect("historical cutoff"));
     assert!(!replica.local_source_author_allowed(&make("after claim").verify().expect("new")).expect("current owner"),"former local key cannot author outside signed cutoff");
+    assert_eq!(replica.receive(&future_parent,repository.store(),|_|Ok(())).expect("authorized account parent after claim"),objects::object::thread_replication::Admission::Accepted);
+    assert!(matches!(replica.operation(&delayed_operation.id().expect("delayed ID")).expect("delayed source").expect("known pending").1,
+        objects::object::thread_replication::Admission::Rejected(ref reason) if reason.contains("cutoff")),"pending former-key source must not settle after signed cutoff");
+    assert!(replica.receive(&make("prepared before claim, delivered later"),repository.store(),|_|Ok(())).expect_err("transaction must recheck claim").to_string().contains("cutoff"),"prepared local source must recheck effective ownership in commit transaction");
     let claimed_signer=repository.native_thread_signer_at(&replica,home.path()).expect("claimed account device signer");
     assert_eq!(claimed_signer.public_key(),account.public_key());
     assert!(matches!(replica.source_author_for_at(&claimed_signer.public_key().try_into().expect("key"),home.path()).expect("claimed source proof"),SourceAuthor::Account { .. }));
@@ -71,8 +88,13 @@ fn explicit_claim_preserves_identity_cutoff_and_conflicts_fail_closed() {
     assert_eq!(replica.claim_ownership(&signed,&authority,"wrong/path",i64::MAX).expect("retained exact proof no refresh"),id);
     assert_eq!(replica.generation().expect("replay generation"),generation);
     claim.acceptance=acceptance(&authority,&account,spool,"ClaimThreadOwnership",false);
+    claim.source_frontier=replica.frontier_page(objects::object::thread_replication::ThreadFacet::Source,None,128).expect("current frontier").into_iter().collect();
     let conflicting=SignedOwnershipClaim::sign(&claim,&local,&account).expect("different valid claim");
     assert!(replica.claim_ownership(&conflicting,&authority,"acme/project",100).expect_err("competing explicit claim").to_string().contains("conflicting"));
     assert!(replica.effective_owner().is_err(),"conflicting claims must not select an arbitrary owner");
+    for retained in [&signed,&conflicting] {
+        assert!(replica.claim_ownership(retained,&authority,"acme/project",100).expect_err("claim replay remains conflicted").to_string().contains("conflicting"),"retained claim replay must not assert resolved ownership");
+    }
+    assert!(replica.claim_ownership_with_command(&signed,&authority,"acme/project",100,&command,&[7]).expect_err("cached receipt remains conflicted").to_string().contains("conflicting"),"cached ownership receipt must not hide unresolved conflict");
     assert!(!replica.local_source_author_allowed(&old.verify().expect("old")).expect("conflict denies"));
 }

@@ -2,8 +2,6 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v2alpha1::*;
-#[cfg(test)]
-use crypto::Ed25519Signer;
 use objects::{
     object::{ContentHash, StateId},
     store::{
@@ -609,21 +607,6 @@ pub(super) fn verified_lease(
         bail!("active writer token belongs to another actor or checkout");
     }
     Ok(())
-}
-#[cfg(test)]
-pub(super) fn signer(repository: &repo::Repository) -> Result<Ed25519Signer> {
-    let pem = match repo::identity::load_device(&repo::identity::device_identity_path())? {
-        Some(device) => device.private_key_pem,
-        None => {
-            repo::identity::load_or_mint_local(
-                &repository
-                    .heddle_dir()
-                    .join(repo::identity::LOCAL_IDENTITY_FILE),
-            )?
-            .private_key_pem
-        }
-    };
-    Ok(Ed25519Signer::from_pem(&pem)?)
 }
 fn conflict_version(thread: ContentHash, heads: &BTreeSet<StateId>) -> Vec<u8> {
     repo::thread_replication::source_conflict_version(thread, heads)

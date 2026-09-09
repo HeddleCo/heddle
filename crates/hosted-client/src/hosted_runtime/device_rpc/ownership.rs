@@ -22,6 +22,11 @@ impl DeviceRpc {
         };
         if let Some(response) = repo::device_operations::replay_response(&session.spool.heddle_dir, &command)? { return Ok(response); }
         let proof = thread_ownership::decode(request.claim.as_ref().context("claim required")?)?;
+        let accepting_account = match &proof {
+            ClaimProof::Complete(value) => value.verify()?.account()?,
+            ClaimProof::Acceptance(value) => value.verify()?.account()?,
+        };
+        ensure!(accepting_account == uuid::Uuid::parse_str(&session.principal)?, "claim acceptance belongs to another authenticated account");
         let now = chrono::Utc::now().timestamp();
         let authority = repo::device_authority::load(&self.home, now)?;
         let complete = match proof {
@@ -35,6 +40,8 @@ impl DeviceRpc {
                     verify_claim_account_authority(&statement, &replica.genesis()?, &authority, &session.spool.capability_path, now)?;
                     let frontier = replica.frontier_page(ThreadFacet::Source, None, 129)?.into_iter().collect();
                     ensure!(statement.source_frontier == frontier, "ownership claim source frontier changed");
+                    ensure!(replica.effective_owner()? == objects::object::thread_replication::GenesisOwner::LocalKey(statement.prior_local_key),
+                        "Thread already has an account owner; use its retained ownership proof");
                     let local = repository.native_thread_signer(&replica)?;
                     acceptance.cosign(&local)?
                 }

@@ -57,6 +57,20 @@ impl ThreadReplica {
             }
         }
     }
+    /// Recheck ownership while the source admission transaction owns the writer
+    /// lock. This closes the gap between preparing a local capture and claim CAS.
+    pub(super) fn validate_source_owner_in(&self, connection:&rusqlite::Connection, operation:&ThreadOperation) -> Result<()> {
+        let Some(author) = operation.source_author()? else { return Ok(()); };
+        let (count,historical):(i64,bool) = connection.query_row(
+            "SELECT (SELECT count(*) FROM thread_owner_claims WHERE thread=?1),EXISTS(SELECT 1 FROM thread_owner_claim_history WHERE thread=?1 AND operation=?2)",
+            params![self.thread.as_bytes(),operation.id()?.as_bytes()],|row|Ok((row.get(0)?,row.get(1)?)),
+        )?;
+        if count >= 2 { return Err(Error::Invalid("conflicting Thread ownership claims require explicit resolution".into())); }
+        if count == 1 && matches!(author,SourceAuthor::LocalKey) && !historical {
+            return Err(Error::Invalid("former local source author is outside signed ownership cutoff".into()));
+        }
+        Ok(())
+    }
     pub fn ownership_claims_with_admission(&self) -> Result<Vec<(SignedOwnershipClaim,Option<crypto::thread_authority_admission::SignedAuthorityAdmission>)>> {
         let connection = self.connect()?;
         let mut statement = connection.prepare("SELECT canonical,local_signature,acceptance_signature,admission,admission_signature FROM thread_owner_claims WHERE thread=?1 ORDER BY id LIMIT 2")?;
@@ -151,6 +165,8 @@ impl ThreadReplica {
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let count:i64 = transaction.query_row("SELECT count(*) FROM thread_owner_claims WHERE thread=?1", [self.thread.as_bytes()], |row|row.get(0))?;
+        if count >= 2 { return Err(Error::Invalid("conflicting Thread ownership claims require explicit resolution".into())); }
         if let Some((command,_)) = command {
             if let Some(prior) = crate::device_operations::replay(&transaction,command).map_err(|error|Error::Invalid(error.to_string()))? {
                 return Ok((id,Some(prior)));
@@ -162,8 +178,6 @@ impl ThreadReplica {
             transaction.commit()?;
             return Ok((id,command.map(|(_,response)|response.to_vec())));
         }
-        let count:i64 = transaction.query_row("SELECT count(*) FROM thread_owner_claims WHERE thread=?1", [self.thread.as_bytes()], |row|row.get(0))?;
-        if count >= 2 { return Err(Error::Invalid("ownership claim conflict is unresolved".into())); }
         if exact_frontier {
             let mut query = transaction.prepare("SELECT o.id FROM operations o WHERE o.thread=?1 AND o.facet=1 AND o.status=1 AND NOT EXISTS(SELECT 1 FROM parents p JOIN operations c ON c.id=p.child WHERE p.parent=o.id AND c.thread=o.thread AND c.status=1) ORDER BY o.id LIMIT 129")?;
             let frontier = query.query_map([self.thread.as_bytes()], |row| row.get::<_,Vec<u8>>(0))?

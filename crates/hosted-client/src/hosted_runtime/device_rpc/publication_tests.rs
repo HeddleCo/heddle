@@ -28,7 +28,7 @@ pub(super) async fn roundtrip(
         )
         .expect("Thread");
     let genesis = replica.genesis().expect("genesis");
-    let signer = super::checkout::signer(repository).expect("actual local signer");
+    let signer = repository.native_thread_signer(&replica).expect("actual local owner signer");
     let reference = ThreadRef {
         spool: Some(SpoolRef {
             id: genesis.spool.clone(),
@@ -39,6 +39,10 @@ pub(super) async fn roundtrip(
     };
     let baseline = scratch_count(repository);
     for round in 0..2 {
+        let replica = if round == 0 { repo::thread_replication::ThreadReplica::open(repository.heddle_dir(), replica.thread_id()).expect("local Thread") }
+            else { account_thread(remote, repository, &genesis).await };
+        let genesis = replica.genesis().expect("round genesis");
+        let reference = ThreadRef { spool: reference.spool.clone(), id: Some(ThreadId { value: replica.thread_id().as_bytes().to_vec() }) };
         let blob = Blob::from(format!("private source {round}\n").into_bytes());
         repository.store().put_blob(&blob).expect("blob");
         let mut tree = Tree::new();
@@ -226,4 +230,27 @@ fn scratch_count(repository: &repo::Repository) -> usize {
                 .starts_with("device-publication-")
         })
         .count()
+}
+
+async fn account_thread(
+    remote: &thread_api::Remote<thread_api::transport::IrohTransport<thread_api::credentials::Credentials>>,
+    repository: &repo::Repository,
+    local: &objects::object::thread_replication::ThreadGenesis,
+) -> repo::thread_replication::ThreadReplica {
+    let signer = Ed25519Signer::from_seed(&[71;32]).expect("account signer");
+    let genesis = objects::object::thread_replication::ThreadGenesis {
+        owner: objects::object::thread_replication::GenesisOwner::Account(uuid::Uuid::from_bytes([9;16])),
+        creator: signer.public_key().try_into().expect("key"), name: "account-publication".into(), nonce: vec![93;32], ..local.clone()
+    };
+    let now = chrono::Utc::now().timestamp();
+    let authority = repo::device_authority::load(&repo::identity::heddle_home_dir(), now).expect("owner");
+    let minted = crate::hosted_runtime::root_mint::mint_agent_root(&[71;32]).expect("token");
+    let key = biscuit_verifier::PublicKey::from_bytes(signer.public_key(), biscuit_auth::Algorithm::Ed25519).expect("mint");
+    let token = biscuit_verifier::parse_token(&minted.token, &[key]).expect("token");
+    let proof = repo::thread_replication::metadata::prepare_control_authority(&authority, &signer.public_key().try_into().expect("key"), &token, now).expect("creator proof");
+    remote.api.call::<thread_api::rpc::ThreadServiceStartThread>(&StartThreadRequest {
+        client_operation_id: uuid::Uuid::new_v4().to_string(), spool: Some(SpoolRef { id: genesis.spool.clone() }),
+        thread_genesis: Some(thread_api::replication::opening::sign_genesis(&genesis, &signer).expect("genesis")), creator_authority: proof,
+    }).await.expect("actual Account Thread creation");
+    repo::thread_replication::ThreadReplica::open(repository.heddle_dir(), genesis.id().expect("Thread ID")).expect("Account replica")
 }

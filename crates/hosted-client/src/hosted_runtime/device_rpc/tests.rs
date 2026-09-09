@@ -425,6 +425,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
         )
         .await
         .expect("release writer");
+    super::ownership_tests::claim(&remote, &repository, &replica).await;
     // The server must respond before the browser closes its input stream.
     // Metadata received here changes the Thread graph, never either checkout.
     {

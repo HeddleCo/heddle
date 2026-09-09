@@ -473,6 +473,14 @@ impl ThreadReplica {
         authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
     ) -> Result<Admission> {
         let id = operation.id()?;
+        let already_accepted: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operations WHERE id=?1 AND canonical=?2 AND signature=?3 AND status=1)",
+            params![id.as_bytes(), &signed.canonical, &signed.signature], |row| row.get(0),
+        )?;
+        if !already_accepted {
+            self.validate_source_owner_in(tx, operation)?;
+        }
+
         if compare_frontier && let Some(receipt) = operation.local_integration()? {
             let existing: Option<i32> = tx
                 .query_row(
@@ -590,6 +598,11 @@ impl ThreadReplica {
                         |r| r.get(0),
                     )?;
                     parents.push(ThreadOperation::decode(&bytes)?);
+                }
+                if let Err(error) = self.validate_source_owner_in(tx, &operation) {
+                    tx.execute("UPDATE operations SET status=2,reason=?2 WHERE id=?1", params![id.as_bytes(), error.to_string()])?;
+                    tx.execute("UPDATE threads SET generation=generation+1 WHERE id=?1", [self.thread.as_bytes()])?;
+                    continue;
                 }
                 match operation.validate_parents(&genesis, &parents) {
                     Ok(()) => {
