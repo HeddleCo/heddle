@@ -47,8 +47,8 @@ pub fn inspect_verified_credential(
         expires_at_unix_seconds: facts.exp,
         revocation_ids: facts.revocation_ids,
         session_id: facts.sid,
-        device_id: None,
-        credential_id: None,
+        device_id: facts.device_id,
+        credential_id: facts.credential_id,
     })
 }
 #[cfg(test)]
@@ -76,8 +76,11 @@ mod tests {
             inspected.asserted_account,
             Some(uuid::Uuid::from_bytes([0x11; 16]))
         );
-        assert_eq!(inspected.device_id.as_deref(),Some("registered-device"));
-        assert_eq!(inspected.credential_id.as_deref(),Some("issued-credential"));
+        assert_eq!(inspected.device_id.as_deref(), Some("registered-device"));
+        assert_eq!(
+            inspected.credential_id.as_deref(),
+            Some("issued-credential")
+        );
         assert_eq!(inspected.proof_public_key, root.to_bytes());
         assert_eq!(inspected.expires_at_unix_seconds, 946684800);
         assert!(!inspected.revocation_ids.is_empty());
@@ -113,13 +116,23 @@ mod tests {
         let signature = SigningKey::from_bytes(&[17; 32])
             .sign(&crate::key_delegation::statement(&encoded, &key).expect("canonical delegation"))
             .to_bytes();
-        let delegated =
-            crate::key_delegation::append(&encoded, &key, &signature, BlockBuilder::new().code("device(\"appended-device\"); credential_id(\"appended-credential\");").expect("untrusted appended selectors"))
-                .expect("delegated");
+        let delegated = crate::key_delegation::append(
+            &encoded,
+            &key,
+            &signature,
+            BlockBuilder::new()
+                .code("device(\"appended-device\"); credential_id(\"appended-credential\");")
+                .expect("untrusted appended selectors"),
+        )
+        .expect("delegated");
         let verified = Biscuit::from_base64(&delegated, root).expect("signature chain");
-        let inspected=inspect_verified_credential(&verified,&root).expect("original authority selectors");
-        assert_eq!(inspected.device_id.as_deref(),Some("registered-device"));
-        assert_eq!(inspected.credential_id.as_deref(),Some("issued-credential"));
+        let inspected =
+            inspect_verified_credential(&verified, &root).expect("original authority selectors");
+        assert_eq!(inspected.device_id.as_deref(), Some("registered-device"));
+        assert_eq!(
+            inspected.credential_id.as_deref(),
+            Some("issued-credential")
+        );
         assert_eq!(
             inspect_verified_credential(&verified, &root)
                 .expect("verified child")
