@@ -9,6 +9,7 @@ use repo::device_catalog::DeviceSpool;
 pub(super) struct Session {
     pub principal: String,
     pub actor: String,
+    pub publisher: [u8; 32],
     pub attribution: objects::object::Attribution,
     pub spool: DeviceSpool,
     token: biscuit_auth::Biscuit,
@@ -37,6 +38,7 @@ impl Session {
         self.check_clock()?;
         let authority = repo::device_authority::load(home, Utc::now().timestamp())?;
         authority.verify_mint_root(&self.root.to_bytes(), Utc::now().timestamp())?;
+        authority.verify_publisher(&self.publisher)?;
         let checked = facts(&self.token, self.method, &self.spool, Utc::now())?;
         if checked
             .revocation_ids
@@ -129,6 +131,7 @@ pub(super) fn authorize(
     )?
     .try_into()
     .map_err(|_| anyhow::anyhow!("invalid proof key"))?;
+    authority.verify_publisher(&key)?;
     let proof =
         thread_api::request_proof::verify(context, method, body, &key, now.timestamp_millis())?;
     if !repo::device_catalog::claim_nonce(
@@ -189,6 +192,7 @@ pub(super) fn authorize(
         principal,
         attribution,
         actor: hex::encode(key),
+        publisher: key,
         spool,
         token: parsed,
         root,

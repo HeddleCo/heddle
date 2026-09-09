@@ -51,9 +51,13 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     };
     repo::device_authority::publish(
         home.path(),
-        &owner,
-        &[],
-        &[],
+        &repo::device_authority::DeviceAuthority {
+            owner: owner.clone(),
+            mint_roots: vec![],
+            revoked_ids: vec![],
+            revoked_mint_roots: vec![],
+            revoked_publishers: vec![],
+        },
         chrono::Utc::now().timestamp(),
     )
     .expect("independent local enrollment");
@@ -421,6 +425,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
                     facets: vec![
                         SharedFacet::Source as i32,
                         SharedFacet::Collaboration as i32,
+                        SharedFacet::Metadata as i32,
                     ],
                     record_formats: vec![OPERATION_FORMAT.into()],
                     session_nonce: uuid::Uuid::now_v7().as_bytes().to_vec(),
@@ -587,6 +592,179 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
                 .frontier_page(ThreadFacet::Source, None, 64)
                 .expect("frontier")
                 .contains(&incoming_id)
+        );
+        // Metadata uses the same live RPC, but original user authority is
+        // independently admitted rather than inferred from the current sender.
+        use objects::object::{
+            CollaborationActor, ContentHash,
+            thread_replication::metadata::{AUTHORITY_FORMAT, Control, ThreadControl},
+        };
+        let now = chrono::Utc::now().timestamp();
+        let authority = repo::device_authority::load(home.path(), now).expect("enrolled account");
+        let original_token = mint_agent_root(&[71; 32]).expect("original owner credential");
+        let mint_key = biscuit_verifier::PublicKey::from_bytes(
+            publisher.public_key(),
+            biscuit_auth::Algorithm::Ed25519,
+        )
+        .expect("mint key");
+        let parsed = biscuit_verifier::parse_token(&original_token.token, &[mint_key])
+            .expect("original Biscuit");
+        let proof = repo::thread_replication::metadata::prepare_control_authority(
+            &authority,
+            &publisher.public_key().try_into().expect("mint key"),
+            &parsed,
+            now,
+        )
+        .expect("sealed public authority");
+        let control = ThreadControl {
+            version: 1,
+            spool,
+            actor: CollaborationActor {
+                principal_id: uuid::Uuid::from_bytes([9; 16]),
+                agent_id: None,
+            },
+            authority_digest: ContentHash::compute_typed(AUTHORITY_FORMAT, &proof),
+            authority_envelope: proof,
+            client_operation_id: uuid::Uuid::now_v7(),
+            occurred_at_ms: now * 1000,
+            control: Control::Name("browser signed name".into()),
+        };
+        let native = ThreadOperation {
+            version: 1,
+            thread: replica.thread_id(),
+            parents: Default::default(),
+            publisher: publisher.public_key().try_into().expect("key"),
+            body: ThreadOperationBody::Metadata(control.encode().expect("metadata")),
+        };
+        let signed =
+            SignedOperation::sign(&native, &publisher).expect("original metadata signature");
+        let metadata_id = native.id().expect("metadata ID");
+        input
+            .send(&ReplicateThreadRequest {
+                body: Some(replicate_thread_request::Body::Operations(
+                    ReplicationOperations {
+                        operations: vec![SignedRecord {
+                            format: OPERATION_FORMAT.into(),
+                            canonical_record: signed.canonical.clone(),
+                            signatures: vec![RecordSignature {
+                                public_key: publisher.public_key().to_vec(),
+                                signature: signed.signature.clone(),
+                            }],
+                        }],
+                    },
+                )),
+            })
+            .await
+            .expect("send original metadata");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let frame = output
+                    .next()
+                    .await
+                    .expect("metadata receipt frame")
+                    .expect("live stream");
+                if let Some(replicate_thread_response::Body::Receipt(receipt)) = frame.body {
+                    if receipt
+                        .accepted_operation_ids
+                        .contains(&metadata_id.as_bytes().to_vec())
+                    {
+                        break;
+                    }
+                    assert!(
+                        receipt.rejected.is_empty(),
+                        "valid original-author metadata must be accepted"
+                    );
+                }
+            }
+        })
+        .await
+        .expect("metadata admission deadline");
+        assert!(
+            replica
+                .control_authority_admitted(&signed)
+                .expect("durable original-author receipt")
+        );
+        input
+            .send(&ReplicateThreadRequest {
+                body: Some(replicate_thread_request::Body::Need(ReplicationNeed {
+                    operation_ids: vec![metadata_id.as_bytes().to_vec()],
+                })),
+            })
+            .await
+            .expect("request original metadata");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let frame = output
+                    .next()
+                    .await
+                    .expect("metadata export frame")
+                    .expect("live stream");
+                if let Some(replicate_thread_response::Body::Operations(operations)) = frame.body {
+                    for record in operations.operations {
+                        let exported = thread_api::replication::decode_record(record)
+                            .expect("original export signature");
+                        if exported.verify().expect("operation").id().expect("ID") == metadata_id {
+                            assert_eq!(exported, signed);
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("metadata facet exports original signed operation");
+
+        // Current owner delivery cannot manufacture another publisher's original
+        // authority. This proof is valid for its root key, not the new signer.
+        let unrelated = Ed25519Signer::from_seed(&[74; 32]).expect("unrelated publisher");
+        let mut unowned = native;
+        unowned.publisher = unrelated.public_key().try_into().expect("key");
+        let unowned = SignedOperation::sign(&unowned, &unrelated)
+            .expect("cryptographically valid distinct publisher");
+        let unowned_id = unowned.verify().expect("signature").id().expect("ID");
+        input
+            .send(&ReplicateThreadRequest {
+                body: Some(replicate_thread_request::Body::Operations(
+                    ReplicationOperations {
+                        operations: vec![SignedRecord {
+                            format: OPERATION_FORMAT.into(),
+                            canonical_record: unowned.canonical,
+                            signatures: vec![RecordSignature {
+                                public_key: unrelated.public_key().to_vec(),
+                                signature: unowned.signature,
+                            }],
+                        }],
+                    },
+                )),
+            })
+            .await
+            .expect("submit distinct original publisher");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                match output.next().await {
+                    Ok(Some(frame)) => {
+                        if let Some(replicate_thread_response::Body::Receipt(receipt)) = frame.body
+                        {
+                            assert!(
+                                !receipt
+                                    .accepted_operation_ids
+                                    .contains(&unowned_id.as_bytes().to_vec()),
+                                "delivery authority cannot replace original author authority"
+                            );
+                        }
+                    }
+                    Ok(None) | Err(_) => break,
+                }
+            }
+        })
+        .await
+        .expect("original author denial terminates stream");
+        assert!(
+            replica
+                .operation(&unowned_id)
+                .expect("unowned lookup")
+                .is_none(),
+            "denied original authority never persists"
         );
         drop(input);
         drop(output);

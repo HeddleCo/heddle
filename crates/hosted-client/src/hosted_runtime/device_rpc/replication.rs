@@ -69,7 +69,7 @@ impl DeviceRpc {
         let session = Arc::new(auth::authorize(
             &self.home, descriptor, context, &body, registered,
         )?);
-        let facets = BTreeSet::from([ThreadFacet::Source, ThreadFacet::Discussion]);
+        let facets = BTreeSet::from(ThreadFacet::ALL);
         let accepted = opening::accept(
             &open,
             reference,
@@ -123,10 +123,10 @@ impl DeviceRpc {
         );
         let _notifier = AbortTask(notifier.abort_handle());
         let feed = live_replication::Feed::from_changes(replica.thread_id(), receiver);
-        let backend = OwnedReplica(LocalReplica::new(
-            replica,
-            Arc::new(FsStore::new(&session.spool.heddle_dir)),
-        ));
+        let backend = OwnedReplica(
+            LocalReplica::new(replica, Arc::new(FsStore::new(&session.spool.heddle_dir)))
+                .with_device_authority(self.home.clone()),
+        );
         let causal = replication::Session::new(backend, peer, negotiated, max_items)?;
         session.check_current(&self.home)?;
         writer
@@ -176,10 +176,7 @@ impl ReplicaStore for OwnedReplica {
         self.0.generation().await
     }
     async fn sharing(&self, _destination: [u8; 32]) -> Result<BTreeSet<ThreadFacet>, Error> {
-        Ok(BTreeSet::from([
-            ThreadFacet::Source,
-            ThreadFacet::Discussion,
-        ]))
+        Ok(BTreeSet::from(ThreadFacet::ALL))
     }
     async fn frontier_page(
         &self,

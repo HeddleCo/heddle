@@ -64,3 +64,11 @@ Real repository and Iroh fixtures require access to their existing local
 configuration lock and loopback sockets. A sandboxed run that hit a read-only
 configuration lock failed before repository operations; the authorized restored
 run above passed with the necessary local access.
+
+The daemon adapter follow-up is verified on API
+`104362c71f355c91e0f36c97ad356c28b1ae93ba`:
+
+- `cargo test --locked --offline -p heddle-hosted-client --features client --lib device_rpc::tests -- --nocapture`: restored 1 passed (15.64s). The real no-Weft Iroh workflow now negotiates Metadata, verifies a sealed original-author proof, persists its admission, exports the unchanged original signature, and rejects an unrelated original publisher despite authorized delivery. Existing Checkout/Run/private Source checks remain in this workflow.
+- Temporarily removing Metadata from the owned export facets failed specifically during original Metadata export. Restored byte-exact.
+- Temporarily omitting original-author verification failed because the delivered operation from a mismatched original publisher was accepted. The test asserts the exact denied operation never persists. Restored byte-exact.
+- Current device admission and output checks also honor explicitly revoked publisher keys from independently enrolled authority.
