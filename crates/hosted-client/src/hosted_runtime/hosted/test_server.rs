@@ -17,15 +17,16 @@ use api::{
         AnnotatedFile, BlobResponse, CallFailure, CallFailureCode, ContextRevision,
         CreateSpoolRequest, DeleteSpoolRequest, Discussion, GetBlobRequest,
         GetContextHistoryPageEnd, GetContextHistoryRequest, GetContextHistoryResponse,
-        GetDiscussionRequest, HostedSpool, ListContextPageEnd, ListContextRequest,
-        ListContextResponse, ListDiscussionsByStateRequest, ListDiscussionsPageEnd,
-        ListDiscussionsResponse, ListRefsPageEnd, ListRefsResponse, ListThreadsPageEnd,
-        ListThreadsResponse, PackChunk, PackStreamKind, PullComplete, PullReady, PullServerFrame,
-        PushClientFrame, PushComplete, PushReady, PushRequest, PushServerFrame, RepoEvent,
-        SignedSpoolOwnerGenesis, StateContextEntry, StateId, SubscribeRepoEventsRequest,
-        TransferCheckpoint, TransportMode, UpdateSpoolRequest, get_context_history_response,
-        list_context_response, list_discussions_response, list_refs_response,
-        list_threads_response, pull_server_frame, push_client_frame, push_server_frame,
+        GetCurrentUserSpoolRequest, GetDiscussionRequest, GetSpoolRequest, HostedSpool,
+        ListContextPageEnd, ListContextRequest, ListContextResponse, ListDiscussionsByStateRequest,
+        ListDiscussionsPageEnd, ListDiscussionsResponse, ListRefsPageEnd, ListRefsResponse,
+        ListThreadsPageEnd, ListThreadsResponse, PackChunk, PackStreamKind, PromoteSpoolRequest,
+        PromoteSpoolResponse, PullComplete, PullReady, PullServerFrame, PushClientFrame,
+        PushComplete, PushReady, PushRequest, PushServerFrame, RepoEvent, SignedSpoolOwnerGenesis,
+        StateContextEntry, StateId, SubscribeRepoEventsRequest, TransferCheckpoint, TransportMode,
+        UpdateSpoolRequest, get_context_history_response, list_context_response,
+        list_discussions_response, list_refs_response, list_threads_response, pull_server_frame,
+        push_client_frame, push_server_frame,
     },
     method_descriptor,
 };
@@ -43,6 +44,10 @@ const GET_BLOB_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/GetBlob";
 const CREATE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/CreateSpool";
 const DELETE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/DeleteSpool";
 const UPDATE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/UpdateSpool";
+const GET_CURRENT_USER_SPOOL_METHOD: &str =
+    "/heddle.api.v1alpha1.RegistryService/GetCurrentUserSpool";
+const GET_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/GetSpool";
+const PROMOTE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/PromoteSpool";
 const GET_DISCUSSION_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/GetDiscussion";
 const LIST_BY_STATE_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/ListByState";
 const LIST_CONTEXT_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/ListContext";
@@ -54,6 +59,15 @@ const SUBSCRIBE_REPO_EVENTS_METHOD: &str =
 pub(crate) struct SpoolMutationCapture {
     pub updates: Vec<UpdateSpoolRequest>,
     pub deletes: Vec<DeleteSpoolRequest>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct RegistryFixture {
+    pub personal_root: Option<HostedSpool>,
+    pub spools: HashMap<String, HostedSpool>,
+    pub get_spool_requests: Arc<Mutex<Vec<String>>>,
+    pub promote_requests: Arc<Mutex<Vec<PromoteSpoolRequest>>>,
+    pub promote_denial: Option<(CallFailureCode, String)>,
 }
 
 fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
@@ -87,7 +101,35 @@ pub(crate) struct ContextFixture {
 }
 
 pub(crate) async fn start() -> (HostedClient, JoinHandle<()>) {
-    start_inner(None, BlobFixture::default(), None, None, None, None, None).await
+    start_inner(
+        None,
+        BlobFixture::default(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn start_with_registry(
+    fixture: RegistryFixture,
+) -> (HostedClient, JoinHandle<()>, RegistryFixture) {
+    let fixture_clone = fixture.clone();
+    let (client, server) = start_inner(
+        None,
+        BlobFixture::default(),
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(fixture),
+    )
+    .await;
+    (client, server, fixture_clone)
 }
 
 pub(crate) async fn start_with_collaboration(
@@ -102,6 +144,7 @@ pub(crate) async fn start_with_collaboration(
         None,
         None,
         Some(fixture),
+        None,
     )
     .await;
     (client, server, fixture_clone)
@@ -119,6 +162,7 @@ pub(crate) async fn start_with_context(
         None,
         Some(fixture),
         None,
+        None,
     )
     .await;
     (client, server, fixture_clone)
@@ -133,6 +177,7 @@ pub(crate) async fn start_recording_push()
         None,
         None,
         Some(Arc::clone(&captured)),
+        None,
         None,
         None,
     )
@@ -150,6 +195,7 @@ pub(crate) async fn start_recording_create_spool() -> (
         None,
         BlobFixture::default(),
         Some(Arc::clone(&captured)),
+        None,
         None,
         None,
         None,
@@ -173,6 +219,7 @@ pub(crate) async fn start_recording_spool_mutations() -> (
         None,
         None,
         None,
+        None,
     )
     .await;
     (client, server, captured)
@@ -187,6 +234,7 @@ pub(crate) async fn start_with_remote_state(
             pack: None,
         }),
         BlobFixture::default(),
+        None,
         None,
         None,
         None,
@@ -207,6 +255,7 @@ pub(crate) async fn start_with_pull_pack(
             pack: Some((pack_data, index_data)),
         }),
         BlobFixture::default(),
+        None,
         None,
         None,
         None,
@@ -247,7 +296,7 @@ async fn start_with_get_blob_contents_and_pull(
         contents: blobs.into_iter().collect(),
         requested: Arc::clone(&requested),
     };
-    let (client, server) = start_inner(pull, fixture, None, None, None, None, None).await;
+    let (client, server) = start_inner(pull, fixture, None, None, None, None, None, None).await;
     (client, server, requested)
 }
 
@@ -263,6 +312,7 @@ struct BlobFixture {
     requested: Arc<Mutex<Vec<String>>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_inner(
     pull: Option<PullFixture>,
     blobs: BlobFixture,
@@ -271,6 +321,7 @@ async fn start_inner(
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
+    registry: Option<RegistryFixture>,
 ) -> (HostedClient, JoinHandle<()>) {
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
@@ -299,6 +350,7 @@ async fn start_inner(
                 push_requests.clone(),
                 context.clone(),
                 collaboration.clone(),
+                registry.clone(),
             ));
         }
         server.close().await;
@@ -331,6 +383,7 @@ async fn serve_call(
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
+    registry: Option<RegistryFixture>,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -353,6 +406,12 @@ async fn serve_call(
                 serve_update_spool(&mut send, &mut recv, &mut request, spool_mutations).await;
             } else if method == DELETE_SPOOL_METHOD {
                 serve_delete_spool(&mut send, &mut recv, &mut request, spool_mutations).await;
+            } else if method == GET_CURRENT_USER_SPOOL_METHOD {
+                serve_get_current_user_spool(&mut send, &mut recv, &mut request, registry).await;
+            } else if method == GET_SPOOL_METHOD {
+                serve_get_spool(&mut send, &mut recv, &mut request, registry).await;
+            } else if method == PROMOTE_SPOOL_METHOD {
+                serve_promote_spool(&mut send, &mut recv, &mut request, registry).await;
             } else if method == GET_BLOB_METHOD && !blobs.contents.is_empty() {
                 serve_get_blob(&mut send, &mut recv, &mut request, blobs).await;
             } else if method == GET_DISCUSSION_METHOD {
@@ -599,6 +658,121 @@ fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
         }
         _ => Vec::new(),
     }
+}
+
+async fn serve_get_current_user_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    registry: Option<RegistryFixture>,
+) {
+    read_request_body(recv, request).await;
+    let _ = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| GetCurrentUserSpoolRequest::decode(frame.body).ok());
+    let response = registry
+        .and_then(|fixture| fixture.personal_root)
+        .unwrap_or_default();
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_get_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    registry: Option<RegistryFixture>,
+) {
+    read_request_body(recv, request).await;
+    let full_path = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| GetSpoolRequest::decode(frame.body).ok())
+        .map(|body| body.full_path)
+        .unwrap_or_default();
+    let Some(fixture) = registry else {
+        send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
+            .await
+            .unwrap();
+        return;
+    };
+    fixture
+        .get_spool_requests
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(full_path.clone());
+    let Some(spool) = fixture.spools.get(&full_path) else {
+        let failure = CallFailure {
+            code: CallFailureCode::NotFound as i32,
+            message: format!("{full_path} not found"),
+            error: None,
+        };
+        send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
+            .await
+            .unwrap();
+        return;
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&spool.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_promote_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    registry: Option<RegistryFixture>,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| PromoteSpoolRequest::decode(frame.body).ok());
+    if let (Some(fixture), Some(body)) = (registry.as_ref(), body.as_ref()) {
+        fixture
+            .promote_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(body.clone());
+        if let Some((code, message)) = fixture.promote_denial.clone() {
+            let failure = CallFailure {
+                code: code as i32,
+                message,
+                error: None,
+            };
+            send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
+                .await
+                .unwrap();
+            return;
+        }
+        let slug = body
+            .full_path
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let promoted = HostedSpool {
+            full_path: format!("spool/{slug}"),
+            kind: "spool".to_string(),
+            is_repo: true,
+            ..HostedSpool::default()
+        };
+        let response = PromoteSpoolResponse {
+            spool: Some(promoted),
+        };
+        send.write_chunk(Bytes::from(
+            encode_success_response(&response.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+        return;
+    }
+    send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
+        .await
+        .unwrap();
 }
 
 async fn serve_create_spool(

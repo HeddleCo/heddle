@@ -6,6 +6,31 @@ use clap::{Args, Subcommand, ValueEnum};
 const DEFAULT_CLAIM_TIMEOUT: &str = "15m";
 pub const DEFAULT_CLAIM_WEB_ORIGIN: &str = "https://app.heddle.sh";
 
+/// Arguments for `heddle promote`.
+#[derive(Args, Clone, Debug)]
+#[command(after_help = "\
+Promote moves a personal hosted spool to the shared root namespace:
+
+  spool/<your-handle>/<name>  →  spool/<name>
+
+The server requires the root slug to be free, a claimed/verified account, and
+an owner grant on the personal spool. Denials print the recovery step.
+
+Examples:
+  heddle promote spool/willow-ibis-8e7264/notes
+  heddle promote willow-ibis-8e7264/notes --server api.preview.heddle.sh
+  heddle promote https://api.preview.heddle.sh/willow-ibis-8e7264/notes
+")]
+pub struct PromoteArgs {
+    /// Personal spool to lift to root (`spool/<handle>/<name>`, `<handle>/<name>`, or a hosted URL).
+    #[arg(value_name = "PATH")]
+    pub path: String,
+
+    /// Hosted Heddle server. Omit when `PATH` is a URL, or to use the configured default.
+    #[arg(long)]
+    pub server: Option<String>,
+}
+
 /// Offer the current agent-rooted account for a human to claim.
 #[derive(Args, Clone, Debug)]
 pub struct ClaimArgs {
@@ -160,7 +185,7 @@ pub enum AuthCommands {
         #[arg(long = "ttl", default_value_t = 3600)]
         ttl_secs: u64,
 
-        /// Resource scope (`repo:org/name`, `namespace:org`, `spool:org/name`, or a bare repo path).
+        /// Resource scope (`spool:name`, `spool:handle/name`, or a bare spool path).
         #[arg(long = "scope")]
         scopes: Vec<String>,
 
@@ -366,6 +391,24 @@ mod tests {
         assert_eq!(args.web_origin.as_deref(), Some("https://heddle.example"));
         assert_eq!(args.timeout, std::time::Duration::from_secs(30 * 60));
         assert!(Cli::try_parse_from(["heddle", "claim", "--timeout", "0s"]).is_err());
+    }
+
+    #[test]
+    fn promote_parses_path_and_optional_server() {
+        let cli = Cli::try_parse_from([
+            "heddle",
+            "promote",
+            "spool/willow-ibis-8e7264/notes",
+            "--server",
+            "api.preview.heddle.sh",
+        ])
+        .expect("promote flags parse");
+        let Commands::Promote(args) = cli.command else {
+            panic!("expected top-level promote");
+        };
+        assert_eq!(args.path, "spool/willow-ibis-8e7264/notes");
+        assert_eq!(args.server.as_deref(), Some("api.preview.heddle.sh"));
+        assert!(Cli::try_parse_from(["heddle", "promote"]).is_err());
     }
 
     #[test]

@@ -52,6 +52,8 @@ mod next_action;
 mod operator_core;
 mod operator_loop;
 mod oplog;
+#[cfg(feature = "client")]
+mod promote;
 mod purge;
 mod query;
 mod ready_cmd;
@@ -154,6 +156,8 @@ pub use netdaemon::{cmd_netd_serve, cmd_netd_status, cmd_netd_stop};
 pub use operator_core::operator_emission_output_kinds;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 pub use oplog::cmd_oplog;
+#[cfg(feature = "client")]
+pub use promote::cmd_promote;
 pub use purge::cmd_purge;
 pub use query::run as cmd_query;
 pub use ready_cmd::cmd_ready;

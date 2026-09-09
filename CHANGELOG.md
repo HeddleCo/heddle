@@ -15,6 +15,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **`heddle promote` and personal-first hosted reads.** `heddle promote`
+  calls `RegistryService/PromoteSpool` to lift `spool/<handle>/<name>` to
+  `spool/<name>`. Clone and pull resolve a bare first path segment to the
+  caller's personal child first, then the shared root. Promotion denials
+  (taken slug, unverified account, missing owner grant) print recovery
+  instead of a generic remote error (heddle#1728, weft#2107).
+
 - **Harness identity cursor on each capture.** `integration install` writes
   per-harness hooks that stamp a workspace `.heddle/identity` sidecar
   (`provider`, `model`, `thought_level`, `session`, `parent`). Each

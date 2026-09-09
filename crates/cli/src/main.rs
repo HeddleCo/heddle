@@ -13,6 +13,8 @@ use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
 use cli::cli::commands::cmd_context_reason_git;
 #[cfg(feature = "semantic")]
 use cli::cli::commands::cmd_semantic;
+#[cfg(feature = "client")]
+use cli::cli::commands::{cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami, cmd_promote};
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     BridgeCommands, BridgeGitCommands,
@@ -53,9 +55,6 @@ use cli::{
     perf::{ProfileField, emit_command_profile, profile_enabled},
 };
 use tracing::debug;
-
-#[cfg(feature = "client")]
-use cli::cli::commands::{cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami};
 
 // `current_thread` flavor avoids spinning up a CPU-count-sized worker
 // pool on every CLI invocation. The foreground `heddle` binary is a
@@ -639,6 +638,9 @@ async fn async_main() -> Result<()> {
 
         #[cfg(feature = "client")]
         Commands::Claim(args) => cmd_hosted_claim(args.clone()).await,
+
+        #[cfg(feature = "client")]
+        Commands::Promote(args) => cmd_promote(&cli, args.clone()).await,
 
         #[cfg(feature = "client")]
         Commands::Whoami { server } => cmd_hosted_whoami(&cli, server.clone()).await,

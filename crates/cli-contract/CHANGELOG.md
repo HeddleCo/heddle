@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `promote` command catalog, JSON schema, and recovery advice (heddle#1728).
+
 ## [0.15.2](https://github.com/HeddleCo/heddle/compare/heddle-cli-contract-v0.15.1...heddle-cli-contract-v0.15.2) - 2026-08-28
 
 ### Other

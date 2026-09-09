@@ -18,7 +18,7 @@ use super::{
     },
 };
 #[cfg(feature = "client")]
-use super::{AuthCommands, ClaimArgs};
+use super::{AuthCommands, ClaimArgs, PromoteArgs};
 
 #[derive(Clone, Debug, Args)]
 pub struct FsckArgs {
@@ -372,6 +372,15 @@ Examples:
         #[command(subcommand)]
         command: AuthCommands,
     },
+
+    /// Promote a personal hosted spool to a root-level spool.
+    ///
+    /// Moves `spool/<your-handle>/<name>` to `spool/<name>` after the server
+    /// confirms the root slug is free, the account is claimed/verified, and
+    /// you hold an owner grant. Clone a bare name still prefers your personal
+    /// copy first.
+    #[cfg(feature = "client")]
+    Promote(PromoteArgs),
 
     /// Offer this agent account for a human to claim.
     ///

@@ -1171,6 +1171,80 @@ impl RecoveryAdvice {
     }
 
     #[cfg(feature = "client")]
+    pub fn promote_slug_taken(full_path: &str, slug: &str) -> Self {
+        Self::safety_refusal(
+            "promote_slug_taken",
+            format!("Cannot promote '{full_path}': root slug '{slug}' is already taken"),
+            "Pick a free root name, or rename the personal spool first. Inspect with `heddle whoami`."
+                .to_string(),
+            format!("a root-level spool named '{slug}' already exists or is reserved"),
+            "the personal spool stays under your handle until the root slug is free",
+            "hosted spool path, grants, and local checkouts were left unchanged",
+            "heddle whoami".to_string(),
+            vec!["heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn promote_account_standing(full_path: &str) -> Self {
+        Self::safety_refusal(
+            "promote_account_standing",
+            format!("Cannot promote '{full_path}': the account is not claimed and verified"),
+            "Promotion requires a claimed, verified account. Run `heddle claim`, then retry.",
+            "the server refused promotion because this account is anonymous or unverified",
+            "the personal spool stays under your handle until the account is claimed",
+            "hosted spool path, grants, and local checkouts were left unchanged",
+            "heddle claim".to_string(),
+            vec!["heddle claim".to_string(), "heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn promote_not_owner(full_path: &str) -> Self {
+        Self::safety_refusal(
+            "promote_not_owner",
+            format!("Cannot promote '{full_path}': only an owner of this spool can promote it"),
+            "Ask an owner to promote it, or check the roles on `heddle whoami`.",
+            "the caller does not hold an owner grant on the personal spool",
+            "the personal spool was not moved",
+            "hosted spool path, grants, and local checkouts were left unchanged",
+            "heddle whoami".to_string(),
+            vec!["heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn promote_already_root(full_path: &str) -> Self {
+        Self::safety_refusal(
+            "promote_already_root",
+            format!("'{full_path}' is already a root-level spool"),
+            format!("Clone it with `heddle clone https://<host>/{full_path} <dir>`."),
+            "promotion only moves a personal child spool to the shared root",
+            "no hosted path would change",
+            "hosted spool path, grants, and local checkouts were left unchanged",
+            format!("heddle clone https://<host>/{full_path} <dir>"),
+            vec![format!("heddle clone https://<host>/{full_path} <dir>")],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn promote_failed(full_path: &str, error: &str) -> Self {
+        Self::safety_refusal(
+            "promote_failed",
+            format!("Cannot promote '{full_path}': {error}"),
+            "Fix the reported condition, then retry `heddle promote` with the same path.",
+            format!("the server refused PromoteSpool for '{full_path}': {error}"),
+            "the personal spool was not moved",
+            "hosted spool path, grants, and local checkouts were left unchanged",
+            format!("heddle promote {full_path}"),
+            vec![
+                format!("heddle promote {full_path}"),
+                "heddle whoami".to_string(),
+            ],
+        )
+    }
+
+    #[cfg(feature = "client")]
     pub fn network_clone_failed(error: &str, local_path: &std::path::Path) -> Self {
         Self::safety_refusal(
             "network_clone_failed",

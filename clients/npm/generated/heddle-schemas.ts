@@ -1814,6 +1814,22 @@ export interface PrincipalReport {
   name: string;
 }
 
+/** JSON payload for `heddle promote`. */
+export interface PromoteSchema {
+  from: string;
+  full_path: string;
+  idempotency_status?: string | null;
+  is_repo: boolean;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "promote";
+  recommended_action?: string | null;
+  replayed?: boolean | null;
+  server: string;
+  spool_id: string;
+  status: string;
+}
+
 export interface ProvenanceReport {
   clean: boolean;
   registry_hash?: string | null;
@@ -3593,6 +3609,7 @@ export interface HeddleVerbOutputs {
   "netd serve": NetdServeSchema;
   "netd status": NetdStatusSchema;
   "netd stop": NetdStopSchema;
+  promote: PromoteSchema;
   pull: PullOutput;
   push: PushOutput;
   query: QueryReport;
@@ -3762,6 +3779,7 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "netd serve",
   "netd status",
   "netd stop",
+  "promote",
   "pull",
   "push",
   "query",

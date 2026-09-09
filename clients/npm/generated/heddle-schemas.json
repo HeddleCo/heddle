@@ -24520,6 +24520,101 @@
       "title": "GenericJsonObjectSchema",
       "type": "object"
     },
+    "promote": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON payload for `heddle promote`.",
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "full_path": {
+          "type": "string"
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is_repo": {
+          "type": "boolean"
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "promote"
+          ],
+          "type": "string"
+        },
+        "recommended_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "server": {
+          "type": "string"
+        },
+        "spool_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "status",
+        "from",
+        "full_path",
+        "spool_id",
+        "is_repo",
+        "server"
+      ],
+      "title": "PromoteSchema",
+      "type": "object"
+    },
     "pull": {
       "$defs": {
         "ActionTemplate": {

@@ -1569,6 +1569,38 @@ const CONTRACTS: &[CommandContractEntry] = &[
             191,
         ),
     ),
+    entry(
+        &["promote"],
+        feature_gated(
+            exits(
+                json_discriminators(
+                    documented_schemas(
+                        CommandContract {
+                            help_rank: 192,
+                            ..user_scoped(NETWORK_METADATA_MUTATION)
+                        },
+                        &["promote"],
+                    ),
+                    &[json_discriminator(
+                        Some("promote"),
+                        "output_kind",
+                        "promote",
+                    )],
+                ),
+                &[
+                    (0, "ok"),
+                    (75, "server unreachable; safe to retry"),
+                    (
+                        76,
+                        "target slug taken or request rejected; do not retry without changing inputs",
+                    ),
+                    (77, "not the owner, or account is not claimed/verified"),
+                    (78, "not authenticated or spool path missing"),
+                ],
+            ),
+            "client",
+        ),
+    ),
     entry(&["bridge"], surface(GROUP, "git_projection")),
     entry(&["bridge", "git"], surface(GROUP, "git_projection")),
     entry(
@@ -4615,6 +4647,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Whoami { .. } => vec!["whoami"],
         #[cfg(feature = "client")]
         Commands::Claim(_) => vec!["claim"],
+        #[cfg(feature = "client")]
+        Commands::Promote(_) => vec!["promote"],
         Commands::Context { command } => match command {
             ContextCommands::Set(_) => vec!["context", "set"],
             ContextCommands::Get(_) => vec!["context", "get"],
