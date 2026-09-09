@@ -8,8 +8,8 @@ use std::{
 };
 
 use api::v2::client::RpcTransport;
-use heddle_object_model::object::{ObjectSource, State, StateId};
-use heddle_pack::store::pack::{StreamingPackBuilder, build_source_pack};
+use heddle_object_model::object::{ObjectSource, State, StateId, source_target::capture::ReferenceProof};
+use heddle_pack::store::pack::{StreamingPackBuilder, build_source_pack_with_references};
 
 use super::{Error, typed_digest};
 use crate::{Thread, contract::*, transport};
@@ -43,6 +43,18 @@ impl SourcePack {
         scratch_root: &Path,
         budget: SourceBudget,
     ) -> Result<Self, Error> {
+        Self::prepare_with_references(source, selected, &[], scratch_root, budget)
+    }
+
+    /// Include only descriptor closures selected by independently verified source
+    /// operation proofs. A reference never authorizes another source revision.
+    pub fn prepare_with_references(
+        source: &impl ObjectSource,
+        selected: &State,
+        references: &[ReferenceProof],
+        scratch_root: &Path,
+        budget: SourceBudget,
+    ) -> Result<Self, Error> {
         let directory = tempfile::Builder::new()
             .prefix("thread-source-")
             .tempdir_in(scratch_root)?;
@@ -60,10 +72,11 @@ impl SourcePack {
             directory.path().join("buckets"),
         )
         .map_err(store_error)?;
-        let (pack, _) = build_source_pack(
+        let (pack, _) = build_source_pack_with_references(
             builder,
             source,
             selected,
+            references,
             budget.max_objects,
             budget.max_decoded_bytes,
         )

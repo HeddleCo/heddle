@@ -3,10 +3,14 @@ use std::collections::BTreeSet;
 use crypto::{Ed25519Signer, Signer, thread_operation::SignedOperation};
 use objects::object::{
     Attribution, CollaborationActor, CollaborationMetadata, CollaborationSourceAnchor,
-    ContextRevision, Principal, Tree, TreeEntry, source_target::SourceTargetReference,
+    ContextRevision, Principal, Tree, TreeEntry,
+    source_target::{SourceTargetReference, capture::SourceTargetSnapshot},
 };
 
 use super::*;
+fn put(store: &impl ObjectStore, value: &impl serde::Serialize) -> Result<ContentHash> {
+    Ok(store.put_blob(&Blob::new(capture::encode(value)?))?)
+}
 
 fn state(repo: &Repository, parent: StateId, path: &str, text: &str) -> State {
     let blob = Blob::new(text.as_bytes().to_vec());
@@ -379,5 +383,178 @@ fn source_pack_exports_and_validates_exact_signed_reference_closure() {
             .validate_source_closure_with_references(&first, &[changed], 1024, 8 * 1024 * 1024)
             .is_err(),
         "valid blob addresses cannot replace scope proof"
+    );
+}
+
+#[test]
+fn local_integration_inherits_source_and_target_roots_and_next_capture_keeps_them() {
+    use objects::object::{
+        VisibilityTier, thread_replication::local_integration::LocalIntegration,
+    };
+    let (_directory, repo, target, base, reference) = fixture();
+    let first = state(&repo, base.id(), "main.rs", "zero\none\ntwo\nthree\n");
+    let (parent, _) = captured(&repo, &target, "tracked", &first);
+    let source = repo
+        .create_native_thread("integration-source", first.id(), Some("tracked"), "fork")
+        .expect("fork");
+    let moved = state(&repo, first.id(), "renamed.rs", "zero\none\ntwo\nthree\n");
+    let (original, _) = captured(&repo, &source, "integration-source", &moved);
+    let source_operation = original.verify().expect("source").id().expect("source ID");
+    let result = State::new_merge(
+        moved.tree,
+        vec![first.id(), moved.id()],
+        Attribution::human(Principal::new("integrator", "")),
+    );
+    repo.store().put_state(&result).expect("result");
+    let prepared = target
+        .prepare_integration(&repo, &result, source.thread, source_operation)
+        .expect("prepare exact integration roots");
+    let signer = Ed25519Signer::from_seed(&[92; 32]).expect("signer");
+    let parents = BTreeSet::from([parent.verify().expect("parent").id().expect("parent ID")]);
+    let receipt = LocalIntegration {
+        version: 1,
+        spool: target.reference_scope().expect("scope").spool,
+        device: signer.public_key().try_into().expect("key"),
+        source_thread: source.thread,
+        source_operation,
+        source_revision: moved.id(),
+        target_thread: target.thread,
+        expected_target_frontier: parents.clone(),
+        result: prepared,
+        result_visibility: VisibilityTier::Public,
+        initiating_request_proof: ContentHash::from_bytes([3; 32]),
+        local_policy_version: ContentHash::from_bytes([4; 32]),
+        executed_at_ms: 100,
+    };
+    let operation = ThreadOperation {
+        version: 1,
+        thread: target.thread,
+        parents,
+        publisher: receipt.device,
+        body: ThreadOperationBody::LocalIntegration(receipt.encode().expect("receipt")),
+    };
+    let signed = SignedOperation::sign(&operation, &signer).expect("signed integration");
+    assert_eq!(
+        target
+            .receive_local_integration_cas(&signed, repo.store(), |_| Ok(()))
+            .expect("admission"),
+        super::super::Admission::Accepted
+    );
+    let resolved = target
+        .resolve_source_target(&repo, &reference, result.id())
+        .expect("resolve landed target")
+        .expect("landed target present");
+    assert_eq!(resolved.file.path, "renamed.rs");
+    assert_eq!(
+        resolved.file.status,
+        ResolutionStatus::Resolved,
+        "unambiguous result selects matching source file"
+    );
+    assert_eq!(resolved.target.status, ResolutionStatus::Resolved);
+    let next = state(
+        &repo,
+        result.id(),
+        "renamed.rs",
+        "extra\nzero\none\ntwo\nthree\n",
+    );
+    let (_, closure) = captured(&repo, &target, "tracked", &next);
+    assert!(
+        matches!(closure.targets[&reference.target].selector, SourceSelector::Lines {range} if range.start==3 && range.end==4)
+    );
+    let mut omitted = receipt;
+    omitted.result.source_targets = None;
+    assert!(
+        omitted
+            .validate_source(&original.verify().expect("source"))
+            .is_err(),
+        "integration cannot drop source closure"
+    );
+}
+
+#[test]
+fn capture_cannot_drop_parent_or_fork_reference_closure() {
+    let (_directory, repo, replica, base, _) = fixture();
+    let first = state(&repo, base.id(), "main.rs", "zero\none\ntwo\nthree\n");
+    let (parent, _) = captured(&repo, &replica, "tracked", &first);
+    let signer = Ed25519Signer::from_seed(&[93; 32]).expect("signer");
+    let next = state(
+        &repo,
+        first.id(),
+        "main.rs",
+        "next\nzero\none\ntwo\nthree\n",
+    );
+    let omitted = ThreadOperation {
+        version: 1,
+        thread: replica.thread,
+        parents: BTreeSet::from([parent.verify().expect("parent").id().expect("parent ID")]),
+        publisher: signer.public_key().try_into().expect("key"),
+        body: ThreadOperationBody::Capture(next.encode_current_msgpack().expect("State").into()),
+    };
+    let signed = SignedOperation::sign(&omitted, &signer).expect("signed");
+    assert!(
+        matches!(replica.receive(&signed,repo.store(), |_|Ok(())).expect("record rejection"),super::super::Admission::Rejected(reason) if reason.contains("drops inherited reference closure"))
+    );
+    let fork = repo
+        .create_native_thread("drop-fork", first.id(), Some("tracked"), "fork")
+        .expect("fork");
+    let omitted = ThreadOperation {
+        thread: fork.thread,
+        parents: BTreeSet::new(),
+        ..omitted
+    };
+    let signed = SignedOperation::sign(&omitted, &signer).expect("signed");
+    assert!(
+        fork.receive(&signed, repo.store(), |_| Ok(()))
+            .expect_err("fork cannot drop inherited root")
+            .to_string()
+            .contains("drops inherited fork reference closure")
+    );
+}
+
+#[test]
+fn integration_keeps_competing_branch_locations_ambiguous() {
+    let (_directory, repo, target, base, reference) = fixture();
+    let first = state(&repo, base.id(), "main.rs", "zero\none\ntwo\nthree\n");
+    captured(&repo, &target, "tracked", &first);
+    let source = repo
+        .create_native_thread("competing-source", first.id(), Some("tracked"), "fork")
+        .expect("fork");
+    let left = state(&repo, first.id(), "left.rs", "zero\none\ntwo\nthree\n");
+    captured(&repo, &target, "tracked", &left);
+    let right = state(&repo, first.id(), "right.rs", "zero\none\ntwo\nthree\n");
+    let (original, _) = captured(&repo, &source, "competing-source", &right);
+    let blob = repo
+        .store()
+        .put_blob(&Blob::new(b"zero\none\ntwo\nthree\n".to_vec()))
+        .expect("blob");
+    let mut tree = Tree::new();
+    tree.insert(TreeEntry::file("left.rs", blob, false).expect("left"));
+    tree.insert(TreeEntry::file("right.rs", blob, false).expect("right"));
+    let tree = repo.store().put_tree(&tree).expect("tree");
+    let result = State::new_merge(
+        tree,
+        vec![left.id(), right.id()],
+        Attribution::human(Principal::new("integrator", "")),
+    );
+    let prepared = target
+        .prepare_integration(
+            &repo,
+            &result,
+            source.thread,
+            original.verify().expect("operation").id().expect("id"),
+        )
+        .expect("prepare competing locations");
+    let closure = capture::closure(
+        &Source(repo.store()),
+        prepared.source_targets.expect("descriptor"),
+        &target.reference_scope().expect("scope"),
+        result.id(),
+    )
+    .expect("closure");
+    let selected = &closure.targets[&reference.target];
+    assert_eq!(selected.status, ResolutionStatus::Ambiguous);
+    assert_eq!(
+        closure.files[&selected.core.file].status,
+        ResolutionStatus::Ambiguous
     );
 }

@@ -158,7 +158,12 @@ impl DeviceRpc {
                 source_revision: source,
                 target_thread: target,
                 expected_target_frontier: frontier.clone(),
-                result: state.encode_current_msgpack()?,
+                result: target_replica.prepare_integration(
+                    &checkout.repository,
+                    &state,
+                    checkout.binding.thread,
+                    source_operation,
+                )?,
                 result_visibility,
                 initiating_request_proof: session.request_proof,
                 local_policy_version: policy_version(&checkout.repository)?,

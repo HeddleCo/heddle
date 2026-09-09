@@ -125,7 +125,7 @@ impl ThreadOperation {
         &self,
         genesis: &ThreadGenesis,
     ) -> Result<Option<crate::object::source_target::capture::ReferenceProof>> {
-        let ThreadOperationBody::Capture(capture) = &self.body else {
+        let Some(capture) = self.source_result()? else {
             return Ok(None);
         };
         let Some(descriptor) = capture.source_targets else {
@@ -154,6 +154,20 @@ impl ThreadOperation {
             ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_) => {
                 ThreadFacet::Discussion
             }
+        }
+    }
+
+    /// Uniform source result for capture and both integration authorities.
+    pub fn source_result(&self) -> Result<Option<Capture>> {
+        match &self.body {
+            ThreadOperationBody::Capture(result) => Ok(Some(result.clone())),
+            ThreadOperationBody::Integration(bytes) => {
+                Ok(Some(integration::HostedIntegration::decode(bytes)?.result))
+            }
+            ThreadOperationBody::LocalIntegration(bytes) => Ok(Some(
+                local_integration::LocalIntegration::decode(bytes)?.result,
+            )),
+            _ => Ok(None),
         }
     }
 
@@ -308,6 +322,21 @@ impl ThreadOperation {
                 .any(|p| p.thread != self.thread || p.facet() != self.facet())
         {
             return Err(invalid("causal parents cross Thread or disclosure facet"));
+        }
+        if self
+            .source_result()?
+            .is_some_and(|result| result.source_targets.is_none())
+        {
+            for parent in parents {
+                if parent
+                    .source_result()?
+                    .is_some_and(|result| result.source_targets.is_some())
+                {
+                    return Err(invalid(
+                        "source evolution drops inherited reference closure",
+                    ));
+                }
+            }
         }
         match &self.body {
             ThreadOperationBody::Capture(bytes) => {

@@ -33,7 +33,7 @@ pub struct HostedIntegration {
     pub expected_target_frontier: BTreeSet<ContentHash>,
     /// Exact canonical resulting State. Content installation is a separate,
     /// authorized closure transfer and never writes a checkout on receive.
-    pub result: Vec<u8>,
+    pub result: super::Capture,
     pub initiating_request_proof: ContentHash,
     pub review_policy_version: ContentHash,
     pub review_evidence: BTreeSet<ContentHash>,
@@ -50,8 +50,8 @@ impl HostedIntegration {
         {
             return Err(invalid("invalid or unbounded hosted integration receipt"));
         }
-        let state = State::decode_current_msgpack(&self.result)?;
-        if state.encode_current_msgpack()? != self.result {
+        let state = State::decode_current_msgpack(&self.result.state)?;
+        if state.encode_current_msgpack()? != self.result.state {
             return Err(invalid("non-canonical integration result"));
         }
         let bytes = rmp_serde::to_vec_named(self)?;
@@ -73,7 +73,28 @@ impl HostedIntegration {
         ))
     }
     pub fn resulting_state(&self) -> Result<State> {
-        State::decode_current_msgpack(&self.result)
+        State::decode_current_msgpack(&self.result.state)
+    }
+    /// Supply the independently authenticated original source operation.
+    pub fn validate_source(&self, source: &ThreadOperation) -> Result<()> {
+        if source.thread != self.source_thread
+            || source.id()? != self.source_operation
+            || source
+                .source_state()?
+                .is_none_or(|state| state.id() != self.source_revision)
+        {
+            return Err(invalid(
+                "integration differs from original source operation",
+            ));
+        }
+        if self.result.source_targets.is_none()
+            && source
+                .source_result()?
+                .is_some_and(|result| result.source_targets.is_some())
+        {
+            return Err(invalid("integration drops source reference closure"));
+        }
+        Ok(())
     }
     pub(super) fn validate_operation(&self, operation: &ThreadOperation) -> Result<()> {
         if self.target_thread != operation.thread
@@ -199,7 +220,7 @@ mod tests {
             source_revision: source.id(),
             target_thread: genesis.id().expect("Thread"),
             expected_target_frontier: BTreeSet::from([target_operation.id().expect("parent")]),
-            result: source.encode_current_msgpack().expect("source"),
+            result: source.encode_current_msgpack().expect("source").into(),
             initiating_request_proof: ContentHash::from_bytes([8; 32]),
             review_policy_version: ContentHash::from_bytes([9; 32]),
             review_evidence: BTreeSet::from([ContentHash::from_bytes([10; 32])]),
@@ -258,7 +279,7 @@ mod tests {
             vec![target.id(), receipt.source_revision],
             Attribution::human(Principal::new("executor", "weft@example.test")),
         );
-        receipt.result = merge.encode_current_msgpack().expect("merge");
+        receipt.result = merge.encode_current_msgpack().expect("merge").into();
         operation.body = ThreadOperationBody::Integration(receipt.encode().expect("receipt"));
         operation
             .validate_parents(&genesis, std::slice::from_ref(&parent))
@@ -285,7 +306,7 @@ mod tests {
             vec![target.id()],
             Attribution::human(Principal::new("executor", "weft@example.test")),
         );
-        receipt.result = dropped.encode_current_msgpack().expect("dropped ancestry");
+        receipt.result = dropped.encode_current_msgpack().expect("dropped ancestry").into();
         operation.body = ThreadOperationBody::Integration(receipt.encode().expect("receipt"));
         assert!(
             operation.validate_parents(&genesis, &[parent]).is_err(),

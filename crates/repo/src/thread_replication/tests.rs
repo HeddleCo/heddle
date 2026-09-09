@@ -784,7 +784,7 @@ fn hosted_integration_requires_independent_persistent_executor_trust_and_never_w
             .expect("parent")
             .id()
             .expect("ID")]),
-        result: result.encode_current_msgpack().expect("result"),
+        result: result.encode_current_msgpack().expect("result").into(),
         initiating_request_proof: ContentHash::from_bytes([26; 32]),
         review_policy_version: ContentHash::from_bytes([27; 32]),
         review_evidence: BTreeSet::new(),
@@ -1028,7 +1028,7 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
         source_revision: source_state,
         target_thread: target.thread_id(),
         expected_target_frontier: BTreeSet::new(),
-        result: result.encode_current_msgpack().expect("state"),
+        result: result.encode_current_msgpack().expect("state").into(),
         result_visibility: private.clone(),
         initiating_request_proof: ContentHash::from_bytes([3; 32]),
         local_policy_version: ContentHash::from_bytes([4; 32]),

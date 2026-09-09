@@ -22,7 +22,7 @@ pub struct LocalIntegration {
     pub source_revision: StateId,
     pub target_thread: ContentHash,
     pub expected_target_frontier: BTreeSet<ContentHash>,
-    pub result: Vec<u8>,
+    pub result: super::Capture,
     pub result_visibility: VisibilityTier,
     pub initiating_request_proof: ContentHash,
     pub local_policy_version: ContentHash,
@@ -38,8 +38,8 @@ impl LocalIntegration {
         {
             return Err(invalid("invalid local integration receipt"));
         }
-        let state = State::decode_current_msgpack(&self.result)?;
-        if state.encode_current_msgpack()? != self.result {
+        let state = State::decode_current_msgpack(&self.result.state)?;
+        if state.encode_current_msgpack()? != self.result.state {
             return Err(invalid("non-canonical local integration State"));
         }
         let bytes = rmp_serde::to_vec_named(self)?;
@@ -55,11 +55,18 @@ impl LocalIntegration {
         Ok(receipt)
     }
     pub fn resulting_state(&self) -> Result<State> {
-        State::decode_current_msgpack(&self.result)
+        State::decode_current_msgpack(&self.result.state)
     }
     /// Supply the independently authenticated original record from the named
     /// source Thread, never a record selected solely by a claimed revision hash.
     pub fn validate_source(&self, source: &ThreadOperation) -> Result<()> {
+        if self.result.source_targets.is_none()
+            && source
+                .source_result()?
+                .is_some_and(|result| result.source_targets.is_some())
+        {
+            return Err(invalid("integration drops source reference closure"));
+        }
         if source.thread != self.source_thread
             || source.id()? != self.source_operation
             || source

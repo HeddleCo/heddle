@@ -1,4 +1,5 @@
 //! Canonical source-reference objects use the existing blob store.
+pub mod prepare;
 use crate::{
     error::{HeddleError, Result},
     object::{

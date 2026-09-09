@@ -8,17 +8,13 @@ use objects::{
         CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationRevision,
         CollaborationScope, ContentHash, State, StateId, TreeEntryTarget,
         source_target::{
-            SourceAffinity, SourceFileCore, SourceLineRange, SourceRangeProjection, SourceSelector,
-            SourceTargetBinding, SourceTargetCore,
-            capture::{
-                self, FileResolution, ReferenceClosure, ResolutionStatus, SourceTargetSnapshot,
-                TargetResolution,
-            },
+            SourceAffinity, SourceFileCore, SourceLineRange, SourceSelector, SourceTargetBinding,
+            SourceTargetCore,
+            capture::{self, FileResolution, ReferenceClosure, ResolutionStatus, TargetResolution},
         },
-        source_target_map::{MapBudget, SourceTargetMap},
         thread_replication::{Capture, ThreadFacet, ThreadOperation, ThreadOperationBody},
     },
-    reference_store::{MapStore, Source},
+    reference_store::Source,
     store::ObjectStore,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -29,11 +25,13 @@ use crate::Repository;
 fn err(value: impl std::fmt::Display) -> Error {
     Error::Invalid(value.to_string())
 }
-fn budget() -> MapBudget {
-    MapBudget::new(65_536, 32 * 1024 * 1024, 65_536, 32 * 1024 * 1024)
-}
-fn put(store: &impl ObjectStore, value: &impl serde::Serialize) -> Result<ContentHash> {
-    Ok(store.put_blob(&Blob::new(capture::encode(value)?))?)
+fn budget() -> objects::object::source_target_map::MapBudget {
+    objects::object::source_target_map::MapBudget::new(
+        65_536,
+        32 * 1024 * 1024,
+        65_536,
+        32 * 1024 * 1024,
+    )
 }
 fn selector(source: &objects::object::CollaborationSourceAnchor) -> Result<SourceSelector> {
     Ok(if !source.symbol_id.is_empty() {
@@ -93,8 +91,21 @@ impl ThreadReplica {
         operation: &ThreadOperation,
         store: &impl ObjectStore,
     ) -> Result<()> {
-        if let Some(proof) = operation.reference_proof(&self.genesis()?)? {
+        let genesis = self.genesis()?;
+        if let Some(proof) = operation.reference_proof(&genesis)? {
             capture::closure(&Source(store), proof.descriptor, &proof.scope, proof.state)?;
+        } else if let Some(state) = operation.source_state()? {
+            if let Some(parent) = genesis.parent {
+                if state.parents.contains(&genesis.base)
+                    && !descriptor_rows_at(&self.connect()?, parent, genesis.base)?
+                        .1
+                        .is_empty()
+                {
+                    return Err(err(
+                        "source evolution drops inherited fork reference closure",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -169,50 +180,78 @@ impl ThreadReplica {
     /// Called after source capture but before signing its publication. Retrying
     /// an admitted State reuses its exact signed descriptor, never today's tags.
     pub fn prepare_capture(&self, repo: &Repository, state: &State) -> Result<Capture> {
+        self.prepare_source_result(repo, state, Vec::new())
+    }
+    /// Integration inherits the exact selected source operation and every exact
+    /// target frontier, not either Thread's latest mutable checkout.
+    pub fn prepare_integration(
+        &self,
+        repo: &Repository,
+        state: &State,
+        source_thread: ContentHash,
+        source_operation: ContentHash,
+    ) -> Result<Capture> {
+        let source = ThreadReplica::open(repo.heddle_dir(), source_thread)?;
+        if source.genesis()?.spool != self.genesis()?.spool {
+            return Err(err("integration references cross Spool"));
+        }
+        let (signed, status) = source
+            .operation(&source_operation)?
+            .ok_or_else(|| err("integration source operation missing"))?;
+        if status != super::Admission::Accepted {
+            return Err(err("integration source operation not admitted"));
+        }
+        let operation = signed.verify()?;
+        let mut roots = Vec::new();
+        if let Some(proof) = operation.reference_proof(&source.genesis()?)? {
+            roots.push(capture::closure(
+                &Source(repo.store()),
+                proof.descriptor,
+                &proof.scope,
+                proof.state,
+            )?);
+        }
+        for head in self.frontier_page(ThreadFacet::Source, None, 129)? {
+            if roots.len() >= 128 {
+                return Err(err("integration reference frontier budget exceeded"));
+            }
+            let (signed, _) = self
+                .operation(&head)?
+                .ok_or_else(|| err("integration target head missing"))?;
+            if let Some(proof) = signed.verify()?.reference_proof(&self.genesis()?)? {
+                roots.push(capture::closure(
+                    &Source(repo.store()),
+                    proof.descriptor,
+                    &proof.scope,
+                    proof.state,
+                )?);
+            }
+        }
+        self.prepare_source_result(repo, state, roots)
+    }
+    fn prepare_source_result(
+        &self,
+        repo: &Repository,
+        state: &State,
+        mut roots: Vec<ReferenceClosure>,
+    ) -> Result<Capture> {
         let connection = self.connect()?;
         let existing:Option<Vec<u8>>=connection.query_row("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.source_revision=?2 AND o.status=1 ORDER BY o.id LIMIT 1",params![self.thread.as_bytes(),state.id().as_bytes()],|r|r.get(0)).optional()?;
         if let Some(bytes) = existing {
-            if let ThreadOperationBody::Capture(capture) = ThreadOperation::decode(&bytes)?.body {
+            if let Some(capture) = ThreadOperation::decode(&bytes)?.source_result()? {
                 return Ok(capture);
             }
         }
         let scope = self.reference_scope()?;
         let store = repo.store();
-        let mut roots = Vec::new();
         for parent in &state.parents {
             roots.extend(self.reference_snapshots_at(*parent, store)?);
         }
-        let mut inherited_files = BTreeMap::new();
-        let mut inherited_targets = BTreeMap::new();
-        let (mut file_root, mut target_root) = (None, None);
-        if let Some(first) = roots.first() {
-            file_root = first.snapshot.files;
-            target_root = first.snapshot.targets;
-        }
-        for inherited in roots {
-            for (id, file) in inherited.files {
-                if let Some(prior) = inherited_files.get(&id) {
-                    if prior != &file {
-                        let mut conflict = file;
-                        conflict.status = ResolutionStatus::Ambiguous;
-                        inherited_files.insert(id, conflict);
-                    }
-                } else {
-                    inherited_files.insert(id, file);
-                }
-            }
-            for (id, target) in inherited.targets {
-                if let Some(prior) = inherited_targets.get(&id) {
-                    if prior != &target {
-                        let mut conflict = target;
-                        conflict.status = ResolutionStatus::Ambiguous;
-                        inherited_targets.insert(id, conflict);
-                    }
-                } else {
-                    inherited_targets.insert(id, target);
-                }
-            }
-        }
+        let known_targets: std::collections::BTreeSet<_> = roots
+            .iter()
+            .flat_map(|root| root.targets.keys().copied())
+            .collect();
+        let mut prepared_seeds = Vec::new();
         let (seed_count, seed_bytes): (i64, i64) = connection.query_row(
             "SELECT count(*),coalesce(sum(length(source)),0) FROM reference_seeds WHERE thread=?1",
             [self.thread.as_bytes()],
@@ -236,7 +275,7 @@ impl ThreadReplica {
             let Some(target) = &reference.source.target else {
                 continue;
             };
-            if inherited_targets.contains_key(&target.target) {
+            if known_targets.contains(&target.target) {
                 continue;
             }
             let core = SourceFileCore {
@@ -263,191 +302,76 @@ impl ThreadReplica {
                 .get_state(&baseline_id)?
                 .ok_or_else(|| err("target original State missing"))?;
             let old = files(store, baseline.tree)?.get(&core.path).copied();
-            inherited_files.entry(file).or_insert(FileResolution {
-                path: core.path.clone(),
-                core,
-                blob: old,
-                status: if old.is_some() {
-                    ResolutionStatus::Resolved
-                } else {
-                    ResolutionStatus::Deleted
+            prepared_seeds.push(objects::reference_store::prepare::Seed {
+                file: FileResolution {
+                    path: core.path.clone(),
+                    core,
+                    blob: old,
+                    status: if old.is_some() {
+                        ResolutionStatus::Resolved
+                    } else {
+                        ResolutionStatus::Deleted
+                    },
                 },
-            });
-            inherited_targets.insert(
-                target.target,
-                TargetResolution {
+                target: TargetResolution {
                     selector: target_core.selector.clone(),
                     core: target_core,
                     status: ResolutionStatus::Resolved,
                 },
-            );
-        }
-        if inherited_targets.is_empty() {
-            return Ok(state.encode_current_msgpack()?.into());
-        }
-        let current = files(store, state.tree)?;
-        let mut pairs = BTreeMap::new();
-        let mut maps = BTreeMap::new();
-        let mut changed_bytes = 0u64;
-        let mut map_store = MapStore(store);
-        let mut work = budget();
-        for (id, file) in &mut inherited_files {
-            let previous = file.clone();
-            let direct = current.get(&file.path).copied();
-            let moved: Vec<_> = if direct.is_none() {
-                current
-                    .iter()
-                    .filter(|(_, hash)| Some(**hash) == file.blob)
-                    .map(|(path, hash)| (path.clone(), *hash))
-                    .take(2)
-                    .collect()
-            } else {
-                Vec::new()
-            };
-            if let Some(blob) = direct {
-                file.blob = Some(blob);
-                if file.status != ResolutionStatus::Ambiguous {
-                    file.status = ResolutionStatus::Resolved;
-                }
-            } else if moved.len() == 1 {
-                file.path = moved[0].0.clone();
-                file.blob = Some(moved[0].1);
-                file.status = ResolutionStatus::Resolved;
-            } else {
-                file.status = if moved.is_empty() {
-                    ResolutionStatus::Deleted
-                } else {
-                    ResolutionStatus::Ambiguous
-                };
-            }
-            if previous.blob != file.blob || previous.status != file.status {
-                pairs.insert(*id, (previous.clone(), file.clone()));
-                if let (Some(old), Some(new)) = (previous.blob, file.blob) {
-                    if old != new {
-                        let length = store
-                            .blob_size(&old)?
-                            .unwrap_or(u64::MAX)
-                            .saturating_add(store.blob_size(&new)?.unwrap_or(u64::MAX));
-                        changed_bytes = changed_bytes.saturating_add(length);
-                        if length > 8 * 1024 * 1024 || changed_bytes > 32 * 1024 * 1024 {
-                            return Err(err("reference changed-file byte budget exceeded"));
-                        }
-                        let old_blob = store
-                            .get_blob(&old)?
-                            .ok_or_else(|| err("old reference file missing"))?;
-                        let new_blob = store
-                            .get_blob(&new)?
-                            .ok_or_else(|| err("new reference file missing"))?;
-                        maps.insert(*id, (old_blob, new_blob));
-                    }
-                }
-            }
-            file_root = SourceTargetMap::update(
-                &mut map_store,
-                file_root,
-                *id,
-                Some(put(store, file)?),
-                &mut work,
-            )
-            .map_err(err)?;
-        }
-        let mut line_maps = BTreeMap::new();
-        for (file, (old, new)) in &maps {
-            line_maps.insert(
-                *file,
-                objects::worktree::source_line_edit_map(old, new, 8 * 1024 * 1024, 65_536)
-                    .map_err(err)?,
-            );
-        }
-        for (id, target) in &mut inherited_targets {
-            if let Some((previous, file)) = pairs.get(&target.core.file) {
-                if file.status != ResolutionStatus::Resolved {
-                    target.status = file.status;
-                } else if target.status == ResolutionStatus::Resolved {
-                    match &target.selector {
-                        SourceSelector::Lines { range } => {
-                            use objects::worktree::SourceLineMapBuild;
-                            match line_maps.get(&target.core.file) {
-                                Some(SourceLineMapBuild::Ready(map)) => {
-                                    match map.project(*range).map_err(err)? {
-                                        SourceRangeProjection::Resolved { range, .. } => {
-                                            target.selector = SourceSelector::Lines { range }
-                                        }
-                                        SourceRangeProjection::Deleted => {
-                                            target.status = ResolutionStatus::Deleted
-                                        }
-                                        SourceRangeProjection::Ambiguous => {
-                                            target.status = ResolutionStatus::Ambiguous
-                                        }
-                                    }
-                                }
-                                Some(_) => target.status = ResolutionStatus::Ambiguous,
-                                None => {}
-                            }
-                        }
-                        SourceSelector::Symbol { address } => {
-                            #[cfg(feature = "tree-sitter-symbols")]
-                            if let Some((old, new)) = maps.get(&target.core.file) {
-                                let update = crate::discussion_anchor_travel::travel_symbol_anchor(
-                                    &std::collections::HashMap::from([(
-                                        previous.path.clone(),
-                                        old.content().to_vec(),
-                                    )]),
-                                    &std::collections::HashMap::from([(
-                                        file.path.clone(),
-                                        new.content().to_vec(),
-                                    )]),
-                                    &objects::object::SymbolAnchor::new(&previous.path, address),
-                                );
-                                target.selector = SourceSelector::Symbol {
-                                    address: update.new_anchor.symbol,
-                                };
-                                target.status = if update.ambiguous {
-                                    ResolutionStatus::Ambiguous
-                                } else if update.orphaned {
-                                    ResolutionStatus::Deleted
-                                } else {
-                                    ResolutionStatus::Resolved
-                                };
-                            }
-                            #[cfg(not(feature = "tree-sitter-symbols"))]
-                            {
-                                let _ = (address, previous);
-                                target.status = ResolutionStatus::Ambiguous;
-                            }
-                        }
-                        SourceSelector::File => {}
-                    }
-                }
-            }
-            target_root = SourceTargetMap::update(
-                &mut map_store,
-                target_root,
-                *id,
-                Some(put(store, target)?),
-                &mut work,
-            )
-            .map_err(err)?;
+            });
         }
         let frontier = self.frontier_page(ThreadFacet::Discussion, None, 129)?;
         if frontier.len() > 128 {
             return Err(err("reference collaboration frontier budget exceeded"));
         }
-        let descriptor = SourceTargetSnapshot {
-            version: 1,
+        let prepared = objects::reference_store::prepare::prepare(
+            &Source(store),
             scope,
-            state: state.id(),
-            collaboration_frontier: ContentHash::compute_typed(
+            state,
+            ContentHash::compute_typed(
                 "heddle-source-target-frontier-v1",
                 &capture::encode(&frontier)?,
             ),
-            files: file_root,
-            targets: target_root,
-        };
-        Ok(Capture {
-            state: state.encode_current_msgpack()?,
-            source_targets: Some(put(store, &descriptor)?),
-        })
+            roots,
+            prepared_seeds,
+            |previous, file, old, new, address| {
+                #[cfg(feature = "tree-sitter-symbols")]
+                {
+                    let update = crate::discussion_anchor_travel::travel_symbol_anchor(
+                        &std::collections::HashMap::from([(
+                            previous.path.clone(),
+                            old.content().to_vec(),
+                        )]),
+                        &std::collections::HashMap::from([(
+                            file.path.clone(),
+                            new.content().to_vec(),
+                        )]),
+                        &objects::object::SymbolAnchor::new(&previous.path, address),
+                    );
+                    Ok((
+                        update.new_anchor.symbol,
+                        if update.ambiguous {
+                            ResolutionStatus::Ambiguous
+                        } else if update.orphaned {
+                            ResolutionStatus::Deleted
+                        } else {
+                            ResolutionStatus::Resolved
+                        },
+                    ))
+                }
+                #[cfg(not(feature = "tree-sitter-symbols"))]
+                {
+                    let _ = (previous, file, old, new);
+                    Ok((address.to_owned(), ResolutionStatus::Ambiguous))
+                }
+            },
+        )?;
+        for (expected, bytes) in prepared.blobs {
+            if store.put_blob(&Blob::new(bytes))? != expected {
+                return Err(err("prepared reference object hash mismatch"));
+            }
+        }
+        Ok(prepared.capture)
     }
     fn reference_snapshots_at(
         &self,
@@ -573,7 +497,7 @@ impl ThreadReplica {
         id: ContentHash,
         store: &impl ObjectStore,
     ) -> Result<()> {
-        let ThreadOperationBody::Capture(payload) = &operation.body else {
+        let Some(payload) = operation.source_result()? else {
             return Ok(());
         };
         let Some(descriptor) = payload.source_targets else {
