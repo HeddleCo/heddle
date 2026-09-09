@@ -26,6 +26,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use config::UserConfig;
 use objects::{
     object::{AnnotationKind, AnnotationScope, AnnotationStatus, ContextTarget},
     store::ObjectStore,
@@ -38,8 +39,6 @@ use repo::{
 use serde_json::{Value, json};
 use tracing::debug;
 
-use config::UserConfig;
-
 use crate::bridge::RelayCapture;
 
 /// PreToolUse dispatcher.
@@ -47,33 +46,40 @@ use crate::bridge::RelayCapture;
 /// Only file-reading/editing tools trigger context injection. Unknown or
 /// non-file tools are ignored.
 pub(crate) fn handle_pre_tool_use(repo: &Repository, payload: &Value) -> Result<()> {
+    if let Some(body) = pre_tool_use_context(repo, payload)? {
+        emit_hook_specific_output("PreToolUse", &body);
+    }
+    Ok(())
+}
+
+pub(crate) fn pre_tool_use_context(repo: &Repository, payload: &Value) -> Result<Option<String>> {
     let tool_name = payload
         .get("tool_name")
         .and_then(Value::as_str)
         .unwrap_or("");
     if !is_file_tool(tool_name) {
-        return Ok(());
+        return Ok(None);
     }
     let Some(path_str) = payload
         .get("tool_input")
         .and_then(|v| v.get("file_path"))
         .and_then(Value::as_str)
     else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(rel_path) = relative_to_repo(repo.root(), path_str) else {
-        return Ok(());
+        return Ok(None);
     };
     let annotations = match load_active_annotations(repo, &rel_path) {
         Ok(list) => list,
         Err(err) => {
             debug!(?err, "heddle context lookup failed in PreToolUse hook");
-            return Ok(());
+            return Ok(None);
         }
     };
     let stack_context = stack_context_for_current_thread(repo);
     if annotations.is_empty() && stack_context.is_none() {
-        return Ok(());
+        return Ok(None);
     }
     let mut body = String::new();
     if !annotations.is_empty() {
@@ -85,8 +91,7 @@ pub(crate) fn handle_pre_tool_use(repo: &Repository, payload: &Value) -> Result<
         }
         body.push_str(&stack_body);
     }
-    emit_hook_specific_output("PreToolUse", &body);
-    Ok(())
+    Ok(Some(body))
 }
 
 /// Render the current thread's stack context as additional context for

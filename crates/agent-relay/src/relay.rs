@@ -497,16 +497,34 @@ fn relay_claude(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value
             ) {
                 tracing::debug!(?err, "heddle UserPromptSubmit segment rotation failed");
             }
+            #[cfg(feature = "client")]
+            crate::device_runs::claude_controls(
+                &runtime.repo,
+                &opened.heddle_session_id,
+                event,
+                || Ok(None),
+                &mut std::io::stdout().lock(),
+            )?;
         }
         "PreToolUse" => {
             runtime.update_progress(UpdateProgressParams {
-                heddle_session_id: opened.heddle_session_id,
+                heddle_session_id: opened.heddle_session_id.clone(),
                 harness: Some("claude-code".to_string()),
                 status: Some("PreToolUse".to_string()),
                 touched_paths: csv_from_value(metadata.get("touched_paths")),
                 probe_metadata: metadata,
                 ..UpdateProgressParams::default()
             })?;
+            #[cfg(feature = "client")]
+            if crate::device_runs::claude_controls(
+                &runtime.repo,
+                &opened.heddle_session_id,
+                event,
+                || claude_hook::pre_tool_use_context(&runtime.repo, payload),
+                &mut std::io::stdout().lock(),
+            )? {
+                return Ok(());
+            }
             if let Err(err) = claude_hook::handle_pre_tool_use(&runtime.repo, payload) {
                 tracing::debug!(?err, "heddle PreToolUse context inject skipped");
             }
@@ -1866,6 +1884,8 @@ impl HarnessBridgeRuntime {
         report: &SessionReportEnvelope,
         status: ActorPresenceStatus,
     ) -> Result<()> {
+        #[cfg(feature = "client")]
+        crate::device_runs::publish(&self.repo, report, &status)?;
         let registry = ActorPresenceStore::new(self.repo.heddle_dir());
         let entry = if let Some(agent_session_id) = &report.agent_session_id {
             registry.update_entry(agent_session_id, |entry| {

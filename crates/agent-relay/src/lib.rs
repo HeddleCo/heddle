@@ -16,6 +16,8 @@
 
 pub mod bridge;
 mod claude_hook;
+#[cfg(feature = "client")]
+mod device_runs;
 mod probe;
 mod relay;
 

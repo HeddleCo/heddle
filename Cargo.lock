@@ -2138,6 +2138,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "heddle-api",
  "heddle-cli-render",
  "heddle-config",
  "heddle-hosted-client",
