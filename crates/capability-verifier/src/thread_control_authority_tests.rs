@@ -6,6 +6,13 @@ fn fixture(agent: bool) -> (Vec<u8>, VerifiedOwnerState, [u8; 32]) {
     fixture_mint(agent, false)
 }
 fn fixture_mint(agent: bool, attached: bool) -> (Vec<u8>, VerifiedOwnerState, [u8; 32]) {
+    fixture_mint_method(agent, attached, "RenameThread")
+}
+fn fixture_mint_method(
+    agent: bool,
+    attached: bool,
+    operation: &str,
+) -> (Vec<u8>, VerifiedOwnerState, [u8; 32]) {
     let owner = TestKey::new(91);
     let publisher = TestKey::new(92).signing.verifying_key().to_bytes();
     let a = TestKey::new(93);
@@ -29,7 +36,7 @@ fn fixture_mint(agent: bool, attached: bool) -> (Vec<u8>, VerifiedOwnerState, [u
     } else {
         ""
     };
-    let token = Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); session(\"original-session\"); device_pop_key(\"{}\"); {} check if operation(\"RenameThread\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};", hex::encode(publisher), agent_fact, expiry.to_rfc3339()).as_str()).expect("facts").build(&pair).expect("token");
+    let token = Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); session(\"original-session\"); device_pop_key(\"{}\"); {} check if operation(\"{operation}\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};", hex::encode(publisher), agent_fact, expiry.to_rfc3339()).as_str()).expect("facts").build(&pair).expect("token");
     let attachment = attached.then(|| {
         let body = crate::wire::MintRootAttachment {
             format_version: 1,
@@ -310,4 +317,27 @@ fn retained_device_certificate_and_cached_proof_survive_rotation_without_new_aut
         .is_err(),
         "recovery invalidates previously admitted independent roots"
     );
+}
+
+#[test]
+fn evidence_original_authority_requires_its_exact_evidence_method() {
+    for (operation, method) in [
+        (
+            "RecordEvidence",
+            "/heddle.api.v2alpha1.EvidenceService/RecordEvidence",
+        ),
+        (
+            "AcknowledgeCheck",
+            "/heddle.api.v2alpha1.EvidenceService/AcknowledgeCheck",
+        ),
+    ] {
+        let (bytes, owner, publisher) = fixture_mint_method(false, false, operation);
+        let mut expected = context(&owner, &publisher);
+        expected.method = method;
+        proof::verify(&bytes, expected, |_| false).expect("exact evidence author scope");
+        assert!(
+            proof::verify(&bytes, context(&owner, &publisher), |_| false).is_err(),
+            "evidence-only authority cannot mutate Thread metadata"
+        );
+    }
 }

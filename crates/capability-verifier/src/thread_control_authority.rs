@@ -132,6 +132,8 @@ pub fn verify_with_retained_mint_roots(
             | "/heddle.api.v2alpha1.ThreadService/ChangeLifecycle"
             | "/heddle.api.v2alpha1.ThreadService/SetSharingPolicy"
             | "/heddle.api.v2alpha1.ThreadService/RecordReview"
+            | "/heddle.api.v2alpha1.EvidenceService/RecordEvidence"
+            | "/heddle.api.v2alpha1.EvidenceService/AcknowledgeCheck"
     ) || context.spool_path.is_empty()
         || context.spool_path.len() > 4096
     {
