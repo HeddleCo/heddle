@@ -8,6 +8,20 @@
 use schemars::JsonSchema;
 use serde::Serialize;
 
+/// JSON payload for `heddle promote`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "PromoteSchema")]
+pub struct PromoteOutput {
+    pub output_kind: &'static str,
+    pub status: &'static str,
+    pub from: String,
+    pub full_path: String,
+    pub spool_id: String,
+    pub is_repo: bool,
+    pub server: String,
+    pub recommended_action: Option<String>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 #[schemars(rename = "AgentAccountCreatedSchema")]
 pub struct AgentAccountCreatedOutput {

@@ -1342,7 +1342,7 @@ fn current_unix_timestamp_i64() -> Result<i64> {
 // ---------------------------------------------------------------------------
 
 /// Resolve server from explicit arg, default credential, or fallback.
-pub(crate) fn resolve_server(explicit: Option<&str>) -> Result<String> {
+pub fn resolve_server(explicit: Option<&str>) -> Result<String> {
     if let Some(s) = explicit {
         return Ok(s.to_string());
     }

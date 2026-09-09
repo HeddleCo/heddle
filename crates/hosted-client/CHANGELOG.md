@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `GetSpool` / `PromoteSpool` client routes and personal-first read
+  resolution for a bare hosted path (heddle#1728).
+
 ### Fixed
 
 - Side-channel `heddle-pull-refs-v1` removed. Clone bootstrap refs are

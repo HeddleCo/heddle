@@ -583,6 +583,10 @@ options. Advanced/planned flags `--lazy` and `--filter blob:none`
 skip blob content and hydrate it on demand for hosted/network Heddle
 remotes; local clone paths reject them today.
 
+A bare hosted name (`https://host/notes`) clones your personal copy
+`spool/<handle>/notes` when it exists, otherwise the root `spool/notes`.
+`heddle promote` moves a personal spool to that root.
+
 See `heddle help threads` for the thread model and `heddle help remotes`
 for remote management.
 "#;
@@ -840,7 +844,9 @@ Common loop:
     heddle verify
 
 Remote values may be Git URLs, hosted endpoints, or local paths. `push` and
-`pull` use the default remote unless a positional remote is supplied. In Git
+`pull` use the default remote unless a positional remote is supplied. A bare
+hosted name on clone/pull resolves to your personal spool first, then the
+shared root; `heddle promote` lifts a personal spool to that root. In Git
 Overlay, Sley reads and edits the repository's Git configuration and streams
 objects directly between the remote and `.git`. In Native Heddle, the same
 verbs use Heddle transport and storage. The Git executable is not involved.

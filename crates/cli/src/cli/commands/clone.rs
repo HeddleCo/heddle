@@ -1574,10 +1574,14 @@ async fn clone_network(
         .with_warning_sink(std::sync::Arc::new(
             crate::cli::warning_render::StderrWarningSink,
         ));
+    let repo_path =
+        hosted_client::hosted_runtime::hosted::resolve_personal_first_read(&mut client, repo_path)
+            .await
+            .map_err(anyhow::Error::new)?;
     let result = clone_network_connected(
         cli,
         authority,
-        repo_path,
+        &repo_path,
         local_path,
         options,
         endpoint_spec,
@@ -2189,10 +2193,14 @@ async fn clone_monorepo(
         .with_warning_sink(std::sync::Arc::new(
             crate::cli::warning_render::StderrWarningSink,
         ));
+    let root_path =
+        hosted_client::hosted_runtime::hosted::resolve_personal_first_read(&mut client, root_path)
+            .await
+            .map_err(anyhow::Error::new)?;
     let result = clone_monorepo_connected(
         cli,
         authority,
-        root_path,
+        &root_path,
         local_path,
         endpoint_spec,
         &mut client,
@@ -2508,7 +2516,7 @@ fn monorepo_requires_hosted_remote_advice(remote: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "monorepo_requires_hosted_remote",
         format!("--recursive monorepo clone requires a hosted spool remote; '{remote}' is not one"),
-        "Point `--recursive` at a hosted spool (e.g. `https://host/org/root`), or clone this remote without `--recursive`.",
+        "Point `--recursive` at a hosted spool (e.g. `https://host/spool/root`), or clone this remote without `--recursive`.",
         format!("remote '{remote}' does not resolve to a hosted spool that can carry a child tree"),
         "a monorepo clone must call ResolveMonorepo on a hosted spool to discover its children",
         "no destination directory, repository metadata, or worktree files were written",
@@ -3315,11 +3323,11 @@ mod tests {
     #[test]
     fn hosted_endpoint_spec_strips_repo_path_suffix() {
         assert_eq!(
-            hosted_endpoint_spec("example.heddle.cloud:443/org/acme/repo"),
+            hosted_endpoint_spec("example.heddle.cloud:443/spool/acme/repo"),
             "example.heddle.cloud:443",
         );
         assert_eq!(
-            hosted_endpoint_spec("https://example.heddle.cloud:443/org/acme/repo"),
+            hosted_endpoint_spec("https://example.heddle.cloud:443/spool/acme/repo"),
             "example.heddle.cloud:443",
         );
     }

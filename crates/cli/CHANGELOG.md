@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `heddle promote` lifts a personal hosted spool to the shared root.
+  Clone and pull resolve a bare hosted name to the caller's personal
+  copy first (heddle#1728).
+
 ## [0.15.3](https://github.com/HeddleCo/heddle/compare/heddle-cli-v0.15.2...heddle-cli-v0.15.3) - 2026-08-28
 
 ### Other

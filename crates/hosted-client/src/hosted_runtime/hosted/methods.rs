@@ -163,6 +163,20 @@ impl HostedRoutes<'_> {
         HostedSpool
     );
     unary_method!(
+        get_spool,
+        "RegistryService",
+        "GetSpool",
+        GetSpoolRequest,
+        HostedSpool
+    );
+    unary_method!(
+        promote_spool,
+        "RegistryService",
+        "PromoteSpool",
+        PromoteSpoolRequest,
+        PromoteSpoolResponse
+    );
+    unary_method!(
         grant_support_access,
         "RegistryService",
         "GrantSupportAccess",
@@ -454,7 +468,7 @@ mod tests {
     };
 
     #[test]
-    fn shipped_native_inventory_is_36_unary_seven_server_streams_and_two_bidi() {
+    fn shipped_native_inventory_is_38_unary_seven_server_streams_and_two_bidi() {
         const ROUTES: &[MethodRoute] = &[
             MethodRoute::CollaborationServiceAppendTurn,
             MethodRoute::CollaborationServiceListByState,
@@ -472,6 +486,8 @@ mod tests {
             MethodRoute::RegistryServiceDeleteGrant,
             MethodRoute::RegistryServiceDeleteSpool,
             MethodRoute::RegistryServiceGetCurrentUserSpool,
+            MethodRoute::RegistryServiceGetSpool,
+            MethodRoute::RegistryServicePromoteSpool,
             MethodRoute::RegistryServiceGrantSupportAccess,
             MethodRoute::RegistryServiceListGrants,
             MethodRoute::RegistryServiceListSpools,
@@ -511,13 +527,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(shipped.len(), 45);
+        assert_eq!(shipped.len(), 47);
         assert_eq!(
             shipped
                 .iter()
                 .filter(|method| method.streaming == StreamingShape::Unary)
                 .count(),
-            36
+            38
         );
         assert_eq!(
             shipped

@@ -5,10 +5,10 @@ use api::heddle::api::v1alpha1::{
     CreateInvitationRequest, CreateServiceAccountRequest, CreateSignupInviteRequest,
     CreateSignupInviteResponse, CreateSpoolRequest, DeleteGrantRequest, DeleteSpoolRequest,
     GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse, GetCurrentUserSpoolRequest,
-    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
+    GetSpoolRequest, GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
     IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
     ListSignupInvitesRequest, ListSignupInvitesResponse, ListSpoolsRequest,
-    ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
+    ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode, PromoteSpoolRequest,
     ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
     ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
     UpdateSpoolRequest, Visibility, grant_target_ref::Target as GrantTargetKind,
@@ -161,6 +161,47 @@ impl HostedClient {
             "GetCurrentUserSpool",
             GetCurrentUserSpoolRequest {}
         );
+        Ok(to_protocol_spool(spool))
+    }
+
+    pub async fn get_spool(
+        &mut self,
+        full_path: &str,
+    ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+        let spool = authed_call!(
+            self,
+            get_spool,
+            "GetSpool",
+            GetSpoolRequest {
+                full_path: full_path.to_string(),
+            }
+        );
+        Ok(to_protocol_spool(spool))
+    }
+
+    pub async fn promote_spool(
+        &mut self,
+        full_path: &str,
+        client_operation_id: &str,
+    ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+        let method = "heddle.api.v1alpha1.RegistryService/PromoteSpool";
+        let operation_id = if client_operation_id.is_empty() {
+            ClientOperationId::fresh(method)
+        } else {
+            ClientOperationId::for_required_method(method, client_operation_id.to_string())?
+        };
+        let response = authed_call!(
+            self,
+            promote_spool,
+            "PromoteSpool",
+            PromoteSpoolRequest {
+                full_path: full_path.to_string(),
+                client_operation_id: operation_id.to_wire(),
+            }
+        );
+        let spool = response.spool.ok_or_else(|| {
+            ProtocolError::InvalidState("PromoteSpool returned no spool".to_string())
+        })?;
         Ok(to_protocol_spool(spool))
     }
 
@@ -672,7 +713,7 @@ fn parse_hosted_role_arg(
 mod tests {
     use std::{ffi::OsString, sync::MutexGuard};
 
-    use api::heddle::api::v1alpha1::{HostedRole, grant_target_ref::Target};
+    use api::heddle::api::v1alpha1::{HostedRole, HostedSpool, grant_target_ref::Target};
 
     use super::*;
 
@@ -995,5 +1036,152 @@ mod tests {
             ["/heddle.api.v1alpha1.RegistryService/CreateSpool"],
             "auto-provision must issue CreateSpool without BootstrapOwnerRoot"
         );
+    }
+
+    fn test_spool(full_path: &str) -> HostedSpool {
+        HostedSpool {
+            spool_id: full_path.to_string(),
+            full_path: full_path.to_string(),
+            kind: "spool".to_string(),
+            is_repo: true,
+            ..HostedSpool::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn promote_spool_moves_personal_child_to_root() {
+        let _home = IsolatedHeddleHome::new();
+        let fixture = crate::hosted_runtime::hosted::test_server::RegistryFixture {
+            personal_root: Some(test_spool("spool/alice")),
+            ..Default::default()
+        };
+        let (mut client, server, fixture) =
+            crate::hosted_runtime::hosted::test_server::start_with_registry(fixture).await;
+
+        let promoted = client
+            .promote_spool("spool/alice/foo", "promote-op-1")
+            .await
+            .expect("promote");
+        assert_eq!(promoted.full_path, "spool/foo");
+        assert!(promoted.is_repo);
+
+        client.close().await;
+        server.await.unwrap();
+        let requests = fixture
+            .promote_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].full_path, "spool/alice/foo");
+        assert_eq!(requests[0].client_operation_id, "promote-op-1");
+    }
+
+    #[tokio::test]
+    async fn promote_spool_surfaces_slug_taken() {
+        use api::heddle::api::v1alpha1::CallFailureCode;
+
+        let _home = IsolatedHeddleHome::new();
+        let fixture = crate::hosted_runtime::hosted::test_server::RegistryFixture {
+            promote_denial: Some((
+                CallFailureCode::AlreadyExists,
+                "root slug foo is taken".to_string(),
+            )),
+            ..Default::default()
+        };
+        let (mut client, server, _) =
+            crate::hosted_runtime::hosted::test_server::start_with_registry(fixture).await;
+        let err = client
+            .promote_spool("spool/alice/foo", "promote-op-2")
+            .await
+            .expect_err("slug taken");
+        assert!(matches!(err, ProtocolError::AlreadyExists(_)), "{err:?}");
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn personal_first_read_selects_the_caller_child_when_both_exist() {
+        let _home = IsolatedHeddleHome::new();
+        let mut spools = std::collections::HashMap::new();
+        spools.insert("spool/me/foo".to_string(), test_spool("spool/me/foo"));
+        spools.insert("spool/foo".to_string(), test_spool("spool/foo"));
+        spools.insert("spool/other/foo".to_string(), test_spool("spool/other/foo"));
+        let fixture = crate::hosted_runtime::hosted::test_server::RegistryFixture {
+            personal_root: Some(test_spool("spool/me")),
+            spools,
+            ..Default::default()
+        };
+        let (mut client, server, fixture) =
+            crate::hosted_runtime::hosted::test_server::start_with_registry(fixture).await;
+
+        let resolved = super::super::resolve_personal_first_read(&mut client, "foo")
+            .await
+            .expect("resolve");
+        assert_eq!(
+            resolved, "spool/me/foo",
+            "bare foo must clone the caller's copy, not the root or another owner"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+        let probed = fixture
+            .get_spool_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        assert_eq!(probed, vec!["spool/me/foo".to_string()]);
+        assert!(
+            !probed.iter().any(|path| path.starts_with("spool/other/")),
+            "must never probe another owner's personal child: {probed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn personal_first_read_falls_back_to_root_when_caller_has_no_child() {
+        let _home = IsolatedHeddleHome::new();
+        let mut spools = std::collections::HashMap::new();
+        spools.insert("spool/foo".to_string(), test_spool("spool/foo"));
+        let fixture = crate::hosted_runtime::hosted::test_server::RegistryFixture {
+            personal_root: Some(test_spool("spool/bob")),
+            spools,
+            ..Default::default()
+        };
+        let (mut client, server, fixture) =
+            crate::hosted_runtime::hosted::test_server::start_with_registry(fixture).await;
+
+        let resolved = super::super::resolve_personal_first_read(&mut client, "foo")
+            .await
+            .expect("resolve");
+        assert_eq!(resolved, "spool/foo");
+
+        client.close().await;
+        server.await.unwrap();
+        let probed = fixture
+            .get_spool_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        assert_eq!(probed, vec!["spool/bob/foo".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn get_spool_mismatch_fails_closed_instead_of_cloning_the_wrong_spool() {
+        let _home = IsolatedHeddleHome::new();
+        let mut spools = std::collections::HashMap::new();
+        // Server returns the root spool when asked for the personal child.
+        spools.insert("spool/me/foo".to_string(), test_spool("spool/foo"));
+        let fixture = crate::hosted_runtime::hosted::test_server::RegistryFixture {
+            personal_root: Some(test_spool("spool/me")),
+            spools,
+            ..Default::default()
+        };
+        let (mut client, server, _) =
+            crate::hosted_runtime::hosted::test_server::start_with_registry(fixture).await;
+        let err = super::super::resolve_personal_first_read(&mut client, "foo")
+            .await
+            .expect_err("mismatched GetSpool must not resolve");
+        assert!(matches!(err, ProtocolError::InvalidState(_)), "{err:?}");
+        client.close().await;
+        server.await.unwrap();
     }
 }

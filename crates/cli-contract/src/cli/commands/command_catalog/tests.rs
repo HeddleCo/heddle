@@ -183,6 +183,8 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["whoami"], &["whoami"]),
     #[cfg(feature = "client")]
     sample(&["claim"], &["claim"]),
+    #[cfg(feature = "client")]
+    sample(&["promote"], &["promote", "spool/willow-ibis-8e7264/notes"]),
     #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "import"], &["bridge", "git", "import"]),
     #[cfg(feature = "git-overlay")]
@@ -1782,6 +1784,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // advertises its discriminator here alongside the other
             // client-gated hosted verbs.
             "whoami",
+            "promote",
             "bridge git import",
             "bridge git export",
             "sync git",
@@ -2487,6 +2490,6 @@ fn feature_gated_command_roots_are_catalog_owned() {
     // listed here.
     assert_eq!(
         feature_gated_command_roots(),
-        &["auth", "ci", "claim", "whoami"]
+        &["auth", "ci", "claim", "promote", "whoami"]
     );
 }

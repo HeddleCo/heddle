@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `heddle promote` clap surface (heddle#1728).
+
 ## [0.15.3](https://github.com/HeddleCo/heddle/compare/heddle-cli-args-v0.15.2...heddle-cli-args-v0.15.3) - 2026-08-28
 
 ### Other

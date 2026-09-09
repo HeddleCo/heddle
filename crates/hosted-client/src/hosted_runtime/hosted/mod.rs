@@ -26,6 +26,7 @@ mod resolver;
 mod session;
 #[cfg(test)]
 mod session_tests;
+mod spool_path;
 mod state_review;
 mod sync;
 #[cfg(test)]
@@ -69,6 +70,10 @@ pub use methods::HostedRoutes;
 use objects::{NoopWarnings, Warning, WarningSink};
 use prost::Message;
 pub use session::{HostedAuthMode, HostedSession};
+pub use spool_path::{
+    HostedReadPath, canonicalize_spool_path, is_root_level_spool_path, plan_personal_first_read,
+    resolve_personal_first_read, strip_spool_prefix,
+};
 #[cfg(test)]
 pub(crate) use sync::PullBootstrapMetadata;
 pub use sync::{
