@@ -355,6 +355,7 @@ mod tests {
                             spool: None,
                         }),
                         biscuit: token.clone(),
+                        subject: binding.account_id.clone(),
                         proof_public_key: subject.public_key().to_vec(),
                         kind: api::CredentialKind::Device as i32,
                         expires_at: Some(prost_types::Timestamp {
@@ -403,6 +404,16 @@ mod tests {
                 .expect_err("changed proof key")
                 .to_string()
                 .contains("changed subject")
+        );
+        let mut changed = response.clone();
+        let Some(api::credential_result::Outcome::Issued(issued)) = changed
+            .credential.as_mut().expect("credential").outcome.as_mut()
+        else { panic!("issued credential") };
+        issued.subject = "unrelated-subject".into();
+        assert!(
+            verify_response(&subject, &binding, &attachment, changed, "pairing-op")
+                .expect_err("response subject must match verified Biscuit")
+                .to_string().contains("credential subject")
         );
         let mut changed = response;
         changed
