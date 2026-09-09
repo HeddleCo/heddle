@@ -452,15 +452,31 @@ mod tests {
         stored
             .verify_mint_root(device.public_key(), 101)
             .expect("paired device still works offline");
-        let private = biscuit_auth::PrivateKey::from_bytes(&device.to_seed(), biscuit_auth::Algorithm::Ed25519).expect("local device signing authority");
+        let private = biscuit_auth::PrivateKey::from_bytes(
+            &device.to_seed(),
+            biscuit_auth::Algorithm::Ed25519,
+        )
+        .expect("local device signing authority");
         let keypair = biscuit_auth::KeyPair::from(&private);
-        let token = biscuit_auth::Biscuit::builder().build(&keypair).expect("locally minted credential");
+        let token = biscuit_auth::Biscuit::builder()
+            .build(&keypair)
+            .expect("locally minted credential");
         let proof = crate::thread_replication::metadata::prepare_control_authority(
-            &stored, &device.public_key().try_into().expect("mint key"), &token, 101,
-        ).expect("retained device can prepare a new local proof after rotation without recertification");
-        let envelope = api::heddle::api::v2alpha1::ThreadControlAuthority::decode(proof.as_slice()).expect("portable proof");
+            &stored,
+            &device.public_key().try_into().expect("mint key"),
+            &token,
+            101,
+        )
+        .expect(
+            "retained device can prepare a new local proof after rotation without recertification",
+        );
+        let envelope = api::heddle::api::v2alpha1::ThreadControlAuthority::decode(proof.as_slice())
+            .expect("portable proof");
         assert_eq!(envelope.mint_root_attachment, Some(certificate.clone()));
-        assert_eq!(envelope.owner.expect("owner history").state_hash, current.state_hash());
+        assert_eq!(
+            envelope.owner.expect("owner history").state_hash,
+            current.state_hash()
+        );
         assert!(
             stored.verify_mint_root(old_key.public_key(), 101).is_err(),
             "retired owner direct mint is not a retained device"

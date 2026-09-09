@@ -44,7 +44,7 @@ pub fn prepare_control_authority(
                 .mint_roots
                 .iter()
                 .find(|attachment| {
-                    heddleco_capability_verifier::creation::verify_mint_root_attachment(
+                    heddleco_capability_verifier::creation::verify_retained_mint_root_attachment(
                         attachment,
                         &owner,
                         &root.account_uuid,
@@ -53,7 +53,9 @@ pub fn prepare_control_authority(
                     )
                     .is_ok()
                 })
-                .ok_or_else(|| Error::Invalid("current mint root attachment missing".into()))?,
+                .ok_or_else(|| {
+                    Error::Invalid("independently retained mint root attachment missing".into())
+                })?,
         )
     };
     heddleco_capability_verifier::thread_control_authority::encode(
