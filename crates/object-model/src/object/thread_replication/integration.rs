@@ -250,7 +250,9 @@ mod tests {
             parents: BTreeSet::new(),
             publisher: [2; 32],
             body: ThreadOperationBody::Capture(
-                target.encode_current_msgpack().expect("target").into(),
+                crate::object::thread_replication::AuthoredCapture::local(
+                    target.encode_current_msgpack().expect("target").into(),
+                ),
             ),
         };
         let source = State::new_snapshot(
@@ -343,7 +345,9 @@ mod tests {
             parents: BTreeSet::from([operation.id().expect("integration")]),
             publisher: [3; 32],
             body: ThreadOperationBody::Capture(
-                after.encode_current_msgpack().expect("capture").into(),
+                crate::object::thread_replication::AuthoredCapture::local(
+                    after.encode_current_msgpack().expect("capture").into(),
+                ),
             ),
         };
         capture

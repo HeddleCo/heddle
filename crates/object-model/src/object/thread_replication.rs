@@ -5,10 +5,11 @@ pub mod hosted_import;
 pub mod integration;
 pub mod local_integration;
 pub mod metadata;
-
+pub mod source_author;
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+pub use source_author::{AuthoredCapture, SourceAuthor};
 
 use crate::{
     error::{HeddleError, Result},
@@ -107,7 +108,7 @@ pub enum Admission {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "canonical", rename_all = "snake_case")]
 pub enum ThreadOperationBody {
-    Capture(Capture),
+    Capture(AuthoredCapture),
     Integration(Vec<u8>),
     HostedImport(Vec<u8>),
     LocalIntegration(Vec<u8>),
@@ -116,7 +117,8 @@ pub enum ThreadOperationBody {
     Metadata(Vec<u8>),
 }
 
-/// Signed source publication. Per-Thread reference metadata never changes State identity.
+/// Source result shared by authored captures and executor-derived integrations.
+/// Per-Thread reference metadata never changes State identity.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capture {
@@ -185,7 +187,7 @@ impl ThreadOperation {
     /// Uniform source result for capture and both integration authorities.
     pub fn source_result(&self) -> Result<Option<Capture>> {
         match &self.body {
-            ThreadOperationBody::Capture(result) => Ok(Some(result.clone())),
+            ThreadOperationBody::Capture(capture) => Ok(Some(capture.result.clone())),
             ThreadOperationBody::Integration(bytes) => {
                 Ok(Some(integration::HostedIntegration::decode(bytes)?.result))
             }
@@ -203,7 +205,7 @@ impl ThreadOperation {
     pub fn source_state(&self) -> Result<Option<State>> {
         match &self.body {
             ThreadOperationBody::Capture(bytes) => {
-                State::decode_current_msgpack(&bytes.state).map(Some)
+                State::decode_current_msgpack(&bytes.result.state).map(Some)
             }
             ThreadOperationBody::Integration(bytes) => {
                 integration::HostedIntegration::decode(bytes)?
@@ -276,8 +278,9 @@ impl ThreadOperation {
         }
         match &self.body {
             ThreadOperationBody::Capture(bytes) => {
-                let state = State::decode_current_msgpack(&bytes.state)?;
-                if state.encode_current_msgpack()? != bytes.state {
+                bytes.author.validate()?;
+                let state = State::decode_current_msgpack(&bytes.result.state)?;
+                if state.encode_current_msgpack()? != bytes.result.state {
                     return Err(invalid("non-canonical capture"));
                 }
             }
@@ -383,7 +386,13 @@ impl ThreadOperation {
         }
         match &self.body {
             ThreadOperationBody::Capture(bytes) => {
-                let state = State::decode_current_msgpack(&bytes.state)?;
+                bytes.author.validate()?;
+                if let SourceAuthor::Account { spool, .. } = &bytes.author {
+                    if spool.to_string() != genesis.spool {
+                        return Err(invalid("original source author crosses Spool scope"));
+                    }
+                }
+                let state = State::decode_current_msgpack(&bytes.result.state)?;
                 let mut source_parents = BTreeSet::new();
                 for parent in parents {
                     source_parents.insert(

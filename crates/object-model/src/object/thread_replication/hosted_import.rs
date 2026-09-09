@@ -264,10 +264,12 @@ mod tests {
             thread: imported.thread,
             parents: BTreeSet::from([imported.id().expect("parent")]),
             publisher: genesis.creator,
-            body: ThreadOperationBody::Capture(Capture {
-                state: state.encode_current_msgpack().expect("capture"),
-                source_targets: receipt.result.source_targets,
-            }),
+            body: ThreadOperationBody::Capture(
+                crate::object::thread_replication::AuthoredCapture::local(Capture {
+                    state: state.encode_current_msgpack().expect("capture"),
+                    source_targets: receipt.result.source_targets,
+                }),
+            ),
         };
         capture
             .validate_parents(&genesis, std::slice::from_ref(&imported))
@@ -275,7 +277,7 @@ mod tests {
         let ThreadOperationBody::Capture(result) = &mut capture.body else {
             panic!("capture")
         };
-        result.source_targets = None;
+        result.result.source_targets = None;
         assert!(
             capture.validate_parents(&genesis, &[imported]).is_err(),
             "imported references cannot disappear"

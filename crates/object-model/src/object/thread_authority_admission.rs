@@ -6,7 +6,7 @@ use uuid::Uuid;
 use super::{
     CollaborationActor, ContentHash,
     thread_replication::{
-        ThreadOperation, ThreadOperationBody, integration::TrustedHostedExecutor,
+        SourceAuthor, ThreadOperation, ThreadOperationBody, integration::TrustedHostedExecutor,
         metadata::ThreadControl,
     },
 };
@@ -77,18 +77,38 @@ impl ThreadAuthorityAdmission {
                 "authority admission differs from independently pinned executor",
             ));
         }
-        let ThreadOperationBody::Metadata(bytes) = &operation.body else {
-            return Err(invalid(
-                "authority admission requires original Thread metadata",
-            ));
+        let (actor, spool, authority_digest) = match &operation.body {
+            ThreadOperationBody::Metadata(bytes) => {
+                let control = ThreadControl::decode(bytes)?;
+                (control.actor, control.spool, control.authority_digest)
+            }
+            ThreadOperationBody::Capture(capture) => {
+                capture.author.validate()?;
+                let SourceAuthor::Account {
+                    spool,
+                    actor,
+                    authority_digest,
+                    ..
+                } = &capture.author
+                else {
+                    return Err(invalid(
+                        "account admission cannot relabel a local-key source author",
+                    ));
+                };
+                (actor.clone(), *spool, *authority_digest)
+            }
+            _ => {
+                return Err(invalid(
+                    "authority admission requires original authored Thread work",
+                ));
+            }
         };
-        let control = ThreadControl::decode(bytes)?;
         if self.operation != operation.id()?
             || self.thread != operation.thread
             || self.publisher != operation.publisher
-            || self.actor != control.actor
-            || self.spool != control.spool
-            || self.authority_digest != control.authority_digest
+            || self.actor != actor
+            || self.spool != spool
+            || self.authority_digest != authority_digest
         {
             return Err(invalid(
                 "authority admission differs from original operation",
