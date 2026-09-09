@@ -105,6 +105,7 @@ pub struct Session<B: ReplicaStore> {
     announce_generation: i64,
     announce_facet: usize,
     after: Option<ContentHash>,
+    pending_input_bookkeeping: Option<(ThreadFacet, ContentHash)>,
 }
 impl<B: ReplicaStore> Session<B> {
     /// `facets` is the intersection of authenticated admission scope and the
@@ -128,6 +129,7 @@ impl<B: ReplicaStore> Session<B> {
             announce_generation: -1,
             announce_facet: 0,
             after: None,
+            pending_input_bookkeeping: None,
         })
     }
     pub async fn export_facets(&self) -> StoreResult<BTreeSet<ThreadFacet>, B::Error> {
@@ -190,8 +192,6 @@ impl<B: ReplicaStore> Session<B> {
     pub async fn handle(&mut self, frame: Frame) -> StoreResult<Vec<Outbound>, B::Error> {
         self.handle_frame(frame, true).await
     }
-    /// The live driver flushes committed input receipts before maintenance can
-    /// observe a policy change caused by that same input.
     /// Validate the complete wire batch before committing any prefix. Each
     /// returned unit can then receive its own durable acknowledgement.
     pub(crate) fn input_units(&self, frame: Frame) -> StoreResult<Vec<Frame>, B::Error> {
@@ -222,6 +222,19 @@ impl<B: ReplicaStore> Session<B> {
         }
         Ok(units)
     }
+    pub(crate) fn has_input_bookkeeping(&self) -> bool {
+        self.pending_input_bookkeeping.is_some()
+    }
+    pub(crate) async fn finish_input_bookkeeping(&mut self) -> StoreResult<(), B::Error> {
+        if let Some(head) = self.pending_input_bookkeeping.take() {
+            self.replica
+                .remember_peer_heads(self.destination, vec![head])
+                .await
+                .map_err(StoreError::Store)?;
+        }
+        Ok(())
+    }
+    /// Return the committed result before optional peer repair bookkeeping.
     pub(crate) async fn handle_input(
         &mut self,
         frame: Frame,
@@ -303,6 +316,9 @@ impl<B: ReplicaStore> Session<B> {
                 }
             }
             Frame::Operations(batch) => {
+                if self.pending_input_bookkeeping.is_some() {
+                    return Err(Error::Protocol("prior input bookkeeping not completed").into());
+                }
                 self.check_count(batch.operations.len())?;
                 self.check_count(batch.authority_admissions.len())?;
                 let decoded =
@@ -335,13 +351,17 @@ impl<B: ReplicaStore> Session<B> {
                         }
                         Admission::Pending => {
                             receipt.pending_operation_ids.push(id.as_bytes().to_vec());
-                            self.replica
-                                .remember_peer_heads(
-                                    self.destination,
-                                    vec![(operation.facet(), id)],
-                                )
-                                .await
-                                .map_err(StoreError::Store)?;
+                            if maintenance {
+                                self.replica
+                                    .remember_peer_heads(
+                                        self.destination,
+                                        vec![(operation.facet(), id)],
+                                    )
+                                    .await
+                                    .map_err(StoreError::Store)?;
+                            } else {
+                                self.pending_input_bookkeeping = Some((operation.facet(), id));
+                            }
                         }
                         Admission::Rejected(message) => {
                             receipt.rejected.push(rejection(id, message));
@@ -476,6 +496,18 @@ impl<B: ReplicaStore> Session<B> {
             Ok(())
         }
     }
+}
+
+/// Exact completion fields for one durably admitted original operation.
+/// Hosts can bind their acknowledgement exception to these canonical fields.
+pub fn completion_receipt(id: ContentHash, admission: Admission) -> ReplicationReceipt {
+    let mut receipt = ReplicationReceipt::default();
+    match admission {
+        Admission::Accepted => receipt.accepted_operation_ids.push(id.as_bytes().to_vec()),
+        Admission::Pending => receipt.pending_operation_ids.push(id.as_bytes().to_vec()),
+        Admission::Rejected(message) => receipt.rejected.push(rejection(id, message)),
+    }
+    receipt
 }
 
 fn rejection(id: ContentHash, message: String) -> ReplicationRejection {

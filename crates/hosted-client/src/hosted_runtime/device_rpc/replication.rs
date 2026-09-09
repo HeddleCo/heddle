@@ -48,10 +48,14 @@ impl DeviceRpc {
         budget: &mut super::super::hosted::claim_protocol::CallBudget,
     ) -> Result<()> {
         if method == "/heddle.api.v2alpha1.SyncService/PublishContent" {
-            return self.serve_publication_stream(method, context, peer, send, recv, budget).await;
+            return self
+                .serve_publication_stream(method, context, peer, send, recv, budget)
+                .await;
         }
         if method == "/heddle.api.v2alpha1.SyncService/Fetch" {
-            return self.serve_fetch_stream(method, context, peer, send, recv, budget).await;
+            return self
+                .serve_fetch_stream(method, context, peer, send, recv, budget)
+                .await;
         }
         let descriptor = api::v2::method_descriptor(method).context("unknown device stream")?;
         let (mut writer, mut reader) = thread_api::transport::accepted_stream(
@@ -155,6 +159,9 @@ impl DeviceRpc {
                 let session = session.clone();
                 let home = home.clone();
                 async move {
+                    if matches!(activity, Activity::InputConsumed { .. }) {
+                        return Ok(());
+                    }
                     let checked = if matches!(activity, Activity::Idle) {
                         session.check_clock()
                     } else {

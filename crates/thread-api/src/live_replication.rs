@@ -10,7 +10,7 @@ use prost::Message;
 #[cfg(feature = "native")]
 use repo::thread_replication::ThreadReplica;
 use tokio::{
-    sync::{Notify, mpsc, oneshot, watch},
+    sync::{Mutex, Notify, mpsc, oneshot, watch},
     task::{AbortHandle, JoinHandle},
 };
 use tracing::{Instrument, instrument::WithSubscriber};
@@ -35,6 +35,8 @@ pub enum Error<E: std::error::Error + 'static> {
     Backpressure,
     #[error("Thread change feed stopped")]
     FeedClosed,
+    #[error("Thread policy changed; reconnect from durable receipts")]
+    PolicyChanged,
 }
 pub type Result<T, E> = std::result::Result<T, Error<E>>;
 
@@ -126,6 +128,7 @@ pub enum Side {
 }
 impl Side {
     fn decode<E: std::error::Error + 'static>(self, bytes: &[u8]) -> Result<Frame, E> {
+        input::reservation(bytes, 64)?;
         Ok(match self {
             Self::Initiator => Frame::from_response(
                 ReplicateThreadResponse::decode(bytes).map_err(transport::Error::from)?,
@@ -149,17 +152,25 @@ enum Event {
     Maintain,
 }
 
-enum Queued {
-    Item {
-        item: Outbound,
-        immediate_receipt: bool,
-    },
-    Flush(oneshot::Sender<()>),
+struct Queued {
+    item: Outbound,
+    immediate_receipt: bool,
+    generation: u64,
+    delivered: Option<oneshot::Sender<()>>,
 }
-async fn flush<E: std::error::Error + 'static>(queue: &mpsc::Sender<Queued>) -> Result<(), E> {
+async fn completion<E: std::error::Error + 'static>(
+    queue: &mpsc::Sender<Queued>,
+    item: Outbound,
+    generation: u64,
+) -> Result<(), E> {
     let (sent, received) = oneshot::channel();
     queue
-        .send(Queued::Flush(sent))
+        .send(Queued {
+            item,
+            immediate_receipt: true,
+            generation,
+            delivered: Some(sent),
+        })
         .await
         .map_err(|_| Error::Backpressure)?;
     received
@@ -167,22 +178,48 @@ async fn flush<E: std::error::Error + 'static>(queue: &mpsc::Sender<Queued>) -> 
         .map_err(|_| Error::Worker("replication sender stopped before receipt flush".into()))
 }
 fn requires_disclosure_fence<E: std::error::Error + 'static>(frame: &Frame) -> Result<bool, E> {
+    use heddle_object_model::object::thread_replication::{ThreadFacet, ThreadOperation};
     let Frame::Operations(batch) = frame else {
         return Ok(false);
     };
     for record in &batch.operations {
-        // This selects ordering only. Session admission still verifies the
-        // original signature, format, negotiated facet and authority.
-        let operation = heddle_object_model::object::thread_replication::ThreadOperation::decode(
-            &record.canonical_record,
-        )
-        .map_err(crate::replication::Error::from)?;
-        if operation.facet() != heddle_object_model::object::thread_replication::ThreadFacet::Source
-        {
+        let operation = ThreadOperation::decode(&record.canonical_record)
+            .map_err(crate::replication::Error::from)?;
+        // Same-facet causal parents are mandatory in both stores. Any Metadata
+        // parent may settle an already pending policy descendant, so fence the
+        // whole facet, not just a policy-shaped incoming body.
+        if operation.facet() == ThreadFacet::Metadata {
             return Ok(true);
         }
     }
     Ok(false)
+}
+#[path = "live_replication_input.rs"]
+pub mod input;
+fn retained_record_bytes(record: &SignedRecord) -> usize {
+    record.format.capacity()
+        + record.canonical_record.capacity()
+        + record.signatures.capacity() * std::mem::size_of::<RecordSignature>()
+        + record
+            .signatures
+            .iter()
+            .map(|s| s.public_key.capacity() + s.signature.capacity())
+            .sum::<usize>()
+}
+fn retained_frame_bytes(frame: &Frame) -> usize {
+    match frame {
+        Frame::Operations(batch) => {
+            (batch.operations.capacity() + batch.authority_admissions.capacity())
+                * std::mem::size_of::<SignedRecord>()
+                + batch
+                    .operations
+                    .iter()
+                    .chain(&batch.authority_admissions)
+                    .map(retained_record_bytes)
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
 }
 
 /// A permission-only recheck must not wait for an output memory reservation
@@ -193,6 +230,11 @@ pub enum Activity {
     /// caveats only. Hosts must not query the store or reserve output memory.
     /// Every actual input and disclosure still uses the fresh gates below.
     Idle,
+    /// Shrink retained input accounting after consumed decoded allocations have
+    /// been dropped. This is an accounting callback, not authorization.
+    InputConsumed {
+        remaining_bytes: usize,
+    },
     Check,
     /// Advance input admission and bounded control queues. The reader already
     /// accounts for the input; waiting for output memory here could deadlock
@@ -204,6 +246,8 @@ pub enum Activity {
     ReceiptWork,
     /// Recheck only that immediate receipt, never prepared source disclosure.
     ReceiptCheck,
+    /// Post-receipt peer bookkeeping for an already admitted pending input.
+    Bookkeeping,
 }
 
 /// Hosts can charge database work and output memory separately. Finishing the
@@ -279,62 +323,97 @@ where
     let (queue, mut outgoing) = mpsc::channel::<Queued>(256);
     let progress = Arc::new(Notify::new());
     let sender_progress = progress.clone();
+    let (completions, mut incoming_completions) = mpsc::channel::<Queued>(1);
     let sender_session = session.clone();
     let sender_authorize = authorize.clone();
+    let delivery = Arc::new(Mutex::new(()));
+    let sender_delivery = delivery.clone();
+    let (disclosures, mut disclosure_changes) = watch::channel(0u64);
+    let mut disclosure_generation = 0u64;
     let mut sender: JoinHandle<Result<(), B::Error>> = tokio::spawn(
         (async move {
-            while let Some(item) = outgoing.recv().await {
+            let mut deferred = None;
+            let mut priority = None;
+            let mut priority_closed = false;
+            loop {
+                let next = if let Some(item) = priority.take() { Some(item) }
+                    else if let Ok(item) = incoming_completions.try_recv() { Some(item) }
+                    else if let Some(item) = deferred.take() { Some(item) }
+                    else { tokio::select! {
+                        biased;
+                        item = incoming_completions.recv(), if !priority_closed => match item { Some(item) => Some(item), None => { priority_closed = true; continue; } },
+                        item = outgoing.recv() => item,
+                    }};
+                let Some(queued) = next else { break; };
                 sender_progress.notify_one();
-                let (item, immediate_receipt) = match item {
-                    Queued::Flush(done) => {
-                        let _ = done.send(());
-                        continue;
-                    }
-                    Queued::Item {
-                        item,
-                        immediate_receipt,
-                    } => (item, immediate_receipt),
-                };
+                let generation = queued.generation;
+                let immediate_receipt = queued.immediate_receipt;
+                if generation != *disclosure_changes.borrow_and_update() {
+                    continue;
+                }
                 let session = sender_session.clone();
                 let gate = sender_authorize.clone();
-                let activity = gate(if immediate_receipt {
-                    Activity::ReceiptWork
-                } else {
-                    Activity::Work
-                })
-                .await?;
-                let frame = match item {
-                    Outbound::Operation(id) => session.export_operation(id).await?,
-                    Outbound::Frame(frame) => {
-                        if let Frame::Have(have) = &frame {
-                            let allowed = session.export_facets().await?;
-                            for frontier in &have.frontiers {
-                                if !allowed
-                                    .contains(&crate::replication::native_facet(frontier.facet)?)
-                                {
-                                    return Err(transport::Error::Protocol(
-                                        "sharing policy changed before disclosure",
-                                    )
-                                    .into());
-                                }
-                            }
+                // Only cancel an unacquired work reservation. Once admitted,
+                // store implementations may own non-cancellable blocking work;
+                // keep its lease until it completes, then discard stale output.
+                let activity = if immediate_receipt { gate(Activity::ReceiptWork).await? } else {
+                    tokio::select! {
+                        biased;
+                        changed = disclosure_changes.changed() => {
+                            changed.map_err(|_| Error::FeedClosed)?;
+                            continue;
                         }
-                        frame
+                        received = incoming_completions.recv(), if !priority_closed => {
+                            if let Some(received) = received {
+                                deferred = Some(queued);
+                                priority = Some(received);
+                                continue;
+                            }
+                            priority_closed = true;
+                            deferred = Some(queued);
+                            continue;
+                        }
+                        activity = gate(Activity::Work) => activity?,
                     }
                 };
-                // Store reads can yield; verify live rights again at disclosure.
-                let encoded = side.encode(frame);
-                let retained = activity.finish(encoded.len())?;
-                drop(
-                    gate(if immediate_receipt {
-                        Activity::ReceiptCheck
-                    } else {
-                        Activity::Check
-                    })
-                    .await?,
-                );
+                let Queued { item, delivered, .. } = queued;
+                let prepared = async {
+                    let frame = match item {
+                        Outbound::Operation(id) => session.export_operation(id).await?,
+                        Outbound::Frame(frame) => {
+                            if let Frame::Have(have) = &frame {
+                                let allowed = session.export_facets().await?;
+                                for frontier in &have.frontiers {
+                                    if !allowed.contains(&crate::replication::native_facet(
+                                        frontier.facet,
+                                    )?) {
+                                        return Err(transport::Error::Protocol(
+                                            "sharing policy changed before disclosure",
+                                        )
+                                        .into());
+                                    }
+                                }
+                            }
+                            frame
+                        }
+                    };
+                    let encoded = side.encode(frame);
+                    let retained = activity.finish(encoded.len())?;
+                    Ok::<_, Error<B::Error>>((encoded, retained))
+                }.await;
+                if generation != *disclosure_changes.borrow_and_update() { continue; }
+                let (encoded, retained) = prepared?;
+                let delivery_guard = sender_delivery.lock().await;
+                if generation != *disclosure_changes.borrow_and_update() {
+                    continue;
+                }
+                // Permission-only checks cannot acquire work slots while this
+                // mutex is held; an input may already own the same work pool.
+                drop(gate(if immediate_receipt { Activity::ReceiptCheck } else { Activity::Check }).await?);
                 writer.send(encoded).await?;
+                drop(delivery_guard);
                 drop(retained);
+                if let Some(delivered) = delivered { let _ = delivered.send(()); }
             }
             writer.finish().await?;
             Ok(())
@@ -376,26 +455,64 @@ where
                 let preflight = authorize(Activity::Receive).await?;
                 let units = session.input_units(frame)?;
                 drop(preflight);
-                for frame in units {
+                let container_bytes = units.capacity() * std::mem::size_of::<Frame>();
+                let mut units = units.into_iter();
+                while let Some(frame) = units.next() {
                     let immediate_receipt = matches!(&frame, Frame::Operations(_));
-                    if requires_disclosure_fence(&frame)? {
-                        flush(&queue).await?;
-                    }
+                    let policy = requires_disclosure_fence(&frame)?;
                     let activity = authorize(Activity::Receive).await?;
+                    let delivery_guard = if policy {
+                        let guard = delivery.lock().await;
+                        disclosure_generation = disclosure_generation
+                            .checked_add(1)
+                            .ok_or(Error::Backpressure)?;
+                        disclosures.send_replace(disclosure_generation);
+                        Some(guard)
+                    } else {
+                        None
+                    };
                     let output = session.handle_input(frame).await?;
                     drop(activity);
-                    for item in output {
-                        let receipt = immediate_receipt
-                            && matches!(&item, Outbound::Frame(Frame::Receipt(_)));
-                        queue
-                            .try_send(Queued::Item {
-                                item,
-                                immediate_receipt: receipt,
-                            })
-                            .map_err(|_| Error::Backpressure)?;
+                    drop(delivery_guard);
+                    let remaining_bytes = if units.len() == 0 {
+                        0
+                    } else {
+                        container_bytes
+                            + units
+                                .as_slice()
+                                .iter()
+                                .map(retained_frame_bytes)
+                                .sum::<usize>()
+                    };
+                    // IntoIter retains its backing allocation until dropped,
+                    // including after its final element has been consumed.
+                    if units.len() == 0 {
+                        drop(units);
+                        units = Vec::new().into_iter();
                     }
-                    if immediate_receipt {
-                        flush(&queue).await?;
+                    drop(authorize(Activity::InputConsumed { remaining_bytes }).await?);
+                    for item in output {
+                        if immediate_receipt && matches!(&item, Outbound::Frame(Frame::Receipt(_)))
+                        {
+                            completion(&completions, item, disclosure_generation).await?;
+                        } else {
+                            queue
+                                .try_send(Queued {
+                                    item,
+                                    immediate_receipt: false,
+                                    generation: disclosure_generation,
+                                    delivered: None,
+                                })
+                                .map_err(|_| Error::Backpressure)?;
+                        }
+                    }
+                    if session.has_input_bookkeeping() {
+                        let bookkeeping = authorize(Activity::Bookkeeping).await?;
+                        session.finish_input_bookkeeping().await?;
+                        drop(bookkeeping);
+                    }
+                    if policy {
+                        return Err(Error::PolicyChanged);
                     }
                 }
                 continue;
@@ -422,14 +539,17 @@ where
         drop(activity);
         for item in output {
             queue
-                .try_send(Queued::Item {
+                .try_send(Queued {
                     item,
                     immediate_receipt: false,
+                    generation: disclosure_generation,
+                    delivered: None,
                 })
                 .map_err(|_| Error::Backpressure)?;
         }
     }
     drop(queue);
+    drop(completions);
     sender.await.map_err(worker)?
 }
 
@@ -440,3 +560,7 @@ fn worker<E: std::error::Error + 'static>(error: tokio::task::JoinError) -> Erro
 #[cfg(all(test, feature = "native"))]
 #[path = "live_replication_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "native"))]
+#[path = "live_replication_schedule_tests.rs"]
+mod schedule_tests;

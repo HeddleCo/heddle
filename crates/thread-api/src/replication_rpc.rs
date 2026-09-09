@@ -156,9 +156,23 @@ impl Peer {
         let (facets, max_items) =
             opening::validate_ready(&ready, &thread, &destination, &self.facets, 64)?;
         let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?;
-        live_replication::run(session, reader, writer, Side::Initiator, feed, move |_| {
-            authorize()
-        })
+        live_replication::run(
+            session,
+            reader,
+            writer,
+            Side::Initiator,
+            feed,
+            move |activity| {
+                let authorize = authorize.clone();
+                async move {
+                    if matches!(activity, live_replication::Activity::InputConsumed { .. }) {
+                        Ok(())
+                    } else {
+                        authorize().await
+                    }
+                }
+            },
+        )
         .await
     }
 
@@ -275,9 +289,22 @@ impl Peer {
             )
             .await?;
         let session = Session::new(self.local_replica(store), remote_key, facets, max_items)?;
-        live_replication::run(session, reader, writer, Side::Acceptor, feed, move |_| {
-            std::future::ready(authority.recheck(&verified))
-        })
+        live_replication::run(
+            session,
+            reader,
+            writer,
+            Side::Acceptor,
+            feed,
+            move |activity| {
+                std::future::ready(
+                    if matches!(activity, live_replication::Activity::InputConsumed { .. }) {
+                        Ok(())
+                    } else {
+                        authority.recheck(&verified)
+                    },
+                )
+            },
+        )
         .await
     }
 }

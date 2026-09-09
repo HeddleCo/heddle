@@ -785,7 +785,12 @@ async fn committed_receipt_case(with_successor: bool) {
             move |activity| {
                 std::future::ready(
                     if gate_invalidated.load(Ordering::SeqCst)
-                        && !matches!(activity, Activity::ReceiptWork | Activity::ReceiptCheck)
+                        && !matches!(
+                            activity,
+                            Activity::ReceiptWork
+                                | Activity::ReceiptCheck
+                                | Activity::InputConsumed { .. }
+                        )
                     {
                         Err(transport::Error::Protocol("old content epoch invalidated"))
                     } else {
