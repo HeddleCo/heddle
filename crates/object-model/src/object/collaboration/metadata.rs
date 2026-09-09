@@ -48,6 +48,7 @@ pub enum CollaborationRecordKind {
     DeviceRecord,
     Delegation,
     Recovery,
+    OwnerTransition,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]

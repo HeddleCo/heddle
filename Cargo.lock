@@ -2148,16 +2148,18 @@ dependencies = [
  "heddle-repo",
  "heddle-verbs",
  "heddle-wire",
+ "prost-types 0.14.1",
  "serde",
  "serde_json",
  "tempfile",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "heddle-api"
 version = "0.29.0"
-source = "git+https://github.com/HeddleCo/api.git?rev=c5d1c7722e9300b1d2798364ba62222fb46be3b7#c5d1c7722e9300b1d2798364ba62222fb46be3b7"
+source = "git+https://github.com/HeddleCo/api.git?rev=840efd986302a3a83888802279949ef92f60b9ad#840efd986302a3a83888802279949ef92f60b9ad"
 dependencies = [
  "blake3",
  "bytes",
