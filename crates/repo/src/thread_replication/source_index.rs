@@ -6,16 +6,32 @@ use rusqlite::Transaction;
 use super::{Error, Result, hash};
 
 pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS thread_source_revisions(
+ thread BLOB NOT NULL,revision BLOB NOT NULL,PRIMARY KEY(thread,revision));
 CREATE TABLE IF NOT EXISTS thread_source_counts(
  thread BLOB PRIMARY KEY, count INTEGER NOT NULL CHECK(count>=0));
 CREATE TABLE IF NOT EXISTS thread_source_heads(
  thread BLOB NOT NULL, operation BLOB NOT NULL, revision BLOB NOT NULL,
  PRIMARY KEY(thread,operation));
+CREATE TABLE IF NOT EXISTS thread_source_head_revisions(
+ thread BLOB NOT NULL,revision BLOB NOT NULL,references_count INTEGER NOT NULL CHECK(references_count>=0),
+ PRIMARY KEY(thread,revision));
+CREATE TRIGGER IF NOT EXISTS thread_source_head_insert AFTER INSERT ON thread_source_heads
+BEGIN
+ INSERT INTO thread_source_head_revisions(thread,revision,references_count) VALUES(NEW.thread,NEW.revision,1)
+ ON CONFLICT(thread,revision) DO UPDATE SET references_count=references_count+1;
+END;
+CREATE TRIGGER IF NOT EXISTS thread_source_head_delete AFTER DELETE ON thread_source_heads
+BEGIN
+ UPDATE thread_source_head_revisions SET references_count=references_count-1 WHERE thread=OLD.thread AND revision=OLD.revision;
+ DELETE FROM thread_source_head_revisions WHERE thread=OLD.thread AND revision=OLD.revision AND references_count=0;
+END;
 CREATE TRIGGER IF NOT EXISTS thread_source_admitted
 AFTER UPDATE OF status ON operations
 WHEN OLD.status<>1 AND NEW.status=1 AND NEW.facet=1
 BEGIN
- INSERT INTO thread_source_counts(thread,count) VALUES(NEW.thread,1)
+ INSERT OR IGNORE INTO thread_source_revisions(thread,revision) VALUES(NEW.thread,NEW.source_revision);
+ INSERT INTO thread_source_counts(thread,count) SELECT NEW.thread,1 WHERE changes()=1
  ON CONFLICT(thread) DO UPDATE SET count=count+1;
  DELETE FROM thread_source_heads WHERE thread=NEW.thread AND operation IN
  (SELECT parent FROM parents WHERE child=NEW.id);
@@ -25,7 +41,8 @@ END;
 CREATE TRIGGER IF NOT EXISTS thread_source_inserted
 AFTER INSERT ON operations WHEN NEW.status=1 AND NEW.facet=1
 BEGIN
- INSERT INTO thread_source_counts(thread,count) VALUES(NEW.thread,1)
+ INSERT OR IGNORE INTO thread_source_revisions(thread,revision) VALUES(NEW.thread,NEW.source_revision);
+ INSERT INTO thread_source_counts(thread,count) SELECT NEW.thread,1 WHERE changes()=1
  ON CONFLICT(thread) DO UPDATE SET count=count+1;
  DELETE FROM thread_source_heads WHERE thread=NEW.thread AND operation IN
  (SELECT parent FROM parents WHERE child=NEW.id);
@@ -42,7 +59,7 @@ pub(super) fn summary_in(tx: &Transaction<'_>, thread: ContentHash) -> Result<(u
     let count =
         u64::try_from(count).map_err(|_| Error::Invalid("invalid accepted source count".into()))?;
     let mut statement = tx.prepare(
-        "SELECT revision FROM thread_source_heads WHERE thread=?1 ORDER BY operation LIMIT 129",
+        "SELECT revision FROM thread_source_head_revisions WHERE thread=?1 ORDER BY revision LIMIT 129",
     )?;
     let heads = statement
         .query_map([thread.as_bytes()], |row| row.get::<_, Vec<u8>>(0))?
@@ -213,19 +230,45 @@ mod tests {
     fn source_index_counts_distinct_revisions_across_independent_publishers() {
         let (_dir, repository, replica, genesis, signer) = fixture();
         let (first, revision) = capture(&genesis, &signer, "shared capture", None);
-        let second_signer = Ed25519Signer::from_seed(&[202;32]).expect("other publisher");
+        let second_signer = Ed25519Signer::from_seed(&[202; 32]).expect("other publisher");
         let mut same_state = first.verify().expect("verified original");
         same_state.publisher = second_signer.public_key().try_into().expect("key");
-        let second = SignedOperation::sign(&same_state, &second_signer).expect("independently authored original");
+        let second = SignedOperation::sign(&same_state, &second_signer)
+            .expect("independently authored original");
         for record in [&first, &second] {
-            assert_eq!(replica.receive(record, repository.store(), |_| Ok(())).expect("source admitted"), Admission::Accepted);
+            assert_eq!(
+                replica
+                    .receive(record, repository.store(), |_| Ok(()))
+                    .expect("source admitted"),
+                Admission::Accepted
+            );
         }
-        assert_ne!(first.verify().expect("first").id().expect("id"), second.verify().expect("second").id().expect("id"));
+        assert_ne!(
+            first.verify().expect("first").id().expect("id"),
+            second.verify().expect("second").id().expect("id")
+        );
         let projection = replica.projection().expect("revision summary");
-        assert_eq!(projection.capture_count, 1, "CaptureSummary identity is the State revision, not a publisher signature");
-        assert_eq!(projection.source_heads, vec![revision], "one visible revision despite two independently accepted operations");
-        assert!(replica.operation(&first.verify().expect("first").id().expect("id")).expect("lookup").is_some());
-        assert!(replica.operation(&second.verify().expect("second").id().expect("id")).expect("lookup").is_some());
+        assert_eq!(
+            projection.capture_count, 1,
+            "CaptureSummary identity is the State revision, not a publisher signature"
+        );
+        assert_eq!(
+            projection.source_heads,
+            vec![revision],
+            "one visible revision despite two independently accepted operations"
+        );
+        assert!(
+            replica
+                .operation(&first.verify().expect("first").id().expect("id"))
+                .expect("lookup")
+                .is_some()
+        );
+        assert!(
+            replica
+                .operation(&second.verify().expect("second").id().expect("id"))
+                .expect("lookup")
+                .is_some()
+        );
     }
     #[test]
     fn source_index_frontier_bound_rejects_large_concurrency_without_history_walk() {
