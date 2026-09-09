@@ -241,3 +241,150 @@ async fn admitted_input_can_finish_while_the_output_memory_pool_is_full() {
     .await
     .expect("input and output memory returned after cancellation");
 }
+
+struct RecordingWriter(mpsc::Sender<Vec<u8>>);
+impl MessageWriter for RecordingWriter {
+    type Error = transport::Error;
+    async fn send(&mut self, bytes: Vec<u8>) -> std::result::Result<(), Self::Error> {
+        self.0
+            .send(bytes)
+            .await
+            .map_err(|_| transport::Error::Protocol("test receiver closed"))
+    }
+    async fn finish(&mut self) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+    fn abort(&mut self) {}
+}
+
+fn seed_frontiers(
+    replica: &ThreadReplica,
+    repository: &Repository,
+    signer: &Ed25519Signer,
+    genesis: &ThreadGenesis,
+    count: usize,
+) {
+    use objects::object::{
+        Attribution, Principal, State, Tree,
+        thread_replication::{ThreadOperation, ThreadOperationBody},
+    };
+    replica
+        .set_sharing([7; 32], &[ThreadFacet::Source].into())
+        .expect("explicit source sharing");
+    for index in 0..count {
+        let state = State::new_snapshot(
+            Tree::new().hash(),
+            vec![genesis.base],
+            Attribution::human(Principal::new(
+                format!("Agent {index}"),
+                "agent@example.test",
+            )),
+        );
+        let operation = ThreadOperation {
+            version: 1,
+            thread: replica.thread_id(),
+            parents: Default::default(),
+            publisher: genesis.creator,
+            body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("source")),
+        };
+        replica
+            .receive(
+                &crypto::thread_operation::SignedOperation::sign(&operation, signer)
+                    .expect("signed capture"),
+                repository.store(),
+                |_| Ok(()),
+            )
+            .expect("accepted capture");
+    }
+}
+
+fn fixture(count: usize) -> (tempfile::TempDir, Repository, ThreadReplica) {
+    let directory = tempfile::TempDir::new().expect("local replica");
+    let repository = Repository::init_default(directory.path()).expect("repository");
+    let signer = Ed25519Signer::from_seed(&[17; 32]).expect("creator");
+    let genesis = ThreadGenesis {
+        version: 1,
+        spool: "01980000-0000-7000-8000-000000000001".into(),
+        parent: None,
+        base: repository.head().expect("HEAD").expect("initial state"),
+        name: "idle".into(),
+        intent: "push on durable changes".into(),
+        creator: signer.public_key().try_into().expect("key"),
+        nonce: vec![93],
+    };
+    let replica = ThreadReplica::create(
+        repository.heddle_dir(),
+        &SignedGenesis::sign(&genesis, &signer).expect("proof"),
+    )
+    .expect("replica");
+    seed_frontiers(&replica, &repository, &signer, &genesis, count);
+    (directory, repository, replica)
+}
+
+#[tokio::test]
+async fn unchanged_replication_sends_no_frames_or_database_activity_after_initial_frontiers() {
+    let (_directory, repository, replica) = fixture(1);
+    let (_changes, receiver) = watch::channel(Some(1));
+    let feed = Feed::from_changes(replica.thread_id(), receiver);
+    let session = Session::new(
+        LocalReplica::new(replica, Arc::new(repository.store().clone())),
+        [7; 32],
+        [ThreadFacet::Source].into(),
+        1,
+    )
+    .expect("session");
+    let (writer, mut frames) = mpsc::channel(4);
+    let work = Arc::new(AtomicUsize::new(0));
+    let measured = work.clone();
+    let task = tokio::spawn(async move {
+        run(
+            session,
+            QuietReader,
+            RecordingWriter(writer),
+            Side::Acceptor,
+            &feed,
+            move |activity| {
+                if matches!(
+                    activity,
+                    Activity::Check | Activity::Receive | Activity::Work
+                ) {
+                    measured.fetch_add(1, Ordering::SeqCst);
+                }
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+    });
+    let frame = tokio::time::timeout(Duration::from_secs(2), frames.recv())
+        .await
+        .expect("initial frontier")
+        .expect("frame");
+    let Frame::Have(have) = Side::Initiator
+        .decode::<crate::replication::native::Error>(&frame)
+        .expect("frontier frame")
+    else {
+        panic!("Have")
+    };
+    assert_eq!(
+        have.frontiers
+            .iter()
+            .map(|frontier| frontier.heads.len())
+            .sum::<usize>(),
+        1
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let baseline = work.load(Ordering::SeqCst);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(2200), frames.recv())
+            .await
+            .is_err(),
+        "unchanged peers must not send empty Have heartbeats"
+    );
+    assert_eq!(
+        work.load(Ordering::SeqCst),
+        baseline,
+        "idle time must not enter any database-work authorization gate"
+    );
+    task.abort();
+    assert!(task.await.expect_err("cancelled").is_cancelled());
+}
