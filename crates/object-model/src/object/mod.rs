@@ -46,6 +46,7 @@ mod structured_conflict;
 #[cfg(test)]
 mod structured_conflict_tests;
 mod suggestion_core;
+pub mod thread_authority_admission;
 mod timeline;
 mod tree;
 mod tree_canonical;

@@ -391,6 +391,7 @@ impl<B: ReplicaStore> Session<B> {
             return Err(Error::Protocol("operation is outside current sharing policy").into());
         }
         Ok(Frame::Operations(ReplicationOperations {
+            authority_admissions: Vec::new(),
             operations: vec![SignedRecord {
                 format: OPERATION_FORMAT.into(),
                 canonical_record: record.canonical,

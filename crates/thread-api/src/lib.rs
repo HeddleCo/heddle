@@ -3,6 +3,8 @@
 //! discovery belong to the application; this crate never obtains a Weft token.
 #[cfg(feature = "native")]
 pub mod authority;
+#[cfg(feature = "replication")]
+pub mod authority_admission;
 #[cfg(feature = "semantic-analysis")]
 pub mod behavior;
 #[cfg(feature = "replication")]

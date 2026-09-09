@@ -522,6 +522,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
             .send(&ReplicateThreadRequest {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
+                        authority_admissions: Vec::new(),
                         operations: vec![SignedRecord {
                             format: OPERATION_FORMAT.into(),
                             canonical_record: incoming.canonical,
@@ -644,6 +645,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
             .send(&ReplicateThreadRequest {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
+                        authority_admissions: Vec::new(),
                         operations: vec![SignedRecord {
                             format: OPERATION_FORMAT.into(),
                             canonical_record: signed.canonical.clone(),
@@ -727,6 +729,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
             .send(&ReplicateThreadRequest {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
+                        authority_admissions: Vec::new(),
                         operations: vec![SignedRecord {
                             format: OPERATION_FORMAT.into(),
                             canonical_record: unowned.canonical,
