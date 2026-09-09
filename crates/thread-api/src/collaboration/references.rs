@@ -88,6 +88,11 @@ pub fn mention(value: &EntityRef) -> Result<Mention, Error> {
             Entity::SignupInvitation(r) => record(r, Kind::SignupInvitation)?,
             Entity::TimelineEvent(r) => record(r, Kind::TimelineEvent)?,
             Entity::Artifact(r) => record(r, Kind::Artifact)?,
+            Entity::Mount(r) => record(r, Kind::Mount)?,
+            Entity::SupportAccess(r) => record(r, Kind::SupportAccess)?,
+            Entity::DeviceRecord(r) => record(r, Kind::DeviceRecord)?,
+            Entity::Delegation(r) => record(r, Kind::Delegation)?,
+            Entity::Recovery(r) => record(r, Kind::Recovery)?,
             Entity::Bookmark(_) => {
                 return Err(Error::Protocol(
                     "bookmarks are account-private; mention their Spool or Thread instead",
@@ -170,6 +175,11 @@ pub fn mention_ref(value: &Mention) -> EntityRef {
                 Kind::SignupInvitation => Entity::SignupInvitation(r),
                 Kind::TimelineEvent => Entity::TimelineEvent(r),
                 Kind::Artifact => Entity::Artifact(r),
+                Kind::Mount => Entity::Mount(r),
+                Kind::SupportAccess => Entity::SupportAccess(r),
+                Kind::DeviceRecord => Entity::DeviceRecord(r),
+                Kind::Delegation => Entity::Delegation(r),
+                Kind::Recovery => Entity::Recovery(r),
             }
         }
     };
@@ -423,6 +433,11 @@ mod tests {
             Kind::SignupInvitation,
             Kind::TimelineEvent,
             Kind::Artifact,
+            Kind::Mount,
+            Kind::SupportAccess,
+            Kind::DeviceRecord,
+            Kind::Delegation,
+            Kind::Recovery,
         ] {
             for spool in [None, Some(spool)] {
                 mentions.push(Mention::Record {
@@ -432,7 +447,7 @@ mod tests {
                 });
             }
         }
-        assert_eq!(mentions.len(), 42);
+        assert_eq!(mentions.len(), 52);
         for original in mentions {
             assert_eq!(
                 mention(&mention_ref(&original)).expect("typed mention"),

@@ -43,6 +43,11 @@ pub enum CollaborationRecordKind {
     SignupInvitation,
     TimelineEvent,
     Artifact,
+    Mount,
+    SupportAccess,
+    DeviceRecord,
+    Delegation,
+    Recovery,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
