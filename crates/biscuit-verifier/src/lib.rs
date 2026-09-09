@@ -22,12 +22,14 @@ pub mod key_delegation;
 pub mod edge;
 pub mod envelope;
 pub mod facts;
+pub mod inspection;
 pub mod resource;
 
 #[cfg(test)]
 mod grant_envelope_conformance_tests;
 
 pub use facts::{ActorClaims, BiscuitFacts, Right};
+pub use inspection::{InspectedCredential, inspect_verified_credential};
 
 /// Versioned domain for offline PoP-key delegation.
 pub const POP_DELEGATION_DOMAIN: &[u8] = b"heddle-pop-delegation-v1\0";
