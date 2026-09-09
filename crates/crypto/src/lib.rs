@@ -13,6 +13,7 @@ mod state_signature;
 pub mod thread_authority_admission;
 pub mod thread_genesis_admission;
 pub mod thread_operation;
+pub mod thread_ownership_claim;
 
 #[cfg(test)]
 mod behavior_tests;

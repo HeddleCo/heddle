@@ -19,6 +19,9 @@ mod policy_sync;
 pub mod projection;
 mod source_index;
 pub mod source_authority;
+pub mod ownership_claim;
+#[cfg(test)]
+mod ownership_claim_tests;
 pub mod source_publication;
 mod source_possession;
 mod source_transfer;
@@ -101,6 +104,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
             CREATE TABLE IF NOT EXISTS sharing(thread BLOB NOT NULL, destination BLOB NOT NULL, facets INTEGER NOT NULL, version BLOB NOT NULL, PRIMARY KEY(thread,destination));
             CREATE TABLE IF NOT EXISTS thread_control_heads(thread BLOB NOT NULL,property TEXT NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,property,operation));
             CREATE TABLE IF NOT EXISTS thread_control_commands(thread BLOB NOT NULL,publisher BLOB NOT NULL,command BLOB NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,publisher,command));")?;
+    connection.execute_batch(ownership_claim::SCHEMA)?;
     connection.execute_batch(collaboration::SCHEMA)?;
     connection.execute_batch(collaboration_search::SCHEMA)?;
     connection.execute_batch(source_index::SCHEMA)?;
@@ -278,7 +282,32 @@ impl ThreadReplica {
             }
             _ => return Err(Error::Invalid("incomplete stored genesis admission".into())),
         };
+        let mut ownership_claims = Vec::new();
+        let mut ownership_claim_admissions = Vec::new();
+        for (claim, admission) in self.ownership_claims_with_admission()? {
+            let value = claim.verify()?;
+            value.validate_genesis(&genesis)?;
+            ownership_claims.push(wire::SignedRecord {
+                format: objects::object::thread_replication::ownership_claim::FORMAT.into(),
+                canonical_record: claim.canonical,
+                signatures: vec![
+                    wire::RecordSignature { public_key: value.prior_local_key.to_vec(), signature: claim.local_signature },
+                    wire::RecordSignature { public_key: value.accepting_publisher.to_vec(), signature: claim.acceptance_signature },
+                ],
+            });
+            if let Some(receipt) = admission {
+                let statement = receipt.verify_signature()?;
+                statement.authorize_claim(&value, &genesis, &self.authority_admission_trust(&receipt)?)?;
+                ownership_claim_admissions.push(wire::SignedRecord {
+                    format: objects::object::thread_authority_admission::FORMAT.into(),
+                    canonical_record: receipt.canonical,
+                    signatures: vec![wire::RecordSignature {public_key:statement.executor.to_vec(),signature:receipt.signature}],
+                });
+            }
+        }
         Ok(wire::ThreadGenesisRecord {
+            ownership_claims,
+            ownership_claim_admissions,
             genesis: Some(wire::SignedRecord {
                 format: objects::object::thread_replication::GENESIS_FORMAT.into(),
                 canonical_record: signed.canonical,
@@ -486,7 +515,7 @@ impl ThreadReplica {
         // The host's original-author gate ran before any immutable bytes were
         // installed. Persist its successful admission in this same transaction;
         // missing causal parents may arrive after the original credential expires.
-        if matches!(operation.body, ThreadOperationBody::Metadata(_)) || matches!(&operation.body, ThreadOperationBody::Capture(capture) if matches!(capture.author, objects::object::thread_replication::SourceAuthor::Account { .. })) {
+        if objects::object::thread_authority_admission::OriginalAuthorityBinding::from_operation(&operation)?.is_some() {
             tx.execute(
                 "UPDATE operations SET authority_admitted=1 WHERE id=?1 AND authority_admitted=0",
                 [id.as_bytes()],

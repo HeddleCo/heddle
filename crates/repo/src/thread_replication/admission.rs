@@ -35,6 +35,15 @@ impl ThreadReplica {
         original: &SignedOperation,
         receipt: &SignedAuthorityAdmission,
     ) -> Result<()> {
+        receipt.verify(original, &self.authority_admission_trust(receipt)?)?;
+        Ok(())
+    }
+    /// Resolve the receiver-owned executor pin for any typed admission subject.
+    /// Incoming testimony never inserts or replaces a trust record.
+    pub fn authority_admission_trust(
+        &self,
+        receipt: &SignedAuthorityAdmission,
+    ) -> Result<TrustedHostedExecutor> {
         let statement = receipt.verify_signature()?;
         if self.genesis()?.spool != statement.spool.to_string() {
             return Err(Error::Invalid(
@@ -59,8 +68,7 @@ impl ThreadReplica {
             spool_genesis: super::hash(&genesis)?,
             executor: statement.executor,
         };
-        receipt.verify(original, &trust)?;
-        Ok(())
+        Ok(trust)
     }
     /// One indexed statement returns original bytes, status and retained proof.
     pub fn operation_with_authority_admission(

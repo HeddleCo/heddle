@@ -166,6 +166,7 @@ fn verify_original(
             | "/heddle.api.v2alpha1.ThreadService/StartThread"
             | "/heddle.api.v2alpha1.IntegrationService/ImportSource"
             | "/heddle.api.v2alpha1.SyncService/PublishContent"
+            | "/heddle.api.v2alpha1.ThreadService/ClaimThreadOwnership"
             | "/heddle.api.v2alpha1.ThreadService/RecordReview"
             | "/heddle.api.v2alpha1.EvidenceService/RecordEvidence"
             | "/heddle.api.v2alpha1.EvidenceService/AcknowledgeCheck"

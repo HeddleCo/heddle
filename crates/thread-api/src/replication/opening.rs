@@ -146,6 +146,7 @@ pub fn verify_genesis_record(record: &ThreadGenesisRecord, thread: &ThreadRef) -
         }
         _ => {}
     }
+    super::ownership::verify_claims(record, &genesis)?;
     Ok(genesis)
 }
 
@@ -282,6 +283,7 @@ mod tests {
         let open = ReplicationOpen {
             thread: Some(thread.clone()),
             thread_genesis: Some(ThreadGenesisRecord {
+            ownership_claims: vec![], ownership_claim_admissions: vec![],
                 genesis: Some(signed),
                 creator_authority: vec![],
                 admission: None,

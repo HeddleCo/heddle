@@ -125,11 +125,11 @@ mod tests {
             executor: executor.public_key().try_into().expect("key"),
         };
         let receipt = ThreadAuthorityAdmission {
-            version: 1,
+            version: 2,
             spool: trust.spool,
             spool_genesis: trust.spool_genesis,
             thread: operation.thread,
-            operation: operation.id().expect("ID"),
+            subject: objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(operation.id().expect("ID")),
             actor: control.actor,
             publisher: operation.publisher,
             authority_digest: control.authority_digest,
@@ -172,7 +172,7 @@ mod tests {
         }
         let mut mutations = Vec::new();
         let mut changed = value.clone();
-        changed.operation = ContentHash::from_bytes([47; 32]);
+        changed.subject = objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(ContentHash::from_bytes([47; 32]));
         mutations.push(changed);
         let mut changed = value.clone();
         changed.thread = ContentHash::from_bytes([48; 32]);
@@ -254,7 +254,8 @@ pub fn match_batch(batch: &wire::ReplicationOperations) -> Result<Vec<crate::rep
     for record in &batch.authority_admissions {
         let signed = decode(record)?;
         let statement = signed.verify_signature().map_err(|_| Error::Protocol("invalid authority admission signature"))?;
-        if receipts.insert(statement.operation, (signed, statement)).is_some() {
+        let operation_id = statement.subject.operation_id().ok_or(Error::Protocol("operation batch cannot carry ownership claim admission"))?;
+        if receipts.insert(operation_id, (signed, statement)).is_some() {
             return Err(Error::Protocol("duplicate authority admission sidecar"));
         }
     }

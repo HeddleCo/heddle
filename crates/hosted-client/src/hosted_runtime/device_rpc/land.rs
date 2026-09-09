@@ -20,7 +20,7 @@ use repo::thread_replication::ThreadReplica;
 use super::{
     DeviceRpc,
     auth::Session,
-    checkout::{decode_token, revision, signer, thread, verified_lease},
+    checkout::{decode_token, revision, thread, verified_lease},
     read_bounded,
 };
 
@@ -56,7 +56,7 @@ impl DeviceRpc {
             .heddle_dir
             .join("device-checkout-commands")
             .join(format!("{}.landing", request.client_operation_id));
-        let signer = signer(&checkout.repository)?;
+        let signer = checkout.repository.native_thread_signer(&target_replica)?;
         let operation = if path.exists() {
             let operation = ThreadOperation::decode(&read_bounded(&path, 256 * 1024)?)?;
             let receipt = operation
@@ -147,6 +147,8 @@ impl DeviceRpc {
                 .cloned()
                 .unwrap_or_default();
             let receipt = LocalIntegration {
+                author: target_replica.source_author_for(
+                    &signer.public_key().try_into().map_err(|_| anyhow::anyhow!("invalid publisher key"))?)?,
                 version: 1,
                 spool: session.spool.id,
                 device: signer

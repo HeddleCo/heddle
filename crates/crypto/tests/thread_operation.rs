@@ -187,11 +187,11 @@ fn retained_account_source_admission_requires_exact_original_and_pinned_executor
         executor: executor.public_key().try_into().expect("executor key"),
     };
     let statement = ThreadAuthorityAdmission {
-        version: 1,
+        version: 2,
         spool,
         spool_genesis: trust.spool_genesis,
         thread: operation.thread,
-        operation: operation.id().expect("operation ID"),
+        subject: heddle_object_model::object::thread_authority_admission::OriginalAuthoritySubject::Operation(operation.id().expect("operation ID")),
         actor,
         publisher: operation.publisher,
         authority_digest,
@@ -218,7 +218,7 @@ fn retained_account_source_admission_requires_exact_original_and_pinned_executor
     capture.author = SourceAuthor::LocalKey;
     let original_local = SignedOperation::sign(&local, &signer).expect("local key capture");
     let mut relabeled = statement;
-    relabeled.operation = local.id().expect("local operation");
+    relabeled.subject = heddle_object_model::object::thread_authority_admission::OriginalAuthoritySubject::Operation(local.id().expect("local operation"));
     let false_account = SignedAuthorityAdmission::sign(&relabeled, &executor)
         .expect("signed but wrong author type");
     assert!(

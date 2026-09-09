@@ -153,7 +153,7 @@ impl ThreadReplica {
         owned_local_key: Option<&[u8; 32]>,
     ) -> Result<bool> {
         use objects::object::thread_replication::{GenesisOwner, metadata::Control};
-        let owner = self.genesis()?.owner;
+        let owner = self.effective_owner()?;
         let is_owner = match owner {
             GenesisOwner::Account(owner) => owner == principal && !principal.is_nil(),
             GenesisOwner::LocalKey(key) => owned_local_key == Some(&key),
@@ -189,7 +189,7 @@ impl ThreadReplica {
     pub fn original_authority_admitted(&self, signed: &SignedOperation) -> Result<bool> {
         let operation = signed.verify()?;
         if operation.thread != self.thread
-            || !(matches!(operation.body, ThreadOperationBody::Metadata(_)) || matches!(&operation.body, ThreadOperationBody::Capture(capture) if matches!(capture.author, objects::object::thread_replication::SourceAuthor::Account { .. })))
+            || objects::object::thread_authority_admission::OriginalAuthorityBinding::from_operation(&operation)?.is_none()
         {
             return Ok(false);
         }

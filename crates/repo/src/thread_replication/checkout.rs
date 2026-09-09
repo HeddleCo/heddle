@@ -380,14 +380,7 @@ impl ThreadCheckout {
             None => {
                 let capture = objects::object::thread_replication::AuthoredCapture {
                     result: replica.prepare_capture(&self.repository, &state)?,
-                    author: self.repository.native_capture_author(
-                        &signer
-                            .public_key()
-                            .try_into()
-                            .map_err(|_| Error::Invalid("source signer length".into()))?,
-                        uuid::Uuid::parse_str(&replica.genesis()?.spool)
-                            .map_err(|error| Error::Invalid(error.to_string()))?,
-                    )?,
+                    author: replica.source_author_for(&signer.public_key().try_into().map_err(|_| Error::Invalid("source signer length".into()))?)?,
                 };
                 journal.capture = Some(capture.clone());
                 journal.resulting = Some(state.id());

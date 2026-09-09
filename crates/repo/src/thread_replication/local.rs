@@ -37,16 +37,6 @@ impl Repository {
         }
         Ok(false)
     }
-    /// Read the exact original signer's retained enrollment proof without any
-    /// hosted request. The caller's browser/agent credential is never substituted.
-    pub fn native_capture_author(
-        &self,
-        publisher: &[u8; 32],
-        spool: uuid::Uuid,
-    ) -> Result<objects::object::thread_replication::SourceAuthor> {
-        crate::identity::source_author::load(&crate::identity::heddle_home_dir(), publisher, spool)
-            .map_err(|error| Error::Invalid(error.to_string()))
-    }
     /// Stable local/hosted spool identity, created before the first Thread.
     pub fn native_spool_id(&self) -> Result<uuid::Uuid> {
         let _guard = self.native_identity_lock()?;
@@ -93,6 +83,31 @@ impl Repository {
             .write()
             .map_err(|error| Error::Invalid(error.to_string()))
     }
+    /// Enrollment never changes the signer of an unclaimed local Thread.
+    pub fn native_thread_signer(&self, replica: &ThreadReplica) -> Result<Ed25519Signer> {
+        self.native_thread_signer_at(replica, &crate::identity::heddle_home_dir())
+    }
+    pub(crate) fn native_thread_signer_at(&self, replica: &ThreadReplica, home: &std::path::Path) -> Result<Ed25519Signer> {
+        let objects::object::thread_replication::GenesisOwner::LocalKey(owner) = replica.effective_owner()? else {
+            let pem = match crate::identity::load_device(&home.join(crate::identity::DEVICE_IDENTITY_FILE))? {
+                Some(device) => device.private_key_pem,
+                None => crate::identity::load_local(&self.heddle_dir().join(crate::identity::LOCAL_IDENTITY_FILE))?
+                    .ok_or_else(||Error::Invalid("account Thread signing key is not available".into()))?.private_key_pem,
+            };
+            return Ok(Ed25519Signer::from_pem(&pem)?);
+        };
+        let local = crate::identity::load_local(&self.heddle_dir().join(crate::identity::LOCAL_IDENTITY_FILE))?;
+        if let Some(local) = local {
+            let signer = Ed25519Signer::from_pem(&local.private_key_pem)?;
+            if signer.public_key() == owner { return Ok(signer); }
+        }
+        if let Some(device) = crate::identity::load_device(&home.join(crate::identity::DEVICE_IDENTITY_FILE))? {
+            let signer = Ed25519Signer::from_pem(&device.private_key_pem)?;
+            if signer.public_key() == owner { return Ok(signer); }
+        }
+        Err(Error::Invalid("unclaimed Thread requires its retained original owner key".into()))
+    }
+
     fn native_signer(&self) -> Result<Ed25519Signer> {
         let pem = match crate::identity::load_device(&crate::identity::device_identity_path())? {
             Some(device) => device.private_key_pem,
@@ -285,7 +300,7 @@ impl Repository {
             }
             parents.extend(operations);
         }
-        let signer = self.native_signer()?;
+        let signer = self.native_thread_signer(&replica)?;
         let operation = ThreadOperation {
             version: 1,
             thread: replica.thread_id(),
@@ -297,14 +312,8 @@ impl Repository {
             body: ThreadOperationBody::Capture(
                 objects::object::thread_replication::AuthoredCapture {
                     result: replica.prepare_capture(self, &state)?,
-                    author: self.native_capture_author(
-                        &signer
-                            .public_key()
-                            .try_into()
-                            .map_err(|_| Error::Invalid("source signer length".into()))?,
-                        uuid::Uuid::parse_str(&replica.genesis()?.spool)
-                            .map_err(|error| Error::Invalid(error.to_string()))?,
-                    )?,
+                    author: replica.source_author_for(&signer.public_key().try_into()
+                        .map_err(|_| Error::Invalid("source signer length".into()))?)?,
                 },
             ),
         };

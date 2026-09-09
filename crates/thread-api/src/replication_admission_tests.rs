@@ -98,7 +98,7 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
     let original = SignedOperation::sign(&operation, &author).expect("original agent signature");
     let id = operation.id().expect("ID");
     let statement = ThreadAuthorityAdmission {
-        version: 1,
+        version: 2,
         spool,
         spool_genesis: ContentHash::compute_typed(
             SPOOL_GENESIS_TRUST_FORMAT,
@@ -109,7 +109,7 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
                 .encode_to_vec(),
         ),
         thread: operation.thread,
-        operation: id,
+        subject: objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(id),
         actor: control.actor,
         publisher: operation.publisher,
         authority_digest: control.authority_digest,
@@ -118,7 +118,7 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
     };
     let receipt = SignedAuthorityAdmission::sign(&statement, &executor).expect("first admission");
     let mut unknown = statement;
-    unknown.operation = ContentHash::from_bytes([87; 32]);
+    unknown.subject = objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(ContentHash::from_bytes([87; 32]));
     let unmatched =
         crate::authority_admission::sign(&unknown, &executor).expect("valid unmatched testimony");
     left.receive_with_authority_admission(&original, &receipt, left_repo.store(), |_| Ok(()))

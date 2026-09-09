@@ -72,7 +72,7 @@ pub fn replay_response(directory: &Path, command: &Command<'_>) -> Result<Option
     let connection = crate::local_metadata::open_existing(directory)?.context("metadata absent")?;
     replay(&connection, command)
 }
-fn replay(connection: &Connection, command: &Command<'_>) -> Result<Option<Vec<u8>>> {
+pub(crate) fn replay(connection: &Connection, command: &Command<'_>) -> Result<Option<Vec<u8>>> {
     let prior: Option<(String,Vec<u8>,Vec<u8>,bool)> = connection.query_row("SELECT verb,request_hash,response,pending FROM operation_receipts WHERE namespace=?1 AND operation_id=?2",params![command.namespace,command.id.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
     match prior {
         Some((method, hash, response, pending)) => {
@@ -85,7 +85,7 @@ fn replay(connection: &Connection, command: &Command<'_>) -> Result<Option<Vec<u
         None => Ok(None),
     }
 }
-fn receipt(connection: &Connection, command: &Command<'_>, response: &[u8]) -> Result<()> {
+pub(crate) fn receipt(connection: &Connection, command: &Command<'_>, response: &[u8]) -> Result<()> {
     connection.execute("INSERT INTO operation_receipts(namespace,operation_id,record_id,verb,request_hash,response,created_at,pending) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",params![command.namespace,command.id.to_string(),crate::operation_dedup::receipt_record_key(command.namespace,command.id).as_bytes(),command.method,command.request_hash.as_slice(),response,chrono::Utc::now().timestamp()])?;
     Ok(())
 }

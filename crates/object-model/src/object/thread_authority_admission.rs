@@ -12,8 +12,51 @@ use super::{
 };
 use crate::error::{HeddleError, Result};
 
-pub const FORMAT: &str = "heddle-thread-authority-admission-v1";
+pub const FORMAT: &str = "heddle-thread-authority-admission-v2";
 pub const MAX_BYTES: usize = 2048;
+
+/// An admission never changes kind when relayed: a claim receipt cannot
+/// authorize a source operation with coincidentally equal bytes or identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum OriginalAuthoritySubject {
+    Operation(ContentHash),
+    OwnershipClaim(ContentHash),
+}
+impl OriginalAuthoritySubject {
+    pub fn id(&self) -> ContentHash {
+        match self { Self::Operation(id) | Self::OwnershipClaim(id) => *id }
+    }
+    pub fn operation_id(&self) -> Option<ContentHash> {
+        match self { Self::Operation(id) => Some(*id), Self::OwnershipClaim(_) => None }
+    }
+    pub fn claim_id(&self) -> Option<ContentHash> {
+        match self { Self::OwnershipClaim(id) => Some(*id), Self::Operation(_) => None }
+    }
+}
+
+/// Signed original account identity shared by fresh admission and retained
+/// testimony. Local-key authors have no account binding to relabel.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OriginalAuthorityBinding {
+    pub spool: Uuid,
+    pub actor: CollaborationActor,
+    pub authority_digest: ContentHash,
+}
+impl OriginalAuthorityBinding {
+    pub fn from_operation(operation: &ThreadOperation) -> Result<Option<Self>> {
+        if let ThreadOperationBody::Metadata(bytes) = &operation.body {
+            let control = ThreadControl::decode(bytes)?;
+            return Ok(Some(Self { spool: control.spool, actor: control.actor, authority_digest: control.authority_digest }));
+        }
+        match operation.source_author()? {
+            Some(SourceAuthor::Account { spool, actor, authority_digest, authority }) => {
+                SourceAuthor::Account { spool, actor: actor.clone(), authority_digest, authority }.validate()?;
+                Ok(Some(Self { spool, actor, authority_digest }))
+            }
+            Some(SourceAuthor::LocalKey) | None => Ok(None),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,7 +65,7 @@ pub struct ThreadAuthorityAdmission {
     pub spool: Uuid,
     pub spool_genesis: ContentHash,
     pub thread: ContentHash,
-    pub operation: ContentHash,
+    pub subject: OriginalAuthoritySubject,
     pub actor: CollaborationActor,
     pub publisher: [u8; 32],
     pub authority_digest: ContentHash,
@@ -33,7 +76,7 @@ pub struct ThreadAuthorityAdmission {
 }
 impl ThreadAuthorityAdmission {
     pub fn encode(&self) -> Result<Vec<u8>> {
-        if self.version != 1
+        if self.version != 2
             || self.spool.is_nil()
             || self.actor.principal_id.is_nil()
             || self.publisher == [0; 32]
@@ -77,42 +120,39 @@ impl ThreadAuthorityAdmission {
                 "authority admission differs from independently pinned executor",
             ));
         }
-        let (actor, spool, authority_digest) = match &operation.body {
-            ThreadOperationBody::Metadata(bytes) => {
-                let control = ThreadControl::decode(bytes)?;
-                (control.actor, control.spool, control.authority_digest)
-            }
-            ThreadOperationBody::Capture(capture) => {
-                capture.author.validate()?;
-                let SourceAuthor::Account {
-                    spool,
-                    actor,
-                    authority_digest,
-                    ..
-                } = &capture.author
-                else {
-                    return Err(invalid(
-                        "account admission cannot relabel a local-key source author",
-                    ));
-                };
-                (actor.clone(), *spool, *authority_digest)
-            }
-            _ => {
-                return Err(invalid(
-                    "authority admission requires original authored Thread work",
-                ));
-            }
-        };
-        if self.operation != operation.id()?
+        let binding = OriginalAuthorityBinding::from_operation(operation)?.ok_or_else(||
+            invalid("account admission requires original authored account work"))?;
+        if self.subject != OriginalAuthoritySubject::Operation(operation.id()?)
             || self.thread != operation.thread
             || self.publisher != operation.publisher
-            || self.actor != actor
-            || self.spool != spool
-            || self.authority_digest != authority_digest
+            || self.actor != binding.actor
+            || self.spool != binding.spool
+            || self.authority_digest != binding.authority_digest
         {
             return Err(invalid(
                 "authority admission differs from original operation",
             ));
+        }
+        Ok(())
+    }
+    pub fn authorize_claim(
+        &self,
+        claim: &super::thread_replication::ownership_claim::ThreadOwnershipClaim,
+        genesis: &super::thread_replication::ThreadGenesis,
+        trust: &TrustedHostedExecutor,
+    ) -> Result<()> {
+        self.encode()?;
+        claim.validate_genesis(genesis)?;
+        let SourceAuthor::Account { spool, actor, authority_digest, .. } = &claim.acceptance else {
+            return Err(invalid("claim admission requires signed account acceptance"));
+        };
+        if self.spool != trust.spool || self.spool_genesis != trust.spool_genesis || self.executor != trust.executor {
+            return Err(invalid("authority admission differs from independently pinned executor"));
+        }
+        if self.subject != OriginalAuthoritySubject::OwnershipClaim(claim.id()?)
+            || self.thread != claim.thread || self.publisher != claim.accepting_publisher
+            || self.actor != *actor || self.spool != *spool || self.authority_digest != *authority_digest {
+            return Err(invalid("authority admission differs from original ownership claim"));
         }
         Ok(())
     }

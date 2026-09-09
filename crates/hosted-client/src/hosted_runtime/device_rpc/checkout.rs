@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v2alpha1::*;
+#[cfg(test)]
 use crypto::Ed25519Signer;
 use objects::{
     object::{ContentHash, StateId},
@@ -240,7 +241,7 @@ impl DeviceRpc {
                 if checkout.repository.head()? == Some(expected) {
                     self.check_version(session, &checkout, &request.expected_checkout_version)?;
                 }
-                let signer = signer(&checkout.repository)?;
+                let signer = checkout.repository.native_thread_signer(&replica)?;
                 let signed = checkout.capture_with_paths(
                     &replica,
                     CaptureInput {
@@ -331,7 +332,7 @@ impl DeviceRpc {
                     &request.conflict_set_version,
                     choices[0],
                     session.attribution.clone(),
-                    &signer(&checkout.repository)?,
+                    &checkout.repository.native_thread_signer(&replica)?,
                 )?;
                 self.checkout_response(session, &checkout, operation, None)?
             }
@@ -609,6 +610,7 @@ pub(super) fn verified_lease(
     }
     Ok(())
 }
+#[cfg(test)]
 pub(super) fn signer(repository: &repo::Repository) -> Result<Ed25519Signer> {
     let pem = match repo::identity::load_device(&repo::identity::device_identity_path())? {
         Some(device) => device.private_key_pem,

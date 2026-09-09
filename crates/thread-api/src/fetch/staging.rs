@@ -243,13 +243,14 @@ pub(crate) fn validate_artifacts(
     for record in receipt_records {
         let receipt = crate::authority_admission::decode(&record)?;
         let statement = receipt.verify_signature().map_err(preparation)?;
-        let original = decoded.get(&statement.operation).ok_or(Error::Invalid("unmatched source authority receipt"))?;
+        let operation_id = statement.subject.operation_id().ok_or(Error::Invalid("source batch cannot carry ownership claim admission"))?;
+        let original = decoded.get(&operation_id).ok_or(Error::Invalid("unmatched source authority receipt"))?;
         // Match immutable claims and signatures only. This self-described key
         // is not enrolled here; the receiver must independently pin the issuer.
         statement.authorize(original, &heddle_object_model::object::thread_replication::integration::TrustedHostedExecutor {
             spool: statement.spool, spool_genesis: statement.spool_genesis, executor: statement.executor,
         }).map_err(preparation)?;
-        if authority_admissions.insert(statement.operation, receipt).is_some() {
+        if authority_admissions.insert(operation_id, receipt).is_some() {
             return Err(Error::Invalid("duplicate source authority receipt"));
         }
     }

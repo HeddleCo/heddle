@@ -1019,6 +1019,7 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
         author(),
     );
     let receipt = LocalIntegration {
+        author: objects::object::thread_replication::SourceAuthor::LocalKey,
         version: 1,
         spool: uuid::Uuid::parse_str(&source_genesis.spool).expect("spool"),
         device: signer.public_key().try_into().expect("key"),

@@ -6,6 +6,7 @@ pub mod integration;
 pub mod local_integration;
 pub mod metadata;
 pub mod source_author;
+pub mod ownership_claim;
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -185,6 +186,14 @@ impl ThreadOperation {
     }
 
     /// Uniform source result for capture and both integration authorities.
+    /// Original authored source identity. Hosted execution uses its executor proof.
+    pub fn source_author(&self) -> Result<Option<SourceAuthor>> {
+        if let ThreadOperationBody::Capture(capture) = &self.body {
+            return Ok(Some(capture.author.clone()));
+        }
+        Ok(self.local_integration()?.map(|integration| integration.author))
+    }
+
     pub fn source_result(&self) -> Result<Option<Capture>> {
         match &self.body {
             ThreadOperationBody::Capture(capture) => Ok(Some(capture.result.clone())),

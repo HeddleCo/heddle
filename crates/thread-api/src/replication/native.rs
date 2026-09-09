@@ -107,10 +107,7 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
             }
             replica.receive(&operation, objects, |native| {
                 use heddle_object_model::object::thread_replication::ThreadOperationBody;
-                if native.local_integration()?.is_some() && native.publisher != replica.genesis()?.creator {
-                    return Err(repo::thread_replication::Error::Invalid("fresh local integration requires independently admitted author authority".into()));
-                }
-                if !matches!(native.body, ThreadOperationBody::Metadata(_) | ThreadOperationBody::Capture(_)) {
+                if !matches!(native.body, ThreadOperationBody::Metadata(_)) && native.source_author()?.is_none() {
                     return Ok(());
                 }
                 // Durable original-author receipt remains valid while causal
@@ -120,8 +117,8 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
                     return Ok(());
                 }
                 let genesis = replica.genesis()?;
-                if matches!(&native.body, ThreadOperationBody::Capture(capture) if matches!(capture.author, heddle_object_model::object::thread_replication::SourceAuthor::LocalKey)) {
-                    return repo::thread_replication::source_authority::verify_local_source_owner(native, &genesis);
+                if matches!(native.source_author()?, Some(heddle_object_model::object::thread_replication::SourceAuthor::LocalKey)) {
+                    return replica.verify_local_source_owner(native);
                 }
                 let home = authority_home.as_ref().ok_or_else(|| {
                     repo::thread_replication::Error::Invalid(
@@ -137,8 +134,8 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
                 let spool = genesis.spool.parse().map_err(authority_error)?;
                 let registered =
                     repo::device_catalog::load(home, spool).map_err(authority_error)?;
-                if matches!(native.body, ThreadOperationBody::Capture(_)) {
-                    repo::thread_replication::source_authority::verify_source_authority(native, &genesis, &authority, &registered.capability_path, now)
+                if native.source_author()?.is_some() {
+                    replica.verify_source_authority(native, &authority, &registered.capability_path, now)
                 } else {
                     repo::thread_replication::metadata::verify_control_authority(native, &authority, &registered.capability_path, now)
                 }

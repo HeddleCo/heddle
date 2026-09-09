@@ -17,6 +17,7 @@ pub struct LocalIntegration {
     pub version: u16,
     pub spool: uuid::Uuid,
     pub device: [u8; 32],
+    pub author: super::SourceAuthor,
     pub source_thread: ContentHash,
     pub source_operation: ContentHash,
     pub source_revision: StateId,
@@ -30,6 +31,10 @@ pub struct LocalIntegration {
 }
 impl LocalIntegration {
     pub fn encode(&self) -> Result<Vec<u8>> {
+        self.author.validate()?;
+        if matches!(&self.author, super::SourceAuthor::Account { spool, .. } if *spool != self.spool) {
+            return Err(invalid("local integration author crosses Spool scope"));
+        }
         if self.version != 1
             || self.spool.is_nil()
             || self.source_thread == self.target_thread

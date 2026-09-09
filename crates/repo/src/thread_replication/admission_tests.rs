@@ -74,11 +74,11 @@ fn retained_receipt_is_atomic_with_pending_bytes_and_survives_restart_without_or
             body: ThreadOperationBody::Metadata(control.encode().expect("control")),
         };
         let receipt = ThreadAuthorityAdmission {
-            version: 1,
+            version: 2,
             spool,
             spool_genesis,
             thread: operation.thread,
-            operation: operation.id().expect("ID"),
+            subject: objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(operation.id().expect("ID")),
             actor: control.actor,
             publisher: operation.publisher,
             authority_digest: control.authority_digest,

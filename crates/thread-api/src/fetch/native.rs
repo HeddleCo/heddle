@@ -244,16 +244,12 @@ impl StagedSource {
             if prior.is_some_and(|prior| prior.original == *signed && prior.status == objects::object::thread_replication::Admission::Accepted) {
                 continue;
             }
-            if operation.local_integration().map_err(preparation)?.is_some() && operation.publisher != replica.genesis().map_err(preparation)?.creator {
-                return Err(Error::Invalid("fresh local integration requires independently admitted author authority"));
-            }
-            if let objects::object::thread_replication::ThreadOperationBody::Capture(capture) = &operation.body {
-                let genesis = replica.genesis().map_err(preparation)?;
-                match &capture.author {
-                    objects::object::thread_replication::SourceAuthor::LocalKey => repo::thread_replication::source_authority::verify_local_source_owner(&operation, &genesis).map_err(preparation)?,
+            if let Some(author) = operation.source_author().map_err(preparation)? {
+                match &author {
+                    objects::object::thread_replication::SourceAuthor::LocalKey => replica.verify_local_source_owner(&operation).map_err(preparation)?,
                     objects::object::thread_replication::SourceAuthor::Account { .. } => {
                         let authority = authority.ok_or(Error::Invalid("fresh account source requires original author authority or retained admission"))?;
-                        repo::thread_replication::source_authority::verify_source_authority(&operation, &genesis, authority, spool_path, now).map_err(preparation)?;
+                        replica.verify_source_authority(&operation, authority, spool_path, now).map_err(preparation)?;
                     }
                 }
             }

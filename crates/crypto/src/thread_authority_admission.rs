@@ -47,6 +47,16 @@ impl SignedAuthorityAdmission {
         value.authorize(&original.verify()?, trust)?;
         Ok(value)
     }
+    pub fn verify_claim(
+        &self,
+        original: &crate::thread_ownership_claim::SignedOwnershipClaim,
+        genesis: &heddle_object_model::object::thread_replication::ThreadGenesis,
+        trust: &TrustedHostedExecutor,
+    ) -> Result<ThreadAuthorityAdmission, Error> {
+        let value = self.verify_signature()?;
+        value.authorize_claim(&original.verify()?, genesis, trust)?;
+        Ok(value)
+    }
 }
 fn signing_bytes(canonical: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(FORMAT.len() + 1 + canonical.len());

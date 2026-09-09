@@ -1,7 +1,7 @@
 # Original-author admission receipts
 
-`heddle-thread-authority-admission-v1` is executor testimony about the first durable
-receipt of an original signed Thread metadata operation. It proves that the host
+`heddle-thread-authority-admission-v2` is executor testimony about the first durable
+receipt of an original signed Thread operation or dual-signed ownership claim. It proves that the host
 verified that original account/agent's authority at that boundary. It does not
 prove causal readiness, current authority, approval, publication consent or
 landing eligibility. The original operation and its original signature remain
@@ -10,7 +10,7 @@ unchanged, including an agent's explicit attribution.
 Trust comes from the receiver's independently enrolled hosted executor pin for
 an immutable Spool genesis. An incoming receipt, author envelope, transport peer
 or delivery credential cannot create that pin. The statement commits Spool UUID,
-Spool genesis, Thread ID, operation ID, original actor (account and optional
+Spool genesis, Thread ID, typed operation-or-claim subject, original actor (account and optional
 agent), original publisher, authority-envelope digest, executor and the executor's
 first-admission timestamp. No author-supplied timestamp establishes prior rights.
 
@@ -38,7 +38,7 @@ causal parents arrive. Indexed reads return original bytes, status and receipt i
 one statement, and subsequent peers receive the same signed testimony.
 
 An original already admitted locally can replay under its durable admission;
-fresh metadata without a receipt still requires independently enrolled original
+fresh authored work without a receipt still requires independently enrolled original
 account authority. Current browser/device delivery remains freshly authenticated.
 Receipts do not create publication consent: foreign sharing policies cannot expand
 a private device's local export policy.
@@ -96,3 +96,5 @@ test result: ok. 26 passed; 0 failed; finished in 7.56s
 
 The repository run also included the concurrently developed listing projection;
 its registration and leaf are delivered in the separate account-service checkpoint.
+
+The canonical subject distinguishes an original operation from an ownership claim. Both retain the same account/agent, exact envelope digest, independently pinned executor, and first-admission time. A receipt for one subject kind cannot authorize the other.

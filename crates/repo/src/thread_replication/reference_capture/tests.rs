@@ -412,6 +412,7 @@ fn local_integration_inherits_source_and_target_roots_and_next_capture_keeps_the
     let signer = Ed25519Signer::from_seed(&[92; 32]).expect("signer");
     let parents = BTreeSet::from([parent.verify().expect("parent").id().expect("parent ID")]);
     let receipt = LocalIntegration {
+        author: objects::object::thread_replication::SourceAuthor::LocalKey,
         version: 1,
         spool: target.reference_scope().expect("scope").spool,
         device: signer.public_key().try_into().expect("key"),

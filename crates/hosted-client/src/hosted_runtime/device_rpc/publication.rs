@@ -437,22 +437,13 @@ fn authorize_original(
     let now = chrono::Utc::now().timestamp();
     let authority = repo::device_authority::load(home, now)?;
     authority.verify_publisher(&operation.publisher)?;
-    if matches!(
-        operation.body,
-        objects::object::thread_replication::ThreadOperationBody::Capture(_)
-    ) {
-        repo::thread_replication::source_authority::verify_source_authority(
+    if operation.source_author()?.is_some() {
+        replica.verify_source_authority(
             &operation,
-            &replica.genesis()?,
             &authority,
             &session.spool.capability_path,
             now,
         )?;
-    } else if operation.hosted_execution_binding()?.is_none() {
-        ensure!(
-            operation.publisher == replica.genesis()?.creator,
-            "new local integration requires original creator or independent retained admission"
-        );
     }
     // Hosted execution is separately checked against receiver-owned executor pins
     // by publish_prepared_source before any source operation can commit.

@@ -605,8 +605,8 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
             SignedOperation::sign(&operation, &publisher).expect("signed source")
         };
         let incoming = make_operation("browser causal branch");
-        repo::thread_replication::source_authority::verify_source_authority(
-            &incoming.verify().expect("source original"), &replica.genesis().expect("genesis"),
+        replica.verify_source_authority(
+            &incoming.verify().expect("source original"),
             &source_authority, &repo::device_catalog::load(home.path(), spool)
                 .expect("registered source Spool").capability_path, source_now,
         ).expect("independently verified original source author before delivery");

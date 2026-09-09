@@ -56,6 +56,7 @@ mod evidence_tests;
 #[cfg(test)]
 mod tests;
 mod thread;
+mod ownership;
 mod thread_observe;
 #[cfg(test)]
 mod thread_tests;
@@ -76,6 +77,7 @@ use prost::Message;
 
 pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread", "/heddle.api.v2alpha1.SyncService/Fetch", "/heddle.api.v2alpha1.SyncService/PublishContent"];
 pub(crate) const METHODS: &[&str] = &[
+    "/heddle.api.v2alpha1.ThreadService/ClaimThreadOwnership",
     "/heddle.api.v2alpha1.AnalysisService/ObserveAnalysis",
     #[cfg(feature = "semantic")]
     "/heddle.api.v2alpha1.AnalysisService/StartAnalysis",
@@ -241,6 +243,7 @@ impl DeviceRpc {
         Ok(())
     }
     fn execute(&self, session: &auth::Session, method: &str, body: &[u8]) -> Result<Vec<u8>> {
+        if method.ends_with("/ClaimThreadOwnership") { return self.claim_thread_ownership(session,body); }
         if method.ends_with("/CancelOperation") { return self.cancel_operation(session, body); }
         if method.contains(".EvidenceService/") { return self.evidence_command(session, method, body); }
         if method.contains(".CollaborationService/") { return self.collaboration_command(session, method, body); }
@@ -296,6 +299,7 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
     }
     let spool = match method.rsplit('/').next().context("method missing")? {
         "ObserveAnalysis" => scope!(ObserveAnalysisRequest, |r:ObserveAnalysisRequest|r.source.and_then(|v|v.spool)),
+        "ClaimThreadOwnership" => scope!(ClaimThreadOwnershipRequest, |r:ClaimThreadOwnershipRequest|r.thread.and_then(|v|v.spool)),
         "StartAnalysis" => scope!(StartAnalysisRequest, |r:StartAnalysisRequest|r.source.and_then(|v|v.spool)),
         "CancelOperation" => scope!(CancelOperationRequest, |r:CancelOperationRequest|r.operation.and_then(|v|v.spool)),
         "RecordEvidence" => scope!(RecordEvidenceRequest, |r:RecordEvidenceRequest|r.evidence.and_then(|e|e.revision).and_then(|r|r.spool)),

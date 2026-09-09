@@ -202,6 +202,7 @@ fn integrated_fixture(
         Attribution::human(Principal::new("integrator", "")),
     );
     let receipt = LocalIntegration {
+        author: heddle_object_model::object::thread_replication::SourceAuthor::LocalKey,
         version: 1,
         spool: source.spool.parse().expect("Spool"),
         device: signer.public_key().try_into().expect("key"),
@@ -259,6 +260,7 @@ fn integrated_fixture(
             SignedOperation::sign(&source_op, &signer).expect("source signature"),
         ],
         vec![ThreadGenesisRecord {
+            ownership_claims: vec![], ownership_claim_admissions: vec![],
             genesis: Some(source_record),
             creator_authority: vec![],
             admission: None,
@@ -369,14 +371,14 @@ fn publication_staging_preserves_matched_account_admission_without_trusting_issu
     let signed = SignedOperation::sign(&operation, &signer).expect("original source signature");
     originals.operations[0].operations[0] = SignedRecord { format: objects::object::thread_replication::OPERATION_FORMAT.into(), canonical_record: signed.canonical.clone(), signatures: vec![RecordSignature { public_key: operation.publisher.to_vec(), signature: signed.signature.clone() }] };
     let executor = Ed25519Signer::from_seed(&[74; 32]).expect("receipt issuer");
-    let statement = ThreadAuthorityAdmission { version: 1, spool, spool_genesis: ContentHash::from_bytes([75;32]), thread: operation.thread,
-        operation: operation.id().expect("operation ID"), actor, publisher: operation.publisher, authority_digest,
+    let statement = ThreadAuthorityAdmission { version: 2, spool, spool_genesis: ContentHash::from_bytes([75;32]), thread: operation.thread,
+        subject: objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(operation.id().expect("operation ID")), actor, publisher: operation.publisher, authority_digest,
         executor: executor.public_key().try_into().expect("executor key"), admitted_at_ms: 100 };
     let receipt = crypto::thread_authority_admission::SignedAuthorityAdmission::sign(&statement, &executor).expect("historical testimony");
     originals.operations[0].authority_admissions = vec![crate::authority_admission::encode(&receipt).expect("portable receipt")];
     let validated = crate::publication::validate_source_artifacts(directory, &opening, originals).expect("matched structurally valid source");
     assert_eq!(validated.state().id(), state.id());
-    assert_eq!(validated.authority_admissions().get(&statement.operation), Some(&receipt));
+    assert_eq!(validated.authority_admissions().get(&statement.subject.id()), Some(&receipt));
     let wrong_trust = TrustedHostedExecutor { spool, spool_genesis: statement.spool_genesis, executor: [76;32] };
-    assert!(validated.authority_admissions()[&statement.operation].verify(&signed, &wrong_trust).is_err(), "structural staging never enrolls its issuer");
+    assert!(validated.authority_admissions()[&statement.subject.id()].verify(&signed, &wrong_trust).is_err(), "structural staging never enrolls its issuer");
 }
