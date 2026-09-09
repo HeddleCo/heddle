@@ -831,3 +831,44 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     browser.close().await;
     router.shutdown().await.expect("router shutdown");
 }
+
+pub(super) async fn denied_spool_stream_is_typed(
+    remote: &thread_api::Remote<
+        thread_api::transport::IrohTransport<thread_api::credentials::Credentials>,
+    >,
+    spool: uuid::Uuid,
+) {
+    let mut denied = remote
+        .observe::<thread_api::rpc::CheckoutServiceObserveCheckouts>(
+            ObserveCheckoutsRequest {
+                spool: Some(SpoolRef {
+                    id: spool.to_string(),
+                }),
+                observe: Some(ObserveOptions {
+                    mode: ObservationMode::Once as i32,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("denied stream opens its framed response");
+    let error = denied
+        .next_commit()
+        .await
+        .err()
+        .expect("unauthorized stream is denied");
+    match error {
+        thread_api::observation::Error::Client(api::v2::client::ClientError::Transport(
+            thread_api::transport::Error::Remote(failure),
+        )) => assert_eq!(
+            failure.code,
+            CallFailureCode::Unauthenticated as i32,
+            "denied exact-Spool stream preserves typed authorization failure"
+        ),
+        other => {
+            panic!("denied exact-Spool stream must preserve typed authorization failure: {other}")
+        }
+    }
+}

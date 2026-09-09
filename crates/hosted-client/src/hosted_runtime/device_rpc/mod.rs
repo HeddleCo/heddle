@@ -94,11 +94,13 @@ impl DeviceRpc {
         let session = match prepared {
             Ok(session) => session,
             Err(error) => {
-                send.write_all(&api::framing::encode_failure_response(&failure(
-                    CallFailureCode::Unauthenticated,
-                    error,
-                ))?)
-                .await?;
+                let failure = failure(CallFailureCode::Unauthenticated, error);
+                let bytes = if descriptor.streaming == api::StreamingShape::ServerStreaming {
+                    api::framing::encode_stream_failure(&failure)?
+                } else {
+                    api::framing::encode_failure_response(&failure)?
+                };
+                send.write_all(&bytes).await?;
                 send.finish()?;
                 return Ok(());
             }
