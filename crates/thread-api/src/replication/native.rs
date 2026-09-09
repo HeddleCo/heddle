@@ -109,6 +109,9 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
                 let now = chrono::Utc::now().timestamp();
                 let authority = repo::device_authority::load(home, now).map_err(authority_error)?;
                 let genesis = replica.genesis()?;
+                if let ThreadOperationBody::Metadata(bytes) = &native.body {
+                    heddle_object_model::object::thread_replication::metadata::ThreadControl::decode(bytes)?.validate_parents(&genesis, &[])?;
+                }
                 let spool = genesis.spool.parse().map_err(authority_error)?;
                 let registered =
                     repo::device_catalog::load(home, spool).map_err(authority_error)?;

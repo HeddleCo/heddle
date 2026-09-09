@@ -41,10 +41,41 @@ The API TypeScript implementation checks the same fixtures. UUIDs use MessagePac
 binary values; content hashes and `Vec<u8>` use their existing canonical array
 encoding. Clients use the supplied codecs rather than assembling opaque records.
 
-This checkpoint supplies the model, durable admission, native replication facet,
-and client preparation. The direct Thread RPC handlers and bounded Thread view
-projection are subsequent integration work; the independent daemon method
-inventory remains failing until every advertised device method is implemented.
+The daemon now routes StartThread, RenameThread, ReviseIntent, ChangeLifecycle,
+SetSharingPolicy, RecordReview and ObserveThread to real local operations. Name
+and lifecycle compare their own portable field versions, just like intent,
+sharing and each review UUID; edits to other fields do not invalidate them.
+Command journals bind delivery actor, method and exact request, while an exact
+already-admitted operation also survives loss of the response journal.
+
+Thread observation composes overview, source captures, original review decisions,
+exact source/base comparisons and sharing policy. Optional original operations
+retain their signatures. Review diff/evidence composition is still partial;
+collaboration, analysis, checkouts and timeline composition remain explicitly
+unavailable in this adapter until their shared read handlers are connected.
+The independent daemon method inventory remains failing until every advertised
+device method is implemented; route registration is not a completeness claim.
+
+The source count and frontier are durable SQLite indexes changed exactly once
+at source acceptance, in the same transaction. Views read current bounded field
+heads rather than operation history. Filesystem events wake observers, but the
+actual committed Thread revision fences output and checkpoints. Duplicate OS
+hints do not invalidate a stable snapshot. Unchanged idle streams perform local
+clock/caveat checks and no periodic storage reads.
+
+Interactive owner/delegate sharing enables publication consent for that Thread
+once. Later admitted policies from that same account govern ongoing native
+Source, Collaboration and Metadata sync without another consent action. A
+conflicting policy or foreign original actor cannot broaden private device
+consent. Evidence and scrubbed timeline transport remain separate unfinished
+facet integration work. Merely receiving a policy cannot establish initial
+local publication consent.
+
+Ordinary Fetch staging already selects Source alone. Installation also checks
+Source explicitly before accepting any operation: a source verifier callback
+cannot establish Metadata original-author admission. Shared foreign-account
+metadata still needs portable hosted admission evidence bound to its exact
+original operation; the account envelope cannot establish its own trust.
 
 ## Verification
 
@@ -72,3 +103,24 @@ The daemon adapter follow-up is verified on API
 - Temporarily removing Metadata from the owned export facets failed specifically during original Metadata export. Restored byte-exact.
 - Temporarily omitting original-author verification failed because the delivered operation from a mismatched original publisher was accepted. The test asserts the exact denied operation never persists. Restored byte-exact.
 - Current device admission and output checks also honor explicitly revoked publisher keys from independently enrolled authority.
+
+
+## Direct Thread acceptance checkpoint
+
+Against API `104362c71f355c91e0f36c97ad356c28b1ae93ba`:
+
+- Real no-Weft device RPC workflow: 1 passed (21.86s), covering all seven Thread methods alongside existing Checkout, Run and bidirectional replication checks. It proves independent field updates, stale same-field rejection, original creator rejection, exact retry after response-journal loss, signed review push and idle no-heartbeat behavior.
+- Restored native repository suite: 21 passed (6.88s), including durable source count/frontier, out-of-order acceptance, exact replay, concurrent heads, rollback and one-time local policy consent.
+- Source-index controls removed count/bound maintenance and parent-head deletion; all failed at the intended assertions and were restored byte-exact.
+- Device controls independently removed current-field CAS and original creator binding; both failed at their real RPC assertions. Publication actor and shared signature-key binding omission controls also failed at the precise retained-consent and framing assertions. All guards restored byte-exact.
+- Rust Name/Lifecycle builder control replacing the field version with the whole Thread version failed; restored builder suite passed. Shared verifier rejects unknown formats, extra signatures and a substituted publisher key field.
+- Explicit source installation guard: 1 passed (0.38s), with a valid signed Metadata fixture proving denial before durable bytes or original-author admission marker. Public staging was already Source-only; this strengthens the installation boundary rather than claiming a previously reachable public bypass.
+
+Final restored checks on API `988e4bbf0a66f6741a4bfc81e104dbfe918d1a9f`:
+
+- Native repository Thread suite: 22 passed (6.92s).
+- Full shared Thread API library suite: 51 passed (14.96s), including source installation, portable controls, evidence codecs and native stream backpressure/cancellation.
+- Production source page query executes 148 VM instructions for a 16-row first page with 32 Source records, 148 with 10,032 Source plus 10,032 unrelated-facet records, and 147 for a deep cursor. Its covering index and range predicate keep work proportional to the requested page.
+- Removing the covering index caused 704 instructions at the small fixture; restoring the nullable cursor `OR` caused 60,190 instructions at the deep page. Both exceeded the asserted bound and failed; both restored byte-exact.
+- Removing the source-only installation guard admitted the valid signed but unproved Metadata fixture and failed its intended assertion. Guard restored; the complete 51-test client run above includes the final positive.
+- Final restored real no-Weft device RPC workflow on API988: 1 passed (21.48s), retaining all Thread, Checkout, Run, original-author replication and idle checks after every control was restored.

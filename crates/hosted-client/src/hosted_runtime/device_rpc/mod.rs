@@ -7,8 +7,13 @@ mod inventory_tests;
 mod land;
 mod observe;
 mod replication;
+mod stream;
 #[cfg(test)]
 mod tests;
+mod thread;
+mod thread_observe;
+#[cfg(test)]
+mod thread_tests;
 
 use std::{
     collections::BTreeMap,
@@ -26,6 +31,13 @@ use prost::Message;
 
 pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread"];
 pub(crate) const METHODS: &[&str] = &[
+    "/heddle.api.v2alpha1.ThreadService/ObserveThread",
+    "/heddle.api.v2alpha1.ThreadService/StartThread",
+    "/heddle.api.v2alpha1.ThreadService/RenameThread",
+    "/heddle.api.v2alpha1.ThreadService/ReviseIntent",
+    "/heddle.api.v2alpha1.ThreadService/ChangeLifecycle",
+    "/heddle.api.v2alpha1.ThreadService/SetSharingPolicy",
+    "/heddle.api.v2alpha1.ThreadService/RecordReview",
     "/heddle.api.v2alpha1.SyncService/ReplicateThread",
     "/heddle.api.v2alpha1.CheckoutService/ObserveCheckouts",
     "/heddle.api.v2alpha1.CheckoutService/Materialize",
@@ -86,6 +98,9 @@ impl DeviceRpc {
                 return Ok(());
             }
         };
+        if method.ends_with("/ObserveThread") {
+            return self.observe_thread(&session, body, send).await;
+        }
         if method.ends_with("/ObserveCheckouts") || method.ends_with("/ObserveRuns") {
             return self.observe(&session, method, body, send).await;
         }
@@ -114,6 +129,9 @@ impl DeviceRpc {
         Ok(())
     }
     fn execute(&self, session: &auth::Session, method: &str, body: &[u8]) -> Result<Vec<u8>> {
+        if method.contains(".ThreadService/") {
+            return self.thread_command(session, method, body);
+        }
         if method.contains(".CheckoutService/") {
             return self.checkout_command(session, method, body);
         }
@@ -162,6 +180,28 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
         }};
     }
     let spool = match method.rsplit('/').next().context("method missing")? {
+        "ObserveThread" => scope!(ObserveThreadRequest, |r: ObserveThreadRequest| r
+            .thread
+            .and_then(|t| t.spool)),
+        "StartThread" => scope!(StartThreadRequest, |r: StartThreadRequest| r.spool),
+        "RenameThread" => scope!(RenameThreadRequest, |r: RenameThreadRequest| r
+            .thread
+            .and_then(|t| t.spool)),
+        "ReviseIntent" => scope!(ReviseIntentRequest, |r: ReviseIntentRequest| r
+            .thread
+            .and_then(|t| t.spool)),
+        "ChangeLifecycle" => scope!(
+            ChangeThreadLifecycleRequest,
+            |r: ChangeThreadLifecycleRequest| r.thread.and_then(|t| t.spool)
+        ),
+        "SetSharingPolicy" => scope!(SetThreadSharingRequest, |r: SetThreadSharingRequest| r
+            .policy
+            .and_then(|p| p.thread)
+            .and_then(|t| t.spool)),
+        "RecordReview" => scope!(RecordReviewRequest, |r: RecordReviewRequest| r
+            .decision
+            .and_then(|p| p.thread)
+            .and_then(|t| t.spool)),
         "ObserveCheckouts" => scope!(ObserveCheckoutsRequest, |r: ObserveCheckoutsRequest| r
             .spool),
         "Materialize" => scope!(

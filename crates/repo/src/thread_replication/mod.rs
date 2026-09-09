@@ -10,6 +10,9 @@ mod integration;
 mod local;
 pub mod metadata;
 mod peers;
+mod policy_sync;
+pub mod projection;
+mod source_index;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -29,6 +32,8 @@ use objects::{
     store::ObjectStore,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+
+const ACCEPTED_PAGE_SQL: &str = "SELECT id,canonical,signature FROM operations WHERE thread=?1 AND status=1 AND facet=?2 AND id>COALESCE(?3,x'') ORDER BY id LIMIT ?4";
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -82,6 +87,7 @@ impl ThreadReplica {
             CREATE TABLE IF NOT EXISTS threads(id BLOB PRIMARY KEY, genesis BLOB NOT NULL, genesis_signature BLOB NOT NULL CHECK(length(genesis_signature)=64), generation INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT, source_revision BLOB, authority_admitted INTEGER NOT NULL DEFAULT 0 CHECK(authority_admitted IN(0,1)));
             CREATE INDEX IF NOT EXISTS operations_thread_status ON operations(thread,status);
+            CREATE INDEX IF NOT EXISTS operations_thread_facet_status_id ON operations(thread,facet,status,id);
             CREATE INDEX IF NOT EXISTS operations_source_revision ON operations(thread,source_revision,status,id);
             CREATE TABLE IF NOT EXISTS parents(child BLOB NOT NULL, parent BLOB NOT NULL, PRIMARY KEY(child,parent));
             CREATE INDEX IF NOT EXISTS parents_parent ON parents(parent);
@@ -89,9 +95,11 @@ impl ThreadReplica {
             CREATE TABLE IF NOT EXISTS peer_heads(thread BLOB NOT NULL, peer BLOB NOT NULL, operation BLOB NOT NULL, facet INTEGER NOT NULL, PRIMARY KEY(thread,peer,operation));
             CREATE TABLE IF NOT EXISTS peer_receipts(thread BLOB NOT NULL, peer BLOB NOT NULL, operation BLOB NOT NULL, status INTEGER NOT NULL, reason TEXT, PRIMARY KEY(thread,peer,operation));
             CREATE TABLE IF NOT EXISTS hosted_executor_pins(spool TEXT NOT NULL,genesis BLOB NOT NULL CHECK(length(genesis)=32),executor BLOB NOT NULL CHECK(length(executor)=32),PRIMARY KEY(spool,executor));
+            CREATE TABLE IF NOT EXISTS native_policy_consent(thread BLOB PRIMARY KEY,account TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS sharing(thread BLOB NOT NULL, destination BLOB NOT NULL, facets INTEGER NOT NULL, version BLOB NOT NULL, PRIMARY KEY(thread,destination));
             CREATE TABLE IF NOT EXISTS thread_control_heads(thread BLOB NOT NULL,property TEXT NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,property,operation));
             CREATE TABLE IF NOT EXISTS thread_control_commands(thread BLOB NOT NULL,publisher BLOB NOT NULL,command BLOB NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,publisher,command));")?;
+        connection.execute_batch(source_index::SCHEMA)?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT OR IGNORE INTO threads(id,genesis,genesis_signature) VALUES(?1,?2,?3)",
@@ -544,7 +552,7 @@ impl ThreadReplica {
             return Err(Error::Invalid("page size must be 1..1024".into()));
         }
         let connection = self.connect()?;
-        let mut query = connection.prepare("SELECT id,canonical,signature FROM operations WHERE thread=?1 AND status=1 AND facet=?2 AND (?3 IS NULL OR id>?3) ORDER BY id LIMIT ?4")?;
+        let mut query = connection.prepare(ACCEPTED_PAGE_SQL)?;
         let rows = query.query_map(
             params![
                 self.thread.as_bytes(),
@@ -679,6 +687,9 @@ impl ThreadReplica {
         &self,
         destination: &[u8; 32],
     ) -> Result<(BTreeSet<ThreadFacet>, Option<ContentHash>)> {
+        if let Some(policy) = self.policy_sync_sharing(destination)? {
+            return Ok(policy);
+        }
         let row: Option<(i64, Vec<u8>)> = self
             .connect()?
             .query_row(

@@ -86,7 +86,7 @@ pub fn verify_control_authority(
     let control = ThreadControl::decode(bytes)?;
     let owner = crate::verify_account_owner_observation(&authority.owner, now)
         .map_err(|error| Error::Invalid(error.to_string()))?;
-    heddleco_capability_verifier::thread_control_authority::verify(
+    heddleco_capability_verifier::thread_control_authority::verify_with_retained_mint_roots(
         &control.authority_envelope,
         heddleco_capability_verifier::thread_control_authority::Context {
             owner: &owner,
@@ -97,6 +97,7 @@ pub fn verify_control_authority(
             spool_path,
             now,
         },
+        &authority.mint_roots,
         |kind| authority.is_revoked(kind),
     )
     .map_err(|error| Error::Invalid(error.to_string()))?;
@@ -189,7 +190,7 @@ impl ThreadReplica {
             ));
         }
         let connection = self.connect()?;
-        let mut query=connection.prepare("SELECT DISTINCT property FROM thread_control_heads WHERE thread=?1 AND (?2 IS NULL OR property>?2) ORDER BY property LIMIT ?3")?;
+        let mut query=connection.prepare("SELECT DISTINCT property FROM thread_control_heads WHERE thread=?1 AND property>COALESCE(?2,'') ORDER BY property LIMIT ?3")?;
         let keys = query
             .query_map(
                 params![self.thread.as_bytes(), after, limit as u32],

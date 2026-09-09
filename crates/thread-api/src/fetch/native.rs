@@ -69,6 +69,7 @@ impl StagedSource {
         };
         for signed in &self.operations {
             let operation = signed.verify().map_err(preparation)?;
+            require_source_operation(&operation).map_err(preparation)?;
             if operation.integration().map_err(preparation)?.is_some() {
                 trust.authorize(&operation).map_err(preparation)?;
             }
@@ -111,7 +112,7 @@ impl StagedSource {
         // child-first; the replica settles it when its original parents arrive.
         for operation in &self.operations {
             replica
-                .receive(operation, repository.store(), |_| Ok(()))
+                .receive(operation, repository.store(), require_source_operation)
                 .map_err(preparation)?;
         }
         if replica
@@ -126,4 +127,93 @@ impl StagedSource {
 }
 fn preparation(error: impl std::fmt::Display) -> Error {
     Error::Preparation(error.to_string())
+}
+
+// Stage already negotiates Source alone. Keep that trust boundary explicit at
+// installation too: source verification is never original Metadata authority.
+fn require_source_operation(
+    operation: &heddle_object_model::object::thread_replication::ThreadOperation,
+) -> repo::thread_replication::Result<()> {
+    if operation.facet() != heddle_object_model::object::thread_replication::ThreadFacet::Source {
+        return Err(repo::thread_replication::Error::Invalid(
+            "source installation cannot admit non-source authority".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crypto::{Ed25519Signer, Signer, thread_operation::SignedOperation};
+    use heddle_object_model::object::{
+        CollaborationActor,
+        thread_replication::{
+            ThreadGenesis, ThreadOperation, ThreadOperationBody,
+            metadata::{AUTHORITY_FORMAT, Control, ThreadControl},
+        },
+    };
+
+    use super::*;
+    #[test]
+    fn source_install_gate_cannot_create_metadata_original_authority() {
+        let directory = tempfile::tempdir().expect("repository");
+        let repository = Repository::init_default(directory.path()).expect("repo");
+        let signer = Ed25519Signer::from_seed(&[56; 32]).expect("signer");
+        let spool = uuid::Uuid::from_u128(11);
+        let genesis = ThreadGenesis {
+            version: 1,
+            spool: spool.to_string(),
+            parent: None,
+            base: repository.head().expect("head").expect("base"),
+            name: "source import".into(),
+            intent: "original authority".into(),
+            creator: signer.public_key().try_into().expect("key"),
+            nonce: vec![5],
+        };
+        let replica = ThreadReplica::create(
+            repository.heddle_dir(),
+            &SignedGenesis::sign(&genesis, &signer).expect("original genesis"),
+        )
+        .expect("replica");
+        let proof = b"unverified author evidence must not establish admission".to_vec();
+        let control = ThreadControl {
+            version: 1,
+            spool,
+            actor: CollaborationActor {
+                principal_id: uuid::Uuid::from_u128(22),
+                agent_id: None,
+            },
+            authority_digest: ContentHash::compute_typed(AUTHORITY_FORMAT, &proof),
+            authority_envelope: proof,
+            client_operation_id: uuid::Uuid::now_v7(),
+            occurred_at_ms: 0,
+            control: Control::Name("unproved author".into()),
+        };
+        let operation = ThreadOperation {
+            version: 1,
+            thread: replica.thread_id(),
+            parents: Default::default(),
+            publisher: signer.public_key().try_into().expect("key"),
+            body: ThreadOperationBody::Metadata(control.encode().expect("valid canonical control")),
+        };
+        let signed = SignedOperation::sign(&operation, &signer).expect("valid original signature");
+        signed.verify().expect("signature itself is valid");
+        let failure = replica
+            .receive(&signed, repository.store(), require_source_operation)
+            .expect_err("source-only gate denies unproved Metadata");
+        assert!(failure.to_string().contains("non-source authority"));
+        assert!(
+            replica
+                .operation(&operation.id().expect("ID"))
+                .expect("stored operation")
+                .is_none(),
+            "denial precedes immutable persistence"
+        );
+        assert!(
+            !replica
+                .control_authority_admitted(&signed)
+                .expect("admission marker"),
+            "source trust cannot manufacture author admission"
+        );
+    }
 }

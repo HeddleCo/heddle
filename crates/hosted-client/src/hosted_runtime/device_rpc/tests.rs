@@ -116,6 +116,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     let spool_ref = SpoolRef {
         id: spool.to_string(),
     };
+    super::thread_tests::roundtrip(&remote, &device, &repository, spool).await;
     let source = RevisionRef {
         spool: Some(spool_ref.clone()),
         revision: Some(revision_ref::Revision::State(
