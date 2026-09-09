@@ -7,6 +7,7 @@ mod materialize;
 mod metadata;
 mod operation;
 mod source;
+mod tags;
 
 pub use codec::{CollaborationCodecError, DecodedCollaborationOperation};
 pub use context::{CONTEXT_FORMAT, ContextRevision};
@@ -28,5 +29,9 @@ pub use operation::{
     LegacyDiscussionResolutionV1,
 };
 pub use source::{CollaborationRevision, CollaborationSourceAnchor};
+pub use tags::{
+    AnnotationComparison, AnnotationDecimal, AnnotationQuery, AnnotationSourceReference,
+    AnnotationTag, AnnotationTagPredicate, AnnotationValue, validate_annotation_tags,
+};
 
 pub const COLLABORATION_OPERATION_SCHEMA_VERSION: u16 = 2;

@@ -19,7 +19,7 @@ pub struct ContextRevision {
     pub metadata: CollaborationMetadata,
     pub anchor: CollaborationAnchor,
     pub content: String,
-    pub tags: Vec<String>,
+    pub tags: Vec<super::AnnotationTag>,
     pub supersedes: Option<Uuid>,
     pub extracted_from: Option<DiscussionRecordId>,
     pub occurred_at_ms: i64,
@@ -27,6 +27,7 @@ pub struct ContextRevision {
 impl ContextRevision {
     pub fn encode(&self) -> Result<Vec<u8>, CollaborationCodecError> {
         self.metadata.validate()?;
+        super::validate_annotation_tags(&self.tags)?;
         super::operation::validate_anchor(&self.anchor)?;
         if self.version != 2
             || self.id.is_nil()
@@ -35,11 +36,6 @@ impl ContextRevision {
                 .is_some_and(|id| id.is_nil() || id == self.id)
             || self.content.trim().is_empty()
             || self.content.len() > 256 * 1024
-            || self.tags.len() > 128
-            || self
-                .tags
-                .iter()
-                .any(|tag| tag.trim().is_empty() || tag.len() > 512)
             || self.parents.len() > 128
             || self.parents.windows(2).any(|pair| pair[0] >= pair[1])
         {

@@ -92,50 +92,57 @@ impl CollaborationMetadata {
             return Err(invalid("invalid stable collaboration agent identity"));
         }
         for mention in &self.mentions {
-            match mention {
-                CollaborationMention::Spool { spool }
-                | CollaborationMention::Thread { spool, .. }
-                | CollaborationMention::State { spool, .. } => {
-                    if spool.is_nil() {
-                        return Err(invalid("mention spool cannot be nil"));
-                    }
-                }
-                CollaborationMention::Record { spool, id, .. } => {
-                    if spool.is_some_and(|id| id.is_nil())
-                        || id.trim().is_empty()
-                        || id.len() > 1024
-                        || id.chars().any(char::is_control)
-                    {
-                        return Err(invalid("invalid stable mention identity"));
-                    }
-                }
-                CollaborationMention::Checkout { spool, id, .. } => {
-                    if spool.is_nil()
-                        || id.trim().is_empty()
-                        || id.len() > 1024
-                        || id.chars().any(char::is_control)
-                    {
-                        return Err(invalid("invalid stable mention identity"));
-                    }
-                }
-                CollaborationMention::GitCommit { spool, oid } => {
-                    if spool.is_nil()
-                        || !matches!(oid.len(), 40 | 64)
-                        || !oid
-                            .bytes()
-                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                    {
-                        return Err(invalid(
-                            "Git mention requires exact lower-case commit identity",
-                        ));
-                    }
-                }
-                CollaborationMention::Device { .. } => {}
-            }
+            mention.validate()?;
         }
         Ok(())
     }
 }
+impl CollaborationMention {
+    pub fn validate(&self) -> Result<(), CollaborationCodecError> {
+        match self {
+            CollaborationMention::Spool { spool }
+            | CollaborationMention::Thread { spool, .. }
+            | CollaborationMention::State { spool, .. } => {
+                if spool.is_nil() {
+                    return Err(invalid("mention spool cannot be nil"));
+                }
+            }
+            CollaborationMention::Record { spool, id, .. } => {
+                if spool.is_some_and(|id| id.is_nil())
+                    || id.trim().is_empty()
+                    || id.len() > 1024
+                    || id.chars().any(char::is_control)
+                {
+                    return Err(invalid("invalid stable mention identity"));
+                }
+            }
+            CollaborationMention::Checkout { spool, id, .. } => {
+                if spool.is_nil()
+                    || id.trim().is_empty()
+                    || id.len() > 1024
+                    || id.chars().any(char::is_control)
+                {
+                    return Err(invalid("invalid stable mention identity"));
+                }
+            }
+            CollaborationMention::GitCommit { spool, oid } => {
+                if spool.is_nil()
+                    || !matches!(oid.len(), 40 | 64)
+                    || !oid
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                {
+                    return Err(invalid(
+                        "Git mention requires exact lower-case commit identity",
+                    ));
+                }
+            }
+            CollaborationMention::Device { .. } => {}
+        }
+        Ok(())
+    }
+}
+
 fn invalid(message: &str) -> CollaborationCodecError {
     CollaborationCodecError::Invalid(message.into())
 }

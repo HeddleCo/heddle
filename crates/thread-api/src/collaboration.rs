@@ -1,6 +1,7 @@
 //! Portable collaboration commands. Original parent records reconstruct both
 //! causal frontiers; callers never translate UI version tokens into proofs.
 mod references;
+mod tags;
 use std::collections::BTreeSet;
 
 use crypto::{Signer, thread_operation::SignedOperation};
@@ -10,6 +11,10 @@ use heddle_object_model::object::{
     thread_replication::{OPERATION_FORMAT, ThreadOperation, ThreadOperationBody},
 };
 pub use references::{anchor, anchor_ref, audience, mention, mention_ref, visibility};
+pub use tags::{
+    annotation_query, annotation_source, annotation_source_ref, annotation_tag, annotation_tag_ref,
+    annotation_tags, annotation_value, annotation_value_ref,
+};
 
 use crate::{
     contract::{RecordSignature, SignedRecord},
@@ -576,6 +581,52 @@ mod tests {
                 oid: "a".repeat(40),
             },
         );
+        let mut structured = verify(&context)
+            .expect("context proof")
+            .context_revision()
+            .expect("decode")
+            .expect("context");
+        structured.tags = vec![
+            "decision".into(),
+            heddle_object_model::object::AnnotationTag::Symbol {
+                name: "authorize".into(),
+                target: Some(heddle_object_model::object::AnnotationSourceReference {
+                    scope: structured.metadata.scope.clone(),
+                    source: heddle_object_model::object::CollaborationSourceAnchor {
+                        revision: heddle_object_model::object::CollaborationRevision::GitCommit {
+                            oid: "a".repeat(40),
+                        },
+                        path: "src/auth.rs".into(),
+                        symbol_id: "auth::authorize".into(),
+                        start_line: Some(12),
+                        end_line: Some(18),
+                    },
+                }),
+            },
+            heddle_object_model::object::AnnotationTag::Property {
+                key: "confidence".into(),
+                value: heddle_object_model::object::AnnotationValue::Decimal(
+                    heddle_object_model::object::AnnotationDecimal {
+                        coefficient: 9,
+                        scale: 1,
+                    },
+                ),
+            },
+            heddle_object_model::object::AnnotationTag::Property {
+                key: "requires_review".into(),
+                value: heddle_object_model::object::AnnotationValue::Boolean(false),
+            },
+            heddle_object_model::object::AnnotationTag::Property {
+                key: "large".into(),
+                value: heddle_object_model::object::AnnotationValue::Integer(i64::MAX),
+            },
+            heddle_object_model::object::AnnotationTag::Property {
+                key: "severity".into(),
+                value: heddle_object_model::object::AnnotationValue::Text("high".into()),
+            },
+        ];
+        let structured_context =
+            sign_context(structured, &[], &signer).expect("structured context");
         let mut vectors = String::new();
         for (name, record) in [
             ("open", open),
@@ -583,6 +634,7 @@ mod tests {
             ("resolve", resolve),
             ("reopen", reopen),
             ("context", context),
+            ("structured_context", structured_context),
             ("source_state", source_state),
             ("source_git", source_git),
             ("extract_context", extraction),
