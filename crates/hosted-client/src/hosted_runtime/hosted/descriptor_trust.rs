@@ -1,4 +1,9 @@
-//! Per-server descriptor-signing trust continuity.
+//! Per-server deployment descriptor ROOT pin.
+//!
+//! The stored `{key_id, public_key}` is the stable descriptor root, not an
+//! instance endpoint key. Served ephemeral keys are accepted only when a
+//! root attestation verifies against this pin; a fetched document cannot
+//! replace the pin (root rotation is `heddle auth trust replace`).
 
 use std::{
     collections::BTreeMap,
@@ -249,9 +254,9 @@ pub fn pin_change_message(
     observed_key_id: &str,
 ) -> Result<String> {
     Ok(format!(
-        "descriptor trust changed for {canonical_server}: pinned key id `{}` \
-         with descriptor public key fingerprint {}; observed descriptor key id `{observed_key_id}`. \
-         Automatic re-pinning was refused; verify the new descriptor public key out of band, then run \
+        "descriptor root changed for {canonical_server}: pinned root key id `{}` \
+         with descriptor root public key fingerprint {}; observed descriptor key id `{observed_key_id}`. \
+         Automatic root rotation was refused; verify the new descriptor root public key out of band, then run \
          `heddle auth trust replace --server {canonical_server} \
          --expect-current-public-key {} --key-id <new-id> --public-key <64-hex>`",
         current.key_id,

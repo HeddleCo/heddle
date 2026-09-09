@@ -21,10 +21,12 @@ pub struct ClientConfig {
     /// Server key used to look up the credential in the credential store
     /// (`~/.heddle/credentials.toml`).  Matches the key used by `heddle auth login`.
     pub server_key: Option<String>,
-    /// Trusted descriptor-signing key identifier for native Iroh bootstrap.
+    /// Trusted deployment descriptor ROOT key identifier for native Iroh bootstrap.
     pub descriptor_key_id: Option<String>,
-    /// Raw Ed25519 public key for the trusted descriptor-signing key.
+    /// Raw Ed25519 public key for the trusted deployment descriptor ROOT.
     pub descriptor_public_key: Option<[u8; 32]>,
+    /// Optional region hint used to prefer same-region attested endpoints.
+    pub preferred_region: Option<String>,
     /// Enable TLS.
     pub tls_enabled: bool,
     /// Override the expected TLS server name.
@@ -74,6 +76,7 @@ impl ClientConfig {
             server_key: None,
             descriptor_key_id: None,
             descriptor_public_key: None,
+            preferred_region: None,
             tls_enabled: false,
             tls_domain_name: None,
             tls_ca_certificate_pem: None,
@@ -124,6 +127,12 @@ impl ClientConfig {
     ) -> Self {
         self.descriptor_key_id = Some(key_id.into());
         self.descriptor_public_key = Some(public_key);
+        self
+    }
+
+    pub fn with_preferred_region(mut self, region: impl Into<String>) -> Self {
+        let region = region.into();
+        self.preferred_region = (!region.is_empty()).then_some(region);
         self
     }
 

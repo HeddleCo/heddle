@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Native bootstrap pins the deployment descriptor **root** and trusts a
+  live set of root-attested ephemeral endpoints from
+  `/.well-known/heddle/iroh-endpoint` (heddle#1566). Entries whose
+  attestation does not verify, whose validity window has not started or
+  has expired, or that arrive over a failed TLS chain are rejected; a
+  served document cannot rotate the root pin.
 - `GetSpool` / `PromoteSpool` client routes and personal-first read
   resolution for a bare hosted path (heddle#1728).
 

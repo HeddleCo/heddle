@@ -18,15 +18,12 @@ mod fixture {
     use api::{
         HOSTED_ALPN_V1,
         framing::{decode_request_prelude, encode_stream_failure},
-        heddle::api::v1alpha1::{
-            CallFailure, CallFailureCode, EndpointDescriptor, SignedEndpointDescriptor,
-        },
-        signing::endpoint_descriptor_bytes,
+        heddle::api::v1alpha1::{CallFailure, CallFailureCode},
     };
     use biscuit_auth::KeyPair;
     use crypto::{Ed25519Signer, Signer};
+    use hosted_client::hosted_runtime::hosted::root_attestation_bytes;
     use iroh::{Endpoint, RelayMode, endpoint::presets};
-    use prost::Message;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
     use rustls::{
         ServerConfig, ServerConnection, StreamOwned,
@@ -369,24 +366,34 @@ mod fixture {
         signer: &Ed25519Signer,
     ) -> Vec<u8> {
         let now = chrono::Utc::now().timestamp_millis();
-        let descriptor = EndpointDescriptor {
-            version: 1,
-            endpoint_id: endpoint_id.to_string(),
-            relay_urls: Vec::new(),
-            direct_addresses: vec![direct_address.to_string()],
-            supported_alpns: vec![HOSTED_ALPN_V1.to_vec()],
-            issued_at_unix_millis: now - 1_000,
-            expires_at_unix_millis: now + 60_000,
-            rotation: None,
-        };
-        SignedEndpointDescriptor {
-            signature: signer
-                .sign(&endpoint_descriptor_bytes(&descriptor))
-                .expect("sign fixture endpoint descriptor"),
-            descriptor: Some(descriptor),
-            key_id: "clone-test-key".to_string(),
-        }
-        .encode_to_vec()
+        let public_key: [u8; 32] = hex::decode(endpoint_id)
+            .expect("fixture endpoint id is hex")
+            .try_into()
+            .expect("fixture endpoint id is 32 bytes");
+        let not_before = now - 1_000;
+        let not_after = now + 60_000;
+        let signature = signer
+            .sign(&root_attestation_bytes(
+                "clone-ephemeral",
+                &public_key,
+                not_before,
+                not_after,
+                "test",
+            ))
+            .expect("sign fixture root attestation");
+        serde_json::to_vec(&serde_json::json!({
+            "version": 2,
+            "entries": [{
+                "ephemeral_key_id": "clone-ephemeral",
+                "ephemeral_public_key": hex::encode(public_key),
+                "not_before": not_before,
+                "not_after": not_after,
+                "region": "test",
+                "signature": hex::encode(signature),
+                "direct_addresses": [direct_address],
+            }],
+        }))
+        .expect("encode fixture ephemeral descriptor set")
     }
 
     struct TestHttpsServer {
@@ -509,7 +516,7 @@ mod fixture {
             "200 OK"
         };
         let response = format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/protobuf\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             body.len()
         );
         let response_written = stream

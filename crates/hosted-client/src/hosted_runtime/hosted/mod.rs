@@ -23,6 +23,7 @@ pub(crate) mod operation_id;
 mod provider_pull;
 mod provider_transport;
 mod resolver;
+mod root_attestation;
 mod session;
 #[cfg(test)]
 mod session_tests;
@@ -45,7 +46,7 @@ use std::sync::Arc;
 use api::heddle::api::v1alpha1::CallContext;
 pub use bootstrap::{
     DescriptorKeyring, VerifiedEndpointDescriptor, fetch_descriptor_key_document,
-    fetch_signed_endpoint_descriptor,
+    fetch_ephemeral_descriptor_set,
 };
 pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, ServerStreamItem};
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn, HostedResolution};
@@ -69,6 +70,7 @@ use iroh::{Endpoint, EndpointAddr};
 pub use methods::HostedRoutes;
 use objects::{NoopWarnings, Warning, WarningSink};
 use prost::Message;
+pub use root_attestation::root_attestation_bytes;
 pub use session::{HostedAuthMode, HostedSession};
 pub use spool_path::{
     HostedReadPath, canonicalize_spool_path, is_root_level_spool_path, plan_personal_first_read,
