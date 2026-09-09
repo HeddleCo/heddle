@@ -1716,3 +1716,6 @@ fn public_transfer_audit_codec_matches_verification_and_binds_history() {
         expected
     );
 }
+
+#[path = "thread_control_authority_tests.rs"]
+mod thread_control_authority_tests;

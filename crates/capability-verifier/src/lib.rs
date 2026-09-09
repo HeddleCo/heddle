@@ -15,6 +15,7 @@ mod keyring;
 mod limits;
 mod operation;
 mod owner;
+pub mod thread_control_authority;
 mod transfer;
 
 #[cfg(target_arch = "wasm32")]

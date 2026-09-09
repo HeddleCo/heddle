@@ -189,7 +189,7 @@ pub fn creation_restrictions(statement: &SpoolCreationStatement) -> Result<Block
         .map_err(|error| invalid(format!("creation restriction: {error}")))
 }
 
-fn history_state(history: &OwnerHistory, now: i64) -> Result<VerifiedOwnerState> {
+pub(crate) fn history_state(history: &OwnerHistory, now: i64) -> Result<VerifiedOwnerState> {
     if history.accepted_transitions.len() > VerificationLimits::MAX_TRANSITIONS {
         return Err(invalid("creation history exceeds transition bound"));
     }
