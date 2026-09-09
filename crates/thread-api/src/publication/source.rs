@@ -26,6 +26,8 @@ pub struct SourceBudget {
 pub struct PublicationOptions {
     pub client_operation_id: String,
     pub source: EndpointRef,
+    /// Empty omits the compare-and-set condition; otherwise exactly 32 bytes.
+    /// Explicit publication does not enable ongoing synchronization.
     pub sharing_policy_version: Vec<u8>,
     pub checkpoint: Option<TransferCheckpoint>,
 }
@@ -149,17 +151,11 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
                 .as_ref()
                 .is_none_or(|id| id.value.len() != 32)
             || options.source.public_key.len() != 32
-            || (options.sharing_policy_version.len() != 32
-                && !(options.sharing_policy_version.is_empty()
-                    && self
-                        .remote
-                        .description
-                        .endpoint
-                        .as_ref()
-                        .is_some_and(|endpoint| endpoint.kind == EndpointKind::Device as i32)))
+            || (!options.sharing_policy_version.is_empty()
+                && options.sharing_policy_version.len() != 32)
         {
             return Err(Error::Invalid(
-                "Thread, source endpoint and sharing policy version required",
+                "Thread, source endpoint and optional 32-byte policy version required",
             ));
         }
         let destination = self

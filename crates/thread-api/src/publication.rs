@@ -109,6 +109,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         if open.destination != self.description.endpoint
             || open.thread.is_none()
             || open.revision.is_none()
+            || (!open.sharing_policy_version.is_empty() && open.sharing_policy_version.len() != 32)
             || open.packs.len() != 2
             || open.packs[0].kind != pack_extent::Kind::NativePack as i32
             || open.packs[1].kind != pack_extent::Kind::NativeIndex as i32
@@ -292,7 +293,9 @@ fn validate_receipt(
         || receipt.destination != open.destination
         || receipt.thread != open.thread
         || receipt.revision != open.revision
-        || receipt.sharing_policy_version != open.sharing_policy_version
+        || receipt.sharing_policy_version.len() != 32
+        || (!open.sharing_policy_version.is_empty()
+            && receipt.sharing_policy_version != open.sharing_policy_version)
     {
         return Err(Error::Invalid("receipt differs from requested publication"));
     }
@@ -496,7 +499,11 @@ mod tests {
                                 destination: open.destination.clone(),
                                 thread: open.thread.clone(),
                                 revision: open.revision.clone(),
-                                sharing_policy_version: open.sharing_policy_version.clone(),
+                                sharing_policy_version: if open.sharing_policy_version.is_empty() {
+                                    vec![3; 32]
+                                } else {
+                                    open.sharing_policy_version.clone()
+                                },
                                 accepted_inventory: Some(ObjectAddress {
                                     algorithm: "blake3".into(),
                                     digest: typed_digest("thread-source-inventory-v1", &inventory)
@@ -662,6 +669,48 @@ mod tests {
             Error::Invalid("receipt differs from requested publication")
         ));
     }
+    #[test]
+    fn publication_policy_is_optional_cas_and_receipt_reports_actual_frontier() {
+        let (_, mut opening, _) = fixture(false);
+        let inventory = [7; 32];
+        let Some(publish_content_client_frame::Body::Open(open)) = &opening.body else {
+            panic!("opening")
+        };
+        let receipt = PublicationReceipt {
+            client_operation_id: opening.client_operation_id.clone(),
+            destination: open.destination.clone(),
+            thread: open.thread.clone(),
+            revision: open.revision.clone(),
+            sharing_policy_version: vec![3; 32],
+            accepted_inventory: Some(ObjectAddress {
+                algorithm: "blake3".into(),
+                digest: inventory.to_vec(),
+            }),
+            outcome: Some(publication_receipt::Outcome::Accepted(Applied::default())),
+        };
+        validate_receipt(receipt.clone(), &opening, &inventory)
+            .expect("one-shot upload returns actual policy without CAS");
+        let mut absent = receipt.clone();
+        absent.sharing_policy_version.clear();
+        assert!(
+            validate_receipt(absent, &opening, &inventory).is_err(),
+            "receipt must report actual policy frontier"
+        );
+        let Some(publish_content_client_frame::Body::Open(open)) = &mut opening.body else {
+            panic!("opening")
+        };
+        open.sharing_policy_version = vec![4; 32];
+        assert!(
+            validate_receipt(receipt.clone(), &opening, &inventory).is_err(),
+            "explicit policy CAS cannot silently accept another version"
+        );
+        let Some(publish_content_client_frame::Body::Open(open)) = &mut opening.body else {
+            panic!("opening")
+        };
+        open.sharing_policy_version = vec![3; 32];
+        validate_receipt(receipt, &opening, &inventory).expect("matching explicit policy version");
+    }
+
     #[cfg(feature = "replication")]
     #[test]
     fn publication_digests_match_the_native_typed_hash_format() {
@@ -724,7 +773,7 @@ mod tests {
                         public_key: vec![2; 32],
                         kind: EndpointKind::Device as i32,
                     },
-                    sharing_policy_version: vec![3; 32],
+                    sharing_policy_version: vec![],
                     checkpoint: None,
                 },
             )

@@ -67,7 +67,7 @@ impl DeviceRpc {
         let thread = checkout::thread(&session, Some(reference))?;
         let replica = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
         let revision = selected_revision(&session, &open)?;
-        check_policy(&session, &replica, &open, &self.endpoint)?;
+        check_policy(&session, &replica, &open)?;
         let inventory = inventory(&open)?;
         let digest =
             ContentHash::compute_typed("thread-source-transfer-v1", &request.encode_to_vec());
@@ -245,7 +245,6 @@ impl DeviceRpc {
         }
         drop(files);
         let home = self.home.clone();
-        let endpoint = self.endpoint;
         let admitted = session.clone();
         let opening = open.clone();
         let command_id = request.client_operation_id.clone();
@@ -273,7 +272,7 @@ impl DeviceRpc {
                 admitted.authorize_thread(&repository, &dependency)?;
                 guards.push((dependency.clone(), dependency.generation()?));
             }
-            check_policy(&admitted, &replica, &opening, &endpoint)?;
+            check_policy(&admitted, &replica, &opening)?;
             for signed in validated.operations() {
                 authorize_original(
                     &guards,
@@ -291,13 +290,13 @@ impl DeviceRpc {
             for (dependency, _) in &guards {
                 admitted.authorize_thread(&repository, dependency)?;
             }
-            check_policy(&admitted, &replica, &opening, &endpoint)?;
+            let policy_version = check_policy(&admitted, &replica, &opening)?;
             let receipt = PublicationReceipt {
                 client_operation_id: command_id,
                 destination: opening.destination.clone(),
                 thread: opening.thread.clone(),
                 revision: opening.revision.clone(),
-                sharing_policy_version: opening.sharing_policy_version.clone(),
+                sharing_policy_version: policy_version.as_bytes().to_vec(),
                 accepted_inventory: Some(ObjectAddress {
                     algorithm: "blake3".into(),
                     digest: inventory.as_bytes().to_vec(),
@@ -364,21 +363,23 @@ fn check_policy(
     session: &auth::Session,
     replica: &ThreadReplica,
     open: &PublishContentOpen,
-    endpoint: &[u8; 32],
-) -> Result<()> {
+) -> Result<ContentHash> {
+    use objects::object::thread_replication::metadata::{Property, property_version};
     let repository = repo::Repository::open(&session.spool.root)?;
     session.authorize_thread(&repository, replica)?;
-    let (_, version) = replica.sharing(endpoint)?;
+    let heads = replica
+        .metadata_frontier(&Property::Sharing)?
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    let version = property_version(replica.thread_id(), &Property::Sharing, &heads)?;
     ensure!(
-        version
-            .as_ref()
-            .map(|value| value.as_bytes().as_slice())
-            .unwrap_or_default()
-            == open.sharing_policy_version,
+        open.sharing_policy_version.is_empty() || open.sharing_policy_version == version.as_bytes(),
         "publication sharing policy changed"
     );
-    Ok(())
+    Ok(version)
 }
+
 fn inventory(open: &PublishContentOpen) -> Result<ContentHash> {
     ensure!(
         open.packs.len() == 2
