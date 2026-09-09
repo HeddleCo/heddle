@@ -52,6 +52,8 @@ pub enum CollaborationRecordKind {
     Billing,
     Evidence,
     CheckAcknowledgement,
+    ProviderConnection,
+    RemoteLink,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]

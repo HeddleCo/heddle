@@ -97,6 +97,8 @@ pub fn mention(value: &EntityRef) -> Result<Mention, Error> {
             Entity::Billing(r) => record(r, Kind::Billing)?,
             Entity::Evidence(r) => record(r, Kind::Evidence)?,
             Entity::CheckAcknowledgement(r) => record(r, Kind::CheckAcknowledgement)?,
+            Entity::ProviderConnection(r) => record(r, Kind::ProviderConnection)?,
+            Entity::RemoteLink(r) => record(r, Kind::RemoteLink)?,
             Entity::Bookmark(_) => {
                 return Err(Error::Protocol(
                     "bookmarks are account-private; mention their Spool or Thread instead",
@@ -188,6 +190,8 @@ pub fn mention_ref(value: &Mention) -> EntityRef {
                 Kind::Billing => Entity::Billing(r),
                 Kind::Evidence => Entity::Evidence(r),
                 Kind::CheckAcknowledgement => Entity::CheckAcknowledgement(r),
+                Kind::ProviderConnection => Entity::ProviderConnection(r),
+                Kind::RemoteLink => Entity::RemoteLink(r),
             }
         }
     };
@@ -673,6 +677,8 @@ mod tests {
             Kind::Billing,
             Kind::Evidence,
             Kind::CheckAcknowledgement,
+            Kind::ProviderConnection,
+            Kind::RemoteLink,
         ] {
             for spool in [None, Some(spool)] {
                 mentions.push(Mention::Record {
@@ -682,7 +688,7 @@ mod tests {
                 });
             }
         }
-        assert_eq!(mentions.len(), 60);
+        assert_eq!(mentions.len(), 64);
         for original in mentions {
             assert_eq!(
                 mention(&mention_ref(&original)).expect("typed mention"),
