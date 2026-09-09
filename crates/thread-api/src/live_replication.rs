@@ -10,7 +10,7 @@ use prost::Message;
 #[cfg(feature = "native")]
 use repo::thread_replication::ThreadReplica;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{Notify, mpsc, watch},
     task::{AbortHandle, JoinHandle},
 };
 
@@ -152,6 +152,10 @@ enum Event {
 /// already retained by this stream. Work may produce one bounded output frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
+    /// Idle clock tick: verify locally known identity, revocation and time
+    /// caveats only. Hosts must not query the store or reserve output memory.
+    /// Every actual input and disclosure still uses the fresh gates below.
+    Idle,
     Check,
     /// Advance input admission and bounded control queues. The reader already
     /// accounts for the input; waiting for output memory here could deadlock
@@ -180,12 +184,43 @@ impl ActivityGuard for () {
 /// It runs before every admission and output, including queued output. Readers
 /// must enforce the negotiated frame bound before allocating message bodies.
 pub async fn run<B, R, W, G, F, A>(
+    session: Session<B>,
+    reader: R,
+    writer: W,
+    side: Side,
+    feed: &Feed,
+    authorize: G,
+) -> Result<(), B::Error>
+where
+    B: ReplicaStore,
+    R: MessageReader<Error = transport::Error>,
+    W: MessageWriter<Error = transport::Error> + 'static,
+    G: Fn(Activity) -> F + Clone + Send + Sync + 'static,
+    F: Future<Output = std::result::Result<A, transport::Error>> + Send,
+    A: ActivityGuard,
+{
+    run_with_idle_clock(
+        session,
+        reader,
+        writer,
+        side,
+        feed,
+        authorize,
+        tokio::time::interval(Duration::from_secs(1)),
+    )
+    .await
+}
+
+// Keep the idle clock injectable inside the driver so progress tests can prove
+// that queue wakeups work without a heartbeat rescuing a missed notification.
+async fn run_with_idle_clock<B, R, W, G, F, A>(
     mut session: Session<B>,
     mut reader: R,
     mut writer: W,
     side: Side,
     feed: &Feed,
     authorize: G,
+    mut heartbeat: tokio::time::Interval,
 ) -> Result<(), B::Error>
 where
     B: ReplicaStore,
@@ -201,10 +236,13 @@ where
     drop(authorize(Activity::Check).await?);
     let mut changes = feed.changes.clone();
     let (queue, mut outgoing) = mpsc::channel::<Outbound>(256);
+    let progress = Arc::new(Notify::new());
+    let sender_progress = progress.clone();
     let sender_session = session.clone();
     let sender_authorize = authorize.clone();
     let mut sender: JoinHandle<Result<(), B::Error>> = tokio::spawn(async move {
         while let Some(item) = outgoing.recv().await {
+            sender_progress.notify_one();
             let session = sender_session.clone();
             let gate = sender_authorize.clone();
             let activity = gate(Activity::Work).await?;
@@ -239,8 +277,9 @@ where
     // Dropping a JoinHandle detaches it. Abort explicitly so cancellation drops
     // the transport writer too, including while its peer is applying pressure.
     let _sender_guard = AbortOnDrop(sender.abort_handle());
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut announce = true;
+    let mut maintain = true;
     loop {
         let event = tokio::select! {
             result = &mut sender => return result.map_err(worker)?,
@@ -252,28 +291,33 @@ where
                 result.map_err(|_| Error::FeedClosed)?;
                 if changes.borrow_and_update().is_none() { return Err(Error::FeedClosed); }
                 announce = true;
-                Event::Maintain
+                maintain = true;
+                continue
             },
             _ = std::future::ready(()), if announce && queue.capacity() > 128 => Event::Announce,
+            _ = std::future::ready(()), if maintain && queue.capacity() > 128 => Event::Maintain,
+            _ = progress.notified() => continue,
             _ = heartbeat.tick() => {
-                queue.try_send(Outbound::Frame(Frame::Have(ReplicationHave::default()))).map_err(|_| Error::Backpressure)?;
-                Event::Maintain
+                drop(authorize(Activity::Idle).await?);
+                continue
             }
         };
         let activity = authorize(Activity::Receive).await?;
         let output = match event {
-            Event::Incoming(frame) => session.handle(frame).await?,
+            Event::Incoming(frame) => {
+                maintain = true;
+                session.handle(frame).await?
+            }
             Event::Announce => {
                 let frame = session.announcement().await?;
                 announce = frame.is_some();
                 frame.into_iter().map(Outbound::Frame).collect()
             }
-            Event::Maintain => session
-                .control()
-                .await?
-                .into_iter()
-                .map(Outbound::Frame)
-                .collect(),
+            Event::Maintain => {
+                let frame = session.control().await?;
+                maintain = frame.is_some();
+                frame.into_iter().map(Outbound::Frame).collect()
+            }
         };
         drop(activity);
         for item in output {

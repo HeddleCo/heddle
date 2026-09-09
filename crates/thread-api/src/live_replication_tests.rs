@@ -72,6 +72,7 @@ async fn stalled_delivery_retains_memory_releases_work_and_refunds_on_cancellati
             &SignedGenesis::sign(&genesis, &signer).expect("proof"),
         )
         .expect("replica");
+        seed_frontiers(&replica, &repo, &signer, &genesis, 1);
         let feed = Feed::new(replica.clone()).await.expect("shared feed");
         let session = Session::new(
             LocalReplica::new(replica, Arc::new(repo.store().clone())),
@@ -174,6 +175,7 @@ async fn admitted_input_can_finish_while_the_output_memory_pool_is_full() {
         &SignedGenesis::sign(&genesis, &signer).expect("proof"),
     )
     .expect("replica");
+    seed_frontiers(&replica, &repo, &signer, &genesis, 1);
     let feed = Feed::new(replica.clone()).await.expect("shared feed");
     let session = Session::new(
         LocalReplica::new(replica, Arc::new(repo.store().clone())),
@@ -387,4 +389,174 @@ async fn unchanged_replication_sends_no_frames_or_database_activity_after_initia
     );
     task.abort();
     assert!(task.await.expect_err("cancelled").is_cancelled());
+}
+
+struct PausedWriter {
+    resume: Option<Arc<Notify>>,
+    frames: mpsc::Sender<Vec<u8>>,
+}
+impl MessageWriter for PausedWriter {
+    type Error = transport::Error;
+    async fn send(&mut self, bytes: Vec<u8>) -> std::result::Result<(), Self::Error> {
+        if let Some(resume) = self.resume.take() {
+            resume.notified().await;
+        }
+        self.frames
+            .send(bytes)
+            .await
+            .map_err(|_| transport::Error::Protocol("test receiver closed"))
+    }
+    async fn finish(&mut self) -> std::result::Result<(), Self::Error> {
+        Ok(())
+    }
+    fn abort(&mut self) {}
+}
+struct CompletedReceive {
+    count: Option<Arc<AtomicUsize>>,
+    changed: Arc<Notify>,
+}
+impl Drop for CompletedReceive {
+    fn drop(&mut self) {
+        if let Some(count) = &self.count {
+            count.fetch_add(1, Ordering::SeqCst);
+            self.changed.notify_one();
+        }
+    }
+}
+impl ActivityGuard for CompletedReceive {
+    type Retained = ();
+    fn finish(self, _: usize) -> std::result::Result<(), transport::Error> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn bounded_sender_progress_drains_more_than_256_frontiers_without_idle_clock_or_input() {
+    let (_directory, repository, replica) = fixture(300);
+    let (_changes, receiver) = watch::channel(Some(1));
+    let feed = Feed::from_changes(replica.thread_id(), receiver);
+    let session = Session::new(
+        LocalReplica::new(replica, Arc::new(repository.store().clone())),
+        [7; 32],
+        [ThreadFacet::Source].into(),
+        1,
+    )
+    .expect("session");
+    let (writer, mut frames) = mpsc::channel(1);
+    let release = Arc::new(Notify::new());
+    let paused = PausedWriter {
+        resume: Some(release.clone()),
+        frames: writer,
+    };
+    let completed = Arc::new(AtomicUsize::new(0));
+    let observed = completed.clone();
+    let changed = Arc::new(Notify::new());
+    let notify = changed.clone();
+    let first_idle = tokio::time::Instant::now() + Duration::from_secs(60);
+    let task = tokio::spawn(async move {
+        run_with_idle_clock(
+            session,
+            QuietReader,
+            paused,
+            Side::Acceptor,
+            &feed,
+            move |activity| {
+                std::future::ready(Ok(CompletedReceive {
+                    count: (activity == Activity::Receive).then(|| observed.clone()),
+                    changed: notify.clone(),
+                }))
+            },
+            tokio::time::interval_at(first_idle, Duration::from_secs(60)),
+        )
+        .await
+    });
+    // The writer retains page one. One initial empty control check and 129
+    // completed one-item announcements leave 128 pages queued, forcing the
+    // producer to suspend. Wait for that state rather than guessing a delay.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while completed.load(Ordering::SeqCst) < 130 {
+            changed.notified().await;
+        }
+    })
+    .await
+    .expect("bounded output queue must fill behind paused writer");
+    release.notify_one();
+    let mut heads = std::collections::BTreeSet::new();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while heads.len() < 300 {
+            let frame = frames.recv().await.expect("complete paged announcement");
+            let Frame::Have(have) = Side::Initiator
+                .decode::<crate::replication::native::Error>(&frame)
+                .expect("frontier")
+            else {
+                panic!("Have")
+            };
+            assert_eq!(have.frontiers.len(), 1);
+            assert_eq!(
+                have.frontiers[0].heads.len(),
+                1,
+                "negotiated one-item pages"
+            );
+            assert!(
+                heads.insert(have.frontiers[0].heads[0].clone()),
+                "each frontier is sent once"
+            );
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("sender progress must wake blocked announcement without a clock tick");
+    task.abort();
+    assert!(task.await.expect_err("cancelled").is_cancelled());
+}
+
+#[tokio::test]
+async fn idle_clock_enforces_local_expiration_without_inbound_or_store_work() {
+    let (_directory, repository, replica) = fixture(0);
+    let (_changes, receiver) = watch::channel(Some(1));
+    let feed = Feed::from_changes(replica.thread_id(), receiver);
+    let session = Session::new(
+        LocalReplica::new(replica, Arc::new(repository.store().clone())),
+        [7; 32],
+        [ThreadFacet::Source].into(),
+        1,
+    )
+    .expect("session");
+    let (writer, mut frames) = mpsc::channel(1);
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+    let idle_checks = Arc::new(AtomicUsize::new(0));
+    let measured = idle_checks.clone();
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        run(
+            session,
+            QuietReader,
+            RecordingWriter(writer),
+            Side::Acceptor,
+            &feed,
+            move |activity| {
+                if activity == Activity::Idle {
+                    measured.fetch_add(1, Ordering::SeqCst);
+                }
+                std::future::ready(if tokio::time::Instant::now() >= deadline {
+                    Err(transport::Error::Protocol("local capability expired"))
+                } else {
+                    Ok(())
+                })
+            },
+        ),
+    )
+    .await
+    .expect("idle expiry must stop a silent peer")
+    .expect_err("expired capability");
+    assert!(matches!(
+        result,
+        Error::Transport(transport::Error::Protocol("local capability expired"))
+    ));
+    assert!(idle_checks.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        frames.recv().await,
+        None,
+        "empty replica never emits a fabricated heartbeat"
+    );
 }
