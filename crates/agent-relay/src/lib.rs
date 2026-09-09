@@ -20,6 +20,8 @@ mod claude_hook;
 mod device_runs;
 mod probe;
 mod relay;
+#[cfg(feature = "client")]
+mod run_permissions;
 
 pub use bridge::{HarnessCliBridge, RelayCapture};
 pub use probe::{HarnessProbeInput, HarnessProbeResult};

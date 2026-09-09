@@ -224,11 +224,20 @@ pub fn relay_harness_event(
     event: &str,
     payload: &str,
 ) -> Result<()> {
-    let mut runtime = init_harness_runtime(bridge, repo)?;
     let (json, warning) = parse_relay_payload(payload);
     if let Some(warning) = warning {
         eprintln!("{}", style::warn(&warning));
     }
+    #[cfg(feature = "client")]
+    if harness == "claude-code" && matches!(event, "PreToolUse" | "PermissionRequest") {
+        return crate::device_runs::claude_tool_edge(
+            repo,
+            event,
+            &json,
+            &mut std::io::stdout().lock(),
+        );
+    }
+    let mut runtime = init_harness_runtime(bridge, repo)?;
     runtime.relay(harness, event, &json)
 }
 
@@ -340,6 +349,15 @@ fn relay_codex(runtime: &mut HarnessBridgeRuntime, _event: &str, payload: &Value
 }
 
 fn relay_claude(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value) -> Result<()> {
+    #[cfg(feature = "client")]
+    if matches!(event, "PreToolUse" | "PermissionRequest") {
+        return crate::device_runs::claude_tool_edge(
+            &runtime.repo,
+            event,
+            payload,
+            &mut std::io::stdout().lock(),
+        );
+    }
     let metadata = map_from_pairs([
         ("session_id", value_string(payload, &["session_id"])),
         ("agent_id", value_string(payload, &["agent_id"])),
@@ -503,6 +521,15 @@ fn relay_claude(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value
                 &opened.heddle_session_id,
                 event,
                 || Ok(None),
+                &mut std::io::stdout().lock(),
+            )?;
+        }
+        #[cfg(feature = "client")]
+        "PermissionRequest" => {
+            crate::run_permissions::claude_permission(
+                &runtime.repo,
+                &opened.heddle_session_id,
+                payload,
                 &mut std::io::stdout().lock(),
             )?;
         }

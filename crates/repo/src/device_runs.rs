@@ -36,6 +36,7 @@ impl RunStore {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.execute_batch("PRAGMA journal_mode=WAL;
             CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, thread TEXT NOT NULL, record BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS run_harness_bindings (native_key TEXT PRIMARY KEY, run TEXT NOT NULL, active INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS run_timeline (run TEXT NOT NULL, position INTEGER NOT NULL, record BLOB NOT NULL, PRIMARY KEY(run,position));
             CREATE TABLE IF NOT EXISTS run_controls (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, run TEXT NOT NULL, request BLOB NOT NULL, principal TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0);
             CREATE INDEX IF NOT EXISTS pending_run_controls ON run_controls(run, done, sequence);
@@ -46,6 +47,61 @@ impl RunStore {
             path,
             _anchor: std::sync::Arc::new(std::sync::Mutex::new(connection)),
         })
+    }
+    /// Hook reads never create a database or execute schema statements.
+    pub fn open_existing(heddle_dir: &Path) -> Result<Option<Self>> {
+        let path = heddle_dir.join("device-runs.sqlite3");
+        if !path.try_exists()? {
+            return Ok(None);
+        }
+        let connection =
+            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        Ok(Some(Self {
+            path,
+            _anchor: std::sync::Arc::new(std::sync::Mutex::new(connection)),
+        }))
+    }
+    pub fn bind_harness(&self, native_key: &str, run: &str, active: bool) -> Result<()> {
+        if native_key.is_empty() || native_key.len() > 512 {
+            bail!("invalid harness identity");
+        }
+        valid_id(run)?;
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if load_run(&tx, run)?.is_none() {
+            bail!("harness run unavailable");
+        }
+        let existing: Option<(String, bool)> = tx
+            .query_row(
+                "SELECT run,active FROM run_harness_bindings WHERE native_key=?1",
+                [native_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if existing
+            .as_ref()
+            .is_some_and(|(previous, active)| *active && previous != run)
+        {
+            bail!("harness identity is already bound to another active run");
+        }
+        tx.execute("INSERT INTO run_harness_bindings(native_key,run,active) VALUES(?1,?2,?3) ON CONFLICT(native_key) DO UPDATE SET run=excluded.run,active=excluded.active WHERE run_harness_bindings.run!=excluded.run OR run_harness_bindings.active!=excluded.active", params![native_key,run,active])?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// Indexed physical-checkout-local lookup; never scans other agents' sessions.
+    pub fn harness_run(&self, native_key: &str) -> Result<Option<String>> {
+        if native_key.is_empty() || native_key.len() > 512 {
+            bail!("invalid harness identity");
+        }
+        Ok(self
+            .connection()?
+            .query_row(
+                "SELECT run FROM run_harness_bindings WHERE native_key=?1 AND active=1",
+                [native_key],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
     fn committed(&self) -> Result<()> {
         objects::fs_atomic::write_file_atomic_secret(

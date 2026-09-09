@@ -274,3 +274,63 @@ fn pending_permission_is_observable_versioned_closed_and_expiring() {
             .contains("expired")
     );
 }
+
+#[test]
+fn harness_binding_is_indexed_exclusive_and_does_not_create_stores_on_read() {
+    let empty = tempfile::tempdir().expect("empty checkout");
+    assert!(
+        RunStore::open_existing(empty.path())
+            .expect("read absent")
+            .is_none()
+    );
+    assert_eq!(
+        std::fs::read_dir(empty.path()).expect("directory").count(),
+        0
+    );
+    let (directory, store, mut run) = fixture();
+    store
+        .bind_harness("claude-code:session:first", "run-1", true)
+        .expect("bind first");
+    run.r#ref.as_mut().expect("reference").id = "run-2".into();
+    store.put_run(run).expect("second agent");
+    store
+        .bind_harness("claude-code:agent:second", "run-2", true)
+        .expect("bind independent agent");
+    let error = store
+        .bind_harness("claude-code:session:first", "run-2", true)
+        .expect_err("cannot steal active identity");
+    assert!(error.to_string().contains("another active run"), "{error}");
+    let reopened = RunStore::open_existing(directory.path())
+        .expect("reopen")
+        .expect("existing");
+    assert_eq!(
+        reopened
+            .harness_run("claude-code:session:first")
+            .expect("first"),
+        Some("run-1".into())
+    );
+    assert_eq!(
+        reopened
+            .harness_run("claude-code:agent:second")
+            .expect("second"),
+        Some("run-2".into())
+    );
+    store
+        .bind_harness("claude-code:session:first", "run-1", false)
+        .expect("close first");
+    assert!(
+        reopened
+            .harness_run("claude-code:session:first")
+            .expect("closed")
+            .is_none()
+    );
+    store
+        .bind_harness("claude-code:session:first", "run-2", true)
+        .expect("reuse closed identity");
+    assert_eq!(
+        reopened
+            .harness_run("claude-code:session:first")
+            .expect("new binding"),
+        Some("run-2".into())
+    );
+}

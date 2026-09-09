@@ -74,6 +74,26 @@ fn reachability_path(heddle_home: &std::path::Path) -> std::path::PathBuf {
     repo::daemon::box_state_dir_in(heddle_home).join("heddle-netd.reachability.json")
 }
 
+/// Load the running local daemon identity without creating keys or dialing.
+/// A stopped daemon must not delay ordinary local harness permission prompts.
+#[cfg(feature = "client")]
+pub fn running_device_node_id() -> anyhow::Result<Option<EndpointId>> {
+    let path = reachability_path(&repo::identity::heddle_home_dir());
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let metadata: DeviceReachability = serde_json::from_slice(&bytes)?;
+    let Some(endpoint) = persisted_node_id()? else {
+        return Ok(None);
+    };
+    Ok(
+        (metadata.node_id == endpoint.to_string() && repo::daemon::pid_alive(metadata.pid))
+            .then_some(endpoint),
+    )
+}
+
 /// Keep claim-link relay metadata current as the device's home relay changes.
 /// The daemon owns this task and aborts it before removing its discovery files.
 #[cfg(feature = "client")]

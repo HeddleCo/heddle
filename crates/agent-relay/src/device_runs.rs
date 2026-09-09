@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use api::heddle::api::v2alpha1 as v2;
 use objects::object::ContentHash;
 use repo::{
-    ActorPresenceStatus, Repository, device_runs::RunStore, thread_replication::checkout::ThreadCheckout,
+    ActorPresenceStatus, Repository, device_runs::RunStore,
+    thread_replication::checkout::ThreadCheckout,
 };
 use serde_json::{Value, json};
 use wire::SessionReportEnvelope;
@@ -103,9 +104,19 @@ pub(crate) fn publish(
     let mut previous = store.run(&report.heddle_session_id)?;
     if let Some(previous) = previous.as_mut() {
         previous.version.clear();
+        previous.pending_permissions.clear();
     }
     if previous.as_ref() != Some(&record) {
         store.put_run(record)?;
+    }
+    if report.harness.harness.as_deref() == Some("claude-code")
+        && let Some(key) = report.native_actor_key.as_deref()
+    {
+        store.bind_harness(
+            key,
+            &report.heddle_session_id,
+            *status == ActorPresenceStatus::Active,
+        )?;
     }
     let last = store.last_timeline_position(&report.heddle_session_id)?;
     let next = last.map_or(0, |position| position.saturating_add(1));
@@ -161,12 +172,14 @@ pub(crate) fn claude_controls(
     if !matches!(event, "PreToolUse" | "UserPromptSubmit") {
         return Ok(false);
     }
-    let store = RunStore::open(repo.heddle_dir())?;
+    let Some(store) = RunStore::open_existing(repo.heddle_dir())? else {
+        return Ok(false);
+    };
     let controls = store.pending_controls(run_id, 32)?;
     if controls.is_empty() {
         return Ok(false);
     }
-    let run = store.run(run_id)?.context("controlled run missing")?;
+    store.run(run_id)?.context("controlled run missing")?;
     let mut context = additional_context()?.unwrap_or_default();
     let mut stop = false;
     let mut delivered = Vec::new();
@@ -210,7 +223,7 @@ pub(crate) fn claude_controls(
     output.write_all(b"\n")?;
     output.flush()?;
     for id in delivered {
-        store.complete_control(&id, &run)?;
+        store.acknowledge_control_delivery(&id)?;
     }
     Ok(true)
 }
@@ -259,6 +272,56 @@ mod tests {
                 "human-account",
             )
             .expect("enqueue control");
+    }
+
+    #[test]
+    fn tool_edge_selects_the_exact_agent_without_rewriting_session_progress() {
+        let (_directory, repo, store, run) = fixture();
+        store
+            .bind_harness("claude-code:session:parent", "run-1", true)
+            .expect("bind parent");
+        enqueue(
+            &store,
+            &run,
+            "stop-parent",
+            v2::control_run_request::Action::Stop,
+        );
+        let mut output = Vec::new();
+        claude_tool_edge(
+            &repo,
+            "PreToolUse",
+            &json!({"session_id":"parent","agent_id":"other","tool_name":"Bash","tool_input":{}}),
+            &mut output,
+        )
+        .expect("other agent");
+        assert!(output.is_empty());
+        assert_eq!(
+            store
+                .pending_controls("run-1", 32)
+                .expect("pending parent")
+                .len(),
+            1
+        );
+        claude_tool_edge(
+            &repo,
+            "PreToolUse",
+            &json!({"session_id":"parent","tool_name":"Bash","tool_input":{}}),
+            &mut output,
+        )
+        .expect("parent edge");
+        let response: Value = serde_json::from_slice(&output).expect("stop response");
+        assert_eq!(response["continue"], false);
+        assert!(
+            store
+                .pending_controls("run-1", 32)
+                .expect("delivered")
+                .is_empty()
+        );
+        assert_eq!(
+            store.last_timeline_position("run-1").expect("timeline"),
+            None,
+            "a tool boundary must not manufacture progress records"
+        );
     }
 
     #[test]
@@ -332,4 +395,48 @@ mod tests {
             run.state
         );
     }
+}
+
+/// A tool-edge hook reads the indexed binding and pending command queue only.
+/// It does not reopen the session, scan actor files, or rewrite its progress.
+pub(crate) fn claude_tool_edge(
+    repo: &Repository,
+    event: &str,
+    payload: &Value,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
+    let key = crate::probe::claude_actor_key(
+        payload.get("session_id").and_then(Value::as_str),
+        payload.get("agent_id").and_then(Value::as_str),
+    );
+    let run = match (key, RunStore::open_existing(repo.heddle_dir())?) {
+        (Some(key), Some(store)) => store.harness_run(&key)?,
+        _ => None,
+    };
+    if event == "PermissionRequest" {
+        if let Some(run) = run {
+            crate::run_permissions::claude_permission(repo, &run, payload, output)?;
+        }
+        return Ok(());
+    }
+    if let Some(run) = run {
+        if claude_controls(
+            repo,
+            &run,
+            event,
+            || crate::claude_hook::pre_tool_use_context(repo, payload),
+            output,
+        )? {
+            return Ok(());
+        }
+    }
+    if let Some(context) = crate::claude_hook::pre_tool_use_context(repo, payload)? {
+        serde_json::to_writer(
+            &mut *output,
+            &json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":context}}),
+        )?;
+        output.write_all(b"\n")?;
+        output.flush()?;
+    }
+    Ok(())
 }
