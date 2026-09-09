@@ -346,9 +346,281 @@ fn evidence_original_authority_requires_its_exact_evidence_method() {
 fn thread_authority_checks_session_and_stored_credential_revocations() {
     let (bytes, owner, publisher) = fixture(false);
     for revoked_id in ["original-session", "original-credential"] {
-        let error = proof::verify(&bytes, context(&owner, &publisher), |revocation| {
-            matches!(revocation, Revocation::Credential(id) if id == revoked_id)
-        }).err().expect("exact credential identity must be revoked");
-        assert!(error.to_string().contains("original Thread capability is revoked"), "{revoked_id}: {error}");
+        let error = proof::verify(
+            &bytes,
+            context(&owner, &publisher),
+            |revocation| matches!(revocation, Revocation::Credential(id) if id == revoked_id),
+        )
+        .err()
+        .expect("exact credential identity must be revoked");
+        assert!(
+            error
+                .to_string()
+                .contains("original Thread capability is revoked"),
+            "{revoked_id}: {error}"
+        );
+    }
+}
+
+fn boundary_acceptor(clauses: &str) -> (Vec<u8>, VerifiedOwnerState, [u8; 32]) {
+    let (template, owner, _) = fixture(false);
+    let envelope =
+        crate::wire::ThreadControlAuthority::decode(template.as_slice()).expect("template owner");
+    let key = TestKey::new(91);
+    let pair = KeyPair::from(
+        &PrivateKey::from_bytes(&key.seed, Algorithm::Ed25519).expect("current owner"),
+    );
+    let publisher = key.signing.verifying_key().to_bytes();
+    let token=Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); subject_kind(\"user\"); subject_user_uuid(\"11111111-1111-1111-1111-111111111111\"); session(\"accepting-session\"); credential_id(\"accepting-credential\"); device_pop_key(\"{}\"); check if operation(\"PublishContent\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {}; {clauses}",hex::encode(publisher),chrono::DateTime::from_timestamp(NOW+1000,0).expect("expiry").to_rfc3339()).as_str()).expect("current bounded authority").build(&pair).expect("owner credential");
+    (
+        proof::encode(
+            envelope.owner.as_ref().expect("owner history"),
+            &publisher,
+            None,
+            &token,
+        )
+        .expect("current envelope"),
+        owner,
+        publisher,
+    )
+}
+fn boundary_scope<'a>(
+    thread: &'a [u8; 32],
+    subject: &'a [u8; 32],
+    publisher: &'a [u8; 32],
+) -> crate::boundary_authority::OriginalSubjectScope<'a> {
+    crate::boundary_authority::OriginalSubjectScope {
+        kind: crate::boundary_authority::BoundarySubjectKind::Source,
+        account: &OWNER_UUID,
+        thread,
+        subject,
+        publisher,
+        agent_id: Some("original-session"),
+    }
+}
+#[test]
+fn boundary_revoked_expired_original_is_provenance_only_and_acceptor_must_be_current() {
+    use crate::boundary_authority::{inspect_original_identity, verify_accepting_authority};
+    let (old, owner, old_key) = fixture_mint_method(true, true, "PublishContent");
+    let mut old_context = context(&owner, &old_key);
+    old_context.agent_id = Some("original-session");
+    old_context.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    old_context.now = NOW + 200;
+    let inspected = inspect_original_identity(&old, old_context, |_| true)
+        .expect("expired revoked signatures remain provenance");
+    assert_eq!(inspected.publisher, old_key);
+    assert_eq!(inspected.agent_id.as_deref(), Some("original-session"));
+    assert!(inspected.explicitly_revoked);
+    assert!(
+        inspected
+            .revocation_identities
+            .iter()
+            .any(|id| id == "original-session")
+    );
+    assert!(
+        inspected
+            .revocation_identities
+            .iter()
+            .any(|id| id == "original-credential")
+    );
+    let mut expired = context(&owner, &old_key);
+    expired.agent_id = Some("original-session");
+    expired.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    expired.now = NOW + 200;
+    assert!(
+        proof::verify(&old, expired, |_| true).is_err(),
+        "revoked original cannot authorize its own acceptance"
+    );
+    let (fresh, current, key) = boundary_acceptor("");
+    let thread = [21; 32];
+    let subject = [22; 32];
+    let mut fresh_context = context(&current, &key);
+    fresh_context.now = NOW + 200;
+    fresh_context.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    let accepting = verify_accepting_authority(
+        &fresh,
+        fresh_context,
+        boundary_scope(&thread, &subject, &old_key),
+        &[],
+        |item| {
+            matches!(
+                item,
+                Revocation::Credential("original-session")
+                    | Revocation::Credential("original-credential")
+            )
+        },
+    )
+    .expect("different live owner accepts exact old work");
+    assert_eq!(accepting.publisher, key);
+    assert_ne!(accepting.publisher, inspected.publisher);
+    for revoked in ["accepting-session", "accepting-credential"] {
+        let mut current_context = context(&current, &key);
+        current_context.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+        current_context.now = NOW + 200;
+        assert!(
+            verify_accepting_authority(
+                &fresh,
+                current_context,
+                boundary_scope(&thread, &subject, &old_key),
+                &[],
+                |item| matches!(item,Revocation::Credential(id) if id==revoked)
+            )
+            .is_err(),
+            "current accepting revocation must deny: {revoked}"
+        );
+    }
+}
+#[test]
+fn boundary_acceptance_preserves_subject_attenuation_and_rejects_asserted_selectors() {
+    use crate::boundary_authority::{REQUEST_PREDICATE, verify_accepting_authority};
+    let thread = [21; 32];
+    let subject = [22; 32];
+    let original = [92; 32];
+    let selector = format!(
+        "{REQUEST_PREDICATE}(\"source\",\"{}\",\"{}\",\"{}\",\"{}\",\"original-session\")",
+        hex::encode(OWNER_UUID),
+        hex::encode(thread),
+        hex::encode(subject),
+        hex::encode(original)
+    );
+    let clauses = format!("check if {selector};");
+    let (proof, current, key) = boundary_acceptor(&clauses);
+    let mut ctx = context(&current, &key);
+    ctx.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    verify_accepting_authority(
+        &proof,
+        ctx,
+        boundary_scope(&thread, &subject, &original),
+        &[],
+        |_| false,
+    )
+    .expect("exact original permitted");
+    let mut ctx = context(&current, &key);
+    ctx.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    assert!(
+        verify_accepting_authority(
+            &proof,
+            ctx,
+            boundary_scope(&[23; 32], &subject, &original),
+            &[],
+            |_| false
+        )
+        .is_err(),
+        "subject-scoped acceptance must not widen"
+    );
+    let (forged, current, key) = boundary_acceptor(&format!("{selector}; {clauses}"));
+    let mut ctx = context(&current, &key);
+    ctx.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    let error = verify_accepting_authority(
+        &forged,
+        ctx,
+        boundary_scope(&[23; 32], &subject, &original),
+        &[],
+        |_| false,
+    )
+    .err()
+    .expect("credential cannot claim different request selectors");
+    assert!(
+        error.to_string().contains("reserved boundary acceptance"),
+        "{error}"
+    );
+}
+#[test]
+fn boundary_current_delegate_is_not_replaced_by_an_owner_role_shortcut() {
+    let (bytes, owner, key) = fixture_mint_method(true, false, "PublishContent");
+    let mut ctx = context(&owner, &key);
+    ctx.agent_id = Some("original-session");
+    ctx.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    let author = crate::boundary_authority::verify_accepting_authority(
+        &bytes,
+        ctx,
+        boundary_scope(&[21; 32], &[22; 32], &[23; 32]),
+        &[],
+        |_| false,
+    )
+    .expect("owner-derived current delegate retains its action permission");
+    assert_eq!(author.agent_id.as_deref(), Some("original-session"));
+    let mut ctx = context(&owner, &key);
+    ctx.agent_id = Some("original-session");
+    ctx.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    let mut scope = boundary_scope(&[21; 32], &[22; 32], &[23; 32]);
+    scope.account = &[24; 16];
+    assert!(
+        crate::boundary_authority::verify_accepting_authority(&bytes, ctx, scope, &[], |_| false)
+            .is_err(),
+        "same-account original binding is mandatory"
+    );
+}
+
+#[test]
+fn boundary_provenance_cannot_relabel_original_identity_or_enroll_an_incoming_root() {
+    use crate::boundary_authority::inspect_original_identity;
+    let (bytes, owner, key) = fixture_mint_method(true, true, "PublishContent");
+    let mut ctx = context(&owner, &key);
+    ctx.agent_id = Some("different-agent");
+    assert!(
+        inspect_original_identity(&bytes, ctx, |_| true).is_err(),
+        "revoked provenance cannot relabel original agent"
+    );
+    let other_key = [99; 32];
+    let mut ctx = context(&owner, &other_key);
+    ctx.agent_id = Some("original-session");
+    assert!(
+        inspect_original_identity(&bytes, ctx, |_| true).is_err(),
+        "revoked provenance cannot relabel original publisher"
+    );
+    let mut ctx = context(&owner, &key);
+    ctx.agent_id = Some("original-session");
+    ctx.account_uuid = &[9; 16];
+    assert!(
+        inspect_original_identity(&bytes, ctx, |_| true).is_err(),
+        "incoming owner cannot choose a different account"
+    );
+    let mut changed =
+        crate::wire::ThreadControlAuthority::decode(bytes.as_slice()).expect("envelope");
+    changed.mint_root_public_key = other_key.to_vec();
+    let mut ctx = context(&owner, &key);
+    ctx.agent_id = Some("original-session");
+    assert!(
+        inspect_original_identity(&changed.encode_to_vec(), ctx, |_| true).is_err(),
+        "an incoming mint key is not independent trust"
+    );
+}
+
+#[test]
+fn boundary_historical_identity_survives_rotation_and_recovery_without_issuance_rights() {
+    let (bytes, previous, publisher) = fixture_mint(false, true);
+    let old = TestKey::new(91);
+    let next = TestKey::new(96);
+    let limits = VerificationLimits::new(30 * 24 * 60 * 60).expect("limits");
+    let rotated =
+        apply_accepted_transition(&previous, &rotation(&previous, &old, &next), NOW, limits)
+            .expect("rotation");
+    let recovered = apply_accepted_transition(
+        &previous,
+        &recovery_transition(
+            &previous,
+            &[&TestKey::new(93), &TestKey::new(94)],
+            &next,
+            previous.recovery_policy().clone(),
+            NOW - 1,
+        ),
+        NOW,
+        limits,
+    )
+    .expect("recovery");
+    for current in [&rotated, &recovered] {
+        let mut ctx = context(current, &publisher);
+        ctx.now = NOW + 200;
+        let inspected = crate::boundary_authority::inspect_original_identity(&bytes, ctx, |_| true)
+            .expect("historical cryptographic identity remains auditable");
+        assert_eq!(inspected.publisher, publisher);
+        assert!(inspected.explicitly_revoked);
+        let mut ctx = context(current, &publisher);
+        ctx.now = NOW + 200;
+        assert!(
+            proof::verify(&bytes, ctx, |_| true).is_err(),
+            "inspecting an old issuer never authorizes it to issue now"
+        );
     }
 }

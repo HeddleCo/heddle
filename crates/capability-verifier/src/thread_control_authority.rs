@@ -110,7 +110,7 @@ pub fn verify_with_retained_mint_roots(
     admitted_mint_roots: &[SignedMintRootAttachment],
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<VerifiedAuthor> {
-    verify_original(bytes, context, admitted_mint_roots, is_revoked, true)
+    verify_original(bytes, context, admitted_mint_roots, is_revoked, true, &[])
 }
 
 /// Genesis binds creator key and owner, while its agent attribution comes from
@@ -130,31 +130,21 @@ pub fn verify_genesis_with_retained_mint_roots(
             "genesis authority requires an exact creation method",
         ));
     }
-    verify_original(bytes, context, admitted_mint_roots, is_revoked, false)
+    verify_original(bytes, context, admitted_mint_roots, is_revoked, false, &[])
 }
 
-fn verify_original(
+pub(super) fn verify_original(
     bytes: &[u8],
     context: Context<'_>,
     admitted_mint_roots: &[SignedMintRootAttachment],
     is_revoked: impl Fn(Revocation<'_>) -> bool,
     bind_agent_attribution: bool,
+    extra_facts: &[String],
 ) -> Result<VerifiedAuthor> {
     if admitted_mint_roots.len() > 256 {
         return Err(invalid("retained mint certificate inventory exceeds bound"));
     }
-    if bytes.len() > MAX_BYTES {
-        return Err(Error::TooLarge { limit: MAX_BYTES });
-    }
-    let envelope = Envelope::decode(bytes)
-        .map_err(|error| invalid(format!("Thread authority encoding: {error}")))?;
-    if envelope.format != 1
-        || envelope.encode_to_vec() != bytes
-        || envelope.mint_root_public_key.len() != 32
-        || envelope.sealed_biscuit.is_empty()
-    {
-        return Err(invalid("invalid or noncanonical Thread authority envelope"));
-    }
+    let envelope = decode_envelope(bytes)?;
     if !matches!(
         context.method,
         "/heddle.api.v2alpha1.ThreadService/RenameThread"
@@ -177,24 +167,7 @@ fn verify_original(
             "Thread authority requires the exact mutation and resolved Spool path",
         ));
     }
-    let history = envelope
-        .owner
-        .as_ref()
-        .ok_or_else(|| invalid("original owner history required"))?;
-    let original = crate::creation::history_state(history, context.now)?;
-    let root = original
-        .signed_root()
-        .root
-        .as_ref()
-        .ok_or_else(|| invalid("owner root missing"))?;
-    if !context.owner.extends(&original)
-        || original.owner_id() != context.owner.owner_id()
-        || root.account_uuid != context.account_uuid
-    {
-        return Err(invalid(
-            "Thread author history is not a verified prefix of independently admitted current account authority",
-        ));
-    }
+    verify_original_owner(&envelope, &context)?;
     if envelope.mint_root_public_key != context.owner.authority_key().public_key {
         let attachment = envelope
             .mint_root_attachment
@@ -244,13 +217,17 @@ fn verify_original(
         .rsplit('/')
         .next()
         .ok_or_else(|| invalid("mutation required"))?;
-    let facts = heddle_biscuit_verifier::authorize_at(
+    if !extra_facts.is_empty() {
+        crate::boundary_authority::reject_request_claims(&token)?;
+    }
+    let facts = heddle_biscuit_verifier::authorize_at_with_extra_facts(
         &token,
         operation,
         now,
         None,
         &[],
         Some(("spool", context.spool_path)),
+        extra_facts,
     )
     .map_err(|error| invalid(format!("original Thread authorization: {error}")))?;
     let publisher = hex::encode(context.publisher);
@@ -283,4 +260,45 @@ fn verify_original(
         agent_id: agent,
         facts,
     })
+}
+
+pub(super) fn decode_envelope(bytes: &[u8]) -> Result<Envelope> {
+    if bytes.len() > MAX_BYTES {
+        return Err(Error::TooLarge { limit: MAX_BYTES });
+    }
+    let envelope = Envelope::decode(bytes)
+        .map_err(|error| invalid(format!("Thread authority encoding: {error}")))?;
+    if envelope.format != 1
+        || envelope.encode_to_vec() != bytes
+        || envelope.mint_root_public_key.len() != 32
+        || envelope.sealed_biscuit.is_empty()
+    {
+        return Err(invalid("invalid or noncanonical Thread authority envelope"));
+    }
+    Ok(envelope)
+}
+
+pub(super) fn verify_original_owner(
+    envelope: &Envelope,
+    context: &Context<'_>,
+) -> Result<VerifiedOwnerState> {
+    let history = envelope
+        .owner
+        .as_ref()
+        .ok_or_else(|| invalid("original owner history required"))?;
+    let original = crate::creation::history_state(history, context.now)?;
+    let root = original
+        .signed_root()
+        .root
+        .as_ref()
+        .ok_or_else(|| invalid("owner root missing"))?;
+    if !context.owner.extends(&original)
+        || original.owner_id() != context.owner.owner_id()
+        || root.account_uuid != context.account_uuid
+    {
+        return Err(invalid(
+            "Thread author history is not a verified prefix of independently admitted current account authority",
+        ));
+    }
+    Ok(original)
 }

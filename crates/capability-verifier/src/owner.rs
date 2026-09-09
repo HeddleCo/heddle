@@ -111,6 +111,23 @@ impl VerifiedOwnerState {
         Ok(&issuer.key)
     }
 
+    /// Signature provenance only, including issuers invalidated by recovery.
+    /// Never use this key to authorize fresh issuance or enrollment.
+    pub(crate) fn provenance_issuer(
+        &self,
+        state_hash: &[u8],
+        sequence: u64,
+    ) -> Result<&AuthorizationVerificationKey> {
+        let hash: [u8; 32] = state_hash
+            .try_into()
+            .map_err(|_| Error::Invalid("provenance state must be 32 bytes".into()))?;
+        self.issuers
+            .get(&hash)
+            .filter(|issuer| issuer.sequence == sequence)
+            .map(|issuer| &issuer.key)
+            .ok_or_else(|| Error::BrokenChain("unknown original provenance issuer".into()))
+    }
+
     pub(crate) fn issuer_at(
         &self,
         state_hash: &[u8],

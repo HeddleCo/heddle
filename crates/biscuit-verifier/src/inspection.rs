@@ -15,6 +15,15 @@ pub struct InspectedCredential {
     pub device_id: Option<String>,
     pub credential_id: Option<String>,
 }
+impl InspectedCredential {
+    /// All revocation selectors; inspection reports identity, not permission.
+    pub fn revocation_identities(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.session_id.as_str())
+            .chain(self.credential_id.as_deref())
+            .chain(self.revocation_ids.iter().map(String::as_str))
+            .filter(|id| !id.is_empty())
+    }
+}
 /// Inspect an already signature-verified Biscuit without requiring it to permit
 /// an introspection RPC. The bounded Datalog fixpoint and authority-scoped fact
 /// extractor verify the complete effective proof-key chain; checks are evaluated

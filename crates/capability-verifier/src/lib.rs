@@ -16,6 +16,7 @@ mod limits;
 mod operation;
 mod owner;
 pub mod thread_control_authority;
+pub mod boundary_authority;
 mod transfer;
 
 #[cfg(target_arch = "wasm32")]

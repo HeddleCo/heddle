@@ -36,7 +36,8 @@ impl OriginalAuthoritySubject {
 
 /// Signed original account identity shared by fresh admission and retained
 /// testimony. Local-key authors have no account binding to relabel.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OriginalAuthorityBinding {
     pub spool: Uuid,
     pub actor: CollaborationActor,
