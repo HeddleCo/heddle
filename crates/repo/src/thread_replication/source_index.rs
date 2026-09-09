@@ -210,6 +210,24 @@ mod tests {
         );
     }
     #[test]
+    fn source_index_counts_distinct_revisions_across_independent_publishers() {
+        let (_dir, repository, replica, genesis, signer) = fixture();
+        let (first, revision) = capture(&genesis, &signer, "shared capture", None);
+        let second_signer = Ed25519Signer::from_seed(&[202;32]).expect("other publisher");
+        let mut same_state = first.verify().expect("verified original");
+        same_state.publisher = second_signer.public_key().try_into().expect("key");
+        let second = SignedOperation::sign(&same_state, &second_signer).expect("independently authored original");
+        for record in [&first, &second] {
+            assert_eq!(replica.receive(record, repository.store(), |_| Ok(())).expect("source admitted"), Admission::Accepted);
+        }
+        assert_ne!(first.verify().expect("first").id().expect("id"), second.verify().expect("second").id().expect("id"));
+        let projection = replica.projection().expect("revision summary");
+        assert_eq!(projection.capture_count, 1, "CaptureSummary identity is the State revision, not a publisher signature");
+        assert_eq!(projection.source_heads, vec![revision], "one visible revision despite two independently accepted operations");
+        assert!(replica.operation(&first.verify().expect("first").id().expect("id")).expect("lookup").is_some());
+        assert!(replica.operation(&second.verify().expect("second").id().expect("id")).expect("lookup").is_some());
+    }
+    #[test]
     fn source_index_frontier_bound_rejects_large_concurrency_without_history_walk() {
         let (_dir, repository, replica, genesis, signer) = fixture();
         for i in 0..129 {
