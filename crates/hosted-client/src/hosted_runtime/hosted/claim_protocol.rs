@@ -31,7 +31,6 @@ pub(crate) const CLAIM_SIGN_METHOD: &str =
 const DESCRIBE_METHOD: &str = "/heddle.api.v2alpha1.EndpointService/DescribeEndpoint";
 
 const MAX_REQUEST_BODY: usize = 256 * 1024;
-const MAX_REQUEST_FRAME: usize = 6 + MAX_METHOD_PATH + MAX_CALL_CONTEXT + MAX_REQUEST_BODY;
 
 /// The account identity established by a valid short-lived claim secret.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -110,13 +109,14 @@ where
                         continue;
                     };
                     let endpoint_key = self.endpoint_key;
+                    let peer_key = *connection.remote_id().as_bytes();
                     let device = self.device.clone();
                     let verifier = Arc::clone(&self.verifier);
                     let handler = Arc::clone(&self.handler);
                     calls.spawn(async move {
                         {
                             let _permit = permit;
-                            handle_call(verifier.as_ref(), handler.as_ref(), endpoint_key, device.as_deref(), send, recv).await
+                            handle_call(verifier.as_ref(), handler.as_ref(), endpoint_key, device.as_deref(), peer_key, send, recv).await
                         }
                     });
                 }
@@ -148,6 +148,7 @@ async fn handle_call<V, H>(
     handler: &H,
     endpoint_key: [u8; 32],
     device: Option<&super::super::device_rpc::DeviceRpc>,
+    peer_key: [u8; 32],
     mut send: SendStream,
     mut recv: RecvStream,
 ) -> Result<(), ClaimProtocolError>
@@ -155,13 +156,48 @@ where
     V: ClaimSecretVerifier,
     H: ClaimHandler,
 {
-    let request = tokio::time::timeout(
+    // Read the bounded routing prelude without waiting for FIN: native bidi
+    // input remains open while responses are being delivered.
+    let mut request = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        let mut header = [0u8; 6];
+        recv.read_exact(&mut header)
+            .await
+            .map_err(ClaimProtocolError::transport)?;
+        let method_len = u16::from_be_bytes([header[0], header[1]]) as usize;
+        let context_len = u32::from_be_bytes([header[2], header[3], header[4], header[5]]) as usize;
+        if method_len == 0 || method_len > MAX_METHOD_PATH || context_len > MAX_CALL_CONTEXT {
+            return Err(ClaimProtocolError::transport(
+                "request prelude exceeds budget",
+            ));
+        }
+        let mut prelude = vec![0; 6 + method_len + context_len];
+        prelude[..6].copy_from_slice(&header);
+        recv.read_exact(&mut prelude[6..])
+            .await
+            .map_err(ClaimProtocolError::transport)?;
+        Ok(prelude)
+    })
+    .await
+    .map_err(ClaimProtocolError::transport)??;
+    let (prelude, _) = api::framing::decode_request_prelude(&request)
+        .map_err(ClaimProtocolError::transport)?
+        .ok_or_else(|| ClaimProtocolError::transport("incomplete request prelude"))?;
+    if let Some(device) = device
+        && super::super::device_rpc::STREAM_METHODS.contains(&prelude.method)
+    {
+        return device
+            .serve_stream(prelude.method, &prelude.context, peer_key, send, recv)
+            .await
+            .map_err(ClaimProtocolError::transport);
+    }
+    let body = tokio::time::timeout(
         std::time::Duration::from_secs(30),
-        recv.read_to_end(MAX_REQUEST_FRAME + 1),
+        recv.read_to_end(MAX_REQUEST_BODY + 1),
     )
     .await
     .map_err(ClaimProtocolError::transport)?
     .map_err(ClaimProtocolError::transport)?;
+    request.extend(body);
     let mut successful_call = None;
     let response = match decode_request_frame(&request) {
         Ok(frame) if frame.body.len() > MAX_REQUEST_BODY => Err(failure(

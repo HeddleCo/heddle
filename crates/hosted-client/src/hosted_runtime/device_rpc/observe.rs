@@ -45,7 +45,7 @@ impl Payload {
     }
 }
 impl DeviceRpc {
-    fn feed(&self, session: &Session) -> Result<Arc<Feed>> {
+    pub(super) fn feed(&self, session: &Session) -> Result<Arc<Feed>> {
         let mut feeds = self
             .feeds
             .lock()

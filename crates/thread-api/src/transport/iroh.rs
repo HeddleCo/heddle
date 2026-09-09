@@ -117,6 +117,25 @@ impl<A: Authorize> RpcTransport for IrohTransport<A> {
     }
 }
 
+/// Adapt an already accepted RPC stream after the caller parsed its bounded
+/// request prelude. This performs framing only; the server must independently
+/// authorize the exact opening before admission or disclosure.
+pub fn accepted_stream(
+    send: SendStream,
+    recv: RecvStream,
+    frame_limit: usize,
+    progress_timeout: Duration,
+    method: &MethodDescriptor,
+) -> Result<(Writer, Reader), Error> {
+    if frame_limit == 0 || frame_limit > framing::MAX_CONTROL_BODY || progress_timeout.is_zero() {
+        return Err(Error::Protocol("invalid accepted transport limits"));
+    }
+    Ok((
+        Writer::new(send, frame_limit, progress_timeout),
+        Reader::for_method(recv, frame_limit, progress_timeout, method),
+    ))
+}
+
 pub struct Reader {
     recv: RecvStream,
     frame_limit: usize,

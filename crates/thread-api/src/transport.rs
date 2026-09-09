@@ -12,7 +12,7 @@ use prost::Message;
 #[cfg(feature = "iroh")]
 mod iroh;
 #[cfg(feature = "iroh")]
-pub use iroh::{IrohTransport, Reader, Writer};
+pub use iroh::{IrohTransport, Reader, Writer, accepted_stream};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

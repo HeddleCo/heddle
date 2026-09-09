@@ -402,6 +402,211 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
         )
         .await
         .expect("release writer");
+    // The server must respond before the browser closes its input stream.
+    // Metadata received here changes the Thread graph, never either checkout.
+    {
+        use crypto::{Signer as _, thread_operation::SignedOperation};
+        use objects::object::{
+            Attribution, Principal, State, Tree,
+            thread_replication::{
+                Admission, OPERATION_FORMAT, ThreadFacet, ThreadOperation, ThreadOperationBody,
+            },
+        };
+        let reference = materialize.thread.clone().expect("Thread reference");
+        let (mut input, mut output) = remote
+            .api
+            .exchange::<thread_api::rpc::SyncServiceReplicateThread>(&ReplicateThreadRequest {
+                body: Some(replicate_thread_request::Body::Open(ReplicationOpen {
+                    thread: Some(reference),
+                    facets: vec![
+                        SharedFacet::Source as i32,
+                        SharedFacet::Collaboration as i32,
+                    ],
+                    record_formats: vec![OPERATION_FORMAT.into()],
+                    session_nonce: uuid::Uuid::now_v7().as_bytes().to_vec(),
+                    source: Some(EndpointRef {
+                        public_key: browser.id().as_bytes().to_vec(),
+                        kind: EndpointKind::Device as i32,
+                    }),
+                    destination: Some(device.endpoint()),
+                    ..Default::default()
+                })),
+            })
+            .await
+            .expect("real bidi open");
+        let ready = tokio::time::timeout(std::time::Duration::from_secs(5), output.next())
+            .await
+            .expect("Ready before client FIN")
+            .expect("Ready frame")
+            .expect("Ready");
+        assert!(matches!(
+            ready.body,
+            Some(replicate_thread_response::Body::Ready(_))
+        ));
+        let have = tokio::time::timeout(std::time::Duration::from_secs(5), output.next())
+            .await
+            .expect("Have deadline")
+            .expect("Have frame")
+            .expect("Have");
+        let Some(replicate_thread_response::Body::Have(have)) = have.body else {
+            panic!("initial native frontier")
+        };
+        let original = have
+            .frontiers
+            .iter()
+            .flat_map(|frontier| frontier.heads.iter())
+            .next()
+            .expect("real nonempty frontier")
+            .clone();
+        input
+            .send(&ReplicateThreadRequest {
+                body: Some(replicate_thread_request::Body::Need(ReplicationNeed {
+                    operation_ids: vec![original.clone()],
+                })),
+            })
+            .await
+            .expect("request original proof");
+        let exported = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let frame = output.next().await.expect("export frame").expect("open");
+                if let Some(replicate_thread_response::Body::Operations(records)) = frame.body {
+                    break records;
+                }
+            }
+        })
+        .await
+        .expect("export deadline");
+        let record = exported
+            .operations
+            .into_iter()
+            .next()
+            .expect("signed record");
+        let verified = thread_api::replication::decode_record(record)
+            .expect("original proof")
+            .verify()
+            .expect("signature");
+        assert_eq!(verified.id().expect("ID").as_bytes().as_slice(), original);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(1100), output.next())
+                .await
+                .is_err(),
+            "idle replication emits no empty Have heartbeat"
+        );
+        let publisher = Ed25519Signer::from_seed(&[71; 32]).expect("browser publisher");
+        let make_operation = |intent: &str| {
+            let mut state = State::new_snapshot(
+                Tree::new().hash(),
+                vec![base],
+                Attribution::human(Principal::new(intent, "")),
+            );
+            state.intent = Some(intent.into());
+            let operation = ThreadOperation {
+                version: 1,
+                thread: replica.thread_id(),
+                parents: Default::default(),
+                publisher: publisher.public_key().try_into().expect("key"),
+                body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("State")),
+            };
+            SignedOperation::sign(&operation, &publisher).expect("signed source")
+        };
+        let incoming = make_operation("browser causal branch");
+        let incoming_id = incoming.verify().expect("proof").id().expect("ID");
+        assert!(replica.operation(&incoming_id).expect("lookup").is_none());
+        input
+            .send(&ReplicateThreadRequest {
+                body: Some(replicate_thread_request::Body::Operations(
+                    ReplicationOperations {
+                        operations: vec![SignedRecord {
+                            format: OPERATION_FORMAT.into(),
+                            canonical_record: incoming.canonical,
+                            signatures: vec![RecordSignature {
+                                public_key: publisher.public_key().to_vec(),
+                                signature: incoming.signature,
+                            }],
+                        }],
+                    },
+                )),
+            })
+            .await
+            .expect("send new source branch");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let frame = output.next().await.expect("receipt frame").expect("open");
+                if let Some(replicate_thread_response::Body::Receipt(receipt)) = frame.body {
+                    if receipt
+                        .accepted_operation_ids
+                        .contains(&incoming_id.as_bytes().to_vec())
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("new record durably acknowledged");
+        assert_eq!(
+            replica
+                .operation(&incoming_id)
+                .expect("lookup")
+                .expect("durable operation")
+                .1,
+            Admission::Accepted
+        );
+        // Drain activity caused by the browser write before committing a new
+        // external write; only the post-commit feed can rescue that idle state.
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(250), output.next()).await {
+                Err(_) => break,
+                Ok(Ok(Some(_))) => {}
+                other => panic!("stream ended while draining: {other:?}"),
+            }
+        }
+        let local_update = make_operation("independent process branch");
+        let local_id = local_update.verify().expect("proof").id().expect("ID");
+        replica
+            .receive(&local_update, repository.store(), |_| Ok(()))
+            .expect("independent committed write");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let frame = output.next().await.expect("push frame").expect("open");
+                if let Some(replicate_thread_response::Body::Have(have)) = frame.body {
+                    if have
+                        .frontiers
+                        .iter()
+                        .any(|frontier| frontier.heads.contains(&local_id.as_bytes().to_vec()))
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("post-commit marker pushes external update");
+        assert!(
+            replica
+                .frontier_page(ThreadFacet::Source, None, 64)
+                .expect("frontier")
+                .contains(&incoming_id)
+        );
+        drop(input);
+        drop(output);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if device
+                    .feeds
+                    .lock()
+                    .expect("feeds")
+                    .get(&spool)
+                    .is_none_or(|feed| feed.strong_count() == 0)
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replication cancellation drops OS watcher");
+    }
     let wrong = mint_agent_root(&[73; 32]).expect("unowned root");
     let transport = thread_api::transport::IrohTransport::new(
         browser

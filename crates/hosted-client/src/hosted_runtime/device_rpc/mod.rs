@@ -2,8 +2,11 @@
 //! no handler creates a hosted client or consults Weft to permit local work.
 mod auth;
 mod checkout;
+#[cfg(test)]
+mod inventory_tests;
 mod land;
 mod observe;
+mod replication;
 #[cfg(test)]
 mod tests;
 
@@ -21,7 +24,9 @@ use api::heddle::api::{
 use iroh::endpoint::SendStream;
 use prost::Message;
 
+pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread"];
 pub(crate) const METHODS: &[&str] = &[
+    "/heddle.api.v2alpha1.SyncService/ReplicateThread",
     "/heddle.api.v2alpha1.CheckoutService/ObserveCheckouts",
     "/heddle.api.v2alpha1.CheckoutService/Materialize",
     "/heddle.api.v2alpha1.CheckoutService/ClaimCheckoutWriter",
