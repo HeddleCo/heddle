@@ -164,7 +164,7 @@ pub enum AuthCommands {
         command: Option<AuthInviteCommands>,
     },
 
-    /// Inspect or explicitly replace descriptor-signing trust
+    /// Inspect or explicitly replace the deployment descriptor root pin
     Trust {
         #[command(subcommand)]
         command: AuthTrustCommands,
@@ -237,9 +237,9 @@ pub enum AuthInviteCommands {
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum AuthTrustCommands {
-    /// Show the descriptor trust controlling a server connection
+    /// Show the descriptor root pin controlling a server connection
     Show(AuthTrustShowArgs),
-    /// Atomically replace an automatic descriptor trust pin
+    /// Atomically replace an automatic descriptor root pin
     Replace(AuthTrustReplaceArgs),
 }
 
@@ -255,13 +255,13 @@ pub struct AuthTrustReplaceArgs {
     /// Heddle server authority
     #[arg(long)]
     pub server: String,
-    /// Current descriptor public key required for compare-and-swap
+    /// Current descriptor root public key required for compare-and-swap
     #[arg(long, value_name = "64_HEX")]
     pub expect_current_public_key: String,
-    /// New descriptor key id confirmed out of band
+    /// New descriptor root key id confirmed out of band
     #[arg(long)]
     pub key_id: String,
-    /// New descriptor public key confirmed out of band
+    /// New descriptor root public key confirmed out of band
     #[arg(long, value_name = "64_HEX")]
     pub public_key: String,
 }

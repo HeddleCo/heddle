@@ -487,6 +487,26 @@ mod tests {
 
     use super::*;
 
+    fn with_isolated_home<T>(test: impl FnOnce() -> T) -> T {
+        let _guard = config::credentials::lock_test_env();
+        let home = tempfile::TempDir::new().expect("temporary Heddle home");
+        let previous = std::env::var_os("HEDDLE_HOME");
+        unsafe {
+            std::env::set_var("HEDDLE_HOME", home.path());
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("HEDDLE_HOME", value),
+                None => std::env::remove_var("HEDDLE_HOME"),
+            }
+        }
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
     #[derive(Deserialize)]
     struct Vector {
         identity: String,
@@ -710,36 +730,38 @@ mod tests {
 
     #[test]
     fn mint_spool_owner_genesis_uses_the_configured_proof_key_and_a_uuidv7() {
-        let signer = Ed25519Signer::generate().unwrap();
-        let factory = CallContextFactory::default()
-            .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
-            .unwrap();
-        let signed = factory.mint_spool_owner_genesis().unwrap();
-        let genesis = signed.genesis.expect("signed genesis payload");
-        let spool_uuid: [u8; 16] = genesis
-            .spool_uuid
-            .as_slice()
-            .try_into()
-            .expect("spool UUID is 16 bytes");
-        assert_eq!(uuid::Uuid::from_bytes(spool_uuid).get_version_num(), 7);
-        assert_eq!(
-            genesis
-                .owner_public_key
-                .expect("owner public key")
-                .public_key,
-            signer.public_key()
-        );
-        use sha2::{Digest, Sha256};
+        with_isolated_home(|| {
+            let signer = Ed25519Signer::generate().unwrap();
+            let factory = CallContextFactory::default()
+                .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
+                .unwrap();
+            let signed = factory.mint_spool_owner_genesis().unwrap();
+            let genesis = signed.genesis.expect("signed genesis payload");
+            let spool_uuid: [u8; 16] = genesis
+                .spool_uuid
+                .as_slice()
+                .try_into()
+                .expect("spool UUID is 16 bytes");
+            assert_eq!(uuid::Uuid::from_bytes(spool_uuid).get_version_num(), 7);
+            assert_eq!(
+                genesis
+                    .owner_public_key
+                    .expect("owner public key")
+                    .public_key,
+                signer.public_key()
+            );
+            use sha2::{Digest, Sha256};
 
-        let digest = Sha256::new()
-            .chain_update(signer.public_key())
-            .chain_update(spool_uuid)
-            .finalize();
-        Ed25519Signer::verify_with_public_key(
-            &digest,
-            signer.public_key(),
-            &signed.owner_signature.expect("owner signature").signature,
-        )
-        .unwrap();
+            let digest = Sha256::new()
+                .chain_update(signer.public_key())
+                .chain_update(spool_uuid)
+                .finalize();
+            Ed25519Signer::verify_with_public_key(
+                &digest,
+                signer.public_key(),
+                &signed.owner_signature.expect("owner signature").signature,
+            )
+            .unwrap();
+        });
     }
 }

@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -8,13 +6,16 @@ use std::{
 
 use api::{
     HOSTED_ALPN_V1,
+    descriptor_trust::{
+        DescriptorSetError, EndpointDescriptorSetDocument, VerifiedEndpoint,
+        parse_endpoint_descriptor_set,
+    },
     heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
     signing::endpoint_descriptor_bytes,
 };
 use config::ClientConfig;
 use crypto::Ed25519Signer;
 use iroh::{EndpointAddr, EndpointId, RelayUrl};
-use prost::Message;
 use reqwest::{
     Client, StatusCode,
     header::{CONTENT_TYPE, HOST, HeaderValue},
@@ -155,22 +156,29 @@ impl VerifiedEndpointDescriptor {
     pub fn document(&self) -> &EndpointDescriptor {
         &self.0
     }
+
+    /// Construct a verified descriptor from a two-layer-verified endpoint.
+    ///
+    /// Dial addresses come from the attested ephemeral key's signed
+    /// `EndpointDescriptor`. Unsigned well-known hints are never used.
+    pub(super) fn from_verified_endpoint(
+        endpoint: &VerifiedEndpoint,
+        now_unix_millis: i64,
+    ) -> Result<Self> {
+        if now_unix_millis < endpoint.not_before_unix_millis
+            || now_unix_millis >= endpoint.not_after_unix_millis
+        {
+            return Err(HostedError::DescriptorOutsideValidityWindow);
+        }
+        validate_descriptor(&endpoint.endpoint_descriptor, now_unix_millis)?;
+        Ok(Self(endpoint.endpoint_descriptor.clone()))
+    }
 }
 
-#[cfg(test)]
-pub async fn fetch_endpoint_descriptor(
-    url: &str,
-    keys: &DescriptorKeyring,
-    config: &ClientConfig,
-) -> Result<VerifiedEndpointDescriptor> {
-    let signed = fetch_signed_endpoint_descriptor(url, config).await?;
-    keys.verify(&signed, now_unix_millis()?)
-}
-
-pub async fn fetch_signed_endpoint_descriptor(
+pub async fn fetch_ephemeral_descriptor_set(
     url: &str,
     config: &ClientConfig,
-) -> Result<SignedEndpointDescriptor> {
+) -> Result<EndpointDescriptorSetDocument> {
     if !url.starts_with("https://") {
         return Err(HostedError::InvalidDescriptor(
             "endpoint descriptor URL must use HTTPS".to_string(),
@@ -191,8 +199,26 @@ pub async fn fetch_signed_endpoint_descriptor(
             response.status()
         )));
     }
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if !content_type.is_some_and(|value| value.eq_ignore_ascii_case("application/json")) {
+        return Err(HostedError::InvalidDescriptor(
+            "ephemeral descriptor set must use application/json".to_string(),
+        ));
+    }
     let body = bounded_response_body(response, MAX_DESCRIPTOR_BYTES, "endpoint descriptor").await?;
-    Ok(SignedEndpointDescriptor::decode(body.as_slice())?)
+    parse_endpoint_descriptor_set(&body).map_err(|error| match error {
+        DescriptorSetError::Malformed(message) => HostedError::InvalidDescriptor(format!(
+            "ephemeral descriptor set is malformed: {message}"
+        )),
+        DescriptorSetError::UnsupportedVersion(version) => HostedError::InvalidDescriptor(format!(
+            "unsupported endpoint descriptor set version {version}"
+        )),
+    })
 }
 
 pub async fn fetch_descriptor_key_document(
@@ -404,19 +430,10 @@ fn validate_descriptor(descriptor: &EndpointDescriptor, now_unix_millis: i64) ->
 }
 
 #[cfg(test)]
-fn now_unix_millis() -> Result<i64> {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(HostedError::transport)?
-        .as_millis();
-    i64::try_from(millis).map_err(HostedError::transport)
-}
-
-#[cfg(test)]
 mod tests {
     use config::ClientConfig;
 
-    use super::{DescriptorKeyring, bootstrap_target, fetch_endpoint_descriptor};
+    use super::{bootstrap_target, fetch_ephemeral_descriptor_set};
 
     #[tokio::test]
     async fn bootstrap_server_name_override_preserves_the_network_target_and_http_authority() {
@@ -434,9 +451,8 @@ mod tests {
     #[tokio::test]
     async fn descriptor_bootstrap_consumes_the_configured_ca_bundle_before_network_io() {
         let config = ClientConfig::default().with_tls_ca_certificate_pem("not a PEM certificate");
-        let error = fetch_endpoint_descriptor(
+        let error = fetch_ephemeral_descriptor_set(
             "https://127.0.0.1:1/.well-known/heddle/iroh-endpoint",
-            &DescriptorKeyring::default(),
             &config,
         )
         .await

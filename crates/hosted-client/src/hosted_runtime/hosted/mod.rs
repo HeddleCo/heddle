@@ -39,13 +39,15 @@ mod user;
 
 #[cfg(test)]
 mod descriptor_trust_acceptance;
+#[cfg(test)]
+mod descriptor_trust_conformance;
 
 use std::sync::Arc;
 
 use api::heddle::api::v1alpha1::CallContext;
 pub use bootstrap::{
     DescriptorKeyring, VerifiedEndpointDescriptor, fetch_descriptor_key_document,
-    fetch_signed_endpoint_descriptor,
+    fetch_ephemeral_descriptor_set,
 };
 pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, ServerStreamItem};
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn, HostedResolution};
