@@ -11,6 +11,9 @@ mod account_spool;
 mod account_tests;
 mod account_threads;
 mod artifact;
+mod analysis;
+#[cfg(all(test, feature = "semantic"))]
+mod analysis_tests;
 pub(crate) mod artifact_retention;
 #[cfg(test)]
 mod artifact_tests;
@@ -70,6 +73,10 @@ use prost::Message;
 
 pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread", "/heddle.api.v2alpha1.SyncService/Fetch"];
 pub(crate) const METHODS: &[&str] = &[
+    "/heddle.api.v2alpha1.AnalysisService/ObserveAnalysis",
+    #[cfg(feature = "semantic")]
+    "/heddle.api.v2alpha1.AnalysisService/StartAnalysis",
+    "/heddle.api.v2alpha1.OperationService/CancelOperation",
     "/heddle.api.v2alpha1.SearchService/Search",
     "/heddle.api.v2alpha1.OperationService/ObserveOperations",
     "/heddle.api.v2alpha1.EvidenceService/RecordEvidence",
@@ -128,6 +135,7 @@ pub(crate) struct DeviceRpc {
     feeds: Arc<Mutex<BTreeMap<uuid::Uuid, Weak<observe::Feed>>>>,
     account_feed: Arc<Mutex<Weak<account_feed::AccountFeed>>>,
     content_work: Arc<tokio::sync::Semaphore>,
+    analysis: Arc<analysis::Runtime>,
     authority_clock: Arc<authority_clock::AuthorityClock>,
     #[cfg(test)]
     thread_snapshots: Arc<std::sync::atomic::AtomicU64>,
@@ -140,6 +148,7 @@ impl DeviceRpc {
             feeds: Arc::new(Mutex::new(BTreeMap::new())),
             account_feed: Arc::new(Mutex::new(Weak::new())),
             content_work: Arc::new(tokio::sync::Semaphore::new(8)),
+            analysis: Arc::new(analysis::Runtime::default()),
             authority_clock: Arc::new(authority_clock::AuthorityClock::default()),
             #[cfg(test)]
             thread_snapshots: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -187,6 +196,9 @@ impl DeviceRpc {
         if descriptor.streaming == api::StreamingShape::ServerStreaming {
             budget.retain().map_err(anyhow::Error::msg)?;
         }
+        if method.ends_with("/ObserveAnalysis") { return self.observe_analysis(&session, body, send).await; }
+        #[cfg(feature = "semantic")]
+        if method.ends_with("/StartAnalysis") { return self.start_analysis(session, body, send).await; }
         if method.ends_with("/ReadContent") {
             return self.read_content(session, body, send).await;
         }
@@ -225,6 +237,7 @@ impl DeviceRpc {
         Ok(())
     }
     fn execute(&self, session: &auth::Session, method: &str, body: &[u8]) -> Result<Vec<u8>> {
+        if method.ends_with("/CancelOperation") { return self.cancel_operation(session, body); }
         if method.contains(".EvidenceService/") { return self.evidence_command(session, method, body); }
         if method.contains(".CollaborationService/") { return self.collaboration_command(session, method, body); }
         if method.contains(".ThreadService/") {
@@ -278,6 +291,9 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
         }};
     }
     let spool = match method.rsplit('/').next().context("method missing")? {
+        "ObserveAnalysis" => scope!(ObserveAnalysisRequest, |r:ObserveAnalysisRequest|r.source.and_then(|v|v.spool)),
+        "StartAnalysis" => scope!(StartAnalysisRequest, |r:StartAnalysisRequest|r.source.and_then(|v|v.spool)),
+        "CancelOperation" => scope!(CancelOperationRequest, |r:CancelOperationRequest|r.operation.and_then(|v|v.spool)),
         "RecordEvidence" => scope!(RecordEvidenceRequest, |r:RecordEvidenceRequest|r.evidence.and_then(|e|e.revision).and_then(|r|r.spool)),
         "AcknowledgeCheck" => scope!(AcknowledgeCheckRequest, |r:AcknowledgeCheckRequest|r.evidence.and_then(|e|e.spool)),
         "ObserveCollaboration" => scope!(ObserveCollaborationRequest, |r:ObserveCollaborationRequest|r.spool),

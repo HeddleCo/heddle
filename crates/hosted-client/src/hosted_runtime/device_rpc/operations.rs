@@ -158,7 +158,19 @@ impl DeviceRpc {
             rows.truncate(remaining);
             for row in rows {
                 cursor.record = Some(row.record);
-                let record = OperationRecord {
+                if let (Some(execution), Some(executor)) = (&row.execution, &row.executor) {
+                    if matches!(execution.state, state if state == operation_record::State::Queued as i32 || state == operation_record::State::Running as i32)
+                        && repo::device_operations::recover_if_dead(
+                            &scope.spool.heddle_dir,
+                            &scope.namespace,
+                            row.record,
+                            executor,
+                        )?
+                    {
+                        return Err(super::stream::SnapshotChanged.into());
+                    }
+                }
+                let record = row.execution.clone().unwrap_or_else(|| OperationRecord {
                     r#ref: Some(RecordRef {
                         spool: Some(SpoolRef {
                             id: scope.spool.id.to_string(),
@@ -173,10 +185,10 @@ impl DeviceRpc {
                     } else {
                         operation_record::State::Completed
                     } as i32,
-                    unit: row.method,
+                    unit: row.method.clone(),
                     cancellation_supported: false,
                     ..Default::default()
-                };
+                });
                 events.push((
                     row.record.to_string(),
                     OperationEvent {

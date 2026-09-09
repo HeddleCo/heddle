@@ -262,6 +262,8 @@ pub(super) fn prepare(session: &auth::Session, thread: ContentHash, revision: St
     let repository = repo::Repository::open(&session.spool.root)?;
     let selected = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
     session.authorize_thread(&repository, &selected)?;
+    // Signed metadata is not possession of the named global CAS objects.
+    session.authorize_revision(&repository, revision)?;
     let state = selected
         .accepted_source_revision(revision)?
         .context("selected revision is not admitted by Thread")?;

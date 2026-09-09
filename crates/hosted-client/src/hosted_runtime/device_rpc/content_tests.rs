@@ -53,10 +53,7 @@ pub(super) async fn roundtrip(
             },
             ContentRead {
                 selection_id: "summary".into(),
-                selection: Some(content_read::Selection::State(StateRead {
-                    include_summary: true,
-                    ..Default::default()
-                })),
+                selection: Some(content_read::Selection::State(StateRead::default())),
             },
             ContentRead {
                 selection_id: "tree".into(),

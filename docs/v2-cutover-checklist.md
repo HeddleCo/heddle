@@ -33,10 +33,26 @@ while every device is offline.
   per-frame SQL consolidation remain pending.
 - Device real-Iroh fixture passed source audience denial, collaboration, operation
   recovery, Evidence3, integrated Fetch, two 40-view cleanup rounds and quiet idle
-  replication. Subsequent evidence origin-Thread binding is still being integrated.
+  replication. The subsequent client+semantic fixture also passed real analysis
+  completion, exact retry and queued cancellation with worker acknowledgement.
 - Evidence must bind its original Thread, not merely a source State that could
-  also occur in another audience. Canonical evidence v2 and both consumers are in
-  progress; acknowledgement continues to bind the exact original evidence digest.
+  also occur in another audience. Canonical evidence v2, Rust/browser byte vectors and device origin gates pass;
+  hosted origin gating passed 13 PostgreSQL tests. Removing the origin SQL
+  filter failed the cross-Thread budget assertion; restored test passed. Acknowledgement
+  continues to bind the exact original evidence digest.
+- Hosted source closure regression passed; omitting incoming-closure validation
+  admitted private globally retained bytes and failed the assertion, then restoration
+  passed. Possession is distinct from a signed claim that an object exists.
+- Tapestry API candidate is aligned to 2fba1eb2; typecheck reports zero errors and
+  warnings, with 14 focused Thread tests passing. The additional origin-Thread presentation
+  regression failed before the reducer guard and all 11 reducer tests passed after.
+  Full browser acceptance is pending.
+- Raw State reads now return only immutable summaries. Source attachments are
+  removed: risk/conflict/semantic sidecars can carry authored attribution or
+  context. Typed semantic queries remain in Analysis; authored data needs its
+  originating Thread or checkout access. Descriptor absence test failed before
+  removal, then six content/descriptor tests passed; current Heddle semantic
+  client and Tapestry typechecks pass against this schema.
 - User confirmed: local keys remain owners until explicit signed claim. Claim RPC,
   durable ownership transition and client flow are not implemented yet.
 

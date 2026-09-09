@@ -34,6 +34,7 @@ pub mod device_authority;
 pub mod device_catalog;
 pub mod device_runs;
 pub mod device_evidence;
+pub mod device_operations;
 pub mod device_watch;
 #[cfg(feature = "tree-sitter-symbols")]
 mod discussion_anchor_travel;
@@ -81,6 +82,8 @@ mod repository_resolve_for_command;
 mod repository_semantic_index;
 #[cfg(feature = "tree-sitter-symbols")]
 pub use repository_semantic_index::{ParentIndex, SemanticIndexBuilder};
+#[cfg(feature = "tree-sitter-symbols")]
+pub use semantic::parser::ParseBudget as SemanticParseBudget;
 /// Read-only, never-compute semantic-index query primitives. Always compiled,
 /// with no tree-sitter dependency, so a parse-free consumer can read a
 /// persisted index (heddle#1078).

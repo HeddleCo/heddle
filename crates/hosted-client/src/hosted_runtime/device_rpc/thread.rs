@@ -107,7 +107,7 @@ impl DeviceRpc {
             }
             let now = chrono::Utc::now().timestamp();
             let authority = repo::device_authority::load(&self.home, now)?;
-            ThreadReplica::create_authorized(
+            let created = ThreadReplica::create_authorized(
                 &session.spool.heddle_dir,
                 &signed,
                 &request.creator_authority,
@@ -115,7 +115,12 @@ impl DeviceRpc {
                 &session.spool.capability_path,
                 method,
                 now,
-            )?
+            )?;
+            // The base was independently audience-authorized before this new
+            // genesis existed; record availability without trusting a base pointer.
+            session.authorize_revision(&repository, genesis.base)?;
+            created.record_source_possession(genesis.base)?;
+            created
         } else {
             let (reference, record) = match method.rsplit('/').next().context("method")? {
                 "RenameThread" => {

@@ -658,6 +658,14 @@ impl Repository {
         state_id: StateId,
         budget: semantic::parser::ParseBudget,
     ) -> Result<SemanticIndexRoot> {
+        self.analyze_semantic_index_with_admission(state_id, budget, || Ok(()))
+    }
+    pub fn analyze_semantic_index_with_admission(
+        &self,
+        state_id: StateId,
+        budget: semantic::parser::ParseBudget,
+        before_publish: impl FnOnce() -> Result<()>,
+    ) -> Result<SemanticIndexRoot> {
         let state = self
             .store()
             .get_state(&state_id)?
@@ -666,6 +674,48 @@ impl Repository {
             .store()
             .get_tree(&state.tree)?
             .ok_or_else(|| HeddleError::NotFound("analysis source tree".into()))?;
+        // Inspect lengths before decoding any source blob. A stored large object
+        // must not allocate outside the RPC budget merely to decide it is opaque.
+        let mut pending = vec![state.tree];
+        let mut visited = std::collections::BTreeSet::new();
+        let mut bytes = 0u64;
+        let mut entries = 0usize;
+        while let Some(hash) = pending.pop() {
+            if !visited.insert(hash) {
+                continue;
+            }
+            if budget.interrupted() {
+                return Err(HeddleError::InvalidObject(
+                    "semantic analysis interrupted".into(),
+                ));
+            }
+            let directory = self
+                .store()
+                .get_tree(&hash)?
+                .ok_or_else(|| HeddleError::NotFound("analysis source directory".into()))?;
+            entries = entries.saturating_add(directory.len());
+            if entries > 4096 {
+                return Err(HeddleError::InvalidObject(
+                    "semantic analysis source work budget exceeded".into(),
+                ));
+            }
+            for entry in directory.entries() {
+                if let Some(child) = entry.tree_hash() {
+                    pending.push(child);
+                }
+                if let Some(blob) = entry.blob_hash() {
+                    let length =
+                        objects::store::ObjectSource::decoded_blob_len(self.store(), &blob)?
+                            .ok_or_else(|| HeddleError::NotFound("analysis source blob".into()))?;
+                    bytes = bytes.saturating_add(length);
+                    if bytes > 32 * 1024 * 1024 {
+                        return Err(HeddleError::InvalidObject(
+                            "semantic analysis source byte budget exceeded".into(),
+                        ));
+                    }
+                }
+            }
+        }
         let mut builder =
             SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION).with_budget(budget.clone());
         let (root, root_hash) = builder.build_root(&tree, None)?;
@@ -674,6 +724,7 @@ impl Repository {
                 "semantic analysis interrupted".into(),
             ));
         }
+        before_publish()?;
         self.attach_semantic_index(&state_id, &state, root_hash)?;
         Ok(root)
     }
@@ -872,19 +923,47 @@ mod tests {
     fn bounded_analysis_rejects_source_work_before_loading_or_publishing() {
         let (_temp, repository) = repo();
         let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let budget = semantic::parser::ParseBudget { cancelled: cancelled.clone(), deadline: std::time::Instant::now() + std::time::Duration::from_secs(10) };
+        let budget = semantic::parser::ParseBudget {
+            cancelled: cancelled.clone(),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
+        };
         let mut tree = Tree::new();
         for index in 0..4097 {
-            tree.insert(TreeEntry::file(format!("{index}.rs"), ContentHash::from_bytes([19;32]), false).expect("entry"));
+            tree.insert(
+                TreeEntry::file(
+                    format!("{index}.rs"),
+                    ContentHash::from_bytes([19; 32]),
+                    false,
+                )
+                .expect("entry"),
+            );
         }
-        let error = SemanticIndexBuilder::new(repository.store(), EXTRACTOR_VERSION).with_budget(budget.clone()).build_root(&tree, None).expect_err("entry bound");
-        assert!(error.to_string().contains("source work budget exceeded"), "must reject at the work bound: {error}");
+        let error = SemanticIndexBuilder::new(repository.store(), EXTRACTOR_VERSION)
+            .with_budget(budget.clone())
+            .build_root(&tree, None)
+            .expect_err("entry bound");
+        assert!(
+            error.to_string().contains("source work budget exceeded"),
+            "must reject at the work bound: {error}"
+        );
         cancelled.store(true, std::sync::atomic::Ordering::Release);
         let state = repository.head().expect("head").expect("initial source");
-        let before = repository.latest_state_attachment(&state, StateAttachmentKind::SemanticIndex).expect("prior").map(|a|a.id());
-        let error = repository.analyze_semantic_index(state, budget).expect_err("cancelled before execution");
+        let before = repository
+            .latest_state_attachment(&state, StateAttachmentKind::SemanticIndex)
+            .expect("prior")
+            .map(|a| a.id());
+        let error = repository
+            .analyze_semantic_index(state, budget)
+            .expect_err("cancelled before execution");
         assert!(error.to_string().contains("interrupted"));
-        assert_eq!(before, repository.latest_state_attachment(&state, StateAttachmentKind::SemanticIndex).expect("after").map(|a|a.id()), "cancelled analysis cannot publish an attachment");
+        assert_eq!(
+            before,
+            repository
+                .latest_state_attachment(&state, StateAttachmentKind::SemanticIndex)
+                .expect("after")
+                .map(|a| a.id()),
+            "cancelled analysis cannot publish an attachment"
+        );
     }
 
     /// Attach `root_hash` as the (superseding) SemanticIndex on `state_id`.

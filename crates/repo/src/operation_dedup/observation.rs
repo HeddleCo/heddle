@@ -1,5 +1,6 @@
 //! Bounded receipt metadata excludes response bytes and unnamespaced CLI records.
 use objects::object::{ContentHash, OperationId};
+use prost::Message;
 use rusqlite::{params_from_iter, types::Value};
 
 use super::{HeddleError, Result, database_error};
@@ -11,6 +12,8 @@ pub struct Receipt {
     pub request_hash: [u8; 32],
     pub created_at: i64,
     pub pending: bool,
+    pub execution: Option<api::heddle::api::v2alpha1::OperationRecord>,
+    pub executor: Option<String>,
 }
 impl Receipt {
     pub fn version(&self) -> ContentHash {
@@ -45,7 +48,7 @@ pub fn page(
         .map_err(database_error)?
         .ok_or_else(|| database_error("local metadata missing"))?;
     let mut sql = String::from(
-        "SELECT record_id,operation_id,verb,request_hash,created_at,pending FROM operation_receipts WHERE namespace=?1 AND record_id>?2",
+        "SELECT r.record_id,r.operation_id,r.verb,r.request_hash,r.created_at,r.pending,e.record,e.executor FROM operation_receipts r LEFT JOIN device_operations e ON e.namespace=r.namespace AND e.record_id=r.record_id WHERE r.namespace=?1 AND r.record_id>?2",
     );
     let mut values = vec![
         Value::Text(namespace.into()),
@@ -54,7 +57,7 @@ pub fn page(
     if !ids.is_empty() || !records.is_empty() {
         sql.push_str(" AND (");
         if !ids.is_empty() {
-            sql.push_str("operation_id IN (");
+            sql.push_str("r.operation_id IN (");
             for (index, id) in ids.iter().enumerate() {
                 if index > 0 {
                     sql.push(',');
@@ -68,7 +71,7 @@ pub fn page(
             if !ids.is_empty() {
                 sql.push_str(" OR ");
             }
-            sql.push_str("record_id IN (");
+            sql.push_str("r.record_id IN (");
             for (index, id) in records.iter().enumerate() {
                 if index > 0 {
                     sql.push(',');
@@ -80,7 +83,7 @@ pub fn page(
         }
         sql.push(')');
     }
-    sql.push_str(" ORDER BY record_id LIMIT ?");
+    sql.push_str(" ORDER BY r.record_id LIMIT ?");
     values.push(Value::Integer(limit as i64));
     let mut query = connection.prepare(&sql).map_err(database_error)?;
     let rows = query
@@ -92,11 +95,14 @@ pub fn page(
                 row.get::<_, Vec<u8>>(3)?,
                 row.get(4)?,
                 row.get(5)?,
+                row.get::<_, Option<Vec<u8>>>(6)?,
+                row.get::<_, Option<String>>(7)?,
             ))
         })
         .map_err(database_error)?;
     rows.map(|row| {
-        let (record, id, method, hash, created_at, pending) = row.map_err(database_error)?;
+        let (record, id, method, hash, created_at, pending, execution, executor) =
+            row.map_err(database_error)?;
         Ok(Receipt {
             record: ContentHash::from_bytes(
                 record
@@ -110,6 +116,13 @@ pub fn page(
                 .map_err(|_| database_error("invalid receipt hash"))?,
             created_at,
             pending,
+            executor,
+            execution: execution
+                .map(|bytes| {
+                    api::heddle::api::v2alpha1::OperationRecord::decode(bytes.as_slice())
+                        .map_err(database_error)
+                })
+                .transpose()?,
         })
     })
     .collect()

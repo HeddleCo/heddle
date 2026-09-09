@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, ensure};
 use api::heddle::api::{v1alpha1 as shared, v2alpha1::*};
 use objects::{
-    object::{ContentHash, State, StateAttachmentBody, StateAttachmentKind},
+    object::{ContentHash, State},
     store::ObjectStore,
 };
 use prost::Message;
@@ -70,107 +70,9 @@ fn blob(
     );
     Ok(value)
 }
-pub(super) fn state(
-    repository: &repo::Repository,
-    state: &State,
-    revision: &RevisionRef,
-    read: &StateRead,
-    limits: ReadBudget,
-    emit: &mut impl FnMut(Payload) -> Result<()>,
-) -> Result<()> {
-    ensure!(
-        read.include_summary || read.include_attachments,
-        "state selection must request summary or attachments"
-    );
-    ensure!(
-        read.include_attachments || (read.attachment_kinds.is_empty() && read.page.is_none()),
-        "attachment filters require attachments"
-    );
-    use SourceAttachmentKind as Wire;
-    let known = [
-        (Wire::RiskSignals, StateAttachmentKind::RiskSignals),
-        (
-            Wire::StructuredConflicts,
-            StateAttachmentKind::StructuredConflicts,
-        ),
-        (Wire::SemanticIndex, StateAttachmentKind::SemanticIndex),
-    ];
-    let mut requested = BTreeSet::new();
-    for kind in &read.attachment_kinds {
-        ensure!(
-            known.iter().any(|(wire, _)| *wire as i32 == *kind),
-            "unknown attachment kind"
-        );
-        requested.insert(*kind);
-    }
-    let kinds: Vec<_> = known
-        .into_iter()
-        .filter(|(wire, _)| {
-            read.include_attachments
-                && (requested.is_empty() || requested.contains(&(*wire as i32)))
-        })
-        .collect();
-    let mut attachments = Vec::new();
-    for (_, kind) in &kinds {
-        attachments.push(repository.latest_state_attachment(&state.id(), *kind)?);
-    }
-    let mut normalized = read.clone();
-    normalized.page = None;
-    let mut binding = blake3::Hasher::new();
-    binding.update(&revision.encode_to_vec());
-    binding.update(&normalized.encode_to_vec());
-    for value in attachments.iter().flatten() {
-        binding.update(value.id().as_hash().as_bytes());
-    }
-    let (start, end, page) = page(
-        &read.page.clone().unwrap_or_default(),
-        binding.finalize().as_bytes(),
-        kinds.len(),
-        limits
-            .max_items
-            .saturating_sub(1 + u32::from(read.include_summary)) as usize,
-    )?;
-    if read.include_summary {
-        emit(Payload::State(super::content_summary::summary(state, None)))?;
-    }
-    let mut partial = false;
-    for index in start..end {
-        let mut result = StateAttachmentContent {
-            kind: kinds[index].0 as i32,
-            coverage: Coverage::Unavailable as i32,
-            ..Default::default()
-        };
-        if let Some(value) = &attachments[index] {
-            ensure!(value.state_id == state.id(), "attachment revision mismatch");
-            let body = match value.body {
-                StateAttachmentBody::StructuredConflicts(hash) => {
-                    let value = blob(repository.store(), &hash, u64::from(limits.max_frame_bytes))?;
-                    Some(state_attachment_content::Body::StructuredConflicts(
-                        thread_api::content::structured_conflicts(value.content())?,
-                    ))
-                }
-                _ => Some(state_attachment_content::Body::RawObject(
-                    value.encode_current_msgpack()?,
-                )),
-            };
-            result.attachment_id = value.id().as_hash().as_bytes().to_vec();
-            result.body = body;
-            result.coverage = Coverage::Complete as i32;
-        } else {
-            partial = true;
-        }
-        emit(Payload::Attachment(result))?;
-    }
-    emit(Payload::SelectionComplete(complete(
-        "state",
-        revision,
-        if partial {
-            Coverage::Partial
-        } else {
-            Coverage::Complete
-        },
-        Some(page),
-    )))
+pub(super) fn state(state: &State, revision: &RevisionRef, emit: &mut impl FnMut(Payload) -> Result<()>) -> Result<()> {
+    emit(Payload::State(super::content_summary::summary(state, None)))?;
+    emit(Payload::SelectionComplete(complete("state", revision, Coverage::Complete, None)))
 }
 pub(super) fn diff(
     repository: &repo::Repository,
