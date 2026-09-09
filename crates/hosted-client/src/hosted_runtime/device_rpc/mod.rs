@@ -10,6 +10,7 @@ mod account_spool;
 #[cfg(test)]
 mod account_tests;
 mod account_threads;
+mod artifact;
 #[cfg(test)]
 mod artifact_tests;
 mod auth;
@@ -47,6 +48,7 @@ use prost::Message;
 
 pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread"];
 pub(crate) const METHODS: &[&str] = &[
+    "/heddle.api.v2alpha1.ContentService/ReadArtifact",
     "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace",
     "/heddle.api.v2alpha1.WorkspaceService/ResolveResources",
     "/heddle.api.v2alpha1.WorkspaceService/SetBookmark",
@@ -88,6 +90,7 @@ pub(crate) struct DeviceRpc {
     endpoint: [u8; 32],
     feeds: Arc<Mutex<BTreeMap<uuid::Uuid, Weak<observe::Feed>>>>,
     account_feed: Arc<Mutex<Weak<account_feed::AccountFeed>>>,
+    content_work: Arc<tokio::sync::Semaphore>,
 }
 impl DeviceRpc {
     pub fn new(home: PathBuf, endpoint: [u8; 32]) -> Self {
@@ -96,6 +99,7 @@ impl DeviceRpc {
             endpoint,
             feeds: Arc::new(Mutex::new(BTreeMap::new())),
             account_feed: Arc::new(Mutex::new(Weak::new())),
+            content_work: Arc::new(tokio::sync::Semaphore::new(8)),
         }
     }
     pub fn endpoint(&self) -> EndpointRef {
@@ -139,6 +143,9 @@ impl DeviceRpc {
         };
         if descriptor.streaming == api::StreamingShape::ServerStreaming {
             budget.retain().map_err(anyhow::Error::msg)?;
+        }
+        if method.ends_with("/ReadArtifact") {
+            return self.read_artifact(session, body, send).await;
         }
         if method.ends_with("/ObserveThread") {
             return self.observe_thread(&session, body, send).await;
@@ -222,6 +229,9 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
         }};
     }
     let spool = match method.rsplit('/').next().context("method missing")? {
+        "ReadArtifact" => scope!(ReadArtifactRequest, |r: ReadArtifactRequest| r
+            .artifact
+            .and_then(|r| r.spool)),
         "ObserveThread" => scope!(ObserveThreadRequest, |r: ObserveThreadRequest| r
             .thread
             .and_then(|t| t.spool)),
