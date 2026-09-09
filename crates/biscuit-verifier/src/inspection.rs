@@ -11,6 +11,8 @@ pub struct InspectedCredential {
     pub expires_at_unix_seconds: u64,
     pub revocation_ids: Vec<String>,
     pub session_id: String,
+    pub device_id: Option<String>,
+    pub credential_id: Option<String>,
 }
 /// Inspect an already signature-verified Biscuit without requiring it to permit
 /// an introspection RPC. The bounded Datalog fixpoint and authority-scoped fact
@@ -45,6 +47,8 @@ pub fn inspect_verified_credential(
         expires_at_unix_seconds: facts.exp,
         revocation_ids: facts.revocation_ids,
         session_id: facts.sid,
+        device_id: None,
+        credential_id: None,
     })
 }
 #[cfg(test)]
@@ -60,7 +64,7 @@ mod tests {
     fn fixture() -> (Biscuit, PublicKey) {
         let key =
             KeyPair::from(&PrivateKey::from_bytes(&[17; 32], Algorithm::Ed25519).expect("root"));
-        let token=Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); subject_kind(\"user\"); subject_user_uuid(\"11111111-1111-1111-1111-111111111111\"); session(\"inspect-scoped\"); device_pop_key(\"{}\"); expires_at(2000-01-01T00:00:00Z); check if operation(\"ReadContent\"); check if resource(\"spool\", \"private/one\"); check if time($t), $t < 2000-01-01T00:00:00Z;",hex::encode(key.public().to_bytes())).as_str()).expect("expired scoped facts").build(&key).expect("token");
+        let token=Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); subject_kind(\"user\"); subject_user_uuid(\"11111111-1111-1111-1111-111111111111\"); session(\"inspect-scoped\"); device(\"registered-device\"); credential_id(\"issued-credential\"); device_pop_key(\"{}\"); expires_at(2000-01-01T00:00:00Z); check if operation(\"ReadContent\"); check if resource(\"spool\", \"private/one\"); check if time($t), $t < 2000-01-01T00:00:00Z;",hex::encode(key.public().to_bytes())).as_str()).expect("expired scoped facts").build(&key).expect("token");
         (token, key.public())
     }
     #[test]
@@ -72,6 +76,8 @@ mod tests {
             inspected.asserted_account,
             Some(uuid::Uuid::from_bytes([0x11; 16]))
         );
+        assert_eq!(inspected.device_id.as_deref(),Some("registered-device"));
+        assert_eq!(inspected.credential_id.as_deref(),Some("issued-credential"));
         assert_eq!(inspected.proof_public_key, root.to_bytes());
         assert_eq!(inspected.expires_at_unix_seconds, 946684800);
         assert!(!inspected.revocation_ids.is_empty());
@@ -108,9 +114,12 @@ mod tests {
             .sign(&crate::key_delegation::statement(&encoded, &key).expect("canonical delegation"))
             .to_bytes();
         let delegated =
-            crate::key_delegation::append(&encoded, &key, &signature, BlockBuilder::new())
+            crate::key_delegation::append(&encoded, &key, &signature, BlockBuilder::new().code("device(\"appended-device\"); credential_id(\"appended-credential\");").expect("untrusted appended selectors"))
                 .expect("delegated");
         let verified = Biscuit::from_base64(&delegated, root).expect("signature chain");
+        let inspected=inspect_verified_credential(&verified,&root).expect("original authority selectors");
+        assert_eq!(inspected.device_id.as_deref(),Some("registered-device"));
+        assert_eq!(inspected.credential_id.as_deref(),Some("issued-credential"));
         assert_eq!(
             inspect_verified_credential(&verified, &root)
                 .expect("verified child")
