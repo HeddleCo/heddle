@@ -252,6 +252,9 @@ fn verify_response(
         Utc::now(),
     )
     .context("verify paired capability")?;
+    if issued.subject != facts.sub {
+        bail!("pairing response changed the verified credential subject");
+    }
     let session = result.session.context("paired parent session missing")?;
     if session.revoked
         || session
@@ -407,13 +410,20 @@ mod tests {
         );
         let mut changed = response.clone();
         let Some(api::credential_result::Outcome::Issued(issued)) = changed
-            .credential.as_mut().expect("credential").outcome.as_mut()
-        else { panic!("issued credential") };
+            .credential
+            .as_mut()
+            .expect("credential")
+            .outcome
+            .as_mut()
+        else {
+            panic!("issued credential")
+        };
         issued.subject = "unrelated-subject".into();
         assert!(
             verify_response(&subject, &binding, &attachment, changed, "pairing-op")
                 .expect_err("response subject must match verified Biscuit")
-                .to_string().contains("credential subject")
+                .to_string()
+                .contains("credential subject")
         );
         let mut changed = response;
         changed
