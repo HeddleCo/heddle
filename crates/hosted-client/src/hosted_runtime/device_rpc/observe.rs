@@ -132,10 +132,9 @@ impl DeviceRpc {
         let authority = repo::device_watch::watch_filtered(
             &self.home.join("state/device-rpc"),
             |path| {
-                path.file_name().is_some_and(|name| name == "authority.bin")
-                    || path
-                        .parent()
-                        .is_some_and(|parent| parent.ends_with("spools"))
+                path.file_name().is_some_and(|name| {
+                    name == "authority.bin" || name == "catalog.sqlite3.changed"
+                })
             },
             move |result| {
                 authority_sender.send_modify(|version| {

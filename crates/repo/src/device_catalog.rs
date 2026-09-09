@@ -5,6 +5,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+pub mod mutations;
+pub mod store;
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeviceSpool {
     pub id: uuid::Uuid,
@@ -13,22 +18,9 @@ pub struct DeviceSpool {
     /// Canonical capability resource path, set by locally authenticated setup.
     pub capability_path: String,
 }
-fn directory(home: &Path) -> PathBuf {
-    home.join("state/device-rpc/spools")
-}
 pub fn register(home: &Path, repository: &crate::Repository, id: uuid::Uuid) -> Result<()> {
     if id.is_nil() {
         bail!("nil local spool identity");
-    }
-    let directory = directory(home);
-    objects::fs_atomic::create_dir_all_durable(&directory)?;
-    let file = directory.join(format!("{id}.json"));
-    let _guard = objects::lock::RepoLock::at(directory.join(format!("{id}.lock"))).write()?;
-    if file.exists() {
-        let previous = load(home, id)?;
-        if previous.root.exists() {
-            return Ok(());
-        }
     }
     let entry = DeviceSpool {
         id,
@@ -36,18 +28,34 @@ pub fn register(home: &Path, repository: &crate::Repository, id: uuid::Uuid) -> 
         heddle_dir: repository.heddle_dir().canonicalize()?,
         capability_path: id.to_string(),
     };
-    objects::fs_atomic::write_file_atomic_secret(&file, &serde_json::to_vec(&entry)?)?;
-    Ok(())
+    let overview = api::heddle::api::v2alpha1::SpoolOverview {
+        name: repository
+            .root()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Local Spool")
+            .to_owned(),
+        slug: id.to_string(),
+        audience: api::heddle::api::v2alpha1::Audience::Private as i32,
+        settings: Some(api::heddle::api::v2alpha1::SpoolSettings {
+            audience: api::heddle::api::v2alpha1::Audience::Private as i32,
+            default_state_audience: api::heddle::api::v2alpha1::Audience::Private as i32,
+            allow_child_creation: true,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    store::Catalog::open(home)?.register(&entry, overview)
 }
 pub fn load(home: &Path, id: uuid::Uuid) -> Result<DeviceSpool> {
     if id.is_nil() {
         bail!("nil local spool identity");
     }
-    let file = directory(home).join(format!("{id}.json"));
-    if std::fs::metadata(&file)?.len() > 16 * 1024 {
-        bail!("local spool registration exceeds bound");
-    }
-    let entry: DeviceSpool = serde_json::from_slice(&bounded_read(&file, 16 * 1024)?)?;
+    let entry = store::Catalog::read(home)?
+        .context("local catalog unavailable")?
+        .spool(id)?
+        .context("local Spool unavailable")?
+        .registration;
     if entry.id != id || entry.capability_path.is_empty() {
         bail!("local spool registration differs from lookup");
     }
@@ -68,15 +76,9 @@ pub fn set_capability_path(home: &Path, id: uuid::Uuid, path: &str) -> Result<()
     {
         bail!("invalid spool capability path");
     }
-    let directory = directory(home);
-    let _guard = objects::lock::RepoLock::at(directory.join(format!("{id}.lock"))).write()?;
-    let mut entry = load(home, id)?;
-    entry.capability_path = path.to_owned();
-    objects::fs_atomic::write_file_atomic_secret(
-        &directory.join(format!("{id}.json")),
-        &serde_json::to_vec(&entry)?,
-    )?;
-    Ok(())
+    // Revalidate the physical binding before changing its capability path.
+    load(home, id)?;
+    store::Catalog::open(home)?.set_capability_path(id, path)
 }
 /// Resolve a checkout only from locally registered bindings, never a caller path.
 pub fn checkout(
