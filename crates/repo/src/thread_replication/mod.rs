@@ -2,6 +2,9 @@
 //! Durable Thread replication over native captures and collaboration operations.
 //! Endpoint adapters must authorize the exact Thread and disclosure facets before
 //! calling receive/export. Signatures prove the publisher, not spool membership.
+pub mod admission;
+#[cfg(test)]
+mod admission_tests;
 pub mod checkout;
 mod checkout_resolution;
 mod checkout_selection;
@@ -85,7 +88,7 @@ impl ThreadReplica {
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS local_thread_names(name TEXT PRIMARY KEY, thread BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS threads(id BLOB PRIMARY KEY, genesis BLOB NOT NULL, genesis_signature BLOB NOT NULL CHECK(length(genesis_signature)=64), generation INTEGER NOT NULL DEFAULT 0);
-            CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT, source_revision BLOB, authority_admitted INTEGER NOT NULL DEFAULT 0 CHECK(authority_admitted IN(0,1)));
+            CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT, source_revision BLOB, authority_admitted INTEGER NOT NULL DEFAULT 0 CHECK(authority_admitted IN(0,1)), authority_receipt_canonical BLOB CHECK(authority_receipt_canonical IS NULL OR length(authority_receipt_canonical)<=2048), authority_receipt_signature BLOB CHECK(authority_receipt_signature IS NULL OR length(authority_receipt_signature)=64), CHECK((authority_receipt_canonical IS NULL)=(authority_receipt_signature IS NULL)));
             CREATE INDEX IF NOT EXISTS operations_thread_status ON operations(thread,status);
             CREATE INDEX IF NOT EXISTS operations_thread_facet_status_id ON operations(thread,facet,status,id);
             CREATE INDEX IF NOT EXISTS operations_source_revision ON operations(thread,source_revision,status,id);
@@ -240,7 +243,7 @@ impl ThreadReplica {
         store: &impl ObjectStore,
         authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
     ) -> Result<Admission> {
-        self.receive_inner(signed, store, authorize, false)
+        self.receive_inner(signed, store, authorize, false, None)
     }
     /// Execute local landing only against the exact currently observed target
     /// frontier. Historical replication uses `receive` and preserves branches.
@@ -255,7 +258,7 @@ impl ThreadReplica {
                 "local integration CAS requires a local receipt".into(),
             ));
         }
-        self.receive_inner(signed, store, authorize, true)
+        self.receive_inner(signed, store, authorize, true, None)
     }
     fn receive_inner(
         &self,
@@ -263,6 +266,7 @@ impl ThreadReplica {
         store: &impl ObjectStore,
         authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
         compare_frontier: bool,
+        authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
     ) -> Result<Admission> {
         let operation = signed.verify()?;
         if operation.thread != self.thread {
@@ -270,6 +274,9 @@ impl ThreadReplica {
         }
         self.require_trusted_integration(&operation)?;
         self.require_local_integration_source(&operation)?;
+        if let Some(receipt) = authority_receipt {
+            self.require_authority_admission(signed, receipt)?;
+        }
         authorize(&operation)?;
         let id = operation.id()?;
         let mut connection = self.connect()?;
@@ -317,6 +324,18 @@ impl ThreadReplica {
                 "UPDATE operations SET authority_admitted=1 WHERE id=?1 AND authority_admitted=0",
                 [id.as_bytes()],
             )?;
+        }
+        if let Some(receipt) = authority_receipt {
+            let stored = tx.execute(
+                "UPDATE operations SET authority_receipt_canonical=?2,authority_receipt_signature=?3 WHERE id=?1 AND authority_receipt_canonical IS NULL",
+                params![id.as_bytes(), receipt.canonical, receipt.signature],
+            )?;
+            if stored > 0 && inserted == 0 {
+                tx.execute(
+                    "UPDATE threads SET generation=generation+1 WHERE id=?1",
+                    [self.thread.as_bytes()],
+                )?;
+            }
         }
         if inserted > 0 {
             for parent in &operation.parents {
@@ -523,21 +542,9 @@ impl ThreadReplica {
     }
 
     pub fn operation(&self, id: &ContentHash) -> Result<Option<(SignedOperation, Admission)>> {
-        let connection = self.connect()?;
-        let row = connection
-            .query_row(
-                "SELECT canonical,signature FROM operations WHERE id=?1 AND thread=?2",
-                params![id.as_bytes(), self.thread.as_bytes()],
-                |r| {
-                    Ok(SignedOperation {
-                        canonical: r.get(0)?,
-                        signature: r.get(1)?,
-                    })
-                },
-            )
-            .optional()?;
-        row.map(|record| Ok((record, status(&connection, id)?)))
-            .transpose()
+        Ok(self
+            .operation_with_authority_admission(id)?
+            .map(|stored| (stored.original, stored.status)))
     }
 
     /// Bounded durable paging, also used after reconnect. The cursor is an

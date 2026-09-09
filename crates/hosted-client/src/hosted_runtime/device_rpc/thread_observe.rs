@@ -343,6 +343,7 @@ impl DeviceRpc {
                     ("checkouts", Coverage::Unavailable, PageInfo::default())
                 }
                 ThreadSection::Timeline => ("timeline", Coverage::Unavailable, PageInfo::default()),
+                ThreadSection::Evidence => ("evidence", Coverage::Unavailable, PageInfo::default()),
                 ThreadSection::Unspecified => bail!("Thread section required"),
             };
             all_exhausted &= page.exhausted || coverage == Coverage::Unavailable;

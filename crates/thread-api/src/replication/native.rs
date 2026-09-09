@@ -1,7 +1,6 @@
 //! Local SQLite adapter. Blocking work stays off the stream runtime.
 use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
 
-use crypto::thread_operation::SignedOperation;
 use heddle_object_model::object::{
     ContentHash,
     thread_replication::{Admission, ThreadFacet},
@@ -9,7 +8,7 @@ use heddle_object_model::object::{
 use objects::store::ObjectStore;
 use repo::thread_replication::ThreadReplica;
 
-use super::store::ReplicaStore;
+use super::store::{ReceivedOperation, ReplicaStore};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -83,12 +82,29 @@ impl<S: ObjectStore + Send + Sync + 'static> ReplicaStore for LocalReplica<S> {
     async fn operation(
         &self,
         id: ContentHash,
-    ) -> Result<Option<(SignedOperation, Admission)>, Error> {
-        self.execute(move |replica, _| replica.operation(&id)).await
+    ) -> Result<Option<(ReceivedOperation, Admission)>, Error> {
+        self.execute(move |replica, _| {
+            Ok(replica
+                .operation_with_authority_admission(&id)?
+                .map(|stored| {
+                    (
+                        ReceivedOperation {
+                            original: stored.original,
+                            authority_admission: stored.authority_admission,
+                        },
+                        stored.status,
+                    )
+                }))
+        })
+        .await
     }
-    async fn receive(&self, operation: SignedOperation) -> Result<Admission, Error> {
+    async fn receive(&self, received: ReceivedOperation) -> Result<Admission, Error> {
         let authority_home = self.authority_home.clone();
         self.execute(move |replica, objects| {
+            let operation = received.original;
+            if let Some(receipt) = received.authority_admission {
+                return replica.receive_with_authority_admission(&operation, &receipt, objects, |_| Ok(()));
+            }
             replica.receive(&operation, objects, |native| {
                 use heddle_object_model::object::thread_replication::ThreadOperationBody;
                 if !matches!(native.body, ThreadOperationBody::Metadata(_)) {

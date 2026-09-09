@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! A bounded, transport-neutral causal exchange shared by device and hosted
 //! endpoints. The RPC adapter supplies the verified request scope.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crypto::thread_operation::SignedOperation;
 use heddle_object_model::object::{
@@ -12,7 +12,7 @@ use heddle_object_model::object::{
 pub mod native;
 pub mod opening;
 pub mod store;
-use store::ReplicaStore;
+use store::{ReceivedOperation, ReplicaStore};
 
 use crate::contract::*;
 
@@ -208,7 +208,7 @@ impl<B: ReplicaStore> Session<B> {
                             .await
                             .map_err(StoreError::Store)?
                         {
-                            if record.verify().map_err(Error::from)?.facet() != facet {
+                            if record.original.verify().map_err(Error::from)?.facet() != facet {
                                 return Err(Error::Protocol(
                                     "advertised frontier has the wrong facet",
                                 )
@@ -247,7 +247,7 @@ impl<B: ReplicaStore> Session<B> {
                     else {
                         return Err(Error::Protocol("requested operation unavailable").into());
                     };
-                    let operation = record.verify().map_err(Error::from)?;
+                    let operation = record.original.verify().map_err(Error::from)?;
                     if !sharing.contains(&operation.facet()) {
                         return Err(
                             Error::Protocol("operation is outside current sharing policy").into(),
@@ -258,7 +258,18 @@ impl<B: ReplicaStore> Session<B> {
             }
             Frame::Operations(batch) => {
                 self.check_count(batch.operations.len())?;
-                let mut receipt = ReplicationReceipt::default();
+                self.check_count(batch.authority_admissions.len())?;
+                let mut admissions = BTreeMap::new();
+                for record in batch.authority_admissions {
+                    let signed = crate::authority_admission::decode(&record)
+                        .map_err(|_| Error::Protocol("invalid authority admission sidecar"))?;
+                    let statement = signed.verify_signature().map_err(Error::from)?;
+                    if admissions.insert(statement.operation, signed).is_some() {
+                        return Err(Error::Protocol("duplicate authority admission sidecar").into());
+                    }
+                }
+                let mut operations = Vec::with_capacity(batch.operations.len());
+                let mut operation_ids = BTreeSet::new();
                 for record in batch.operations {
                     let signed = decode_record(record)?;
                     let operation = signed.verify().map_err(Error::from)?;
@@ -266,10 +277,21 @@ impl<B: ReplicaStore> Session<B> {
                     if !self.facets.contains(&operation.facet()) {
                         return Err(Error::Protocol("operation is outside admission scope").into());
                     }
+                    operation_ids.insert(id);
+                    operations.push((signed, operation, id));
+                }
+                if admissions.keys().any(|id| !operation_ids.contains(id)) {
+                    return Err(Error::Protocol("unmatched authority admission sidecar").into());
+                }
+                let mut receipt = ReplicationReceipt::default();
+                for (signed, operation, id) in operations {
                     self.in_flight.remove(&id);
                     match self
                         .replica
-                        .receive(signed)
+                        .receive(ReceivedOperation {
+                            original: signed,
+                            authority_admission: admissions.remove(&id),
+                        })
                         .await
                         .map_err(StoreError::Store)?
                     {
@@ -386,18 +408,25 @@ impl<B: ReplicaStore> Session<B> {
         else {
             return Err(Error::Protocol("requested operation unavailable").into());
         };
-        let operation = record.verify().map_err(Error::from)?;
+        let operation = record.original.verify().map_err(Error::from)?;
         if !self.export_facets().await?.contains(&operation.facet()) {
             return Err(Error::Protocol("operation is outside current sharing policy").into());
         }
         Ok(Frame::Operations(ReplicationOperations {
-            authority_admissions: Vec::new(),
+            authority_admissions: record
+                .authority_admission
+                .as_ref()
+                .map(crate::authority_admission::encode)
+                .transpose()
+                .map_err(|_| Error::Protocol("invalid retained authority admission"))?
+                .into_iter()
+                .collect(),
             operations: vec![SignedRecord {
                 format: OPERATION_FORMAT.into(),
-                canonical_record: record.canonical,
+                canonical_record: record.original.canonical,
                 signatures: vec![RecordSignature {
                     public_key: operation.publisher.to_vec(),
-                    signature: record.signature,
+                    signature: record.original.signature,
                 }],
             }],
         }))
@@ -463,3 +492,7 @@ fn hash(bytes: &[u8]) -> Result<ContentHash> {
 #[cfg(all(test, feature = "native"))]
 #[path = "replication_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "native"))]
+#[path = "replication_admission_tests.rs"]
+mod admission_tests;

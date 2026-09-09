@@ -1,11 +1,30 @@
 //! Async durable-store boundary shared by device and hosted replication.
 use std::{collections::BTreeSet, future::Future};
 
-use crypto::thread_operation::SignedOperation;
+use crypto::{
+    thread_authority_admission::SignedAuthorityAdmission, thread_operation::SignedOperation,
+};
 use heddle_object_model::object::{
     ContentHash,
     thread_replication::{Admission, ThreadFacet},
 };
+
+/// Original immutable bytes plus optional independently signed first-authority
+/// admission. A receipt never replaces the original signature or current courier
+/// authorization, and remains attached across later peer relays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReceivedOperation {
+    pub original: SignedOperation,
+    pub authority_admission: Option<SignedAuthorityAdmission>,
+}
+impl From<SignedOperation> for ReceivedOperation {
+    fn from(original: SignedOperation) -> Self {
+        Self {
+            original,
+            authority_admission: None,
+        }
+    }
+}
 
 /// Implementations commit before returning receipts. A store is bound to one
 /// authorized Thread; operations and peer metadata may never escape that scope.
@@ -27,10 +46,10 @@ pub trait ReplicaStore: Clone + Send + Sync + 'static {
     fn operation(
         &self,
         id: ContentHash,
-    ) -> impl Future<Output = Result<Option<(SignedOperation, Admission)>, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<Option<(ReceivedOperation, Admission)>, Self::Error>> + Send;
     fn receive(
         &self,
-        operation: SignedOperation,
+        operation: ReceivedOperation,
     ) -> impl Future<Output = Result<Admission, Self::Error>> + Send;
     fn remember_peer_heads(
         &self,

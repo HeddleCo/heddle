@@ -117,6 +117,14 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     };
     super::thread_tests::roundtrip(&remote, &device, &repository, spool).await;
     super::capacity_tests::roundtrip(&remote, &device, &repository, &replica, &budgets).await;
+    super::receipt_tests::roundtrip(
+        &remote,
+        &device,
+        &repository,
+        &replica,
+        *browser.id().as_bytes(),
+    )
+    .await;
     let source = RevisionRef {
         spool: Some(spool_ref.clone()),
         revision: Some(revision_ref::Revision::State(

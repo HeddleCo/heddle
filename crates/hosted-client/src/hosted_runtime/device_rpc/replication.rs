@@ -7,7 +7,6 @@ use api::{
     heddle::api::{v1alpha1::CallContext, v2alpha1::*},
     v2::client::{MessageReader, MessageWriter},
 };
-use crypto::thread_operation::SignedOperation;
 use iroh::endpoint::{RecvStream, SendStream};
 use objects::{
     object::{
@@ -23,7 +22,7 @@ use thread_api::{
         self,
         native::{Error, LocalReplica},
         opening,
-        store::ReplicaStore,
+        store::{ReceivedOperation, ReplicaStore},
     },
     transport,
 };
@@ -191,10 +190,10 @@ impl ReplicaStore for OwnedReplica {
     async fn operation(
         &self,
         id: ContentHash,
-    ) -> Result<Option<(SignedOperation, Admission)>, Error> {
+    ) -> Result<Option<(ReceivedOperation, Admission)>, Error> {
         self.0.operation(id).await
     }
-    async fn receive(&self, operation: SignedOperation) -> Result<Admission, Error> {
+    async fn receive(&self, operation: ReceivedOperation) -> Result<Admission, Error> {
         self.0.receive(operation).await
     }
     async fn remember_peer_heads(

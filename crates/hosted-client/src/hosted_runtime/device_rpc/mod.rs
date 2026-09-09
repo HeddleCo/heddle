@@ -8,6 +8,8 @@ mod checkout;
 mod inventory_tests;
 mod land;
 mod observe;
+#[cfg(test)]
+mod receipt_tests;
 mod replication;
 mod stream;
 #[cfg(test)]
