@@ -17,6 +17,8 @@ pub struct DeviceAuthority {
     pub owner: OwnerState,
     pub mint_roots: Vec<SignedMintRootAttachment>,
     pub revoked_ids: Vec<String>,
+    pub revoked_mint_roots: Vec<[u8; 32]>,
+    pub revoked_publishers: Vec<[u8; 32]>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -29,6 +31,10 @@ struct StoredAuthority {
     mint_roots: Vec<SignedMintRootAttachment>,
     #[prost(string, repeated, tag = "4")]
     revoked_ids: Vec<String>,
+    #[prost(bytes = "vec", repeated, tag = "5")]
+    revoked_mint_roots: Vec<Vec<u8>>,
+    #[prost(bytes = "vec", repeated, tag = "6")]
+    revoked_publishers: Vec<Vec<u8>>,
 }
 
 fn read(home: &Path) -> Result<StoredAuthority> {
@@ -47,6 +53,13 @@ fn validate(stored: &StoredAuthority, now: i64) -> Result<()> {
         || stored.encoded_len() > MAX_BYTES
         || stored.mint_roots.len() > MAX_ATTACHMENTS
         || stored.revoked_ids.len() > MAX_REVOCATIONS
+        || stored.revoked_mint_roots.len() > MAX_REVOCATIONS
+        || stored.revoked_publishers.len() > MAX_REVOCATIONS
+        || stored
+            .revoked_mint_roots
+            .iter()
+            .chain(&stored.revoked_publishers)
+            .any(|key| key.len() != 32)
         || stored
             .revoked_ids
             .iter()
@@ -71,13 +84,62 @@ pub fn load(home: &Path, now: i64) -> Result<DeviceAuthority> {
         owner: stored.owner.context("device account authority missing")?,
         mint_roots: stored.mint_roots,
         revoked_ids: stored.revoked_ids,
+        revoked_mint_roots: keys(stored.revoked_mint_roots)?,
+        revoked_publishers: keys(stored.revoked_publishers)?,
     })
 }
 
+fn keys(values: Vec<Vec<u8>>) -> Result<Vec<[u8; 32]>> {
+    values
+        .into_iter()
+        .map(|key| {
+            key.try_into()
+                .map_err(|_| anyhow::anyhow!("revoked key must be 32 bytes"))
+        })
+        .collect()
+}
+
 impl DeviceAuthority {
+    /// Current local revocation gate for original operation publishers.
+    pub fn verify_publisher(&self, public_key: &[u8]) -> Result<()> {
+        if public_key.len() != 32
+            || self
+                .revoked_publishers
+                .iter()
+                .any(|key| key.as_slice() == public_key)
+        {
+            bail!("operation publisher is invalid or revoked");
+        }
+        Ok(())
+    }
+    /// Typed revocation callback for the portable original-author verifier.
+    pub fn is_revoked(
+        &self,
+        kind: heddleco_capability_verifier::thread_control_authority::Revocation<'_>,
+    ) -> bool {
+        use heddleco_capability_verifier::thread_control_authority::Revocation;
+        match kind {
+            Revocation::Credential(id) => self.revoked_ids.iter().any(|value| value == id),
+            Revocation::MintRoot(key) => self
+                .revoked_mint_roots
+                .iter()
+                .any(|value| value.as_slice() == key),
+            Revocation::Publisher(key) => self
+                .revoked_publishers
+                .iter()
+                .any(|value| value.as_slice() == key),
+        }
+    }
     /// Resolve only a locally admitted, currently valid association. A request
     /// may not introduce another mint root by supplying a self-signed statement.
     pub fn verify_mint_root(&self, public_key: &[u8], now: i64) -> Result<()> {
+        if self
+            .revoked_mint_roots
+            .iter()
+            .any(|key| key.as_slice() == public_key)
+        {
+            bail!("mint root is revoked");
+        }
         let current = crate::verify_account_owner_observation(&self.owner, now)?;
         let account = current
             .signed_root()
@@ -107,13 +169,10 @@ impl DeviceAuthority {
 /// Publish an independently authenticated observation. The first observation is
 /// admitted by the calling enrollment ceremony; later ones must extend its exact
 /// history. Revocations are cumulative, including across repeated observations.
-pub fn publish(
-    home: &Path,
-    owner: &OwnerState,
-    mint_roots: &[SignedMintRootAttachment],
-    revoked_ids: &[String],
-    now: i64,
-) -> Result<()> {
+pub fn publish(home: &Path, authority: &DeviceAuthority, now: i64) -> Result<()> {
+    let owner = &authority.owner;
+    let mint_roots = &authority.mint_roots;
+    let revoked_ids = &authority.revoked_ids;
     let directory = home.join("state/device-rpc");
     fs_atomic::create_private_dir_all(&directory)?;
     let _guard = RepoLock::at(directory.join("authority.lock")).write()?;
@@ -122,6 +181,16 @@ pub fn publish(
         owner: Some(owner.clone()),
         mint_roots: mint_roots.to_vec(),
         revoked_ids: revoked_ids.to_vec(),
+        revoked_mint_roots: authority
+            .revoked_mint_roots
+            .iter()
+            .map(|key| key.to_vec())
+            .collect(),
+        revoked_publishers: authority
+            .revoked_publishers
+            .iter()
+            .map(|key| key.to_vec())
+            .collect(),
     };
     validate(&next, now)?;
     let current = crate::verify_account_owner_observation(owner, now)?;
@@ -158,6 +227,8 @@ pub fn publish(
             bail!("device account observation rolls back or forks admitted authority");
         }
         next.revoked_ids.extend(previous.revoked_ids);
+        next.revoked_mint_roots.extend(previous.revoked_mint_roots);
+        next.revoked_publishers.extend(previous.revoked_publishers);
         if owner.version == old.version {
             for attachment in previous.mint_roots {
                 if !next.mint_roots.contains(&attachment) {
@@ -168,6 +239,10 @@ pub fn publish(
     }
     next.revoked_ids.sort();
     next.revoked_ids.dedup();
+    next.revoked_mint_roots.sort();
+    next.revoked_mint_roots.dedup();
+    next.revoked_publishers.sort();
+    next.revoked_publishers.dedup();
     validate(&next, now)?;
     fs_atomic::write_file_atomic_secret(&directory.join("authority.bin"), &next.encode_to_vec())
         .context("persist admitted device account authority")
@@ -179,6 +254,25 @@ mod tests {
 
     use super::*;
 
+    fn publish(
+        home: &Path,
+        owner: &OwnerState,
+        mint_roots: &[SignedMintRootAttachment],
+        revoked_ids: &[String],
+        now: i64,
+    ) -> Result<()> {
+        super::publish(
+            home,
+            &DeviceAuthority {
+                owner: owner.clone(),
+                mint_roots: mint_roots.to_vec(),
+                revoked_ids: revoked_ids.to_vec(),
+                revoked_mint_roots: vec![],
+                revoked_publishers: vec![],
+            },
+            now,
+        )
+    }
     fn owner(seed: u8) -> (OwnerState, Ed25519Signer) {
         let key = Ed25519Signer::from_seed(&[seed; 32]).expect("authority");
         let recovery = Ed25519Signer::from_seed(&[seed + 1; 32]).expect("recovery");
@@ -225,5 +319,48 @@ mod tests {
         candidate.version[0] ^= 1;
         assert!(publish(home.path(), &candidate, &[], &[], 100).is_err());
         assert!(!home.path().join("state/device-rpc/authority.bin").exists());
+    }
+    #[test]
+    fn typed_key_revocations_survive_repeated_owner_publication() {
+        use heddleco_capability_verifier::thread_control_authority::Revocation;
+        let home = tempfile::tempdir().expect("home");
+        let (state, key) = owner(81);
+        let mint: [u8; 32] = key.public_key().try_into().expect("Ed25519 root");
+        let publisher = [42; 32];
+        let authority = DeviceAuthority {
+            owner: state.clone(),
+            mint_roots: vec![],
+            revoked_ids: vec!["session-a".into()],
+            revoked_mint_roots: vec![mint],
+            revoked_publishers: vec![publisher],
+        };
+        super::publish(home.path(), &authority, 100).expect("record typed revocations");
+        publish(home.path(), &state, &[], &[], 100)
+            .expect("repeated observation cannot clear revocations");
+        let stored = load(home.path(), 100).expect("persisted authority");
+        assert_eq!(stored.revoked_mint_roots, vec![mint]);
+        assert_eq!(stored.revoked_publishers, vec![publisher]);
+        assert!(
+            stored
+                .verify_mint_root(&mint, 100)
+                .expect_err("revoked current mint")
+                .to_string()
+                .contains("revoked")
+        );
+        assert!(
+            stored
+                .verify_publisher(&publisher)
+                .expect_err("revoked publisher")
+                .to_string()
+                .contains("revoked")
+        );
+        stored
+            .verify_publisher(&[43; 32])
+            .expect("independent publisher remains usable");
+        assert!(stored.is_revoked(Revocation::Credential("session-a")));
+        assert!(stored.is_revoked(Revocation::MintRoot(&mint)));
+        assert!(stored.is_revoked(Revocation::Publisher(&publisher)));
+        assert!(!stored.is_revoked(Revocation::Credential(&hex::encode(mint))));
+        assert!(!stored.is_revoked(Revocation::Publisher(&mint)));
     }
 }

@@ -172,7 +172,19 @@ fn finish(
     response: api::AuthenticationResponse,
     operation: &str,
 ) -> Result<AuthLoginOutcome> {
+    let owner = response
+        .ownership
+        .clone()
+        .context("pairing omitted account ownership")?;
     let credential = verify_response(subject, binding, attachment, response, operation)?;
+    let now = Utc::now().timestamp();
+    let authority = verify_pairing_authority(
+        owner,
+        binding,
+        credential.mint_root_attachment.as_deref(),
+        now,
+    )?;
+    repo::device_authority::publish(&repo::identity::heddle_home_dir(), &authority, now)?;
     let pem = credential
         .private_key_pem
         .as_deref()
@@ -189,6 +201,38 @@ fn finish(
         subject,
         credential_saved: true,
     })
+}
+
+fn verify_pairing_authority(
+    owner: api::OwnerState,
+    binding: &api::RootAttachmentBinding,
+    mint_attachment: Option<&[u8]>,
+    now: i64,
+) -> Result<repo::device_authority::DeviceAuthority> {
+    if owner
+        .owner
+        .as_ref()
+        .is_none_or(|owner| owner.id != binding.account_id)
+    {
+        bail!("pairing ownership differs from the approving account");
+    }
+    let mint_roots = mint_attachment
+        .map(api::SignedMintRootAttachment::decode)
+        .transpose()
+        .context("decode paired mint-root association")?
+        .into_iter()
+        .collect();
+    let authority = repo::device_authority::DeviceAuthority {
+        owner,
+        mint_roots,
+        revoked_ids: Vec::new(),
+        revoked_mint_roots: Vec::new(),
+        revoked_publishers: Vec::new(),
+    };
+    authority
+        .verify_mint_root(&binding.root_public_key, now)
+        .context("verify approved root belongs to the paired account")?;
+    Ok(authority)
 }
 
 fn verify_response(
@@ -295,6 +339,48 @@ async fn wait_for_pairing<T, E: std::fmt::Display>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pairing_requires_verified_same_account_current_authority() {
+        let root = Ed25519Signer::from_seed(&[71; 32]).expect("root");
+        let recovery = Ed25519Signer::from_seed(&[72; 32]).expect("recovery");
+        let signed = repo::sign_custodial_owner_root(&root, &recovery, [9; 16], [5; 32])
+            .expect("root proof");
+        let signed_binding =
+            repo::sign_custodial_owner_binding(&root, &signed, [6; 32]).expect("binding");
+        let verified =
+            heddleco_capability_verifier::verify_owner_root(&signed).expect("verify root");
+        let owner = api::OwnerState {
+            owner: Some(api::PrincipalRef {
+                id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+            }),
+            root: Some(signed),
+            binding: Some(signed_binding),
+            version: verified.state_hash().to_vec(),
+            ..Default::default()
+        };
+        let mut binding = api::RootAttachmentBinding {
+            account_id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+            root_public_key: root.public_key().to_vec(),
+            ..Default::default()
+        };
+        verify_pairing_authority(owner.clone(), &binding, None, 100).expect("matching authority");
+        binding.account_id = uuid::Uuid::from_bytes([8; 16]).to_string();
+        assert!(
+            verify_pairing_authority(owner.clone(), &binding, None, 100)
+                .err()
+                .expect("wrong account")
+                .to_string()
+                .contains("approving account")
+        );
+        binding.account_id = uuid::Uuid::from_bytes([9; 16]).to_string();
+        binding.root_public_key = vec![99; 32];
+        assert!(verify_pairing_authority(owner.clone(), &binding, None, 100).is_err());
+        binding.root_public_key = root.public_key().to_vec();
+        let mut changed = owner;
+        changed.version = vec![0; 32];
+        assert!(verify_pairing_authority(changed, &binding, None, 100).is_err());
+    }
+
     #[tokio::test]
     async fn stalled_pairing_observation_respects_ceremony_deadline() {
         let error = wait_for_pairing(
