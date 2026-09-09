@@ -50,6 +50,8 @@ pub enum CollaborationRecordKind {
     Recovery,
     OwnerTransition,
     Billing,
+    Evidence,
+    CheckAcknowledgement,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
