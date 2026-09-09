@@ -117,3 +117,30 @@ fn incomplete_or_duplicate_frontier_never_produces_a_signature() {
         .contains("observe")
     );
 }
+
+#[test]
+fn name_and_lifecycle_compare_their_own_portable_frontiers() {
+    let signer = Ed25519Signer::from_seed(&[19; 32]).expect("signer");
+    for (property, control) in [
+        (Property::Name, Control::Name("new name".into())),
+        (Property::Lifecycle, Control::Lifecycle(Lifecycle::Active)),
+    ] {
+        let mut view = observed(property, BTreeSet::new());
+        view.version.clear(); // Whole-Thread versions are irrelevant to field CAS.
+        let prepared =
+            PreparedControl::sign(&view, control, author(), Uuid::from_u128(3), 1000, &signer)
+                .expect("prepare");
+        let actual = match prepared.control.control {
+            Control::Name(_) => prepared.rename().expect("rename").expected_version,
+            Control::Lifecycle(_) => {
+                prepared
+                    .change_lifecycle()
+                    .expect("lifecycle")
+                    .expected_version
+            }
+            _ => unreachable!("fixed test controls"),
+        };
+        assert_eq!(actual, view.metadata_frontiers[0].version);
+        assert!(!actual.is_empty());
+    }
+}

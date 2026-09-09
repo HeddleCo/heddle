@@ -177,13 +177,13 @@ impl PreparedControl {
         let Control::Name(name) = &self.control.control else {
             return Err(Error::Protocol("control is not a name"));
         };
-        if self.thread_version.is_empty() {
-            return Err(Error::Protocol("observed Thread version missing"));
+        if self.property_version.is_empty() {
+            return Err(Error::Protocol("observed property version missing"));
         }
         Ok(wire::RenameThreadRequest {
             client_operation_id: self.control.client_operation_id.to_string(),
             thread: Some(self.thread.clone()),
-            expected_version: self.thread_version.clone(),
+            expected_version: self.property_version.clone(),
             name: name.clone(),
             operation: Some(self.record.clone()),
         })
@@ -192,13 +192,13 @@ impl PreparedControl {
         let Control::Lifecycle(value) = self.control.control else {
             return Err(Error::Protocol("control is not lifecycle"));
         };
-        if self.thread_version.is_empty() {
-            return Err(Error::Protocol("observed Thread version missing"));
+        if self.property_version.is_empty() {
+            return Err(Error::Protocol("observed property version missing"));
         }
         Ok(wire::ChangeThreadLifecycleRequest {
             client_operation_id: self.control.client_operation_id.to_string(),
             thread: Some(self.thread.clone()),
-            expected_version: self.thread_version.clone(),
+            expected_version: self.property_version.clone(),
             lifecycle: match value {
                 Lifecycle::Draft => wire::ThreadLifecycle::Draft,
                 Lifecycle::Active => wire::ThreadLifecycle::Active,
