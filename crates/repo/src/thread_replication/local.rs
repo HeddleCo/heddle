@@ -79,7 +79,7 @@ impl Repository {
     /// Lookup never creates a Thread or invents a publisher signature.
     pub fn native_thread(&self, name: &str) -> Result<ThreadReplica> {
         let connection = rusqlite::Connection::open_with_flags(
-            self.heddle_dir().join("thread-replication.sqlite3"),
+            self.heddle_dir().join(crate::local_metadata::DATABASE_NAME),
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         let id: Option<Vec<u8>> = connection
@@ -109,7 +109,7 @@ impl Repository {
         let parent_id = parent
             .map(|name| self.native_thread(name).map(|replica| replica.thread_id()))
             .transpose()?;
-        let database = self.heddle_dir().join("thread-replication.sqlite3");
+        let database = self.heddle_dir().join(crate::local_metadata::DATABASE_NAME);
         if database.exists() {
             let connection = rusqlite::Connection::open_with_flags(
                 &database,

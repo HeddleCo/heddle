@@ -41,6 +41,8 @@ const ACCEPTED_PAGE_SQL: &str = "SELECT id,canonical,signature FROM operations W
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("Local metadata: {0}")]
+    Metadata(#[from] crate::local_metadata::Error),
     #[error("Thread storage: {0}")]
     Sql(#[from] rusqlite::Error),
     #[error("Thread object: {0}")]
@@ -73,20 +75,8 @@ pub struct ThreadReplica {
     path: PathBuf,
     thread: ContentHash,
 }
-impl ThreadReplica {
-    /// Create or relay a Thread using the creator's original signed identity.
-    /// Verify before touching disk; possession of the key is not needed to relay.
-    pub fn create(heddle_dir: &Path, signed: &SignedGenesis) -> Result<Self> {
-        let genesis = signed.verify()?;
-        objects::fs_atomic::create_dir_all_durable(heddle_dir)?;
-        let this = Self {
-            path: heddle_dir.join("thread-replication.sqlite3"),
-            thread: genesis.id()?,
-        };
-        let mut connection = this.connect_with_flags(
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
-        )?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch("
             CREATE TABLE IF NOT EXISTS local_thread_names(name TEXT PRIMARY KEY, thread BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS threads(id BLOB PRIMARY KEY, genesis BLOB NOT NULL, genesis_signature BLOB NOT NULL CHECK(length(genesis_signature)=64), generation INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT, source_revision BLOB, authority_admitted INTEGER NOT NULL DEFAULT 0 CHECK(authority_admitted IN(0,1)), authority_receipt_canonical BLOB CHECK(authority_receipt_canonical IS NULL OR length(authority_receipt_canonical)<=2048), authority_receipt_signature BLOB CHECK(authority_receipt_signature IS NULL OR length(authority_receipt_signature)=64), CHECK((authority_receipt_canonical IS NULL)=(authority_receipt_signature IS NULL)));
@@ -103,8 +93,21 @@ impl ThreadReplica {
             CREATE TABLE IF NOT EXISTS sharing(thread BLOB NOT NULL, destination BLOB NOT NULL, facets INTEGER NOT NULL, version BLOB NOT NULL, PRIMARY KEY(thread,destination));
             CREATE TABLE IF NOT EXISTS thread_control_heads(thread BLOB NOT NULL,property TEXT NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,property,operation));
             CREATE TABLE IF NOT EXISTS thread_control_commands(thread BLOB NOT NULL,publisher BLOB NOT NULL,command BLOB NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,publisher,command));")?;
-        connection.execute_batch(source_index::SCHEMA)?;
-        connection.execute_batch(listing::SCHEMA)?;
+    connection.execute_batch(source_index::SCHEMA)?;
+    connection.execute_batch(listing::SCHEMA)
+}
+
+impl ThreadReplica {
+    /// Create or relay a Thread using the creator's original signed identity.
+    /// Verify before touching disk; possession of the key is not needed to relay.
+    pub fn create(heddle_dir: &Path, signed: &SignedGenesis) -> Result<Self> {
+        let genesis = signed.verify()?;
+        objects::fs_atomic::create_dir_all_durable(heddle_dir)?;
+        let this = Self {
+            path: heddle_dir.join(crate::local_metadata::DATABASE_NAME),
+            thread: genesis.id()?,
+        };
+        let mut connection = crate::local_metadata::open(heddle_dir)?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "INSERT OR IGNORE INTO threads(id,genesis,genesis_signature) VALUES(?1,?2,?3)",
@@ -128,7 +131,7 @@ impl ThreadReplica {
     /// caller-supplied genesis. Unknown IDs never create another replica.
     pub fn open(heddle_dir: &Path, thread: ContentHash) -> Result<Self> {
         let this = Self {
-            path: heddle_dir.join("thread-replication.sqlite3"),
+            path: heddle_dir.join(crate::local_metadata::DATABASE_NAME),
             thread,
         };
         this.signed_genesis()?;

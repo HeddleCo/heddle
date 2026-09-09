@@ -124,7 +124,7 @@ pub fn page(
     if limit == 0 || limit > 1024 {
         return Err(Error::Invalid("Thread list limit must be 1..1024".into()));
     }
-    let path = heddle_dir.join("thread-replication.sqlite3");
+    let path = heddle_dir.join(crate::local_metadata::DATABASE_NAME);
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -181,7 +181,7 @@ pub fn page(
 
 /// Constant-size durable fence independent of watcher delivery latency.
 pub fn epoch(heddle_dir: &Path) -> Result<i64> {
-    let path = heddle_dir.join("thread-replication.sqlite3");
+    let path = heddle_dir.join(crate::local_metadata::DATABASE_NAME);
     if !path.exists() {
         return Ok(0);
     }

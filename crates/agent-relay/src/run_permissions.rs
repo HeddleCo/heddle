@@ -104,7 +104,7 @@ fn permission_roundtrip(
         repo.heddle_dir(),
         |path| {
             path.file_name()
-                .is_some_and(|name| name == "device-runs.sqlite3.changed")
+                .is_some_and(|name| name == repo::local_metadata::CHANGE_MARKER_NAME)
         },
         move |event| {
             let _ = tx.try_send(event);

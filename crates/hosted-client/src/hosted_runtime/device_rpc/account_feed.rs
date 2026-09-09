@@ -36,7 +36,7 @@ impl AccountFeed {
                         Some(
                             "authority.bin"
                                 | "catalog.sqlite3.changed"
-                                | "thread-replication.sqlite3.changed"
+                                | repo::local_metadata::CHANGE_MARKER_NAME
                         )
                     )
                 })

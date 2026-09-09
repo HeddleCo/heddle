@@ -39,14 +39,14 @@ fn local_creation_retains_creator_proof_and_reopens_by_id_without_the_key() {
     let missing = TempDir::new().expect("empty device");
     assert!(ThreadReplica::open(missing.path(), id).is_err());
     assert!(
-        !missing.path().join("thread-replication.sqlite3").exists(),
+        !missing.path().join(crate::local_metadata::DATABASE_NAME).exists(),
         "a lookup cannot create storage"
     );
     let mut invalid = signed;
     invalid.signature[0] ^= 1;
     assert!(ThreadReplica::create(missing.path(), &invalid).is_err());
     assert!(
-        !missing.path().join("thread-replication.sqlite3").exists(),
+        !missing.path().join(crate::local_metadata::DATABASE_NAME).exists(),
         "invalid proof must fail before storage creation"
     );
 }

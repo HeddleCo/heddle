@@ -29,12 +29,8 @@ pub struct RunControl {
     pub instruction: String,
     pub principal: String,
 }
-impl RunStore {
-    pub fn open(heddle_dir: &Path) -> Result<Self> {
-        let path = heddle_dir.join("device-runs.sqlite3");
-        let connection = Connection::open(&path)?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA journal_mode=WAL;
+pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch("
             CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, thread TEXT NOT NULL, record BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS run_harness_bindings (native_key TEXT PRIMARY KEY, run TEXT NOT NULL, active INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS run_timeline (run TEXT NOT NULL, position INTEGER NOT NULL, record BLOB NOT NULL, PRIMARY KEY(run,position));
@@ -42,7 +38,13 @@ impl RunStore {
             CREATE INDEX IF NOT EXISTS pending_run_controls ON run_controls(run, done, sequence);
             CREATE TABLE IF NOT EXISTS run_permissions (run TEXT NOT NULL, id TEXT NOT NULL, digest BLOB NOT NULL, record BLOB NOT NULL, expires INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, decision INTEGER, PRIMARY KEY(run,id));
             CREATE TABLE IF NOT EXISTS run_policies (spool TEXT PRIMARY KEY, policy BLOB NOT NULL);
-            CREATE TABLE IF NOT EXISTS run_commands (id TEXT PRIMARY KEY, method TEXT NOT NULL, body BLOB NOT NULL, principal TEXT NOT NULL);")?;
+            CREATE TABLE IF NOT EXISTS run_commands (id TEXT PRIMARY KEY, method TEXT NOT NULL, body BLOB NOT NULL, principal TEXT NOT NULL);")
+}
+
+impl RunStore {
+    pub fn open(heddle_dir: &Path) -> Result<Self> {
+        let path = heddle_dir.join(crate::local_metadata::DATABASE_NAME);
+        let connection = crate::local_metadata::open(heddle_dir)?;
         Ok(Self {
             path,
             _anchor: std::sync::Arc::new(std::sync::Mutex::new(connection)),
@@ -50,13 +52,10 @@ impl RunStore {
     }
     /// Hook reads never create a database or execute schema statements.
     pub fn open_existing(heddle_dir: &Path) -> Result<Option<Self>> {
-        let path = heddle_dir.join("device-runs.sqlite3");
-        if !path.try_exists()? {
+        let path = heddle_dir.join(crate::local_metadata::DATABASE_NAME);
+        let Some(connection) = crate::local_metadata::open_existing(heddle_dir)? else {
             return Ok(None);
-        }
-        let connection =
-            Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        connection.busy_timeout(std::time::Duration::from_secs(5))?;
+        };
         Ok(Some(Self {
             path,
             _anchor: std::sync::Arc::new(std::sync::Mutex::new(connection)),

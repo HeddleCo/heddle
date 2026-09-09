@@ -57,7 +57,7 @@ pub struct DeviceDatabaseWatch {
 }
 pub fn hold_replica_database(heddle_dir: &std::path::Path) -> anyhow::Result<DeviceDatabaseWatch> {
     let connection = rusqlite::Connection::open_with_flags(
-        heddle_dir.join("thread-replication.sqlite3"),
+        heddle_dir.join(crate::local_metadata::DATABASE_NAME),
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )?;
     let _: i64 = connection.query_row("PRAGMA schema_version", [], |row| row.get(0))?;

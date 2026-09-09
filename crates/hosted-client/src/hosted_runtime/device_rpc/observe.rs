@@ -59,7 +59,7 @@ impl DeviceRpc {
         let replica = if session
             .spool
             .heddle_dir
-            .join("thread-replication.sqlite3")
+            .join(repo::local_metadata::DATABASE_NAME)
             .exists()
         {
             Some(repo::device_watch::hold_replica_database(
@@ -97,9 +97,8 @@ impl DeviceRpc {
                         "HEAD"
                             | "refs"
                             | "config.toml"
-                            | "thread-replication.sqlite3"
-                            | "thread-replication.sqlite3.changed"
-                            | "device-runs.sqlite3.changed"
+                            | repo::local_metadata::DATABASE_NAME
+                            | repo::local_metadata::CHANGE_MARKER_NAME
                             | "native-checkouts"
                             | "device-checkouts"
                             | "writer-leases"
@@ -479,7 +478,7 @@ impl DeviceRpc {
                 && session
                     .spool
                     .heddle_dir
-                    .join("thread-replication.sqlite3")
+                    .join(repo::local_metadata::DATABASE_NAME)
                     .exists()
             {
                 *anchor = Some(repo::device_watch::hold_replica_database(

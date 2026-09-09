@@ -24,14 +24,18 @@ pub struct ArtifactRead {
     pub record: RunArtifact,
     pub file: File,
 }
+pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS run_artifacts (id TEXT PRIMARY KEY, spool TEXT NOT NULL, run TEXT NOT NULL, kind TEXT NOT NULL, digest BLOB NOT NULL CHECK(length(digest)=32), expires INTEGER NOT NULL, record BLOB NOT NULL, phase INTEGER NOT NULL DEFAULT 0 CHECK(phase IN(0,1,2)), UNIQUE(spool,run,kind,digest)); CREATE INDEX IF NOT EXISTS run_artifacts_run ON run_artifacts(spool,run,id); CREATE INDEX IF NOT EXISTS run_artifacts_expiry ON run_artifacts(expires,id);")
+}
+
 impl ArtifactStore {
     pub fn open(heddle_dir: &Path) -> Result<Self> {
         let _runs = crate::device_runs::RunStore::open(heddle_dir)?;
         let this = Self {
             directory: heddle_dir.join("retained-artifacts"),
-            database: heddle_dir.join("device-runs.sqlite3"),
+            database: heddle_dir.join(crate::local_metadata::DATABASE_NAME),
         };
-        this.connection()?.execute_batch("CREATE TABLE IF NOT EXISTS run_artifacts (id TEXT PRIMARY KEY, spool TEXT NOT NULL, run TEXT NOT NULL, kind TEXT NOT NULL, digest BLOB NOT NULL CHECK(length(digest)=32), expires INTEGER NOT NULL, record BLOB NOT NULL, phase INTEGER NOT NULL DEFAULT 0 CHECK(phase IN(0,1,2)), UNIQUE(spool,run,kind,digest)); CREATE INDEX IF NOT EXISTS run_artifacts_run ON run_artifacts(spool,run,id); CREATE INDEX IF NOT EXISTS run_artifacts_expiry ON run_artifacts(expires,id);")?;
+
         Ok(this)
     }
     fn connection(&self) -> Result<Connection> {

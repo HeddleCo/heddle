@@ -44,6 +44,7 @@ mod grant_audience;
 mod hooks;
 pub mod identity;
 pub mod lazy_hydrator;
+pub mod local_metadata;
 mod merge_state;
 pub mod namespace_policy;
 pub mod operation_dedup;
