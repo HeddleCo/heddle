@@ -188,12 +188,19 @@ fn validate(
     if seen.len() != decoded.len() {
         return Err(Error::Invalid("unselected source proofs"));
     }
+    let references = decoded
+        .values()
+        .map(|operation| operation.reference_proof(&genesis).map_err(preparation))
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
     PackReader::open(
         &directory.path().join("source.pack"),
         &directory.path().join("source.idx"),
     )
     .map_err(preparation)?
-    .validate_source_closure(&state, SOURCE_OBJECTS, SOURCE_BYTES)
+    .validate_source_closure_with_references(&state, &references, SOURCE_OBJECTS, SOURCE_BYTES)
     .map_err(preparation)?;
     Ok(StagedSource {
         directory,

@@ -18,6 +18,8 @@ mod policy_sync;
 pub mod projection;
 mod source_index;
 
+mod reference_capture;
+pub mod collaboration;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -93,6 +95,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
             CREATE TABLE IF NOT EXISTS sharing(thread BLOB NOT NULL, destination BLOB NOT NULL, facets INTEGER NOT NULL, version BLOB NOT NULL, PRIMARY KEY(thread,destination));
             CREATE TABLE IF NOT EXISTS thread_control_heads(thread BLOB NOT NULL,property TEXT NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,property,operation));
             CREATE TABLE IF NOT EXISTS thread_control_commands(thread BLOB NOT NULL,publisher BLOB NOT NULL,command BLOB NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,publisher,command));")?;
+    connection.execute_batch(collaboration::SCHEMA)?;
     connection.execute_batch(source_index::SCHEMA)?;
     connection.execute_batch(listing::SCHEMA)
 }
@@ -122,6 +125,7 @@ impl ThreadReplica {
             return Err(Error::Invalid("Thread genesis collision".into()));
         }
         listing::initialize(&transaction, &genesis)?;
+        reference_capture::inherit_root(&transaction, &genesis)?;
         transaction.commit()?;
         this.notify_committed()?;
         Ok(this)
@@ -284,9 +288,24 @@ impl ThreadReplica {
             self.require_authority_admission(signed, receipt)?;
         }
         authorize(&operation)?;
-        let id = operation.id()?;
+        self.validate_reference_capture(&operation, store)?;
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let admission = self.receive_in(&tx, signed, &operation, store, compare_frontier, authority_receipt)?;
+        tx.commit()?;
+        self.notify_committed()?;
+        Ok(admission)
+    }
+    fn receive_in(
+        &self,
+        tx: &Transaction<'_>,
+        signed: &SignedOperation,
+        operation: &ThreadOperation,
+        store: &impl ObjectStore,
+        compare_frontier: bool,
+        authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
+    ) -> Result<Admission> {
+        let id = operation.id()?;
         if compare_frontier && let Some(receipt) = operation.local_integration()? {
             let existing: Option<i32> = tx
                 .query_row(
@@ -312,7 +331,7 @@ impl ThreadReplica {
         }
         self.check_control_command(&tx, &operation, id, compare_frontier)?;
         let source_revision = match &operation.body {
-            ThreadOperationBody::Capture(bytes) => Some(State::decode_current_msgpack(bytes)?.id()),
+            ThreadOperationBody::Capture(bytes) => Some(State::decode_current_msgpack(&bytes.state)?.id()),
             ThreadOperationBody::Integration(_) | ThreadOperationBody::LocalIntegration(_) => {
                 operation.source_state()?.map(|state| state.id())
             }
@@ -355,11 +374,9 @@ impl ThreadReplica {
                 [self.thread.as_bytes()],
             )?;
         }
-        self.admit_ready(&tx, store)?;
-        let admission = status(&tx, &id)?;
-        tx.commit()?;
-        self.notify_committed()?;
-        Ok(admission)
+        collaboration::index_operation(tx, operation)?;
+        self.admit_ready(tx, store)?;
+        status(tx, &id)
     }
 
     fn admit_ready(&self, tx: &Transaction<'_>, store: &impl ObjectStore) -> Result<()> {
@@ -457,10 +474,12 @@ impl ThreadReplica {
                             store.put_state(&state)?;
                         }
                         self.accept_control_heads(tx, &operation, id)?;
+                        self.index_reference_sources(tx, &operation, id)?;
                         tx.execute(
                             "UPDATE operations SET status=1 WHERE id=?1",
                             [id.as_bytes()],
                         )?;
+                        self.publish_capture_references(tx, &operation, id, store)?;
                     }
                     Err(error) => {
                         tx.execute(

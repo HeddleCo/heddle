@@ -84,12 +84,28 @@ pub enum Admission {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "canonical", rename_all = "snake_case")]
 pub enum ThreadOperationBody {
-    Capture(Vec<u8>),
+    Capture(Capture),
     Integration(Vec<u8>),
     LocalIntegration(Vec<u8>),
     Discussion(Vec<u8>),
     Context(Vec<u8>),
     Metadata(Vec<u8>),
+}
+
+/// Signed source publication. Per-Thread reference metadata never changes State identity.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Capture {
+    pub state: Vec<u8>,
+    pub source_targets: Option<ContentHash>,
+}
+impl From<Vec<u8>> for Capture {
+    fn from(state: Vec<u8>) -> Self {
+        Self {
+            state,
+            source_targets: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +121,30 @@ pub struct ThreadOperation {
 }
 
 impl ThreadOperation {
+    pub fn reference_proof(
+        &self,
+        genesis: &ThreadGenesis,
+    ) -> Result<Option<crate::object::source_target::capture::ReferenceProof>> {
+        let ThreadOperationBody::Capture(capture) = &self.body else {
+            return Ok(None);
+        };
+        let Some(descriptor) = capture.source_targets else {
+            return Ok(None);
+        };
+        if self.thread != genesis.id()? {
+            return Err(invalid("capture reference Thread mismatch"));
+        }
+        Ok(Some(
+            crate::object::source_target::capture::ReferenceProof {
+                descriptor,
+                scope: crate::object::CollaborationScope {
+                    spool: genesis.spool.parse().map_err(invalid)?,
+                    thread: Some(self.thread),
+                },
+                state: State::decode_current_msgpack(&capture.state)?.id(),
+            },
+        ))
+    }
     pub fn facet(&self) -> ThreadFacet {
         match self.body {
             ThreadOperationBody::Capture(_)
@@ -120,7 +160,9 @@ impl ThreadOperation {
     /// The exact source revision represented by a capture or hosted integration.
     pub fn source_state(&self) -> Result<Option<State>> {
         match &self.body {
-            ThreadOperationBody::Capture(bytes) => State::decode_current_msgpack(bytes).map(Some),
+            ThreadOperationBody::Capture(bytes) => {
+                State::decode_current_msgpack(&bytes.state).map(Some)
+            }
             ThreadOperationBody::Integration(bytes) => {
                 integration::HostedIntegration::decode(bytes)?
                     .resulting_state()
@@ -180,8 +222,8 @@ impl ThreadOperation {
         }
         match &self.body {
             ThreadOperationBody::Capture(bytes) => {
-                let state = State::decode_current_msgpack(bytes)?;
-                if state.encode_current_msgpack()? != *bytes {
+                let state = State::decode_current_msgpack(&bytes.state)?;
+                if state.encode_current_msgpack()? != bytes.state {
                     return Err(invalid("non-canonical capture"));
                 }
             }
@@ -269,7 +311,7 @@ impl ThreadOperation {
         }
         match &self.body {
             ThreadOperationBody::Capture(bytes) => {
-                let state = State::decode_current_msgpack(bytes)?;
+                let state = State::decode_current_msgpack(&bytes.state)?;
                 let mut source_parents = BTreeSet::new();
                 for parent in parents {
                     source_parents.insert(
@@ -370,4 +412,46 @@ fn bounded(bytes: &[u8]) -> Result<()> {
 
 fn invalid(message: impl std::fmt::Display) -> HeddleError {
     HeddleError::InvalidObject(message.to_string())
+}
+
+#[cfg(test)]
+mod capture_shape_tests {
+    use super::*;
+    use crate::object::{Attribution, Principal, Tree};
+    #[test]
+    fn byte_only_capture_shape_is_rejected_in_clean_cutover() {
+        #[derive(serde::Serialize)]
+        struct OldBody {
+            kind: &'static str,
+            canonical: Vec<u8>,
+        }
+        #[derive(serde::Serialize)]
+        struct OldOperation {
+            version: u16,
+            thread: ContentHash,
+            parents: BTreeSet<ContentHash>,
+            publisher: [u8; 32],
+            body: OldBody,
+        }
+        let state = State::new_snapshot(
+            Tree::new().hash(),
+            vec![],
+            Attribution::human(Principal::new("author", "")),
+        );
+        let bytes = rmp_serde::to_vec_named(&OldOperation {
+            version: 1,
+            thread: ContentHash::from_bytes([1; 32]),
+            parents: BTreeSet::new(),
+            publisher: [41; 32],
+            body: OldBody {
+                kind: "capture",
+                canonical: state.encode_current_msgpack().expect("state"),
+            },
+        })
+        .expect("old wire bytes");
+        assert!(
+            ThreadOperation::decode(&bytes).is_err(),
+            "capture has one typed shape, without a legacy byte decoder"
+        );
+    }
 }

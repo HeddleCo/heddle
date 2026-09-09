@@ -143,7 +143,9 @@ mod tests {
                 thread: genesis.id().expect("Thread"),
                 parents,
                 publisher: signer.public_key().try_into().expect("publisher"),
-                body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("source")),
+                body: ThreadOperationBody::Capture(
+                    state.encode_current_msgpack().expect("source").into(),
+                ),
             },
             signer,
         )

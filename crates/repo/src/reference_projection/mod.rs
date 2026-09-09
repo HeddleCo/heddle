@@ -51,7 +51,17 @@ pub(crate) fn initialize_schema(db: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY(spool,thread,record,name)
         ) WITHOUT ROWID;
         CREATE INDEX IF NOT EXISTS annotation_property_lookup
-            ON annotation_property_index(spool,thread,name,kind,value,record);",
+            ON annotation_property_index(spool,thread,name,kind,value,record);
+        CREATE TABLE IF NOT EXISTS reference_captures (
+            thread BLOB NOT NULL, state BLOB NOT NULL, operation BLOB NOT NULL,
+            descriptor BLOB NOT NULL, targets BLOB, PRIMARY KEY(thread,operation)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS reference_capture_revision ON reference_captures(thread,state,operation);
+        CREATE TABLE IF NOT EXISTS reference_seeds (
+            thread BLOB NOT NULL, operation BLOB NOT NULL, target BLOB NOT NULL,
+            source BLOB NOT NULL, PRIMARY KEY(thread,target)
+        ) WITHOUT ROWID;
+        CREATE INDEX IF NOT EXISTS reference_seeds_target ON reference_seeds(thread,target,operation);",
     )
 }
 

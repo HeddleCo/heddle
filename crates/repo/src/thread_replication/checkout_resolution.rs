@@ -108,7 +108,9 @@ impl ThreadCheckout {
                     .public_key()
                     .try_into()
                     .map_err(|_| Error::Invalid("invalid source publisher".into()))?,
-                body: ThreadOperationBody::Capture(state.encode_current_msgpack()?),
+                body: ThreadOperationBody::Capture(
+                    replica.prepare_capture(&self.repository, &state)?,
+                ),
             };
             let journal = Resolution {
                 expected,

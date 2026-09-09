@@ -64,7 +64,7 @@ fn capture(
         thread: replica.thread_id(),
         parents: BTreeSet::new(),
         publisher: signer.public_key().try_into().expect("public key"),
-        body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("state")),
+        body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("state").into()),
     };
     let id = operation.id().expect("ID");
     assert_eq!(

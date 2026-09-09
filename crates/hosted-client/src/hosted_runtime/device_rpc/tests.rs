@@ -116,6 +116,8 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
         id: spool.to_string(),
     };
     super::artifact_tests::roundtrip(&remote, &repository, spool).await;
+    super::content_tests::roundtrip(&remote, &repository, spool).await;
+    super::collaboration_tests::roundtrip(&remote, &repository, &replica, spool).await;
     super::thread_tests::roundtrip(&remote, &device, &repository, spool).await;
     super::account_tests::roundtrip(&remote, &device, spool).await;
     super::capacity_tests::roundtrip(&remote, &device, &repository, &replica, &budgets).await;
@@ -521,7 +523,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
                 thread: replica.thread_id(),
                 parents: Default::default(),
                 publisher: publisher.public_key().try_into().expect("key"),
-                body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("State")),
+                body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("State").into()),
             };
             SignedOperation::sign(&operation, &publisher).expect("signed source")
         };

@@ -305,3 +305,52 @@ fn independent_branch_maps_project_the_same_core_differently() {
         }
     );
 }
+
+#[test]
+fn source_interning_matches_browser_vectors_and_preserves_materialized_identity() {
+    let vectors: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(include_str!("source_target_ids.json")).expect("shared vectors");
+    for (kind, symbol, lines) in [
+        ("file", "", None),
+        ("symbol", "main::run", None),
+        ("lines", "", Some((12, 18))),
+    ] {
+        let mut source = AnnotationSourceReference {
+            scope: CollaborationScope {
+                spool: uuid::Uuid::from_u128(1),
+                thread: Some(ContentHash::from_bytes([2; 32])),
+            },
+            source: CollaborationSourceAnchor {
+                revision: CollaborationRevision::State {
+                    state_id: crate::object::StateId::from_bytes([5; 32]),
+                },
+                path: "src/main.rs".into(),
+                symbol_id: symbol.into(),
+                start_line: lines.map(|(start, _)| start),
+                end_line: lines.map(|(_, end)| end),
+                target: None,
+            },
+        };
+        let target = SourceTargetReference::from_source(&source, SourceTargetBinding::ViewedThread)
+            .expect("intern");
+        assert_eq!(hex::encode(target.target.as_bytes()), vectors[kind]);
+        source.source.path = "renamed.rs".into();
+        source.source.start_line = Some(20);
+        source.source.end_line = Some(25);
+        source.source.target = Some(target.clone());
+        let pinned = SourceTargetReference::from_source(
+            &source,
+            SourceTargetBinding::PinnedRevision {
+                scope: source.scope.clone(),
+                revision: source.source.revision.clone(),
+            },
+        )
+        .expect("pin existing identity");
+        assert_eq!(pinned.target, target.target);
+        assert_eq!(source.source.target, Some(target));
+        source.source.start_line = Some(0);
+        assert!(
+            SourceTargetReference::from_source(&source, SourceTargetBinding::ViewedThread).is_err()
+        );
+    }
+}

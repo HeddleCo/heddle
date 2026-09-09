@@ -133,3 +133,43 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         Err(Error::Interrupted)
     }
 }
+
+/// Decode native conflict attachment bytes without inventing lifecycle evidence.
+/// Region geometry is immutable; absent retained resolution evidence stays unspecified.
+
+pub fn structured_conflicts(
+    bytes: &[u8],
+) -> Result<api::heddle::api::v1alpha1::StructuredConflicts, transport::Error> {
+    use api::heddle::api::v1alpha1 as shared;
+    let native = heddle_object_model::object::StructuredConflict::decode(bytes)
+        .map_err(|error| transport::Error::Io(error.to_string()))?;
+    let range = |range: heddle_object_model::object::ConflictRange| shared::ConflictRange {
+        start_line: range.start_line,
+        end_line: range.end_line,
+    };
+    let side = |side: heddle_object_model::object::ConflictSide| shared::ConflictSide {
+        source_state: Some(shared::StateId {
+            value: side.source_state.as_bytes().to_vec(),
+        }),
+        blob_id: side.blob_id.map(|hash| hash.as_bytes().to_vec()),
+        range: Some(range(side.range)),
+        hunk_hash: side.hunk_hash.as_bytes().to_vec(),
+    };
+    Ok(shared::StructuredConflicts {
+        conflicts: native
+            .conflicts
+            .into_iter()
+            .map(|record| shared::StructuredConflict {
+                id: record.id,
+                path: record.path,
+                symbol: record.symbol,
+                occurrence: record.occurrence,
+                merged_range: Some(range(record.merged_range)),
+                base: Some(side(record.base)),
+                ours: Some(side(record.ours)),
+                theirs: Some(side(record.theirs)),
+                ..Default::default()
+            })
+            .collect(),
+    })
+}

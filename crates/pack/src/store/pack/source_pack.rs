@@ -15,6 +15,7 @@ pub(super) fn validate(
     reader: &PackReader<'_>,
     selected: &State,
     max_decoded_bytes: u64,
+    references: &[crate::object::source_target::capture::ReferenceProof],
 ) -> Result<Vec<PackObjectId>> {
     let canonical = selected.encode_current_msgpack()?;
     let mut available = BTreeMap::new();
@@ -77,6 +78,21 @@ pub(super) fn validate(
             }
         }
     }
+    for reference in references {
+        let closure = crate::object::source_target::capture::closure(
+            &ReferenceReader(reader),
+            reference.descriptor,
+            &reference.scope,
+            reference.state,
+        )?;
+        for hash in closure.blobs.keys() {
+            let id = PackObjectId::Hash(*hash);
+            if available.get(&id) != Some(&ObjectType::Blob) {
+                return Err(invalid("reference closure is incomplete"));
+            }
+            visited.insert(id);
+        }
+    }
     if visited.len() != available.len() {
         return Err(invalid(
             "source pack contains objects outside the selected revision",
@@ -97,9 +113,27 @@ fn invalid(message: &str) -> StoreError {
 /// lengths are checked before reading where the source supports that probe.
 /// No object repository, CLI, network, or async runtime dependency is required.
 pub fn build_source_pack<W: Write + Read + Seek + SyncData>(
+    builder: StreamingPackBuilder<W>,
+    source: &impl ObjectSource,
+    selected: &State,
+    max_objects: usize,
+    max_decoded_bytes: u64,
+) -> Result<(W, PackStats)> {
+    build_source_pack_with_references(
+        builder,
+        source,
+        selected,
+        &[],
+        max_objects,
+        max_decoded_bytes,
+    )
+}
+
+pub fn build_source_pack_with_references<W: Write + Read + Seek + SyncData>(
     mut builder: StreamingPackBuilder<W>,
     source: &impl ObjectSource,
     selected: &State,
+    references: &[crate::object::source_target::capture::ReferenceProof],
     max_objects: usize,
     max_decoded_bytes: u64,
 ) -> Result<(W, PackStats)> {
@@ -115,6 +149,20 @@ pub fn build_source_pack<W: Write + Read + Seek + SyncData>(
         &canonical,
     )?;
     let mut discovered = BTreeMap::from([(selected.tree, ObjectType::Tree)]);
+    for reference in references {
+        let closure = crate::object::source_target::capture::closure(
+            source,
+            reference.descriptor,
+            &reference.scope,
+            reference.state,
+        )?;
+        for hash in closure.blobs.keys() {
+            discovered.entry(*hash).or_insert(ObjectType::Blob);
+        }
+        if discovered.len().saturating_add(1) > max_objects {
+            return Err(invalid("reference pack object budget exceeded"));
+        }
+    }
     let mut pending = discovered.clone();
     while let Some((hash, kind)) = pending.pop_first() {
         match kind {
@@ -192,4 +240,24 @@ fn children(tree: &Tree) -> impl Iterator<Item = (ContentHash, ObjectType)> + '_
             }
             TreeEntryTarget::Gitlink { .. } | TreeEntryTarget::Spoollink { .. } => None,
         })
+}
+
+struct ReferenceReader<'a, 'b>(&'a PackReader<'b>);
+impl ObjectSource for ReferenceReader<'_, '_> {
+    fn get_tree(&self, _: &ContentHash) -> Result<Option<Tree>> {
+        Err(invalid("reference closure must not read source trees"))
+    }
+    fn get_state(&self, _: &crate::object::StateId) -> Result<Option<State>> {
+        Err(invalid("reference closure must not read source history"))
+    }
+    fn get_blob(&self, hash: &ContentHash) -> Result<Option<crate::object::Blob>> {
+        match self.0.get_hashed_object(hash)? {
+            Some((ObjectType::Blob, bytes)) => Ok(Some(crate::object::Blob::new(bytes))),
+            None => Ok(None),
+            _ => Err(invalid("reference object must be a blob")),
+        }
+    }
+    fn decoded_blob_len(&self, hash: &ContentHash) -> Result<Option<u64>> {
+        self.0.get_hashed_object_size(hash)
+    }
 }

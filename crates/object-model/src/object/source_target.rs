@@ -6,6 +6,7 @@
 //! each capture's current coordinates would create a different target.
 
 use serde::{Deserialize, Serialize};
+pub mod capture;
 
 use super::{
     AnnotationSourceReference, CollaborationRevision, CollaborationScope,
@@ -96,6 +97,57 @@ pub struct SourceTargetReference {
 }
 
 impl SourceTargetReference {
+    /// Intern exact original evidence once. A materialized anchor preserves its
+    /// existing identity even when a caller explicitly selects another binding.
+    pub fn from_source(
+        source: &AnnotationSourceReference,
+        binding: SourceTargetBinding,
+    ) -> Result<Self, SourceTargetError> {
+        source
+            .validate()
+            .map_err(|error| invalid(&error.to_string()))?;
+        if !source.source.symbol_id.is_empty() && source.source.symbol_id.trim().is_empty() {
+            return Err(invalid("invalid source symbol address"));
+        }
+        let target = if let Some(existing) = &source.source.target {
+            existing.target
+        } else {
+            let file = SourceFileCore {
+                scope: source.scope.clone(),
+                revision: source.source.revision.clone(),
+                path: source.source.path.clone(),
+            };
+            let selector = if !source.source.symbol_id.is_empty() {
+                SourceSelector::Symbol {
+                    address: source.source.symbol_id.clone(),
+                }
+            } else if let (Some(start), Some(end)) =
+                (source.source.start_line, source.source.end_line)
+            {
+                SourceSelector::Lines {
+                    range: SourceLineRange {
+                        start: start
+                            .checked_sub(1)
+                            .ok_or_else(|| invalid("source lines are one-based"))?,
+                        end,
+                        start_affinity: SourceAffinity::After,
+                        end_affinity: SourceAffinity::Before,
+                    },
+                }
+            } else {
+                SourceSelector::File
+            };
+            SourceTargetCore {
+                file: file.id()?,
+                revision: file.revision,
+                selector,
+            }
+            .id()?
+        };
+        let reference = Self { target, binding };
+        reference.validate()?;
+        Ok(reference)
+    }
     pub fn validate(&self) -> Result<(), SourceTargetError> {
         match &self.binding {
             SourceTargetBinding::ViewedThread => Ok(()),

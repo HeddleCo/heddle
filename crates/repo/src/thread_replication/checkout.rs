@@ -39,6 +39,7 @@ struct CaptureJournal {
     attribution: Attribution,
     #[serde(default)]
     selection: Vec<String>,
+    capture: Option<objects::object::thread_replication::Capture>,
 }
 
 #[derive(Clone)]
@@ -237,6 +238,16 @@ impl ThreadCheckout {
                 .store()
                 .get_state(&state_id)?
                 .ok_or_else(|| Error::Invalid("captured state unavailable".into()))?;
+            let canonical_state = state.encode_current_msgpack()?;
+            if completed
+                .capture
+                .as_ref()
+                .is_none_or(|capture| capture.state != canonical_state)
+            {
+                return Err(Error::Invalid(
+                    "capture receipt source differs from committed State".into(),
+                ));
+            }
             // The receipt is written first. Recover a stop between the two
             // durable writes, without disturbing a later command's journal.
             match std::fs::read(&path) {
@@ -261,7 +272,9 @@ impl ThreadCheckout {
                         .public_key()
                         .try_into()
                         .map_err(|_| Error::Invalid("publisher key must be Ed25519".into()))?,
-                    body: ThreadOperationBody::Capture(state.encode_current_msgpack()?),
+                    body: ThreadOperationBody::Capture(completed.capture.clone().ok_or_else(
+                        || Error::Invalid("capture receipt missing signed descriptor".into()),
+                    )?),
                 },
                 signer,
             )?);
@@ -362,6 +375,16 @@ impl ThreadCheckout {
                 }
             }
         };
+        let capture = match &journal.capture {
+            Some(capture) => capture.clone(),
+            None => {
+                let capture = replica.prepare_capture(&self.repository, &state)?;
+                journal.capture = Some(capture.clone());
+                journal.resulting = Some(state.id());
+                write_journal(&path, &journal)?;
+                capture
+            }
+        };
         let operation = ThreadOperation {
             version: 1,
             thread: self.binding.thread,
@@ -370,7 +393,7 @@ impl ThreadCheckout {
                 .public_key()
                 .try_into()
                 .map_err(|_| Error::Invalid("publisher key must be Ed25519".into()))?,
-            body: ThreadOperationBody::Capture(state.encode_current_msgpack()?),
+            body: ThreadOperationBody::Capture(capture),
         };
         let signed = SignedOperation::sign(&operation, signer)?;
         if replica.receive(&signed, self.repository.store(), |_| Ok(()))? != Admission::Accepted {
@@ -419,6 +442,7 @@ impl ThreadCheckout {
             publisher: signer.public_key().to_vec(),
             parents,
             resulting: None,
+            capture: None,
             attribution: input.attribution.clone(),
             selection: selection.to_vec(),
         })

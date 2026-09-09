@@ -262,7 +262,7 @@ impl Repository {
                 .public_key()
                 .try_into()
                 .map_err(|_| Error::Invalid("invalid publisher key".into()))?,
-            body: ThreadOperationBody::Capture(state.encode_current_msgpack()?),
+            body: ThreadOperationBody::Capture(replica.prepare_capture(self, &state)?),
         };
         let signed = SignedOperation::sign(&operation, &signer)?;
         match replica.receive(&signed, self.store(), |_| Ok(()))? {

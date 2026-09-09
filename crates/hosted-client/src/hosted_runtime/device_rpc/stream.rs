@@ -162,7 +162,7 @@ impl DeviceRpc {
         }
         let mut cursor = Vec::new();
         let mut previous = BTreeMap::<String, Vec<u8>>::new();
-        let mut clock = tokio::time::interval(std::time::Duration::from_secs(1));
+        let mut clock = self.authority_clock.subscribe()?;
         let mut retries = 0u8;
         loop {
             let generation = *changes.borrow_and_update();
@@ -307,7 +307,7 @@ impl DeviceRpc {
                 tokio::select! {
                     _ = send.stopped() => return Ok(()),
                     change = changes.changed() => { change.context("device view feed closed")?; break; },
-                    _ = clock.tick() => if let Err(error) = session.check_clock() {
+                    ended = clock.expired(|| session.check_clock()) => if let Err(error) = ended {
                         send.write_all(&api::framing::encode_stream_failure(&failure(CallFailureCode::Unauthenticated, error))?).await?;
                         send.finish()?; return Ok(());
                     },

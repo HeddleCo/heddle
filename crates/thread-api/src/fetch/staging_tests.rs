@@ -44,7 +44,9 @@ fn fixture(
             thread: genesis.id().expect("Thread ID"),
             parents: BTreeSet::new(),
             publisher: signer.public_key().try_into().expect("key"),
-            body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("State")),
+            body: ThreadOperationBody::Capture(
+                state.encode_current_msgpack().expect("State").into(),
+            ),
         },
         &signer,
     )

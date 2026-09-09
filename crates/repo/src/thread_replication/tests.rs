@@ -39,14 +39,20 @@ fn local_creation_retains_creator_proof_and_reopens_by_id_without_the_key() {
     let missing = TempDir::new().expect("empty device");
     assert!(ThreadReplica::open(missing.path(), id).is_err());
     assert!(
-        !missing.path().join(crate::local_metadata::DATABASE_NAME).exists(),
+        !missing
+            .path()
+            .join(crate::local_metadata::DATABASE_NAME)
+            .exists(),
         "a lookup cannot create storage"
     );
     let mut invalid = signed;
     invalid.signature[0] ^= 1;
     assert!(ThreadReplica::create(missing.path(), &invalid).is_err());
     assert!(
-        !missing.path().join(crate::local_metadata::DATABASE_NAME).exists(),
+        !missing
+            .path()
+            .join(crate::local_metadata::DATABASE_NAME)
+            .exists(),
         "invalid proof must fail before storage creation"
     );
 }
@@ -123,7 +129,9 @@ fn capture(
                 .map(|p| p.verify().expect("operation").id().expect("ID"))
                 .collect(),
             publisher: signer.public_key().try_into().expect("key"),
-            body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("state")),
+            body: ThreadOperationBody::Capture(
+                state.encode_current_msgpack().expect("state").into(),
+            ),
         },
         signer,
     )
@@ -134,7 +142,9 @@ fn state_id(record: &SignedOperation) -> StateId {
     else {
         panic!("capture")
     };
-    State::decode_current_msgpack(&bytes).expect("state").id()
+    State::decode_current_msgpack(&bytes.state)
+        .expect("state")
+        .id()
 }
 fn discussion(
     genesis: &ThreadGenesis,

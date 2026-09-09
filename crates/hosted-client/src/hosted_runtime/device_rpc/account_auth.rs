@@ -15,6 +15,7 @@ pub(super) struct AccountSession {
     pub inspected: InspectedCredential,
     pub token: biscuit_auth::Biscuit,
     pub root: PublicKey,
+    authority_proof: Vec<u8>,
     pub expires: i64,
     pub method: &'static MethodDescriptor,
     admission: (String, Vec<u8>, i64),
@@ -98,7 +99,12 @@ impl AccountSession {
     pub fn owner(&self, home: &Path) -> Result<repo::device_authority::DeviceAuthority> {
         let now = Utc::now().timestamp();
         let authority = repo::device_authority::load(home, now)?;
-        authority.verify_mint_root(&self.root.to_bytes(), now)?;
+        authority.verify_presented_authority(
+            &self.root.to_bytes(),
+            &self.token,
+            &self.authority_proof,
+            now,
+        )?;
         authority.verify_publisher(&self.publisher)?;
         if self
             .inspected
@@ -178,8 +184,13 @@ pub(super) fn authorize(
         )?
     };
     let authority = repo::device_authority::load(home, now.timestamp())?;
-    authority.verify_mint_root(&root.to_bytes(), now.timestamp())?;
     let token = biscuit_verifier::parse_token(encoded, &[root])?;
+    let attachment_deadline = authority.verify_presented_authority(
+        &root.to_bytes(),
+        &token,
+        &context.bearer_authority_proof,
+        now.timestamp(),
+    )?;
     let inspected = biscuit_verifier::inspect_verified_credential(&token, &root)?;
     if inspected
         .revocation_ids
@@ -209,21 +220,7 @@ pub(super) fn authorize(
     }
     let mut expires = i64::try_from(inspected.expires_at_unix_seconds)
         .context("credential expiry out of range")?;
-    if current.authority_key().public_key != root.to_bytes() {
-        let certificate_expiry = authority
-            .mint_roots
-            .iter()
-            .filter_map(|signed| signed.attachment.as_ref())
-            .filter(|attachment| {
-                attachment
-                    .mint_root_key
-                    .as_ref()
-                    .is_some_and(|key| key.public_key == root.to_bytes())
-            })
-            .map(|attachment| attachment.expires_at_unix_seconds)
-            .filter(|expiry| *expiry > now.timestamp())
-            .min()
-            .context("retained mint certificate lifetime missing")?;
+    if let Some(certificate_expiry) = attachment_deadline {
         expires = if expires == 0 {
             certificate_expiry
         } else {
@@ -244,6 +241,7 @@ pub(super) fn authorize(
         principal: principal.to_string(),
         publisher,
         inspected,
+        authority_proof: context.bearer_authority_proof.clone(),
         token,
         root,
         expires,

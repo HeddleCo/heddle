@@ -41,7 +41,7 @@ pub use shared::{
     write_container_header,
 };
 pub(crate) use shared::{verify_supported_container, verify_supported_container_layout};
-pub use source_pack::build_source_pack;
+pub use source_pack::{build_source_pack, build_source_pack_with_references};
 pub use streaming_builder::{StreamingPackBuilder, SyncData};
 
 /// Object type for pack entries.

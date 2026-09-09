@@ -180,7 +180,9 @@ mod tests {
             thread: genesis.id().expect("Thread"),
             parents: BTreeSet::new(),
             publisher: [2; 32],
-            body: ThreadOperationBody::Capture(target.encode_current_msgpack().expect("target")),
+            body: ThreadOperationBody::Capture(
+                target.encode_current_msgpack().expect("target").into(),
+            ),
         };
         let source = State::new_snapshot(
             Tree::new().hash(),
@@ -271,7 +273,9 @@ mod tests {
             thread: operation.thread,
             parents: BTreeSet::from([operation.id().expect("integration")]),
             publisher: [3; 32],
-            body: ThreadOperationBody::Capture(after.encode_current_msgpack().expect("capture")),
+            body: ThreadOperationBody::Capture(
+                after.encode_current_msgpack().expect("capture").into(),
+            ),
         };
         capture
             .validate_parents(&genesis, std::slice::from_ref(&operation))

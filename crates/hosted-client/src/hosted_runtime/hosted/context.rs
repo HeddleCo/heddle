@@ -384,6 +384,7 @@ impl CallContextFactory {
             bearer_grant_envelope: self.bearer_grant_envelope.clone(),
             // empty = legacy scan fallback (weft#1960 leg C cutover)
             bearer_authority_key_selector: Vec::new(),
+            bearer_authority_proof: Vec::new(),
         })
     }
 

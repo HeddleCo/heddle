@@ -197,6 +197,15 @@ impl<'a> PackReader<'a> {
         max_objects: usize,
         max_decoded_bytes: u64,
     ) -> Result<Vec<PackObjectId>> {
+        self.validate_source_closure_with_references(selected, &[], max_objects, max_decoded_bytes)
+    }
+    pub fn validate_source_closure_with_references(
+        &self,
+        selected: &crate::object::State,
+        references: &[crate::object::source_target::capture::ReferenceProof],
+        max_objects: usize,
+        max_decoded_bytes: u64,
+    ) -> Result<Vec<PackObjectId>> {
         let entries = self.index.entries()?;
         if entries.is_empty() || entries.len() > max_objects {
             return Err(StoreError::InvalidObject(
@@ -243,7 +252,7 @@ impl<'a> PackReader<'a> {
                 "source pack has unindexed trailing records".into(),
             ));
         }
-        super::source_pack::validate(self, selected, max_decoded_bytes)
+        super::source_pack::validate(self, selected, max_decoded_bytes, references)
     }
 
     /// Compute this pack's root-spool-scoped logical identity.

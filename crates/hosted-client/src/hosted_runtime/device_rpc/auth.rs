@@ -9,11 +9,13 @@ use repo::device_catalog::DeviceSpool;
 pub(super) struct Session {
     pub principal: String,
     pub actor: String,
+    pub agent_id: Option<String>,
     pub publisher: [u8; 32],
     pub attribution: objects::object::Attribution,
     pub spool: DeviceSpool,
     token: biscuit_auth::Biscuit,
     root: PublicKey,
+    authority_proof: Vec<u8>,
     method: &'static MethodDescriptor,
     pub expires: i64,
     pub request_proof: objects::object::ContentHash,
@@ -37,7 +39,12 @@ impl Session {
     pub fn check_current(&self, home: &Path) -> Result<()> {
         self.check_clock()?;
         let authority = repo::device_authority::load(home, Utc::now().timestamp())?;
-        authority.verify_mint_root(&self.root.to_bytes(), Utc::now().timestamp())?;
+        authority.verify_presented_authority(
+            &self.root.to_bytes(),
+            &self.token,
+            &self.authority_proof,
+            Utc::now().timestamp(),
+        )?;
         authority.verify_publisher(&self.publisher)?;
         let checked = facts(&self.token, self.method, &self.spool, Utc::now())?;
         if checked
@@ -113,8 +120,13 @@ pub(super) fn authorize(
         )?
     };
     let authority = repo::device_authority::load(home, now.timestamp())?;
-    authority.verify_mint_root(&root.to_bytes(), now.timestamp())?;
     let parsed = biscuit_verifier::parse_token(token, &[root])?;
+    let attachment_deadline = authority.verify_presented_authority(
+        &root.to_bytes(),
+        &parsed,
+        &context.bearer_authority_proof,
+        now.timestamp(),
+    )?;
     let checked = facts(&parsed, method, &spool, now)?;
     if checked
         .revocation_ids
@@ -150,21 +162,7 @@ pub(super) fn authorize(
         .context("account root missing")?;
     let principal = uuid::Uuid::from_slice(&owner.account_uuid)?.to_string();
     let mut expires = i64::try_from(checked.exp).context("capability expiration out of range")?;
-    if current.authority_key().public_key != root.to_bytes() {
-        let attachment_expiry = authority
-            .mint_roots
-            .iter()
-            .filter_map(|signed| signed.attachment.as_ref())
-            .filter(|attachment| {
-                attachment
-                    .mint_root_key
-                    .as_ref()
-                    .is_some_and(|key| key.public_key == root.to_bytes())
-            })
-            .map(|attachment| attachment.expires_at_unix_seconds)
-            .filter(|expiry| *expiry > now.timestamp())
-            .min()
-            .context("mint-root lifetime missing")?;
+    if let Some(attachment_expiry) = attachment_deadline {
         expires = if expires == 0 {
             attachment_expiry
         } else {
@@ -190,11 +188,13 @@ pub(super) fn authorize(
     };
     Ok(Session {
         principal,
+        agent_id: checked.delegation_agent_id,
         attribution,
         actor: hex::encode(key),
         publisher: key,
         spool,
         token: parsed,
+        authority_proof: context.bearer_authority_proof.clone(),
         root,
         method,
         expires,

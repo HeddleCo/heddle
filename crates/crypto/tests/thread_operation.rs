@@ -20,7 +20,7 @@ fn portable_thread_signatures_bind_publisher_and_canonical_operation() {
         thread: ContentHash::from_bytes([1; 32]),
         parents: BTreeSet::new(),
         publisher: signer.public_key().try_into().expect("Ed25519 public key"),
-        body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("state")),
+        body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("state").into()),
     };
     let signed = SignedOperation::sign(&operation, &signer).expect("signed operation");
     assert_eq!(signed.verify().expect("portable verification"), operation);

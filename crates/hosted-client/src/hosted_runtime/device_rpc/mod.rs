@@ -19,6 +19,16 @@ mod authority_clock;
 #[cfg(test)]
 mod capacity_tests;
 mod checkout;
+mod collaboration;
+mod collaboration_observe;
+mod collaboration_targets;
+#[cfg(test)]
+mod collaboration_tests;
+mod content;
+mod content_detail;
+mod content_summary;
+#[cfg(test)]
+mod content_tests;
 #[cfg(test)]
 mod inventory_tests;
 mod land;
@@ -50,7 +60,14 @@ use prost::Message;
 
 pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread"];
 pub(crate) const METHODS: &[&str] = &[
+    "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration",
+    "/heddle.api.v2alpha1.CollaborationService/OpenDiscussion",
+    "/heddle.api.v2alpha1.CollaborationService/AppendTurn",
+    "/heddle.api.v2alpha1.CollaborationService/ResolveDiscussion",
+    "/heddle.api.v2alpha1.CollaborationService/ReopenDiscussion",
+    "/heddle.api.v2alpha1.CollaborationService/PutContext",
     "/heddle.api.v2alpha1.ContentService/ReadArtifact",
+    "/heddle.api.v2alpha1.ContentService/ReadContent",
     "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace",
     "/heddle.api.v2alpha1.WorkspaceService/ResolveResources",
     "/heddle.api.v2alpha1.WorkspaceService/SetBookmark",
@@ -148,9 +165,13 @@ impl DeviceRpc {
         if descriptor.streaming == api::StreamingShape::ServerStreaming {
             budget.retain().map_err(anyhow::Error::msg)?;
         }
+        if method.ends_with("/ReadContent") {
+            return self.read_content(session, body, send).await;
+        }
         if method.ends_with("/ReadArtifact") {
             return self.read_artifact(session, body, send).await;
         }
+        if method.ends_with("/ObserveCollaboration") { return self.observe_collaboration(&session,body,send).await; }
         if method.ends_with("/ObserveThread") {
             return self.observe_thread(&session, body, send).await;
         }
@@ -182,6 +203,7 @@ impl DeviceRpc {
         Ok(())
     }
     fn execute(&self, session: &auth::Session, method: &str, body: &[u8]) -> Result<Vec<u8>> {
+        if method.contains(".CollaborationService/") { return self.collaboration_command(session, method, body); }
         if method.contains(".ThreadService/") {
             return self.thread_command(session, method, body);
         }
@@ -233,6 +255,12 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
         }};
     }
     let spool = match method.rsplit('/').next().context("method missing")? {
+        "ObserveCollaboration" => scope!(ObserveCollaborationRequest, |r:ObserveCollaborationRequest|r.spool),
+        "OpenDiscussion" => scope!(OpenDiscussionRequest, |r:OpenDiscussionRequest|r.spool),
+        "AppendTurn" => scope!(AppendDiscussionRequest, |r:AppendDiscussionRequest|r.discussion.and_then(|v|v.spool)),
+        "ResolveDiscussion" => scope!(ResolveDiscussionRequest, |r:ResolveDiscussionRequest|r.discussion.and_then(|v|v.spool)),
+        "ReopenDiscussion" => scope!(ReopenDiscussionRequest, |r:ReopenDiscussionRequest|r.discussion.and_then(|v|v.spool)),
+        "PutContext" => scope!(PutContextRequest, |r:PutContextRequest|r.context.and_then(|v|v.r#ref).and_then(|v|v.spool)),
         "ReadArtifact" => scope!(ReadArtifactRequest, |r: ReadArtifactRequest| r
             .artifact
             .and_then(|r| r.spool)),
@@ -258,6 +286,7 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
             .decision
             .and_then(|p| p.thread)
             .and_then(|t| t.spool)),
+        "ReadContent" => scope!(ReadContentRequest, |r: ReadContentRequest| r.revision.and_then(|r| r.spool)),
         "ObserveCheckouts" => scope!(ObserveCheckoutsRequest, |r: ObserveCheckoutsRequest| r
             .spool),
         "Materialize" => scope!(

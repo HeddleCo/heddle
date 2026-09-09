@@ -287,7 +287,9 @@ fn seed_frontiers(
             thread: replica.thread_id(),
             parents: Default::default(),
             publisher: genesis.creator,
-            body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("source")),
+            body: ThreadOperationBody::Capture(
+                state.encode_current_msgpack().expect("source").into(),
+            ),
         };
         replica
             .receive(

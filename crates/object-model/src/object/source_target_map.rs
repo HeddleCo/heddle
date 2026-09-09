@@ -62,6 +62,38 @@ pub enum MapError<E> {
 
 pub struct SourceTargetMap;
 impl SourceTargetMap {
+    /// Bounded canonical enumeration for transfer verification and rebuilding
+    /// indexes. Capture updates still use individual trie routes.
+    pub fn entries<S: SourceTargetMapStore>(
+        store: &mut S,
+        root: Option<ContentHash>,
+        limit: usize,
+        budget: &mut MapBudget,
+    ) -> Result<Vec<(ContentHash, ContentHash)>, MapError<S::Error>> {
+        let mut pending = root
+            .map(|root| vec![(root, None, Vec::new())])
+            .unwrap_or_default();
+        let mut result = Vec::new();
+        while let Some((hash, count, prefix)) = pending.pop() {
+            match load(store, hash, count, &prefix, budget)? {
+                Node::Leaf(entries) => {
+                    if result.len().saturating_add(entries.len()) > limit {
+                        return Err(MapError::ReadBudget);
+                    }
+                    result.extend(entries);
+                }
+                Node::Branch { children, .. } => {
+                    for child in children.into_iter().rev() {
+                        let mut next = prefix.clone();
+                        next.push(child.slot);
+                        pending.push((child.link.hash, Some(child.link.count), next));
+                    }
+                }
+            }
+        }
+        result.sort_unstable_by_key(|entry| entry.0);
+        Ok(result)
+    }
     pub fn get<S: SourceTargetMapStore>(
         store: &mut S,
         root: Option<ContentHash>,
