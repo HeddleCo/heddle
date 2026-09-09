@@ -144,3 +144,34 @@ fn name_and_lifecycle_compare_their_own_portable_frontiers() {
         assert!(!actual.is_empty());
     }
 }
+
+#[test]
+fn shared_control_verifier_preserves_original_publisher_and_framing() {
+    let signer = Ed25519Signer::from_seed(&[19; 32]).expect("signer");
+    let prepared = PreparedControl::sign(
+        &observed(Property::Name, BTreeSet::new()),
+        Control::Name("name".into()),
+        author(),
+        Uuid::from_u128(3),
+        1000,
+        &signer,
+    )
+    .expect("signed control");
+    let operation = verify(&prepared.record).expect("shared verifier");
+    assert_eq!(
+        operation.publisher.as_slice(),
+        prepared.record.signatures[0].public_key
+    );
+    let mut record = prepared.record.clone();
+    record.signatures[0].public_key[0] ^= 1;
+    assert!(
+        verify(&record).is_err(),
+        "publisher substitution is rejected"
+    );
+    record = prepared.record.clone();
+    record.format = "unrecognized".into();
+    assert!(verify(&record).is_err(), "unknown format is rejected");
+    record = prepared.record;
+    record.signatures.push(record.signatures[0].clone());
+    assert!(verify(&record).is_err(), "one original signature required");
+}

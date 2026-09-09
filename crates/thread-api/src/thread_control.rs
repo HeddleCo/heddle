@@ -18,6 +18,21 @@ use uuid::Uuid;
 
 use crate::{contract as wire, transport::Error};
 
+/// Verify canonical framing and the original operation signature before the
+/// receiver checks current original-author authority and causal admission.
+/// A signature alone never establishes Spool permissions.
+pub fn verify(record: &wire::SignedRecord) -> Result<ThreadOperation, Error> {
+    let operation = crate::replication::decode_record(record.clone())
+        .map_err(|_| Error::Protocol("invalid Thread control record"))?
+        .verify()
+        .map_err(|_| Error::Protocol("invalid Thread control signature"))?;
+    let ThreadOperationBody::Metadata(bytes) = &operation.body else {
+        return Err(Error::Protocol("Thread control requires metadata"));
+    };
+    ThreadControl::decode(bytes).map_err(|_| Error::Protocol("invalid Thread control"))?;
+    Ok(operation)
+}
+
 /// Public original-author evidence. Build the envelope with the shared capability
 /// verifier using independently enrolled account history and the original Biscuit.
 /// The receiving endpoint verifies it independently at admission.
