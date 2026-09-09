@@ -57,7 +57,7 @@ impl DeviceRpc {
                 // Repair only a live creation. A historical retry after deletion
                 // returns its receipt without resurrecting the removed identity.
                 if catalog.spool(id)?.is_some() {
-                    let registration=repo::device_catalog::load(&self.home,id)?;
+                    let registration = repo::device_catalog::load(&self.home, id)?;
                     repo::Repository::open(&registration.root)?.seed_default_thread()?;
                 }
                 session.check_current(&self.home)?;
@@ -254,7 +254,7 @@ impl DeviceRpc {
         else {
             bail!("local creation requires caller-signed owner genesis")
         };
-        let verified = heddleco_capability_verifier::verify_spool_owner_genesis(genesis)?;
+        let verified = repo::verify_spool_owner_genesis(genesis)?;
         ensure!(
             verified.owner_public_key() == owner.authority_key(),
             "new Spool requires current owner key"
@@ -282,9 +282,7 @@ impl DeviceRpc {
             String::new()
         };
         if let Some(proof) = &genesis.delegated_creation {
-            let facts = heddleco_capability_verifier::creation::admit_fresh_spool_creation(
-                genesis, &owner, now,
-            )?;
+            let facts = repo::admit_fresh_spool_creation(genesis, &owner, now)?;
             let statement = proof.statement.as_ref().context("creation statement")?;
             let issuer = proof
                 .mint_root_attachment

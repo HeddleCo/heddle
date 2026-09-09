@@ -52,7 +52,8 @@ mod owner_authorization_tests;
 mod owner_root;
 mod spool_creation;
 pub use spool_creation::{
-    SpoolCreationIntent, sign_delegated_spool_creation, sign_mint_root_attachment,
+    SpoolCreationIntent, admit_fresh_spool_creation, sign_delegated_spool_creation,
+    sign_mint_root_attachment, verify_spool_owner_genesis,
 };
 #[cfg(test)]
 mod owner_root_tests;

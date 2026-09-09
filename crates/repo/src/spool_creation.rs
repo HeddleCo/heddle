@@ -4,6 +4,10 @@ use anyhow::{Context, Result, bail};
 use api::heddle::api::v2alpha1::*;
 use crypto::Signer;
 use heddleco_capability_verifier::creation;
+// Device callers share the same verification boundary as portable producers.
+pub use heddleco_capability_verifier::{
+    creation::admit_fresh_spool_creation, verify_spool_owner_genesis,
+};
 
 /// Exact intended parent and address, authenticated alongside the new UUID.
 pub struct SpoolCreationIntent {
