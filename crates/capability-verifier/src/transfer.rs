@@ -11,6 +11,13 @@ use crate::{
     wire::{ResourceOwnershipTransfer, ResourceTransferAuditRecord},
 };
 
+/// Compute the specified canonical audit digest after constructing a verified
+/// transfer record. The digest excludes `audit_record_hash` itself and is also
+/// used by audit-chain verification, preventing writer/verifier codec drift.
+pub fn resource_transfer_audit_hash(record: &ResourceTransferAuditRecord) -> Result<[u8; 32]> {
+    Ok(digest(TRANSFER_AUDIT_DOMAIN, &transfer_audit_body(record)?))
+}
+
 /// Caller-verified owner state used to validate a resource re-anchor.
 #[derive(Clone, Copy)]
 pub struct TransferOwner<'a> {
@@ -192,7 +199,7 @@ pub fn verify_transfer_audit_chain(
             source,
             destination,
         )?;
-        let expected_hash = digest(TRANSFER_AUDIT_DOMAIN, &transfer_audit_body(record)?);
+        let expected_hash = resource_transfer_audit_hash(record)?;
         if record.audit_record_hash.as_slice() != expected_hash {
             return Err(Error::BrokenChain(
                 "ownership audit hash does not match canonical record".to_owned(),

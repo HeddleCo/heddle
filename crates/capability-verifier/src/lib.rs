@@ -41,7 +41,8 @@ pub use owner::{
     verify_owner_root, verify_spool_owner_genesis, verify_transition_timelock,
 };
 pub use transfer::{
-    TransferOwner, VerifiedResourceTransfer, verify_resource_transfer, verify_transfer_audit_chain,
+    TransferOwner, VerifiedResourceTransfer, resource_transfer_audit_hash,
+    verify_resource_transfer, verify_transfer_audit_chain,
 };
 
 /// Generated public wire types used by this verifier.

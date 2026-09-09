@@ -1663,3 +1663,56 @@ fn portable_transfer_histories_select_exact_historical_states() {
         Err(Error::BrokenChain(_))
     ));
 }
+
+#[test]
+fn public_transfer_audit_codec_matches_verification_and_binds_history() {
+    let root = signed_root(
+        OWNER_UUID,
+        &TestKey::new(1),
+        &[
+            (&TestKey::new(2), RecoveryGuardianKind::Paper),
+            (&TestKey::new(3), RecoveryGuardianKind::Social),
+        ],
+    );
+    let state = verify_owner_root(&root).expect("owner");
+    let transfer = signed_transfer(
+        OWNER_UUID,
+        &state,
+        &TestKey::new(1),
+        [0x44; 16],
+        &state,
+        &TestKey::new(1),
+    );
+    let audit = ResourceTransferAuditRecord {
+        transfer: Some(transfer),
+        committed_at_unix_seconds: NOW,
+        previous_audit_record_hash: vec![7; 32],
+        audit_record_hash: vec![],
+    };
+    let expected = digest(
+        TRANSFER_AUDIT_DOMAIN,
+        &transfer_audit_body(&audit).expect("canonical body"),
+    );
+    assert_eq!(
+        crate::resource_transfer_audit_hash(&audit).expect("public codec"),
+        expected
+    );
+    let mut changed = audit.clone();
+    changed.committed_at_unix_seconds += 1;
+    assert_ne!(
+        crate::resource_transfer_audit_hash(&changed).expect("time bound"),
+        expected
+    );
+    changed = audit.clone();
+    changed.previous_audit_record_hash[0] ^= 1;
+    assert_ne!(
+        crate::resource_transfer_audit_hash(&changed).expect("history bound"),
+        expected
+    );
+    changed = audit;
+    changed.audit_record_hash = vec![9; 32];
+    assert_eq!(
+        crate::resource_transfer_audit_hash(&changed).expect("digest excludes itself"),
+        expected
+    );
+}
