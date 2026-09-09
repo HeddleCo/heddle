@@ -88,6 +88,11 @@ pub fn mention(value: &EntityRef) -> Result<Mention, Error> {
             Entity::SignupInvitation(r) => record(r, Kind::SignupInvitation)?,
             Entity::TimelineEvent(r) => record(r, Kind::TimelineEvent)?,
             Entity::Artifact(r) => record(r, Kind::Artifact)?,
+            Entity::Bookmark(_) => {
+                return Err(Error::Protocol(
+                    "bookmarks are account-private; mention their Spool or Thread instead",
+                ));
+            }
         },
     )
 }
