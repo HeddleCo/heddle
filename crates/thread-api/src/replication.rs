@@ -188,6 +188,51 @@ impl<B: ReplicaStore> Session<B> {
         )
     }
     pub async fn handle(&mut self, frame: Frame) -> StoreResult<Vec<Outbound>, B::Error> {
+        self.handle_frame(frame, true).await
+    }
+    /// The live driver flushes committed input receipts before maintenance can
+    /// observe a policy change caused by that same input.
+    /// Validate the complete wire batch before committing any prefix. Each
+    /// returned unit can then receive its own durable acknowledgement.
+    pub(crate) fn input_units(&self, frame: Frame) -> StoreResult<Vec<Frame>, B::Error> {
+        let Frame::Operations(batch) = frame else {
+            return Ok(vec![frame]);
+        };
+        self.check_count(batch.operations.len())?;
+        self.check_count(batch.authority_admissions.len())?;
+        let originals = crate::authority_admission::match_batch(&batch)
+            .map_err(|_| Error::Protocol("invalid original authority batch"))?;
+        let mut units = Vec::with_capacity(originals.len());
+        for (record, received) in batch.operations.into_iter().zip(originals) {
+            let operation = received.original.verify().map_err(Error::from)?;
+            if !self.facets.contains(&operation.facet()) {
+                return Err(Error::Protocol("operation is outside admission scope").into());
+            }
+            units.push(Frame::Operations(ReplicationOperations {
+                operations: vec![record],
+                authority_admissions: received
+                    .authority_admission
+                    .as_ref()
+                    .map(crate::authority_admission::encode)
+                    .transpose()
+                    .map_err(|_| Error::Protocol("invalid authority admission encoding"))?
+                    .into_iter()
+                    .collect(),
+            }));
+        }
+        Ok(units)
+    }
+    pub(crate) async fn handle_input(
+        &mut self,
+        frame: Frame,
+    ) -> StoreResult<Vec<Outbound>, B::Error> {
+        self.handle_frame(frame, false).await
+    }
+    async fn handle_frame(
+        &mut self,
+        frame: Frame,
+        maintenance: bool,
+    ) -> StoreResult<Vec<Outbound>, B::Error> {
         let mut responses = Vec::new();
         match frame {
             Frame::Have(have) => {
@@ -260,8 +305,13 @@ impl<B: ReplicaStore> Session<B> {
             Frame::Operations(batch) => {
                 self.check_count(batch.operations.len())?;
                 self.check_count(batch.authority_admissions.len())?;
-                let decoded = crate::authority_admission::match_batch(&batch)
-                    .map_err(|error| match error { crate::transport::Error::Protocol(message) => Error::Protocol(message), _ => Error::Protocol("invalid original authority batch") })?;
+                let decoded =
+                    crate::authority_admission::match_batch(&batch).map_err(
+                        |error| match error {
+                            crate::transport::Error::Protocol(message) => Error::Protocol(message),
+                            _ => Error::Protocol("invalid original authority batch"),
+                        },
+                    )?;
                 let mut operations = Vec::with_capacity(decoded.len());
                 for received in decoded {
                     let operation = received.original.verify().map_err(Error::from)?;
@@ -332,8 +382,10 @@ impl<B: ReplicaStore> Session<B> {
                 }
             }
         }
-        if let Some(repair) = self.control().await? {
-            responses.push(Outbound::Frame(repair));
+        if maintenance {
+            if let Some(repair) = self.control().await? {
+                responses.push(Outbound::Frame(repair));
+            }
         }
         Ok(responses)
     }

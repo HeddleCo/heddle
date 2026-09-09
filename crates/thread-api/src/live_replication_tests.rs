@@ -65,7 +65,9 @@ async fn stalled_delivery_retains_memory_releases_work_and_refunds_on_cancellati
             name: "stream".into(),
             intent: "separate work from delivery".into(),
             creator: signer.public_key().try_into().expect("key"),
-            owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
+            owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(
+                signer.public_key().try_into().expect("key"),
+            ),
             nonce: vec![91],
         };
         let replica = ThreadReplica::create(
@@ -98,7 +100,8 @@ async fn stalled_delivery_retains_memory_releases_work_and_refunds_on_cancellati
                 move |activity| {
                     std::future::ready(Ok(Work {
                         _active: Count::acquire(&work_active),
-                        buffer: (activity == Activity::Work).then(|| Count::acquire(&work_buffers)),
+                        buffer: (matches!(activity, Activity::Work | Activity::ReceiptWork))
+                            .then(|| Count::acquire(&work_buffers)),
                     }))
                 },
             )
@@ -169,7 +172,9 @@ async fn admitted_input_can_finish_while_the_output_memory_pool_is_full() {
         name: "stream".into(),
         intent: "separate work from delivery".into(),
         creator: signer.public_key().try_into().expect("key"),
-        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(
+            signer.public_key().try_into().expect("key"),
+        ),
         nonce: vec![91],
     };
     let replica = ThreadReplica::create(
@@ -218,7 +223,8 @@ async fn admitted_input_can_finish_while_the_output_memory_pool_is_full() {
             move |activity| {
                 let memory = activity_memory.clone();
                 async move {
-                    let reservation = if activity == Activity::Work {
+                    let reservation = if matches!(activity, Activity::Work | Activity::ReceiptWork)
+                    {
                         Some(
                             memory
                                 .acquire_owned()
@@ -289,7 +295,11 @@ fn seed_frontiers(
             thread: replica.thread_id(),
             parents: Default::default(),
             publisher: genesis.creator,
-            body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(state.encode_current_msgpack().expect("source").into())),
+            body: ThreadOperationBody::Capture(
+                objects::object::thread_replication::AuthoredCapture::local(
+                    state.encode_current_msgpack().expect("source").into(),
+                ),
+            ),
         };
         replica
             .receive(
@@ -314,7 +324,9 @@ fn fixture(count: usize) -> (tempfile::TempDir, Repository, ThreadReplica) {
         name: "idle".into(),
         intent: "push on durable changes".into(),
         creator: signer.public_key().try_into().expect("key"),
-        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(
+            signer.public_key().try_into().expect("key"),
+        ),
         nonce: vec![93],
     };
     let replica = ThreadReplica::create(
@@ -351,7 +363,11 @@ async fn unchanged_replication_sends_no_frames_or_database_activity_after_initia
             move |activity| {
                 if matches!(
                     activity,
-                    Activity::Check | Activity::Receive | Activity::Work
+                    Activity::Check
+                        | Activity::Receive
+                        | Activity::Work
+                        | Activity::ReceiptWork
+                        | Activity::ReceiptCheck
                 ) {
                     measured.fetch_add(1, Ordering::SeqCst);
                 }
@@ -627,7 +643,7 @@ async fn replication_sender_preserves_rpc_subscriber_and_span() {
                 &feed,
                 |activity| {
                     // Work only executes in the separately spawned sender.
-                    if activity == Activity::Work {
+                    if matches!(activity, Activity::Work | Activity::ReceiptWork) {
                         tracing::info!(target: "replication_sender_oracle", "export work");
                     }
                     std::future::ready(Ok(()))
@@ -652,5 +668,171 @@ async fn replication_sender_preserves_rpc_subscriber_and_span() {
         parented.load(Ordering::SeqCst),
         observed.load(Ordering::SeqCst),
         "sender work must remain inside the originating RPC span"
+    );
+}
+
+struct CloseFeedAfterCommit {
+    replica: ThreadReplica,
+    initial: i64,
+    changes: watch::Sender<Option<i64>>,
+    invalidated: Arc<std::sync::atomic::AtomicBool>,
+    receive: bool,
+}
+impl Drop for CloseFeedAfterCommit {
+    fn drop(&mut self) {
+        if self.receive && self.replica.generation().expect("durable generation") > self.initial {
+            self.invalidated.store(true, Ordering::SeqCst);
+            self.changes.send_replace(None);
+        }
+    }
+}
+impl ActivityGuard for CloseFeedAfterCommit {
+    type Retained = ();
+    fn finish(self, _: usize) -> std::result::Result<(), transport::Error> {
+        Ok(())
+    }
+}
+#[tokio::test]
+async fn committed_input_receipt_flushes_before_invalidated_feed_closes() {
+    committed_receipt_case(false).await;
+}
+#[tokio::test]
+async fn committed_prefix_receipt_precedes_denied_next_operation() {
+    committed_receipt_case(true).await;
+}
+async fn committed_receipt_case(with_successor: bool) {
+    use objects::object::{
+        Attribution, Principal, State, Tree,
+        thread_replication::{
+            AuthoredCapture, OPERATION_FORMAT, ThreadOperation, ThreadOperationBody,
+        },
+    };
+    let (_directory, repository, replica) = fixture(0);
+    let initial = replica.generation().expect("initial generation");
+    let signer = Ed25519Signer::from_seed(&[17; 32]).expect("creator");
+    let state = State::new_snapshot(
+        Tree::new().hash(),
+        vec![replica.genesis().expect("genesis").base],
+        Attribution::human(Principal::new("Author", "author@example.test")),
+    );
+    let operation = ThreadOperation {
+        version: 1,
+        thread: replica.thread_id(),
+        parents: Default::default(),
+        publisher: signer.public_key().try_into().expect("key"),
+        body: ThreadOperationBody::Capture(AuthoredCapture::local(
+            state.encode_current_msgpack().expect("State").into(),
+        )),
+    };
+    let id = operation.id().expect("operation ID");
+    let signed = crypto::thread_operation::SignedOperation::sign(&operation, &signer)
+        .expect("signed original");
+    let mut records = vec![SignedRecord {
+        format: OPERATION_FORMAT.into(),
+        canonical_record: signed.canonical,
+        signatures: vec![RecordSignature {
+            public_key: operation.publisher.to_vec(),
+            signature: signed.signature,
+        }],
+    }];
+    let successor_id = if with_successor {
+        let mut successor = operation.clone();
+        successor.parents.insert(id);
+        let successor_id = successor.id().expect("successor ID");
+        let signed = crypto::thread_operation::SignedOperation::sign(&successor, &signer)
+            .expect("signed successor");
+        records.push(SignedRecord {
+            format: OPERATION_FORMAT.into(),
+            canonical_record: signed.canonical,
+            signatures: vec![RecordSignature {
+                public_key: successor.publisher.to_vec(),
+                signature: signed.signature,
+            }],
+        });
+        Some(successor_id)
+    } else {
+        None
+    };
+    let bytes = Frame::Operations(ReplicationOperations {
+        operations: records,
+        authority_admissions: vec![],
+    })
+    .request()
+    .encode_to_vec();
+    let (changes, receiver) = watch::channel(Some(initial));
+    let feed = Feed::from_changes(replica.thread_id(), receiver);
+    let session = Session::new(
+        LocalReplica::new(replica.clone(), Arc::new(repository.store().clone())),
+        [7; 32],
+        [ThreadFacet::Source].into(),
+        2,
+    )
+    .expect("session");
+    let (writer, mut frames) = mpsc::channel(8);
+    let invalidated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let gate_invalidated = invalidated.clone();
+    let gate_replica = replica.clone();
+    let task = tokio::spawn(async move {
+        run(
+            session,
+            InputReader {
+                frame: Some(bytes),
+                input_memory: None,
+            },
+            RecordingWriter(writer),
+            Side::Acceptor,
+            &feed,
+            move |activity| {
+                std::future::ready(
+                    if gate_invalidated.load(Ordering::SeqCst)
+                        && !matches!(activity, Activity::ReceiptWork | Activity::ReceiptCheck)
+                    {
+                        Err(transport::Error::Protocol("old content epoch invalidated"))
+                    } else {
+                        Ok(CloseFeedAfterCommit {
+                            replica: gate_replica.clone(),
+                            initial,
+                            changes: changes.clone(),
+                            invalidated: gate_invalidated.clone(),
+                            receive: activity == Activity::Receive,
+                        })
+                    },
+                )
+            },
+        )
+        .await
+    });
+    let receipt = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(bytes) = frames.recv().await {
+            if let Frame::Receipt(receipt) = Side::Initiator
+                .decode::<crate::replication::native::Error>(&bytes)
+                .expect("response")
+            {
+                return Some(receipt);
+            }
+        }
+        None
+    })
+    .await
+    .expect("bounded acknowledgement")
+    .expect("committed input must receive its receipt before feed closure");
+    assert_eq!(receipt.accepted_operation_ids, vec![id.as_bytes().to_vec()]);
+    assert!(replica.operation(&id).expect("durable original").is_some());
+    if let Some(successor_id) = successor_id {
+        assert!(
+            replica
+                .operation(&successor_id)
+                .expect("successor lookup")
+                .is_none(),
+            "next operation must not commit after authority invalidation"
+        );
+    }
+    assert!(invalidated.load(Ordering::SeqCst));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), task)
+            .await
+            .expect("clean reconnect after receipt")
+            .expect("driver task")
+            .is_err()
     );
 }

@@ -10,7 +10,7 @@ use prost::Message;
 #[cfg(feature = "native")]
 use repo::thread_replication::ThreadReplica;
 use tokio::{
-    sync::{Notify, mpsc, watch},
+    sync::{Notify, mpsc, oneshot, watch},
     task::{AbortHandle, JoinHandle},
 };
 use tracing::{Instrument, instrument::WithSubscriber};
@@ -149,6 +149,42 @@ enum Event {
     Maintain,
 }
 
+enum Queued {
+    Item {
+        item: Outbound,
+        immediate_receipt: bool,
+    },
+    Flush(oneshot::Sender<()>),
+}
+async fn flush<E: std::error::Error + 'static>(queue: &mpsc::Sender<Queued>) -> Result<(), E> {
+    let (sent, received) = oneshot::channel();
+    queue
+        .send(Queued::Flush(sent))
+        .await
+        .map_err(|_| Error::Backpressure)?;
+    received
+        .await
+        .map_err(|_| Error::Worker("replication sender stopped before receipt flush".into()))
+}
+fn requires_disclosure_fence<E: std::error::Error + 'static>(frame: &Frame) -> Result<bool, E> {
+    let Frame::Operations(batch) = frame else {
+        return Ok(false);
+    };
+    for record in &batch.operations {
+        // This selects ordering only. Session admission still verifies the
+        // original signature, format, negotiated facet and authority.
+        let operation = heddle_object_model::object::thread_replication::ThreadOperation::decode(
+            &record.canonical_record,
+        )
+        .map_err(crate::replication::Error::from)?;
+        if operation.facet() != heddle_object_model::object::thread_replication::ThreadFacet::Source
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// A permission-only recheck must not wait for an output memory reservation
 /// already retained by this stream. Work may produce one bounded output frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,6 +200,10 @@ pub enum Activity {
     Receive,
     /// Load and encode one output frame, retaining its memory through delivery.
     Work,
+    /// Encode the immediate receipt for this session's just-admitted input.
+    ReceiptWork,
+    /// Recheck only that immediate receipt, never prepared source disclosure.
+    ReceiptCheck,
 }
 
 /// Hosts can charge database work and output memory separately. Finishing the
@@ -236,7 +276,7 @@ where
     }
     drop(authorize(Activity::Check).await?);
     let mut changes = feed.changes.clone();
-    let (queue, mut outgoing) = mpsc::channel::<Outbound>(256);
+    let (queue, mut outgoing) = mpsc::channel::<Queued>(256);
     let progress = Arc::new(Notify::new());
     let sender_progress = progress.clone();
     let sender_session = session.clone();
@@ -245,9 +285,24 @@ where
         (async move {
             while let Some(item) = outgoing.recv().await {
                 sender_progress.notify_one();
+                let (item, immediate_receipt) = match item {
+                    Queued::Flush(done) => {
+                        let _ = done.send(());
+                        continue;
+                    }
+                    Queued::Item {
+                        item,
+                        immediate_receipt,
+                    } => (item, immediate_receipt),
+                };
                 let session = sender_session.clone();
                 let gate = sender_authorize.clone();
-                let activity = gate(Activity::Work).await?;
+                let activity = gate(if immediate_receipt {
+                    Activity::ReceiptWork
+                } else {
+                    Activity::Work
+                })
+                .await?;
                 let frame = match item {
                     Outbound::Operation(id) => session.export_operation(id).await?,
                     Outbound::Frame(frame) => {
@@ -270,7 +325,14 @@ where
                 // Store reads can yield; verify live rights again at disclosure.
                 let encoded = side.encode(frame);
                 let retained = activity.finish(encoded.len())?;
-                drop(gate(Activity::Check).await?);
+                drop(
+                    gate(if immediate_receipt {
+                        Activity::ReceiptCheck
+                    } else {
+                        Activity::Check
+                    })
+                    .await?,
+                );
                 writer.send(encoded).await?;
                 drop(retained);
             }
@@ -308,11 +370,43 @@ where
                 continue
             }
         };
+        let event = match event {
+            Event::Incoming(frame) => {
+                maintain = true;
+                let preflight = authorize(Activity::Receive).await?;
+                let units = session.input_units(frame)?;
+                drop(preflight);
+                for frame in units {
+                    let immediate_receipt = matches!(&frame, Frame::Operations(_));
+                    if requires_disclosure_fence(&frame)? {
+                        flush(&queue).await?;
+                    }
+                    let activity = authorize(Activity::Receive).await?;
+                    let output = session.handle_input(frame).await?;
+                    drop(activity);
+                    for item in output {
+                        let receipt = immediate_receipt
+                            && matches!(&item, Outbound::Frame(Frame::Receipt(_)));
+                        queue
+                            .try_send(Queued::Item {
+                                item,
+                                immediate_receipt: receipt,
+                            })
+                            .map_err(|_| Error::Backpressure)?;
+                    }
+                    if immediate_receipt {
+                        flush(&queue).await?;
+                    }
+                }
+                continue;
+            }
+            other => other,
+        };
         let activity = authorize(Activity::Receive).await?;
         let output = match event {
             Event::Incoming(frame) => {
                 maintain = true;
-                session.handle(frame).await?
+                session.handle_input(frame).await?
             }
             Event::Announce => {
                 let frame = session.announcement().await?;
@@ -327,7 +421,12 @@ where
         };
         drop(activity);
         for item in output {
-            queue.try_send(item).map_err(|_| Error::Backpressure)?;
+            queue
+                .try_send(Queued::Item {
+                    item,
+                    immediate_receipt: false,
+                })
+                .map_err(|_| Error::Backpressure)?;
         }
     }
     drop(queue);
