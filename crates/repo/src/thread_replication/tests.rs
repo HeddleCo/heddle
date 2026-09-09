@@ -899,3 +899,288 @@ fn hosted_integration_requires_independent_persistent_executor_trust_and_never_w
         "self-signed executor never enrolls itself"
     );
 }
+
+#[test]
+fn selected_native_capture_keeps_unselected_work_out_of_the_snapshot() {
+    use super::checkout::{CaptureInput, ThreadCheckout};
+    let (temp, repo, genesis, signer, replica) = setup();
+    let checkout = ThreadCheckout::create(
+        &repo,
+        &replica,
+        &temp.path().join("selected"),
+        genesis.base,
+        &crate::AudienceTier::Internal,
+    )
+    .expect("checkout");
+    let writer = checkout
+        .claim_writer("writer".into(), None)
+        .expect("writer");
+    std::fs::write(checkout.repository.root().join("selected.txt"), "selected").expect("edit");
+    std::fs::write(checkout.repository.root().join("other.txt"), "keep working").expect("edit");
+    let input = CaptureInput {
+        lease: &writer.lease.lease_id,
+        token: &writer.token,
+        operation_id: "selected",
+        expected: genesis.base,
+        summary: "selection",
+        attribution: author(),
+    };
+    let signed = checkout
+        .capture_with_paths(&replica, input.clone(), &signer, &["selected.txt".into()])
+        .expect("capture selection");
+    let captured = signed
+        .verify()
+        .expect("proof")
+        .source_state()
+        .expect("source")
+        .expect("State");
+    let tree = repo
+        .store()
+        .get_tree(&captured.tree)
+        .expect("tree")
+        .expect("stored tree");
+    assert!(
+        tree.entries()
+            .iter()
+            .any(|entry| entry.name() == "selected.txt")
+    );
+    assert!(
+        !tree
+            .entries()
+            .iter()
+            .any(|entry| entry.name() == "other.txt"),
+        "unselected working file must not enter source snapshot"
+    );
+    assert_eq!(
+        std::fs::read_to_string(checkout.repository.root().join("other.txt"))
+            .expect("working file"),
+        "keep working"
+    );
+    assert_eq!(
+        checkout
+            .capture_with_paths(&replica, input.clone(), &signer, &["selected.txt".into()])
+            .expect("exact retry"),
+        signed
+    );
+    assert!(
+        checkout
+            .capture_with_paths(&replica, input, &signer, &["other.txt".into()])
+            .is_err(),
+        "retry cannot change selected paths"
+    );
+}
+
+#[test]
+fn local_integration_requires_original_source_frontier_cas_and_preserves_private_audience() {
+    use objects::object::{
+        StateVisibility, thread_replication::local_integration::LocalIntegration,
+    };
+    let (_directory, repository, source_genesis, signer, source) = setup();
+    let original = capture(&source_genesis, &signer, &[], vec![source_genesis.base]);
+    source
+        .receive(&original, repository.store(), |_| Ok(()))
+        .expect("source admission");
+    let source_state = state_id(&original);
+    let private = VisibilityTier::Private {
+        scope_label: "owner".into(),
+    };
+    repository
+        .put_state_visibility_if_absent(StateVisibility {
+            state: source_state,
+            tier: private.clone(),
+            embargo_until: None,
+            declarer: author().principal,
+            declared_at: chrono::Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .expect("source privacy");
+    let mut target_genesis = source_genesis.clone();
+    target_genesis.name = "target".into();
+    target_genesis.nonce = vec![8];
+    let target = ThreadReplica::create(
+        repository.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(&target_genesis, &signer)
+            .expect("target proof"),
+    )
+    .expect("target");
+    let result = State::new_merge(
+        Tree::new().hash(),
+        vec![target_genesis.base, source_state],
+        author(),
+    );
+    let receipt = LocalIntegration {
+        version: 1,
+        spool: uuid::Uuid::parse_str(&source_genesis.spool).expect("spool"),
+        device: signer.public_key().try_into().expect("key"),
+        source_thread: source.thread_id(),
+        source_operation: original.verify().expect("source").id().expect("source ID"),
+        source_revision: source_state,
+        target_thread: target.thread_id(),
+        expected_target_frontier: BTreeSet::new(),
+        result: result.encode_current_msgpack().expect("state"),
+        result_visibility: private.clone(),
+        initiating_request_proof: ContentHash::from_bytes([3; 32]),
+        local_policy_version: ContentHash::from_bytes([4; 32]),
+        executed_at_ms: 100,
+    };
+    let make = |receipt: LocalIntegration| {
+        SignedOperation::sign(
+            &ThreadOperation {
+                version: 1,
+                thread: target.thread_id(),
+                parents: receipt.expected_target_frontier.clone(),
+                publisher: receipt.device,
+                body: ThreadOperationBody::LocalIntegration(receipt.encode().expect("receipt")),
+            },
+            &signer,
+        )
+        .expect("operation")
+    };
+    let mut unrelated = receipt.clone();
+    unrelated.source_operation = ContentHash::from_bytes([99; 32]);
+    assert!(
+        target
+            .receive_local_integration_cas(&make(unrelated), repository.store(), |_| Ok(()))
+            .expect_err("original source required")
+            .to_string()
+            .contains("original source")
+    );
+    let mut public = receipt.clone();
+    public.result_visibility = VisibilityTier::Public;
+    assert!(
+        target
+            .receive_local_integration_cas(&make(public), repository.store(), |_| Ok(()))
+            .expect_err("no audience downgrade")
+            .to_string()
+            .contains("weakens source audience")
+    );
+    let signed = make(receipt.clone());
+    assert_eq!(
+        target
+            .receive_local_integration_cas(&signed, repository.store(), |_| Ok(()))
+            .expect("landing"),
+        Admission::Accepted
+    );
+    assert_eq!(
+        repository
+            .effective_visibility_tier(&result.id())
+            .expect("result privacy"),
+        private
+    );
+    assert_eq!(
+        target
+            .receive_local_integration_cas(&signed, repository.store(), |_| Ok(()))
+            .expect("exact retry"),
+        Admission::Accepted
+    );
+    let mut stale = receipt;
+    stale.executed_at_ms += 1;
+    assert!(
+        target
+            .receive_local_integration_cas(&make(stale.clone()), repository.store(), |_| Ok(()))
+            .expect_err("CAS")
+            .to_string()
+            .contains("frontier changed")
+    );
+    assert_eq!(
+        target
+            .receive(&make(stale), repository.store(), |_| Ok(()))
+            .expect("historical concurrent landing"),
+        Admission::Accepted,
+        "replication retains authenticated historic branches; only fresh execution compares current frontier"
+    );
+    assert_eq!(
+        repository.head().expect("original checkout"),
+        Some(source_genesis.base)
+    );
+}
+
+#[test]
+fn explicit_source_resolution_requires_current_candidates_and_retains_all_parents() {
+    use super::checkout::ThreadCheckout;
+    let (temp, repository, genesis, signer, replica) = setup();
+    let left = capture(&genesis, &signer, &[], vec![genesis.base]);
+    let right = capture(&genesis, &signer, &[], vec![genesis.base]);
+    assert_ne!(state_id(&left), state_id(&right));
+    replica
+        .receive(&left, repository.store(), |_| Ok(()))
+        .expect("left");
+    replica
+        .receive(&right, repository.store(), |_| Ok(()))
+        .expect("right");
+    let checkout = ThreadCheckout::create(
+        &repository,
+        &replica,
+        &temp.path().join("resolution"),
+        genesis.base,
+        &crate::AudienceTier::Internal,
+    )
+    .expect("checkout");
+    let writer = checkout
+        .claim_writer("resolver".into(), None)
+        .expect("writer");
+    let heads = replica.view().expect("heads").source_heads;
+    let version = source_conflict_version(replica.thread_id(), &heads);
+    let operation = uuid::Uuid::new_v4().to_string();
+    assert!(
+        checkout
+            .resolve_source_choice(
+                &replica,
+                &writer.lease.lease_id,
+                &writer.token,
+                &operation,
+                genesis.base,
+                &[0; 32],
+                state_id(&left),
+                author(),
+                &signer
+            )
+            .expect_err("stale conflict set")
+            .to_string()
+            .contains("candidates changed")
+    );
+    let resolved = checkout
+        .resolve_source_choice(
+            &replica,
+            &writer.lease.lease_id,
+            &writer.token,
+            &operation,
+            genesis.base,
+            &version,
+            state_id(&left),
+            author(),
+            &signer,
+        )
+        .expect("explicit selection");
+    let state = resolved
+        .verify()
+        .expect("proof")
+        .source_state()
+        .expect("source")
+        .expect("State");
+    assert_eq!(
+        state.parents.iter().copied().collect::<BTreeSet<_>>(),
+        heads
+    );
+    assert_eq!(
+        replica.view().expect("resolved").source_heads,
+        BTreeSet::from([state.id()])
+    );
+    assert_eq!(
+        checkout
+            .resolve_source_choice(
+                &replica,
+                &writer.lease.lease_id,
+                &writer.token,
+                &operation,
+                genesis.base,
+                &version,
+                state_id(&left),
+                author(),
+                &signer
+            )
+            .expect("retry"),
+        resolved
+    );
+}

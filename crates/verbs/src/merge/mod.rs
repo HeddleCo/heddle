@@ -21,7 +21,7 @@ use std::{fs, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 use merge::{
-    ConflictLabels, MergeBlobSource, MergeError, MergeOptions as EngineMergeOptions, MergeStrategy,
+    MergeBlobSource, MergeError, MergeOptions as EngineMergeOptions, MergeStrategy,
     RenameMatcherStats, RenameOptions, SemanticMergeFn, SemanticSimilarityFn,
     detect_renames_between_trees, merge_trees,
 };
@@ -58,6 +58,7 @@ mod worktree_safety;
 
 pub use apply::apply_merged_tree;
 pub use git_commit::{GitCommitInfo, GitCommitPreview};
+pub use merge::ConflictLabels;
 pub use plan::MergePlan;
 pub use relation::{MergeRelation, MergeRelationKind};
 pub use structured::build_conflict_payload;

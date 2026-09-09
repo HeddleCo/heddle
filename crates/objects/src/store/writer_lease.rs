@@ -194,12 +194,51 @@ impl WriterLeaseStore {
 
     pub fn reserve(
         &self,
-        mut draft: WriterLeaseDraft,
+        draft: WriterLeaseDraft,
         now: DateTime<Utc>,
     ) -> Result<WriterLeaseReserveOutcome> {
+        self.reserve_prepared(
+            draft,
+            generate_writer_lease_id(),
+            generate_writer_lease_token(),
+            now,
+        )
+    }
+
+    /// A command journal persists these random credentials before reservation.
+    /// Retrying the exact live reservation recovers its token; a different actor,
+    /// path, token or an expired/released reservation can never revive it.
+    pub fn reserve_prepared(
+        &self,
+        mut draft: WriterLeaseDraft,
+        lease_id: String,
+        token: String,
+        now: DateTime<Utc>,
+    ) -> Result<WriterLeaseReserveOutcome> {
+        validate_lease_id(&lease_id)?;
+        if token.len() < 32 || token.len() > 256 {
+            return Err(HeddleError::Config("invalid prepared writer token".into()));
+        }
         draft.path = draft.path.map(std::fs::canonicalize).transpose()?;
         let _lock = self.write_lock()?;
         self.reap_expired_locked(now)?;
+        if let Some(old) = self.load_path(&self.lease_path(&lease_id)?)? {
+            if old.status == WriterLeaseStatus::Active
+                && old.liveness_at(now) != Liveness::Dead
+                && old.thread == draft.thread
+                && old.path == draft.path
+                && old.actor_session_id == draft.actor_session_id
+                && old.token_hash == token_hash(&token)
+            {
+                return Ok(WriterLeaseReserveOutcome::Reserved(WriterLeaseGrant {
+                    lease: old,
+                    token,
+                }));
+            }
+            return Err(HeddleError::Config(
+                "prepared writer reservation changed or expired".into(),
+            ));
+        }
         if let Some(owner) = self
             .list_locked()?
             .into_iter()
@@ -207,9 +246,6 @@ impl WriterLeaseStore {
         {
             return Ok(WriterLeaseReserveOutcome::LiveOwner(owner));
         }
-
-        let lease_id = generate_writer_lease_id();
-        let token = generate_writer_lease_token();
         let lease = WriterLease {
             lease_id,
             thread: draft.thread,

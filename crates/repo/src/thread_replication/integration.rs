@@ -73,3 +73,39 @@ impl ThreadReplica {
         Ok(())
     }
 }
+
+impl ThreadReplica {
+    pub(super) fn require_local_integration_source(
+        &self,
+        operation: &ThreadOperation,
+    ) -> Result<()> {
+        let Some(receipt) = operation.local_integration()? else {
+            return Ok(());
+        };
+        let directory = self
+            .path
+            .parent()
+            .ok_or_else(|| Error::Invalid("replica directory missing".into()))?;
+        let source = ThreadReplica::open(directory, receipt.source_thread)?;
+        if source.genesis()?.spool != receipt.spool.to_string()
+            || self.genesis()?.spool != receipt.spool.to_string()
+        {
+            return Err(Error::Invalid("local integration crosses Spools".into()));
+        }
+        let (original, admission) =
+            source
+                .operation(&receipt.source_operation)?
+                .ok_or_else(|| {
+                    Error::Invalid(
+                        "local integration requires original source Thread operation".into(),
+                    )
+                })?;
+        if admission != super::Admission::Accepted {
+            return Err(Error::Invalid(
+                "local integration source is not admitted".into(),
+            ));
+        }
+        receipt.validate_source(&original.verify()?)?;
+        Ok(())
+    }
+}

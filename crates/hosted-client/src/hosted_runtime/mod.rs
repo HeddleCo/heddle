@@ -10,6 +10,7 @@
 mod agent_node_identity;
 pub mod auth;
 mod auth_pairing;
+mod device_rpc;
 mod auth_login;
 mod auth_login_agent;
 #[cfg(test)]

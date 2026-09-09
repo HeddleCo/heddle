@@ -37,8 +37,11 @@ struct CaptureJournal {
     parents: BTreeSet<ContentHash>,
     resulting: Option<StateId>,
     attribution: Attribution,
+    #[serde(default)]
+    selection: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct CaptureInput<'a> {
     pub lease: &'a str,
     pub token: &'a str,
@@ -99,6 +102,13 @@ impl ThreadCheckout {
             &local_dir.join("thread-checkout.json"),
             &serde_json::to_vec(&binding).map_err(|e| Error::Invalid(e.to_string()))?,
         )?;
+        let index = source.heddle_dir().join("native-checkouts");
+        objects::fs_atomic::create_dir_all_durable(&index)?;
+        objects::fs_atomic::write_file_atomic_secret(
+            &index.join(format!("{}.json", binding.id)),
+            &serde_json::to_vec(&path.canonicalize()?)
+                .map_err(|error| Error::Invalid(error.to_string()))?,
+        )?;
         Ok(Self {
             binding,
             repository,
@@ -148,6 +158,32 @@ impl ThreadCheckout {
         input: CaptureInput<'_>,
         signer: &impl Signer,
     ) -> Result<SignedOperation> {
+        self.capture_with_paths(replica, input, signer, &[])
+    }
+    pub fn capture_with_paths(
+        &self,
+        replica: &ThreadReplica,
+        input: CaptureInput<'_>,
+        signer: &impl Signer,
+        selected_paths: &[String],
+    ) -> Result<SignedOperation> {
+        let mut selection = selected_paths.to_vec();
+        selection.sort();
+        selection.dedup();
+        if selection.len() > 256
+            || selection.iter().any(|path| {
+                path.len() > 4096
+                    || path.split('/').count() > 128
+                    || path.is_empty()
+                    || std::path::Path::new(path)
+                        .components()
+                        .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            })
+        {
+            return Err(Error::Invalid(
+                "capture selection must contain repository-relative paths".into(),
+            ));
+        }
         let CaptureInput {
             lease,
             token,
@@ -187,6 +223,7 @@ impl ThreadCheckout {
                 || completed.summary != *summary
                 || completed.attribution != *attribution
                 || completed.publisher != signer.public_key()
+                || completed.selection != selection
             {
                 return Err(Error::Invalid(
                     "capture retry changes its signed inputs".into(),
@@ -243,6 +280,7 @@ impl ThreadCheckout {
                     || old.summary != *summary
                     || old.publisher != signer.public_key()
                     || old.attribution != *attribution
+                    || old.selection != selection
                 {
                     return Err(Error::Invalid(
                         "capture retry changes its signed inputs".into(),
@@ -256,10 +294,10 @@ impl ThreadCheckout {
                         old.operation_id
                     )));
                 }
-                self.new_journal(replica, &input, signer)?
+                self.new_journal(replica, &input, signer, &selection)?
             }
         } else {
-            self.new_journal(replica, &input, signer)?
+            self.new_journal(replica, &input, signer, &selection)?
         };
         write_journal(&path, &journal)?;
         let state = if let Some(id) = journal.resulting {
@@ -289,11 +327,39 @@ impl ThreadCheckout {
                 }
                 state
             } else {
-                self.repository.snapshot_with_attribution(
-                    Some((*summary).to_owned()),
-                    None,
-                    attribution.clone(),
-                )?
+                if selection.is_empty() {
+                    self.repository.snapshot_with_attribution(
+                        Some((*summary).to_owned()),
+                        None,
+                        attribution.clone(),
+                    )?
+                } else {
+                    let baseline = self
+                        .repository
+                        .store()
+                        .get_state(&expected)?
+                        .ok_or_else(|| Error::Invalid("capture parent missing".into()))?;
+                    let tree = self
+                        .repository
+                        .store()
+                        .get_tree(&baseline.tree)?
+                        .ok_or_else(|| Error::Invalid("capture tree missing".into()))?;
+                    let working = self.repository.build_tree(self.repository.root())?;
+                    let tree = super::checkout_selection::selected_tree(
+                        self.repository.store(),
+                        tree,
+                        &working,
+                        &selection,
+                    )?;
+                    self.repository
+                        .snapshot_tree_with_attribution_profiled(
+                            tree,
+                            Some((*summary).to_owned()),
+                            None,
+                            attribution.clone(),
+                        )?
+                        .state
+                }
             }
         };
         let operation = ThreadOperation {
@@ -323,6 +389,7 @@ impl ThreadCheckout {
         replica: &ThreadReplica,
         input: &CaptureInput<'_>,
         signer: &impl Signer,
+        selection: &[String],
     ) -> Result<CaptureJournal> {
         let expected = input.expected;
         if self.repository.head()? != Some(expected) {
@@ -353,6 +420,7 @@ impl ThreadCheckout {
             parents,
             resulting: None,
             attribution: input.attribution.clone(),
+            selection: selection.to_vec(),
         })
     }
 }

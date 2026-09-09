@@ -3,6 +3,9 @@
 //! Endpoint adapters must authorize the exact Thread and disclosure facets before
 //! calling receive/export. Signatures prove the publisher, not spool membership.
 pub mod checkout;
+mod checkout_resolution;
+mod checkout_selection;
+pub use checkout_resolution::source_conflict_version;
 mod integration;
 mod local;
 mod peers;
@@ -142,6 +145,13 @@ impl ThreadReplica {
         connection.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
         Ok(connection)
     }
+    pub(super) fn notify_committed(&self) -> Result<()> {
+        objects::fs_atomic::write_file_atomic_secret(
+            &self.path.with_extension("sqlite3.changed"),
+            uuid::Uuid::now_v7().as_bytes(),
+        )?;
+        Ok(())
+    }
     pub fn thread_id(&self) -> ContentHash {
         self.thread
     }
@@ -218,18 +228,66 @@ impl ThreadReplica {
         store: &impl ObjectStore,
         authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
     ) -> Result<Admission> {
+        self.receive_inner(signed, store, authorize, false)
+    }
+    /// Execute local landing only against the exact currently observed target
+    /// frontier. Historical replication uses `receive` and preserves branches.
+    pub fn receive_local_integration_cas(
+        &self,
+        signed: &SignedOperation,
+        store: &impl ObjectStore,
+        authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
+    ) -> Result<Admission> {
+        if signed.verify()?.local_integration()?.is_none() {
+            return Err(Error::Invalid(
+                "local integration CAS requires a local receipt".into(),
+            ));
+        }
+        self.receive_inner(signed, store, authorize, true)
+    }
+    fn receive_inner(
+        &self,
+        signed: &SignedOperation,
+        store: &impl ObjectStore,
+        authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
+        compare_frontier: bool,
+    ) -> Result<Admission> {
         let operation = signed.verify()?;
         if operation.thread != self.thread {
             return Err(Error::Invalid("wrong Thread".into()));
         }
         self.require_trusted_integration(&operation)?;
+        self.require_local_integration_source(&operation)?;
         authorize(&operation)?;
         let id = operation.id()?;
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if compare_frontier && let Some(receipt) = operation.local_integration()? {
+            let existing: Option<i32> = tx
+                .query_row(
+                    "SELECT status FROM operations WHERE id=?1",
+                    [id.as_bytes()],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if existing != Some(1) {
+                let mut query = tx.prepare("SELECT o.id FROM operations o WHERE o.thread=?1 AND o.facet=1 AND o.status=1 AND NOT EXISTS(SELECT 1 FROM parents p JOIN operations c ON c.id=p.child WHERE p.parent=o.id AND c.thread=o.thread AND c.status=1) ORDER BY o.id LIMIT 129")?;
+                let frontier = query
+                    .query_map([self.thread.as_bytes().as_slice()], |row| {
+                        row.get::<_, Vec<u8>>(0)
+                    })?
+                    .map(|row| hash(&row?))
+                    .collect::<Result<BTreeSet<_>>>()?;
+                if frontier != receipt.expected_target_frontier {
+                    return Err(Error::Invalid(
+                        "local integration target frontier changed".into(),
+                    ));
+                }
+            }
+        }
         let source_revision = match &operation.body {
             ThreadOperationBody::Capture(bytes) => Some(State::decode_current_msgpack(bytes)?.id()),
-            ThreadOperationBody::Integration(_) => {
+            ThreadOperationBody::Integration(_) | ThreadOperationBody::LocalIntegration(_) => {
                 operation.source_state()?.map(|state| state.id())
             }
             ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_) => None,
@@ -251,6 +309,7 @@ impl ThreadReplica {
         self.admit_ready(&tx, store)?;
         let admission = status(&tx, &id)?;
         tx.commit()?;
+        self.notify_committed()?;
         Ok(admission)
     }
 
@@ -298,6 +357,54 @@ impl ThreadReplica {
                 match operation.validate_parents(&genesis, &parents) {
                     Ok(()) => {
                         if let Some(state) = operation.source_state()? {
+                            if let Some(receipt) = operation.local_integration()? {
+                                use objects::object::{
+                                    StateVisibility, StateVisibilityBlob, VisibilityTier,
+                                    thread_replication::local_integration::intersect_visibility,
+                                };
+                                let mut required = VisibilityTier::Public;
+                                for parent in &state.parents {
+                                    if let Some(bytes) =
+                                        store.get_state_visibility_bytes_for_state(parent)?
+                                    {
+                                        let blob = StateVisibilityBlob::decode(&bytes)
+                                            .map_err(|e| Error::Invalid(e.to_string()))?;
+                                        if let Some(record) = blob
+                                            .latest()
+                                            .map_err(|e| Error::Invalid(e.to_string()))?
+                                        {
+                                            required =
+                                                intersect_visibility(&required, &record.tier)?;
+                                        }
+                                    }
+                                }
+                                if intersect_visibility(&required, &receipt.result_visibility)?
+                                    != receipt.result_visibility
+                                {
+                                    return Err(Error::Invalid(
+                                        "local integration weakens source audience".into(),
+                                    ));
+                                }
+                                if receipt.result_visibility != VisibilityTier::Public
+                                    && !store.has_state_visibility_for_state(&state.id())?
+                                {
+                                    let blob = StateVisibilityBlob::new(vec![StateVisibility {
+                                        state: state.id(),
+                                        tier: receipt.result_visibility,
+                                        embargo_until: None,
+                                        declarer: state.attribution.principal.clone(),
+                                        declared_at: state.created_at,
+                                        signature: None,
+                                        supersedes: None,
+                                    }]);
+                                    store.put_state_visibility_bytes_for_state(
+                                        &state.id(),
+                                        &blob
+                                            .encode()
+                                            .map_err(|e| Error::Invalid(e.to_string()))?,
+                                    )?;
+                                }
+                            }
                             store.put_state(&state)?;
                         }
                         tx.execute(

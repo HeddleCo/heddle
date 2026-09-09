@@ -93,7 +93,11 @@ pub fn mount_claim_router(endpoint: Endpoint) -> DaemonClaimRouter {
                 std::sync::Arc::clone(&authorization),
                 authorization,
                 endpoint_key,
-            ),
+            )
+            .with_device(std::sync::Arc::new(super::device_rpc::DeviceRpc::new(
+                repo::identity::heddle_home_dir(),
+                endpoint_key,
+            ))),
         )
         .spawn();
     DaemonClaimRouter {

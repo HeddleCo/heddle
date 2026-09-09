@@ -1,8 +1,9 @@
-//! Inbound Iroh protocol seam for browser-to-agent claim calls.
+//! Inbound Iroh router for direct device operations and account-claim calls.
 //!
 //! Uses the shared framed native RPC transport. Public endpoint discovery is
 //! separated from claim methods, which require exact browser proof and an
-//! expiring local claim secret before foreground signing.
+//! expiring local claim secret before foreground signing. Device operations use
+//! independently admitted owner authority and shared checkout/run stores.
 
 // `CallFailure` carries structured error detail and intentionally crosses the
 // protocol/handler seam by value, matching Weft's native Iroh dispatcher.
@@ -72,13 +73,19 @@ pub(crate) struct ClaimProtocol<V, H> {
     handler: Arc<H>,
     endpoint_key: [u8; 32],
     permits: Arc<tokio::sync::Semaphore>,
+    device: Option<Arc<super::super::device_rpc::DeviceRpc>>,
 }
 
 impl<V, H> ClaimProtocol<V, H> {
+    pub(crate) fn with_device(mut self, device: Arc<super::super::device_rpc::DeviceRpc>) -> Self {
+        self.device = Some(device);
+        self
+    }
     pub(crate) fn new(verifier: Arc<V>, handler: Arc<H>, endpoint_key: [u8; 32]) -> Self {
         Self {
             verifier,
             handler,
+            device: None,
             endpoint_key,
             permits: Arc::new(tokio::sync::Semaphore::new(32)),
         }
@@ -103,13 +110,13 @@ where
                         continue;
                     };
                     let endpoint_key = self.endpoint_key;
+                    let device = self.device.clone();
                     let verifier = Arc::clone(&self.verifier);
                     let handler = Arc::clone(&self.handler);
                     calls.spawn(async move {
                         {
                             let _permit = permit;
-                            tokio::time::timeout(std::time::Duration::from_secs(30), handle_call(verifier.as_ref(), handler.as_ref(), endpoint_key, send, recv)).await
-                                .map_err(ClaimProtocolError::transport)?
+                            handle_call(verifier.as_ref(), handler.as_ref(), endpoint_key, device.as_deref(), send, recv).await
                         }
                     });
                 }
@@ -140,6 +147,7 @@ async fn handle_call<V, H>(
     verifier: &V,
     handler: &H,
     endpoint_key: [u8; 32],
+    device: Option<&super::super::device_rpc::DeviceRpc>,
     mut send: SendStream,
     mut recv: RecvStream,
 ) -> Result<(), ClaimProtocolError>
@@ -160,7 +168,22 @@ where
             CallFailureCode::InvalidArgument,
             "claim request exceeds the body budget",
         )),
-        Ok(frame) if frame.method == DESCRIBE_METHOD => describe(endpoint_key, frame.body),
+        Ok(frame) if frame.method == DESCRIBE_METHOD => {
+            describe(endpoint_key, frame.body, device.is_some())
+        }
+        Ok(frame)
+            if device.is_some() && super::super::device_rpc::METHODS.contains(&frame.method) =>
+        {
+            if let Some(device) = device {
+                return device
+                    .serve(frame.method, &frame.context, frame.body, send)
+                    .await
+                    .map_err(ClaimProtocolError::transport);
+            }
+            return Err(ClaimProtocolError::transport(
+                "device configuration changed",
+            ));
+        }
         Ok(frame) => match validate_auth_shape(frame.method, &frame.context) {
             Ok(()) => match verifier
                 .verify(frame.method, &frame.context, frame.body)
@@ -238,12 +261,12 @@ impl ClaimProtocolError {
     }
 }
 
-fn describe(endpoint_key: [u8; 32], body: &[u8]) -> Result<Vec<u8>, CallFailure> {
+fn describe(endpoint_key: [u8; 32], body: &[u8], device: bool) -> Result<Vec<u8>, CallFailure> {
     use api::heddle::api::v2alpha1::*;
     use prost::Message;
     DescribeEndpointRequest::decode(body)
         .map_err(|_| failure(CallFailureCode::InvalidArgument, "invalid endpoint request"))?;
-    let description = DescribeEndpointResponse {
+    let mut description = DescribeEndpointResponse {
         endpoint: Some(EndpointRef {
             public_key: endpoint_key.to_vec(),
             kind: EndpointKind::Device as i32,
@@ -262,6 +285,13 @@ fn describe(endpoint_key: [u8; 32], body: &[u8]) -> Result<Vec<u8>, CallFailure>
         max_pending_batch_bytes: 1024 * 1024,
         ..Default::default()
     };
+    if device {
+        description.implemented_methods.extend(
+            super::super::device_rpc::METHODS
+                .iter()
+                .map(|method| (*method).to_owned()),
+        );
+    }
     encode_success_response(&description.encode_to_vec()).map_err(|_| {
         failure(
             CallFailureCode::Internal,

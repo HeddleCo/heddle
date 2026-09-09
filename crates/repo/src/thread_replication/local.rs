@@ -21,12 +21,17 @@ impl Repository {
     /// Stable local/hosted spool identity, created before the first Thread.
     pub fn native_spool_id(&self) -> Result<uuid::Uuid> {
         let _guard = self.native_identity_lock()?;
-        self.native_spool_id_locked(None)
+        let id = self.native_spool_id_locked(None)?;
+        crate::device_catalog::register(&crate::identity::heddle_home_dir(), self, id)
+            .map_err(|error| Error::Invalid(error.to_string()))?;
+        Ok(id)
     }
     /// Clone installs the source identity before creating local Thread records.
     pub fn install_native_spool_id(&self, id: uuid::Uuid) -> Result<()> {
         let _guard = self.native_identity_lock()?;
         self.native_spool_id_locked(Some(id))?;
+        crate::device_catalog::register(&crate::identity::heddle_home_dir(), self, id)
+            .map_err(|error| Error::Invalid(error.to_string()))?;
         Ok(())
     }
     fn native_spool_id_locked(&self, desired: Option<uuid::Uuid>) -> Result<uuid::Uuid> {
@@ -99,6 +104,8 @@ impl Repository {
     ) -> Result<ThreadReplica> {
         let _guard = self.native_identity_lock()?;
         let spool = self.native_spool_id_locked(None)?;
+        crate::device_catalog::register(&crate::identity::heddle_home_dir(), self, spool)
+            .map_err(|error| Error::Invalid(error.to_string()))?;
         let parent_id = parent
             .map(|name| self.native_thread(name).map(|replica| replica.thread_id()))
             .transpose()?;

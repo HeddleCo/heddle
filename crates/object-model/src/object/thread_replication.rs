@@ -2,6 +2,7 @@
 //! Portable Thread identity and immutable replication operations. Source and
 //! discussion causality have separate graphs so selective sharing is closed.
 pub mod integration;
+pub mod local_integration;
 
 use std::collections::BTreeSet;
 
@@ -80,6 +81,7 @@ pub enum Admission {
 pub enum ThreadOperationBody {
     Capture(Vec<u8>),
     Integration(Vec<u8>),
+    LocalIntegration(Vec<u8>),
     Discussion(Vec<u8>),
     Context(Vec<u8>),
 }
@@ -99,9 +101,9 @@ pub struct ThreadOperation {
 impl ThreadOperation {
     pub fn facet(&self) -> ThreadFacet {
         match self.body {
-            ThreadOperationBody::Capture(_) | ThreadOperationBody::Integration(_) => {
-                ThreadFacet::Source
-            }
+            ThreadOperationBody::Capture(_)
+            | ThreadOperationBody::Integration(_)
+            | ThreadOperationBody::LocalIntegration(_) => ThreadFacet::Source,
             ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_) => {
                 ThreadFacet::Discussion
             }
@@ -116,6 +118,19 @@ impl ThreadOperation {
                 integration::HostedIntegration::decode(bytes)?
                     .resulting_state()
                     .map(Some)
+            }
+            ThreadOperationBody::LocalIntegration(bytes) => {
+                local_integration::LocalIntegration::decode(bytes)?
+                    .resulting_state()
+                    .map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+    pub fn local_integration(&self) -> Result<Option<local_integration::LocalIntegration>> {
+        match &self.body {
+            ThreadOperationBody::LocalIntegration(bytes) => {
+                local_integration::LocalIntegration::decode(bytes).map(Some)
             }
             _ => Ok(None),
         }
@@ -165,6 +180,9 @@ impl ThreadOperation {
             }
             ThreadOperationBody::Integration(bytes) => {
                 integration::HostedIntegration::decode(bytes)?.validate_operation(self)?;
+            }
+            ThreadOperationBody::LocalIntegration(bytes) => {
+                local_integration::LocalIntegration::decode(bytes)?.validate_operation(self)?;
             }
             ThreadOperationBody::Context(bytes) => {
                 let context = crate::object::ContextRevision::decode(bytes).map_err(invalid)?;
@@ -268,6 +286,11 @@ impl ThreadOperation {
             }
             ThreadOperationBody::Integration(bytes) => {
                 let receipt = integration::HostedIntegration::decode(bytes)?;
+                receipt.validate_operation(self)?;
+                receipt.validate_parents(genesis, parents)?;
+            }
+            ThreadOperationBody::LocalIntegration(bytes) => {
+                let receipt = local_integration::LocalIntegration::decode(bytes)?;
                 receipt.validate_operation(self)?;
                 receipt.validate_parents(genesis, parents)?;
             }
