@@ -215,12 +215,14 @@ impl DeviceRpc {
         };
         let repository = repo::Repository::open(&session.spool.root)?;
         let replica = ThreadReplica::open(&session.spool.heddle_dir, operation.thread)?;
+        session.authorize_thread(&repository, &replica)?;
         let signed = thread_api::replication::decode_record(signed)?;
         let digest = blake3::hash(&[session.actor.as_bytes(), body].concat());
         Ok(replica.collaboration_command(
             &signed,
             repository.store(),
             Command {
+                namespace: session.command_namespace()?,
                 id,
                 method,
                 request_hash: *digest.as_bytes(),

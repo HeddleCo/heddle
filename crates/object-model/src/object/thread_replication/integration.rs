@@ -156,17 +156,64 @@ pub struct TrustedHostedExecutor {
 impl TrustedHostedExecutor {
     pub fn authorize(&self, operation: &ThreadOperation) -> Result<()> {
         let receipt = operation
-            .integration()?
-            .ok_or_else(|| invalid("executor trust requires a hosted integration"))?;
+            .hosted_execution_binding()?
+            .ok_or_else(|| invalid("executor trust requires a hosted execution"))?;
         if receipt.spool != self.spool
             || receipt.spool_genesis != self.spool_genesis
             || receipt.executor != self.executor
         {
             return Err(invalid(
-                "hosted integration has no independently trusted executor for this Spool genesis",
+                "hosted execution has no independently trusted executor for this Spool genesis",
             ));
         }
-        receipt.validate_operation(operation)
+        Ok(())
+    }
+}
+
+/// Extracted after canonical receipt and enclosing operation binding checks.
+/// It identifies an execution; receiving these bytes never establishes trust.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HostedExecutionBinding {
+    pub kind: HostedExecutionKind,
+    pub spool: Uuid,
+    pub spool_genesis: ContentHash,
+    pub executor: [u8; 32],
+    pub initiating_request_proof: ContentHash,
+    pub review_policy_version: Option<ContentHash>,
+    pub executed_at_ms: i64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostedExecutionKind {
+    Integration,
+    Import,
+}
+impl ThreadOperation {
+    pub fn hosted_execution_binding(&self) -> Result<Option<HostedExecutionBinding>> {
+        if let Some(value) = self.integration()? {
+            value.validate_operation(self)?;
+            return Ok(Some(HostedExecutionBinding {
+                kind: HostedExecutionKind::Integration,
+                spool: value.spool,
+                spool_genesis: value.spool_genesis,
+                executor: value.executor,
+                initiating_request_proof: value.initiating_request_proof,
+                review_policy_version: Some(value.review_policy_version),
+                executed_at_ms: value.executed_at_ms,
+            }));
+        }
+        if let Some(value) = self.hosted_import()? {
+            value.validate_operation(self)?;
+            return Ok(Some(HostedExecutionBinding {
+                kind: HostedExecutionKind::Import,
+                spool: value.spool,
+                spool_genesis: value.spool_genesis,
+                executor: value.executor,
+                initiating_request_proof: value.initiating_request_proof,
+                review_policy_version: None,
+                executed_at_ms: value.executed_at_ms,
+            }));
+        }
+        Ok(None)
     }
 }
 
@@ -188,6 +235,7 @@ mod tests {
             base: StateId::from_bytes([1; 32]),
             name: "target".into(),
             intent: "hosted landing".into(),
+            owner: crate::object::thread_replication::GenesisOwner::Account(Uuid::from_u128(12)),
             creator: [2; 32],
             nonce: vec![3; 16],
         };
@@ -306,7 +354,10 @@ mod tests {
             vec![target.id()],
             Attribution::human(Principal::new("executor", "weft@example.test")),
         );
-        receipt.result = dropped.encode_current_msgpack().expect("dropped ancestry").into();
+        receipt.result = dropped
+            .encode_current_msgpack()
+            .expect("dropped ancestry")
+            .into();
         operation.body = ThreadOperationBody::Integration(receipt.encode().expect("receipt"));
         assert!(
             operation.validate_parents(&genesis, &[parent]).is_err(),

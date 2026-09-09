@@ -5,6 +5,23 @@ A checkbox means the complete production path and its relevant verification are
 finished. A model/helper, advertised method, or compile-only result is insufficient.
 No legacy adapter or migration bridge is part of the cutover.
 
+## Policy invariants — clarified 2026-09-09
+
+Privacy describes audience, independently of storage destination. Sync policy
+(device-only or synced to Weft), audience (owner, explicitly authorized
+people/agents, or Spool audience), and material retention are independent.
+Uploading and ongoing sync never broaden audience. Sharing and public disclosure
+are distinct explicit actions. Authorized users can read hosted private Threads
+while every device is offline.
+
+- [ ] Signed policy represents sync, audience and retention independently, with owner-only audience as the safe default.
+- [ ] Local-key Threads work before enrollment; attaching one to an account requires an explicit signed claim and never happens as a side effect of upload.
+- [ ] Original genesis owner, creator authority and admission receipts remain bound across devices/Weft; historical owned-device reads do not refresh expired original credentials.
+- [ ] One Thread audience decision protects metadata, source, collaboration, evidence, search, activity, transfer and active streams; Spool membership alone cannot reveal private Threads.
+- [ ] Audience changes require delegated policy-management authority, preserve capability attenuation and invalidate current observations.
+- [ ] Hosted private offline access succeeds for owner/authorized parties and fails for an unrelated Spool member, including names/counts/events and object fetches.
+- [ ] Sync-only and retention-only changes cannot broaden audience; concurrent policy edits cannot accidentally union recipient grants.
+
 ## Completed foundation
 
 - [x] Shared signed Thread/control/evidence models and original-author receipts.
@@ -64,7 +81,7 @@ No legacy adapter or migration bridge is part of the cutover.
 - [ ] Relevant tests, real negative controls, production build/gates and client typechecks pass; no silently skipped acceptance.
 - [ ] Fresh local full v2 stack runs with real relay https://relay.preview.heddle.sh/.
 - [ ] Create/capture/sync/publish/review/approve/land tested across CLI, browser and Weft, including hosted work with devices offline.
-- [ ] Private device work stays local unless policy opts into sharing; delegation/onboarding/rotation/revocation behavior verified.
+- [ ] Device-only state remains local; hosted private state retains its explicit audience; delegation/onboarding/rotation/revocation behavior verified.
 - [ ] OTEL traces/metrics show bounded SQL/work/queues, quiet idle streams, backpressure and released resources after cancellation/disconnect.
 - [ ] Draft PRs reflect final implementation and merge order, checks are green and all remaining limitations are explicit.
 

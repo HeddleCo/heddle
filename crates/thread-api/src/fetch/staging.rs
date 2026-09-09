@@ -25,6 +25,7 @@ pub struct StagedSource {
     pub(super) directory: tempfile::TempDir,
     pub(super) ready: TransferReady,
     pub(super) operations: Vec<SignedOperation>,
+    pub(super) dependencies: Vec<ThreadGenesisRecord>,
     pub(super) state: State,
 }
 impl StagedSource {
@@ -36,6 +37,9 @@ impl StagedSource {
     }
     pub fn operations(&self) -> &[SignedOperation] {
         &self.operations
+    }
+    pub fn dependency_geneses(&self) -> &[ThreadGenesisRecord] {
+        &self.dependencies
     }
     pub fn ready(&self) -> &TransferReady {
         &self.ready
@@ -70,6 +74,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
             tokio::fs::File::create(directory.path().join("source.idx")).await?,
         ];
         let mut operations = Vec::new();
+        let mut dependencies = Vec::new();
         let mut metadata_bytes = 0usize;
         let mut complete = false;
         while let Some(item) = self.next().await? {
@@ -96,6 +101,15 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
                     }
                     operations.push(replication::decode_record(record)?);
                 }
+                Item::ThreadGenesis(record) => {
+                    metadata_bytes = metadata_bytes
+                        .checked_add(record.encoded_len())
+                        .ok_or(Error::Invalid("source metadata length overflow"))?;
+                    if metadata_bytes > METADATA_BYTES || dependencies.len() >= 127 {
+                        return Err(Error::Invalid("dependency metadata exceeds bounds"));
+                    }
+                    dependencies.push(record);
+                }
                 Item::Complete(_) => complete = true,
                 Item::Sidecar(_) => return Err(Error::Invalid("source staging excludes sidecars")),
             }
@@ -109,7 +123,7 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
         }
         drop(files);
         let ready = self.state.ready;
-        tokio::task::spawn_blocking(move || validate(directory, ready, operations))
+        tokio::task::spawn_blocking(move || validate(directory, ready, operations, dependencies))
             .await
             .map_err(|error| Error::Preparation(error.to_string()))?
     }
@@ -118,12 +132,13 @@ fn validate(
     directory: tempfile::TempDir,
     ready: TransferReady,
     operations: Vec<SignedOperation>,
+    dependency_records: Vec<ThreadGenesisRecord>,
 ) -> Result<StagedSource, Error> {
     let thread = ready
         .thread
         .as_ref()
         .ok_or(Error::Invalid("Thread absent"))?;
-    let genesis = replication::opening::verify_genesis(
+    let genesis = super::verify_origin(
         ready
             .thread_genesis
             .as_ref()
@@ -135,6 +150,34 @@ fn validate(
     else {
         return Err(Error::Invalid("exact native State required"));
     };
+    let selected_thread = genesis.id().map_err(preparation)?;
+    let mut geneses = BTreeMap::from([(selected_thread, genesis)]);
+    let mut dependencies = Vec::new();
+    for wrapper in dependency_records {
+        let record = wrapper
+            .genesis
+            .as_ref()
+            .ok_or(Error::Invalid("dependency signed genesis absent"))?;
+        let candidate = heddle_object_model::object::thread_replication::ThreadGenesis::decode(
+            &record.canonical_record,
+        )
+        .map_err(preparation)?;
+        let reference = ThreadRef {
+            spool: thread.spool.clone(),
+            id: Some(ThreadId {
+                value: candidate.id().map_err(preparation)?.as_bytes().to_vec(),
+            }),
+        };
+        let candidate = super::verify_origin(&wrapper, &reference)?;
+        let id = candidate.id().map_err(preparation)?;
+        if geneses.len() >= 128 || geneses.insert(id, candidate).is_some() {
+            return Err(Error::Invalid(
+                "duplicate or oversized dependency genesis set",
+            ));
+        }
+        dependencies.push(wrapper);
+    }
+    let mut originals = BTreeMap::new();
     let mut decoded = BTreeMap::<ContentHash, ThreadOperation>::new();
     let mut selected_operation = None;
     for signed in &operations {
@@ -144,11 +187,13 @@ fn validate(
             .source_state()
             .map_err(preparation)?
             .ok_or(Error::Invalid("non-source operation in source ancestry"))?;
-        if state.id().as_bytes().as_slice() == selected.value {
+        if operation.thread == selected_thread && state.id().as_bytes().as_slice() == selected.value
+        {
             if selected_operation.replace((id, state)).is_some() {
                 return Err(Error::Invalid("ambiguous selected source proof"));
             }
         }
+        originals.insert(id, signed.clone());
         if decoded.insert(id, operation).is_some() {
             return Err(Error::Invalid("duplicate source proof"));
         }
@@ -157,6 +202,8 @@ fn validate(
         selected_operation.ok_or(Error::Invalid("selected source proof absent"))?;
     let mut pending = BTreeSet::from([selected_id]);
     let mut seen = BTreeSet::new();
+    let mut used_threads = BTreeSet::new();
+    let mut edges = BTreeMap::new();
     while let Some(id) = pending.pop_first() {
         if !seen.insert(id) {
             continue;
@@ -174,9 +221,35 @@ fn validate(
                     .ok_or(Error::Invalid("incomplete source ancestry"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let genesis = geneses
+            .get(&operation.thread)
+            .ok_or(Error::Invalid("source dependency genesis absent"))?;
+        used_threads.insert(operation.thread);
         operation
-            .validate_parents(&genesis, &parents)
+            .validate_parents(genesis, &parents)
             .map_err(preparation)?;
+        let mut required = operation.parents.clone();
+        if let Some(receipt) = operation.local_integration().map_err(preparation)? {
+            let source = decoded
+                .get(&receipt.source_operation)
+                .ok_or(Error::Invalid(
+                    "local integration original source proof absent",
+                ))?;
+            receipt.validate_source(source).map_err(preparation)?;
+            required.insert(receipt.source_operation);
+            pending.insert(receipt.source_operation);
+        }
+        if let Some(receipt) = operation.integration().map_err(preparation)? {
+            let source = decoded
+                .get(&receipt.source_operation)
+                .ok_or(Error::Invalid(
+                    "hosted integration original source proof absent",
+                ))?;
+            receipt.validate_source(source).map_err(preparation)?;
+            required.insert(receipt.source_operation);
+            pending.insert(receipt.source_operation);
+        }
+        edges.insert(id, required);
         pending.extend(
             operation
                 .parents
@@ -185,12 +258,20 @@ fn validate(
                 .copied(),
         );
     }
-    if seen.len() != decoded.len() {
+    if seen.len() != decoded.len() || used_threads.len() != geneses.len() {
         return Err(Error::Invalid("unselected source proofs"));
     }
     let references = decoded
         .values()
-        .map(|operation| operation.reference_proof(&genesis).map_err(preparation))
+        .map(|operation| {
+            operation
+                .reference_proof(
+                    geneses
+                        .get(&operation.thread)
+                        .ok_or(Error::Invalid("dependency genesis absent"))?,
+                )
+                .map_err(preparation)
+        })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -202,10 +283,46 @@ fn validate(
     .map_err(preparation)?
     .validate_source_closure_with_references(&state, &references, SOURCE_OBJECTS, SOURCE_BYTES)
     .map_err(preparation)?;
+    // Dependency-first installation makes foreign source authority available
+    // before admitting a local integration. Cycles cannot settle this graph.
+    let mut ready_ids: BTreeSet<_> = edges
+        .iter()
+        .filter(|(_, parents)| parents.is_empty())
+        .map(|(id, _)| *id)
+        .collect();
+    let mut children: BTreeMap<ContentHash, Vec<ContentHash>> = BTreeMap::new();
+    for (child, parents) in &edges {
+        for parent in parents {
+            children.entry(*parent).or_default().push(*child);
+        }
+    }
+    let mut ordered = Vec::new();
+    while let Some(id) = ready_ids.pop_first() {
+        ordered.push(
+            originals
+                .remove(&id)
+                .ok_or(Error::Invalid("duplicate source topology identity"))?,
+        );
+        if let Some(dependants) = children.get(&id) {
+            for child in dependants {
+                let parents = edges
+                    .get_mut(child)
+                    .ok_or(Error::Invalid("incomplete source topology"))?;
+                parents.remove(&id);
+                if parents.is_empty() {
+                    ready_ids.insert(*child);
+                }
+            }
+        }
+    }
+    if !originals.is_empty() {
+        return Err(Error::Invalid("source dependency cycle"));
+    }
     Ok(StagedSource {
         directory,
         ready,
-        operations,
+        operations: ordered,
+        dependencies,
         state,
     })
 }

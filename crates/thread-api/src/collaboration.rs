@@ -373,6 +373,7 @@ mod tests {
             name: "extraction".into(),
             intent: "retain proof".into(),
             creator: signer.public_key().try_into().expect("key"),
+            owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
             nonce: vec![1; 16],
         };
         let discussion = DiscussionRecordId::generate();

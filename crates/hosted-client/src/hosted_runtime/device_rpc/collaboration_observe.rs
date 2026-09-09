@@ -60,6 +60,7 @@ impl DeviceRpc {
         budget: &ReadBudget,
         binding: &[u8],
     ) -> Result<(Vec<(String, CollaborationEvent)>, PageInfo, Vec<u8>)> {
+        let repository = repo::Repository::open(&session.spool.root)?;
         let generation = collaboration::generation(&session.spool.heddle_dir)?;
         let spool = request.spool.clone().context("spool required")?;
         let mut after = decode(
@@ -111,6 +112,14 @@ impl DeviceRpc {
                 "collaboration candidate index mismatch"
             );
             let replica = ThreadReplica::open(&session.spool.heddle_dir, operation.thread)?;
+            if !super::auth::thread_visible(
+                &repository,
+                &replica,
+                uuid::Uuid::parse_str(&session.principal)?,
+                session.agent_id.as_deref(),
+            )? {
+                continue;
+            }
             ensure!(
                 replica.genesis()?.spool == spool.id,
                 "collaboration belongs to another Spool"

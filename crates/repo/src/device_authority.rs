@@ -375,6 +375,14 @@ mod tests {
                 .is_err(),
             "certificate expiration remains effective"
         );
+        crate::verify_account_owner_observation(&receiver.owner, 20)
+            .expect("prime exact current owner cache");
+        let mut changed_owner = receiver.owner.clone();
+        changed_owner.version[0] ^= 1;
+        assert!(
+            crate::verify_account_owner_observation(&changed_owner, 20).is_err(),
+            "cached owner verification must bind exact observation bytes"
+        );
         receiver.revoked_mint_roots.push(root);
         assert!(
             receiver
@@ -389,6 +397,21 @@ mod tests {
                 .verify_presented_authority(&root, &token, &proof, 20)
                 .is_err(),
             "proof cannot replace pinned owner"
+        );
+    }
+
+    #[test]
+    fn owner_observation_memoization_has_bounded_cardinality() {
+        let (owner, _) = owner(95);
+        for count in 0..140 {
+            let mut observation = owner.clone();
+            observation.pending_transitions = vec![Default::default(); count];
+            crate::verify_account_owner_observation(&observation, 1234)
+                .expect("unchanged accepted owner with distinct pending presentation");
+        }
+        assert!(
+            crate::owner_root::owner_observation_cache_entries().expect("cache count") <= 128,
+            "owner memoization cardinality remains bounded"
         );
     }
 
@@ -526,6 +549,11 @@ mod tests {
         let mut rotated = original.clone();
         rotated.accepted_transitions.push(signed);
         rotated.version = current.state_hash().to_vec();
+        crate::verify_account_owner_observation(&rotated, 101).expect("current verified rotation");
+        assert!(
+            crate::verify_account_owner_observation(&rotated, 90).is_err(),
+            "cached owner verification must bind exact verification clock"
+        );
         publish(home.path(), &rotated, &[], &[], 101)
             .expect("publish current owner without recertifying devices");
         let stored = load(home.path(), 101).expect("persisted current owner");
@@ -603,7 +631,9 @@ impl DeviceAuthority {
         proof: &[u8],
         now: i64,
     ) -> Result<Option<i64>> {
-        let root_key: &[u8; 32] = root_key.try_into().context("device mint root must be Ed25519")?;
+        let root_key: &[u8; 32] = root_key
+            .try_into()
+            .context("device mint root must be Ed25519")?;
         let current = crate::verify_account_owner_observation(&self.owner, now)?;
         if proof.is_empty() {
             self.verify_mint_root(root_key, now)?;

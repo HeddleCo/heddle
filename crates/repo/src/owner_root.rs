@@ -778,7 +778,68 @@ fn verify_observed_owner(
 
 /// Verify an account observation's original binding and exact accepted state.
 /// The caller still establishes which account is expected for its request.
+struct OwnerObservationCache {
+    second: i64,
+    owners: std::collections::BTreeMap<[u8; 32], heddleco_capability_verifier::VerifiedOwnerState>,
+}
+static OWNER_OBSERVATION_CACHE: std::sync::OnceLock<std::sync::Mutex<OwnerObservationCache>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn owner_observation_cache_entries() -> Result<usize> {
+    let Some(cache) = OWNER_OBSERVATION_CACHE.get() else {
+        return Ok(0);
+    };
+    Ok(cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("owner verification cache poisoned"))?
+        .owners
+        .len())
+}
+
+/// Memoize only identical pure verifier inputs. Current revocations, resource
+/// scope and request caveats remain separate uncached admission checks.
 pub fn verify_account_owner_observation(
+    observed: &api::heddle::api::v2alpha1::OwnerState,
+    now_unix_seconds: i64,
+) -> Result<heddleco_capability_verifier::VerifiedOwnerState> {
+    use prost::Message as _;
+    let cache = OWNER_OBSERVATION_CACHE.get_or_init(|| {
+        std::sync::Mutex::new(OwnerObservationCache {
+            second: i64::MIN,
+            owners: Default::default(),
+        })
+    });
+    let encoded = observed.encode_to_vec();
+    if encoded.len() > 64 * 1024 {
+        return verify_account_owner_observation_uncached(observed, now_unix_seconds);
+    }
+    let digest = *blake3::hash(&encoded).as_bytes();
+    {
+        let guard = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("owner verification cache poisoned"))?;
+        if guard.second == now_unix_seconds {
+            if let Some(verified) = guard.owners.get(&digest) {
+                return Ok(verified.clone());
+            }
+        }
+    }
+    let verified = verify_account_owner_observation_uncached(observed, now_unix_seconds)?;
+    let mut guard = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("owner verification cache poisoned"))?;
+    if guard.second != now_unix_seconds {
+        guard.owners.clear();
+        guard.second = now_unix_seconds;
+    }
+    if guard.owners.len() < 128 {
+        guard.owners.insert(digest, verified.clone());
+    }
+    Ok(verified)
+}
+
+fn verify_account_owner_observation_uncached(
     observed: &api::heddle::api::v2alpha1::OwnerState,
     now_unix_seconds: i64,
 ) -> Result<heddleco_capability_verifier::VerifiedOwnerState> {

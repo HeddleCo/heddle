@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Portable Thread identity and immutable replication operations. Source and
 //! discussion causality have separate graphs so selective sharing is closed.
+pub mod hosted_import;
 pub mod integration;
 pub mod local_integration;
 pub mod metadata;
@@ -18,6 +19,24 @@ pub const GENESIS_FORMAT: &str = "heddle-thread-genesis-v1";
 pub const OPERATION_FORMAT: &str = "heddle-thread-operation-v1";
 pub const MAX_OPERATION_BYTES: usize = 256 * 1024;
 
+/// Ownership fixed by the original signed genesis. Hosting a key-owned Thread
+/// requires a separately verified, explicit ownership claim.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenesisOwner {
+    LocalKey([u8; 32]),
+    Account(uuid::Uuid),
+}
+
+impl GenesisOwner {
+    fn is_valid(&self) -> bool {
+        match self {
+            Self::LocalKey(key) => *key != [0; 32],
+            Self::Account(account) => !account.is_nil(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadGenesis {
@@ -29,6 +48,8 @@ pub struct ThreadGenesis {
     pub base: StateId,
     pub name: String,
     pub intent: String,
+    /// Immutable original ownership; uploading does not transfer it.
+    pub owner: GenesisOwner,
     pub creator: [u8; 32],
     pub nonce: Vec<u8>,
 }
@@ -36,6 +57,8 @@ pub struct ThreadGenesis {
 impl ThreadGenesis {
     pub fn encode(&self) -> Result<Vec<u8>> {
         if self.version != 1
+            || !self.owner.is_valid()
+            || matches!(&self.owner, GenesisOwner::LocalKey(key) if *key != self.creator)
             || !uuid::Uuid::parse_str(&self.spool)
                 .is_ok_and(|id| !id.is_nil() && id.to_string() == self.spool)
             || self.name.is_empty()
@@ -86,6 +109,7 @@ pub enum Admission {
 pub enum ThreadOperationBody {
     Capture(Capture),
     Integration(Vec<u8>),
+    HostedImport(Vec<u8>),
     LocalIntegration(Vec<u8>),
     Discussion(Vec<u8>),
     Context(Vec<u8>),
@@ -149,6 +173,7 @@ impl ThreadOperation {
         match self.body {
             ThreadOperationBody::Capture(_)
             | ThreadOperationBody::Integration(_)
+            | ThreadOperationBody::HostedImport(_)
             | ThreadOperationBody::LocalIntegration(_) => ThreadFacet::Source,
             ThreadOperationBody::Metadata(_) => ThreadFacet::Metadata,
             ThreadOperationBody::Discussion(_) | ThreadOperationBody::Context(_) => {
@@ -163,6 +188,9 @@ impl ThreadOperation {
             ThreadOperationBody::Capture(result) => Ok(Some(result.clone())),
             ThreadOperationBody::Integration(bytes) => {
                 Ok(Some(integration::HostedIntegration::decode(bytes)?.result))
+            }
+            ThreadOperationBody::HostedImport(bytes) => {
+                Ok(Some(hosted_import::HostedImport::decode(bytes)?.result))
             }
             ThreadOperationBody::LocalIntegration(bytes) => Ok(Some(
                 local_integration::LocalIntegration::decode(bytes)?.result,
@@ -187,6 +215,9 @@ impl ThreadOperation {
                     .resulting_state()
                     .map(Some)
             }
+            ThreadOperationBody::HostedImport(bytes) => hosted_import::HostedImport::decode(bytes)?
+                .resulting_state()
+                .map(Some),
             _ => Ok(None),
         }
     }
@@ -202,6 +233,15 @@ impl ThreadOperation {
         match &self.body {
             ThreadOperationBody::Integration(bytes) => {
                 integration::HostedIntegration::decode(bytes).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub fn hosted_import(&self) -> Result<Option<hosted_import::HostedImport>> {
+        match &self.body {
+            ThreadOperationBody::HostedImport(bytes) => {
+                hosted_import::HostedImport::decode(bytes).map(Some)
             }
             _ => Ok(None),
         }
@@ -243,6 +283,9 @@ impl ThreadOperation {
             }
             ThreadOperationBody::Integration(bytes) => {
                 integration::HostedIntegration::decode(bytes)?.validate_operation(self)?;
+            }
+            ThreadOperationBody::HostedImport(bytes) => {
+                hosted_import::HostedImport::decode(bytes)?.validate_operation(self)?
             }
             ThreadOperationBody::LocalIntegration(bytes) => {
                 local_integration::LocalIntegration::decode(bytes)?.validate_operation(self)?;
@@ -367,6 +410,11 @@ impl ThreadOperation {
             }
             ThreadOperationBody::Integration(bytes) => {
                 let receipt = integration::HostedIntegration::decode(bytes)?;
+                receipt.validate_operation(self)?;
+                receipt.validate_parents(genesis, parents)?;
+            }
+            ThreadOperationBody::HostedImport(bytes) => {
+                let receipt = hosted_import::HostedImport::decode(bytes)?;
                 receipt.validate_operation(self)?;
                 receipt.validate_parents(genesis, parents)?;
             }

@@ -65,6 +65,7 @@ async fn stalled_delivery_retains_memory_releases_work_and_refunds_on_cancellati
             name: "stream".into(),
             intent: "separate work from delivery".into(),
             creator: signer.public_key().try_into().expect("key"),
+            owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
             nonce: vec![91],
         };
         let replica = ThreadReplica::create(
@@ -168,6 +169,7 @@ async fn admitted_input_can_finish_while_the_output_memory_pool_is_full() {
         name: "stream".into(),
         intent: "separate work from delivery".into(),
         creator: signer.public_key().try_into().expect("key"),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
         nonce: vec![91],
     };
     let replica = ThreadReplica::create(
@@ -314,6 +316,7 @@ fn fixture(count: usize) -> (tempfile::TempDir, Repository, ThreadReplica) {
         name: "idle".into(),
         intent: "push on durable changes".into(),
         creator: signer.public_key().try_into().expect("key"),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
         nonce: vec![93],
     };
     let replica = ThreadReplica::create(

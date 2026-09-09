@@ -23,6 +23,7 @@ async fn reconnect_finds_missing_ancestors_through_already_pending_parents() {
         name: "offline".into(),
         intent: "repair interrupted causal delivery".into(),
         creator: signer.public_key().try_into().expect("Ed25519 key"),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("Ed25519 key")),
         nonce: vec![],
     };
     let replica = ThreadReplica::create(
@@ -114,6 +115,7 @@ async fn wide_ancestry_resumes_through_a_small_window_and_retains_acceptance() {
         name: "wide".into(),
         intent: "bounded causal repair".into(),
         creator: signer.public_key().try_into().expect("key"),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
         nonce: vec![],
     };
     let left = ThreadReplica::create(
@@ -288,6 +290,7 @@ async fn paged_announcement_restarts_when_a_write_lands_behind_its_cursor() {
         name: "paged".into(),
         intent: "no changefeed handoff gap".into(),
         creator: signer.public_key().try_into().expect("key"),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
         nonce: vec![],
     };
     let replica = ThreadReplica::create(

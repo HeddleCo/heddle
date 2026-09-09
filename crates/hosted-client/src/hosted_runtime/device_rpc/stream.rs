@@ -306,7 +306,19 @@ impl DeviceRpc {
             loop {
                 tokio::select! {
                     _ = send.stopped() => return Ok(()),
-                    change = changes.changed() => { change.context("device view feed closed")?; break; },
+                    change = changes.changed() => {
+                        change.context("device view feed closed")?;
+                        // One committed Spool change can wake thousands of views.
+                        // Yield before synchronous verification so ready commands
+                        // are not queued behind every observer on this worker.
+                        tokio::task::yield_now().await;
+                        session.check_current(&self.home)?;
+                        let can_skip = method == "/heddle.api.v2alpha1.ThreadService/ObserveThread"
+                            && api::heddle::api::v2alpha1::ObserveThreadRequest::decode(normalized_query)?
+                                .sections.iter().all(|section| *section == api::heddle::api::v2alpha1::ThreadSection::Overview as i32);
+                        if !can_skip || current_version()? != revision { break; }
+                        // A sibling Thread's mutation does not rebuild this view.
+                    },
                     ended = clock.expired(|| session.check_clock()) => if let Err(error) = ended {
                         send.write_all(&api::framing::encode_stream_failure(&failure(CallFailureCode::Unauthenticated, error))?).await?;
                         send.finish()?; return Ok(());

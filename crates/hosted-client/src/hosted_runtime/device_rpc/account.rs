@@ -12,6 +12,8 @@ use super::{
     DeviceRpc, account_auth, account_feed::AccountFeed, failure, stream::ObservationAuthority,
 };
 pub(super) const METHODS: &[&str] = &[
+    "/heddle.api.v2alpha1.SearchService/Search",
+    "/heddle.api.v2alpha1.OperationService/ObserveOperations",
     "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace",
     "/heddle.api.v2alpha1.WorkspaceService/ResolveResources",
     "/heddle.api.v2alpha1.WorkspaceService/SetBookmark",
@@ -78,6 +80,8 @@ impl DeviceRpc {
         };
         if descriptor.streaming == api::StreamingShape::ServerStreaming {
             budget.retain().map_err(anyhow::Error::msg)?;
+            if method.ends_with("/Search") { return self.search_local(session, body, send).await; }
+            if method.ends_with("/ObserveOperations") { return self.observe_operations(&session, body, send).await; }
             return self.observe_account(&session, method, body, send).await;
         }
         let result = if method.ends_with("/ResolveResources") {

@@ -44,6 +44,11 @@ fn genesis(repository: &Repository) -> ThreadGenesis {
             .public_key()
             .try_into()
             .expect("public key"),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(Ed25519Signer::from_seed(&[17; 32])
+            .expect("creator")
+            .public_key()
+            .try_into()
+            .expect("public key")),
         nonce: vec![],
     }
 }

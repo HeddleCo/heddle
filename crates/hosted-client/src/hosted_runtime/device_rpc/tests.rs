@@ -120,6 +120,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     super::collaboration_tests::roundtrip(&remote, &repository, &replica, spool).await;
     super::thread_tests::roundtrip(&remote, &device, &repository, spool).await;
     super::account_tests::roundtrip(&remote, &device, spool).await;
+    super::sibling_tests::roundtrip(home.path(), &browser, address.clone(), key, &owner).await;
     super::capacity_tests::roundtrip(&remote, &device, &repository, &replica, &budgets).await;
     super::receipt_tests::roundtrip(
         &remote,

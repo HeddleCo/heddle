@@ -70,22 +70,14 @@ impl StagedSource {
         for signed in &self.operations {
             let operation = signed.verify().map_err(preparation)?;
             require_source_operation(&operation).map_err(preparation)?;
-            if operation.integration().map_err(preparation)?.is_some() {
+            if operation
+                .hosted_execution_binding()
+                .map_err(preparation)?
+                .is_some()
+            {
                 trust.authorize(&operation).map_err(preparation)?;
             }
         }
-        let original = self
-            .ready
-            .thread_genesis
-            .as_ref()
-            .ok_or(Error::Invalid("Thread genesis absent"))?;
-        let [signature] = original.signatures.as_slice() else {
-            return Err(Error::Invalid("one original creator signature required"));
-        };
-        let signed = SignedGenesis {
-            canonical: original.canonical_record.clone(),
-            signature: signature.signature.clone(),
-        };
         repository
             .verify_and_pin_owner_observation(
                 genesis,
@@ -95,11 +87,149 @@ impl StagedSource {
                 now_unix_seconds,
             )
             .map_err(preparation)?;
-        let replica =
-            ThreadReplica::create(repository.heddle_dir(), &signed).map_err(preparation)?;
-        repository
-            .pin_thread_hosted_executor(&replica, executor)
+        self.install_replicas(repository, Some(&trust), None, "", now_unix_seconds)?;
+        Ok(self.state.id())
+    }
+    /// Device-only source uses independently admitted local account authority;
+    /// incoming material cannot enroll its endpoint or replace a Spool owner.
+    pub fn install_owned_device(
+        self,
+        repository: &Repository,
+        authority: &repo::device_authority::DeviceAuthority,
+        spool_path: &str,
+        now_unix_seconds: i64,
+    ) -> Result<StateId, Error> {
+        let endpoint = self
+            .ready
+            .endpoint
+            .as_ref()
+            .ok_or(Error::Invalid("endpoint absent"))?;
+        if endpoint.kind != EndpointKind::Device as i32 {
+            return Err(Error::Invalid(
+                "owned-device installation requires device endpoint",
+            ));
+        }
+        authority
+            .verify_mint_root(&endpoint.public_key, now_unix_seconds)
             .map_err(preparation)?;
+        authority
+            .verify_publisher(&endpoint.public_key)
+            .map_err(preparation)?;
+        let spool = self
+            .ready
+            .thread
+            .as_ref()
+            .and_then(|thread| thread.spool.as_ref())
+            .ok_or(Error::Invalid("Spool absent"))?;
+        repository
+            .install_native_spool_id(spool.id.parse().map_err(preparation)?)
+            .map_err(preparation)?;
+        self.install_replicas(
+            repository,
+            None,
+            Some(authority),
+            spool_path,
+            now_unix_seconds,
+        )?;
+        Ok(self.state.id())
+    }
+    fn install_replicas(
+        &self,
+        repository: &Repository,
+        trust: Option<&TrustedHostedExecutor>,
+        authority: Option<&repo::device_authority::DeviceAuthority>,
+        spool_path: &str,
+        now: i64,
+    ) -> Result<(), Error> {
+        let main = self
+            .ready
+            .thread_genesis
+            .as_ref()
+            .ok_or(Error::Invalid("Thread genesis absent"))?;
+        let mut replicas = std::collections::BTreeMap::new();
+        for wrapper in std::iter::once(main).chain(&self.dependencies) {
+            let original = wrapper
+                .genesis
+                .as_ref()
+                .ok_or(Error::Invalid("original signed genesis absent"))?;
+            let [signature] = original.signatures.as_slice() else {
+                return Err(Error::Invalid("one original creator signature required"));
+            };
+            let signed = SignedGenesis {
+                canonical: original.canonical_record.clone(),
+                signature: signature.signature.clone(),
+            };
+            let genesis = signed.verify().map_err(preparation)?;
+            let replica = match genesis.owner {
+                heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(_) => {
+                    if !wrapper.creator_authority.is_empty() || wrapper.admission.is_some() {
+                        return Err(Error::Invalid(
+                            "local ownership cannot carry implicit account admission",
+                        ));
+                    }
+                    ThreadReplica::create(repository.heddle_dir(), &signed).map_err(preparation)?
+                }
+                heddle_object_model::object::thread_replication::GenesisOwner::Account(_) => {
+                    if let Some(receipt) = &wrapper.admission {
+                        if receipt.format
+                            != heddle_object_model::object::thread_genesis_admission::FORMAT
+                        {
+                            return Err(Error::Invalid("unknown genesis admission format"));
+                        }
+                        let [signature] = receipt.signatures.as_slice() else {
+                            return Err(Error::Invalid(
+                                "one hosted genesis admission signature required",
+                            ));
+                        };
+                        let admission = crypto::thread_genesis_admission::SignedGenesisAdmission {
+                            canonical: receipt.canonical_record.clone(),
+                            signature: signature.signature.clone(),
+                        };
+                        let value = admission.verify_signature().map_err(preparation)?;
+                        if signature.public_key != value.executor {
+                            return Err(Error::Invalid("genesis admission key differs"));
+                        }
+                        match trust {
+                            Some(trust) => ThreadReplica::create_from_genesis_admission(
+                                repository.heddle_dir(),
+                                &signed,
+                                &wrapper.creator_authority,
+                                &admission,
+                                trust,
+                            ),
+                            None => ThreadReplica::create_from_pinned_genesis_admission(
+                                repository.heddle_dir(),
+                                &signed,
+                                &wrapper.creator_authority,
+                                &admission,
+                            ),
+                        }
+                        .map_err(preparation)?
+                    } else {
+                        let authority = authority.ok_or(Error::Invalid(
+                            "original account genesis admission required",
+                        ))?;
+                        ThreadReplica::create_authorized(
+                            repository.heddle_dir(),
+                            &signed,
+                            &wrapper.creator_authority,
+                            authority,
+                            spool_path,
+                            "/heddle.api.v2alpha1.ThreadService/StartThread",
+                            now,
+                        )
+                        .map_err(preparation)?
+                    }
+                }
+            };
+            if let Some(trust) = trust {
+                let executor = trust.executor;
+                repository
+                    .pin_thread_hosted_executor(&replica, executor)
+                    .map_err(preparation)?;
+            }
+            replicas.insert(replica.thread_id(), replica);
+        }
         repository
             .store()
             .install_pack_streaming(
@@ -107,22 +237,42 @@ impl StagedSource {
                 &self.directory.path().join("source.idx"),
             )
             .map_err(preparation)?;
-        // The exact selected read authorized this material; original signatures
-        // and causal rules still govern durable admission. Metadata can arrive
-        // child-first; the replica settles it when its original parents arrive.
-        for operation in &self.operations {
-            replica
-                .receive(operation, repository.store(), require_source_operation)
-                .map_err(preparation)?;
+        for signed in &self.operations {
+            let operation = signed.verify().map_err(preparation)?;
+            let replica = replicas
+                .get(&operation.thread)
+                .ok_or(Error::Invalid("source dependency replica absent"))?;
+            if replica
+                .receive(signed, repository.store(), require_source_operation)
+                .map_err(preparation)?
+                != objects::object::thread_replication::Admission::Accepted
+            {
+                return Err(Error::Invalid(
+                    "source proof did not settle in dependency order",
+                ));
+            }
         }
-        if replica
+        let main_id = crate::replication::opening::verify_genesis(
+            main.genesis
+                .as_ref()
+                .ok_or(Error::Invalid("signed genesis absent"))?,
+            self.ready
+                .thread
+                .as_ref()
+                .ok_or(Error::Invalid("Thread absent"))?,
+        )?
+        .id()
+        .map_err(preparation)?;
+        if replicas
+            .get(&main_id)
+            .ok_or(Error::Invalid("selected replica absent"))?
             .accepted_source_revision(self.state.id())
             .map_err(preparation)?
             .is_none()
         {
             return Err(Error::Invalid("selected source proof did not settle"));
         }
-        Ok(self.state.id())
+        Ok(())
     }
 }
 fn preparation(error: impl std::fmt::Display) -> Error {
@@ -161,6 +311,9 @@ mod tests {
         let signer = Ed25519Signer::from_seed(&[56; 32]).expect("signer");
         let spool = uuid::Uuid::from_u128(11);
         let genesis = ThreadGenesis {
+            owner: objects::object::thread_replication::GenesisOwner::LocalKey(
+                signer.public_key().try_into().expect("key"),
+            ),
             version: 1,
             spool: spool.to_string(),
             parent: None,

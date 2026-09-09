@@ -45,7 +45,7 @@ impl ThreadReplica {
         Ok(())
     }
     pub(super) fn require_trusted_integration(&self, operation: &ThreadOperation) -> Result<()> {
-        let Some(receipt) = operation.integration()? else {
+        let Some(receipt) = operation.hosted_execution_binding()? else {
             return Ok(());
         };
         let genesis: Option<Vec<u8>> = self
@@ -107,5 +107,122 @@ impl ThreadReplica {
         }
         receipt.validate_source(&original.verify()?)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use crypto::{
+        Ed25519Signer, Signer,
+        thread_operation::{SignedGenesis, SignedOperation},
+    };
+    use objects::object::{
+        Attribution, Principal, State, Tree,
+        thread_replication::{
+            Admission, GenesisOwner, ThreadGenesis, ThreadOperationBody,
+            hosted_import::{HostedImport, ImportedCommit},
+        },
+    };
+
+    use super::*;
+
+    #[test]
+    fn hosted_import_requires_persistent_independent_executor_pin_without_checkout_writes() {
+        let directory = tempfile::TempDir::new().expect("repository directory");
+        let repo = crate::Repository::init_default(directory.path()).expect("repository");
+        let creator = Ed25519Signer::from_seed(&[41; 32]).expect("creator");
+        let executor = Ed25519Signer::from_seed(&[42; 32]).expect("executor");
+        let key = creator.public_key().try_into().expect("creator key");
+        let base = repo.head().expect("HEAD").expect("initial state");
+        let genesis = ThreadGenesis {
+            version: 1,
+            spool: uuid::Uuid::from_u128(43).to_string(),
+            parent: None,
+            base,
+            name: "import".into(),
+            intent: "retain Git attribution".into(),
+            owner: GenesisOwner::LocalKey(key),
+            creator: key,
+            nonce: vec![],
+        };
+        let replica = ThreadReplica::create(
+            repo.heddle_dir(),
+            &SignedGenesis::sign(&genesis, &creator).expect("original genesis"),
+        )
+        .expect("replica");
+        let state = State::new_snapshot(
+            Tree::new().hash(),
+            vec![base],
+            Attribution::human(Principal::new("Git author", "git@example.test")),
+        );
+        let trust = TrustedHostedExecutor {
+            spool: uuid::Uuid::from_u128(43),
+            spool_genesis: ContentHash::from_bytes([44; 32]),
+            executor: executor.public_key().try_into().expect("executor key"),
+        };
+        let receipt = HostedImport {
+            version: 1,
+            spool: trust.spool,
+            spool_genesis: trust.spool_genesis,
+            executor: trust.executor,
+            target_thread: replica.thread_id(),
+            expected_target_frontier: BTreeSet::new(),
+            result: state.encode_current_msgpack().expect("state").into(),
+            provider: "github".into(),
+            provider_repository_id: "123".into(),
+            source_commit: ImportedCommit::Sha1([45; 20]),
+            initiating_request_proof: ContentHash::from_bytes([46; 32]),
+            executed_at_ms: 100,
+        };
+        let operation = ThreadOperation {
+            version: 1,
+            thread: replica.thread_id(),
+            parents: BTreeSet::new(),
+            publisher: trust.executor,
+            body: ThreadOperationBody::HostedImport(receipt.encode().expect("receipt")),
+        };
+        let signed = SignedOperation::sign(&operation, &executor).expect("attestation");
+        let error = replica
+            .receive(&signed, repo.store(), |_| Ok(()))
+            .expect_err("incoming receipt is not trust");
+        assert!(
+            error
+                .to_string()
+                .contains("independently pinned executor trust"),
+            "{error}"
+        );
+        assert!(
+            replica
+                .operation(&operation.id().expect("ID"))
+                .expect("lookup")
+                .is_none()
+        );
+        replica
+            .pin_hosted_executor(&trust)
+            .expect("receiver configuration");
+        assert_eq!(
+            replica
+                .receive(&signed, repo.store(), |_| Ok(()))
+                .expect("trusted import"),
+            Admission::Accepted
+        );
+        let reopened = ThreadReplica::open(repo.heddle_dir(), replica.thread_id()).expect("reopen");
+        assert_eq!(
+            reopened
+                .receive(&signed, repo.store(), |_| Ok(()))
+                .expect("replay"),
+            Admission::Accepted
+        );
+        assert_eq!(
+            reopened
+                .accepted_source_revision(state.id())
+                .expect("source membership")
+                .expect("retained capture")
+                .id(),
+            state.id()
+        );
+        assert_eq!(repo.head().expect("unchanged checkout"), Some(base));
     }
 }

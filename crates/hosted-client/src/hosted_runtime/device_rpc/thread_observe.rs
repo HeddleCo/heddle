@@ -50,16 +50,31 @@ impl DeviceRpc {
             request.observe.clone().unwrap_or_default(),
             send,
             |budget, binding| self.thread_snapshot(session, &replica, &request, budget, binding),
-            || {
-                Ok(repo::thread_replication::projection::version(
-                    replica.thread_id(),
-                    replica.generation()?,
-                )
-                .as_bytes()
-                .to_vec())
-            },
+            || self.thread_observation_version(session, &replica),
         )
         .await
+    }
+    fn thread_observation_version(
+        &self,
+        session: &Session,
+        replica: &ThreadReplica,
+    ) -> Result<Vec<u8>> {
+        let repository = repo::Repository::open(&session.spool.root)?;
+        let version = repo::thread_replication::projection::version(
+            replica.thread_id(),
+            replica.generation()?,
+        );
+        Ok(blake3::hash(
+            &[
+                version.as_bytes().as_slice(),
+                super::land::policy_version(&repository)?
+                    .as_bytes()
+                    .as_slice(),
+            ]
+            .concat(),
+        )
+        .as_bytes()
+        .to_vec())
     }
     fn thread_snapshot(
         &self,
@@ -69,8 +84,11 @@ impl DeviceRpc {
         budget: &ReadBudget,
         binding: &[u8],
     ) -> Result<(Vec<(String, ThreadEvent)>, PageInfo, Vec<u8>)> {
+        #[cfg(test)]
+        self.thread_snapshots
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut overview = self.thread_overview(session, replica)?;
-        let generation = overview.version.clone();
+        let generation = self.thread_observation_version(session, replica)?;
         let reference = overview.r#ref.clone().context("Thread scope")?;
         let mut events = Vec::new();
         let mut all_exhausted = true;
@@ -359,11 +377,7 @@ impl DeviceRpc {
                 event(thread_event::Payload::Status(status)),
             ));
         }
-        if repo::thread_replication::projection::version(replica.thread_id(), replica.generation()?)
-            .as_bytes()
-            .as_slice()
-            != generation
-        {
+        if self.thread_observation_version(session, replica)? != generation {
             return Err(super::stream::SnapshotChanged.into());
         }
         events.insert(

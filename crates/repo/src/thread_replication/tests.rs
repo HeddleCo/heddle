@@ -97,6 +97,7 @@ fn setup() -> (
     let repo = Repository::init_default(temp.path()).expect("native repository");
     let signer = Ed25519Signer::generate().expect("test publisher");
     let genesis = ThreadGenesis {
+        owner: objects::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
         version: 1,
         spool: "01980000-0000-7000-8000-000000000001".into(),
         parent: None,

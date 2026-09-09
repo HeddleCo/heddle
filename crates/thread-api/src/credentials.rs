@@ -6,6 +6,8 @@ use api::{
     v2::MethodDescriptor,
 };
 use crypto::{Ed25519Signer, Signer};
+#[cfg(any(feature = "native", feature = "root-attachment"))]
+use prost::Message;
 
 use crate::transport::{Authorize, Error};
 
@@ -17,6 +19,8 @@ use crate::transport::{Authorize, Error};
 #[derive(Clone)]
 pub enum Credentials {
     Public,
+    #[cfg(any(feature = "native", feature = "root-attachment"))]
+    OwnedDevice(OwnedDeviceCredentials),
     Bearer {
         /// Raw serialized Biscuit, directly from IssuedCredential.biscuit.
         biscuit: Vec<u8>,
@@ -28,6 +32,53 @@ pub enum Credentials {
         biscuit: Vec<u8>,
         grant_envelope: Vec<u8>,
     },
+}
+
+/// Prepared owned-device credential; the public proof supplies the exact sealed
+/// Biscuit and mint selector. The receiver independently pins account authority.
+#[cfg(any(feature = "native", feature = "root-attachment"))]
+#[derive(Clone)]
+pub struct OwnedDeviceCredentials {
+    signer: std::sync::Arc<Ed25519Signer>,
+    biscuit: Vec<u8>,
+    mint_root: Vec<u8>,
+    authority: Vec<u8>,
+}
+impl Credentials {
+    #[cfg(any(feature = "native", feature = "root-attachment"))]
+    pub fn owned_device(
+        signer: std::sync::Arc<Ed25519Signer>,
+        authority: &[u8],
+    ) -> Result<Self, Error> {
+        use api::heddle::api::v2alpha1::ThreadControlAuthority;
+        if authority.is_empty() || authority.len() > 64 * 1024 {
+            return Err(Error::Protocol("owned-device authority proof bound"));
+        }
+        let proof = ThreadControlAuthority::decode(authority)
+            .map_err(|error| Error::Io(error.to_string()))?;
+        if proof.format != 1 || proof.encode_to_vec() != authority {
+            return Err(Error::Protocol("canonical owned-device authority required"));
+        }
+        if proof.mint_root_public_key.len() != 32
+            || proof.sealed_biscuit.is_empty()
+            || proof.sealed_biscuit.len() > 64 * 1024
+        {
+            return Err(Error::Protocol("owned-device mint root or Biscuit bound"));
+        }
+        use base64::Engine as _;
+        let biscuit = base64::engine::general_purpose::URL_SAFE
+            .encode(&proof.sealed_biscuit)
+            .into_bytes();
+        if biscuit.len() > 64 * 1024 {
+            return Err(Error::Protocol("encoded owned-device Biscuit bound"));
+        }
+        Ok(Self::OwnedDevice(OwnedDeviceCredentials {
+            signer,
+            biscuit,
+            mint_root: proof.mint_root_public_key,
+            authority: authority.to_vec(),
+        }))
+    }
 }
 
 impl Authorize for Credentials {
@@ -42,6 +93,8 @@ impl Authorize for Credentials {
         }
         let (biscuit, grant_envelope, signer) = match self {
             Self::Public => (&[][..], &[][..], None),
+            #[cfg(any(feature = "native", feature = "root-attachment"))]
+            Self::OwnedDevice(value) => (value.biscuit.as_slice(), &[][..], Some(&value.signer)),
             Self::Bearer {
                 biscuit,
                 grant_envelope,
@@ -63,6 +116,11 @@ impl Authorize for Credentials {
             bearer_grant_envelope: grant_envelope.to_vec(),
             ..Default::default()
         };
+        #[cfg(any(feature = "native", feature = "root-attachment"))]
+        if let Self::OwnedDevice(value) = self {
+            context.bearer_authority_key_selector = value.mint_root.clone();
+            context.bearer_authority_proof = value.authority.clone();
+        }
         let Some(signer) = signer else {
             return Ok(context);
         };
@@ -103,6 +161,7 @@ mod tests {
     };
 
     use api::v2::client::Rpc;
+    #[cfg(any(feature = "native", feature = "root-attachment"))]
     use prost::Message;
 
     use super::*;

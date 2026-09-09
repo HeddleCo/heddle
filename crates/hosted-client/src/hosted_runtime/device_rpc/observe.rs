@@ -81,6 +81,10 @@ impl DeviceRpc {
                         .next()
                         .map(|part| part.as_os_str().to_string_lossy().into_owned())
                         .unwrap_or_default();
+                    if first == "objects" {
+                        return relative.components().nth(1).is_some_and(|part| part.as_os_str() == "state-attachment-index")
+                            && path.extension().is_some_and(|extension| extension == "msgpack");
+                    }
                     if first == "device-checkouts" {
                         let parts = relative
                             .components()

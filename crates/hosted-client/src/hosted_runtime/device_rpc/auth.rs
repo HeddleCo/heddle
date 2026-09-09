@@ -21,6 +21,62 @@ pub(super) struct Session {
     pub request_proof: objects::object::ContentHash,
 }
 impl Session {
+    pub fn authorize_thread(
+        &self,
+        repository: &repo::Repository,
+        replica: &repo::thread_replication::ThreadReplica,
+    ) -> Result<()> {
+        self.check_clock()?;
+        anyhow::ensure!(
+            replica.genesis()?.spool == self.spool.id.to_string(),
+            "Thread belongs to another Spool"
+        );
+        anyhow::ensure!(
+            thread_visible(
+                repository,
+                replica,
+                uuid::Uuid::parse_str(&self.principal)?,
+                self.agent_id.as_deref()
+            )?,
+            "Thread audience does not include authenticated caller"
+        );
+        Ok(())
+    }
+
+    pub fn authorize_revision(
+        &self,
+        repository: &repo::Repository,
+        revision: objects::object::StateId,
+    ) -> Result<()> {
+        self.check_clock()?;
+        let candidates = repo::thread_replication::ThreadReplica::source_thread_candidates(
+            &self.spool.heddle_dir,
+            revision,
+            None,
+            1024,
+        )?;
+        for thread in candidates {
+            let replica =
+                repo::thread_replication::ThreadReplica::open(&self.spool.heddle_dir, thread)?;
+            if replica.genesis()?.spool == self.spool.id.to_string()
+                && thread_visible(
+                    repository,
+                    &replica,
+                    uuid::Uuid::parse_str(&self.principal)?,
+                    self.agent_id.as_deref(),
+                )?
+            {
+                return Ok(());
+            }
+        }
+        bail!("source revision has no accessible Thread within device authorization work budget")
+    }
+    pub fn command_namespace(&self) -> Result<String> {
+        Ok(serde_json::to_string(&(
+            self.principal.as_str(),
+            self.agent_id.as_deref(),
+        ))?)
+    }
     pub fn permits(&self, method: &str) -> bool {
         api::v2::method_descriptor(method).is_some_and(|descriptor| {
             facts(&self.token, descriptor, &self.spool, Utc::now()).is_ok()
@@ -210,4 +266,24 @@ pub(super) fn authorize(
             )
         },
     })
+}
+
+/// The caller has independently admitted the exact Spool capability first.
+/// A local-key owner proof comes only from retained private key material.
+pub(super) fn thread_visible(
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+) -> Result<bool> {
+    let genesis = replica.genesis()?;
+    let local = match genesis.owner {
+        objects::object::thread_replication::GenesisOwner::LocalKey(key)
+            if repository.holds_native_owner_key(&key)? =>
+        {
+            Some(key)
+        }
+        _ => None,
+    };
+    Ok(replica.audience_allows(principal, agent, true, local.as_ref())?)
 }

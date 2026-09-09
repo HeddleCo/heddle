@@ -47,6 +47,7 @@ impl Default for Limits {
 pub enum Item {
     Pack(PackChunk),
     Operation(SignedRecord),
+    ThreadGenesis(ThreadGenesisRecord),
     Sidecar(TransferSidecar),
     Complete(FetchComplete),
 }
@@ -128,6 +129,7 @@ struct Validation {
     received: u64,
     metadata_bytes: u64,
     operations: usize,
+    threads: std::collections::BTreeSet<heddle_object_model::object::ContentHash>,
     done: bool,
 }
 impl Validation {
@@ -161,25 +163,29 @@ impl Validation {
             .thread_genesis
             .as_ref()
             .ok_or(Error::Invalid("original Thread genesis required"))?;
-        replication::opening::verify_genesis(genesis, thread)?;
+        let verified_genesis = verify_origin(genesis, thread)?;
         let spool = thread
             .spool
             .as_ref()
             .ok_or(Error::Invalid("spool required"))?;
         let id =
             uuid::Uuid::parse_str(&spool.id).map_err(|_| Error::Invalid("invalid spool UUID"))?;
-        if ready
-            .owner_genesis
-            .as_ref()
-            .and_then(|g| g.genesis.as_ref())
-            .is_none_or(|g| g.spool_uuid != id.as_bytes())
-        {
-            return Err(Error::Invalid(
-                "original owner genesis must bind this spool",
-            ));
-        }
-        if ready.ownership.is_none() {
-            return Err(Error::Invalid("portable owner history required"));
+        if endpoint.is_some_and(|endpoint| endpoint.kind == EndpointKind::Weft as i32) {
+            if ready
+                .owner_genesis
+                .as_ref()
+                .and_then(|g| g.genesis.as_ref())
+                .is_none_or(|g| g.spool_uuid != id.as_bytes())
+            {
+                return Err(Error::Invalid(
+                    "original owner genesis must bind this spool",
+                ));
+            }
+            if ready.ownership.is_none() {
+                return Err(Error::Invalid("portable owner history required"));
+            }
+        } else if endpoint.is_none_or(|endpoint| endpoint.kind != EndpointKind::Device as i32) {
+            return Err(Error::Invalid("source endpoint must be Weft or Heddle"));
         }
         let budget = ready
             .budget
@@ -252,6 +258,9 @@ impl Validation {
             received: 0,
             metadata_bytes: 0,
             operations: 0,
+            threads: std::collections::BTreeSet::from([verified_genesis
+                .id()
+                .map_err(|_| Error::Invalid("invalid Thread genesis identity"))?]),
             done: false,
         })
     }
@@ -331,12 +340,7 @@ impl Validation {
                 let operation = signed
                     .verify()
                     .map_err(|_| Error::Invalid("invalid original operation signature"))?;
-                if self
-                    .ready
-                    .thread
-                    .as_ref()
-                    .and_then(|t| t.id.as_ref())
-                    .is_none_or(|id| id.value != operation.thread.as_bytes())
+                if !self.threads.contains(&operation.thread)
                     || !self
                         .facets
                         .contains(&replication::wire_facet(operation.facet()))
@@ -344,6 +348,50 @@ impl Validation {
                     return Err(Error::Invalid("operation crosses Thread or selected facet"));
                 }
                 Ok(Item::Operation(record))
+            }
+            fetch_server_frame::Body::ThreadGenesis(record) => {
+                self.metadata_bytes = self
+                    .metadata_bytes
+                    .checked_add(record.encoded_len() as u64)
+                    .ok_or(Error::Invalid("metadata size overflow"))?;
+                if self.threads.len() >= 128
+                    || self.metadata_bytes
+                        > self.limits.max_total_bytes.saturating_sub(self.received)
+                {
+                    return Err(Error::Invalid("dependency genesis exceeds download budget"));
+                }
+                let genesis =
+                    heddle_object_model::object::thread_replication::ThreadGenesis::decode(
+                        &record
+                            .genesis
+                            .as_ref()
+                            .ok_or(Error::Invalid("dependency signed genesis absent"))?
+                            .canonical_record,
+                    )
+                    .map_err(|_| Error::Invalid("invalid dependency genesis"))?;
+                let spool = self
+                    .ready
+                    .thread
+                    .as_ref()
+                    .and_then(|thread| thread.spool.as_ref())
+                    .ok_or(Error::Invalid("Spool absent"))?;
+                if genesis.spool != spool.id {
+                    return Err(Error::Invalid("dependency genesis crosses Spool"));
+                }
+                let id = genesis
+                    .id()
+                    .map_err(|_| Error::Invalid("invalid dependency identity"))?;
+                let thread = ThreadRef {
+                    spool: Some(spool.clone()),
+                    id: Some(ThreadId {
+                        value: id.as_bytes().to_vec(),
+                    }),
+                };
+                verify_origin(&record, &thread)?;
+                if !self.threads.insert(id) {
+                    return Err(Error::Invalid("duplicate dependency genesis"));
+                }
+                Ok(Item::ThreadGenesis(record))
             }
             fetch_server_frame::Body::Complete(complete) => {
                 let original = self
@@ -386,3 +434,40 @@ impl Validation {
 #[cfg(test)]
 #[path = "fetch_tests.rs"]
 mod tests;
+
+/// Verify original signatures and exact receipt bindings without deriving trust
+/// from the carried executor key. Installation pins executor authority separately.
+fn verify_origin(
+    record: &ThreadGenesisRecord,
+    thread: &ThreadRef,
+) -> Result<heddle_object_model::object::thread_replication::ThreadGenesis, Error> {
+    use heddle_object_model::object::thread_replication::integration::TrustedHostedExecutor;
+    let genesis = replication::opening::verify_genesis_record(record, thread)?;
+    if let Some(receipt) = &record.admission {
+        if receipt.format != heddle_object_model::object::thread_genesis_admission::FORMAT {
+            return Err(Error::Invalid("unknown genesis admission format"));
+        }
+        let [signature] = receipt.signatures.as_slice() else {
+            return Err(Error::Invalid("one genesis admission signature required"));
+        };
+        let signed = crypto::thread_genesis_admission::SignedGenesisAdmission {
+            canonical: receipt.canonical_record.clone(),
+            signature: signature.signature.clone(),
+        };
+        let value = signed
+            .verify_signature()
+            .map_err(|_| Error::Invalid("invalid genesis admission signature"))?;
+        if signature.public_key != value.executor {
+            return Err(Error::Invalid("genesis admission executor differs"));
+        }
+        let trust = TrustedHostedExecutor {
+            spool: value.spool,
+            spool_genesis: value.spool_genesis,
+            executor: value.executor,
+        };
+        value
+            .authorize(&genesis, &record.creator_authority, &trust)
+            .map_err(|_| Error::Invalid("genesis admission differs from original proof"))?;
+    }
+    Ok(genesis)
+}

@@ -29,6 +29,7 @@ fn causal_property_heads_converge_without_overwriting_parallel_fields_and_cas_is
         name: "original".into(),
         intent: "multi-device".into(),
         creator: signer.public_key().try_into().expect("key"),
+        owner: objects::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
         nonce: vec![],
     };
     let signed = SignedGenesis::sign(&genesis, &signer).expect("genesis");
@@ -261,6 +262,7 @@ fn original_authority_receipt_is_durable_and_required_before_pending_causality_p
         name: "receipt".into(),
         intent: "retained admission".into(),
         creator: signer.public_key().try_into().expect("publisher"),
+        owner: objects::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("publisher")),
         nonce: vec![],
     };
     let replica = ThreadReplica::create(

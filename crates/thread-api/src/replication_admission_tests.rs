@@ -43,6 +43,7 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
         name: "shared receipt".into(),
         intent: "original authorship survives every relay".into(),
         creator: author.public_key().try_into().expect("key"),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(author.public_key().try_into().expect("key")),
         nonce: vec![85; 32],
     };
     let signed_genesis = SignedGenesis::sign(&genesis, &author).expect("genesis");

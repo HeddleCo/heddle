@@ -532,7 +532,7 @@ pub(super) fn same_spool(session: &Session, spool: Option<&SpoolRef>) -> Result<
 pub(super) fn thread(session: &Session, reference: Option<&ThreadRef>) -> Result<ContentHash> {
     let reference = reference.context("Thread required")?;
     same_spool(session, reference.spool.as_ref())?;
-    Ok(ContentHash::from_bytes(
+    let id = ContentHash::from_bytes(
         reference
             .id
             .as_ref()
@@ -541,20 +541,27 @@ pub(super) fn thread(session: &Session, reference: Option<&ThreadRef>) -> Result
             .as_slice()
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid Thread hash"))?,
-    ))
+    );
+    let repository = repo::Repository::open(&session.spool.root)?;
+    let replica = repo::thread_replication::ThreadReplica::open(&session.spool.heddle_dir, id)?;
+    session.authorize_thread(&repository, &replica)?;
+    Ok(id)
 }
 pub(super) fn revision(session: &Session, reference: Option<&RevisionRef>) -> Result<StateId> {
     let reference = reference.context("source revision required")?;
     same_spool(session, reference.spool.as_ref())?;
-    match reference.revision.as_ref() {
-        Some(revision_ref::Revision::State(id)) => Ok(StateId::from_bytes(
+    let state = match reference.revision.as_ref() {
+        Some(revision_ref::Revision::State(id)) => StateId::from_bytes(
             id.value
                 .as_slice()
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("invalid State id"))?,
-        )),
+        ),
         _ => bail!("checkout needs a native source revision"),
-    }
+    };
+    let repository = repo::Repository::open(&session.spool.root)?;
+    session.authorize_revision(&repository, state)?;
+    Ok(state)
 }
 fn wire_revision(session: &Session, state: StateId) -> RevisionRef {
     RevisionRef {

@@ -9,6 +9,7 @@ pub mod checkout;
 mod checkout_resolution;
 mod checkout_selection;
 pub use checkout_resolution::source_conflict_version;
+mod genesis_admission;
 mod integration;
 pub mod listing;
 mod local;
@@ -17,9 +18,11 @@ mod peers;
 mod policy_sync;
 pub mod projection;
 mod source_index;
+mod source_transfer;
 
-mod reference_capture;
 pub mod collaboration;
+pub mod collaboration_search;
+mod reference_capture;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -80,7 +83,7 @@ pub struct ThreadReplica {
 pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("
             CREATE TABLE IF NOT EXISTS local_thread_names(name TEXT PRIMARY KEY, thread BLOB NOT NULL);
-            CREATE TABLE IF NOT EXISTS threads(id BLOB PRIMARY KEY, genesis BLOB NOT NULL, genesis_signature BLOB NOT NULL CHECK(length(genesis_signature)=64), generation INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS threads(id BLOB PRIMARY KEY, genesis BLOB NOT NULL, genesis_signature BLOB NOT NULL CHECK(length(genesis_signature)=64), creator_authority BLOB NOT NULL DEFAULT X'' CHECK(length(creator_authority)<=65536), genesis_admission BLOB, genesis_admission_signature BLOB, generation INTEGER NOT NULL DEFAULT 0);
             CREATE TABLE IF NOT EXISTS operations(id BLOB PRIMARY KEY, thread BLOB NOT NULL, facet INTEGER NOT NULL, canonical BLOB NOT NULL, signature BLOB NOT NULL, status INTEGER NOT NULL DEFAULT 0, reason TEXT, source_revision BLOB, authority_admitted INTEGER NOT NULL DEFAULT 0 CHECK(authority_admitted IN(0,1)), authority_receipt_canonical BLOB CHECK(authority_receipt_canonical IS NULL OR length(authority_receipt_canonical)<=2048), authority_receipt_signature BLOB CHECK(authority_receipt_signature IS NULL OR length(authority_receipt_signature)=64), CHECK((authority_receipt_canonical IS NULL)=(authority_receipt_signature IS NULL)));
             CREATE INDEX IF NOT EXISTS operations_thread_status ON operations(thread,status);
             CREATE INDEX IF NOT EXISTS operations_thread_facet_status_id ON operations(thread,facet,status,id);
@@ -96,6 +99,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
             CREATE TABLE IF NOT EXISTS thread_control_heads(thread BLOB NOT NULL,property TEXT NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,property,operation));
             CREATE TABLE IF NOT EXISTS thread_control_commands(thread BLOB NOT NULL,publisher BLOB NOT NULL,command BLOB NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,publisher,command));")?;
     connection.execute_batch(collaboration::SCHEMA)?;
+    connection.execute_batch(collaboration_search::SCHEMA)?;
     connection.execute_batch(source_index::SCHEMA)?;
     connection.execute_batch(listing::SCHEMA)
 }
@@ -105,6 +109,47 @@ impl ThreadReplica {
     /// Verify before touching disk; possession of the key is not needed to relay.
     pub fn create(heddle_dir: &Path, signed: &SignedGenesis) -> Result<Self> {
         let genesis = signed.verify()?;
+        if !matches!(
+            genesis.owner,
+            objects::object::thread_replication::GenesisOwner::LocalKey(_)
+        ) {
+            return Err(Error::Invalid(
+                "account-owned Thread requires original authority admission".into(),
+            ));
+        }
+        Self::create_with_proof(heddle_dir, signed, &[], None)
+    }
+
+    /// Original account authority and signed genesis become durable together.
+    /// The caller independently authorizes delivery and the selected Spool.
+    pub fn create_authorized(
+        heddle_dir: &Path,
+        signed: &SignedGenesis,
+        creator_authority: &[u8],
+        authority: &crate::device_authority::DeviceAuthority,
+        spool_path: &str,
+        method: &str,
+        now: i64,
+    ) -> Result<Self> {
+        let genesis = signed.verify()?;
+        metadata::verify_genesis_authority(
+            &genesis,
+            creator_authority,
+            authority,
+            spool_path,
+            method,
+            now,
+        )?;
+        Self::create_with_proof(heddle_dir, signed, creator_authority, None)
+    }
+
+    fn create_with_proof(
+        heddle_dir: &Path,
+        signed: &SignedGenesis,
+        creator_authority: &[u8],
+        admission: Option<&crypto::thread_genesis_admission::SignedGenesisAdmission>,
+    ) -> Result<Self> {
+        let genesis = signed.verify()?;
         objects::fs_atomic::create_dir_all_durable(heddle_dir)?;
         let this = Self {
             path: heddle_dir.join(crate::local_metadata::DATABASE_NAME),
@@ -113,17 +158,40 @@ impl ThreadReplica {
         let mut connection = crate::local_metadata::open(heddle_dir)?;
         let transaction = connection.transaction()?;
         transaction.execute(
-            "INSERT OR IGNORE INTO threads(id,genesis,genesis_signature) VALUES(?1,?2,?3)",
-            params![this.thread.as_bytes(), &signed.canonical, &signed.signature],
+            "INSERT OR IGNORE INTO threads(id,genesis,genesis_signature,creator_authority) VALUES(?1,?2,?3,?4)",
+            params![this.thread.as_bytes(), &signed.canonical, &signed.signature, creator_authority],
         )?;
-        let stored: (Vec<u8>, Vec<u8>) = transaction.query_row(
-            "SELECT genesis,genesis_signature FROM threads WHERE id=?1",
+        let stored: (Vec<u8>, Vec<u8>, Vec<u8>) = transaction.query_row(
+            "SELECT genesis,genesis_signature,creator_authority FROM threads WHERE id=?1",
             [this.thread.as_bytes()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        if stored.0 != signed.canonical || stored.1 != signed.signature {
+        if stored.0 != signed.canonical
+            || stored.1 != signed.signature
+            || stored.2 != creator_authority
+        {
             return Err(Error::Invalid("Thread genesis collision".into()));
         }
+        if let Some(admission) = admission {
+            let existing: (Option<Vec<u8>>, Option<Vec<u8>>) = transaction.query_row(
+                "SELECT genesis_admission,genesis_admission_signature FROM threads WHERE id=?1",
+                [this.thread.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            match existing {
+                (None, None) => {
+                    transaction.execute("UPDATE threads SET genesis_admission=?2,genesis_admission_signature=?3 WHERE id=?1",params![this.thread.as_bytes(),admission.canonical,admission.signature])?;
+                }
+                (Some(canonical), Some(signature))
+                    if canonical == admission.canonical && signature == admission.signature => {}
+                _ => {
+                    return Err(Error::Invalid(
+                        "conflicting original genesis admission receipt".into(),
+                    ));
+                }
+            }
+        }
+        transaction.execute("INSERT OR IGNORE INTO thread_source_bases(thread,revision) VALUES(?1,?2)",params![this.thread.as_bytes(),genesis.base.as_bytes()])?;
         listing::initialize(&transaction, &genesis)?;
         reference_capture::inherit_root(&transaction, &genesis)?;
         transaction.commit()?;
@@ -159,6 +227,66 @@ impl ThreadReplica {
             ));
         }
         Ok(signed)
+    }
+
+    pub fn genesis_record(&self) -> Result<api::heddle::api::v2alpha1::ThreadGenesisRecord> {
+        let (canonical, signature, creator_authority, admission, admission_signature): (Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>) =
+            self.connect()?.query_row(
+                "SELECT genesis,genesis_signature,creator_authority,genesis_admission,genesis_admission_signature FROM threads WHERE id=?1",
+                [self.thread.as_bytes()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?,row.get(3)?,row.get(4)?)),
+            )?;
+        let signed = SignedGenesis {
+            canonical,
+            signature,
+        };
+        let genesis = signed.verify()?;
+        if genesis.id()? != self.thread {
+            return Err(Error::Invalid(
+                "stored genesis differs from Thread identity".into(),
+            ));
+        }
+        use api::heddle::api::v2alpha1 as wire;
+        let admission = match (admission, admission_signature) {
+            (None, None) => None,
+            (Some(canonical), Some(signature)) => {
+                let signed = crypto::thread_genesis_admission::SignedGenesisAdmission {
+                    canonical,
+                    signature,
+                };
+                let value = signed.verify_signature()?;
+                let trust =
+                    objects::object::thread_replication::integration::TrustedHostedExecutor {
+                        spool: value.spool,
+                        spool_genesis: value.spool_genesis,
+                        executor: value.executor,
+                    };
+                // Receipt trust was independently established at insertion. This
+                // checks stored bindings; transport receivers must pin it anew.
+                value.authorize(&genesis, &creator_authority, &trust)?;
+                Some(wire::SignedRecord {
+                    format: objects::object::thread_genesis_admission::FORMAT.into(),
+                    canonical_record: signed.canonical,
+                    signatures: vec![wire::RecordSignature {
+                        public_key: value.executor.to_vec(),
+                        signature: signed.signature,
+                    }],
+                })
+            }
+            _ => return Err(Error::Invalid("incomplete stored genesis admission".into())),
+        };
+        Ok(wire::ThreadGenesisRecord {
+            genesis: Some(wire::SignedRecord {
+                format: objects::object::thread_replication::GENESIS_FORMAT.into(),
+                canonical_record: signed.canonical,
+                signatures: vec![wire::RecordSignature {
+                    public_key: genesis.creator.to_vec(),
+                    signature: signed.signature,
+                }],
+            }),
+            creator_authority,
+            admission,
+        })
     }
 
     fn connect(&self) -> Result<Connection> {
@@ -291,7 +419,14 @@ impl ThreadReplica {
         self.validate_reference_capture(&operation, store)?;
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let admission = self.receive_in(&tx, signed, &operation, store, compare_frontier, authority_receipt)?;
+        let admission = self.receive_in(
+            &tx,
+            signed,
+            &operation,
+            store,
+            compare_frontier,
+            authority_receipt,
+        )?;
         tx.commit()?;
         self.notify_committed()?;
         Ok(admission)
@@ -331,8 +466,12 @@ impl ThreadReplica {
         }
         self.check_control_command(&tx, &operation, id, compare_frontier)?;
         let source_revision = match &operation.body {
-            ThreadOperationBody::Capture(bytes) => Some(State::decode_current_msgpack(&bytes.state)?.id()),
-            ThreadOperationBody::Integration(_) | ThreadOperationBody::LocalIntegration(_) => {
+            ThreadOperationBody::Capture(bytes) => {
+                Some(State::decode_current_msgpack(&bytes.state)?.id())
+            }
+            ThreadOperationBody::Integration(_)
+            | ThreadOperationBody::HostedImport(_)
+            | ThreadOperationBody::LocalIntegration(_) => {
                 operation.source_state()?.map(|state| state.id())
             }
             ThreadOperationBody::Discussion(_)

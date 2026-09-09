@@ -39,7 +39,7 @@ pub struct Peer {
     replica: ThreadReplica,
     endpoint: EndpointRef,
     facets: BTreeSet<ThreadFacet>,
-    genesis: SignedRecord,
+    genesis: ThreadGenesisRecord,
     authority_home: Option<PathBuf>,
 }
 impl Peer {
@@ -54,16 +54,7 @@ impl Peer {
                 "replication requires an admission facet",
             ));
         }
-        let signed = replica.signed_genesis().map_err(io_error)?;
-        let native = signed.verify().map_err(io_error)?;
-        let genesis = SignedRecord {
-            format: objects::object::thread_replication::GENESIS_FORMAT.into(),
-            canonical_record: signed.canonical,
-            signatures: vec![RecordSignature {
-                public_key: native.creator.to_vec(),
-                signature: signed.signature,
-            }],
-        };
+        let genesis = replica.genesis_record().map_err(io_error)?;
         Ok(Self {
             replica,
             endpoint,

@@ -106,7 +106,84 @@ pub fn verify_control_authority(
     Ok(())
 }
 
+/// Verify first admission of account-owned genesis against the independently
+/// retained account. Local-key ownership uses its explicit local/device trust
+/// path and is never silently attached to this account by this function.
+pub fn verify_genesis_authority(
+    genesis: &objects::object::thread_replication::ThreadGenesis,
+    envelope: &[u8],
+    authority: &crate::device_authority::DeviceAuthority,
+    spool_path: &str,
+    method: &str,
+    now: i64,
+) -> Result<heddleco_capability_verifier::thread_control_authority::VerifiedAuthor> {
+    let objects::object::thread_replication::GenesisOwner::Account(account) = &genesis.owner else {
+        return Err(Error::Invalid(
+            "local-key ownership requires explicit claim before account admission".into(),
+        ));
+    };
+    let owner = crate::verify_account_owner_observation(&authority.owner, now)
+        .map_err(|error| Error::Invalid(error.to_string()))?;
+    heddleco_capability_verifier::thread_control_authority::verify_genesis_with_retained_mint_roots(
+        envelope,
+        heddleco_capability_verifier::thread_control_authority::Context {
+            owner: &owner,
+            account_uuid: account.as_bytes(),
+            publisher: &genesis.creator,
+            agent_id: None,
+            method,
+            spool_path,
+            now,
+        },
+        &authority.mint_roots,
+        |kind| authority.is_revoked(kind),
+    )
+    .map_err(|error| Error::Invalid(error.to_string()))
+}
+
 impl ThreadReplica {
+    /// Audience is an additional ceiling after current capability checks.
+    /// `owned_local_key` is supplied only after verifying device-held key
+    /// possession; neither a remote parameter nor a Spool role proves it.
+    pub fn audience_allows(
+        &self,
+        principal: uuid::Uuid,
+        agent_id: Option<&str>,
+        in_spool_audience: bool,
+        owned_local_key: Option<&[u8; 32]>,
+    ) -> Result<bool> {
+        use objects::object::thread_replication::{GenesisOwner, metadata::Control};
+        let owner = self.genesis()?.owner;
+        let is_owner = match owner {
+            GenesisOwner::Account(owner) => owner == principal && !principal.is_nil(),
+            GenesisOwner::LocalKey(key) => owned_local_key == Some(&key),
+        };
+        if is_owner {
+            return Ok(true);
+        }
+        let candidates = self.metadata_frontier(&Property::Audience)?;
+        if candidates.is_empty() {
+            return Ok(false);
+        }
+        for (_, signed) in candidates {
+            let operation = signed.verify()?;
+            let ThreadOperationBody::Metadata(bytes) = operation.body else {
+                return Err(Error::Invalid(
+                    "audience projection names another facet".into(),
+                ));
+            };
+            let Control::Audience(policy) = ThreadControl::decode(&bytes)?.control else {
+                return Err(Error::Invalid(
+                    "audience projection names another property".into(),
+                ));
+            };
+            if !policy.includes_non_owner(principal, agent_id, in_spool_audience) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Exact durable original-author admission, separate from causal readiness.
     /// Only host-authorized receive writes this bit atomically with signed bytes.
     pub fn control_authority_admitted(&self, signed: &SignedOperation) -> Result<bool> {
@@ -272,6 +349,8 @@ pub(super) fn key(property: &Property) -> String {
         Property::Intent => "intent".into(),
         Property::Lifecycle => "lifecycle".into(),
         Property::Sharing => "sharing".into(),
+        Property::Audience => "audience".into(),
+        Property::Retention => "retention".into(),
         Property::Review(id) => format!("review:{id}"),
     }
 }
@@ -281,6 +360,8 @@ fn parse_key(value: &str) -> Result<Property> {
         "intent" => Property::Intent,
         "lifecycle" => Property::Lifecycle,
         "sharing" => Property::Sharing,
+        "audience" => Property::Audience,
+        "retention" => Property::Retention,
         _ => Property::Review(
             value
                 .strip_prefix("review:")

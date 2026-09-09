@@ -18,6 +18,25 @@ use super::{Admission, Error, Result, ThreadReplica};
 use crate::Repository;
 
 impl Repository {
+    /// Read-only proof that this device still holds the unclaimed owner's key.
+    /// Looking at a Thread must never mint a replacement identity.
+    pub fn holds_native_owner_key(&self, key: &[u8; 32]) -> Result<bool> {
+        if let Some(local) = crate::identity::load_local(
+            &self.heddle_dir().join(crate::identity::LOCAL_IDENTITY_FILE),
+        )? {
+            if Ed25519Signer::from_pem(&local.private_key_pem)?.public_key() == key {
+                return Ok(true);
+            }
+        }
+        if let Some(device) =
+            crate::identity::load_device(&crate::identity::device_identity_path())?
+        {
+            if Ed25519Signer::from_pem(&device.private_key_pem)?.public_key() == key {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     /// Stable local/hosted spool identity, created before the first Thread.
     pub fn native_spool_id(&self) -> Result<uuid::Uuid> {
         let _guard = self.native_identity_lock()?;
@@ -160,6 +179,7 @@ impl Repository {
             name: name.into(),
             intent: intent.into(),
             creator,
+            owner: objects::object::thread_replication::GenesisOwner::LocalKey(creator),
             nonce: Vec::new(),
         };
         let signed = SignedGenesis::sign(&genesis, &signer)?;

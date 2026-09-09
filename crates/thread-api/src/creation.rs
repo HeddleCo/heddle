@@ -22,15 +22,55 @@ impl ThreadCreation {
         Self::from_signed(operation_id, opening::sign_genesis(genesis, signer)?)
     }
 
+    pub fn sign_with_authority(
+        operation_id: impl Into<String>,
+        genesis: &ThreadGenesis,
+        signer: &impl Signer,
+        creator_authority: Vec<u8>,
+    ) -> Result<Self, Error> {
+        Self::from_signed_with_authority(
+            operation_id,
+            opening::sign_genesis(genesis, signer)?,
+            creator_authority,
+        )
+    }
+
     /// Relay an existing creator record without replacing its author or key.
     pub fn from_signed(
         operation_id: impl Into<String>,
         record: SignedRecord,
     ) -> Result<Self, Error> {
+        Self::from_signed_with_authority(operation_id, record, Vec::new())
+    }
+
+    /// Preserve the exact original proof when publishing account-owned work.
+    /// Receiver-side independent authority admission is still mandatory.
+    pub fn from_signed_with_authority(
+        operation_id: impl Into<String>,
+        record: SignedRecord,
+        creator_authority: Vec<u8>,
+    ) -> Result<Self, Error> {
         let operation_id = operation_id.into();
         validate_operation(&operation_id)?;
         let genesis = ThreadGenesis::decode(&record.canonical_record)
             .map_err(|_| Error::Protocol("invalid canonical Thread genesis"))?;
+        use heddle_object_model::object::thread_replication::GenesisOwner;
+        match &genesis.owner {
+            GenesisOwner::LocalKey(_) if !creator_authority.is_empty() => {
+                return Err(Error::Protocol(
+                    "local-key ownership requires an explicit claim, not an account proof on upload",
+                ));
+            }
+            GenesisOwner::Account(_) if creator_authority.is_empty() => {
+                return Err(Error::Protocol(
+                    "account-owned genesis requires original creator authority",
+                ));
+            }
+            _ => {}
+        }
+        if creator_authority.len() > 64 * 1024 {
+            return Err(Error::Protocol("creator authority exceeds bound"));
+        }
         let reference = ThreadRef {
             spool: Some(SpoolRef {
                 id: genesis.spool.clone(),
@@ -49,6 +89,7 @@ impl ThreadCreation {
                 client_operation_id: operation_id,
                 spool: reference.spool.clone(),
                 thread_genesis: Some(record),
+                creator_authority,
             },
             reference,
         })
@@ -59,6 +100,13 @@ impl ThreadCreation {
     }
     pub fn reference(&self) -> &ThreadRef {
         &self.reference
+    }
+    pub fn genesis_record(&self) -> ThreadGenesisRecord {
+        ThreadGenesisRecord {
+            genesis: self.request.thread_genesis.clone(),
+            creator_authority: self.request.creator_authority.clone(),
+            admission: None,
+        }
     }
 }
 

@@ -6,6 +6,8 @@ use crypto::{Signer, thread_operation::SignedOperation};
 pub use heddle_object_model::object::thread_replication::metadata::{
     Control, Destination, EndpointKind, Intent, Lifecycle, Review, ReviewKind, SharedFacet,
     SharingPolicy,
+    audience::{Audience, Invitee},
+    retention::{MaterialRetention, RetentionPolicy},
 };
 use heddle_object_model::object::{
     CollaborationActor, ContentHash,
@@ -280,6 +282,55 @@ impl PreparedControl {
             )),
         }
     }
+    pub fn set_audience(&self) -> Result<wire::SetThreadAudienceRequest, Error> {
+        let Control::Audience(value) = &self.control.control else {
+            return Err(Error::Protocol("control is not audience"));
+        };
+        let (kind, invitees) = match value {
+            Audience::Owner => (wire::thread_audience_policy::Kind::Owner, vec![]),
+            Audience::Spool => (wire::thread_audience_policy::Kind::Spool, vec![]),
+            Audience::Invited(invitees) => (
+                wire::thread_audience_policy::Kind::Invited,
+                invitees
+                    .iter()
+                    .map(|invitee| wire::ThreadInvitee {
+                        principal_id: invitee.principal_id.to_string(),
+                        agent_id: invitee.agent_id.clone().unwrap_or_default(),
+                    })
+                    .collect(),
+            ),
+        };
+        Ok(wire::SetThreadAudienceRequest {
+            client_operation_id: self.control.client_operation_id.to_string(),
+            expected_policy_version: self.property_version.clone(),
+            operation: Some(self.record.clone()),
+            policy: Some(wire::ThreadAudiencePolicy {
+                thread: Some(self.thread.clone()),
+                version: vec![],
+                kind: kind as i32,
+                invitees,
+            }),
+        })
+    }
+    pub fn set_retention(&self) -> Result<wire::SetThreadRetentionRequest, Error> {
+        let Control::Retention(value) = &self.control.control else {
+            return Err(Error::Protocol("control is not retention"));
+        };
+        Ok(wire::SetThreadRetentionRequest {
+            client_operation_id: self.control.client_operation_id.to_string(),
+            expected_policy_version: self.property_version.clone(),
+            operation: Some(self.record.clone()),
+            policy: Some(wire::ThreadRetentionPolicy {
+                thread: Some(self.thread.clone()),
+                version: vec![],
+                source: Some(retention_wire(value.source)),
+                collaboration: Some(retention_wire(value.collaboration)),
+                evidence: Some(retention_wire(value.evidence)),
+                scrubbed_timeline: Some(retention_wire(value.scrubbed_timeline)),
+                raw_transcripts: Some(retention_wire(value.raw_transcripts)),
+            }),
+        })
+    }
     pub fn set_sharing(&self) -> Result<wire::SetThreadSharingRequest, Error> {
         let Control::Sharing(value) = &self.control.control else {
             return Err(Error::Protocol("control is not sharing"));
@@ -326,12 +377,26 @@ impl PreparedControl {
     }
 }
 
+fn retention_wire(value: MaterialRetention) -> wire::MaterialRetention {
+    let (mode, seconds) = match value {
+        MaterialRetention::Discard => (wire::material_retention::Mode::Discard, 0),
+        MaterialRetention::Bounded(seconds) => (wire::material_retention::Mode::Bounded, seconds),
+        MaterialRetention::Retain => (wire::material_retention::Mode::Retain, 0),
+    };
+    wire::MaterialRetention {
+        mode: mode as i32,
+        seconds,
+    }
+}
+
 pub fn property_key(property: &Property) -> (wire::ThreadProperty, String) {
     match property {
         Property::Name => (wire::ThreadProperty::Name, String::new()),
         Property::Intent => (wire::ThreadProperty::Intent, String::new()),
         Property::Lifecycle => (wire::ThreadProperty::Lifecycle, String::new()),
         Property::Sharing => (wire::ThreadProperty::Sharing, String::new()),
+        Property::Audience => (wire::ThreadProperty::Audience, String::new()),
+        Property::Retention => (wire::ThreadProperty::Retention, String::new()),
         Property::Review(id) => (wire::ThreadProperty::Review, id.to_string()),
     }
 }

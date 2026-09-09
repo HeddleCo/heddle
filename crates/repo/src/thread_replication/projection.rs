@@ -48,6 +48,8 @@ impl ThreadReplica {
             Property::Intent,
             Property::Lifecycle,
             Property::Sharing,
+            Property::Audience,
+            Property::Retention,
         ] {
             let key = super::metadata::key(&property);
             let mut statement = tx.prepare("SELECT o.id,o.canonical,o.signature FROM thread_control_heads h JOIN operations o ON o.thread=h.thread AND o.id=h.operation WHERE h.thread=?1 AND h.property=?2 AND o.status=1 AND o.authority_admitted=1 ORDER BY o.id LIMIT 129")?;
@@ -123,6 +125,7 @@ mod tests {
             name: "paging".into(),
             intent: "bounded SQL work".into(),
             creator: signer.public_key().try_into().expect("key"),
+            owner: objects::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
             nonce: vec![1],
         };
         let replica = ThreadReplica::create(

@@ -47,6 +47,7 @@ mod structured_conflict;
 mod structured_conflict_tests;
 mod suggestion_core;
 pub mod thread_authority_admission;
+pub mod thread_genesis_admission;
 mod timeline;
 mod tree;
 mod tree_canonical;

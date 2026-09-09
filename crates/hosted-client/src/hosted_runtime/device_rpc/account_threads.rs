@@ -111,15 +111,30 @@ impl DeviceRpc {
                             .is_some_and(|p| row.parent.is_some_and(|id| p.value == id.as_bytes()))
                 });
             if matches {
-                session.facts(Some(&spool.capability_path))?;
+                let facts = session.facts(Some(&spool.capability_path))?;
                 let replica = ThreadReplica::open(&spool.heddle_dir, row.thread)?;
+                let repository = repo::Repository::open(&spool.root)?;
+                if !super::auth::thread_visible(
+                    &repository,
+                    &replica,
+                    uuid::Uuid::parse_str(&session.principal)?,
+                    facts.delegation_agent_id.as_deref(),
+                )? {
+                    continue;
+                }
                 let mut overview = self.thread_overview_for_spool(spool, &replica, |method| {
                     session.permits_method(method, &spool.capability_path)
                 })?;
                 if overview.name != row.name || overview.lifecycle != row.lifecycle {
                     return Err(super::stream::SnapshotChanged.into());
                 }
-                overview.updated_at=chrono::DateTime::from_timestamp_millis(row.updated).map(|time|prost_types::Timestamp{seconds:time.timestamp(),nanos:time.timestamp_subsec_nanos() as i32});
+                overview.updated_at =
+                    chrono::DateTime::from_timestamp_millis(row.updated).map(|time| {
+                        prost_types::Timestamp {
+                            seconds: time.timestamp(),
+                            nanos: time.timestamp_subsec_nanos() as i32,
+                        }
+                    });
                 output.push(overview);
                 if output.len() == size {
                     more |= index + 1 < candidates.len();

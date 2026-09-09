@@ -110,6 +110,36 @@ pub fn verify_with_retained_mint_roots(
     admitted_mint_roots: &[SignedMintRootAttachment],
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<VerifiedAuthor> {
+    verify_original(bytes, context, admitted_mint_roots, is_revoked, true)
+}
+
+/// Genesis binds creator key and owner, while its agent attribution comes from
+/// the verified original capability. No courier-supplied agent label participates.
+pub fn verify_genesis_with_retained_mint_roots(
+    bytes: &[u8],
+    context: Context<'_>,
+    admitted_mint_roots: &[SignedMintRootAttachment],
+    is_revoked: impl Fn(Revocation<'_>) -> bool,
+) -> Result<VerifiedAuthor> {
+    if !matches!(
+        context.method,
+        "/heddle.api.v2alpha1.ThreadService/StartThread"
+            | "/heddle.api.v2alpha1.IntegrationService/ImportSource"
+    ) {
+        return Err(invalid(
+            "genesis authority requires an exact creation method",
+        ));
+    }
+    verify_original(bytes, context, admitted_mint_roots, is_revoked, false)
+}
+
+fn verify_original(
+    bytes: &[u8],
+    context: Context<'_>,
+    admitted_mint_roots: &[SignedMintRootAttachment],
+    is_revoked: impl Fn(Revocation<'_>) -> bool,
+    bind_agent_attribution: bool,
+) -> Result<VerifiedAuthor> {
     if admitted_mint_roots.len() > 256 {
         return Err(invalid("retained mint certificate inventory exceeds bound"));
     }
@@ -131,6 +161,10 @@ pub fn verify_with_retained_mint_roots(
             | "/heddle.api.v2alpha1.ThreadService/ReviseIntent"
             | "/heddle.api.v2alpha1.ThreadService/ChangeLifecycle"
             | "/heddle.api.v2alpha1.ThreadService/SetSharingPolicy"
+            | "/heddle.api.v2alpha1.ThreadService/SetAudiencePolicy"
+            | "/heddle.api.v2alpha1.ThreadService/SetRetentionPolicy"
+            | "/heddle.api.v2alpha1.ThreadService/StartThread"
+            | "/heddle.api.v2alpha1.IntegrationService/ImportSource"
             | "/heddle.api.v2alpha1.ThreadService/RecordReview"
             | "/heddle.api.v2alpha1.EvidenceService/RecordEvidence"
             | "/heddle.api.v2alpha1.EvidenceService/AcknowledgeCheck"
@@ -237,7 +271,7 @@ pub fn verify_with_retained_mint_roots(
     let agent = facts.delegation_agent_id.clone().or_else(|| {
         (facts.agent_provider.is_some() || facts.agent_model.is_some()).then(|| facts.sid.clone())
     });
-    if agent.as_deref() != context.agent_id {
+    if bind_agent_attribution && agent.as_deref() != context.agent_id {
         return Err(invalid(
             "Thread agent attribution differs from original capability",
         ));

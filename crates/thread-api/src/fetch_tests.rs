@@ -7,6 +7,9 @@ pub(super) fn fixture() -> (FetchOpen, TransferReady, EndpointRef, [Vec<u8>; 2])
     let signer = Ed25519Signer::from_seed(&[61; 32]).expect("test creator");
     let spool_id = uuid::Uuid::from_u128(0x01980000000070008000000000000001);
     let genesis = ThreadGenesis {
+        owner: objects::object::thread_replication::GenesisOwner::LocalKey(
+            signer.public_key().try_into().expect("public key"),
+        ),
         version: 1,
         spool: spool_id.to_string(),
         parent: None,
@@ -78,9 +81,13 @@ pub(super) fn fixture() -> (FetchOpen, TransferReady, EndpointRef, [Vec<u8>; 2])
             repo::sign_spool_owner_genesis(&signer, *spool_id.as_bytes()).expect("owner signature"),
         ),
         ownership: Some(OwnerState::default()),
-        thread_genesis: Some(
-            replication::opening::sign_genesis(&genesis, &signer).expect("creator signature"),
-        ),
+        thread_genesis: Some(ThreadGenesisRecord {
+            genesis: Some(
+                replication::opening::sign_genesis(&genesis, &signer).expect("creator signature"),
+            ),
+            creator_authority: vec![],
+            admission: None,
+        }),
         packs,
         checkpoint: Some(TransferCheckpoint {
             transfer_id: vec![9; 16],

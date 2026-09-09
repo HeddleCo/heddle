@@ -136,6 +136,7 @@ mod tests {
             name: "policy".into(),
             intent: "bounded sync".into(),
             creator: signer.public_key().try_into().expect("key"),
+            owner: objects::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
             nonce: vec![1],
         };
         let replica = ThreadReplica::create(

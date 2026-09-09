@@ -101,9 +101,20 @@ impl DeviceRpc {
                 .get_state(&genesis.base)?
                 .context("Thread base source is not available on this device")?;
             if let Some(parent) = genesis.parent {
-                ThreadReplica::open(&session.spool.heddle_dir, parent)?;
+                let parent = ThreadReplica::open(&session.spool.heddle_dir, parent)?;
+                session.authorize_thread(&repository, &parent)?;
             }
-            ThreadReplica::create(&session.spool.heddle_dir, &signed)?
+            let now = chrono::Utc::now().timestamp();
+            let authority = repo::device_authority::load(&self.home, now)?;
+            ThreadReplica::create_authorized(
+                &session.spool.heddle_dir,
+                &signed,
+                &request.creator_authority,
+                &authority,
+                &session.spool.capability_path,
+                method,
+                now,
+            )?
         } else {
             let (reference, record) = match method.rsplit('/').next().context("method")? {
                 "RenameThread" => {
@@ -120,6 +131,14 @@ impl DeviceRpc {
                 }
                 "SetSharingPolicy" => {
                     let r = SetThreadSharingRequest::decode(body)?;
+                    (r.policy.and_then(|p| p.thread), r.operation)
+                }
+                "SetAudiencePolicy" => {
+                    let r = SetThreadAudienceRequest::decode(body)?;
+                    (r.policy.and_then(|p| p.thread), r.operation)
+                }
+                "SetRetentionPolicy" => {
+                    let r = SetThreadRetentionRequest::decode(body)?;
                     (r.policy.and_then(|p| p.thread), r.operation)
                 }
                 "RecordReview" => {
@@ -195,6 +214,14 @@ impl DeviceRpc {
                         "native sharing retains the same stable Spool identity"
                     );
                 }
+                Control::Audience(_) => ensure!(
+                    SetThreadAudienceRequest::decode(body)? == prepared.set_audience()?,
+                    "audience differs from signed control or observed version"
+                ),
+                Control::Retention(_) => ensure!(
+                    SetThreadRetentionRequest::decode(body)? == prepared.set_retention()?,
+                    "retention differs from signed control or observed version"
+                ),
                 Control::Review(review) => {
                     ensure!(
                         RecordReviewRequest::decode(body)? == prepared.record_review()?,
@@ -269,7 +296,14 @@ impl DeviceRpc {
             }
             replica
         };
-        let response = if method.ends_with("/SetSharingPolicy") || method.ends_with("/RecordReview")
+        let response = if [
+            "/SetSharingPolicy",
+            "/SetAudiencePolicy",
+            "/SetRetentionPolicy",
+            "/RecordReview",
+        ]
+        .iter()
+        .any(|suffix| method.ends_with(suffix))
         {
             MutationResponse {
                 receipt: Some(self.receipt(&command.to_string())),
@@ -371,12 +405,27 @@ impl DeviceRpc {
                 });
                 continue;
             }
+            if *property == Property::Audience && candidates.is_empty() {
+                overview.audience = Some(ThreadAudiencePolicy {
+                    thread: Some(reference.clone()),
+                    version: frontier.version.clone(),
+                    kind: thread_audience_policy::Kind::Owner as i32,
+                    ..Default::default()
+                });
+            }
             if let Some((_, signed)) = candidates.first() {
                 let operation = signed.verify()?;
                 let ThreadOperationBody::Metadata(bytes) = operation.body else {
                     bail!("field index names another facet");
                 };
                 let control = ThreadControl::decode(&bytes)?;
+                let prepared = PreparedControl {
+                    record: signed_record(signed)?,
+                    control: control.clone(),
+                    thread: reference.clone(),
+                    property_version: frontier.version.clone(),
+                    thread_version: Vec::new(),
+                };
                 match control.control {
                     Control::Name(name) => overview.name = name,
                     Control::Intent(intent) => {
@@ -399,6 +448,18 @@ impl DeviceRpc {
                         } as i32
                     }
                     Control::Sharing(_) => {}
+                    Control::Audience(_) => {
+                        overview.audience = prepared.set_audience()?.policy;
+                        if let Some(policy) = &mut overview.audience {
+                            policy.version = frontier.version.clone();
+                        }
+                    }
+                    Control::Retention(_) => {
+                        overview.retention = prepared.set_retention()?.policy;
+                        if let Some(policy) = &mut overview.retention {
+                            policy.version = frontier.version.clone();
+                        }
+                    }
                     Control::Review(_) => bail!("overview singleton index includes review"),
                 }
             }
@@ -412,6 +473,8 @@ impl DeviceRpc {
             (Property::Intent, "ReviseIntent"),
             (Property::Lifecycle, "ChangeLifecycle"),
             (Property::Sharing, "SetSharingPolicy"),
+            (Property::Audience, "SetAudiencePolicy"),
+            (Property::Retention, "SetRetentionPolicy"),
         ] {
             let (kind, _) = thread_api::thread_control::property_key(&property);
             let frontier = overview

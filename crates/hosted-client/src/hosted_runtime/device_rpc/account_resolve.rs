@@ -56,11 +56,27 @@ impl DeviceRpc {
                                                     "Thread identity must contain32bytes",
                                                 )?,
                                             );
-                                            repo::thread_replication::ThreadReplica::open(
-                                                &record.registration.heddle_dir,
-                                                hash,
-                                            )
-                                            .is_ok()
+                                            if let Ok(replica) =
+                                                repo::thread_replication::ThreadReplica::open(
+                                                    &record.registration.heddle_dir,
+                                                    hash,
+                                                )
+                                            {
+                                                let facts = session.facts(Some(
+                                                    &record.registration.capability_path,
+                                                ))?;
+                                                let repository = repo::Repository::open(
+                                                    &record.registration.root,
+                                                )?;
+                                                super::auth::thread_visible(
+                                                    &repository,
+                                                    &replica,
+                                                    uuid::Uuid::parse_str(&session.principal)?,
+                                                    facts.delegation_agent_id.as_deref(),
+                                                )?
+                                            } else {
+                                                false
+                                            }
                                         }
                                         _ => false,
                                     };
@@ -90,10 +106,27 @@ impl DeviceRpc {
                                     Some(&cursor),
                                     2,
                                 )?;
-                                let matches: Vec<_> = rows
-                                    .into_iter()
-                                    .filter(|r| r.name == selector.name)
-                                    .collect();
+                                let facts =
+                                    session.facts(Some(&record.registration.capability_path))?;
+                                let repository = repo::Repository::open(&record.registration.root)?;
+                                let mut matches = Vec::new();
+                                for row in rows {
+                                    if row.name != selector.name {
+                                        continue;
+                                    }
+                                    let replica = repo::thread_replication::ThreadReplica::open(
+                                        &record.registration.heddle_dir,
+                                        row.thread,
+                                    )?;
+                                    if super::auth::thread_visible(
+                                        &repository,
+                                        &replica,
+                                        uuid::Uuid::parse_str(&session.principal)?,
+                                        facts.delegation_agent_id.as_deref(),
+                                    )? {
+                                        matches.push(row);
+                                    }
+                                }
                                 if matches.len() == 1 {
                                     resource = Some(EntityRef {
                                         entity: Some(entity_ref::Entity::Thread(ThreadRef {

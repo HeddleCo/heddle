@@ -290,7 +290,7 @@ fn reject_insecure_identity(path: &Path) -> std::io::Result<()> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))
 }
 
-fn load_local(path: &Path) -> std::io::Result<Option<LocalIdentity>> {
+pub(crate) fn load_local(path: &Path) -> std::io::Result<Option<LocalIdentity>> {
     // Refuse an exposed private key before reading its bytes — fail closed
     // rather than sign with a key any local user could have copied.
     reject_insecure_identity(path)?;

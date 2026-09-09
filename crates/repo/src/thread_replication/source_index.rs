@@ -6,8 +6,11 @@ use rusqlite::Transaction;
 use super::{Error, Result, hash};
 
 pub(super) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS thread_source_bases(thread BLOB PRIMARY KEY,revision BLOB NOT NULL);
+CREATE INDEX IF NOT EXISTS thread_source_bases_revision ON thread_source_bases(revision,thread);
 CREATE TABLE IF NOT EXISTS thread_source_revisions(
  thread BLOB NOT NULL,revision BLOB NOT NULL,PRIMARY KEY(thread,revision));
+CREATE INDEX IF NOT EXISTS thread_source_revisions_revision ON thread_source_revisions(revision,thread);
 CREATE TABLE IF NOT EXISTS thread_source_counts(
  thread BLOB PRIMARY KEY, count INTEGER NOT NULL CHECK(count>=0));
 CREATE TABLE IF NOT EXISTS thread_source_heads(
@@ -106,6 +109,7 @@ mod tests {
             name: "indexed".into(),
             intent: "bounded summary".into(),
             creator: signer.public_key().try_into().expect("key"),
+            owner: objects::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
             nonce: vec![1; 16],
         };
         let replica = super::super::ThreadReplica::create(
@@ -289,5 +293,17 @@ mod tests {
                 .to_string()
                 .contains("source frontier exceeds")
         );
+    }
+}
+
+impl super::ThreadReplica {
+    /// Bounded reverse lookup for exact source reads. Candidate membership is
+    /// evidence only; the caller must authorize each owning Thread separately.
+    pub fn source_thread_candidates(directory:&std::path::Path,revision:StateId,after:Option<ContentHash>,limit:usize)->Result<Vec<ContentHash>> {
+        if !(1..=1024).contains(&limit){return Err(Error::Invalid("source candidate page must be 1..1024".into()))}
+        let connection=crate::local_metadata::open(directory)?;
+        let mut statement=connection.prepare("SELECT thread FROM thread_source_bases WHERE revision=?1 AND (?2 IS NULL OR thread>?2) UNION SELECT thread FROM thread_source_revisions WHERE revision=?1 AND (?2 IS NULL OR thread>?2) ORDER BY thread LIMIT ?3")?;
+        let rows=statement.query_map(rusqlite::params![revision.as_bytes(),after.map(|id|id.as_bytes().to_vec()),limit as i64],|row|row.get::<_,Vec<u8>>(0))?;
+        rows.map(|row|super::hash(&row?)).collect()
     }
 }

@@ -97,10 +97,11 @@ pub fn accept(
     let genesis = open
         .thread_genesis
         .as_ref()
-        .map(|record| verify_genesis(record, thread))
+        .map(|record| verify_genesis_record(record, thread))
         .transpose()?;
     Ok(AcceptedOpening {
         genesis,
+        genesis_record: open.thread_genesis.clone(),
         ready: ReplicationReady {
             thread: Some(thread.clone()),
             endpoint: Some(local.clone()),
@@ -124,6 +125,28 @@ pub fn accept(
 pub struct AcceptedOpening {
     pub ready: ReplicationReady,
     pub genesis: Option<ThreadGenesis>,
+    pub genesis_record: Option<ThreadGenesisRecord>,
+}
+
+/// Structural and original-signature validation only. Account authority and
+/// hosted admission receipts still require independently retained trust.
+pub fn verify_genesis_record(record: &ThreadGenesisRecord, thread: &ThreadRef) -> Result<ThreadGenesis, Error> {
+    let signed = record.genesis.as_ref().ok_or(Error::Protocol("original signed genesis missing"))?;
+    let genesis = verify_genesis(signed, thread)?;
+    if record.creator_authority.len() > 64 * 1024 {
+        return Err(Error::Protocol("creator authority exceeds bound"));
+    }
+    use heddle_object_model::object::thread_replication::GenesisOwner;
+    match genesis.owner {
+        GenesisOwner::LocalKey(_) if !record.creator_authority.is_empty() || record.admission.is_some() => {
+            return Err(Error::Protocol("local-key ownership requires an explicit claim, not an account envelope"));
+        }
+        GenesisOwner::Account(_) if record.creator_authority.is_empty() => {
+            return Err(Error::Protocol("account-owned genesis requires original creator authority"));
+        }
+        _ => {}
+    }
+    Ok(genesis)
 }
 
 pub fn sign_genesis(genesis: &ThreadGenesis, signer: &impl Signer) -> Result<SignedRecord, Error> {
@@ -227,6 +250,9 @@ mod tests {
             name: "original".into(),
             intent: "publish once".into(),
             creator: signer.public_key().try_into().expect("public key"),
+            owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(
+                signer.public_key().try_into().expect("public key"),
+            ),
             nonce: vec![2; 16],
         };
         let canonical = genesis.encode().expect("canonical genesis");
@@ -255,7 +281,11 @@ mod tests {
         };
         let open = ReplicationOpen {
             thread: Some(thread.clone()),
-            thread_genesis: Some(signed),
+            thread_genesis: Some(ThreadGenesisRecord {
+                genesis: Some(signed),
+                creator_authority: vec![],
+                admission: None,
+            }),
             source: Some(EndpointRef {
                 public_key: vec![8; 32],
                 kind: EndpointKind::Device as i32,
@@ -272,7 +302,15 @@ mod tests {
             "first publication must accept the original signed genesis"
         );
         let mut changed = open.clone();
-        changed.thread_genesis.as_mut().expect("genesis").signatures[0].signature[0] ^= 1;
+        changed
+            .thread_genesis
+            .as_mut()
+            .expect("genesis")
+            .genesis
+            .as_mut()
+            .expect("signed genesis")
+            .signatures[0]
+            .signature[0] ^= 1;
         assert!(accept(&changed, &thread, &local, [8; 32], &facets, vec![]).is_err());
         changed = open.clone();
         changed

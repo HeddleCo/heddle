@@ -6,6 +6,9 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod audience;
+pub mod retention;
+
 use super::{MAX_OPERATION_BYTES, ThreadGenesis, ThreadOperation, ThreadOperationBody, invalid};
 use crate::{
     error::Result,
@@ -23,6 +26,8 @@ pub enum Property {
     Intent,
     Lifecycle,
     Sharing,
+    Audience,
+    Retention,
     Review(Uuid),
 }
 
@@ -99,6 +104,8 @@ pub enum Control {
     Intent(Intent),
     Lifecycle(Lifecycle),
     Sharing(SharingPolicy),
+    Audience(audience::Audience),
+    Retention(retention::RetentionPolicy),
     Review(Review),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +130,8 @@ impl ThreadControl {
             Control::Intent(_) => "/heddle.api.v2alpha1.ThreadService/ReviseIntent",
             Control::Lifecycle(_) => "/heddle.api.v2alpha1.ThreadService/ChangeLifecycle",
             Control::Sharing(_) => "/heddle.api.v2alpha1.ThreadService/SetSharingPolicy",
+            Control::Audience(_) => "/heddle.api.v2alpha1.ThreadService/SetAudiencePolicy",
+            Control::Retention(_) => "/heddle.api.v2alpha1.ThreadService/SetRetentionPolicy",
             Control::Review(_) => "/heddle.api.v2alpha1.ThreadService/RecordReview",
         }
     }
@@ -132,6 +141,8 @@ impl ThreadControl {
             Control::Intent(_) => Property::Intent,
             Control::Lifecycle(_) => Property::Lifecycle,
             Control::Sharing(_) => Property::Sharing,
+            Control::Audience(_) => Property::Audience,
+            Control::Retention(_) => Property::Retention,
             Control::Review(review) => Property::Review(review.id),
         }
     }
@@ -172,6 +183,8 @@ impl ThreadControl {
                 }
             }
             Control::Lifecycle(_) => {}
+            Control::Audience(policy) => policy.validate()?,
+            Control::Retention(policy) => policy.validate()?,
             Control::Sharing(policy) => {
                 if policy.destinations.len() > 64 {
                     return Err(invalid("Thread sharing destination bound"));
@@ -289,6 +302,7 @@ mod tests {
                 name: "thread".into(),
                 intent: "intent".into(),
                 creator: [3; 32],
+                owner: super::super::GenesisOwner::Account(Uuid::from_u128(2)),
                 nonce: vec![],
             },
             ThreadControl {

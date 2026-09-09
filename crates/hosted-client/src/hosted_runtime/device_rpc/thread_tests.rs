@@ -23,6 +23,9 @@ pub(super) async fn roundtrip(
     let signer = Ed25519Signer::from_seed(&[71; 32]).expect("owner signer");
     let base = repository.head().expect("head").expect("base");
     let genesis = ThreadGenesis {
+        owner: objects::object::thread_replication::GenesisOwner::Account(uuid::Uuid::from_bytes(
+            [9; 16],
+        )),
         version: 1,
         spool: spool.to_string(),
         parent: None,
@@ -32,7 +35,24 @@ pub(super) async fn roundtrip(
         creator: signer.public_key().try_into().expect("key"),
         nonce: vec![37; 32],
     };
+    let authority = repo::device_authority::load(&device.home, chrono::Utc::now().timestamp())
+        .expect("authority");
+    let token = crate::hosted_runtime::root_mint::mint_agent_root(&[71; 32]).expect("root token");
+    let key = biscuit_verifier::PublicKey::from_bytes(
+        signer.public_key(),
+        biscuit_auth::Algorithm::Ed25519,
+    )
+    .expect("root key");
+    let parsed = biscuit_verifier::parse_token(&token.token, &[key]).expect("token");
+    let proof = repo::thread_replication::metadata::prepare_control_authority(
+        &authority,
+        &signer.public_key().try_into().expect("key"),
+        &parsed,
+        chrono::Utc::now().timestamp(),
+    )
+    .expect("proof");
     let request = StartThreadRequest {
+        creator_authority: proof.clone(),
         client_operation_id: uuid::Uuid::now_v7().to_string(),
         spool: Some(SpoolRef {
             id: spool.to_string(),
@@ -86,23 +106,7 @@ pub(super) async fn roundtrip(
     );
     let first = started.thread.expect("Thread overview");
     assert_eq!(first.name, "commands");
-    assert_eq!(first.metadata_frontiers.len(), 4);
-    let authority = repo::device_authority::load(&device.home, chrono::Utc::now().timestamp())
-        .expect("authority");
-    let token = crate::hosted_runtime::root_mint::mint_agent_root(&[71; 32]).expect("root token");
-    let key = biscuit_verifier::PublicKey::from_bytes(
-        signer.public_key(),
-        biscuit_auth::Algorithm::Ed25519,
-    )
-    .expect("root key");
-    let parsed = biscuit_verifier::parse_token(&token.token, &[key]).expect("token");
-    let proof = repo::thread_replication::metadata::prepare_control_authority(
-        &authority,
-        &signer.public_key().try_into().expect("key"),
-        &parsed,
-        chrono::Utc::now().timestamp(),
-    )
-    .expect("proof");
+    assert_eq!(first.metadata_frontiers.len(), 6);
     let prepare = |view: &ThreadOverview, control| {
         PreparedControl::sign(
             view,

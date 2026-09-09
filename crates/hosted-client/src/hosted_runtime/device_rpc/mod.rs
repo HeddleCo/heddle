@@ -18,6 +18,8 @@ mod auth;
 mod authority_clock;
 #[cfg(test)]
 mod capacity_tests;
+#[cfg(test)]
+mod sibling_tests;
 mod checkout;
 mod collaboration;
 mod collaboration_observe;
@@ -25,6 +27,7 @@ mod collaboration_targets;
 #[cfg(test)]
 mod collaboration_tests;
 mod content;
+mod fetch;
 mod content_detail;
 mod content_summary;
 #[cfg(test)]
@@ -37,6 +40,8 @@ mod observe;
 mod receipt_tests;
 mod replication;
 mod stream;
+mod search;
+mod operations;
 #[cfg(test)]
 mod tests;
 mod thread;
@@ -58,8 +63,10 @@ use api::heddle::api::{
 use iroh::endpoint::SendStream;
 use prost::Message;
 
-pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread"];
+pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread", "/heddle.api.v2alpha1.SyncService/Fetch"];
 pub(crate) const METHODS: &[&str] = &[
+    "/heddle.api.v2alpha1.SearchService/Search",
+    "/heddle.api.v2alpha1.OperationService/ObserveOperations",
     "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration",
     "/heddle.api.v2alpha1.CollaborationService/OpenDiscussion",
     "/heddle.api.v2alpha1.CollaborationService/AppendTurn",
@@ -87,8 +94,11 @@ pub(crate) const METHODS: &[&str] = &[
     "/heddle.api.v2alpha1.ThreadService/ReviseIntent",
     "/heddle.api.v2alpha1.ThreadService/ChangeLifecycle",
     "/heddle.api.v2alpha1.ThreadService/SetSharingPolicy",
+    "/heddle.api.v2alpha1.ThreadService/SetAudiencePolicy",
+    "/heddle.api.v2alpha1.ThreadService/SetRetentionPolicy",
     "/heddle.api.v2alpha1.ThreadService/RecordReview",
     "/heddle.api.v2alpha1.SyncService/ReplicateThread",
+    "/heddle.api.v2alpha1.SyncService/Fetch",
     "/heddle.api.v2alpha1.CheckoutService/ObserveCheckouts",
     "/heddle.api.v2alpha1.CheckoutService/Materialize",
     "/heddle.api.v2alpha1.CheckoutService/ClaimCheckoutWriter",
@@ -111,6 +121,8 @@ pub(crate) struct DeviceRpc {
     account_feed: Arc<Mutex<Weak<account_feed::AccountFeed>>>,
     content_work: Arc<tokio::sync::Semaphore>,
     authority_clock: Arc<authority_clock::AuthorityClock>,
+    #[cfg(test)]
+    thread_snapshots: Arc<std::sync::atomic::AtomicU64>,
 }
 impl DeviceRpc {
     pub fn new(home: PathBuf, endpoint: [u8; 32]) -> Self {
@@ -121,6 +133,8 @@ impl DeviceRpc {
             account_feed: Arc::new(Mutex::new(Weak::new())),
             content_work: Arc::new(tokio::sync::Semaphore::new(8)),
             authority_clock: Arc::new(authority_clock::AuthorityClock::default()),
+            #[cfg(test)]
+            thread_snapshots: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
     }
     pub fn endpoint(&self) -> EndpointRef {
@@ -282,6 +296,8 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
             .policy
             .and_then(|p| p.thread)
             .and_then(|t| t.spool)),
+        "SetAudiencePolicy" => scope!(SetThreadAudienceRequest, |r: SetThreadAudienceRequest| r.policy.and_then(|p| p.thread).and_then(|t| t.spool)),
+        "SetRetentionPolicy" => scope!(SetThreadRetentionRequest, |r: SetThreadRetentionRequest| r.policy.and_then(|p| p.thread).and_then(|t| t.spool)),
         "RecordReview" => scope!(RecordReviewRequest, |r: RecordReviewRequest| r
             .decision
             .and_then(|p| p.thread)

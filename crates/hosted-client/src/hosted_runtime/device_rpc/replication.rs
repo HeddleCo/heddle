@@ -47,6 +47,9 @@ impl DeviceRpc {
         recv: RecvStream,
         budget: &mut super::super::hosted::claim_protocol::CallBudget,
     ) -> Result<()> {
+        if method == "/heddle.api.v2alpha1.SyncService/Fetch" {
+            return self.serve_fetch_stream(method, context, peer, send, recv, budget).await;
+        }
         let descriptor = api::v2::method_descriptor(method).context("unknown device stream")?;
         let (mut writer, mut reader) = thread_api::transport::accepted_stream(
             send,

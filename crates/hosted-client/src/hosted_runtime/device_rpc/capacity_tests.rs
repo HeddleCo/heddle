@@ -75,7 +75,27 @@ pub(super) async fn roundtrip(
             "forty same-Spool views share one filesystem feed"
         );
         let signer = Ed25519Signer::from_seed(&[71; 32]).expect("owner signer");
+        let authority = repo::device_authority::load(&device.home, chrono::Utc::now().timestamp())
+            .expect("authority");
+        let token =
+            crate::hosted_runtime::root_mint::mint_agent_root(&[71; 32]).expect("root token");
+        let key = biscuit_verifier::PublicKey::from_bytes(
+            signer.public_key(),
+            biscuit_auth::Algorithm::Ed25519,
+        )
+        .expect("root key");
+        let parsed = biscuit_verifier::parse_token(&token.token, &[key]).expect("token");
+        let proof = repo::thread_replication::metadata::prepare_control_authority(
+            &authority,
+            &signer.public_key().try_into().expect("key"),
+            &parsed,
+            chrono::Utc::now().timestamp(),
+        )
+        .expect("proof");
         let created = ThreadGenesis {
+            owner: objects::object::thread_replication::GenesisOwner::Account(
+                uuid::Uuid::from_bytes([9; 16]),
+            ),
             version: 1,
             spool: spool.id.clone(),
             parent: None,
@@ -85,11 +105,15 @@ pub(super) async fn roundtrip(
             creator: signer.public_key().try_into().expect("key"),
             nonce: vec![110 + round; 32],
         };
+        let snapshots = device
+            .thread_snapshots
+            .load(std::sync::atomic::Ordering::Relaxed);
         let response = tokio::time::timeout(
             Duration::from_secs(5),
             remote
                 .api
                 .call::<thread_api::rpc::ThreadServiceStartThread>(&StartThreadRequest {
+                    creator_authority: proof.clone(),
                     client_operation_id: uuid::Uuid::now_v7().to_string(),
                     spool: Some(spool.clone()),
                     thread_genesis: Some(
@@ -115,9 +139,80 @@ pub(super) async fn roundtrip(
             .expect("persisted genesis"),
             created
         );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            device
+                .thread_snapshots
+                .load(std::sync::atomic::Ordering::Relaxed),
+            snapshots,
+            "unrelated Thread creation does not rebuild forty overview snapshots"
+        );
         drop(views);
         drained(device, budgets).await;
     }
+    attachment_wakes(remote, device, repository, &reference, budgets).await;
+}
+
+async fn attachment_wakes(
+    remote: &Remote<IrohTransport<Credentials>>,
+    device: &DeviceRpc,
+    repository: &repo::Repository,
+    reference: &ThreadRef,
+    budgets: &(Arc<Semaphore>, Arc<Semaphore>),
+) {
+    use objects::store::ObjectStore as _;
+    let mut view = remote
+        .observe::<thread_api::rpc::ThreadServiceObserveThread>(
+            ObserveThreadRequest {
+                thread: Some(reference.clone()),
+                sections: vec![ThreadSection::Analysis as i32],
+                observe: Some(ObserveOptions {
+                    mode: ObservationMode::Follow as i32,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("attachment view");
+    view.next_commit()
+        .await
+        .expect("initial attachment commit")
+        .expect("snapshot");
+    let before = device
+        .thread_snapshots
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let context = objects::object::Tree::new();
+    let root = repository
+        .store()
+        .put_tree(&context)
+        .expect("empty context tree");
+    repository
+        .store()
+        .put_state_attachment(&objects::object::StateAttachment {
+            state_id: repository.head().expect("head").expect("state"),
+            body: objects::object::StateAttachmentBody::Context(root),
+            attribution: objects::object::Attribution::human(objects::object::Principal::new(
+                "Owner", "",
+            )),
+            created_at: chrono::Utc::now(),
+            supersedes: None,
+        })
+        .expect("attachment-only publication");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while device
+            .thread_snapshots
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == before
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("committed attachment index must wake the selected content view");
+    drop(view);
+    drained(device, budgets).await;
 }
 
 async fn drained(device: &DeviceRpc, budgets: &(Arc<Semaphore>, Arc<Semaphore>)) {

@@ -14,9 +14,11 @@
 //! Completed receipts retain seven days by default; pending reservations require
 //! explicit cancellation and are never expired underneath running work.
 
+pub mod observation;
+
 use std::{
     collections::BTreeSet,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -258,15 +260,19 @@ fn reserve_transaction_id(operation_id: OperationId, verb: &str, request_hash: [
 /// SQLite serializes short reservation transitions across handles/processes.
 /// No transaction remains open while the caller executes its command.
 pub struct OperationDedupStore {
+    change_marker: Option<PathBuf>,
+    namespace: String,
     connection: Mutex<Connection>,
 }
 
 pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("CREATE TABLE operation_receipts (
-      operation_id TEXT PRIMARY KEY, verb TEXT NOT NULL,
+      namespace TEXT NOT NULL DEFAULT '', operation_id TEXT NOT NULL, record_id BLOB UNIQUE CHECK(record_id IS NULL OR length(record_id)=32), verb TEXT NOT NULL,
       request_hash BLOB NOT NULL CHECK(length(request_hash)=32), response BLOB NOT NULL,
       created_at INTEGER NOT NULL, pending INTEGER NOT NULL CHECK(pending IN(0,1)),
-      CHECK(pending=0 OR length(response)=0));
+      PRIMARY KEY(namespace,operation_id), CHECK(pending=0 OR length(response)=0));
+      CREATE INDEX operation_receipts_namespace ON operation_receipts(namespace,created_at,operation_id);
+      CREATE INDEX operation_receipts_namespace_record ON operation_receipts(namespace,record_id);
       CREATE INDEX operation_receipts_completed ON operation_receipts(created_at,operation_id) WHERE pending=0;")
 }
 fn database_error(error: impl std::fmt::Display) -> HeddleError {
@@ -275,10 +281,28 @@ fn database_error(error: impl std::fmt::Display) -> HeddleError {
 impl OperationDedupStore {
     pub fn open(heddle_dir: impl AsRef<Path>) -> Result<Self> {
         Ok(Self {
+            change_marker: Some(
+                heddle_dir
+                    .as_ref()
+                    .join(crate::local_metadata::DATABASE_NAME)
+                    .with_extension("sqlite3.changed"),
+            ),
+            namespace: String::new(),
             connection: Mutex::new(
                 crate::local_metadata::open(heddle_dir.as_ref()).map_err(database_error)?,
             ),
         })
+    }
+    /// RPC callers supply their authenticated stable principal/agent namespace.
+    /// Empty is reserved for ordinary local CLI receipts and is never exposed
+    /// by the device operation observer.
+    pub fn open_scoped(heddle_dir: impl AsRef<Path>, namespace: &str) -> Result<Self> {
+        if namespace.is_empty() || namespace.len() > 1024 || namespace.contains('\0') {
+            return Err(database_error("invalid authenticated operation namespace"));
+        }
+        let mut store = Self::open(heddle_dir)?;
+        store.namespace = namespace.to_owned();
+        Ok(store)
     }
     /// Explicit scope for init/clone receipts, never implicitly selected by a
     /// missing repository. No legacy file is read or written.
@@ -332,8 +356,20 @@ impl OperationDedupStore {
         }
         tx.commit().map_err(database_error)?;
         Ok(Self {
+            change_marker: None,
+            namespace: String::new(),
             connection: Mutex::new(connection),
         })
+    }
+    fn notify_committed(&self) -> Result<()> {
+        if let Some(path) = &self.change_marker {
+            objects::fs_atomic::write_file_atomic_secret(path, uuid::Uuid::now_v7().as_bytes())?;
+        }
+        Ok(())
+    }
+    fn record_key(&self, id: OperationId) -> Option<Vec<u8>> {
+        (!self.namespace.is_empty())
+            .then(|| receipt_record_key(&self.namespace, id).as_bytes().to_vec())
     }
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.connection
@@ -354,14 +390,15 @@ impl OperationDedupStore {
         // Direct expiry of the requested completed key remains correct even if
         // more than a cleanup batch has accumulated since the last command.
         tx.execute(
-            "DELETE FROM operation_receipts WHERE operation_id=?1 AND pending=0 AND created_at<?2",
+            "DELETE FROM operation_receipts WHERE namespace=?3 AND operation_id=?1 AND pending=0 AND created_at<?2",
             params![
                 operation_id.to_string(),
-                now_secs().saturating_sub(DEFAULT_RETENTION_SECS)
+                now_secs().saturating_sub(DEFAULT_RETENTION_SECS),
+                self.namespace
             ],
         )
         .map_err(database_error)?;
-        let prior = entry(&tx, operation_id)?;
+        let prior = entry(&tx, &self.namespace, operation_id)?;
         let outcome = match prior {
             Some(prior) if prior.verb != verb || prior.request_hash != request_hash => {
                 DedupOutcome::Conflict
@@ -372,12 +409,14 @@ impl OperationDedupStore {
             },
             None => {
                 tx.execute(
-                    "INSERT INTO operation_receipts VALUES(?1,?2,?3,x'',?4,1)",
+                    "INSERT INTO operation_receipts(namespace,operation_id,record_id,verb,request_hash,response,created_at,pending) VALUES(?5,?1,?6,?2,?3,x'',?4,1)",
                     params![
                         operation_id.to_string(),
                         verb,
                         request_hash.as_slice(),
-                        now_secs()
+                        now_secs(),
+                        self.namespace,
+                        self.record_key(operation_id)
                     ],
                 )
                 .map_err(database_error)?;
@@ -385,6 +424,10 @@ impl OperationDedupStore {
             }
         };
         tx.commit().map_err(database_error)?;
+        drop(connection);
+        if outcome == DedupOutcome::Reserved {
+            self.notify_committed()?;
+        }
         Ok(outcome)
     }
     /// Finalization preserves the first completed response and timestamp.
@@ -400,7 +443,7 @@ impl OperationDedupStore {
         let tx = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(database_error)?;
-        if let Some(prior) = entry(&tx, operation_id)? {
+        if let Some(prior) = entry(&tx, &self.namespace, operation_id)? {
             if prior.verb != verb
                 || prior.request_hash != request_hash
                 || (!prior.pending && prior.response != response)
@@ -412,44 +455,58 @@ impl OperationDedupStore {
             if !prior.pending {
                 return Ok(());
             }
-            tx.execute("UPDATE operation_receipts SET response=?2,pending=0,created_at=?3 WHERE operation_id=?1 AND pending=1",params![operation_id.to_string(),response,now_secs()]).map_err(database_error)?;
+            tx.execute("UPDATE operation_receipts SET response=?2,pending=0,created_at=?3 WHERE namespace=?4 AND operation_id=?1 AND pending=1",params![operation_id.to_string(),response,now_secs(),self.namespace]).map_err(database_error)?;
         } else {
             tx.execute(
-                "INSERT INTO operation_receipts VALUES(?1,?2,?3,?4,?5,0)",
+                "INSERT INTO operation_receipts(namespace,operation_id,record_id,verb,request_hash,response,created_at,pending) VALUES(?6,?1,?7,?2,?3,?4,?5,0)",
                 params![
                     operation_id.to_string(),
                     verb,
                     request_hash.as_slice(),
                     response,
-                    now_secs()
+                    now_secs(),
+                    self.namespace,
+                    self.record_key(operation_id)
                 ],
             )
             .map_err(database_error)?;
         }
         prune(&tx, now_secs().saturating_sub(DEFAULT_RETENTION_SECS))?;
         tx.commit().map_err(database_error)?;
+        drop(connection);
+        self.notify_committed()?;
         Ok(())
     }
     pub fn cancel(&self, operation_id: OperationId, verb: &str) -> Result<()> {
-        self.lock()?
+        let changed = self.lock()?
             .execute(
-                "DELETE FROM operation_receipts WHERE operation_id=?1 AND verb=?2 AND pending=1",
-                params![operation_id.to_string(), verb],
+                "DELETE FROM operation_receipts WHERE namespace=?3 AND operation_id=?1 AND verb=?2 AND pending=1",
+                params![operation_id.to_string(), verb, self.namespace],
             )
             .map_err(database_error)?;
+        if changed > 0 {
+            self.notify_committed()?;
+        }
         Ok(())
     }
     /// One bounded cleanup batch; pending commands never expire automatically.
     pub fn compact(&self, retention_secs: i64) -> Result<usize> {
         let connection = self.lock()?;
-        prune(&connection, now_secs().saturating_sub(retention_secs))
+        let changed = prune(&connection, now_secs().saturating_sub(retention_secs))?;
+        drop(connection);
+        if changed > 0 {
+            self.notify_committed()?;
+        }
+        Ok(changed)
     }
     pub fn len(&self) -> Result<usize> {
         let count: i64 = self
             .lock()?
-            .query_row("SELECT COUNT(*) FROM operation_receipts", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM operation_receipts WHERE namespace=?1",
+                [&self.namespace],
+                |row| row.get(0),
+            )
             .map_err(database_error)?;
         usize::try_from(count).map_err(database_error)
     }
@@ -462,18 +519,32 @@ impl OperationDedupStore {
         _verb: &str,
     ) -> Result<Option<DedupConflictMetadata>> {
         let connection = self.lock()?;
-        connection.query_row("SELECT verb,request_hash,created_at,pending FROM operation_receipts WHERE operation_id=?1 AND (pending=1 OR created_at>=?2)",params![operation_id.to_string(),now_secs().saturating_sub(DEFAULT_RETENTION_SECS)],|row| Ok(DedupConflictMetadata {
+        connection.query_row("SELECT verb,request_hash,created_at,pending FROM operation_receipts WHERE namespace=?3 AND operation_id=?1 AND (pending=1 OR created_at>=?2)",params![operation_id.to_string(),now_secs().saturating_sub(DEFAULT_RETENTION_SECS),self.namespace],|row| Ok(DedupConflictMetadata {
             operation_id,verb:row.get(0)?,request_hash:row.get(1)?,created_at_secs:row.get(2)?,pending:row.get(3)?,
         })).optional().map_err(database_error)
     }
 }
-fn entry(connection: &Connection, operation_id: OperationId) -> Result<Option<DedupEntry>> {
-    connection.query_row("SELECT verb,request_hash,response,created_at,pending FROM operation_receipts WHERE operation_id=?1",[operation_id.to_string()],|row| Ok(DedupEntry {
+fn entry(
+    connection: &Connection,
+    namespace: &str,
+    operation_id: OperationId,
+) -> Result<Option<DedupEntry>> {
+    connection.query_row("SELECT verb,request_hash,response,created_at,pending FROM operation_receipts WHERE namespace=?2 AND operation_id=?1",params![operation_id.to_string(),namespace],|row| Ok(DedupEntry {
         operation_id,verb:row.get(0)?,request_hash:row.get(1)?,response:row.get(2)?,created_at_secs:row.get(3)?,pending:row.get(4)?,
     })).optional().map_err(database_error)
 }
 fn prune(connection: &Connection, cutoff: i64) -> Result<usize> {
-    connection.execute("DELETE FROM operation_receipts WHERE operation_id IN (SELECT operation_id FROM operation_receipts WHERE pending=0 AND created_at<?1 ORDER BY created_at,operation_id LIMIT ?2)",params![cutoff,COMPACTION_BATCH as i64]).map_err(database_error)
+    connection.execute("DELETE FROM operation_receipts WHERE (namespace,operation_id) IN (SELECT namespace,operation_id FROM operation_receipts WHERE pending=0 AND created_at<?1 ORDER BY created_at,operation_id LIMIT ?2)",params![cutoff,COMPACTION_BATCH as i64]).map_err(database_error)
+}
+
+/// Record references remain globally unambiguous even when agents independently
+/// choose the same client operation UUID. Possession of this ID is not authority.
+pub fn receipt_record_key(namespace: &str, id: OperationId) -> objects::object::ContentHash {
+    let mut hash = blake3::Hasher::new_derive_key("heddle-device-operation-record-v2");
+    hash.update(&(namespace.len() as u64).to_be_bytes());
+    hash.update(namespace.as_bytes());
+    hash.update(id.as_bytes());
+    objects::object::ContentHash::from_bytes(*hash.finalize().as_bytes())
 }
 
 fn now_secs() -> i64 {
@@ -544,6 +615,145 @@ mod tests {
                 self.hash,
             ))?;
             Err(HeddleError::Config("outer transaction aborted".to_string()))
+        }
+    }
+
+    #[test]
+    fn authenticated_namespaces_isolate_replay_pending_and_cleanup() {
+        let (directory, cli) = make_store();
+        let metadata = directory.path().join(".heddle");
+        let first = OperationDedupStore::open_scoped(&metadata, "principal-a/agent-a")
+            .expect("first namespace");
+        let second = OperationDedupStore::open_scoped(&metadata, "principal-a/agent-b")
+            .expect("second namespace");
+        let id = OperationId::new();
+        assert!(matches!(
+            first
+                .reserve(id, "capture", [1; 32])
+                .expect("first reserve"),
+            DedupOutcome::Reserved
+        ));
+        assert!(
+            matches!(
+                second
+                    .reserve(id, "capture", [2; 32])
+                    .expect("second reserve"),
+                DedupOutcome::Reserved
+            ),
+            "same caller operation ID may exist in independent authenticated namespaces"
+        );
+        assert!(matches!(
+            cli.reserve(id, "capture", [3; 32])
+                .expect("local CLI reserve"),
+            DedupOutcome::Reserved
+        ));
+        first
+            .record(id, "capture", [1; 32], b"first response".to_vec())
+            .expect("first response");
+        assert!(
+            matches!(
+                second
+                    .reserve(id, "capture", [2; 32])
+                    .expect("second remains pending"),
+                DedupOutcome::InFlight
+            ),
+            "another namespace must never receive completed response"
+        );
+        assert!(
+            matches!(first.reserve(id,"capture",[1;32]).expect("first replay"), DedupOutcome::Replay {response} if response==b"first response")
+        );
+        first
+            .lock()
+            .expect("database")
+            .execute(
+                "UPDATE operation_receipts SET created_at=1 WHERE namespace=?1",
+                ["principal-a/agent-a"],
+            )
+            .expect("age completed first command");
+        first
+            .compact(DEFAULT_RETENTION_SECS)
+            .expect("bounded cleanup");
+        assert_eq!(first.len().expect("first count"), 0);
+        assert_eq!(
+            second.len().expect("second count"),
+            1,
+            "cleanup cannot delete a pending command sharing another namespace's expired ID"
+        );
+        assert_eq!(cli.len().expect("CLI count"), 1);
+        let visible = observation::page(&metadata, "principal-a/agent-b", &[id], &[], None, 10)
+            .expect("scoped metadata");
+        assert_eq!(visible.len(), 1);
+        assert_eq!(
+            visible[0].record,
+            receipt_record_key("principal-a/agent-b", id)
+        );
+        assert!(visible[0].pending);
+        assert!(
+            observation::page(
+                &metadata,
+                "principal-a/agent-a",
+                &[],
+                &[visible[0].record],
+                None,
+                10
+            )
+            .expect("foreign ref lookup")
+            .is_empty(),
+            "record references do not broaden caller namespace"
+        );
+        assert!(
+            observation::page(&metadata, "", &[], &[], None, 10).is_err(),
+            "device view cannot expose CLI namespace"
+        );
+        second
+            .cancel(id, "capture")
+            .expect("cancel second reservation");
+        assert_eq!(second.len().expect("second cleared"), 0);
+        assert_eq!(
+            cli.len().expect("CLI untouched"),
+            1,
+            "cancel stays in exact authenticated namespace"
+        );
+    }
+
+    #[test]
+    fn receipt_notifications_follow_committed_mutations_only() {
+        let (directory, _) = make_store();
+        let metadata = directory.path().join(".heddle");
+        let store =
+            OperationDedupStore::open_scoped(&metadata, "owner/agent").expect("scoped store");
+        let marker = metadata.join(crate::local_metadata::CHANGE_MARKER_NAME);
+        let initial = observation::generation(&metadata).expect("initial cursor");
+        for _ in 0..2 {
+            let id = OperationId::new();
+            store.reserve(id, "capture", [1; 32]).expect("reserve");
+            let reserved = std::fs::read(&marker).expect("reservation committed wake");
+            let cursor = observation::generation(&metadata).expect("reservation cursor");
+            assert_ne!(
+                cursor, initial,
+                "reservation and durable cursor commit together"
+            );
+            assert_eq!(
+                store.reserve(id, "capture", [1; 32]).expect("retry"),
+                DedupOutcome::InFlight
+            );
+            assert_eq!(
+                std::fs::read(&marker).expect("same marker"),
+                reserved,
+                "read-only replay cannot wake observers"
+            );
+            store
+                .record(id, "capture", [1; 32], vec![1])
+                .expect("complete");
+            assert_ne!(
+                std::fs::read(&marker).expect("completion wake"),
+                reserved,
+                "completion must notify committed observers"
+            );
+            assert_ne!(
+                observation::generation(&metadata).expect("completion cursor"),
+                cursor
+            );
         }
     }
 
@@ -856,7 +1066,7 @@ mod tests {
             .record(completed, "capture", hash, b"exact".to_vec())
             .expect("exact retry");
         assert_eq!(
-            entry(&store.lock().expect("database"), completed)
+            entry(&store.lock().expect("database"), "", completed)
                 .expect("stored receipt")
                 .expect("receipt")
                 .created_at_secs,
@@ -874,7 +1084,7 @@ mod tests {
         let tx = connection.transaction().expect("batch");
         for index in 0..COMPACTION_BATCH + 3 {
             tx.execute(
-                "INSERT INTO operation_receipts VALUES(?1,'capture',zeroblob(32),x'',1,0)",
+                "INSERT INTO operation_receipts(operation_id,verb,request_hash,response,created_at,pending) VALUES(?1,'capture',zeroblob(32),x'',1,0)",
                 [format!("batch-{index}")],
             )
             .expect("old completion");

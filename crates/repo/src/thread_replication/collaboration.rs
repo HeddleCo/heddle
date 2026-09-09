@@ -51,6 +51,7 @@ pub fn records(operation: &ThreadOperation) -> Result<Vec<Record>> {
     Ok(records)
 }
 pub(super) fn index_operation(tx: &Transaction<'_>, operation: &ThreadOperation) -> Result<()> {
+    super::collaboration_search::index(tx, operation)?;
     use objects::object::CollaborationOperationBodyV1 as Body;
     let (is_append, is_open, inner, turns) =
         if let ThreadOperationBody::Discussion(bytes) = &operation.body {
@@ -110,6 +111,7 @@ pub enum Precondition {
     Append,
 }
 pub struct Command<'a> {
+    pub namespace: String,
     pub id: uuid::Uuid,
     pub method: &'a str,
     pub request_hash: [u8; 32],
@@ -129,6 +131,9 @@ impl ThreadReplica {
         authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
         response: impl FnOnce(&[(Record, Heads)]) -> Result<Vec<u8>>,
     ) -> Result<Vec<u8>> {
+        if command.namespace.is_empty() || command.namespace.len() > 1024 {
+            return Err(invalid("authenticated command namespace required"));
+        }
         let operation = signed.verify()?;
         if operation.thread != self.thread
             || !matches!(
@@ -147,7 +152,7 @@ impl ThreadReplica {
         }
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let prior:Option<(String,Vec<u8>,Vec<u8>,bool)>=tx.query_row("SELECT verb,request_hash,response,pending FROM operation_receipts WHERE operation_id=?1",[command.id.to_string()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+        let prior:Option<(String,Vec<u8>,Vec<u8>,bool)>=tx.query_row("SELECT verb,request_hash,response,pending FROM operation_receipts WHERE namespace=?2 AND operation_id=?1",params![command.id.to_string(),command.namespace],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
         if let Some((method, digest, response, pending)) = prior {
             if method != command.method || digest != command.request_hash {
                 return Err(invalid("operation ID names a different command"));
@@ -190,7 +195,7 @@ impl ThreadReplica {
             .map(|record| Ok((record.clone(), heads(&tx, self.thread, &record)?)))
             .collect::<Result<Vec<_>>>()?;
         let response = response(&after)?;
-        tx.execute("INSERT INTO operation_receipts(operation_id,verb,request_hash,response,created_at,pending) VALUES(?1,?2,?3,?4,?5,0)",params![command.id.to_string(),command.method,command.request_hash.as_slice(),response,chrono::Utc::now().timestamp()])?;
+        tx.execute("INSERT INTO operation_receipts(namespace,operation_id,record_id,verb,request_hash,response,created_at,pending) VALUES(?6,?1,?7,?2,?3,?4,?5,0)",params![command.id.to_string(),command.method,command.request_hash.as_slice(),response,chrono::Utc::now().timestamp(),command.namespace,crate::operation_dedup::receipt_record_key(&command.namespace,objects::object::OperationId::from_uuid(command.id)).as_bytes().as_slice()])?;
         tx.commit()?;
         self.notify_committed()?;
         Ok(response)

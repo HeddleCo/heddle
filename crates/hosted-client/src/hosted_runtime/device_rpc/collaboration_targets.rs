@@ -35,6 +35,18 @@ pub(super) fn project(
                 coverage = Coverage::Unavailable;
                 return Ok(());
             }
+            if let Some(thread) = selected.thread {
+                let target_replica = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
+                if !super::auth::thread_visible(
+                    &repository,
+                    &target_replica,
+                    uuid::Uuid::parse_str(&session.principal)?,
+                    session.agent_id.as_deref(),
+                )? {
+                    coverage = Coverage::Unavailable;
+                    return Ok(());
+                }
+            }
             // Reference indirection cannot authorize another resource. This endpoint
             // has admitted only this exact locally owned Spool for the request.
             ensure!(
