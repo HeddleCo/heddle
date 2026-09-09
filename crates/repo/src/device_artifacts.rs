@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v2alpha1::{RecordRef, RunArtifact, RunPolicy, RunRecord};
+use objects::object::thread_replication::metadata::retention::MaterialRetention;
 use prost::Message;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -120,9 +121,9 @@ impl ArtifactStore {
         if count >= MAX_RUN_ARTIFACTS as i64 {
             bail!("Run artifact count exceeds observation budget");
         }
-        let expires = now
-            .checked_add(i64::try_from(duration)?)
-            .context("retention expiry overflow")?;
+        let expires = MaterialRetention::Bounded(duration)
+            .deadline(now)?
+            .context("raw artifact requires a bounded retention deadline")?;
         let id = uuid::Uuid::now_v7().to_string();
         let mut record = RunArtifact {
             r#ref: Some(RecordRef {

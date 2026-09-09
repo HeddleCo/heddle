@@ -5,6 +5,40 @@ A checkbox means the complete production path and its relevant verification are
 finished. A model/helper, advertised method, or compile-only result is insufficient.
 No legacy adapter or migration bridge is part of the cutover.
 
+## Immediate core implementation order
+
+The current focus is ownership/delegation, source sync, hosted RPCs, and
+privacy/retention. Client polish and final-stack profiling follow this core.
+
+- [ ] Extend the existing signed source-author model to local integration;
+  delegated landing must use the same original-author verification as capture.
+- [ ] Implement explicit signed ownership claim without changing genesis or
+  Thread ID; current effective ownership must govern fresh admission and audience.
+- [ ] Complete receipt-aware source intake on both endpoints, including live
+  historical Account admission and independent original-author audience checks.
+- [ ] Consolidate hosted Thread-scoped admission so an explicit Thread invite
+  can work without granting access to its whole Spool.
+- [ ] Reuse that admission for source, context, discussions, evidence, search,
+  and derived artifacts. Apply audience filtering before counts and pagination.
+- [ ] Derived artifacts retain all source/base Thread dependencies; access
+  requires every dependency, including after policy changes or deletion.
+- [ ] Reuse committed authority invalidation for finite transfers and observers;
+  no separate per-frame SQL authorization loop for each material type.
+- [ ] Give retained material one shared lifetime calculation: immutable origin
+  time, restrictive concurrent-policy resolution, and no TTL extension on replay.
+  Raw-material disclosure remains explicit and separate from ordinary read access.
+- [ ] Complete native remote observation/configuration/synchronization using
+  independently identified remotes with explicit Thread targets, and reuse the
+  import admission/finalization machinery rather than a second worker protocol.
+- [ ] Complete hosted analysis/search/artifact/provider reads through the shared
+  access and retention boundaries, with actual producers and bounded work.
+
+Reuse existing ThreadControlAuthority, SourceAuthor, retained admission receipts,
+Thread audience projections, ReadScope/VisibleState, and committed change dispatch.
+Do not duplicate their policy interpretation in individual RPC handlers. Local
+SQLite and hosted PostgreSQL projections must agree on shared policy fixtures;
+sharing semantics does not require coupling their storage implementations.
+
 ## Policy invariants — clarified 2026-09-09
 
 Privacy describes audience, independently of storage destination. Sync policy
@@ -24,6 +58,11 @@ while every device is offline.
 
 ## Current verification checkpoint — 2026-09-09
 
+- Shared material retention intersection/deadline calculation: two model tests
+  and three existing artifact retry/expiry/recovery tests pass. Choosing the
+  longer concurrent lifetime failed the restrictive-deadline assertion; exact
+  restoration passed. Device artifacts use the shared deadline calculation;
+  full Thread retention enforcement across other producers remains pending.
 - Hosted audience SQL: owner-only default, exact agent invites, Spool membership
   denial, explicit Spool sharing and conflict intersection passed against local
   PostgreSQL. Removing the restrictive-conflict check failed the exact assertion;
@@ -55,6 +94,16 @@ while every device is offline.
   client and Tapestry typechecks pass against this schema.
 - User confirmed: local keys remain owners until explicit signed claim. Claim RPC,
   durable ownership transition and client flow are not implemented yet.
+- Source captures now sign their explicit local-key or account author, including
+  the account authority envelope. Model tests (18) and signature/admission tests
+  (3) pass; omitting the envelope digest comparison failed the intended assertion
+  and restoring it passed. Producer and source-transfer integration is in progress.
+- Native import acceptance passed ordinary credential expiry after admission and
+  rejected a separate queued import after explicit root revocation, publishing no
+  source for the rejected job. This uses staged local provider output; external Git
+  fetching and full-stack worker acceptance remain pending. The server composition
+  now supervises the import worker and passes `cargo check --locked -p weft-server
+  --features postgres,semantic`; this is not the release/install acceptance gate.
 
 ## Completed foundation
 
