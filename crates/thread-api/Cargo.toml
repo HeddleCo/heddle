@@ -52,6 +52,7 @@ blake3.workspace = true
 hex = { workspace = true, optional = true }
 iroh = { package = "heddleco-iroh", version = "=0.1.0", default-features = false, features = ["tls-ring"], optional = true }
 prost = "=0.14.1"
+prost-types.workspace = true
 thiserror = "=2.0.18"
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true, optional = true }

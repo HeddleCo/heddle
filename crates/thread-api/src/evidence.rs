@@ -1,12 +1,78 @@
 //! Typed immutable evidence codecs shared by hosted and device callers.
 //! Signature verification does not establish current account or Spool authority.
 use crypto::{Ed25519Signer, Signer};
-use heddle_object_model::object::check_evidence::{ACKNOWLEDGEMENT_FORMAT, EVIDENCE_FORMAT};
 pub use heddle_object_model::object::check_evidence::{
     CheckAcknowledgement, CheckAuthor, CheckEvidence, CheckOutcome,
 };
+use heddle_object_model::object::{
+    ContentHash,
+    check_evidence::{ACKNOWLEDGEMENT_FORMAT, EVIDENCE_FORMAT},
+};
+use prost::Message;
 
 use crate::{contract as wire, transport::Error};
+
+/// Stable version of the exact signed receipt, including its original signature.
+pub fn record_version(record: &wire::SignedRecord) -> ContentHash {
+    ContentHash::compute_typed("heddle-signed-check-receipt-v1", &record.encode_to_vec())
+}
+
+/// Derive the complete query/display surface from the verified original.
+/// Current authority and visibility remain the receiving endpoint's responsibility.
+pub fn project(record: &wire::SignedRecord) -> Result<wire::EvidenceRecord, Error> {
+    let value = verify_evidence(record)?;
+    let spool = wire::SpoolRef {
+        id: value.spool.to_string(),
+    };
+    Ok(wire::EvidenceRecord {
+        r#ref: Some(wire::RecordRef {
+            spool: Some(spool.clone()),
+            id: value.id.to_string(),
+        }),
+        version: record_version(record).as_bytes().to_vec(),
+        revision: Some(wire::RevisionRef {
+            spool: Some(spool),
+            revision: Some(wire::revision_ref::Revision::State(
+                api::heddle::api::v1alpha1::StateId {
+                    value: value.revision.as_bytes().to_vec(),
+                },
+            )),
+        }),
+        check: value.check.clone(),
+        evidence: Some(record.clone()),
+        coverage: wire::Coverage::Complete as i32,
+        summary: Some(summary(&value)),
+    })
+}
+
+/// Presentation only: call `verify_evidence` before projecting untrusted bytes.
+pub fn summary(value: &CheckEvidence) -> wire::CheckEvidenceSummary {
+    let reference = |id: &uuid::Uuid| wire::RecordRef {
+        spool: Some(wire::SpoolRef {
+            id: value.spool.to_string(),
+        }),
+        id: id.to_string(),
+    };
+    wire::CheckEvidenceSummary {
+        outcome: match value.outcome {
+            CheckOutcome::Passed => wire::check_evidence_summary::Outcome::Passed,
+            CheckOutcome::Failed => wire::check_evidence_summary::Outcome::Failed,
+            CheckOutcome::Error => wire::check_evidence_summary::Outcome::Error,
+            CheckOutcome::Skipped => wire::check_evidence_summary::Outcome::Skipped,
+        } as i32,
+        detail: value.detail.clone(),
+        author: Some(wire::PrincipalRef {
+            id: value.author.actor.principal_id.to_string(),
+        }),
+        agent_id: value.author.actor.agent_id.clone().unwrap_or_default(),
+        artifacts: value.artifacts.iter().map(reference).collect(),
+        supersedes: value.supersedes.iter().map(reference).collect(),
+        completed_at: Some(prost_types::Timestamp {
+            seconds: value.completed_at_ms.div_euclid(1000),
+            nanos: (value.completed_at_ms.rem_euclid(1000) * 1_000_000) as i32,
+        }),
+    }
+}
 
 pub fn sign_evidence(
     value: &CheckEvidence,
@@ -129,6 +195,58 @@ mod tests {
             },
             signer,
         )
+    }
+    #[test]
+    fn projection_preserves_typed_attribution_references_and_outcomes() {
+        let (mut value, signer) = fixture();
+        value.artifacts = vec![Uuid::from_u128(8)];
+        value.supersedes = vec![Uuid::from_u128(9)];
+        value.completed_at_ms = 1234;
+        for (outcome, expected) in [
+            (
+                CheckOutcome::Passed,
+                wire::check_evidence_summary::Outcome::Passed,
+            ),
+            (
+                CheckOutcome::Failed,
+                wire::check_evidence_summary::Outcome::Failed,
+            ),
+            (
+                CheckOutcome::Error,
+                wire::check_evidence_summary::Outcome::Error,
+            ),
+            (
+                CheckOutcome::Skipped,
+                wire::check_evidence_summary::Outcome::Skipped,
+            ),
+        ] {
+            value.outcome = outcome;
+            let record = sign_evidence(&value, &signer).expect("signed evidence");
+            let projected = project(&record).expect("verified projection");
+            assert_eq!(projected.version, record_version(&record).as_bytes());
+            let summary = projected.summary.expect("typed summary");
+            assert_eq!(summary.outcome, expected as i32);
+            assert_eq!(summary.detail, "42 passed");
+            assert_eq!(
+                summary.author.expect("original author").id,
+                value.author.actor.principal_id.to_string()
+            );
+            assert_eq!(summary.agent_id, "test-runner");
+            assert_eq!(summary.artifacts[0].id, value.artifacts[0].to_string());
+            assert_eq!(
+                summary.artifacts[0].spool.as_ref().expect("scope").id,
+                value.spool.to_string()
+            );
+            assert_eq!(summary.supersedes[0].id, value.supersedes[0].to_string());
+            let completed = summary.completed_at.expect("completion");
+            assert_eq!((completed.seconds, completed.nanos), (1, 234_000_000));
+            let mut forged = record;
+            forged.signatures[0].signature[0] ^= 1;
+            assert!(
+                project(&forged).is_err(),
+                "unverified bytes cannot become display evidence"
+            );
+        }
     }
     #[test]
     fn evidence_retains_exact_original_signed_fields() {
