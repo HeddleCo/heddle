@@ -16,6 +16,7 @@ pub(super) struct Feed {
     _watchers: std::sync::Mutex<Vec<repo::device_watch::DeviceWatch>>,
     checkout_watches: std::sync::Mutex<std::collections::BTreeSet<std::path::PathBuf>>,
     runs: repo::device_runs::RunStore,
+    artifacts: repo::device_artifacts::ArtifactStore,
     _replica: std::sync::Mutex<Option<repo::device_watch::DeviceDatabaseWatch>>,
 }
 #[derive(Clone)]
@@ -54,6 +55,7 @@ impl DeviceRpc {
             return Ok(feed);
         }
         let runs = repo::device_runs::RunStore::open(&session.spool.heddle_dir)?;
+        let artifacts = repo::device_artifacts::ArtifactStore::open(&session.spool.heddle_dir)?;
         let replica = if session
             .spool
             .heddle_dir
@@ -151,6 +153,7 @@ impl DeviceRpc {
             _watchers: std::sync::Mutex::new(vec![data, authority]),
             checkout_watches: std::sync::Mutex::new(Default::default()),
             runs,
+            artifacts,
             _replica: std::sync::Mutex::new(replica),
         });
         feeds.insert(session.spool.id, Arc::downgrade(&feed));
@@ -317,6 +320,12 @@ impl DeviceRpc {
                                     .as_ref()
                                     .map(|deadline| deadline.seconds)
                             })
+                            .chain(run.artifacts.iter().filter_map(|artifact| {
+                                artifact
+                                    .retained_until
+                                    .as_ref()
+                                    .map(|expiry| expiry.seconds)
+                            }))
                             .min()
                     } else {
                         None
@@ -361,6 +370,16 @@ impl DeviceRpc {
                         bail!("device observation exceeds accepted byte budget; reduce page size");
                     }
                     session.check_current(&self.home)?;
+                    if let Payload::Run(run) = &payload {
+                        let reference = run.r#ref.as_ref().context("Run reference absent")?;
+                        if feed
+                            .artifacts
+                            .for_run(reference, chrono::Utc::now().timestamp())?
+                            != run.artifacts
+                        {
+                            bail!("artifact disclosure changed before Run output");
+                        }
+                    }
                     write(
                         &mut send,
                         is_checkout,
@@ -599,6 +618,10 @@ impl DeviceRpc {
                 last = key;
                 payloads.push(match value {
                     repo::device_runs::RunObservation::Run(mut run) => {
+                        run.artifacts = feed.artifacts.for_run(
+                            run.r#ref.as_ref().context("Run reference absent")?,
+                            chrono::Utc::now().timestamp(),
+                        )?;
                         let method = "/heddle.api.v2alpha1.RunService/ControlRun";
                         run.actions = if run.supported_controls.is_empty() {
                             Vec::new()

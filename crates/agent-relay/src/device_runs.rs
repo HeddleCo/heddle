@@ -105,6 +105,7 @@ pub(crate) fn publish(
     if let Some(previous) = previous.as_mut() {
         previous.version.clear();
         previous.pending_permissions.clear();
+        previous.artifacts.clear();
     }
     if previous.as_ref() != Some(&record) {
         store.put_run(record)?;
@@ -156,6 +157,40 @@ pub(crate) fn publish(
     if report.closed_at.is_some() && closing >= next {
         emit(closing, "session_closed", "Harness session closed".into())?;
     }
+    if report.closed_at.is_some() {
+        retain_final_report(repo, &run_ref, report)?;
+    }
+    Ok(())
+}
+
+/// Preserve the harness report only under explicit raw-retention policy. Its
+/// transcript locators remain data: they never authorize opening local paths.
+fn retain_final_report(
+    repo: &Repository,
+    run: &v2::RecordRef,
+    report: &impl serde::Serialize,
+) -> Result<()> {
+    let spool = run
+        .spool
+        .as_ref()
+        .context("retained report requires Spool")?;
+    let store = RunStore::open(repo.heddle_dir())?;
+    let Some(policy) = store.policy(&spool.id)? else {
+        return Ok(());
+    };
+    if !policy.retain_raw || policy.raw_retention_seconds == 0 {
+        return Ok(());
+    }
+    // ArtifactStore repeats policy and exact Run authorization transactionally.
+    // This preflight avoids serializing raw material when retention is disabled.
+    let bytes = serde_json::to_vec(report)?;
+    repo::device_artifacts::ArtifactStore::open(repo.heddle_dir())?.retain(
+        run,
+        "session-report",
+        "application/json",
+        &bytes,
+        chrono::Utc::now().timestamp(),
+    )?;
     Ok(())
 }
 
@@ -231,6 +266,69 @@ pub(crate) fn claude_controls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_report_artifacts_require_opt_in_and_preserve_exact_retry() {
+        use std::io::Read;
+        let directory = tempfile::tempdir().expect("repository");
+        let repo = Repository::init_default(directory.path()).expect("repository");
+        let runs = RunStore::open(repo.heddle_dir()).expect("runs");
+        let reference = v2::RecordRef {
+            spool: Some(v2::SpoolRef {
+                id: uuid::Uuid::now_v7().to_string(),
+            }),
+            id: uuid::Uuid::now_v7().to_string(),
+        };
+        runs.put_run(v2::RunRecord {
+            r#ref: Some(reference.clone()),
+            ..Default::default()
+        })
+        .expect("persist independently bound Run");
+        let report = json!({"closed": true, "transcript_refs": [{"path": "/must/not/be/opened"}]});
+        retain_final_report(&repo, &reference, &report)
+            .expect("disabled retention skips raw bytes");
+        assert!(!repo.heddle_dir().join("retained-artifacts").exists());
+        runs.put_policy(
+            &v2::PutRunPolicyRequest {
+                client_operation_id: uuid::Uuid::now_v7().to_string(),
+                policy: Some(v2::RunPolicy {
+                    spool: reference.spool.clone(),
+                    retain_raw: true,
+                    raw_retention_seconds: 60,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            "owning-human",
+        )
+        .expect("explicit retention opt-in");
+        retain_final_report(&repo, &reference, &report).expect("retained report");
+        let artifacts =
+            repo::device_artifacts::ArtifactStore::open(repo.heddle_dir()).expect("catalog");
+        let first = artifacts
+            .for_run(&reference, chrono::Utc::now().timestamp())
+            .expect("discovery");
+        assert_eq!(first.len(), 1);
+        retain_final_report(&repo, &reference, &report).expect("exact producer retry");
+        assert_eq!(
+            artifacts
+                .for_run(&reference, chrono::Utc::now().timestamp())
+                .expect("discovery"),
+            first
+        );
+        let mut retained = artifacts
+            .read(
+                first[0].r#ref.as_ref().expect("artifact ref"),
+                chrono::Utc::now().timestamp(),
+            )
+            .expect("authorized retained bytes");
+        let mut bytes = Vec::new();
+        retained.file.read_to_end(&mut bytes).expect("read bytes");
+        assert_eq!(
+            bytes,
+            serde_json::to_vec(&report).expect("original report bytes")
+        );
+    }
 
     fn fixture() -> (tempfile::TempDir, Repository, RunStore, v2::RunRecord) {
         let directory = tempfile::tempdir().expect("repository directory");
