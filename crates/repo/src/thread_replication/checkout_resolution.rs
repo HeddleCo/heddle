@@ -186,7 +186,7 @@ impl ThreadCheckout {
                     false,
                 )?;
         }
-        if replica.receive(&signed, self.repository.store(), |_| Ok(()))? != Admission::Accepted {
+        if replica.receive_prepared_source(&signed, self.repository.store(), |_| Ok(()))? != Admission::Accepted {
             return Err(Error::Invalid(
                 "resolution source ancestry incomplete".into(),
             ));

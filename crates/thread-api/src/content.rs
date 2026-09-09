@@ -137,6 +137,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
 /// Decode native conflict attachment bytes without inventing lifecycle evidence.
 /// Region geometry is immutable; absent retained resolution evidence stays unspecified.
 
+#[cfg(feature = "replication")]
 pub fn structured_conflicts(
     bytes: &[u8],
 ) -> Result<api::heddle::api::v1alpha1::StructuredConflicts, transport::Error> {

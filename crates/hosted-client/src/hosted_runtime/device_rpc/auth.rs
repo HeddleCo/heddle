@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::BTreeSet, path::Path, sync::Mutex};
 
 use anyhow::{Context, Result, bail};
 use api::{heddle::api::v1alpha1::CallContext, v2::MethodDescriptor};
@@ -6,7 +6,13 @@ use biscuit_verifier::{BiscuitFacts, PublicKey};
 use chrono::Utc;
 use repo::device_catalog::DeviceSpool;
 
+#[derive(Default)]
+struct BoundSources {
+    threads: BTreeSet<objects::object::ContentHash>,
+    epoch: Vec<u8>,
+}
 pub(super) struct Session {
+    sources: Mutex<BoundSources>,
     pub principal: String,
     pub actor: String,
     pub agent_id: Option<String>,
@@ -66,10 +72,59 @@ impl Session {
                     self.agent_id.as_deref(),
                 )?
             {
+                self.bind_thread(thread)?;
                 return Ok(());
             }
         }
         bail!("source revision has no accessible Thread within device authorization work budget")
+    }
+    pub(super) fn bind_thread(&self, thread: objects::object::ContentHash) -> Result<()> {
+        let mut sources = self
+            .sources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("source authorization guard poisoned"))?;
+        anyhow::ensure!(
+            sources.threads.contains(&thread) || sources.threads.len() < 256,
+            "source authorization dependency bound"
+        );
+        if sources.threads.insert(thread) {
+            sources.epoch.clear();
+        }
+        Ok(())
+    }
+    fn check_sources(&self) -> Result<()> {
+        let (threads, observed) = {
+            let sources = self
+                .sources
+                .lock()
+                .map_err(|_| anyhow::anyhow!("source authorization guard poisoned"))?;
+            if sources.threads.is_empty() {
+                return Ok(());
+            }
+            (sources.threads.clone(), sources.epoch.clone())
+        };
+        let epoch = repo::operation_dedup::observation::generation(&self.spool.heddle_dir)?;
+        if epoch == observed {
+            return Ok(());
+        }
+        let repository = repo::Repository::open(&self.spool.root)?;
+        for thread in &threads {
+            let replica =
+                repo::thread_replication::ThreadReplica::open(&self.spool.heddle_dir, *thread)?;
+            self.authorize_thread(&repository, &replica)?;
+        }
+        anyhow::ensure!(
+            repo::operation_dedup::observation::generation(&self.spool.heddle_dir)? == epoch,
+            "source authorization changed during disclosure check"
+        );
+        let mut sources = self
+            .sources
+            .lock()
+            .map_err(|_| anyhow::anyhow!("source authorization guard poisoned"))?;
+        if sources.threads == threads {
+            sources.epoch = epoch;
+        }
+        Ok(())
     }
     pub fn command_namespace(&self) -> Result<String> {
         Ok(serde_json::to_string(&(
@@ -126,6 +181,7 @@ impl Session {
         {
             bail!("device spool registration changed");
         }
+        self.check_sources()?;
         Ok(())
     }
 }
@@ -243,6 +299,7 @@ pub(super) fn authorize(
         objects::object::Attribution::human(accountable)
     };
     Ok(Session {
+        sources: Mutex::new(BoundSources::default()),
         principal,
         agent_id: checked.delegation_agent_id,
         attribution,

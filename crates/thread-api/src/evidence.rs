@@ -29,6 +29,12 @@ pub fn project(record: &wire::SignedRecord) -> Result<wire::EvidenceRecord, Erro
             spool: Some(spool.clone()),
             id: value.id.to_string(),
         }),
+        thread: Some(wire::ThreadRef {
+            spool: Some(spool.clone()),
+            id: Some(wire::ThreadId {
+                value: value.thread.as_bytes().to_vec(),
+            }),
+        }),
         version: record_version(record).as_bytes().to_vec(),
         revision: Some(wire::RevisionRef {
             spool: Some(spool),
@@ -206,12 +212,52 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn rust_v2_interop_vector() {
+        let (mut value, _) = fixture();
+        let signer = Ed25519Signer::from_seed(&[19; 32]).expect("fixed vector seed");
+        value.author.publisher = signer.public_key().try_into().expect("Ed25519 key");
+        value.artifacts = vec![Uuid::from_u128(8)];
+        value.supersedes = vec![Uuid::from_u128(9)];
+        value.completed_at_ms = 1234;
+        let evidence = sign_evidence(&value, &signer).expect("evidence");
+        let ack = CheckAcknowledgement {
+            version: 1,
+            spool: value.spool,
+            evidence: value.id,
+            evidence_digest: value.id().expect("digest"),
+            revision: value.revision,
+            policy_version: ContentHash::from_bytes([5; 32]),
+            author: value.author.clone(),
+            client_operation_id: Uuid::from_u128(6),
+            occurred_at_ms: 2001,
+        };
+        let ack = sign_acknowledgement(&ack, &signer).expect("acknowledgement");
+        let hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        println!("RUST_V2_EVIDENCE_HEX {}", hex(&evidence.canonical_record));
+        println!(
+            "RUST_V2_EVIDENCE_SIGNATURE {}",
+            hex(&evidence.signatures[0].signature)
+        );
+        println!("RUST_V2_ACKNOWLEDGEMENT_HEX {}", hex(&ack.canonical_record));
+        println!(
+            "RUST_V2_ACKNOWLEDGEMENT_SIGNATURE {}",
+            hex(&ack.signatures[0].signature)
+        );
+    }
+
     fn fixture() -> (CheckEvidence, Ed25519Signer) {
         let signer = Ed25519Signer::generate().expect("signer");
         let envelope = b"independently verified by receiving host".to_vec();
         (
             CheckEvidence {
-                version: 1,
+                version: 2,
+                thread: ContentHash::from_bytes([7; 32]),
                 id: Uuid::from_u128(1),
                 spool: Uuid::from_u128(2),
                 revision: StateId::from_bytes([3; 32]),

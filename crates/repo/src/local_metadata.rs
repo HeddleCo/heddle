@@ -74,6 +74,7 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
             crate::thread_replication::initialize_schema(&tx)?;
             crate::device_runs::initialize_schema(&tx)?;
             crate::device_artifacts::initialize_schema(&tx)?;
+            crate::device_evidence::initialize_schema(&tx)?;
             crate::reference_projection::initialize_schema(&tx)?;
             crate::operation_dedup::initialize_schema(&tx)?;
             crate::actor_presence::initialize_schema(&tx)?;
@@ -126,6 +127,7 @@ fn initialize_changes(connection: &Connection) -> rusqlite::Result<()> {
         ("run_policies", "NEW.spool", "run_policy"),
         ("run_artifacts", "NEW.run", "run"),
         ("actor_presence", "NEW.session_id", "actor"),
+        ("device_check_records", "NEW.kind || '/' || NEW.id", "evidence"),
         ("operation_receipts", "NEW.namespace || '/' || NEW.operation_id", "operation"),
     ] {
         // All identifiers and expressions are compile-time literals above.

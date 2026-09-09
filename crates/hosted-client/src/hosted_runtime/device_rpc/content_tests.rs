@@ -25,7 +25,7 @@ pub(super) async fn roundtrip(
     repository.store().put_tree(&tree).expect("tree");
     let state = State::new_snapshot(
         tree.hash(),
-        vec![],
+        vec![repository.head().expect("head").expect("source base")],
         Attribution::human(Principal::new("Owner", "owner@test")),
     )
     .with_intent("Read exact source");
@@ -65,6 +65,29 @@ pub(super) async fn roundtrip(
         ],
         ..Default::default()
     };
+    let mut unadmitted = remote
+        .api
+        .observe::<thread_api::rpc::ContentServiceReadContent>(&request)
+        .await
+        .expect("exact source request");
+    assert!(
+        matches!(
+            unadmitted.next().await,
+            Err(api::v2::client::ClientError::Transport(
+                thread_api::transport::Error::Remote(_)
+            ))
+        ),
+        "an object hash without an audience-authorized Thread cannot disclose source"
+    );
+    repository
+        .create_native_thread(
+            "content-source",
+            repository.head().expect("head").expect("source base"),
+            None,
+            "owned source read fixture",
+        )
+        .expect("admitted local-key source Thread");
+    repository.record_native_capture("content-source", state.id()).expect("original accepted source capture");
     let mut stream = remote
         .api
         .observe::<thread_api::rpc::ContentServiceReadContent>(&request)

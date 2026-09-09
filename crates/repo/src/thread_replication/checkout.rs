@@ -396,7 +396,7 @@ impl ThreadCheckout {
             body: ThreadOperationBody::Capture(capture),
         };
         let signed = SignedOperation::sign(&operation, signer)?;
-        if replica.receive(&signed, self.repository.store(), |_| Ok(()))? != Admission::Accepted {
+        if replica.receive_prepared_source(&signed, self.repository.store(), |_| Ok(()))? != Admission::Accepted {
             return Err(Error::Invalid(
                 "local capture has incomplete causal ancestry".into(),
             ));

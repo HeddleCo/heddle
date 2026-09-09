@@ -184,6 +184,7 @@ impl Repository {
         };
         let signed = SignedGenesis::sign(&genesis, &signer)?;
         let replica = ThreadReplica::create(self.heddle_dir(), &signed)?;
+        replica.validate_local_source_possession(self.store(), base)?;
         replica.connect()?.execute(
             "INSERT INTO local_thread_names(name,thread) VALUES(?1,?2)",
             params![name, replica.thread_id().as_bytes()],
@@ -252,6 +253,7 @@ impl Repository {
         let _guard = self.native_identity_lock()?;
         let replica = self.native_thread(name)?;
         if let Some(existing) = replica.source_operation_page(state_id, None, 1)?.first() {
+            replica.validate_local_source_possession(self.store(), state_id)?;
             return Ok(*existing);
         }
         let state = self
@@ -285,7 +287,7 @@ impl Repository {
             body: ThreadOperationBody::Capture(replica.prepare_capture(self, &state)?),
         };
         let signed = SignedOperation::sign(&operation, &signer)?;
-        match replica.receive(&signed, self.store(), |_| Ok(()))? {
+        match replica.receive_prepared_source(&signed, self.store(), |_| Ok(()))? {
             Admission::Accepted => Ok(operation.id()?),
             other => Err(Error::Invalid(format!(
                 "local capture was not admitted: {other:?}"

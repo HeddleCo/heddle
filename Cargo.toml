@@ -52,7 +52,7 @@ categories = ["development-tools"]
 [workspace.dependencies]
 aes-gcm = { version = "0.10", features = ["zeroize"] }
 anyhow = "1"
-api = { package = "heddle-api", git = "https://github.com/HeddleCo/api.git", rev = "3c275e6b91e8750475201b740cd1553519fff9d0" }
+api = { package = "heddle-api", git = "https://github.com/HeddleCo/api.git", rev = "8335ce2079693ac88619032cccedf1c5c0d3f145" }
 async-trait = "0.1"
 base32 = "0.5"
 base64 = "0.22"
@@ -216,4 +216,4 @@ strip = true
 
 [patch.crates-io]
 heddleco-capability-verifier = { path = "crates/capability-verifier" }
-heddle-api = { git = "https://github.com/HeddleCo/api.git", rev = "3c275e6b91e8750475201b740cd1553519fff9d0" }
+heddle-api = { git = "https://github.com/HeddleCo/api.git", rev = "8335ce2079693ac88619032cccedf1c5c0d3f145" }

@@ -181,7 +181,7 @@ impl DeviceRpc {
         };
         let signed = SignedOperation::sign(&operation, &signer)?;
         session.check_current(&self.home)?;
-        if target_replica.receive_local_integration_cas(
+        if target_replica.receive_prepared_source(
             &signed,
             checkout.repository.store(),
             |_| Ok(()),

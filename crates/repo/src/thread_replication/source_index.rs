@@ -11,6 +11,10 @@ CREATE INDEX IF NOT EXISTS thread_source_bases_revision ON thread_source_bases(r
 CREATE TABLE IF NOT EXISTS thread_source_revisions(
  thread BLOB NOT NULL,revision BLOB NOT NULL,PRIMARY KEY(thread,revision));
 CREATE INDEX IF NOT EXISTS thread_source_revisions_revision ON thread_source_revisions(revision,thread);
+CREATE TABLE IF NOT EXISTS thread_source_availability(
+ thread BLOB NOT NULL REFERENCES threads(id) ON DELETE CASCADE,revision BLOB NOT NULL,
+ PRIMARY KEY(thread,revision));
+CREATE INDEX IF NOT EXISTS thread_source_availability_revision ON thread_source_availability(revision,thread);
 CREATE TABLE IF NOT EXISTS thread_source_counts(
  thread BLOB PRIMARY KEY, count INTEGER NOT NULL CHECK(count>=0));
 CREATE TABLE IF NOT EXISTS thread_source_heads(
@@ -157,6 +161,62 @@ mod tests {
         (operation, state.id())
     }
     #[test]
+    fn source_transfer_enforces_original_graph_budgets_and_reverse_pages() {
+        use super::super::ThreadReplica;
+        let (_dir, repository, replica, genesis, signer) = fixture();
+        let (first, first_revision) = capture(&genesis, &signer, "first", None);
+        let (second, second_revision) = capture(&genesis, &signer, "second", Some((&first, first_revision)));
+        replica.receive(&second, repository.store(), |_| Ok(())).expect("pending child");
+        assert!(ThreadReplica::source_thread_candidates(repository.heddle_dir(), second_revision, None, 10).expect("pending excluded").is_empty());
+        replica.receive(&first, repository.store(), |_| Ok(())).expect("causal admission");
+        let selected = second.verify().expect("signed child").id().expect("child ID");
+        let graph = replica.source_ancestry(selected, 2, 16*1024*1024).expect("exact two records");
+        assert_eq!(graph.len(), 2);
+        assert!(replica.source_ancestry(selected, 1, 16*1024*1024).expect_err("record bound").to_string().contains("exceeds transfer budget"));
+        let bytes: usize = graph.iter().map(|record| record.canonical.len()+record.signature.len()+128).sum();
+        assert_eq!(replica.source_ancestry(selected, 2, bytes).expect("exact bytes").len(), 2);
+        assert!(replica.source_ancestry(selected, 2, bytes-1).expect_err("byte bound").to_string().contains("exceeds transfer budget"));
+        assert!(ThreadReplica::source_thread_candidates(repository.heddle_dir(), second_revision, None, 1).expect("signed metadata alone is not possession").is_empty());
+        replica.record_source_possession(second_revision).expect("test explicit validated possession");
+        let generation=replica.generation().expect("possession generation");
+        replica.record_source_possession(second_revision).expect("exact replay");
+        assert_eq!(replica.generation().expect("unchanged generation"),generation);
+        let page = ThreadReplica::source_thread_candidates(repository.heddle_dir(), second_revision, None, 1).expect("accepted source");
+        assert_eq!(page, vec![replica.thread_id()]);
+        assert!(ThreadReplica::source_thread_candidates(repository.heddle_dir(), second_revision, page.first().copied(), 1).expect("strict cursor").is_empty());
+        assert!(!ThreadReplica::source_thread_candidates(repository.heddle_dir(), genesis.base, None, 10).expect("bare genesis cannot grant source access").contains(&replica.thread_id()));
+    }
+    #[test]
+    fn copied_signed_source_and_known_global_blobs_do_not_confer_possession() {
+        use super::super::ThreadReplica;
+        use objects::{object::{Blob, Tree, TreeEntry}, store::ObjectStore};
+        let (_dir, repository, victim, genesis, signer) = fixture();
+        let blob=Blob::new(b"private source already in shared CAS".to_vec());
+        repository.store().put_blob(&blob).expect("private global blob");
+        let tree=Tree::from_entries(vec![TreeEntry::file("private.txt",blob.hash(),false).expect("file")]);
+        repository.store().put_tree(&tree).expect("private global tree");
+        let (first, _)=capture(&genesis,&signer,"private",None);
+        let mut operation=first.verify().expect("original");
+        let mut state=operation.source_state().expect("decode").expect("capture");
+        state.tree=tree.hash();
+        operation.body=ThreadOperationBody::Capture(state.encode_current_msgpack().expect("State").into());
+        let original=SignedOperation::sign(&operation,&signer).expect("private signature");
+        victim.receive_prepared_source(&original,repository.store(),|_|Ok(())).expect("trusted local capture");
+        let revision=state.id();
+        let mut forged=genesis.clone();
+        forged.name="owned hash pointer".into(); forged.nonce.push(3); forged.base=revision;
+        let pointer=ThreadReplica::create(repository.heddle_dir(),&SignedGenesis::sign(&forged,&signer).expect("owned genesis")).expect("metadata-only genesis");
+        assert!(!ThreadReplica::source_thread_candidates(repository.heddle_dir(),revision,None,10).expect("source candidates").contains(&pointer.thread_id()),"owned genesis cannot grant another Thread's source");
+        forged.name="owned copied Capture".into(); forged.nonce.push(4); forged.base=genesis.base;
+        let copied=ThreadReplica::create(repository.heddle_dir(),&SignedGenesis::sign(&forged,&signer).expect("owned genesis")).expect("new Thread");
+        operation.thread=copied.thread_id();
+        let known=SignedOperation::sign(&operation,&signer).expect("valid copied source signature");
+        copied.receive(&known,repository.store(),|_|Ok(())).expect("metadata may arrive first");
+        assert!(copied.accepted_source_revision(revision).expect("accepted metadata").is_some());
+        assert!(repository.store().get_blob(&blob.hash()).expect("global blob remains").is_some());
+        assert_eq!(ThreadReplica::source_thread_candidates(repository.heddle_dir(),revision,None,10).expect("source requires possession"),vec![victim.thread_id()],"valid source signature plus global object presence is insufficient");
+    }
+    #[test]
     fn source_index_tracks_causal_acceptance_once_and_preserves_rollback() {
         let (_dir, repository, replica, genesis, signer) = fixture();
         let (first, first_revision) = capture(&genesis, &signer, "first", None);
@@ -299,10 +359,12 @@ mod tests {
 impl super::ThreadReplica {
     /// Bounded reverse lookup for exact source reads. Candidate membership is
     /// evidence only; the caller must authorize each owning Thread separately.
+    /// An arbitrary signed genesis.base is not source admission and never adds
+    /// a candidate: knowing another Thread's State hash must not grant access.
     pub fn source_thread_candidates(directory:&std::path::Path,revision:StateId,after:Option<ContentHash>,limit:usize)->Result<Vec<ContentHash>> {
         if !(1..=1024).contains(&limit){return Err(Error::Invalid("source candidate page must be 1..1024".into()))}
         let connection=crate::local_metadata::open(directory)?;
-        let mut statement=connection.prepare("SELECT thread FROM thread_source_bases WHERE revision=?1 AND (?2 IS NULL OR thread>?2) UNION SELECT thread FROM thread_source_revisions WHERE revision=?1 AND (?2 IS NULL OR thread>?2) ORDER BY thread LIMIT ?3")?;
+        let mut statement=connection.prepare("SELECT thread FROM thread_source_availability WHERE revision=?1 AND (?2 IS NULL OR thread>?2) ORDER BY thread LIMIT ?3")?;
         let rows=statement.query_map(rusqlite::params![revision.as_bytes(),after.map(|id|id.as_bytes().to_vec()),limit as i64],|row|row.get::<_,Vec<u8>>(0))?;
         rows.map(|row|super::hash(&row?)).collect()
     }

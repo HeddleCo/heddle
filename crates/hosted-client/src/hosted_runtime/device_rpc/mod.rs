@@ -28,6 +28,8 @@ mod collaboration_targets;
 mod collaboration_tests;
 mod content;
 mod fetch;
+#[cfg(test)]
+mod fetch_tests;
 mod content_detail;
 mod content_summary;
 #[cfg(test)]
@@ -42,6 +44,9 @@ mod replication;
 mod stream;
 mod search;
 mod operations;
+mod evidence;
+#[cfg(test)]
+mod evidence_tests;
 #[cfg(test)]
 mod tests;
 mod thread;
@@ -67,6 +72,9 @@ pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/R
 pub(crate) const METHODS: &[&str] = &[
     "/heddle.api.v2alpha1.SearchService/Search",
     "/heddle.api.v2alpha1.OperationService/ObserveOperations",
+    "/heddle.api.v2alpha1.EvidenceService/RecordEvidence",
+    "/heddle.api.v2alpha1.EvidenceService/VerifyEvidence",
+    "/heddle.api.v2alpha1.EvidenceService/AcknowledgeCheck",
     "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration",
     "/heddle.api.v2alpha1.CollaborationService/OpenDiscussion",
     "/heddle.api.v2alpha1.CollaborationService/AppendTurn",
@@ -217,6 +225,7 @@ impl DeviceRpc {
         Ok(())
     }
     fn execute(&self, session: &auth::Session, method: &str, body: &[u8]) -> Result<Vec<u8>> {
+        if method.contains(".EvidenceService/") { return self.evidence_command(session, method, body); }
         if method.contains(".CollaborationService/") { return self.collaboration_command(session, method, body); }
         if method.contains(".ThreadService/") {
             return self.thread_command(session, method, body);
@@ -269,6 +278,8 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
         }};
     }
     let spool = match method.rsplit('/').next().context("method missing")? {
+        "RecordEvidence" => scope!(RecordEvidenceRequest, |r:RecordEvidenceRequest|r.evidence.and_then(|e|e.revision).and_then(|r|r.spool)),
+        "AcknowledgeCheck" => scope!(AcknowledgeCheckRequest, |r:AcknowledgeCheckRequest|r.evidence.and_then(|e|e.spool)),
         "ObserveCollaboration" => scope!(ObserveCollaborationRequest, |r:ObserveCollaborationRequest|r.spool),
         "OpenDiscussion" => scope!(OpenDiscussionRequest, |r:OpenDiscussionRequest|r.spool),
         "AppendTurn" => scope!(AppendDiscussionRequest, |r:AppendDiscussionRequest|r.discussion.and_then(|v|v.spool)),

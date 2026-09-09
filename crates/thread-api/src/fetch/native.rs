@@ -272,6 +272,8 @@ impl StagedSource {
         {
             return Err(Error::Invalid("selected source proof did not settle"));
         }
+        replicas.get(&main_id).ok_or(Error::Invalid("selected replica absent"))?
+            .record_source_possession(self.state.id()).map_err(preparation)?;
         Ok(())
     }
 }

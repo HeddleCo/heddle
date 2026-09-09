@@ -28,10 +28,10 @@ use super::{DeviceRpc, auth, checkout};
 const FRAME: usize = 256 * 1024;
 const BYTES: u64 = 256 * 1024 * 1024;
 const RECORDS: usize = 10_000;
-struct Prepared {
-    pack: SourcePack,
-    geneses: BTreeMap<ContentHash, ThreadGenesisRecord>,
-    operations: Vec<SignedOperation>,
+pub(super) struct Prepared {
+    pub(super) pack: SourcePack,
+    pub(super) geneses: BTreeMap<ContentHash, ThreadGenesisRecord>,
+    pub(super) operations: Vec<SignedOperation>,
     guards: Vec<(ThreadReplica, i64)>,
 }
 impl DeviceRpc {
@@ -258,9 +258,10 @@ async fn send_frame(
     writer.send(frame).await?;
     Ok(())
 }
-fn prepare(session: &auth::Session, thread: ContentHash, revision: StateId) -> Result<Prepared> {
+pub(super) fn prepare(session: &auth::Session, thread: ContentHash, revision: StateId) -> Result<Prepared> {
     let repository = repo::Repository::open(&session.spool.root)?;
     let selected = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
+    session.authorize_thread(&repository, &selected)?;
     let state = selected
         .accepted_source_revision(revision)?
         .context("selected revision is not admitted by Thread")?;

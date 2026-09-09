@@ -9,7 +9,7 @@ use crate::{
     object::{CollaborationActor, ContentHash, StateId},
 };
 
-pub const EVIDENCE_FORMAT: &str = "heddle-check-evidence-v1";
+pub const EVIDENCE_FORMAT: &str = "heddle-check-evidence-v2";
 pub const ACKNOWLEDGEMENT_FORMAT: &str = "heddle-check-acknowledgement-v1";
 pub const MAX_BYTES: usize = 128 * 1024;
 
@@ -55,6 +55,8 @@ pub struct CheckEvidence {
     pub version: u16,
     pub id: Uuid,
     pub spool: Uuid,
+    /// Original access scope; identical source in another Thread grants no access.
+    pub thread: ContentHash,
     pub revision: StateId,
     pub check: String,
     pub outcome: CheckOutcome,
@@ -70,7 +72,7 @@ pub struct CheckEvidence {
 impl CheckEvidence {
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.author.validate()?;
-        if self.version != 1
+        if self.version != 2
             || self.id.is_nil()
             || self.spool.is_nil()
             || self.completed_at_ms < 0

@@ -118,6 +118,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     super::artifact_tests::roundtrip(&remote, &repository, spool).await;
     super::content_tests::roundtrip(&remote, &repository, spool).await;
     super::collaboration_tests::roundtrip(&remote, &repository, &replica, spool).await;
+    super::evidence_tests::roundtrip(&remote, &device, &repository, &replica, spool).await;
     super::thread_tests::roundtrip(&remote, &device, &repository, spool).await;
     super::account_tests::roundtrip(&remote, &device, spool).await;
     super::sibling_tests::roundtrip(home.path(), &browser, address.clone(), key, &owner).await;
@@ -318,6 +319,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
             .len(),
         1
     );
+    super::fetch_tests::roundtrip(&remote, &repository, &target_replica).await;
     assert_eq!(
         landed
             .checkout
@@ -477,6 +479,59 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
             .next()
             .expect("real nonempty frontier")
             .clone();
+        // Announcement is deliberately paged by facet. Drain the actual
+        // expected frontier before measuring idle traffic; a queued Metadata
+        // page is initial synchronization, not a heartbeat.
+        let expected: std::collections::BTreeSet<_> = replica
+            .view()
+            .expect("current frontier")
+            .frontiers
+            .into_iter()
+            .flat_map(|(facet, heads)| {
+                heads.into_iter().map(move |head| {
+                    (
+                        thread_api::replication::wire_facet(facet),
+                        head.as_bytes().to_vec(),
+                    )
+                })
+            })
+            .collect();
+        let mut announced: std::collections::BTreeSet<_> = have
+            .frontiers
+            .iter()
+            .flat_map(|frontier| {
+                frontier
+                    .heads
+                    .iter()
+                    .map(move |head| (frontier.facet, head.clone()))
+            })
+            .collect();
+        while announced != expected {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), output.next())
+                .await
+                .expect("initial frontier completion deadline")
+                .expect("frontier frame")
+                .expect("open stream");
+            let Some(replicate_thread_response::Body::Have(page)) = frame.body else {
+                panic!("initial frontier page")
+            };
+            for frontier in page.frontiers {
+                assert!(
+                    !frontier.heads.is_empty(),
+                    "announcement never sends empty frontier pages"
+                );
+                for head in frontier.heads {
+                    assert!(
+                        expected.contains(&(frontier.facet, head.clone())),
+                        "only actual admitted heads may be announced"
+                    );
+                    assert!(
+                        announced.insert((frontier.facet, head)),
+                        "unchanged initial frontier is announced once"
+                    );
+                }
+            }
+        }
         input
             .send(&ReplicateThreadRequest {
                 body: Some(replicate_thread_request::Body::Need(ReplicationNeed {
@@ -505,11 +560,11 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
             .verify()
             .expect("signature");
         assert_eq!(verified.id().expect("ID").as_bytes().as_slice(), original);
+        let idle =
+            tokio::time::timeout(std::time::Duration::from_millis(1100), output.next()).await;
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(1100), output.next())
-                .await
-                .is_err(),
-            "idle replication emits no empty Have heartbeat"
+            idle.is_err(),
+            "idle replication emits no empty Have heartbeat: {idle:?}"
         );
         let publisher = Ed25519Signer::from_seed(&[71; 32]).expect("browser publisher");
         let make_operation = |intent: &str| {
@@ -524,7 +579,9 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
                 thread: replica.thread_id(),
                 parents: Default::default(),
                 publisher: publisher.public_key().try_into().expect("key"),
-                body: ThreadOperationBody::Capture(state.encode_current_msgpack().expect("State").into()),
+                body: ThreadOperationBody::Capture(
+                    state.encode_current_msgpack().expect("State").into(),
+                ),
             };
             SignedOperation::sign(&operation, &publisher).expect("signed source")
         };

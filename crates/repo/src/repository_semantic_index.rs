@@ -79,6 +79,9 @@ struct BuiltEntry {
 /// prune-without-reparse invariant.
 pub struct SemanticIndexBuilder<'store, S: ObjectStore> {
     store: &'store S,
+    budget: Option<semantic::parser::ParseBudget>,
+    work_entries: usize,
+    work_bytes: usize,
     source_blobs: Option<&'store HashMap<ContentHash, &'store [u8]>>,
     source_trees: Option<&'store HashMap<ContentHash, &'store Tree>>,
     extractor_version: u32,
@@ -101,6 +104,9 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
     pub fn new(store: &'store S, extractor_version: u32) -> Self {
         Self {
             store,
+            budget: None,
+            work_entries: 0,
+            work_bytes: 0,
             source_blobs: None,
             source_trees: None,
             extractor_version,
@@ -109,6 +115,30 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             pending: Vec::new(),
             parse_count: 0,
         }
+    }
+
+    /// Bound RPC analysis independently of historical capture/backfill work.
+    pub fn with_budget(mut self, budget: semantic::parser::ParseBudget) -> Self {
+        self.budget = Some(budget);
+        self
+    }
+    fn check_work(&self) -> Result<()> {
+        if self
+            .budget
+            .as_ref()
+            .is_some_and(|budget| budget.interrupted())
+        {
+            return Err(HeddleError::InvalidObject(
+                "semantic analysis interrupted".into(),
+            ));
+        }
+        if self.budget.is_some() && (self.work_entries > 4096 || self.work_bytes > 32 * 1024 * 1024)
+        {
+            return Err(HeddleError::InvalidObject(
+                "semantic analysis source work budget exceeded".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn with_source_objects(
@@ -133,6 +163,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         parent: Option<&ParentIndex>,
     ) -> Result<(SemanticIndexRoot, ContentHash)> {
         let (root, root_hash, pending) = self.build_root_deferred(tree, parent)?;
+        self.check_work()?;
         self.store.put_blobs_packed(pending)?;
         Ok((root, root_hash))
     }
@@ -186,8 +217,11 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
                 "semantic index tree exceeds max depth {MAX_SEMANTIC_TREE_DEPTH}"
             )));
         }
+        self.work_entries = self.work_entries.saturating_add(tree.len());
+        self.check_work()?;
         let mut entries = Vec::with_capacity(tree.len());
         for entry in tree.entries() {
+            self.check_work()?;
             let name = entry.name();
             let built = match entry.target() {
                 TreeEntryTarget::Tree { hash } => self.build_dir(name, *hash, parent, depth)?,
@@ -355,10 +389,21 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         let Some(blob) = blob else {
             return Ok(opaque);
         };
+        self.work_bytes = self.work_bytes.saturating_add(blob.size());
+        self.check_work()?;
         if blob.size() > SEMANTIC_FILE_BUDGET_BYTES {
             return Ok(opaque);
         }
-        let Some(extracted) = extract_semantic_file(blob.content(), language) else {
+        let extracted = match &self.budget {
+            Some(budget) => semantic::semantic_index::extract_semantic_file_bounded(
+                blob.content(),
+                language,
+                budget,
+            ),
+            None => extract_semantic_file(blob.content(), language),
+        };
+        self.check_work()?;
+        let Some(extracted) = extracted else {
             // Unsupported/parse-fail → opaque.
             return Ok(opaque);
         };
@@ -607,6 +652,32 @@ impl Repository {
         Ok(Some(self.load_index_root(&root_hash)?))
     }
 
+    /// Build only this exact State, with no ancestor backfill or network work.
+    pub fn analyze_semantic_index(
+        &self,
+        state_id: StateId,
+        budget: semantic::parser::ParseBudget,
+    ) -> Result<SemanticIndexRoot> {
+        let state = self
+            .store()
+            .get_state(&state_id)?
+            .ok_or_else(|| HeddleError::NotFound("analysis source State".into()))?;
+        let tree = self
+            .store()
+            .get_tree(&state.tree)?
+            .ok_or_else(|| HeddleError::NotFound("analysis source tree".into()))?;
+        let mut builder =
+            SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION).with_budget(budget.clone());
+        let (root, root_hash) = builder.build_root(&tree, None)?;
+        if budget.interrupted() {
+            return Err(HeddleError::InvalidObject(
+                "semantic analysis interrupted".into(),
+            ));
+        }
+        self.attach_semantic_index(&state_id, &state, root_hash)?;
+        Ok(root)
+    }
+
     /// Rebuild a state's index from scratch with NO parent reuse — guaranteeing
     /// a complete, self-contained node closure independent of any pruned or
     /// broken parent nodes — and supersede the prior attachment. The recovery
@@ -796,6 +867,25 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn bounded_analysis_rejects_source_work_before_loading_or_publishing() {
+        let (_temp, repository) = repo();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let budget = semantic::parser::ParseBudget { cancelled: cancelled.clone(), deadline: std::time::Instant::now() + std::time::Duration::from_secs(10) };
+        let mut tree = Tree::new();
+        for index in 0..4097 {
+            tree.insert(TreeEntry::file(format!("{index}.rs"), ContentHash::from_bytes([19;32]), false).expect("entry"));
+        }
+        let error = SemanticIndexBuilder::new(repository.store(), EXTRACTOR_VERSION).with_budget(budget.clone()).build_root(&tree, None).expect_err("entry bound");
+        assert!(error.to_string().contains("source work budget exceeded"), "must reject at the work bound: {error}");
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+        let state = repository.head().expect("head").expect("initial source");
+        let before = repository.latest_state_attachment(&state, StateAttachmentKind::SemanticIndex).expect("prior").map(|a|a.id());
+        let error = repository.analyze_semantic_index(state, budget).expect_err("cancelled before execution");
+        assert!(error.to_string().contains("interrupted"));
+        assert_eq!(before, repository.latest_state_attachment(&state, StateAttachmentKind::SemanticIndex).expect("after").map(|a|a.id()), "cancelled analysis cannot publish an attachment");
+    }
 
     /// Attach `root_hash` as the (superseding) SemanticIndex on `state_id`.
     fn attach(repo: &Repository, state_id: &StateId, root_hash: ContentHash) {

@@ -18,6 +18,7 @@ mod peers;
 mod policy_sync;
 pub mod projection;
 mod source_index;
+mod source_possession;
 mod source_transfer;
 
 pub mod collaboration;

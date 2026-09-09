@@ -33,6 +33,7 @@ pub mod device_artifacts;
 pub mod device_authority;
 pub mod device_catalog;
 pub mod device_runs;
+pub mod device_evidence;
 pub mod device_watch;
 #[cfg(feature = "tree-sitter-symbols")]
 mod discussion_anchor_travel;

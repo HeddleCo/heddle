@@ -36,6 +36,7 @@ impl DeviceRpc {
                 &mut pages.reviews,
                 &mut pages.collaboration,
                 &mut pages.timeline,
+                &mut pages.evidence,
             ]
             .into_iter()
             .flatten()
@@ -50,7 +51,7 @@ impl DeviceRpc {
             request.observe.clone().unwrap_or_default(),
             send,
             |budget, binding| self.thread_snapshot(session, &replica, &request, budget, binding),
-            || self.thread_observation_version(session, &replica),
+            || self.thread_observation_version(session, &replica, &request.sections),
         )
         .await
     }
@@ -58,14 +59,24 @@ impl DeviceRpc {
         &self,
         session: &Session,
         replica: &ThreadReplica,
+        sections: &[i32],
     ) -> Result<Vec<u8>> {
         let repository = repo::Repository::open(&session.spool.root)?;
         let version = repo::thread_replication::projection::version(
             replica.thread_id(),
             replica.generation()?,
         );
+        let evidence = if sections.contains(&(ThreadSection::Evidence as i32)) {
+            repo::device_evidence::thread_generation(
+                &session.spool.heddle_dir,
+                replica.thread_id(),
+            )?
+        } else {
+            0
+        };
         Ok(blake3::hash(
             &[
+                &evidence.to_be_bytes(),
                 version.as_bytes().as_slice(),
                 super::land::policy_version(&repository)?
                     .as_bytes()
@@ -88,7 +99,7 @@ impl DeviceRpc {
         self.thread_snapshots
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut overview = self.thread_overview(session, replica)?;
-        let generation = self.thread_observation_version(session, replica)?;
+        let generation = self.thread_observation_version(session, replica, &request.sections)?;
         let reference = overview.r#ref.clone().context("Thread scope")?;
         let mut events = Vec::new();
         let mut all_exhausted = true;
@@ -361,7 +372,17 @@ impl DeviceRpc {
                     ("checkouts", Coverage::Unavailable, PageInfo::default())
                 }
                 ThreadSection::Timeline => ("timeline", Coverage::Unavailable, PageInfo::default()),
-                ThreadSection::Evidence => ("evidence", Coverage::Unavailable, PageInfo::default()),
+                ThreadSection::Evidence => {
+                    let page = request
+                        .pages
+                        .as_ref()
+                        .and_then(|p| p.evidence.clone())
+                        .unwrap_or_default();
+                    let (rows, page) =
+                        self.thread_evidence_snapshot(session, &overview, &page, budget, binding)?;
+                    events.extend(rows);
+                    ("evidence", Coverage::Complete, page)
+                }
                 ThreadSection::Unspecified => bail!("Thread section required"),
             };
             all_exhausted &= page.exhausted || coverage == Coverage::Unavailable;
@@ -377,7 +398,7 @@ impl DeviceRpc {
                 event(thread_event::Payload::Status(status)),
             ));
         }
-        if self.thread_observation_version(session, replica)? != generation {
+        if self.thread_observation_version(session, replica, &request.sections)? != generation {
             return Err(super::stream::SnapshotChanged.into());
         }
         events.insert(

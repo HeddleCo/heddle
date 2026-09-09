@@ -96,6 +96,7 @@ impl DeviceRpc {
                 canonical: record.canonical_record.clone(),
                 signature: signature.signature.clone(),
             };
+            session.authorize_revision(&repository, genesis.base)?;
             repository
                 .store()
                 .get_state(&genesis.base)?

@@ -67,6 +67,7 @@ impl DeviceRpc {
             let worker_session = session.clone();
             let worker = tokio::task::spawn_blocking(move || -> Result<Vec<SearchEvent>> {
                 let _permit = permit;
+                let deadline = std::time::Instant::now() + Duration::from_secs(25);
                 worker_session.check_current(&this.home)?;
                 let mut normalized = request.clone();
                 normalized.page = None;
@@ -103,6 +104,10 @@ impl DeviceRpc {
                         && events.len() < limit as usize
                         && examined < 1024
                     {
+                        ensure!(
+                            std::time::Instant::now() < deadline,
+                            "device query work deadline exceeded"
+                        );
                         worker_session.check_clock()?;
                         let spool = &selected[position];
                         worker_session.facts(Some(&spool.capability_path))?;

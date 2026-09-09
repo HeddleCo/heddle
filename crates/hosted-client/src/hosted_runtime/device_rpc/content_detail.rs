@@ -86,21 +86,14 @@ pub(super) fn state(
         read.include_attachments || (read.attachment_kinds.is_empty() && read.page.is_none()),
         "attachment filters require attachments"
     );
-    use shared::StateAttachmentKind as Wire;
+    use SourceAttachmentKind as Wire;
     let known = [
-        (Wire::Context, StateAttachmentKind::Context),
         (Wire::RiskSignals, StateAttachmentKind::RiskSignals),
-        (
-            Wire::ReviewSignatures,
-            StateAttachmentKind::ReviewSignatures,
-        ),
-        (Wire::Discussions, StateAttachmentKind::Discussions),
         (
             Wire::StructuredConflicts,
             StateAttachmentKind::StructuredConflicts,
         ),
         (Wire::SemanticIndex, StateAttachmentKind::SemanticIndex),
-        (Wire::Signature, StateAttachmentKind::Signature),
     ];
     let mut requested = BTreeSet::new();
     for kind in &read.attachment_kinds {

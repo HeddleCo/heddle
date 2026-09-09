@@ -22,6 +22,24 @@ while every device is offline.
 - [ ] Hosted private offline access succeeds for owner/authorized parties and fails for an unrelated Spool member, including names/counts/events and object fetches.
 - [ ] Sync-only and retention-only changes cannot broaden audience; concurrent policy edits cannot accidentally union recipient grants.
 
+## Current verification checkpoint — 2026-09-09
+
+- Hosted audience SQL: owner-only default, exact agent invites, Spool membership
+  denial, explicit Spool sharing and conflict intersection passed against local
+  PostgreSQL. Removing the restrictive-conflict check failed the exact assertion;
+  restoring it passed. This verifies the predicate, not every RPC consumer.
+- Hosted Thread mutations, review, observation, replication and list/collaboration
+  query paths now apply the shared audience ceiling. Full endpoint regression and
+  per-frame SQL consolidation remain pending.
+- Device real-Iroh fixture passed source audience denial, collaboration, operation
+  recovery, Evidence3, integrated Fetch, two 40-view cleanup rounds and quiet idle
+  replication. Subsequent evidence origin-Thread binding is still being integrated.
+- Evidence must bind its original Thread, not merely a source State that could
+  also occur in another audience. Canonical evidence v2 and both consumers are in
+  progress; acknowledgement continues to bind the exact original evidence digest.
+- User confirmed: local keys remain owners until explicit signed claim. Claim RPC,
+  durable ownership transition and client flow are not implemented yet.
+
 ## Completed foundation
 
 - [x] Shared signed Thread/control/evidence models and original-author receipts.

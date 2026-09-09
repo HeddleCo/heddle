@@ -74,6 +74,8 @@ tempfile.workspace = true
 tracing-subscriber.workspace = true
 
 [features]
+# Native analysis production is optional; transport-only clients omit parsers.
+semantic = ["repo/tree-sitter-symbols"]
 # The hosted surface: native Iroh transport, credentials, identity, and the
 # hosted sync glue. Off by default so local-only CLI builds never compile the
 # hosted stack; the `heddle-cli` `client` marker feature forwards here.

@@ -83,6 +83,9 @@ impl DeviceRpc {
                 })
                 .map(|record| ContentHash::from_hex(&record.id))
                 .collect::<std::result::Result<Vec<_>, _>>()?;
+            if !request.operations.is_empty() && ids.is_empty() && records.is_empty() {
+                continue;
+            }
             scopes.push(Scope {
                 spool,
                 namespace,

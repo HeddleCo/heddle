@@ -238,6 +238,10 @@ impl DeviceRpc {
                     if bytes > budget.max_snapshot_bytes as usize {
                         bail!("view exceeds accepted snapshot budget");
                     }
+                    if current_version()? != revision {
+                        reset::<E>(&mut send, &mut sequence, StreamResetReason::WindowChanged, budget.max_frame_bytes).await?;
+                        return Ok(());
+                    }
                     session.check_current(&self.home)?;
                     write(
                         &mut send,

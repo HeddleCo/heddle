@@ -129,6 +129,28 @@ pub fn extract_semantic_file(source: &[u8], language: Language) -> Option<Extrac
     let source_text = std::str::from_utf8(source).ok()?;
     let parsed = ParsedFile::parse(source_text, language)?;
 
+    extract_parsed_file(source, language, parsed)
+}
+
+pub fn extract_semantic_file_bounded(
+    source: &[u8],
+    language: Language,
+    budget: &crate::parser::ParseBudget,
+) -> Option<ExtractedFile> {
+    language.parser_handle()?;
+    let parsed = ParsedFile::parse_bounded(std::str::from_utf8(source).ok()?, language, budget)?;
+    let value = extract_parsed_file(source, language, parsed)?;
+    if budget.interrupted() {
+        return None;
+    }
+    Some(value)
+}
+
+fn extract_parsed_file(
+    source: &[u8],
+    language: Language,
+    parsed: ParsedFile,
+) -> Option<ExtractedFile> {
     let mut symbols = Vec::new();
     // Byte ranges of every extracted definition node — used to carve the
     // residual scaffold (everything NOT covered by a symbol).
