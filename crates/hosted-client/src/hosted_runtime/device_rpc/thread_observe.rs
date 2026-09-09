@@ -74,8 +74,25 @@ impl DeviceRpc {
         } else {
             0
         };
+        let mut analysis = Vec::new();
+        if sections.contains(&(ThreadSection::Analysis as i32)) {
+            for state in replica.current_source_revisions(128)? {
+                analysis.extend_from_slice(state.as_bytes());
+                let present = replica.has_source_possession(state)?;
+                analysis.push(u8::from(present));
+                if present {
+                    session.authorize_revision(&repository, state)?;
+                    if let Some(attachment) = repository
+                        .latest_state_attachment(&state, repo::StateAttachmentKind::SemanticIndex)?
+                    {
+                        analysis.extend_from_slice(attachment.id().as_hash().as_bytes());
+                    }
+                }
+            }
+        }
         Ok(blake3::hash(
             &[
+                analysis.as_slice(),
                 &evidence.to_be_bytes(),
                 version.as_bytes().as_slice(),
                 super::land::policy_version(&repository)?
@@ -365,9 +382,94 @@ impl DeviceRpc {
                     )
                 }
                 ThreadSection::Collaboration => {
-                    ("collaboration", Coverage::Unavailable, PageInfo::default())
+                    let selected = ObserveCollaborationRequest {
+                        spool: reference.spool.clone(),
+                        page: request
+                            .pages
+                            .as_ref()
+                            .and_then(|pages| pages.collaboration.clone()),
+                        include_history: true,
+                        include_operations: request.include_operations,
+                        ..Default::default()
+                    };
+                    let (rows, page, _) = self.collaboration_snapshot_for_thread(
+                        session,
+                        &selected,
+                        budget,
+                        binding,
+                        Some(replica.thread_id()),
+                    )?;
+                    for (key, row) in rows {
+                        let payload = match row.payload.context("collaboration payload required")? {
+                            collaboration_event::Payload::Discussion(value) => {
+                                thread_event::Payload::Discussion(value)
+                            }
+                            collaboration_event::Payload::Turn(value) => {
+                                thread_event::Payload::Turn(value)
+                            }
+                            collaboration_event::Payload::Context(value) => {
+                                thread_event::Payload::Context(value)
+                            }
+                            collaboration_event::Payload::Operation(value) => {
+                                thread_event::Payload::SignedOperation(value)
+                            }
+                            _ => bail!("unexpected collaboration snapshot control"),
+                        };
+                        events.push((format!("collaboration:{key}"), event(payload)));
+                    }
+                    ("collaboration", Coverage::Complete, page)
                 }
-                ThreadSection::Analysis => ("analysis", Coverage::Unavailable, PageInfo::default()),
+                ThreadSection::Analysis => {
+                    let repository = repo::Repository::open(&session.spool.root)?;
+                    for state in replica.current_source_revisions(128)? {
+                        let root = if replica.has_source_possession(state)? {
+                            session.authorize_revision(&repository, state)?;
+                            repository.attached_semantic_index(&state)?
+                        } else {
+                            None
+                        };
+                        let kind = AnalysisKind::SemanticIndex as i32;
+                        let key = ContentHash::compute_typed(
+                            "heddle-native-analysis-v2",
+                            &[state.as_bytes().as_slice(), &kind.to_be_bytes()].concat(),
+                        );
+                        let record = AnalysisRecord {
+                            r#ref: Some(RecordRef {
+                                spool: reference.spool.clone(),
+                                id: key.to_string(),
+                            }),
+                            source: Some(revision(&reference, state)),
+                            kind,
+                            analyzer: "heddle-semantic-index".into(),
+                            analyzer_version: root
+                                .as_ref()
+                                .map(|root| root.extractor_version.to_string())
+                                .unwrap_or_default(),
+                            // The aggregate enumerates exact available indexes without
+                            // traversing every finding. ObserveAnalysis supplies bounded
+                            // finding pages and their detailed completeness assessment.
+                            coverage: if root.is_some() {
+                                Coverage::Partial
+                            } else {
+                                Coverage::Unavailable
+                            } as i32,
+                            version: generation.clone(),
+                            ..Default::default()
+                        };
+                        events.push((
+                            format!("analysis:{key}"),
+                            event(thread_event::Payload::Analysis(record)),
+                        ));
+                    }
+                    (
+                        "analysis",
+                        Coverage::Complete,
+                        PageInfo {
+                            exhausted: true,
+                            ..Default::default()
+                        },
+                    )
+                }
                 ThreadSection::Checkouts => {
                     ("checkouts", Coverage::Unavailable, PageInfo::default())
                 }

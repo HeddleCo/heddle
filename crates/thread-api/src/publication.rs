@@ -10,7 +10,63 @@ use crate::{Remote, contract::*, rpc, transport};
 #[cfg(feature = "source-transfer")]
 mod source;
 #[cfg(feature = "source-transfer")]
+mod staging;
+#[cfg(feature = "source-transfer")]
+pub use staging::validate_source_artifacts;
+#[cfg(feature = "source-transfer")]
 pub use source::{PublicationOptions, SourceBudget, SourcePack};
+
+/// Exact original creator wrappers and signed source operations, including
+/// every foreign integration dependency. The receiver verifies their authority
+/// and complete causal/source closure before any replica admission.
+#[derive(Clone)]
+pub struct PublicationOriginals {
+    pub geneses: Vec<ThreadGenesisRecord>,
+    pub operations: Vec<SignedRecord>,
+}
+impl PublicationOriginals {
+    fn validate_bounds(&self) -> Result<(), Error> {
+        if self.geneses.is_empty()
+            || self.geneses.len() > 128
+            || self.operations.is_empty()
+            || self.operations.len() > 10_000
+        {
+            return Err(Error::Invalid(
+                "bounded original genesis and source operations required",
+            ));
+        }
+        let mut bytes = 0usize;
+        for length in self
+            .geneses
+            .iter()
+            .map(Message::encoded_len)
+            .chain(self.operations.iter().map(Message::encoded_len))
+        {
+            bytes = bytes
+                .checked_add(length)
+                .ok_or(Error::Invalid("publication original size overflow"))?;
+            if length > 256 * 1024 || bytes > 16 * 1024 * 1024 {
+                return Err(Error::Invalid(
+                    "publication original metadata budget exceeded",
+                ));
+            }
+        }
+        if self.geneses.iter().any(|genesis| {
+            genesis.genesis.as_ref().is_none_or(|record| {
+                record.canonical_record.is_empty() || record.signatures.is_empty()
+            })
+        }) || self
+            .operations
+            .iter()
+            .any(|record| record.canonical_record.is_empty() || record.signatures.is_empty())
+        {
+            return Err(Error::Invalid(
+                "original signatures and canonical records required",
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -25,15 +81,17 @@ pub enum Error {
 }
 
 impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
-    /// Publish an admitted capture in one exchange. Inputs are the native pack
+    /// Publish original source proofs and exact source in one exchange. Inputs are the native pack
     /// and its index in opening order; neither is buffered in full. The caller
     /// retains the operation ID and opening to retry after an interrupted call.
     /// A receipt is returned only after verifying its exact publication scope.
     pub async fn publish_content<R: AsyncRead + Unpin + Send>(
         &self,
         opening: &PublishContentClientFrame,
+        originals: &PublicationOriginals,
         mut artifacts: [R; 2],
     ) -> Result<PublicationReceipt, Error> {
+        originals.validate_bounds()?;
         let Some(publish_content_client_frame::Body::Open(open)) = &opening.body else {
             return Err(Error::Invalid("Open required"));
         };
@@ -109,6 +167,30 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
             return Err(Error::Invalid("unsupported publication frame budget"));
         }
         let upload = async {
+            for body in originals
+                .geneses
+                .iter()
+                .cloned()
+                .map(publish_content_client_frame::Body::ThreadGenesis)
+                .chain(
+                    originals
+                        .operations
+                        .iter()
+                        .cloned()
+                        .map(publish_content_client_frame::Body::Operation),
+                )
+            {
+                let frame = PublishContentClientFrame {
+                    client_operation_id: opening.client_operation_id.clone(),
+                    body: Some(body),
+                };
+                if frame.encoded_len() > frame_limit {
+                    return Err(Error::Invalid(
+                        "original exceeds negotiated publication frame budget",
+                    ));
+                }
+                sender.send(&frame).await?;
+            }
             for (artifact, planned) in artifacts.iter_mut().zip(&open.packs) {
                 let mut offset = 0;
                 let mut digest = blake3::Hasher::new();
@@ -335,11 +417,37 @@ mod tests {
                 .await
                 .expect("Ready");
                 let mut lengths = [0_u64; 2];
+                let mut original_counts = [0usize; 2];
                 while let Some(bytes) = incoming.recv().await {
                     let frame = PublishContentClientFrame::decode(bytes.as_slice()).expect("frame");
                     assert_eq!(frame.client_operation_id, opening.client_operation_id);
                     match frame.body {
+                        Some(publish_content_client_frame::Body::ThreadGenesis(genesis)) => {
+                            assert_eq!(lengths, [0, 0]);
+                            assert!(genesis.genesis.is_some());
+                            original_counts[0] += 1;
+                            send(publish_content_server_frame::Body::Checkpoint(
+                                checkpoint.clone(),
+                            ))
+                            .await
+                            .expect("original checkpoint");
+                        }
+                        Some(publish_content_client_frame::Body::Operation(operation)) => {
+                            assert_eq!(lengths, [0, 0]);
+                            assert!(!operation.canonical_record.is_empty());
+                            original_counts[1] += 1;
+                            send(publish_content_server_frame::Body::Checkpoint(
+                                checkpoint.clone(),
+                            ))
+                            .await
+                            .expect("original checkpoint");
+                        }
                         Some(publish_content_client_frame::Body::Pack(chunk)) => {
+                            assert_eq!(
+                                original_counts,
+                                [1, 1],
+                                "original proofs precede source artifacts"
+                            );
                             let extent = chunk.extent.expect("extent");
                             let index = if extent.kind == pack_extent::Kind::NativePack as i32 {
                                 0
@@ -457,12 +565,70 @@ mod tests {
         };
         (remote, open, artifacts.map(std::io::Cursor::new))
     }
+    // These byte fixtures exercise framing/backpressure, not original authority
+    // admission; real Iroh tests independently verify canonical signatures.
+    fn originals() -> PublicationOriginals {
+        let record = SignedRecord {
+            format: "transport-fixture".into(),
+            canonical_record: vec![1],
+            signatures: vec![RecordSignature {
+                public_key: vec![2; 32],
+                signature: vec![3; 64],
+            }],
+        };
+        PublicationOriginals {
+            geneses: vec![ThreadGenesisRecord {
+                genesis: Some(record.clone()),
+                ..Default::default()
+            }],
+            operations: vec![record],
+        }
+    }
+
+    #[test]
+    fn publication_originals_require_bounded_complete_metadata() {
+        let valid = originals();
+        assert!(valid.validate_bounds().is_ok());
+        let mut missing = valid.clone();
+        missing.operations.clear();
+        assert!(matches!(
+            missing.validate_bounds(),
+            Err(Error::Invalid(
+                "bounded original genesis and source operations required"
+            ))
+        ));
+        let mut unsigned = valid.clone();
+        unsigned.operations[0].signatures.clear();
+        assert!(matches!(
+            unsigned.validate_bounds(),
+            Err(Error::Invalid(
+                "original signatures and canonical records required"
+            ))
+        ));
+        let mut oversized = valid.clone();
+        oversized.operations[0].canonical_record = vec![1; 256 * 1024];
+        assert!(matches!(
+            oversized.validate_bounds(),
+            Err(Error::Invalid(
+                "publication original metadata budget exceeded"
+            ))
+        ));
+        let mut too_many = valid;
+        too_many.geneses = vec![too_many.geneses[0].clone(); 129];
+        assert!(matches!(
+            too_many.validate_bounds(),
+            Err(Error::Invalid(
+                "bounded original genesis and source operations required"
+            ))
+        ));
+    }
+
     #[tokio::test]
     async fn publication_drains_checkpoints_while_uploading_under_backpressure() {
         let (remote, open, artifacts) = fixture(false);
         let receipt = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            remote.publish_content(&open, artifacts),
+            remote.publish_content(&open, &originals(), artifacts),
         )
         .await
         .expect("must not deadlock")
@@ -473,7 +639,7 @@ mod tests {
     async fn publication_refuses_a_receipt_for_another_scope() {
         let (remote, open, artifacts) = fixture(true);
         let error = remote
-            .publish_content(&open, artifacts)
+            .publish_content(&open, &originals(), artifacts)
             .await
             .expect_err("mismatched scope");
         assert!(matches!(
@@ -536,6 +702,7 @@ mod tests {
             .thread(thread.clone())
             .publish_source(
                 &prepared,
+                &originals(),
                 PublicationOptions {
                     client_operation_id: "source-upload".into(),
                     source: EndpointRef {

@@ -132,22 +132,53 @@ fn validate(
     directory: tempfile::TempDir,
     ready: TransferReady,
     operations: Vec<SignedOperation>,
-    dependency_records: Vec<ThreadGenesisRecord>,
+    dependencies: Vec<ThreadGenesisRecord>,
 ) -> Result<StagedSource, Error> {
-    let thread = ready
-        .thread
-        .as_ref()
-        .ok_or(Error::Invalid("Thread absent"))?;
-    let genesis = super::verify_origin(
-        ready
-            .thread_genesis
-            .as_ref()
-            .ok_or(Error::Invalid("original genesis absent"))?,
-        thread,
-    )?;
-    let Some(revision_ref::Revision::State(selected)) =
-        ready.current.as_ref().and_then(|r| r.revision.as_ref())
-    else {
+    let value = validate_artifacts(directory,
+        ready.thread.as_ref().ok_or(Error::Invalid("Thread absent"))?,
+        ready.current.as_ref().ok_or(Error::Invalid("revision absent"))?,
+        ready.thread_genesis.as_ref().ok_or(Error::Invalid("original genesis absent"))?,
+        operations, dependencies)?;
+    Ok(StagedSource { directory: value.directory, ready, operations: value.operations,
+        dependencies: value.dependencies, state: value.state })
+}
+/// Structurally verified original source and actual artifact closure. This is
+/// not an author, audience, executor, or sharing-policy admission decision.
+pub struct ValidatedSourceArtifacts {
+    directory: tempfile::TempDir,
+    operations: Vec<SignedOperation>,
+    genesis: ThreadGenesisRecord,
+    dependencies: Vec<ThreadGenesisRecord>,
+    state: State,
+}
+impl ValidatedSourceArtifacts {
+    pub fn artifact_paths(&self) -> [std::path::PathBuf; 2] {
+        [self.directory.path().join("source.pack"), self.directory.path().join("source.idx")]
+    }
+    pub fn operations(&self) -> &[SignedOperation] { &self.operations }
+    pub fn geneses(&self) -> impl Iterator<Item = &ThreadGenesisRecord> {
+        std::iter::once(&self.genesis).chain(&self.dependencies)
+    }
+    pub fn state(&self) -> &State { &self.state }
+}
+pub(crate) fn validate_artifacts(
+    directory: tempfile::TempDir,
+    thread: &ThreadRef,
+    revision: &RevisionRef,
+    original: &ThreadGenesisRecord,
+    operations: Vec<SignedOperation>,
+    dependency_records: Vec<ThreadGenesisRecord>,
+) -> Result<ValidatedSourceArtifacts, Error> {
+    if operations.is_empty() || operations.len() > 10_000 || dependency_records.len() >= 128 {
+        return Err(Error::Invalid("source original graph exceeds bounds"));
+    }
+    let mut metadata = original.encoded_len();
+    for record in &dependency_records { metadata = metadata.saturating_add(record.encoded_len()); }
+    for operation in &operations { metadata = metadata.saturating_add(operation.canonical.len() + operation.signature.len()); }
+    if metadata > METADATA_BYTES { return Err(Error::Invalid("source metadata exceeds 16 MiB")); }
+    if revision.spool != thread.spool { return Err(Error::Invalid("source revision crosses Spool")); }
+    let genesis = super::verify_origin(original, thread)?;
+    let Some(revision_ref::Revision::State(selected)) = revision.revision.as_ref() else {
         return Err(Error::Invalid("exact native State required"));
     };
     let selected_thread = genesis.id().map_err(preparation)?;
@@ -318,9 +349,9 @@ fn validate(
     if !originals.is_empty() {
         return Err(Error::Invalid("source dependency cycle"));
     }
-    Ok(StagedSource {
+    Ok(ValidatedSourceArtifacts {
         directory,
-        ready,
+        genesis: original.clone(),
         operations: ordered,
         dependencies,
         state,

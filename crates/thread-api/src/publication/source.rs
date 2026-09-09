@@ -8,10 +8,12 @@ use std::{
 };
 
 use api::v2::client::RpcTransport;
-use heddle_object_model::object::{ObjectSource, State, StateId, source_target::capture::ReferenceProof};
+use heddle_object_model::object::{
+    ObjectSource, State, StateId, source_target::capture::ReferenceProof,
+};
 use heddle_pack::store::pack::{StreamingPackBuilder, build_source_pack_with_references};
 
-use super::{Error, typed_digest};
+use super::{Error, PublicationOriginals, typed_digest};
 use crate::{Thread, contract::*, transport};
 
 pub struct SourceBudget {
@@ -128,11 +130,12 @@ impl SourcePack {
 
 impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
     /// One exchange, directly to this Thread's endpoint. The source capture must
-    /// already be causally admitted there. Preparation and binding are local;
+    /// carry its complete original proofs. Preparation and binding are local;
     /// no head lookup, proxy call or implicit capture happens here.
     pub async fn publish_source(
         &self,
         source: &SourcePack,
+        originals: &PublicationOriginals,
         options: PublicationOptions,
     ) -> Result<PublicationReceipt, Error> {
         if self
@@ -180,7 +183,9 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
             )),
         };
         let [pack, index] = source.open_artifacts().await?;
-        self.remote.publish_content(&opening, [pack, index]).await
+        self.remote
+            .publish_content(&opening, originals, [pack, index])
+            .await
     }
 }
 

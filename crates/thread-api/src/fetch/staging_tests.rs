@@ -304,3 +304,55 @@ fn source_staging_rejects_missing_or_unrelated_foreign_source_provenance() {
         ))
     ));
 }
+
+fn publication_fixture(scratch: &Path, extra: bool) -> (tempfile::TempDir, PublishContentOpen, crate::publication::PublicationOriginals, State) {
+    let (directory, ready, operations, state) = fixture(scratch, extra);
+    let packs = ["source.pack", "source.idx"].into_iter().enumerate().map(|(index, name)| {
+        let bytes = std::fs::read(directory.path().join(name)).expect("actual uploaded artifact");
+        let address = ObjectAddress { algorithm: "blake3".into(), digest: blake3::hash(&bytes).as_bytes().to_vec() };
+        PackExtent { pack: Some(address.clone()), offset: 0, length: bytes.len() as u64,
+            extent_digest: Some(address), kind: if index == 0 { pack_extent::Kind::NativePack } else { pack_extent::Kind::NativeIndex } as i32 }
+    }).collect();
+    let originals = crate::publication::PublicationOriginals {
+        geneses: vec![ready.thread_genesis.expect("original genesis")],
+        operations: operations.into_iter().map(|signed| {
+            let publisher = signed.verify().expect("original source").publisher;
+            SignedRecord { format: heddle_object_model::object::thread_replication::OPERATION_FORMAT.into(),
+                canonical_record: signed.canonical, signatures: vec![RecordSignature { public_key: publisher.to_vec(), signature: signed.signature }] }
+        }).collect(),
+    };
+    (directory, PublishContentOpen { thread: ready.thread, revision: ready.current, packs, ..Default::default() }, originals, state)
+}
+
+#[test]
+fn publication_staging_validates_originals_actual_artifacts_and_cleanup_twice() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    for _ in 0..2 {
+        let (directory, opening, originals, state) = publication_fixture(scratch.path(), false);
+        let path = directory.path().to_owned();
+        let value = crate::publication::validate_source_artifacts(directory, &opening, originals).expect("validated publication");
+        assert_eq!(value.state().id(), state.id());
+        assert_eq!(value.operations().len(), 1);
+        assert_eq!(value.geneses().count(), 1);
+        assert!(path.exists());
+        drop(value);
+        assert!(!path.exists(), "completed staged publication owns scratch cleanup");
+    }
+}
+
+#[test]
+fn publication_staging_rejects_wrong_inventory_and_unsupplied_originals() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (directory, mut opening, originals, _) = publication_fixture(scratch.path(), false);
+    let path = directory.path().to_owned();
+    opening.packs[0].pack.as_mut().expect("address").digest[0] ^= 1;
+    opening.packs[0].extent_digest = opening.packs[0].pack.clone();
+    assert!(matches!(crate::publication::validate_source_artifacts(directory, &opening, originals),
+        Err(Error::Invalid("uploaded artifact digest differs"))), "actual artifact inventory must be checked");
+    assert!(!path.exists());
+    let (directory, opening, mut originals, _) = publication_fixture(scratch.path(), false);
+    originals.operations[0].signatures[0].signature[0] ^= 1;
+    assert!(crate::publication::validate_source_artifacts(directory, &opening, originals).is_err(), "original source signatures are necessary");
+    let (directory, opening, originals, _) = publication_fixture(scratch.path(), true);
+    assert!(crate::publication::validate_source_artifacts(directory, &opening, originals).is_err(), "unselected private objects must not be staged as source");
+}

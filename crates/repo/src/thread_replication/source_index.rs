@@ -357,6 +357,19 @@ mod tests {
 }
 
 impl super::ThreadReplica {
+    /// Bounded display selectors, not source possession or audience authority.
+    /// Callers must independently authorize every returned revision.
+    pub fn current_source_revisions(&self, limit: usize) -> Result<Vec<StateId>> {
+        if !(1..=128).contains(&limit) {
+            return Err(Error::Invalid("source frontier limit must be 1..128".into()));
+        }
+        let connection = self.connect()?;
+        let mut statement = connection.prepare("SELECT revision FROM thread_source_head_revisions WHERE thread=?1 UNION ALL SELECT revision FROM thread_source_bases WHERE thread=?1 AND NOT EXISTS(SELECT 1 FROM thread_source_head_revisions WHERE thread=?1) ORDER BY revision LIMIT ?2")?;
+        let rows = statement.query_map(rusqlite::params![self.thread.as_bytes(), (limit + 1) as i64], |row| row.get::<_, Vec<u8>>(0))?;
+        let values = rows.map(|row| Ok(StateId::from_bytes(*hash(&row?)?.as_bytes()))).collect::<Result<Vec<_>>>()?;
+        if values.len() > limit { return Err(Error::Invalid("source frontier exceeds display budget".into())); }
+        Ok(values)
+    }
     /// Bounded reverse lookup for exact source reads. Candidate membership is
     /// evidence only; the caller must authorize each owning Thread separately.
     /// An arbitrary signed genesis.base is not source admission and never adds

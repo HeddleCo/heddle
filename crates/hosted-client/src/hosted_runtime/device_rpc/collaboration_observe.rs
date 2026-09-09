@@ -60,6 +60,16 @@ impl DeviceRpc {
         budget: &ReadBudget,
         binding: &[u8],
     ) -> Result<(Vec<(String, CollaborationEvent)>, PageInfo, Vec<u8>)> {
+        self.collaboration_snapshot_for_thread(session, request, budget, binding, None)
+    }
+    pub(super) fn collaboration_snapshot_for_thread(
+        &self,
+        session: &Session,
+        request: &ObserveCollaborationRequest,
+        budget: &ReadBudget,
+        binding: &[u8],
+        selected_thread: Option<objects::object::ContentHash>,
+    ) -> Result<(Vec<(String, CollaborationEvent)>, PageInfo, Vec<u8>)> {
         let repository = repo::Repository::open(&session.spool.root)?;
         let generation = collaboration::generation(&session.spool.heddle_dir)?;
         let spool = request.spool.clone().context("spool required")?;
@@ -90,16 +100,20 @@ impl DeviceRpc {
         let mut events = Vec::new();
         let mut exhausted = false;
         let mut work = 0;
+        let mut candidates = std::collections::VecDeque::new();
         while events.len() < size && work < 1024 {
-            let rows = collaboration::candidate_page(
-                &session.spool.heddle_dir,
-                after.as_ref(),
-                request.include_history,
-                request.include_operations,
-                1,
-                budget.max_snapshot_bytes as usize,
-            )?;
-            let Some(row) = rows.into_iter().next() else {
+            if candidates.is_empty() {
+                candidates.extend(collaboration::candidate_page(
+                    &session.spool.heddle_dir,
+                    selected_thread,
+                    after.as_ref(),
+                    request.include_history,
+                    request.include_operations,
+                    32,
+                    budget.max_snapshot_bytes as usize,
+                )?);
+            }
+            let Some(row) = candidates.pop_front() else {
                 exhausted = true;
                 break;
             };

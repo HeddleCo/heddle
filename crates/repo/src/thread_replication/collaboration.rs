@@ -215,6 +215,7 @@ pub struct Candidate {
 /// Candidate rows are independently paged; turn history never needs materialization.
 pub fn candidate_page(
     directory: &std::path::Path,
+    thread: Option<ContentHash>,
     after: Option<&Position>,
     history: bool,
     proofs: bool,
@@ -225,7 +226,15 @@ pub fn candidate_page(
         return Err(invalid("collaboration candidate page must be 1..1024"));
     }
     let connection = crate::local_metadata::open(directory)?;
-    let mut statement=connection.prepare("WITH kinds(kind) AS (VALUES(0),(1),(2),(3)) SELECT k.kind,o.thread,o.id,o.canonical,o.signature FROM operations o JOIN collaboration_operations x ON x.operation=o.id CROSS JOIN kinds k WHERE o.status=1 AND ((k.kind=0 AND x.record_kind=1 AND x.is_open=1) OR (k.kind=1 AND x.record_kind=1 AND x.turn_count>0 AND ?1) OR (k.kind=2 AND x.record_kind=2 AND (?1 OR NOT EXISTS(SELECT 1 FROM parents p JOIN operations c ON c.id=p.child JOIN collaboration_operations cx ON cx.operation=c.id WHERE p.parent=o.id AND c.status=1 AND cx.thread=x.thread AND cx.record_kind=x.record_kind AND cx.record_id=x.record_id))) OR (k.kind=3 AND ?2 AND x.record_kind=(SELECT MIN(record_kind) FROM collaboration_operations xx WHERE xx.operation=o.id))) AND (?3 IS NULL OR (k.kind,o.thread,o.id)>(?3,?4,?5)) ORDER BY k.kind,o.thread,o.id LIMIT ?6")?;
+    let thread_filter = if thread.is_some() {
+        " AND x.thread=?7"
+    } else {
+        " AND ?7 IS NULL"
+    };
+    let sql = format!(
+        "WITH kinds(kind) AS (VALUES(0),(1),(2),(3)) SELECT k.kind,o.thread,o.id,o.canonical,o.signature FROM operations o JOIN collaboration_operations x ON x.operation=o.id CROSS JOIN kinds k WHERE o.status=1{thread_filter} AND ((k.kind=0 AND x.record_kind=1 AND x.is_open=1) OR (k.kind=1 AND x.record_kind=1 AND x.turn_count>0 AND ?1) OR (k.kind=2 AND x.record_kind=2 AND (?1 OR NOT EXISTS(SELECT 1 FROM parents p JOIN operations c ON c.id=p.child JOIN collaboration_operations cx ON cx.operation=c.id WHERE p.parent=o.id AND c.status=1 AND cx.thread=x.thread AND cx.record_kind=x.record_kind AND cx.record_id=x.record_id))) OR (k.kind=3 AND ?2 AND x.record_kind=(SELECT MIN(record_kind) FROM collaboration_operations xx WHERE xx.operation=o.id))) AND (?3 IS NULL OR (k.kind,o.thread,o.id)>(?3,?4,?5)) ORDER BY k.kind,o.thread,o.id LIMIT ?6"
+    );
+    let mut statement = connection.prepare(&sql)?;
     let mut bytes = 0usize;
     statement
         .query_map(
@@ -235,7 +244,8 @@ pub fn candidate_page(
                 after.map(|value| value.kind),
                 after.map(|value| value.thread.as_bytes().to_vec()),
                 after.map(|value| value.operation.as_bytes().to_vec()),
-                limit as i64
+                limit as i64,
+                thread.map(|thread| thread.as_bytes().to_vec())
             ],
             |row| {
                 Ok((

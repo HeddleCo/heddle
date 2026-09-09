@@ -6,7 +6,8 @@ mod native;
 mod staging;
 use api::v2::client::{ClientError, MessageReader, Messages, RpcTransport};
 use prost::Message;
-pub use staging::StagedSource;
+pub use staging::{StagedSource, ValidatedSourceArtifacts};
+pub(crate) use staging::validate_artifacts;
 
 use crate::{Remote, contract::*, replication, rpc, transport};
 

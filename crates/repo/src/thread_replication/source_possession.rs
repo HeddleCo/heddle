@@ -9,6 +9,15 @@ use rusqlite::{params, Transaction};
 use super::{Admission, Error, Result, ThreadReplica};
 
 impl ThreadReplica {
+    /// Availability is independent of current audience. Callers still authorize
+    /// the Thread before disclosing metadata and the revision before raw reads.
+    pub fn has_source_possession(&self, revision: StateId) -> Result<bool> {
+        Ok(self.connect()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM thread_source_availability WHERE thread=?1 AND revision=?2)",
+            params![self.thread.as_bytes(), revision.as_bytes()], |row| row.get(0),
+        )?)
+    }
+
     /// The caller must have independently authorized and completely validated
     /// the supplied source/reference closure. Never call this because a signed
     /// State header names objects already present in a shared object store.

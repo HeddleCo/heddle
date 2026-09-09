@@ -409,4 +409,76 @@ pub(super) async fn roundtrip(
         .is_empty(),
         "caller text must not become FTS syntax"
     );
+    let empty = repository
+        .create_native_thread(
+            "empty-collaboration",
+            repository.head().expect("head").expect("source"),
+            None,
+            "no collaboration records",
+        )
+        .expect("empty selected Thread");
+    for (thread, expected) in [(replica.thread_id(), true), (empty.thread_id(), false)] {
+        let mut aggregate = remote
+            .api
+            .observe::<thread_api::rpc::ThreadServiceObserveThread>(&ObserveThreadRequest {
+                thread: Some(ThreadRef {
+                    spool: Some(SpoolRef {
+                        id: metadata.scope.spool.to_string(),
+                    }),
+                    id: Some(ThreadId {
+                        value: thread.as_bytes().to_vec(),
+                    }),
+                }),
+                sections: vec![ThreadSection::Collaboration as i32],
+                observe: Some(ObserveOptions {
+                    mode: ObservationMode::Once as i32,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .await
+            .expect("selected Thread collaboration aggregate");
+        let mut found_context = false;
+        let mut found_discussion = false;
+        let mut complete = false;
+        while let Some(event) = aggregate.next().await.expect("aggregate frame") {
+            match event.payload {
+                Some(thread_event::Payload::Context(value)) => {
+                    assert!(
+                        expected,
+                        "other Thread context must not enter selected aggregate"
+                    );
+                    found_context |= value
+                        .r#ref
+                        .as_ref()
+                        .is_some_and(|reference| reference.id == context.id.to_string());
+                }
+                Some(thread_event::Payload::Discussion(value)) => {
+                    assert!(
+                        expected,
+                        "other Thread discussion must not enter selected aggregate"
+                    );
+                    found_discussion |= value
+                        .r#ref
+                        .as_ref()
+                        .is_some_and(|reference| reference.id == discussion.to_string());
+                }
+                Some(thread_event::Payload::Status(status))
+                    if status.section == "collaboration" =>
+                {
+                    complete = status.coverage == Coverage::Complete as i32
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            found_context, expected,
+            "selected Thread context is composed"
+        );
+        assert_eq!(
+            found_discussion, expected,
+            "selected Thread discussion is composed"
+        );
+        assert!(complete, "collaboration reports actual complete coverage");
+    }
 }
