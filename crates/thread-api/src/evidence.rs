@@ -112,6 +112,44 @@ pub fn verify_acknowledgement(record: &wire::SignedRecord) -> Result<CheckAcknow
     verify(record, ACKNOWLEDGEMENT_FORMAT, &value.author)?;
     Ok(value)
 }
+/// Project original progress without treating it as a successful check outcome.
+pub fn project_acknowledgement(
+    record: &wire::SignedRecord,
+) -> Result<wire::CheckAcknowledgementRecord, Error> {
+    let value = verify_acknowledgement(record)?;
+    let spool = wire::SpoolRef {
+        id: value.spool.to_string(),
+    };
+    Ok(wire::CheckAcknowledgementRecord {
+        r#ref: Some(wire::RecordRef {
+            spool: Some(spool.clone()),
+            id: value.client_operation_id.to_string(),
+        }),
+        version: record_version(record).as_bytes().to_vec(),
+        evidence: Some(wire::RecordRef {
+            spool: Some(spool.clone()),
+            id: value.evidence.to_string(),
+        }),
+        revision: Some(wire::RevisionRef {
+            spool: Some(spool),
+            revision: Some(wire::revision_ref::Revision::State(
+                api::heddle::api::v1alpha1::StateId {
+                    value: value.revision.as_bytes().to_vec(),
+                },
+            )),
+        }),
+        policy_version: value.policy_version.as_bytes().to_vec(),
+        author: Some(wire::PrincipalRef {
+            id: value.author.actor.principal_id.to_string(),
+        }),
+        agent_id: value.author.actor.agent_id.unwrap_or_default(),
+        acknowledged_at: Some(prost_types::Timestamp {
+            seconds: value.occurred_at_ms.div_euclid(1000),
+            nanos: (value.occurred_at_ms.rem_euclid(1000) * 1_000_000) as i32,
+        }),
+        acknowledgement: Some(record.clone()),
+    })
+}
 fn sign(
     format: &str,
     canonical: Vec<u8>,
@@ -289,6 +327,21 @@ mod tests {
             occurred_at_ms: 1001,
         };
         let mut record = sign_acknowledgement(&acknowledgement, &signer).expect("sign");
+        let projected = project_acknowledgement(&record).expect("typed progress");
+        assert_eq!(
+            projected.evidence.expect("evidence").id,
+            acknowledgement.evidence.to_string()
+        );
+        assert_eq!(
+            projected.policy_version,
+            acknowledgement.policy_version.as_bytes()
+        );
+        assert_eq!(
+            projected.author.expect("original author").id,
+            acknowledgement.author.actor.principal_id.to_string()
+        );
+        assert_eq!(projected.agent_id, "test-runner");
+        assert_eq!(projected.acknowledgement.as_ref(), Some(&record));
         assert_eq!(
             verify_acknowledgement(&record).expect("verify"),
             acknowledgement
