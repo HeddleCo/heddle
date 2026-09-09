@@ -66,12 +66,35 @@ pub(crate) trait ClaimHandler: Send + Sync + std::fmt::Debug + 'static {
     }
 }
 
+/// Unauthenticated input and short commands share a small admission budget.
+/// Only a successfully authenticated stream can exchange its admission slot
+/// for a retained slot. Both permits are released on cancellation or failure.
+#[derive(Debug)]
+pub(crate) struct CallBudget {
+    admission: Option<tokio::sync::OwnedSemaphorePermit>,
+    retained: Option<tokio::sync::OwnedSemaphorePermit>,
+    streams: Arc<tokio::sync::Semaphore>,
+}
+impl CallBudget {
+    pub(crate) fn retain(&mut self) -> Result<(), &'static str> {
+        if self.retained.is_none() {
+            let permit = Arc::clone(&self.streams)
+                .try_acquire_owned()
+                .map_err(|_| "device retained stream capacity exhausted")?;
+            self.retained = Some(permit);
+            drop(self.admission.take());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ClaimProtocol<V, H> {
     verifier: Arc<V>,
     handler: Arc<H>,
     endpoint_key: [u8; 32],
     permits: Arc<tokio::sync::Semaphore>,
+    stream_permits: Arc<tokio::sync::Semaphore>,
     device: Option<Arc<super::super::device_rpc::DeviceRpc>>,
 }
 
@@ -80,6 +103,10 @@ impl<V, H> ClaimProtocol<V, H> {
         self.device = Some(device);
         self
     }
+    #[cfg(test)]
+    pub(crate) fn budgets(&self) -> (Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>) {
+        (Arc::clone(&self.permits), Arc::clone(&self.stream_permits))
+    }
     pub(crate) fn new(verifier: Arc<V>, handler: Arc<H>, endpoint_key: [u8; 32]) -> Self {
         Self {
             verifier,
@@ -87,6 +114,7 @@ impl<V, H> ClaimProtocol<V, H> {
             device: None,
             endpoint_key,
             permits: Arc::new(tokio::sync::Semaphore::new(32)),
+            stream_permits: Arc::new(tokio::sync::Semaphore::new(2048)),
         }
     }
 }
@@ -108,6 +136,11 @@ where
                         drop((send, recv));
                         continue;
                     };
+                    let mut budget = CallBudget {
+                        admission: Some(permit),
+                        retained: None,
+                        streams: Arc::clone(&self.stream_permits),
+                    };
                     let endpoint_key = self.endpoint_key;
                     let peer_key = *connection.remote_id().as_bytes();
                     let device = self.device.clone();
@@ -115,8 +148,7 @@ where
                     let handler = Arc::clone(&self.handler);
                     calls.spawn(async move {
                         {
-                            let _permit = permit;
-                            handle_call(verifier.as_ref(), handler.as_ref(), endpoint_key, device.as_deref(), peer_key, send, recv).await
+                            handle_call(verifier.as_ref(), handler.as_ref(), endpoint_key, device.as_deref(), peer_key, send, recv, &mut budget).await
                         }
                     });
                 }
@@ -151,6 +183,7 @@ async fn handle_call<V, H>(
     peer_key: [u8; 32],
     mut send: SendStream,
     mut recv: RecvStream,
+    budget: &mut CallBudget,
 ) -> Result<(), ClaimProtocolError>
 where
     V: ClaimSecretVerifier,
@@ -186,7 +219,14 @@ where
         && super::super::device_rpc::STREAM_METHODS.contains(&prelude.method)
     {
         return device
-            .serve_stream(prelude.method, &prelude.context, peer_key, send, recv)
+            .serve_stream(
+                prelude.method,
+                &prelude.context,
+                peer_key,
+                send,
+                recv,
+                budget,
+            )
             .await
             .map_err(ClaimProtocolError::transport);
     }
@@ -212,7 +252,7 @@ where
         {
             if let Some(device) = device {
                 return device
-                    .serve(frame.method, &frame.context, frame.body, send)
+                    .serve(frame.method, &frame.context, frame.body, send, budget)
                     .await
                     .map_err(ClaimProtocolError::transport);
             }
@@ -334,4 +374,56 @@ fn describe(endpoint_key: [u8; 32], body: &[u8], device: bool) -> Result<Vec<u8>
             "cannot encode endpoint description",
         )
     })
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use std::sync::Arc;
+
+    use tokio::sync::Semaphore;
+
+    use super::CallBudget;
+
+    #[test]
+    fn retained_capacity_and_failed_promotion_release_exact_permits() {
+        let admission = Arc::new(Semaphore::new(2));
+        let streams = Arc::new(Semaphore::new(1));
+        let make = || CallBudget {
+            admission: Some(
+                Arc::clone(&admission)
+                    .try_acquire_owned()
+                    .expect("admission"),
+            ),
+            retained: None,
+            streams: Arc::clone(&streams),
+        };
+        let mut first = make();
+        assert_eq!(
+            admission.available_permits(),
+            1,
+            "pre-auth admission remains bounded"
+        );
+        first.retain().expect("first retained stream");
+        first.retain().expect("promotion idempotent");
+        assert_eq!(admission.available_permits(), 2);
+        assert_eq!(streams.available_permits(), 0);
+        let mut second = make();
+        assert_eq!(
+            second.retain(),
+            Err("device retained stream capacity exhausted")
+        );
+        assert_eq!(
+            admission.available_permits(),
+            1,
+            "failed promotion keeps request bound until it returns"
+        );
+        drop(second);
+        assert_eq!(admission.available_permits(), 2);
+        drop(first);
+        assert_eq!(
+            streams.available_permits(),
+            1,
+            "retained slot released exactly once"
+        );
+    }
 }

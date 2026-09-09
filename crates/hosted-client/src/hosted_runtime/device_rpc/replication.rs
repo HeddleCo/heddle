@@ -46,6 +46,7 @@ impl DeviceRpc {
         peer: [u8; 32],
         send: SendStream,
         recv: RecvStream,
+        budget: &mut super::super::hosted::claim_protocol::CallBudget,
     ) -> Result<()> {
         let descriptor = api::v2::method_descriptor(method).context("unknown device stream")?;
         let (mut writer, mut reader) = thread_api::transport::accepted_stream(
@@ -69,6 +70,7 @@ impl DeviceRpc {
         let session = Arc::new(auth::authorize(
             &self.home, descriptor, context, &body, registered,
         )?);
+        budget.retain().map_err(anyhow::Error::msg)?;
         let facets = BTreeSet::from(ThreadFacet::ALL);
         let accepted = opening::accept(
             &open,

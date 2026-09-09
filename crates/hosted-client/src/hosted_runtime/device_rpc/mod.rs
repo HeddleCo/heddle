@@ -1,6 +1,8 @@
 //! Native direct browser/device RPCs. Device authority is locally admitted;
 //! no handler creates a hosted client or consults Weft to permit local work.
 mod auth;
+#[cfg(test)]
+mod capacity_tests;
 mod checkout;
 #[cfg(test)]
 mod inventory_tests;
@@ -79,6 +81,7 @@ impl DeviceRpc {
         context: &CallContext,
         body: &[u8],
         mut send: SendStream,
+        budget: &mut super::hosted::claim_protocol::CallBudget,
     ) -> Result<()> {
         let descriptor = api::v2::method_descriptor(method).context("unknown device RPC")?;
         let prepared = (|| {
@@ -98,6 +101,9 @@ impl DeviceRpc {
                 return Ok(());
             }
         };
+        if descriptor.streaming == api::StreamingShape::ServerStreaming {
+            budget.retain().map_err(anyhow::Error::msg)?;
+        }
         if method.ends_with("/ObserveThread") {
             return self.observe_thread(&session, body, send).await;
         }

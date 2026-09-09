@@ -79,12 +79,11 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     let device = Arc::new(DeviceRpc::new(home.path().to_owned(), key));
     let (authorization, _, _) = StoredClaimAuthorization::new();
     let authorization = Arc::new(authorization);
+    let protocol =
+        ClaimProtocol::new(authorization.clone(), authorization, key).with_device(device.clone());
+    let budgets = protocol.budgets();
     let router = Router::builder(endpoint)
-        .accept(
-            NATIVE_ALPN,
-            ClaimProtocol::new(authorization.clone(), authorization, key)
-                .with_device(device.clone()),
-        )
+        .accept(NATIVE_ALPN, protocol)
         .spawn();
     let browser = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
@@ -117,6 +116,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
         id: spool.to_string(),
     };
     super::thread_tests::roundtrip(&remote, &device, &repository, spool).await;
+    super::capacity_tests::roundtrip(&remote, &device, &repository, &replica, &budgets).await;
     let source = RevisionRef {
         spool: Some(spool_ref.clone()),
         revision: Some(revision_ref::Revision::State(

@@ -124,3 +124,17 @@ Final restored checks on API `988e4bbf0a66f6741a4bfc81e104dbfe918d1a9f`:
 - Removing the covering index caused 704 instructions at the small fixture; restoring the nullable cursor `OR` caused 60,190 instructions at the deep page. Both exceeded the asserted bound and failed; both restored byte-exact.
 - Removing the source-only installation guard admitted the valid signed but unproved Metadata fixture and failed its intended assertion. Guard restored; the complete 51-test client run above includes the final positive.
 - Final restored real no-Weft device RPC workflow on API988: 1 passed (21.48s), retaining all Thread, Checkout, Run, original-author replication and idle checks after every control was restored.
+
+### Retained stream admission
+
+The native router admits at most 32 unfinished handshakes/short commands. After
+local authentication succeeds, each server or bidirectional stream exchanges
+that slot for one of 2,048 retained-stream slots. Incoming method names alone
+cannot trigger promotion. Cancellation, rejected promotion and completed streams
+release their owned permits; no background quota replenishment is needed.
+
+The real Iroh regression holds 40 Thread views while it executes and verifies a
+durable StartThread, then closes all views. It measures all 32 admission slots,
+all 2,048 retained slots, and the shared filesystem feed before and after each of
+two cycles. Removing the admission release fails exactly at the 33rd view. These
+checks establish capacity and cleanup behavior, not a latency benchmark.
