@@ -29,7 +29,11 @@ async fn exercise(corrupt: bool, truncated: bool) {
         TreeEntry::file("sibling.txt", sibling.hash(), false).expect("sibling entry"),
     ]);
     let root = repo.store().put_tree(&tree).expect("tree");
-    let source = State::new(root, vec![], Attribution::human(Principal::new("Test", "test@example.com")));
+    let source = State::new(
+        root,
+        vec![],
+        Attribution::human(Principal::new("Test", "test@example.com")),
+    );
     repo.store().put_state(&source).expect("exact source State");
     let state = source.id();
     let spool = uuid::Uuid::now_v7().to_string();
@@ -152,12 +156,12 @@ async fn exercise(corrupt: bool, truncated: bool) {
         .bind()
         .await
         .expect("client");
-    let mut client =
+    let client =
         HostedClient::connect_addr_with_context(local, address, CallContextFactory::default())
             .await
             .expect("assembled client");
     let result = client
-        .hydrate_blob(&repo, &spool, "unused-remote-name", state, wanted.hash())
+        .hydrate_blob(&repo, &spool, state, wanted.hash())
         .await;
     client.close().await;
     task.await.expect("native server finished");

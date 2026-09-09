@@ -246,6 +246,10 @@ async fn bootstrap_http_client(
     config: &ClientConfig,
 ) -> Result<(Client, reqwest::Url, Option<HeaderValue>)> {
     heddle_perf_contract::record_network_client_initialization();
+    // Library callers (including the lazy worker) do not run the CLI's main.
+    // Reuse ring already selected by this crate, preserving a caller-installed
+    // provider when present; reqwest's no-provider build otherwise panics.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let mut builder = Client::builder()
         .timeout(Duration::from_secs(config.timeout_secs.max(1)))
         .redirect(Policy::none());

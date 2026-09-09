@@ -18,6 +18,7 @@ mod error;
 pub(crate) mod helpers;
 mod human;
 mod hydration;
+mod native_hydration;
 #[cfg(test)]
 mod native_hydration_tests;
 mod methods;
