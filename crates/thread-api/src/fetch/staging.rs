@@ -218,6 +218,18 @@ pub(crate) fn validate_artifacts(
         }
         dependencies.push(wrapper);
     }
+    let mut claim_frontiers = BTreeMap::new();
+    for wrapper in std::iter::once(original).chain(&dependencies) {
+        let signed = wrapper.genesis.as_ref().ok_or(Error::Invalid("claim genesis absent"))?;
+        let genesis = heddle_object_model::object::thread_replication::ThreadGenesis::decode(&signed.canonical_record).map_err(preparation)?;
+        let mut frontier = BTreeSet::new();
+        let claims = crate::replication::ownership::verify_claims(wrapper, &genesis)?;
+        if claims.is_empty() { continue; }
+        for claim in claims {
+            frontier.extend(claim.original.verify().map_err(preparation)?.source_frontier);
+        }
+        claim_frontiers.insert(genesis.id().map_err(preparation)?, frontier);
+    }
     let mut originals = BTreeMap::new();
     let mut decoded = BTreeMap::<ContentHash, ThreadOperation>::new();
     let mut selected_operation = None;
@@ -280,7 +292,16 @@ pub(crate) fn validate_artifacts(
         let genesis = geneses
             .get(&operation.thread)
             .ok_or(Error::Invalid("source dependency genesis absent"))?;
-        used_threads.insert(operation.thread);
+        if used_threads.insert(operation.thread) {
+            if let Some(frontier) = claim_frontiers.get(&operation.thread) {
+                for head in frontier {
+                    if decoded.get(head).is_none_or(|source| source.thread != operation.thread) {
+                        return Err(Error::Invalid("ownership claim cutoff source proof absent or foreign"));
+                    }
+                }
+                pending.extend(frontier);
+            }
+        }
         operation
             .validate_parents(genesis, &parents)
             .map_err(preparation)?;
@@ -316,6 +337,28 @@ pub(crate) fn validate_artifacts(
     }
     if seen.len() != decoded.len() || used_threads.len() != geneses.len() {
         return Err(Error::Invalid("unselected source proofs"));
+    }
+    // A claim cutoff is an additional signed causal barrier. Ancestors retain
+    // their original local author; work outside it must follow the claim.
+    for (thread, frontier) in &claim_frontiers {
+        let mut history = BTreeSet::new();
+        let mut pending = frontier.clone();
+        while let Some(id) = pending.pop_first() {
+            if !history.insert(id) { continue; }
+            let operation = decoded.get(&id).ok_or(Error::Invalid("claim cutoff ancestry absent"))?;
+            if operation.thread != *thread { return Err(Error::Invalid("claim cutoff crosses Thread")); }
+            pending.extend(&operation.parents);
+        }
+        {
+            for (id, operation) in &decoded {
+                if operation.thread == *thread && !history.contains(id) {
+                    if matches!(operation.source_author().map_err(preparation)?, Some(heddle_object_model::object::thread_replication::SourceAuthor::LocalKey)) {
+                        return Err(Error::Invalid("new local source lies outside signed ownership cutoff"));
+                    }
+                    edges.get_mut(id).ok_or(Error::Invalid("source topology entry absent"))?.extend(frontier);
+                }
+            }
+        }
     }
     let references = decoded
         .values()

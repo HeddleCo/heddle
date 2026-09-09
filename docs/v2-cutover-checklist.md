@@ -92,8 +92,18 @@ while every device is offline.
   originating Thread or checkout access. Descriptor absence test failed before
   removal, then six content/descriptor tests passed; current Heddle semantic
   client and Tapestry typechecks pass against this schema.
-- User confirmed: local keys remain owners until explicit signed claim. Claim RPC,
-  durable ownership transition and client flow are not implemented yet.
+- Local keys remain owners until an explicit dual-signed claim. Heddle checkpoint
+  `253611c8` verifies the actual Iroh co-signing RPC, immutable genesis/Thread ID,
+  exact receipt replay, independently authenticated acceptor, and source cutoff
+  enforcement inside the SQLite writer transaction. Removing the conflict replay
+  guard failed its targeted regression; the restored test passed. New-recipient
+  claim installation, browser preparation/status, and explicit conflict resolution
+  are still pending.
+- Hosted ClaimThreadOwnership now passes an actual native RPC regression: incomplete
+  proof rejection, complete claim, exact retry, unchanged genesis, committed competing
+  delegated claim, and denied retries after conflict. Hosted artifact reads pass
+  bounded ranges, typed CAS identity, expiry, all-origin audiences, and current signed
+  retention restriction. Neither establishes complete producer/cleanup coverage.
 - Source captures now sign their explicit local-key or account author, including
   the account authority envelope. Model tests (18) and signature/admission tests
   (3) pass; omitting the envelope digest comparison failed the intended assertion

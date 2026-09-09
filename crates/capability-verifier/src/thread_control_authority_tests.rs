@@ -36,7 +36,7 @@ fn fixture_mint_method(
     } else {
         ""
     };
-    let token = Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); session(\"original-session\"); device_pop_key(\"{}\"); {} check if operation(\"{operation}\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};", hex::encode(publisher), agent_fact, expiry.to_rfc3339()).as_str()).expect("facts").build(&pair).expect("token");
+    let token = Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); session(\"original-session\"); credential_id(\"original-credential\"); device_pop_key(\"{}\"); {} check if operation(\"{operation}\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};", hex::encode(publisher), agent_fact, expiry.to_rfc3339()).as_str()).expect("facts").build(&pair).expect("token");
     let attachment = attached.then(|| {
         let body = crate::wire::MintRootAttachment {
             format_version: 1,
@@ -339,5 +339,16 @@ fn evidence_original_authority_requires_its_exact_evidence_method() {
             proof::verify(&bytes, context(&owner, &publisher), |_| false).is_err(),
             "evidence-only authority cannot mutate Thread metadata"
         );
+    }
+}
+
+#[test]
+fn thread_authority_checks_session_and_stored_credential_revocations() {
+    let (bytes, owner, publisher) = fixture(false);
+    for revoked_id in ["original-session", "original-credential"] {
+        let error = proof::verify(&bytes, context(&owner, &publisher), |revocation| {
+            matches!(revocation, Revocation::Credential(id) if id == revoked_id)
+        }).err().expect("exact credential identity must be revoked");
+        assert!(error.to_string().contains("original Thread capability is revoked"), "{revoked_id}: {error}");
     }
 }

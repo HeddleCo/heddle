@@ -19,8 +19,12 @@ const MAX_CREDENTIAL: usize = 64 * 1024;
 /// again. This value is not a reusable authorization permit.
 pub struct VerifiedAttachment {
     binding: RootAttachmentBinding,
+    credential_revocation_ids: Vec<String>,
 }
 impl VerifiedAttachment {
+    pub fn credential_revocation_ids(&self) -> &[String] {
+        &self.credential_revocation_ids
+    }
     pub fn root_public_key(&self) -> &[u8] {
         &self.binding.root_public_key
     }
@@ -175,7 +179,8 @@ pub fn verify(
         now,
     )
     .map_err(|_| Error::Protocol("endpoint attachment credential is not valid"))?;
-    if facts.cnf.as_deref() != Some(hex::encode(&binding.subject_public_key).as_str())
+    if facts.subject_user_id().is_some_and(|account| account.to_string() != expected_account_id)
+        || facts.cnf.as_deref() != Some(hex::encode(&binding.subject_public_key).as_str())
         || (facts.exp != 0 && binding.expires_at_unix_seconds as u64 > facts.exp)
     {
         return Err(Error::Protocol(
@@ -198,7 +203,7 @@ pub fn verify(
     )
     .map_err(|_| Error::Protocol("endpoint attachment outlives credential attenuation"))?;
     verify_possession(attachment, &binding)?;
-    Ok(VerifiedAttachment { binding })
+    Ok(VerifiedAttachment { binding, credential_revocation_ids: facts.revocation_identities().map(str::to_owned).collect() })
 }
 
 fn validate_binding(binding: &RootAttachmentBinding) -> Result<(), Error> {

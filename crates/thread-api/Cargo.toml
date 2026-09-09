@@ -10,6 +10,7 @@ repository.workspace = true
 default = ["native", "iroh"]
 # Durable replication and the host's ordinary Biscuit authorization boundary.
 native = [
+    "root-attachment",
     "source-transfer",
     "dep:repo",
     "dep:objects",

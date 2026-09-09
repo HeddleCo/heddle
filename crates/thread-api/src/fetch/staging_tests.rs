@@ -382,3 +382,29 @@ fn publication_staging_preserves_matched_account_admission_without_trusting_issu
     let wrong_trust = TrustedHostedExecutor { spool, spool_genesis: statement.spool_genesis, executor: [76;32] };
     assert!(validated.authority_admissions()[&statement.subject.id()].verify(&signed, &wrong_trust).is_err(), "structural staging never enrolls its issuer");
 }
+
+#[test]
+fn source_staging_retains_signed_claim_cutoff_beyond_selected_revision() {
+    use objects::object::{CollaborationActor,thread_replication::{AuthoredCapture,SourceAuthor,ownership_claim::ThreadOwnershipClaim}};
+    let scratch=tempfile::tempdir().expect("scratch");
+    for omit_cutoff in [false,true] {
+        let (directory,mut ready,mut operations,selected)=fixture(scratch.path(),false);
+        let genesis=replication::opening::verify_genesis_record(ready.thread_genesis.as_ref().expect("genesis"),ready.thread.as_ref().expect("Thread")).expect("original genesis");
+        let local=Ed25519Signer::from_seed(&[61;32]).expect("local owner");
+        let account=Ed25519Signer::from_seed(&[69;32]).expect("accepting account key");
+        let future=State::new_snapshot(selected.tree,vec![selected.id()],Attribution::human(Principal::new("owner","owner@example.test")));
+        let next=SignedOperation::sign(&ThreadOperation{version:1,thread:genesis.id().expect("Thread"),parents:BTreeSet::from([operations[0].verify().expect("source").id().expect("source ID")]),publisher:genesis.creator,body:ThreadOperationBody::Capture(AuthoredCapture::local(future.encode_current_msgpack().expect("cutoff source").into()))},&local).expect("future source original");
+        let claim=ThreadOwnershipClaim{version:1,thread:genesis.id().expect("Thread"),prior_local_key:genesis.creator,accepting_publisher:account.public_key().try_into().expect("acceptor"),acceptance:SourceAuthor::account(genesis.spool.parse().expect("Spool"),CollaborationActor{principal_id:uuid::Uuid::from_u128(69),agent_id:Some("delegate".into())},b"independently verified only on installation".to_vec()).expect("signed acceptance binding"),source_frontier:BTreeSet::from([next.verify().expect("future original").id().expect("cutoff ID")])};
+        let proof=crypto::thread_ownership_claim::SignedOwnershipClaim::sign(&claim,&local,&account).expect("both ownership signatures");
+        ready.thread_genesis.as_mut().expect("genesis").ownership_claims=vec![crate::thread_ownership::encode(&proof).expect("portable original")];
+        if !omit_cutoff { operations.push(next.clone()); }
+        let result=validate(directory,ready,operations,vec![]);
+        if omit_cutoff {
+            assert!(result.err().expect("cutoff closure required").to_string().contains("ownership claim cutoff source proof absent or foreign"),"claim must not install with missing cutoff evidence");
+        } else {
+            let staged=result.expect("later signed ownership cutoff retained with historical selected source");
+            assert_eq!(staged.state().id(),selected.id());
+            assert_eq!(staged.operations().last(),Some(&next),"original cutoff follows causal selected source");
+        }
+    }
+}

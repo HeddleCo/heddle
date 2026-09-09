@@ -81,6 +81,15 @@ mod tests {
         (claim, local, acceptor)
     }
     #[test]
+    fn ownership_claim_browser_vector() {
+        let (claim, local, acceptor) = fixture();
+        let proof = SignedOwnershipClaim::sign(&claim, &local, &acceptor).expect("independent Rust fixture");
+        assert_eq!(proof.verify().expect("verified vector"), claim);
+        if std::env::var_os("HEDDLE_EXPORT_OWNERSHIP_VECTOR").is_some() {
+            println!("OWNERSHIP_VECTOR {{\"canonical\":{:?},\"acceptance_signature\":{:?}}}",proof.canonical,proof.acceptance_signature);
+        }
+    }
+    #[test]
     fn ownership_claim_requires_both_exact_statement_signatures() {
         let (claim, local, acceptor) = fixture();
         let signed = SignedOwnershipClaim::sign(&claim, &local, &acceptor).expect("both signatures");

@@ -327,6 +327,16 @@ pub struct BiscuitFacts {
 // ~dozen scoped queries below evaluate well within budget.
 
 impl BiscuitFacts {
+    /// Every independently revocable credential identity from verified facts.
+    /// Session and stored credential IDs complement the signed block chain;
+    /// checking only block IDs would miss explicit session revocation.
+    pub fn revocation_identities(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.sid.as_str())
+            .chain(self.credential_id.as_deref())
+            .chain(self.revocation_ids.iter().map(String::as_str))
+            .filter(|id| !id.is_empty())
+    }
+
     /// Pull out every fact the rest of the server needs. Run AFTER
     /// `authorizer.authorize()` has succeeded so derived rights are
     /// visible too.
@@ -1567,4 +1577,16 @@ mod reserved_predicate_tests {
         reject_reserved_request_facts(&biscuit)
             .expect("a token that asserts nothing reserved must verify normally");
     }
+}
+
+#[cfg(test)]
+#[test]
+fn revocation_identities_include_session_credential_and_every_block() {
+    let mut facts = facts_with(Vec::new(), false);
+    facts.sid = "session-a".into();
+    facts.credential_id = Some("credential-b".into());
+    facts.revocation_ids = vec!["authority-block".into(), "attenuation-block".into()];
+    assert_eq!(facts.revocation_identities().collect::<Vec<_>>(), vec!["session-a", "credential-b", "authority-block", "attenuation-block"]);
+    facts.sid.clear(); facts.credential_id = Some(String::new()); facts.revocation_ids.clear();
+    assert_eq!(facts.revocation_identities().count(), 0);
 }

@@ -153,10 +153,11 @@ impl ThreadReplica {
         let id = claim.id()?;
         let existing = self.ownership_claims()?;
         let retained = existing.iter().any(|stored| stored == signed);
-        if !retained {
-            if let Some(receipt) = admission {
-                receipt.verify_claim(signed, &genesis, &self.authority_admission_trust(receipt)?)?;
-            } else if let Some((authority,path,now)) = authority {
+        if let Some(receipt) = admission {
+            // A retained claim is not permission to attach an untrusted witness.
+            receipt.verify_claim(signed, &genesis, &self.authority_admission_trust(receipt)?)?;
+        } else if !retained {
+            if let Some((authority,path,now)) = authority {
                 verify_claim_authority(signed, &genesis, authority, path, now)?;
             } else { return Err(Error::Invalid("claim requires original account authority or retained admission".into())); }
         }
@@ -174,8 +175,14 @@ impl ThreadReplica {
         }
         let present:bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM thread_owner_claims WHERE thread=?1 AND id=?2)",params![self.thread.as_bytes(),id.as_bytes()],|row|row.get(0))?;
         if present {
+            let added = if let Some(receipt) = admission {
+                transaction.execute("UPDATE thread_owner_claims SET admission=?3,admission_signature=?4 WHERE thread=?1 AND id=?2 AND admission IS NULL", params![self.thread.as_bytes(),id.as_bytes(),receipt.canonical,receipt.signature])? != 0
+            } else { false };
+            if added { transaction.execute("UPDATE threads SET generation=generation+1 WHERE id=?1", [self.thread.as_bytes()])?; }
             if let Some((command,response)) = command { crate::device_operations::receipt(&transaction,command,response).map_err(|error|Error::Invalid(error.to_string()))?; }
             transaction.commit()?;
+            drop(connection);
+            if added { self.notify_committed()?; }
             return Ok((id,command.map(|(_,response)|response.to_vec())));
         }
         if exact_frontier {

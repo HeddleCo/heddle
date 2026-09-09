@@ -82,6 +82,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     let protocol =
         ClaimProtocol::new(authorization.clone(), authorization, key).with_device(device.clone());
     let budgets = protocol.budgets();
+    let endpoint_signer = Ed25519Signer::from_seed(&endpoint.secret_key().to_bytes()).expect("actual endpoint key");
     let router = Router::builder(endpoint)
         .accept(NATIVE_ALPN, protocol)
         .spawn();
@@ -322,7 +323,6 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
             .len(),
         1
     );
-    super::fetch_tests::roundtrip(&remote, &repository, &target_replica).await;
     assert_eq!(
         landed
             .checkout
@@ -426,6 +426,8 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
         .await
         .expect("release writer");
     super::ownership_tests::claim(&remote, &repository, &replica).await;
+    super::fetch_tests::claimed_roundtrip(&remote, &repository, &replica, &endpoint_signer, &owner).await;
+    super::fetch_tests::roundtrip(&remote, &repository, &target_replica, &endpoint_signer, &owner).await;
     // The server must respond before the browser closes its input stream.
     // Metadata received here changes the Thread graph, never either checkout.
     {

@@ -12,6 +12,13 @@ use repo::{Repository, thread_replication::ThreadReplica};
 use super::{Error, StagedSource};
 use crate::contract::EndpointKind;
 
+/// Current endpoint possession under independently retained account authority.
+/// Retain the original credential privately; it never joins source proof packs.
+pub struct OwnedDeviceBinding<'a> {
+    pub attachment: &'a crate::contract::RootAttachment,
+    pub credential: &'a [u8],
+}
+
 impl StagedSource {
     /// Call on the application's disk worker. Owner history is independently
     /// verified and monotonically pinned; the authenticated hosted endpoint is
@@ -92,10 +99,13 @@ impl StagedSource {
     }
     /// Device-only source uses independently admitted local account authority;
     /// incoming material cannot enroll its endpoint or replace a Spool owner.
+    /// The destination must be an unseeded `Repository::init` skeleton or
+    /// already belong to this exact Spool; importing never replaces local work.
     pub fn install_owned_device(
         self,
         repository: &Repository,
         authority: &repo::device_authority::DeviceAuthority,
+        binding: OwnedDeviceBinding<'_>,
         spool_path: &str,
         now_unix_seconds: i64,
     ) -> Result<StateId, Error> {
@@ -109,12 +119,18 @@ impl StagedSource {
                 "owned-device installation requires device endpoint",
             ));
         }
-        authority
-            .verify_mint_root(&endpoint.public_key, now_unix_seconds)
-            .map_err(preparation)?;
-        authority
-            .verify_publisher(&endpoint.public_key)
-            .map_err(preparation)?;
+        let owner = repo::verify_account_owner_observation(&authority.owner, now_unix_seconds).map_err(preparation)?;
+        let account = owner.signed_root().root.as_ref().ok_or(Error::Invalid("account owner root absent"))?;
+        let account_id = uuid::Uuid::from_slice(&account.account_uuid).map_err(preparation)?.to_string();
+        authority.verify_mint_root(&binding.attachment.root_public_key, now_unix_seconds).map_err(preparation)?;
+        authority.verify_publisher(&binding.attachment.subject_public_key).map_err(preparation)?;
+        authority.verify_publisher(&endpoint.public_key).map_err(preparation)?;
+        let roots = biscuit_verifier::parse_ed25519_public_keys_hex(&hex::encode(&binding.attachment.root_public_key), 1).map_err(preparation)?;
+        let verified = crate::root_attachment::verify(binding.attachment, binding.credential, &roots, &account_id, endpoint,
+            chrono::DateTime::from_timestamp(now_unix_seconds, 0).ok_or(Error::Invalid("invalid endpoint verification time"))?)?;
+        if verified.credential_revocation_ids().iter().any(|id| authority.revoked_ids.contains(id)) {
+            return Err(Error::Invalid("endpoint binding credential is explicitly revoked"));
+        }
         let spool = self
             .ready
             .thread
@@ -147,6 +163,7 @@ impl StagedSource {
             .as_ref()
             .ok_or(Error::Invalid("Thread genesis absent"))?;
         let mut replicas = std::collections::BTreeMap::new();
+        let mut claims = std::collections::BTreeMap::<ContentHash, Vec<PendingClaim>>::new();
         for wrapper in std::iter::once(main).chain(&self.dependencies) {
             let original = wrapper
                 .genesis
@@ -160,7 +177,7 @@ impl StagedSource {
                 signature: signature.signature.clone(),
             };
             let genesis = signed.verify().map_err(preparation)?;
-            let replica = match genesis.owner {
+            let replica = match &genesis.owner {
                 heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(_) => {
                     if !wrapper.creator_authority.is_empty() || wrapper.admission.is_some() {
                         return Err(Error::Invalid(
@@ -228,30 +245,30 @@ impl StagedSource {
                     .pin_thread_hosted_executor(&replica, executor)
                     .map_err(preparation)?;
             }
+            let mut pending = Vec::new();
+            let retained = replica.ownership_claims().map_err(preparation)?;
+            for claim in crate::replication::ownership::verify_claims(wrapper, &genesis)? {
+                let value = claim.original.verify().map_err(preparation)?;
+                if let Some(receipt) = &claim.authority_admission {
+                    let trust = replica.authority_admission_trust(receipt).map_err(preparation)?;
+                    receipt.verify_claim(&claim.original, &genesis, &trust).map_err(preparation)?;
+                } else if !retained.contains(&claim.original) {
+                    let authority = authority.ok_or(Error::Invalid("new claim requires current original acceptance or independently pinned admission"))?;
+                    repo::thread_replication::ownership_claim::verify_claim_authority(&claim.original, &genesis, authority, spool_path, now).map_err(preparation)?;
+                }
+                pending.push(PendingClaim { original: claim, remaining: value.source_frontier });
+            }
+            claims.insert(replica.thread_id(), pending);
             replicas.insert(replica.thread_id(), replica);
         }
-        // Structural source signatures are not membership proofs. Resolve all
-        // fresh source authors before installing supplied bytes. Exact accepted
-        // originals keep their durable admission without credential refresh.
+        // Verify portable original testimony before installing immutable bytes.
+        // Fresh capabilities are evaluated in dependency order below, after
+        // explicit claims, while availability remains unpublished on failure.
         for signed in &self.operations {
             let operation = signed.verify().map_err(preparation)?;
             let replica = replicas.get(&operation.thread).ok_or(Error::Invalid("source dependency replica absent"))?;
             if let Some(receipt) = self.authority_admissions.get(&operation.id().map_err(preparation)?) {
                 replica.require_authority_admission(signed, receipt).map_err(preparation)?;
-                continue;
-            }
-            let prior = replica.operation_with_authority_admission(&operation.id().map_err(preparation)?).map_err(preparation)?;
-            if prior.is_some_and(|prior| prior.original == *signed && prior.status == objects::object::thread_replication::Admission::Accepted) {
-                continue;
-            }
-            if let Some(author) = operation.source_author().map_err(preparation)? {
-                match &author {
-                    objects::object::thread_replication::SourceAuthor::LocalKey => replica.verify_local_source_owner(&operation).map_err(preparation)?,
-                    objects::object::thread_replication::SourceAuthor::Account { .. } => {
-                        let authority = authority.ok_or(Error::Invalid("fresh account source requires original author authority or retained admission"))?;
-                        replica.verify_source_authority(&operation, authority, spool_path, now).map_err(preparation)?;
-                    }
-                }
             }
         }
         repository
@@ -261,11 +278,28 @@ impl StagedSource {
                 &self.directory.path().join("source.idx"),
             )
             .map_err(preparation)?;
+        for (thread, pending) in &mut claims {
+            install_ready_claims(replicas.get(thread).ok_or(Error::Invalid("claim replica absent"))?, pending, authority, spool_path, now)?;
+        }
         for signed in &self.operations {
             let operation = signed.verify().map_err(preparation)?;
             let replica = replicas
                 .get(&operation.thread)
                 .ok_or(Error::Invalid("source dependency replica absent"))?;
+            let id = operation.id().map_err(preparation)?;
+            if !self.authority_admissions.contains_key(&id) {
+                let prior = replica.operation_with_authority_admission(&id).map_err(preparation)?;
+                if !prior.is_some_and(|prior| prior.original == *signed && prior.status == objects::object::thread_replication::Admission::Accepted) {
+                    if let Some(author) = operation.source_author().map_err(preparation)? {
+                        match author {
+                            objects::object::thread_replication::SourceAuthor::LocalKey => replica.verify_local_source_owner(&operation).map_err(preparation)?,
+                            objects::object::thread_replication::SourceAuthor::Account { .. } => {
+                                replica.verify_source_authority(&operation, authority.ok_or(Error::Invalid("fresh source requires original authority or retained admission"))?, spool_path, now).map_err(preparation)?;
+                            }
+                        }
+                    }
+                }
+            }
             let admission = if let Some(receipt) = self.authority_admissions.get(&operation.id().map_err(preparation)?) {
                 replica.receive_with_authority_admission(signed, receipt, repository.store(), require_source_operation)
             } else { replica.receive(signed, repository.store(), require_source_operation) }.map_err(preparation)?;
@@ -276,6 +310,13 @@ impl StagedSource {
                     "source proof did not settle in dependency order",
                 ));
             }
+            if let Some(pending) = claims.get_mut(&operation.thread) {
+                for claim in pending.iter_mut() { claim.remaining.remove(&id); }
+                install_ready_claims(replica, pending, authority, spool_path, now)?;
+            }
+        }
+        if claims.values().any(|claims| !claims.is_empty()) {
+            return Err(Error::Invalid("ownership cutoff did not settle before source completion"));
         }
         let main_id = crate::replication::opening::verify_genesis(
             main.genesis
@@ -301,6 +342,27 @@ impl StagedSource {
             .record_source_possession(self.state.id()).map_err(preparation)?;
         Ok(())
     }
+}
+struct PendingClaim {
+    original: crate::replication::ownership::OriginalClaim,
+    remaining: std::collections::BTreeSet<ContentHash>,
+}
+fn install_ready_claims(
+    replica: &ThreadReplica, pending: &mut Vec<PendingClaim>,
+    authority: Option<&repo::device_authority::DeviceAuthority>, spool_path: &str, now: i64,
+) -> Result<(), Error> {
+    let mut index = 0;
+    while index < pending.len() {
+        if !pending[index].remaining.is_empty() { index += 1; continue; }
+        let claim = pending.remove(index).original;
+        if let Some(receipt) = &claim.authority_admission {
+            replica.claim_ownership_with_admission(&claim.original, receipt).map_err(preparation)?;
+        } else if !replica.ownership_claims().map_err(preparation)?.contains(&claim.original) {
+            replica.claim_ownership(&claim.original, authority.ok_or(Error::Invalid("new claim authority absent"))?, spool_path, now).map_err(preparation)?;
+        }
+        replica.effective_owner().map_err(preparation)?;
+    }
+    Ok(())
 }
 fn preparation(error: impl std::fmt::Display) -> Error {
     Error::Preparation(error.to_string())

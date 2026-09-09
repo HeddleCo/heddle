@@ -3,6 +3,8 @@
 //! Pack chunks are staging bytes: install only after the verified Complete frame.
 #[cfg(feature = "native")]
 mod native;
+#[cfg(feature = "native")]
+pub use native::OwnedDeviceBinding;
 mod staging;
 use api::v2::client::{ClientError, MessageReader, Messages, RpcTransport};
 use prost::Message;

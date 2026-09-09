@@ -5,7 +5,7 @@ use prost::Message;
 use api::heddle::api::v2alpha1::*;
 use objects::object::{OperationId, thread_replication::{ThreadFacet, ownership_claim::METHOD}};
 use repo::thread_replication::{ThreadReplica, ownership_claim::verify_claim_account_authority};
-use thread_api::thread_ownership::{self, ClaimProof};
+use thread_api::thread_ownership::{self as claim_codec, ClaimProof};
 use super::{DeviceRpc, auth::Session, checkout};
 
 impl DeviceRpc {
@@ -21,7 +21,7 @@ impl DeviceRpc {
             method: METHOD, request_hash: *blake3::hash(body).as_bytes(),
         };
         if let Some(response) = repo::device_operations::replay_response(&session.spool.heddle_dir, &command)? { return Ok(response); }
-        let proof = thread_ownership::decode(request.claim.as_ref().context("claim required")?)?;
+        let proof = claim_codec::decode(request.claim.as_ref().context("claim required")?)?;
         let accepting_account = match &proof {
             ClaimProof::Complete(value) => value.verify()?.account()?,
             ClaimProof::Acceptance(value) => value.verify()?.account()?,
@@ -52,10 +52,41 @@ impl DeviceRpc {
         let response = ClaimThreadOwnershipResponse {
             receipt: Some(self.receipt(&request.client_operation_id)), thread: request.thread,
             owner: Some(PrincipalRef { id: statement.account()?.to_string() }),
-            claim_id: claim_id.as_bytes().to_vec(), claim: Some(thread_ownership::encode(&complete)?),
+            claim_id: claim_id.as_bytes().to_vec(), claim: Some(claim_codec::encode(&complete)?),
         }.encode_to_vec();
         session.check_current(&self.home)?;
         session.authorize_thread(&repository, &replica)?;
         Ok(replica.claim_ownership_with_command(&complete, &authority, &session.spool.capability_path, now, &command, &response)?)
+    }
+}
+
+pub(super) fn ownership_view(replica: &ThreadReplica) -> Result<ThreadOwnership> {
+    let claims = replica.ownership_claims()?;
+    if claims.len() > 1 {
+        return Ok(ThreadOwnership { owner: Some(thread_ownership::Owner::Conflict(ThreadOwnershipConflict {
+            claim_ids: claims.iter().map(|claim| Ok(claim.verify()?.id()?.as_bytes().to_vec())).collect::<Result<Vec<_>>>()?,
+        })), claim_id: Vec::new() });
+    }
+    let owner = match replica.effective_owner()? {
+        objects::object::thread_replication::GenesisOwner::LocalKey(key) => thread_ownership::Owner::LocalKey(key.to_vec()),
+        objects::object::thread_replication::GenesisOwner::Account(account) => thread_ownership::Owner::Account(PrincipalRef { id: account.to_string() }),
+    };
+    Ok(ThreadOwnership { owner: Some(owner), claim_id: claims.first().map(|claim| -> Result<Vec<u8>> { Ok(claim.verify()?.id()?.as_bytes().to_vec()) }).transpose()?.unwrap_or_default() })
+}
+
+impl DeviceRpc {
+    /// Recovery status is available only through the actual original local key
+    /// retained on this currently authorized owned device. It grants no source
+    /// or collaboration visibility and does not resolve competing claims.
+    pub(super) fn thread_conflict_status(&self, session: &Session, replica: &ThreadReplica) -> Result<Option<ThreadOwnership>> {
+        let claims = replica.ownership_claims()?;
+        if claims.len() < 2 { return Ok(None); }
+        session.check_current(&self.home)?;
+        let genesis = replica.genesis()?;
+        ensure!(genesis.spool == session.spool.id.to_string(), "Thread belongs to another Spool");
+        let objects::object::thread_replication::GenesisOwner::LocalKey(key) = genesis.owner else { anyhow::bail!("conflicted Thread has no original local owner"); };
+        let repository = repo::Repository::open(&session.spool.root)?;
+        ensure!(repository.holds_native_owner_key(&key)?, "ownership conflict status requires retained original local owner key");
+        Ok(Some(ownership_view(replica)?))
     }
 }

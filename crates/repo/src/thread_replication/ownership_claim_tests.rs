@@ -87,6 +87,7 @@ fn explicit_claim_preserves_identity_cutoff_and_conflicts_fail_closed() {
     let generation=replica.generation().expect("generation");
     assert_eq!(replica.claim_ownership(&signed,&authority,"wrong/path",i64::MAX).expect("retained exact proof no refresh"),id);
     assert_eq!(replica.generation().expect("replay generation"),generation);
+    receipt_backfill(&repository, &replica, &signed, spool);
     claim.acceptance=acceptance(&authority,&account,spool,"ClaimThreadOwnership",false);
     claim.source_frontier=replica.frontier_page(objects::object::thread_replication::ThreadFacet::Source,None,128).expect("current frontier").into_iter().collect();
     let conflicting=SignedOwnershipClaim::sign(&claim,&local,&account).expect("different valid claim");
@@ -97,4 +98,36 @@ fn explicit_claim_preserves_identity_cutoff_and_conflicts_fail_closed() {
     }
     assert!(replica.claim_ownership_with_command(&signed,&authority,"acme/project",100,&command,&[7]).expect_err("cached receipt remains conflicted").to_string().contains("conflicting"),"cached ownership receipt must not hide unresolved conflict");
     assert!(!replica.local_source_author_allowed(&old.verify().expect("old")).expect("conflict denies"));
+}
+
+fn receipt_backfill(repository: &crate::Repository, replica: &ThreadReplica, signed: &SignedOwnershipClaim, spool: uuid::Uuid) {
+    use prost::Message;
+    use objects::object::thread_replication::integration::SPOOL_GENESIS_TRUST_FORMAT;
+    use objects::object::thread_authority_admission::{ThreadAuthorityAdmission, OriginalAuthoritySubject};
+    use crypto::thread_authority_admission::SignedAuthorityAdmission;
+    let executor=Ed25519Signer::from_seed(&[83;32]).expect("independent endpoint");
+    let owner=Ed25519Signer::from_seed(&[84;32]).expect("Spool owner");
+    let genesis=crate::sign_spool_owner_genesis(&owner,*spool.as_bytes()).expect("Spool genesis");
+    let statement=signed.verify().expect("claim");
+    let SourceAuthor::Account {actor,authority_digest,..}=statement.acceptance.clone() else { panic!("account claim") };
+    let record=ThreadAuthorityAdmission {version:2,spool,
+        spool_genesis:objects::object::ContentHash::compute_typed(SPOOL_GENESIS_TRUST_FORMAT,&genesis.genesis.as_ref().expect("Spool statement").encode_to_vec()),
+        thread:replica.thread_id(),subject:OriginalAuthoritySubject::OwnershipClaim(statement.id().expect("claim ID")),
+        actor,publisher:statement.accepting_publisher,authority_digest,executor:executor.public_key().try_into().expect("key"),admitted_at_ms:2000};
+    let receipt=SignedAuthorityAdmission::sign(&record,&executor).expect("actual signed testimony");
+    let generation=replica.generation().expect("before untrusted receipt");
+    assert!(replica.claim_ownership_with_admission(signed,&receipt).expect_err("retained claim never establishes executor trust").to_string().contains("independently pinned executor"));
+    assert_eq!(replica.generation().expect("rejection quiet"),generation);
+    assert!(replica.ownership_claim_admission(&statement.id().expect("ID")).expect("no untrusted receipt").is_none());
+    repository.verify_and_pin_owner_genesis(2,Some(&genesis),&["selected".into(),"shared".into()]).expect("independent Spool trust");
+    repository.pin_thread_hosted_executor(replica,record.executor).expect("independent executor trust");
+    replica.claim_ownership_with_admission(signed,&receipt).expect("verified receipt backfill");
+    assert_eq!(replica.ownership_claim_admission(&statement.id().expect("ID")).expect("retained receipt"),Some(receipt.clone()));
+    let generation=replica.generation().expect("published witness");
+    replica.claim_ownership_with_admission(signed,&receipt).expect("same receipt retry");
+    assert_eq!(replica.generation().expect("receipt replay quiet"),generation);
+    let changed=ThreadAuthorityAdmission {admitted_at_ms:3000,..record};
+    replica.claim_ownership_with_admission(signed,&SignedAuthorityAdmission::sign(&changed,&executor).expect("later valid testimony")).expect("later witness does not replace original");
+    assert_eq!(replica.ownership_claim_admission(&statement.id().expect("ID")).expect("first witness preserved"),Some(receipt));
+    assert_eq!(replica.generation().expect("replacement quiet"),generation);
 }

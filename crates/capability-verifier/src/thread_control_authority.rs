@@ -264,8 +264,7 @@ fn verify_original(
         ));
     }
     if facts
-        .revocation_ids
-        .iter()
+        .revocation_identities()
         .any(|id| is_revoked(Revocation::Credential(id)))
     {
         return Err(invalid("original Thread capability is revoked"));

@@ -20,11 +20,14 @@ impl ThreadReplica {
             return Err(Error::Invalid("source ancestry budget invalid".into()));
         }
         let connection = self.connect()?;
-        let mut statement=connection.prepare("WITH RECURSIVE ancestry(id) AS (SELECT ?1 UNION SELECT p.parent FROM parents p JOIN ancestry a ON p.child=a.id LIMIT ?2) SELECT o.canonical,o.signature,o.status,o.thread,o.facet,o.authority_receipt_canonical,o.authority_receipt_signature FROM ancestry a JOIN operations o ON o.id=a.id")?;
-        let mut rows = statement.query(params![selected.as_bytes(), (max_records + 1) as i64])?;
+        let mut statement=connection.prepare("WITH RECURSIVE ancestry(id) AS (SELECT ?1 UNION SELECT operation FROM thread_owner_claim_frontier WHERE thread=?3 UNION SELECT p.parent FROM parents p JOIN ancestry a ON p.child=a.id LIMIT ?2) SELECT o.canonical,o.signature,o.status,o.thread,o.facet,o.authority_receipt_canonical,o.authority_receipt_signature,o.id FROM ancestry a JOIN operations o ON o.id=a.id")?;
+        let mut rows = statement.query(params![selected.as_bytes(), (max_records + 1) as i64, self.thread.as_bytes()])?;
         let mut output = Vec::new();
         let mut bytes = 0usize;
+        let mut selected_present = false;
         while let Some(row) = rows.next()? {
+            let row_id: Vec<u8> = row.get(7)?;
+            selected_present |= row_id == selected.as_bytes();
             let canonical: Vec<u8> = row.get(0)?;
             let signature: Vec<u8> = row.get(1)?;
             let status: i64 = row.get(2)?;
@@ -53,7 +56,7 @@ impl ThreadReplica {
             }
             output.push(super::admission::StoredOperation { original: SignedOperation { canonical, signature }, status: super::Admission::Accepted, authority_admission });
         }
-        if output.is_empty() {
+        if !selected_present {
             return Err(Error::Invalid(
                 "selected source operation unavailable".into(),
             ));

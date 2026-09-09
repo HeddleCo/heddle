@@ -331,3 +331,21 @@ fn binding_requires_distinct_endpoint_key_and_exact_approval_challenge() {
     );
     assert_eq!(vector, include_str!("fixtures/root_attachment_v2.txt"));
 }
+
+#[test]
+fn attached_endpoint_rejects_different_credential_account() {
+    let root = KeyPair::new();
+    let subject = Ed25519Signer::from_seed(&[17; 32]).expect("subject");
+    let endpoint_signer = Ed25519Signer::from_seed(&[91; 32]).expect("endpoint");
+    let endpoint = EndpointRef { public_key: endpoint_signer.public_key().to_vec(), kind: EndpointKind::Device as i32 };
+    let token = Biscuit::builder()
+        .fact("user(\"other-account\")").expect("user")
+        .fact("subject_user_uuid(\"00000000-0000-0000-0000-000000000022\")").expect("different account")
+        .fact("session(\"other-account-session\")").expect("session")
+        .fact(format!("device_pop_key(\"{}\")", hex::encode(subject.public_key())).as_str()).expect("subject")
+        .build(&root).expect("valid root credential").to_vec().expect("credential");
+    let attachment = signed(&subject, &endpoint_signer, &root.public().to_bytes(), &token, endpoint.clone(), NOW, NOW + 300).expect("correct signatures");
+    let error = root_attachment::verify(&attachment, &token, &[root.public()], ACCOUNT, &endpoint,
+        DateTime::<Utc>::from_timestamp(NOW + 1, 0).expect("clock")).err().expect("root trust cannot relabel credential account");
+    assert!(error.to_string().contains("credential subject or lifetime"), "{error}");
+}
