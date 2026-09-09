@@ -25,7 +25,7 @@ pub struct ArtifactRead {
     pub file: File,
 }
 pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()> {
-    connection.execute_batch("CREATE TABLE IF NOT EXISTS run_artifacts (id TEXT PRIMARY KEY, spool TEXT NOT NULL, run TEXT NOT NULL, kind TEXT NOT NULL, digest BLOB NOT NULL CHECK(length(digest)=32), expires INTEGER NOT NULL, record BLOB NOT NULL, phase INTEGER NOT NULL DEFAULT 0 CHECK(phase IN(0,1,2)), UNIQUE(spool,run,kind,digest)); CREATE INDEX IF NOT EXISTS run_artifacts_run ON run_artifacts(spool,run,id); CREATE INDEX IF NOT EXISTS run_artifacts_expiry ON run_artifacts(expires,id);")
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS run_artifacts (id TEXT PRIMARY KEY, spool TEXT NOT NULL, run TEXT NOT NULL, kind TEXT NOT NULL, digest BLOB NOT NULL CHECK(length(digest)=32), expires INTEGER NOT NULL, record BLOB NOT NULL, phase INTEGER NOT NULL DEFAULT 0 CHECK(phase IN(0,1,2)), UNIQUE(spool,run,kind,digest)); CREATE INDEX IF NOT EXISTS run_artifacts_run ON run_artifacts(spool,run,id); CREATE INDEX IF NOT EXISTS run_artifacts_expiry ON run_artifacts(expires,id) WHERE phase!=2;")
 }
 
 impl ArtifactStore {
@@ -233,6 +233,15 @@ impl ArtifactStore {
         file.seek(SeekFrom::Start(0))?;
         Ok(ArtifactRead { record, file })
     }
+    /// Indexed next deadline for one shared store, independent of any observer.
+    pub fn next_expiry(&self) -> Result<Option<i64>> {
+        Ok(self.connection()?.query_row(
+            "SELECT MIN(expires) FROM run_artifacts WHERE phase!=2",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     /// Bounded physical expiration cleanup, also callable by the daemon's shared
     /// retention scheduler. Expired authority is denied by time even if unlink fails.
     /// Immutable tombstones preserve deduplication after physical deletion.

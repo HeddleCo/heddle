@@ -108,8 +108,16 @@ impl Catalog {
         )?)
     }
     pub fn registrations(&self) -> Result<Vec<DeviceSpool>> {
-        let mut statement=self.connection.prepare("SELECT CASE WHEN length(registration)<=16384 THEN registration END FROM spools WHERE deleted=0 ORDER BY id LIMIT 4097")?;
-        let mut rows = statement.query([])?;
+        self.registration_inventory(false)
+    }
+    /// Retention survives removal from discovery: deleted catalog entries still
+    /// identify owned private bytes whose previously agreed TTL must be honored.
+    pub fn retention_registrations(&self) -> Result<Vec<DeviceSpool>> {
+        self.registration_inventory(true)
+    }
+    fn registration_inventory(&self, include_deleted: bool) -> Result<Vec<DeviceSpool>> {
+        let mut statement=self.connection.prepare("SELECT CASE WHEN length(registration)<=16384 THEN registration END FROM spools WHERE deleted=0 OR ?1 ORDER BY id LIMIT 4097")?;
+        let mut rows = statement.query([include_deleted])?;
         let mut result = Vec::new();
         let mut bytes = 0usize;
         while let Some(row) = rows.next()? {

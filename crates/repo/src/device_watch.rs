@@ -34,6 +34,23 @@ pub fn watch_filtered(
     accept: impl Fn(&Path) -> bool + Send + 'static,
     notify: impl Fn(Result<(), String>) + Send + 'static,
 ) -> Result<DeviceWatch> {
+    watch_mode(path, RecursiveMode::Recursive, accept, notify)
+}
+/// Observe only this directory's entries, without watching immutable object
+/// trees or checkouts when the consumer needs only a metadata commit marker.
+pub fn watch_directory_filtered(
+    path: &Path,
+    accept: impl Fn(&Path) -> bool + Send + 'static,
+    notify: impl Fn(Result<(), String>) + Send + 'static,
+) -> Result<DeviceWatch> {
+    watch_mode(path, RecursiveMode::NonRecursive, accept, notify)
+}
+fn watch_mode(
+    path: &Path,
+    mode: RecursiveMode,
+    accept: impl Fn(&Path) -> bool + Send + 'static,
+    notify: impl Fn(Result<(), String>) + Send + 'static,
+) -> Result<DeviceWatch> {
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
             Ok(event)
@@ -45,7 +62,7 @@ pub fn watch_filtered(
             Ok(_) => {}
             Err(error) => notify(Err(error.to_string())),
         })?;
-    watcher.watch(path, RecursiveMode::Recursive)?;
+    watcher.watch(path, mode)?;
     Ok(DeviceWatch { _watcher: watcher })
 }
 

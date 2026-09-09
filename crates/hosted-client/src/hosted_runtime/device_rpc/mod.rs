@@ -11,9 +11,11 @@ mod account_spool;
 mod account_tests;
 mod account_threads;
 mod artifact;
+pub(crate) mod artifact_retention;
 #[cfg(test)]
 mod artifact_tests;
 mod auth;
+mod authority_clock;
 #[cfg(test)]
 mod capacity_tests;
 mod checkout;
@@ -91,6 +93,7 @@ pub(crate) struct DeviceRpc {
     feeds: Arc<Mutex<BTreeMap<uuid::Uuid, Weak<observe::Feed>>>>,
     account_feed: Arc<Mutex<Weak<account_feed::AccountFeed>>>,
     content_work: Arc<tokio::sync::Semaphore>,
+    authority_clock: Arc<authority_clock::AuthorityClock>,
 }
 impl DeviceRpc {
     pub fn new(home: PathBuf, endpoint: [u8; 32]) -> Self {
@@ -100,6 +103,7 @@ impl DeviceRpc {
             feeds: Arc::new(Mutex::new(BTreeMap::new())),
             account_feed: Arc::new(Mutex::new(Weak::new())),
             content_work: Arc::new(tokio::sync::Semaphore::new(8)),
+            authority_clock: Arc::new(authority_clock::AuthorityClock::default()),
         }
     }
     pub fn endpoint(&self) -> EndpointRef {

@@ -41,3 +41,22 @@ receipt; restart continuity; readers during a writer transaction; bounded change
 history; expired-cursor rejection; and future-schema rejection. Missing-event,
 missing-window-bound and missing-cursor-floor controls fail independently. The
 existing Thread, Run and artifact repository suites also run against this schema.
+
+The daemon owns artifact expiration independently of open browser streams. It
+watches only metadata directory entries, sleeps until the indexed next expiry,
+and deletes bounded batches. Removal from discovery does not cancel a retained
+artifact's TTL. Shutdown cancels the workers; startup resumes overdue cleanup.
+Watcher continuity failures and failed/contended cleanup retry with a delay.
+
+Run/Checkout observations share a committed-change gate. Filesystem changes still
+wake them independently. Exact permission/artifact deadlines trigger projection
+updates; a device-owned CPU-only clock rechecks arbitrary Biscuit time caveats
+without SQL or projection reads on valid ticks. That fallback is necessary
+because an ancestor check can expire before the root's explicit expiry fact.
+
+Source anchors can now sign an explicit shared target binding: follow the viewed
+Thread, follow a named Thread, or stay pinned to an exact revision. The original
+coordinates remain signed evidence. An absent target means exact-location only.
+Rust and browser encoders share independent canonical/signature vectors. Binding
+these roots to signed captures and including their object closure in transfer
+remain required before the capture-driven automatic update path is complete.

@@ -74,6 +74,7 @@ pub fn claim_bridge_socket_path(heddle_home: &Path) -> PathBuf {
 /// signer. Held for the daemon's lifetime; dropping it (or completing
 /// [`Self::serve_owner_root_bridge`]) shuts the router down.
 pub struct DaemonClaimRouter {
+    _retention: super::device_rpc::artifact_retention::Retention,
     router: Router,
     owner_root_calls: tokio::sync::mpsc::Receiver<ClaimOwnerRootCall>,
 }
@@ -101,6 +102,9 @@ pub fn mount_claim_router(endpoint: Endpoint) -> DaemonClaimRouter {
         )
         .spawn();
     DaemonClaimRouter {
+        _retention: super::device_rpc::artifact_retention::Retention::start(
+            repo::identity::heddle_home_dir(),
+        ),
         router,
         owner_root_calls,
     }

@@ -71,8 +71,9 @@ impl DeviceRpc {
         let (changes, _) = tokio::sync::watch::channel(0u64);
         let metadata = session.spool.heddle_dir.clone();
         let data_sender = changes.clone();
-        let data = repo::device_watch::watch_filtered(
+        let data = repo::device_watch::watch_with_metadata(
             &session.spool.root,
+            &session.spool.heddle_dir,
             move |path| {
                 if let Ok(relative) = path.strip_prefix(&metadata) {
                     let first = relative
@@ -268,9 +269,9 @@ impl DeviceRpc {
             send.finish()?;
             return Ok(());
         }
+        let mut authority_clock = self.authority_clock.subscribe()?;
         let mut previous = Vec::new();
         let mut observed = BTreeMap::<String, Vec<u8>>::new();
-        let mut clock = tokio::time::interval(std::time::Duration::from_secs(1));
         let mut projection_retries = 0u8;
         loop {
             let generation = *changes.borrow_and_update();
@@ -447,11 +448,34 @@ impl DeviceRpc {
                 send.finish()?;
                 return Ok(());
             }
+            let deadline = permission_deadline
+                .into_iter()
+                .chain((session.expires != 0).then_some(session.expires))
+                .min();
             loop {
+                let clock = async {
+                    match deadline {
+                        Some(deadline) => {
+                            let millis = deadline
+                                .saturating_mul(1000)
+                                .saturating_sub(chrono::Utc::now().timestamp_millis())
+                                .max(0);
+                            tokio::time::sleep(std::time::Duration::from_millis(millis as u64))
+                                .await;
+                        }
+                        None => std::future::pending::<()>().await,
+                    }
+                };
                 tokio::select! {
                     _=send.stopped()=>return Ok(()),
+                    ended=authority_clock.expired(|| session.check_clock())=>{
+                        let error=ended.err().unwrap_or_else(|| anyhow::anyhow!("authority clock ended"));
+                        send.write_all(&api::framing::encode_stream_failure(&failure(CallFailureCode::Unauthenticated,error))?).await?;
+                        send.finish()?;
+                        return Ok(());
+                    },
                     changed=changes.changed()=>{changed.context("device feed closed")?;break;},
-                    _=clock.tick()=>{
+                    _=clock=>{
                         if let Err(error)=session.check_clock(){send.write_all(&api::framing::encode_stream_failure(&failure(CallFailureCode::Unauthenticated,error))?).await?;send.finish()?;return Ok(());}
                         if permission_deadline.is_some_and(|deadline|chrono::Utc::now().timestamp()>=deadline){break;}
                     },
