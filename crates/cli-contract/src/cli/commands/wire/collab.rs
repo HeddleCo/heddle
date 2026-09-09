@@ -66,7 +66,8 @@ pub enum ResolutionOutput {
     IntoContext {
         context_id: String,
         content: String,
-        tags: Vec<String>,
+        #[schemars(schema_with = "annotation_tags_schema")]
+        tags: Vec<objects::object::AnnotationTag>,
     },
     IntoAnnotation {
         annotation_kind: String,
@@ -266,4 +267,26 @@ pub struct WatchLineOutput {
 pub struct WatchActorInfo {
     pub provider: String,
     pub model: String,
+}
+
+// The canonical model stays free of a schema-generation dependency. The CLI
+// describes its tagged union here rather than flattening structured output.
+fn annotation_tags_schema(_: &mut SchemaGenerator) -> Schema {
+    schemars::json_schema!({
+        "type": "array", "maxItems": 128,
+        "items": {
+            "oneOf": [
+                { "type": "object", "required": ["kind", "text"], "properties": { "kind": { "const": "text" }, "text": { "type": "string" } }, "additionalProperties": false },
+                { "type": "object", "required": ["kind", "name", "target"], "properties": { "kind": { "const": "symbol" }, "name": { "type": "string" }, "target": { "type": ["object", "null"], "description": "Scoped original source reference; current target resolution is separate." } }, "additionalProperties": false },
+                { "type": "object", "required": ["kind", "target"], "properties": { "kind": { "const": "source" }, "target": { "type": "object", "description": "Scoped original source reference." } }, "additionalProperties": false },
+                { "type": "object", "required": ["kind", "target"], "properties": { "kind": { "const": "entity" }, "target": { "type": "object", "description": "Typed collaboration entity reference." } }, "additionalProperties": false },
+                { "type": "object", "required": ["kind", "key", "value"], "properties": { "kind": { "const": "property" }, "key": { "type": "string", "pattern": "^[A-Za-z0-9_.\\/-]{1,128}$" }, "value": { "oneOf": [
+                    { "type": "object", "required": ["kind", "value"], "properties": { "kind": { "const": "text" }, "value": { "type": "string" } }, "additionalProperties": false },
+                    { "type": "object", "required": ["kind", "value"], "properties": { "kind": { "const": "boolean" }, "value": { "type": "boolean" } }, "additionalProperties": false },
+                    { "type": "object", "required": ["kind", "value"], "properties": { "kind": { "const": "integer" }, "value": { "type": "integer" } }, "additionalProperties": false },
+                    { "type": "object", "required": ["kind", "value"], "properties": { "kind": { "const": "decimal" }, "value": { "type": "object", "required": ["coefficient", "scale"], "properties": { "coefficient": { "type": "integer" }, "scale": { "type": "integer", "minimum": 0, "maximum": 9 } }, "additionalProperties": false } }, "additionalProperties": false }
+                ] } }, "additionalProperties": false }
+            ]
+        }
+    })
 }

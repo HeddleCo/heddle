@@ -19,7 +19,7 @@ pub struct CollaborationSourceAnchor {
     pub end_line: Option<u32>,
 }
 impl CollaborationSourceAnchor {
-    pub(super) fn validate(&self) -> Result<(), CollaborationCodecError> {
+    pub(crate) fn validate(&self) -> Result<(), CollaborationCodecError> {
         if let CollaborationRevision::GitCommit { oid } = &self.revision {
             if !matches!(oid.len(), 40 | 64)
                 || !oid

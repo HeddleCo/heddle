@@ -30,6 +30,8 @@ mod semantic_index;
 mod semantic_reverse_deps;
 mod session;
 mod source;
+pub mod source_target;
+pub mod source_target_map;
 mod spool_id;
 mod staleness_core;
 mod state_attachment;
