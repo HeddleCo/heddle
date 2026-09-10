@@ -752,6 +752,10 @@ fn parse_hosted_role_arg(
     }
 }
 
+fn native_protocol_error(error: impl std::fmt::Display) -> ProtocolError {
+    ProtocolError::InvalidState(error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsString, sync::MutexGuard};
@@ -1080,8 +1084,4 @@ mod tests {
             "auto-provision must issue CreateSpool without BootstrapOwnerRoot"
         );
     }
-}
-
-fn native_protocol_error(error: impl std::fmt::Display) -> ProtocolError {
-    ProtocolError::InvalidState(error.to_string())
 }

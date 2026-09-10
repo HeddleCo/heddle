@@ -175,6 +175,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_call<V, H>(
     verifier: &V,
     handler: &H,

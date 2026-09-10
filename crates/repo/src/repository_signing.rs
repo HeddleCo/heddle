@@ -1040,10 +1040,12 @@ mod tests {
                 .snapshot(Some("x".to_string()), None)
                 .expect_err("native capture requires the owner key");
             assert!(
-                error.to_string().contains("identity")
-                    || error.to_string().contains("owner key")
-                    || error.to_string().contains("signing"),
-                "expected owner-key failure, got {error}"
+                matches!(
+                    &error,
+                    objects::error::HeddleError::NativeSourceSignerUnavailable { thread, .. }
+                        if thread == "main"
+                ),
+                "expected the typed owner-key refusal on main, got {error:?}"
             );
         });
     }
@@ -1089,9 +1091,15 @@ mod tests {
             let error = repo
                 .snapshot(Some("b".to_string()), None)
                 .expect_err("exposed owner key cannot record native capture");
+            let objects::error::HeddleError::NativeSourceSignerUnavailable { thread, reason } =
+                &error
+            else {
+                panic!("expected the typed owner-key refusal, got {error:?}");
+            };
+            assert_eq!(thread, "main");
             assert!(
-                error.to_string().contains("group/world-accessible"),
-                "expected permission failure, got {error}"
+                reason.contains("group/world-accessible"),
+                "the refusal must name the permission gate, got {reason}"
             );
 
             // Re-securing the key restores native capture on the same handle.

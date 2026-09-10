@@ -1049,6 +1049,7 @@ pub(crate) enum SnapshotFault {
     StageBeforeAtomicCommit,
     ArtifactCommitBeforeOplogView,
     AtomicCommitBeforeRefPublish,
+    NativeSourceRecordedBeforeRefPublish,
 }
 
 #[cfg(test)]
@@ -1288,8 +1289,7 @@ impl Repository {
                     .locker()
                     .write()
                     .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
-                self.require_attached_native_source_signer()
-                    .map_err(|error| HeddleError::Config(error.to_string()))?;
+                self.require_attached_native_source_signer()?;
 
                 if let Some(merge_state) = self.merge_state_manager().load()? {
                     let unresolved: Vec<_> = merge_state
@@ -1415,8 +1415,19 @@ impl Repository {
             #[cfg(test)]
             maybe_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish);
 
+            // Admit on the native Thread before the ref moves. The Thread is the
+            // authority for admitted revisions and a capture's parents must
+            // already be admitted, so a ref that got ahead of admission (crash
+            // after publish, before record) would wedge every later capture on
+            // "parent has no admitted native operation". The reverse crash leaves
+            // an admitted operation the ref never reached: the retry captures
+            // from the unmoved ref as a sibling, and recording is idempotent when
+            // it reproduces the same State. Covered by
+            // `native_admission_before_ref_publish_survives_a_crash_between_them`.
             self.record_attached_native_source(execution.state.id())
                 .map_err(|error| HeddleError::Config(error.to_string()))?;
+            #[cfg(test)]
+            maybe_snapshot_fault(SnapshotFault::NativeSourceRecordedBeforeRefPublish);
             let ref_publish_started = std::time::Instant::now();
             reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
             execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
@@ -1493,8 +1504,7 @@ impl Repository {
                     .write()
                     .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
                 reject_unresolved_snapshot_merge(self)?;
-                self.require_attached_native_source_signer()
-                    .map_err(|error| HeddleError::Config(error.to_string()))?;
+                self.require_attached_native_source_signer()?;
                 (self.head_ref()?, self.head()?)
             };
             let mut mutation = SnapshotMutation::new(
@@ -1557,8 +1567,19 @@ impl Repository {
             #[cfg(test)]
             maybe_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish);
 
+            // Admit on the native Thread before the ref moves. The Thread is the
+            // authority for admitted revisions and a capture's parents must
+            // already be admitted, so a ref that got ahead of admission (crash
+            // after publish, before record) would wedge every later capture on
+            // "parent has no admitted native operation". The reverse crash leaves
+            // an admitted operation the ref never reached: the retry captures
+            // from the unmoved ref as a sibling, and recording is idempotent when
+            // it reproduces the same State. Covered by
+            // `native_admission_before_ref_publish_survives_a_crash_between_them`.
             self.record_attached_native_source(execution.state.id())
                 .map_err(|error| HeddleError::Config(error.to_string()))?;
+            #[cfg(test)]
+            maybe_snapshot_fault(SnapshotFault::NativeSourceRecordedBeforeRefPublish);
             let ref_publish_started = std::time::Instant::now();
             reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
             execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
@@ -1635,8 +1656,7 @@ impl Repository {
         fold_default_visibility: bool,
         transaction_id: Option<&str>,
     ) -> Result<State> {
-        self.require_attached_native_source_signer()
-            .map_err(|error| HeddleError::Config(error.to_string()))?;
+        self.require_attached_native_source_signer()?;
         let tree = self.build_tree(&self.root)?;
         let tree_hash = self.store.put_tree(&tree)?;
 
@@ -1696,6 +1716,8 @@ impl Repository {
                 supersedes: None,
             })?;
         }
+        // Admit before the ref moves, for the reason given at the worktree
+        // capture sites: a ref ahead of native admission wedges later captures.
         self.record_attached_native_source(state.id())
             .map_err(|error| HeddleError::Config(error.to_string()))?;
 

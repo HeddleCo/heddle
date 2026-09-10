@@ -222,22 +222,21 @@ impl DeviceRpc {
         .concat();
         // Resume is always explicit reset until durable replay is implemented;
         // a snapshot cursor is never mistaken for collection pagination.
-        let normalized;
-        if is_checkout {
+        let normalized = if is_checkout {
             let mut request = ObserveCheckoutsRequest::decode(body)?;
             request.observe = None;
             if let Some(page) = request.page.as_mut() {
                 page.after_page.clear();
             }
-            normalized = request.encode_to_vec();
+            request.encode_to_vec()
         } else {
             let mut request = ObserveRunsRequest::decode(body)?;
             request.observe = None;
             if let Some(page) = request.page.as_mut() {
                 page.after_page.clear();
             }
-            normalized = request.encode_to_vec();
-        }
+            request.encode_to_vec()
+        };
         binding_bytes.extend_from_slice(&normalized);
         let binding = blake3::hash(&binding_bytes).as_bytes().to_vec();
         let feed = self.feed(session)?;
@@ -492,6 +491,7 @@ impl DeviceRpc {
             }
         }
     }
+    #[allow(clippy::too_many_arguments)]
     fn snapshot(
         &self,
         session: &Session,

@@ -55,6 +55,17 @@ impl Runtime {
     }
 }
 
+/// A started analysis run: the operation record, its target state, the
+/// revisions it covers, the namespace, and the execution slot it holds.
+#[cfg(feature = "semantic")]
+type StartedAnalysis = (
+    repo::device_operations::Started,
+    ContentHash,
+    Vec<objects::object::StateId>,
+    String,
+    tokio::sync::OwnedSemaphorePermit,
+);
+
 impl DeviceRpc {
     #[cfg(feature = "semantic")]
     pub(super) async fn start_analysis(
@@ -64,7 +75,7 @@ impl DeviceRpc {
         mut send: iroh::endpoint::SendStream,
     ) -> Result<()> {
         let session = Arc::new(session);
-        let result=(||->Result<(Vec<u8>,Option<(repo::device_operations::Started,ContentHash,Vec<objects::object::StateId>,String,tokio::sync::OwnedSemaphorePermit)>)> {
+        let result=(||->Result<(Vec<u8>,Option<StartedAnalysis>)> {
             let request=StartAnalysisRequest::decode(body)?;
             ensure!(request.execution_endpoint.as_ref()==Some(&self.endpoint()),"analysis requires this exact execution endpoint");
             ensure!(request.expected_disclosure_policy_version.is_empty(),"local semantic indexing does not execute provider disclosure policies");
@@ -344,7 +355,7 @@ impl DeviceRpc {
         request: &ObserveAnalysisRequest,
         budget: &ReadBudget,
         binding: &[u8],
-    ) -> Result<(Vec<(String, AnalysisEvent)>, PageInfo, Vec<u8>)> {
+    ) -> Result<super::stream::ViewSnapshot<AnalysisEvent>> {
         let before = analysis_version(session, request)?;
         let repository = repo::Repository::open(&session.spool.root)?;
         let state = checkout::revision(session, request.source.as_ref())?;

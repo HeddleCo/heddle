@@ -341,6 +341,7 @@ impl DeviceRpc {
         objects::fs_atomic::write_file_atomic_secret(&path, &serde_json::to_vec(&command)?)?;
         Ok(response)
     }
+    #[allow(clippy::too_many_arguments)]
     fn move_checkout(
         &self,
         session: &Session,

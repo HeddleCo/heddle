@@ -75,7 +75,11 @@ pub(super) fn budget(requested: Option<ReadBudget>) -> ReadBudget {
         },
     }
 }
+/// One observed page: keyed events, paging, and the version the page was cut at.
+pub(super) type ViewSnapshot<E> = (Vec<(String, E)>, PageInfo, Vec<u8>);
+
 impl DeviceRpc {
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn observe_view<E: Event>(
         &self,
         session: &Session,
@@ -83,7 +87,7 @@ impl DeviceRpc {
         normalized_query: &[u8],
         options: ObserveOptions,
         send: SendStream,
-        snapshot: impl Fn(&ReadBudget, &[u8]) -> Result<(Vec<(String, E)>, PageInfo, Vec<u8>)>,
+        snapshot: impl Fn(&ReadBudget, &[u8]) -> Result<ViewSnapshot<E>>,
         current_version: impl Fn() -> Result<Vec<u8>>,
     ) -> Result<()> {
         let feed = self.feed(session)?;
@@ -99,6 +103,7 @@ impl DeviceRpc {
         )
         .await
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn observe_authorized_view<E: Event>(
         &self,
         session: &impl ObservationAuthority,
@@ -107,7 +112,7 @@ impl DeviceRpc {
         options: ObserveOptions,
         mut send: SendStream,
         mut changes: tokio::sync::watch::Receiver<u64>,
-        snapshot: impl Fn(&ReadBudget, &[u8]) -> Result<(Vec<(String, E)>, PageInfo, Vec<u8>)>,
+        snapshot: impl Fn(&ReadBudget, &[u8]) -> Result<ViewSnapshot<E>>,
         current_version: impl Fn() -> Result<Vec<u8>>,
     ) -> Result<()> {
         let result:Result<()> = async {

@@ -6,6 +6,7 @@ use crypto::{
     thread_operation::{SignedGenesis, SignedOperation},
 };
 use objects::{
+    error::HeddleError,
     object::{
         ContentHash, State, StateId, VisibilityTier,
         thread_replication::{
@@ -401,21 +402,23 @@ impl Repository {
     }
 
     /// Fail closed before committing a snapshot when this checkout is attached
-    /// to a native Thread whose owner key cannot sign a source operation.
-    pub fn require_attached_native_source_signer(&self) -> Result<()> {
-        let name = match self
-            .head_ref()
-            .map_err(|error| Error::Invalid(error.to_string()))?
-        {
-            refs::Head::Attached { thread } => thread.to_string(),
-            refs::Head::Detached { .. } => return Ok(()),
+    /// to a native Thread whose owner key cannot sign a source operation. The
+    /// refusal is the typed [`HeddleError::NativeSourceSignerUnavailable`] so
+    /// callers and tests can tell "no signer" from every other capture failure.
+    pub fn require_attached_native_source_signer(&self) -> objects::error::Result<()> {
+        let refs::Head::Attached { thread } = self.head_ref()? else {
+            return Ok(());
         };
-        let replica = match self.native_thread(&name) {
-            Ok(replica) => replica,
-            Err(_) => return Ok(()),
+        let name = thread.to_string();
+        let Ok(replica) = self.native_thread(&name) else {
+            return Ok(());
         };
-        self.native_thread_signer(&replica)?;
-        Ok(())
+        self.native_thread_signer(&replica).map(|_| ()).map_err(|error| {
+            HeddleError::NativeSourceSignerUnavailable {
+                thread: name,
+                reason: error.to_string(),
+            }
+        })
     }
 
     /// Record a capture on the attached native Thread after a local snapshot.
@@ -509,14 +512,10 @@ impl Repository {
             expected_target_frontier: frontier.clone(),
             result: replica.prepare_integration(self, &state, source_thread, source_operation)?,
             result_visibility,
-            initiating_request_proof: ContentHash::compute_typed(
-                "heddle-cli-local-integration-request-v1",
-                &[
-                    source_thread.as_bytes().as_slice(),
-                    replica.thread_id().as_bytes().as_slice(),
-                    state_id.as_bytes().as_slice(),
-                ]
-                .concat(),
+            initiating_request_proof: local_integration_request_digest(
+                source_thread,
+                replica.thread_id(),
+                state_id,
             ),
             local_policy_version,
             executed_at_ms: chrono::Utc::now().timestamp_millis(),
@@ -617,6 +616,28 @@ fn classify_attached_source(
             })
         }
     }
+}
+
+/// The CLI has no device-RPC request to cite. On the device path
+/// `initiating_request_proof` is the hash of the verified request proof; here
+/// it carries a deterministic digest of the public request tuple instead, so
+/// the receipt is bound to what was asked and a retry reproduces the same
+/// value. It is not evidence of authority: that comes only from the operation
+/// signature checked at admission; heddle admission never reads this field.
+fn local_integration_request_digest(
+    source_thread: ContentHash,
+    target_thread: ContentHash,
+    state_id: StateId,
+) -> ContentHash {
+    ContentHash::compute_typed(
+        "heddle-cli-local-integration-request-v1",
+        &[
+            source_thread.as_bytes().as_slice(),
+            target_thread.as_bytes().as_slice(),
+            state_id.as_bytes().as_slice(),
+        ]
+        .concat(),
+    )
 }
 
 fn local_integration_policy_version(visibility: &VisibilityTier) -> Result<ContentHash> {

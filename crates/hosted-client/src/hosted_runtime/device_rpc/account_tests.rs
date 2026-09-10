@@ -346,6 +346,9 @@ pub(super) async fn roundtrip(
 }
 
 #[tokio::test]
+// `lock_test_env` serializes process-global HEDDLE_HOME/credential mutation,
+// so the guard is deliberately held across the whole async scenario.
+#[allow(clippy::await_holding_lock)]
 async fn real_account_rpc_composes_private_views_and_enforces_scoped_mutations() {
     use std::{net::Ipv4Addr, sync::Arc};
 
@@ -462,7 +465,7 @@ async fn real_account_rpc_composes_private_views_and_enforces_scoped_mutations()
     repo::device_catalog::register(home.path(), &other_repo, other_id).expect("other registration");
     let root = Ed25519Signer::from_seed(&[71; 32]).expect("root signer");
     let key = biscuit_verifier::PublicKey::from_bytes(
-        &root.public_key(),
+        root.public_key(),
         biscuit_auth::Algorithm::Ed25519,
     )
     .expect("root public key");

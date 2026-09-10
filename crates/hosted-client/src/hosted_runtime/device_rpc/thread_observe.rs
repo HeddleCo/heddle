@@ -136,7 +136,7 @@ impl DeviceRpc {
         request: &ObserveThreadRequest,
         budget: &ReadBudget,
         binding: &[u8],
-    ) -> Result<(Vec<(String, ThreadEvent)>, PageInfo, Vec<u8>)> {
+    ) -> Result<super::stream::ViewSnapshot<ThreadEvent>> {
         #[cfg(test)]
         self.thread_snapshots
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -218,7 +218,7 @@ impl DeviceRpc {
                         .cloned()
                         .unwrap_or_default();
                     let after = decode_cursor(&page.after_page, binding, b"captures")?
-                        .map(|bytes| ContentHash::from_bytes(bytes));
+                        .map(ContentHash::from_bytes);
                     let size = page_size(&page, budget);
                     let mut records =
                         replica.accepted_page(ThreadFacet::Source, after, size + 1)?;

@@ -410,10 +410,10 @@ impl DeviceRpc {
                     .to_vec(),
                 operation_ids: ids.iter().map(|id| id.as_bytes().to_vec()).collect(),
             };
-            if *property == Property::Intent {
-                if let Some(intent) = overview.intent.as_mut() {
-                    intent.version = frontier.version.clone();
-                }
+            if *property == Property::Intent
+                && let Some(intent) = overview.intent.as_mut()
+            {
+                intent.version = frontier.version.clone();
             }
             overview.metadata_frontiers.push(frontier.clone());
             if candidates.len() > 1 {

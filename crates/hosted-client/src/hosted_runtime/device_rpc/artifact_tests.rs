@@ -36,7 +36,6 @@ pub(super) async fn roundtrip(
             expected_version: policy_version,
             client_operation_id: uuid::Uuid::new_v4().to_string(),
             policy: Some(policy.clone()),
-            ..Default::default()
         },
         "human",
     )
@@ -123,7 +122,6 @@ pub(super) async fn roundtrip(
                 raw_retention_seconds: 0,
                 ..policy
             }),
-            ..Default::default()
         },
         "human",
     )

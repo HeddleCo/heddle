@@ -210,6 +210,11 @@ pub enum HeddleError {
     Serialization(String),
     #[error("configuration error: {0}")]
     Config(String),
+    /// A checkout attached to a native Thread cannot sign a source operation
+    /// with that Thread's owner key, so capture fails closed. Distinct from
+    /// [`Self::Config`] so callers can tell "no signer" from any other refusal.
+    #[error("native Thread '{thread}' owner signing key is unavailable: {reason}")]
+    NativeSourceSignerUnavailable { thread: String, reason: String },
     #[error("configuration parse error at {path}: {source}")]
     ConfigParse {
         path: std::path::PathBuf,

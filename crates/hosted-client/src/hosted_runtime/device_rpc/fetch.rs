@@ -342,15 +342,15 @@ pub(super) fn prepare(
             if bytes > 16 * 1024 * 1024 || operations.len() >= RECORDS {
                 bail!("source proof metadata budget exceeded")
             }
-            if let Some(receipt) = operation.local_integration()? {
-                if !seen.contains(&(receipt.source_thread, receipt.source_operation)) {
-                    pending.insert((receipt.source_thread, receipt.source_operation));
-                }
+            if let Some(receipt) = operation.local_integration()?
+                && !seen.contains(&(receipt.source_thread, receipt.source_operation))
+            {
+                pending.insert((receipt.source_thread, receipt.source_operation));
             }
-            if let Some(receipt) = operation.integration()? {
-                if !seen.contains(&(receipt.source_thread, receipt.source_operation)) {
-                    pending.insert((receipt.source_thread, receipt.source_operation));
-                }
+            if let Some(receipt) = operation.integration()?
+                && !seen.contains(&(receipt.source_thread, receipt.source_operation))
+            {
+                pending.insert((receipt.source_thread, receipt.source_operation));
             }
             if let Some(proof) = operation.reference_proof(&genesis)? {
                 proofs.push(proof)

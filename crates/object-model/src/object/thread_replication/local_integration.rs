@@ -25,6 +25,10 @@ pub struct LocalIntegration {
     pub expected_target_frontier: BTreeSet<ContentHash>,
     pub result: super::Capture,
     pub result_visibility: VisibilityTier,
+    /// Audit binding to whatever initiated the integration: the verified
+    /// device-RPC request proof on the device path, a digest of the request
+    /// tuple on the CLI path. Never an authority proof; heddle admission does
+    /// not read it.
     pub initiating_request_proof: ContentHash,
     pub local_policy_version: ContentHash,
     pub executed_at_ms: i64,

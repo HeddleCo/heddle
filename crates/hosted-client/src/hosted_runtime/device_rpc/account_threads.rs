@@ -56,7 +56,7 @@ impl DeviceRpc {
         });
         let spools = self.thread_spools(session, query)?;
         let size = page_size(page, budget);
-        let per_spool = (4096 / spools.len().max(1)).min(size + 1).min(1023).max(1);
+        let per_spool = (4096 / spools.len().max(1)).min(size + 1).clamp(1, 1023);
         let compare = |a: &listing::Row, b: &listing::Row| {
             if by_name {
                 a.name.cmp(&b.name).then(a.thread.cmp(&b.thread))

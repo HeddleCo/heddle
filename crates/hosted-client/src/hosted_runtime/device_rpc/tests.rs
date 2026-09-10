@@ -13,6 +13,9 @@ use crate::hosted_runtime::{
 };
 
 #[tokio::test]
+// `lock_test_env` serializes process-global HEDDLE_HOME/credential mutation,
+// so the guard is deliberately held across the whole async scenario.
+#[allow(clippy::await_holding_lock)]
 async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     let _guard = config::credentials::lock_test_env();
     struct Restore(Option<std::ffi::OsString>);
@@ -663,13 +666,12 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let frame = output.next().await.expect("receipt frame").expect("open");
-                if let Some(replicate_thread_response::Body::Receipt(receipt)) = frame.body {
-                    if receipt
+                if let Some(replicate_thread_response::Body::Receipt(receipt)) = frame.body
+                    && receipt
                         .accepted_operation_ids
                         .contains(&incoming_id.as_bytes().to_vec())
-                    {
-                        break;
-                    }
+                {
+                    break;
                 }
             }
         })
@@ -700,14 +702,13 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 let frame = output.next().await.expect("push frame").expect("open");
-                if let Some(replicate_thread_response::Body::Have(have)) = frame.body {
-                    if have
+                if let Some(replicate_thread_response::Body::Have(have)) = frame.body
+                    && have
                         .frontiers
                         .iter()
                         .any(|frontier| frontier.heads.contains(&local_id.as_bytes().to_vec()))
-                    {
-                        break;
-                    }
+                {
+                    break;
                 }
             }
         })
@@ -870,20 +871,14 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
             .await
             .expect("submit distinct original publisher");
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            loop {
-                match output.next().await {
-                    Ok(Some(frame)) => {
-                        if let Some(replicate_thread_response::Body::Receipt(receipt)) = frame.body
-                        {
-                            assert!(
-                                !receipt
-                                    .accepted_operation_ids
-                                    .contains(&unowned_id.as_bytes().to_vec()),
-                                "delivery authority cannot replace original author authority"
-                            );
-                        }
-                    }
-                    Ok(None) | Err(_) => break,
+            while let Ok(Some(frame)) = output.next().await {
+                if let Some(replicate_thread_response::Body::Receipt(receipt)) = frame.body {
+                    assert!(
+                        !receipt
+                            .accepted_operation_ids
+                            .contains(&unowned_id.as_bytes().to_vec()),
+                        "delivery authority cannot replace original author authority"
+                    );
                 }
             }
         })

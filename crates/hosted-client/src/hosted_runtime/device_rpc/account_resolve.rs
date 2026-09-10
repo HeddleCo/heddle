@@ -11,7 +11,7 @@ impl DeviceRpc {
         session: &AccountSession,
         request: &ResolveResourcesRequest,
     ) -> Result<ResolveResourcesResponse> {
-        let budget = super::stream::budget(request.budget.clone());
+        let budget = super::stream::budget(request.budget);
         ensure!(
             !request.selectors.is_empty() && request.selectors.len() <= budget.max_items as usize,
             "resource selector count exceeds budget"
@@ -24,15 +24,15 @@ impl DeviceRpc {
             if let Some(catalog) = &catalog {
                 match selector.selector.as_ref() {
                     Some(resource_selector::Selector::SpoolAddress(address)) => {
-                        if let Some(record) = catalog.find_spool_address(address)? {
-                            if session.permits(&record.registration.capability_path) {
-                                resource = Some(EntityRef {
-                                    entity: Some(entity_ref::Entity::Spool(SpoolRef {
-                                        id: record.registration.id.to_string(),
-                                    })),
-                                });
-                                coverage = Coverage::Complete;
-                            }
+                        if let Some(record) = catalog.find_spool_address(address)?
+                            && session.permits(&record.registration.capability_path)
+                        {
+                            resource = Some(EntityRef {
+                                entity: Some(entity_ref::Entity::Spool(SpoolRef {
+                                    id: record.registration.id.to_string(),
+                                })),
+                            });
+                            coverage = Coverage::Complete;
                         }
                     }
                     Some(resource_selector::Selector::Resource(reference)) => {
@@ -41,50 +41,49 @@ impl DeviceRpc {
                             Some(entity_ref::Entity::Thread(r)) => r.spool.as_ref(),
                             _ => None,
                         };
-                        if let Some(scope) = scope {
-                            if let Some(record) = catalog.spool(scope_id(Some(scope))?)? {
-                                if session.permits(&record.registration.capability_path) {
-                                    let available = match reference.entity.as_ref() {
-                                        Some(entity_ref::Entity::Spool(_)) => true,
-                                        Some(entity_ref::Entity::Thread(thread)) => {
-                                            let id = thread
-                                                .id
-                                                .as_ref()
-                                                .context("Thread identity required")?;
-                                            let hash = ContentHash::from_bytes(
-                                                id.value.as_slice().try_into().context(
-                                                    "Thread identity must contain32bytes",
-                                                )?,
-                                            );
-                                            if let Ok(replica) =
-                                                repo::thread_replication::ThreadReplica::open(
-                                                    &record.registration.heddle_dir,
-                                                    hash,
-                                                )
-                                            {
-                                                let facts = session.facts(Some(
-                                                    &record.registration.capability_path,
-                                                ))?;
-                                                let repository = repo::Repository::open(
-                                                    &record.registration.root,
-                                                )?;
-                                                super::auth::thread_visible(
-                                                    &repository,
-                                                    &replica,
-                                                    uuid::Uuid::parse_str(&session.principal)?,
-                                                    facts.delegation_agent_id.as_deref(),
-                                                )?
-                                            } else {
-                                                false
-                                            }
-                                        }
-                                        _ => false,
-                                    };
-                                    if available {
-                                        resource = Some(reference.clone());
-                                        coverage = Coverage::Complete;
+                        if let Some(scope) = scope
+                            && let Some(record) = catalog.spool(scope_id(Some(scope))?)?
+                            && session.permits(&record.registration.capability_path)
+                        {
+                            let available = match reference.entity.as_ref() {
+                                Some(entity_ref::Entity::Spool(_)) => true,
+                                Some(entity_ref::Entity::Thread(thread)) => {
+                                    let id = thread
+                                        .id
+                                        .as_ref()
+                                        .context("Thread identity required")?;
+                                    let hash = ContentHash::from_bytes(
+                                        id.value.as_slice().try_into().context(
+                                            "Thread identity must contain32bytes",
+                                        )?,
+                                    );
+                                    if let Ok(replica) =
+                                        repo::thread_replication::ThreadReplica::open(
+                                            &record.registration.heddle_dir,
+                                            hash,
+                                        )
+                                    {
+                                        let facts = session.facts(Some(
+                                            &record.registration.capability_path,
+                                        ))?;
+                                        let repository = repo::Repository::open(
+                                            &record.registration.root,
+                                        )?;
+                                        super::auth::thread_visible(
+                                            &repository,
+                                            &replica,
+                                            uuid::Uuid::parse_str(&session.principal)?,
+                                            facts.delegation_agent_id.as_deref(),
+                                        )?
+                                    } else {
+                                        false
                                     }
                                 }
+                                _ => false,
+                            };
+                            if available {
+                                resource = Some(reference.clone());
+                                coverage = Coverage::Complete;
                             }
                         }
                     }
@@ -93,51 +92,51 @@ impl DeviceRpc {
                             !selector.name.is_empty() && selector.name.len() <= 4096,
                             "Thread name bound"
                         );
-                        if let Some(record) = catalog.spool(scope_id(selector.spool.as_ref())?)? {
-                            if session.permits(&record.registration.capability_path) {
-                                let cursor = repo::thread_replication::listing::Cursor {
-                                    name: selector.name.clone(),
-                                    updated: 0,
-                                    thread: Vec::new(),
-                                };
-                                let rows = repo::thread_replication::listing::page(
+                        if let Some(record) = catalog.spool(scope_id(selector.spool.as_ref())?)?
+                            && session.permits(&record.registration.capability_path)
+                        {
+                            let cursor = repo::thread_replication::listing::Cursor {
+                                name: selector.name.clone(),
+                                updated: 0,
+                                thread: Vec::new(),
+                            };
+                            let rows = repo::thread_replication::listing::page(
+                                &record.registration.heddle_dir,
+                                true,
+                                Some(&cursor),
+                                2,
+                            )?;
+                            let facts =
+                                session.facts(Some(&record.registration.capability_path))?;
+                            let repository = repo::Repository::open(&record.registration.root)?;
+                            let mut matches = Vec::new();
+                            for row in rows {
+                                if row.name != selector.name {
+                                    continue;
+                                }
+                                let replica = repo::thread_replication::ThreadReplica::open(
                                     &record.registration.heddle_dir,
-                                    true,
-                                    Some(&cursor),
-                                    2,
+                                    row.thread,
                                 )?;
-                                let facts =
-                                    session.facts(Some(&record.registration.capability_path))?;
-                                let repository = repo::Repository::open(&record.registration.root)?;
-                                let mut matches = Vec::new();
-                                for row in rows {
-                                    if row.name != selector.name {
-                                        continue;
-                                    }
-                                    let replica = repo::thread_replication::ThreadReplica::open(
-                                        &record.registration.heddle_dir,
-                                        row.thread,
-                                    )?;
-                                    if super::auth::thread_visible(
-                                        &repository,
-                                        &replica,
-                                        uuid::Uuid::parse_str(&session.principal)?,
-                                        facts.delegation_agent_id.as_deref(),
-                                    )? {
-                                        matches.push(row);
-                                    }
+                                if super::auth::thread_visible(
+                                    &repository,
+                                    &replica,
+                                    uuid::Uuid::parse_str(&session.principal)?,
+                                    facts.delegation_agent_id.as_deref(),
+                                )? {
+                                    matches.push(row);
                                 }
-                                if matches.len() == 1 {
-                                    resource = Some(EntityRef {
-                                        entity: Some(entity_ref::Entity::Thread(ThreadRef {
-                                            spool: selector.spool.clone(),
-                                            id: Some(ThreadId {
-                                                value: matches[0].thread.as_bytes().to_vec(),
-                                            }),
-                                        })),
-                                    });
-                                    coverage = Coverage::Complete;
-                                }
+                            }
+                            if matches.len() == 1 {
+                                resource = Some(EntityRef {
+                                    entity: Some(entity_ref::Entity::Thread(ThreadRef {
+                                        spool: selector.spool.clone(),
+                                        id: Some(ThreadId {
+                                            value: matches[0].thread.as_bytes().to_vec(),
+                                        }),
+                                    })),
+                                });
+                                coverage = Coverage::Complete;
                             }
                         }
                     }

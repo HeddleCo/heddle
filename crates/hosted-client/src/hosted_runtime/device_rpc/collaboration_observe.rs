@@ -59,7 +59,7 @@ impl DeviceRpc {
         request: &ObserveCollaborationRequest,
         budget: &ReadBudget,
         binding: &[u8],
-    ) -> Result<(Vec<(String, CollaborationEvent)>, PageInfo, Vec<u8>)> {
+    ) -> Result<super::stream::ViewSnapshot<CollaborationEvent>> {
         self.collaboration_snapshot_for_thread(session, request, budget, binding, None)
     }
     pub(super) fn collaboration_snapshot_for_thread(
@@ -69,7 +69,7 @@ impl DeviceRpc {
         budget: &ReadBudget,
         binding: &[u8],
         selected_thread: Option<objects::object::ContentHash>,
-    ) -> Result<(Vec<(String, CollaborationEvent)>, PageInfo, Vec<u8>)> {
+    ) -> Result<super::stream::ViewSnapshot<CollaborationEvent>> {
         let repository = repo::Repository::open(&session.spool.root)?;
         let generation = collaboration::generation(&session.spool.heddle_dir)?;
         let spool = request.spool.clone().context("spool required")?;

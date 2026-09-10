@@ -107,7 +107,7 @@ impl DeviceRpc {
                                 let key = format!(
                                     "thread:{}",
                                     hex::encode(
-                                        &thread
+                                        thread
                                             .r#ref
                                             .as_ref()
                                             .and_then(|r| r.id.as_ref())
@@ -165,7 +165,7 @@ impl DeviceRpc {
             budget.max_items as usize > requested_sections,
             "workspace item budget too small for requested section statuses"
         );
-        let mut quota = budget.clone();
+        let mut quota = *budget;
         quota.max_items = (budget.max_items as usize - requested_sections)
             .checked_div(
                 1 + usize::from(request.threads.is_some())
@@ -367,7 +367,7 @@ impl DeviceRpc {
             budget.max_items as usize > sections.len() + 1,
             "Spool budget too small"
         );
-        let mut quota = budget.clone();
+        let mut quota = *budget;
         quota.max_items = ((budget.max_items as usize - sections.len() - 1) / 2).max(1) as u32;
         for section in sections {
             let section = SpoolSection::try_from(section).context("unknown Spool section")?;
@@ -623,9 +623,9 @@ fn complete() -> PageInfo {
 }
 pub(super) fn page_size(page: &PageRequest, budget: &ReadBudget) -> usize {
     (if page.size == 0 {
-        budget.max_items.min(100).max(1)
+        budget.max_items.clamp(1, 100)
     } else {
-        page.size.min(budget.max_items).min(1024).max(1)
+        page.size.min(budget.max_items).clamp(1, 1024)
     }) as usize
 }
 pub(super) fn encode_page<T: serde::Serialize>(

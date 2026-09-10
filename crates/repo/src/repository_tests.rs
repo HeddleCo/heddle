@@ -1106,6 +1106,64 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
 }
 
 #[test]
+fn native_admission_before_ref_publish_survives_a_crash_between_them() {
+    let (temp_dir, repo) = create_test_repo();
+    fs::write(temp_dir.path().join("tracked.txt"), "baseline").unwrap();
+    let baseline = repo.snapshot(Some("baseline".to_string()), None).unwrap();
+    let main = repo
+        .native_thread("main")
+        .expect("init_default binds native main");
+
+    fs::write(temp_dir.path().join("tracked.txt"), "admitted, never published").unwrap();
+    let crashed = with_snapshot_fault(SnapshotFault::NativeSourceRecordedBeforeRefPublish, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = repo.snapshot(Some("admitted, never published".to_string()), None);
+        }))
+    });
+    assert!(
+        crashed.is_err(),
+        "the checkpoint must crash after native admission"
+    );
+    assert_eq!(
+        repo.head().unwrap(),
+        Some(baseline.id()),
+        "the ref must not have moved before the crash"
+    );
+    let orphaned = main.view().unwrap().source_heads;
+    assert_eq!(orphaned.len(), 1, "one admitted head: {orphaned:?}");
+    assert!(
+        !orphaned.contains(&baseline.id()),
+        "the crashed capture is admitted on main although the ref never reached it"
+    );
+
+    // The retry captures from the unmoved ref. Its parent is admitted, so it
+    // lands beside the orphaned operation instead of wedging the checkout.
+    let retried = repo
+        .snapshot(Some("admitted, never published".to_string()), None)
+        .expect("capture after the crash must still be admitted");
+    assert_eq!(repo.head().unwrap(), Some(retried.id()));
+    assert!(
+        !main
+            .source_operation_page(retried.id(), None, 1)
+            .unwrap()
+            .is_empty(),
+        "the retried capture must be admitted on main"
+    );
+
+    fs::write(temp_dir.path().join("tracked.txt"), "after recovery").unwrap();
+    let next = repo
+        .snapshot(Some("after recovery".to_string()), None)
+        .expect("captures continue from the published ref");
+    assert_eq!(next.parents, vec![retried.id()]);
+    assert!(
+        !main
+            .source_operation_page(next.id(), None, 1)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn packed_structured_snapshot_remains_invisible_until_oplog_commit() {
     let (temp_dir, repo) = create_test_repo();
     let baseline = repo.head().unwrap();
@@ -3291,4 +3349,26 @@ fn source_authority_transition_compares_against_disk() {
         RepositorySourceAuthority::Native
     );
     assert_eq!(reopened.capability(), RepositoryCapability::NativeHeddle);
+}
+
+// RR-PROBE (temporary; not for commit)
+#[test]
+fn rr_probe_crash_windows() {
+    for fault in [SnapshotFault::AtomicCommitBeforeRefPublish, SnapshotFault::NativeSourceRecordedBeforeRefPublish] {
+        let (temp_dir, repo) = create_test_repo();
+        fs::write(temp_dir.path().join("tracked.txt"), "baseline").unwrap();
+        let baseline = repo.snapshot(Some("baseline".to_string()), None).unwrap();
+        let main = repo.native_thread("main").unwrap();
+        eprintln!("RR fault={:?} baseline={} native_heads={:?}", fault as u8, baseline.id(), main.view().unwrap().source_heads);
+        fs::write(temp_dir.path().join("tracked.txt"), "crashed").unwrap();
+        let _ = with_snapshot_fault(fault, || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let _ = repo.snapshot(Some("crashed".to_string()), None); })));
+        eprintln!("RR after-crash head={:?} native_heads={:?}", repo.head().unwrap(), main.view().unwrap().source_heads);
+        let retried = repo.snapshot(Some("crashed".to_string()), None);
+        eprintln!("RR retry(same tree) => {:?}", retried.as_ref().map(|s| (s.id(), s.parents.clone())).map_err(|e| e.to_string()));
+        eprintln!("RR after-retry head={:?} native_heads={:?}", repo.head().unwrap(), main.view().unwrap().source_heads);
+        fs::write(temp_dir.path().join("tracked.txt"), "different").unwrap();
+        let next = repo.snapshot(Some("different".to_string()), None);
+        eprintln!("RR different capture => {:?}", next.as_ref().map(|s| (s.id(), s.parents.clone())).map_err(|e| e.to_string()));
+        eprintln!("RR after-different head={:?} native_heads={:?}", repo.head().unwrap(), main.view().unwrap().source_heads);
+    }
 }

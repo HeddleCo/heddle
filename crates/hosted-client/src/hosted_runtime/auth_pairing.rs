@@ -452,7 +452,6 @@ mod tests {
                             seconds: now + 300,
                             nanos: 0,
                         }),
-                        ..Default::default()
                     },
                 )),
                 session: Some(api::SessionRecord {

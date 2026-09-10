@@ -119,7 +119,6 @@ pub(crate) fn handle_with_authority(
                     seconds: expiry,
                     nanos: 0,
                 }),
-                ..Default::default()
             }
             .encode_to_vec()
         }

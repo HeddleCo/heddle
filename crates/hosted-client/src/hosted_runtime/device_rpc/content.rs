@@ -419,10 +419,10 @@ fn tree_page(
             } else {
                 format!("{prefix}/{}", entry.name())
             };
-            if depth < read.depth {
-                if let Some(child) = entry.tree_hash() {
-                    pending.push_back((path.clone(), child, depth + 1));
-                }
+            if depth < read.depth
+                && let Some(child) = entry.tree_hash()
+            {
+                pending.push_back((path.clone(), child, depth + 1));
             }
             if path <= after {
                 continue;
@@ -479,7 +479,6 @@ fn tree_entry(
             } else {
                 shared::GitObjectAlgorithm::Sha256
             } as i32,
-            ..Default::default()
         }),
         TreeEntryTarget::Spoollink { spool_id, state_id } => Target::Spoollink(ContentSpoolLink {
             native_spool_id: spool_id.to_string(),
