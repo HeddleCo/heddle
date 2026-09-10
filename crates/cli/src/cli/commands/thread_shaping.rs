@@ -146,7 +146,7 @@ pub fn cmd_thread_absorb(
         create_snapshot(
             &parent_repo,
             &user_config,
-            Some(format!("Prepare absorb of {}", child.id)),
+            Some(format!("Prepare absorb of {}", child.thread)),
             None,
             SnapshotAgentOverrides {
                 provider: None,
@@ -244,11 +244,11 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                     thread_resolve_rebase_followup_operator(
                         &source_repo,
                         &rebase_state_path,
-                        &thread.id,
+                        &thread.thread,
                     )?
                 } else {
                     let trust = build_repository_verification_state(&repo);
-                    thread_resolve_refresh_operator(&thread.id, &trust)
+                    thread_resolve_refresh_operator(&thread.thread, &trust)
                 };
                 return emit_thread_resolve(
                     cli,
@@ -264,7 +264,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                     let operator = thread_resolve_rebase_followup_operator(
                         &source_repo,
                         &rebase_state_path,
-                        &thread.id,
+                        &thread.thread,
                     )?;
                     return emit_thread_resolve(
                         cli,
@@ -276,7 +276,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
                     );
                 }
                 if let Some(operator) =
-                    thread_resolve_conflict_recovery_operator(&source_repo, &thread.id)?
+                    thread_resolve_conflict_recovery_operator(&source_repo, &thread.thread)?
                 {
                     return emit_thread_resolve(
                         cli,
@@ -313,7 +313,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         let rebase_state = super::rebase::load_persisted_rebase_state(&rebase_state_path)?;
         let current_state = source_repo
             .current_state()?
-            .ok_or_else(|| anyhow!("Thread '{}' has no current state", thread.id))?;
+            .ok_or_else(|| anyhow!("Thread '{}' has no current state", thread.thread))?;
         if rebase_state
             .pre_conflict_head
             .is_some_and(|head| head != current_state.state_id)
@@ -339,7 +339,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
             &UserConfig::load_default().unwrap_or_default(),
             Some(format!(
                 "Bootstrap git-overlay before resolving {}",
-                thread.id
+                thread.thread
             )),
         )?;
         let preview = merge_thread_into_current(
@@ -355,7 +355,7 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         if preview.conflict_count > 0 {
             blockers.push(format!(
                 "Thread '{}' still has merge conflicts: {}",
-                thread.id,
+                thread.thread,
                 preview.conflicts.join(", ")
             ));
             recommended_action = "heddle resolve --list".to_string();

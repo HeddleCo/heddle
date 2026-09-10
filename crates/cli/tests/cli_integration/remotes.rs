@@ -1268,8 +1268,8 @@ fn local_clone_persists_source_thread_stable_id() {
     heddle(&["capture", "-m", "source main"], Some(source.path())).unwrap();
     let source_id = thread_stable_id(source.path(), "main");
     assert!(
-        uuid::Uuid::parse_str(&source_id).is_ok(),
-        "source main must already carry a stable UUID, got {source_id}"
+        source_id.len() == 64 && source_id.chars().all(|ch| ch.is_ascii_hexdigit()),
+        "source main must already carry a stable native genesis id, got {source_id}"
     );
 
     let dest_parent = TempDir::new().unwrap();

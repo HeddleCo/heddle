@@ -158,7 +158,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
             .collect::<Vec<_>>();
         let message = format!(
             "Thread '{}' cannot run readiness checks until repository verification is restored: {}",
-            thread.id, preflight_trust.summary
+            thread.thread, preflight_trust.summary
         );
         let output = ReadyOutput {
             operator: OperatorCommandOutput {
@@ -201,7 +201,10 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
             .load(&thread.id)?
             .or_else(|| current_thread(repo).ok().flatten())
             .ok_or_else(|| {
-                anyhow::anyhow!(thread_not_found_advice(&thread.id, "ready after capture"))
+                anyhow::anyhow!(thread_not_found_advice(
+                    &thread.thread,
+                    "ready after capture"
+                ))
             })?;
         captured = true;
     }
@@ -413,7 +416,10 @@ fn emit_ready_dry_run(cli: &Cli, repo: &Repository, args: &ReadyArgs) -> Result<
 
     let mut dry = DryRunPlan::new(
         "ready",
-        format!("evaluate thread '{}' for integration readiness", thread.id),
+        format!(
+            "evaluate thread '{}' for integration readiness",
+            thread.thread
+        ),
     );
 
     if repo.current_state()?.is_none() {
@@ -452,7 +458,7 @@ fn emit_ready_dry_run(cli: &Cli, repo: &Repository, args: &ReadyArgs) -> Result<
     };
 
     dry.integrations.push(IntegrationPreview {
-        thread: thread.id.clone(),
+        thread: thread.thread.clone(),
         target: thread.target_thread.clone(),
         merge_relation: report.merge_relation.clone(),
         freshness: report.freshness.clone(),
@@ -476,7 +482,7 @@ fn emit_ready_dry_run(cli: &Cli, repo: &Repository, args: &ReadyArgs) -> Result<
         detail: if decision.has_integration_target {
             format!(
                 "{} vs {}: {}",
-                thread.id,
+                thread.thread,
                 thread.target_thread.as_deref().unwrap_or("(none)"),
                 report.merge_relation
             )

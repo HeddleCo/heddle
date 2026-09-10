@@ -15,6 +15,7 @@
 
 use std::fs;
 
+use repo::{Repository, ThreadManager};
 use serde_json::Value;
 
 use super::*;
@@ -84,24 +85,26 @@ fn test_thread_create_writes_record() {
 
     heddle(&["thread", "create", name], Some(main.path())).unwrap();
 
-    // The record store hex-encodes the thread id as the filename.
-    let encoded: String =
-        name.as_bytes()
-            .iter()
-            .fold(String::with_capacity(name.len() * 2), |mut acc, b| {
-                use std::fmt::Write as _;
-                let _ = write!(&mut acc, "{:02x}", b);
-                acc
-            });
-    let record_path = main
-        .path()
-        .join(".heddle")
-        .join("thread_records")
-        .join(format!("{encoded}.toml"));
+    // Records are keyed by native thread id (genesis content-hash), not the
+    // display name. Load through ThreadManager so the test does not assume a
+    // name-encoded filename.
+    let repo = Repository::open(main.path()).expect("open created repository");
+    let loaded = ThreadManager::new(repo.heddle_dir())
+        .load_id_or_name(name)
+        .expect("load thread record")
+        .expect("thread create should persist a ThreadManager-loadable record");
+    assert_eq!(loaded.thread, name);
+    assert_ne!(loaded.id, name, "native thread id is the genesis hash");
+    let record_dir = main.path().join(".heddle").join("thread_records");
+    let record_files: Vec<_> = std::fs::read_dir(&record_dir)
+        .expect("thread_records directory")
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "toml"))
+        .collect();
     assert!(
-        record_path.exists(),
-        "thread create should write a record file at {}",
-        record_path.display()
+        !record_files.is_empty(),
+        "thread create should write a record file under {}",
+        record_dir.display()
     );
 
     // And the loader must surface the thread.

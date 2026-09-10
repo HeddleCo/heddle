@@ -1179,13 +1179,13 @@ pub fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Op
         conflicts_resolved_manually: true,
     };
     thread.updated_at = Utc::now();
-    let thread_id = thread.id.clone();
+    let thread_name = thread.thread.clone();
     let target = thread.target_thread.clone();
     crate::save_thread_update(repo, &manager, &thread, before, current_state)?;
 
     Ok(Some(manual_resolution_land_action(
         repo,
-        &thread_id,
+        &thread_name,
         target.as_deref(),
     )))
 }

@@ -309,7 +309,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         Some(Repository::open(&thread.execution_path).with_context(|| {
             format!(
                 "opening thread '{}' worktree at {}",
-                thread.id,
+                thread.thread,
                 thread.execution_path.display()
             )
         })?)
@@ -339,7 +339,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         )));
     };
     let remote_synced = sync_remote_before_land_if_needed(&repo, &thread.id)?;
-    git_overlay_txn::preflight_land_checkpoint(&repo, &thread.id)?;
+    git_overlay_txn::preflight_land_checkpoint(&repo, &thread.thread)?;
 
     let mut captured = false;
     if let Some(thread_repo) = thread_repo.as_ref() {
@@ -348,7 +348,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             let capture_message = args
                 .message
                 .clone()
-                .or_else(|| Some(format!("Land {}", thread.id)));
+                .or_else(|| Some(format!("Land {}", thread.thread)));
             create_snapshot(
                 thread_repo,
                 &user_config,
@@ -407,17 +407,17 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                         action: OperatorAction::Land,
                         message: format!(
                             "Thread '{}' must be synced manually",
-                            refreshed_thread.id
+                            refreshed_thread.thread
                         ),
                         blockers: rendered_blockers,
                         warnings: Vec::new(),
                         next_action: Some(format!(
                             "heddle sync {}",
-                            thread_flag(&refreshed_thread.id)
+                            thread_flag(&refreshed_thread.thread)
                         )),
                         recommended_action: Some(format!(
                             "heddle sync {}",
-                            thread_flag(&refreshed_thread.id)
+                            thread_flag(&refreshed_thread.thread)
                         )),
                     },
                     thread: refreshed_thread.id.clone(),
@@ -472,7 +472,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                             action: OperatorAction::Land,
                             message: format!(
                                 "Thread '{}' has merge conflicts to resolve",
-                                refreshed_thread.id
+                                refreshed_thread.thread
                             ),
                             blockers: rendered_blockers,
                             warnings: Vec::new(),
@@ -556,13 +556,13 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             objects::fault_inject::maybe_fail_at("land_after_integration_before_journal_update")?;
             if let Err(error) = write_incomplete_land_marker(
                 &repo,
-                &merge_thread.id,
+                &merge_thread.thread,
                 Some(&merge_state),
                 land_collapse_state.as_ref(),
             ) {
                 return Err(land_checkpoint_failure_after_heddle(
                     &repo,
-                    &merge_thread.id,
+                    &merge_thread.thread,
                     error,
                     Some(&merge_state),
                     land_collapse_state.as_ref(),
@@ -629,12 +629,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             message: if resolved_manually {
                 format!(
                     "Landed thread '{}' from a manually resolved integration state",
-                    merge_thread.id
+                    merge_thread.thread
                 )
             } else {
                 format!(
                     "Landed thread '{}' via an automatic integration merge",
-                    merge_thread.id
+                    merge_thread.thread
                 )
             },
             blockers: Vec::new(),
@@ -711,7 +711,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                         action: OperatorAction::Land,
                         message: format!(
                             "Thread '{}' has merge conflicts to resolve",
-                            merge_thread.id
+                            merge_thread.thread
                         ),
                         blockers: rendered_blockers.clone(),
                         warnings: preview_warnings.clone(),
@@ -856,13 +856,13 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         objects::fault_inject::maybe_fail_at("land_after_integration_before_journal_update")?;
         if let Err(error) = write_incomplete_land_marker(
             &repo,
-            &merge_thread.id,
+            &merge_thread.thread,
             merge_output.merge_state.as_deref(),
             land_collapse_state.as_ref(),
         ) {
             return Err(land_checkpoint_failure_after_heddle(
                 &repo,
-                &merge_thread.id,
+                &merge_thread.thread,
                 error,
                 merge_output.merge_state.as_deref(),
                 land_collapse_state.as_ref(),
@@ -1176,7 +1176,7 @@ fn materialize_land_conflict_for_thread(repo: &Repository, thread: &Thread) -> R
     let thread_repo = Repository::open(&thread.execution_path).with_context(|| {
         format!(
             "opening thread '{}' worktree at {} to materialize land conflict",
-            thread.id,
+            thread.thread,
             thread.execution_path.display()
         )
     })?;
@@ -1212,7 +1212,7 @@ fn collapse_thread_for_land(
     let intent = message
         .filter(|message| !message.trim().is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("Land {}", thread.id));
+        .unwrap_or_else(|| format!("Land {}", thread.thread));
     let result = collapse_resolved_states(
         repo,
         user_config,
@@ -2379,7 +2379,7 @@ fn write_prepared_land_marker(
 ) -> Result<String> {
     let integration_transaction_id = format!("land-integration/{}", uuid::Uuid::new_v4());
     let marker = IncompleteLandMarker {
-        thread_id: thread.id.clone(),
+        thread_id: thread.thread.clone(),
         merge_state: None,
         collapse_state: None,
         target_branch: repo.git_overlay_current_branch()?,
@@ -2954,7 +2954,7 @@ fn emit_land_dry_run(cli: &Cli, args: &LandArgs) -> Result<()> {
     if thread_ids.is_empty() {
         // Fall back to the current checkout thread, matching a bare `heddle land`.
         // Do not read the target repo HEAD — that lands `main` from an isolated checkout.
-        thread_ids.push(resolve_land_subject_thread(cli, &repo, None)?.id);
+        thread_ids.push(resolve_land_subject_thread(cli, &repo, None)?.thread);
     }
 
     let squash = should_squash_land(args, &UserConfig::load_default().unwrap_or_default());
@@ -3013,7 +3013,7 @@ fn emit_land_dry_run(cli: &Cli, args: &LandArgs) -> Result<()> {
         // Read-only: only mutates the in-memory thread's freshness.
         let report = build_thread_preview_report(&repo, &mut thread, true)?;
         dry.integrations.push(IntegrationPreview {
-            thread: thread.id.clone(),
+            thread: thread.thread.clone(),
             target: thread.target_thread.clone(),
             merge_relation: report.merge_relation.clone(),
             freshness: report.freshness.clone(),

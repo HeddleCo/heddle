@@ -134,7 +134,13 @@ fn thread_promote_preserves_thread_identity() {
     .unwrap();
 
     let v: Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["thread"]["id"].as_str(), Some("feature/promote-me"));
+    assert_eq!(v["thread"]["thread"].as_str(), Some("feature/promote-me"));
+    assert_eq!(
+        v["thread"]["id"].as_str().map(str::len),
+        Some(64),
+        "native thread id is the genesis content-hash, not the display name: {v}"
+    );
+    assert_ne!(v["thread"]["id"].as_str(), Some("feature/promote-me"));
     assert_eq!(v["thread"]["mode"].as_str(), Some("solid"));
     assert!(thread_dir.path().join(".heddle").join("HEAD").exists());
 }

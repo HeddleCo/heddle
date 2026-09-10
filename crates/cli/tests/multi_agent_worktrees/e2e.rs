@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::WriterLeaseStore;
+use objects::store::{WriterLeaseStatus, WriterLeaseStore};
 use repo::ActorPresenceStore;
 
 use super::*;
@@ -33,7 +33,12 @@ fn thread_start_creates_presence_without_writer_authority() {
     let leases = WriterLeaseStore::new(main.path().join(".heddle").as_path())
         .list()
         .unwrap();
-    assert!(leases.is_empty(), "start must not mint writer authority");
+    assert!(
+        leases
+            .iter()
+            .all(|lease| lease.status != WriterLeaseStatus::Active),
+        "start must not mint writer authority: {leases:?}"
+    );
 }
 
 #[test]
@@ -1504,7 +1509,13 @@ fn thread_promote_materializes_visible_checkout_without_changing_thread_identity
     )
     .unwrap();
     let promoted: Value = serde_json::from_str(&promote_json).unwrap();
-    assert_eq!(promoted["thread"]["id"], "feature/promote");
+    assert_eq!(promoted["thread"]["thread"], "feature/promote");
+    assert_eq!(
+        promoted["thread"]["id"].as_str().map(str::len),
+        Some(64),
+        "native thread id is the genesis content-hash, not the display name: {promoted}"
+    );
+    assert_ne!(promoted["thread"]["id"], "feature/promote");
     assert_eq!(promoted["thread"]["mode"], "solid");
     assert_eq!(
         canonical_path_string(std::path::Path::new(
