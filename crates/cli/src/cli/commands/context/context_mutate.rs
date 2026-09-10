@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use objects::{
     lock::RepositoryLockExt,
-    object::{Annotation, ContextBlob},
+    object::{Annotation, AnnotationKind, AnnotationScope, ContextBlob, ContextTarget},
 };
 use repo::compute_rewrite_pct;
 use serde::Serialize;
@@ -65,6 +65,89 @@ impl CompactProjection for ContextSetOutput {
     }
 }
 
+/// Result of writing one annotation through the same path as `context set`.
+pub(crate) struct WrittenContextAnnotation {
+    pub(crate) annotation: Annotation,
+    pub(crate) target: ContextTarget,
+    pub(crate) annotation_count: usize,
+    pub(crate) active_count: usize,
+    pub(crate) state_short: String,
+}
+
+/// Append one context annotation to the current HEAD context tree.
+///
+/// Caller holds the repository write lock. This is the single write path
+/// `context set` and `discuss resolve --into-annotation` share.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_context_annotation(
+    repo: &repo::Repository,
+    target: ContextTarget,
+    scope: AnnotationScope,
+    kind: AnnotationKind,
+    content: String,
+    tags: Vec<String>,
+    resolved_from_discussion: Option<String>,
+) -> Result<WrittenContextAnnotation> {
+    target.validate_scope(&scope)?;
+    let head_state = resolve_state(repo, None)?;
+    // Eagerly resolve symbol scopes against the worktree so the annotation
+    // carries `resolved_lines` from the moment of creation. Without this, the
+    // staleness check returns SymbolMissing on the very first read and the
+    // chip never renders.
+    let scope = resolve_scope_at_target(repo, &target, scope)?;
+    let source_hash = compute_source_hash(repo, &target, &scope);
+    let user_config = UserConfig::load_default()?;
+    let attribution = resolve_attribution(repo, &user_config)?;
+    let mut annotation = Annotation::new(
+        scope,
+        kind,
+        content,
+        tags,
+        attribution.to_string(),
+        Utc::now().timestamp(),
+        source_hash,
+        Some(head_state.state_id),
+    );
+    annotation.resolved_from_discussion = resolved_from_discussion;
+
+    let prior_root = context_root_for_state(repo, &head_state)?;
+    let mut blob = match &prior_root {
+        Some(root) => repo
+            .get_context_blob(root, &target)?
+            .unwrap_or_else(|| ContextBlob::new(vec![])),
+        None => ContextBlob::new(vec![]),
+    };
+    blob.annotations.push(annotation.clone());
+    let new_context_root = repo.set_context_blob(prior_root.as_ref(), &target, &blob)?;
+    put_context_attachment(repo, &head_state, Some(new_context_root))?;
+    Ok(WrittenContextAnnotation {
+        annotation,
+        target,
+        annotation_count: blob.annotations.len(),
+        active_count: count_active_annotations(&blob.annotations),
+        state_short: head_state.state_id.short(),
+    })
+}
+
+/// Return the annotation previously produced by resolving `discussion_id`, if any.
+pub(crate) fn find_annotation_resolved_from_discussion(
+    repo: &repo::Repository,
+    discussion_id: &str,
+) -> Result<Option<Annotation>> {
+    let head_state = resolve_state(repo, None)?;
+    let Some(root) = context_root_for_state(repo, &head_state)? else {
+        return Ok(None);
+    };
+    for entry in repo.list_context_entries(&root, None)? {
+        if let Some(annotation) = entry.blob.annotations.into_iter().find(|annotation| {
+            annotation.resolved_from_discussion.as_deref() == Some(discussion_id)
+        }) {
+            return Ok(Some(annotation));
+        }
+    }
+    Ok(None)
+}
+
 /// Set a context annotation on a file path or state target.
 #[allow(clippy::too_many_arguments)]
 pub async fn cmd_context_set(
@@ -87,37 +170,8 @@ pub async fn cmd_context_set(
     let content = read_annotation_content(message, file)?;
 
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let head_state = resolve_state(&repo, None)?;
-    // Eagerly resolve symbol scopes against the worktree so the annotation
-    // carries `resolved_lines` from the moment of creation. Without this, the
-    // staleness check returns SymbolMissing on the very first read and the
-    // chip never renders.
-    let scope = resolve_scope_at_target(&repo, &target, scope)?;
-    let source_hash = compute_source_hash(&repo, &target, &scope);
-    let user_config = UserConfig::load_default()?;
-    let attribution = resolve_attribution(&repo, &user_config)?;
-    let annotation = Annotation::new(
-        scope,
-        kind,
-        content,
-        tags,
-        attribution.to_string(),
-        Utc::now().timestamp(),
-        source_hash,
-        Some(head_state.state_id),
-    );
-
-    let prior_root = context_root_for_state(&repo, &head_state)?;
-    let mut blob = match &prior_root {
-        Some(root) => repo
-            .get_context_blob(root, &target)?
-            .unwrap_or_else(|| ContextBlob::new(vec![])),
-        None => ContextBlob::new(vec![]),
-    };
-    blob.annotations.push(annotation);
-    let new_context_root = repo.set_context_blob(prior_root.as_ref(), &target, &blob)?;
-    let (_, label) = target_label(&target);
-    put_context_attachment(&repo, &head_state, Some(new_context_root))?;
+    let written = append_context_annotation(&repo, target, scope, kind, content, tags, None)?;
+    let (_, label) = target_label(&written.target);
 
     if should_output_json(cli, None) {
         write_projected_command_json(
@@ -125,18 +179,21 @@ pub async fn cmd_context_set(
             &ContextSetOutput {
                 output_kind: "context_set",
                 target: label,
-                annotations: blob.annotations.len(),
-                state: head_state.state_id.short(),
+                annotations: written.annotation_count,
+                state: written.state_short,
             },
             &["context", "set"],
         )?;
     } else {
-        let active = count_active_annotations(&blob.annotations);
         println!(
             "Annotated {} ({} active annotation{})",
             label,
-            active,
-            if blob.annotations.len() == 1 { "" } else { "s" }
+            written.active_count,
+            if written.annotation_count == 1 {
+                ""
+            } else {
+                "s"
+            }
         );
     }
 

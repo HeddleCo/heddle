@@ -58,6 +58,20 @@
 //! key)` (see `resolve_op_key`) and is recorded only after `ResolveDiscussion`
 //! succeeds.
 //!
+//! ## Annotation identity (heddle#1731)
+//!
+//! `discuss resolve --into-annotation` writes a real local context annotation
+//! and records `CollaborationResolution::Annotation { annotation_id }` with
+//! that id. Hosted push still calls weft `ResolveDiscussion.IntoAnnotation`
+//! (kind/content/tags) so the hosted discussion shows as resolved. Weft may
+//! mint a distinct `hc-…` id that is **not** a context-store row. After the
+//! echo we keep the local context id rather than replacing it with that
+//! orphan. The coherent id across push/clone is the context annotation:
+//! local UUID, then the SetContext server id recorded in
+//! `hosted-context-mirror.json`. A weft twin that creates the context row
+//! (or accepts the existing id) would make clone `discuss show` and
+//! `context history` share one id.
+//!
 //! ## Reconciliation is author-aware, never body-alone
 //!
 //! When the mirror map is lost/rebuilt, an unlinked server turn is reconciled
@@ -110,6 +124,7 @@ use repo::{CollaborationStore, Repository};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    attachments::context_root_for_state,
     client::HostedClient,
     hosted_runtime::hosted::{HostedDiscussion, HostedDiscussionTurn, HostedResolution},
 };
@@ -520,8 +535,10 @@ async fn push_one(
         }
     }
 
-    if push_into_annotation_resolution(client, repo_path, mirror, index, &server_id, discussion)
-        .await?
+    if push_into_annotation_resolution(
+        client, repo_path, mirror, index, &server_id, discussion, repo,
+    )
+    .await?
     {
         changed = true;
     }
@@ -535,17 +552,14 @@ async fn push_into_annotation_resolution(
     index: usize,
     server_id: &str,
     discussion: &MaterializedDiscussion,
+    repo: &Repository,
 ) -> Result<bool> {
-    let Some(objects::object::CollaborationResolution::IntoAnnotation {
-        annotation_kind,
-        content,
-        tags,
-    }) = &discussion.resolution
+    let Some((annotation_kind, content, tags)) = resolution_annotation_payload(repo, discussion)?
     else {
         return Ok(false);
     };
     let operation_id =
-        resolve_into_annotation_op_id(repo_path, server_id, *annotation_kind, content, tags)?;
+        resolve_into_annotation_op_id(repo_path, server_id, annotation_kind, &content, &tags)?;
     if mirror.repos[repo_path].discussions[index]
         .resolved_into_annotation_operation_id
         .as_deref()
@@ -557,9 +571,9 @@ async fn push_into_annotation_resolution(
         .resolve_discussion_into_annotation(
             repo_path,
             server_id,
-            *annotation_kind,
-            content,
-            tags.clone(),
+            annotation_kind,
+            &content,
+            tags,
             operation_id.clone(),
         )
         .await
@@ -574,6 +588,53 @@ async fn push_into_annotation_resolution(
         entry.pulled_resolution_key = Some(key);
     }
     Ok(true)
+}
+
+fn resolution_annotation_payload(
+    repo: &Repository,
+    discussion: &MaterializedDiscussion,
+) -> Result<Option<(objects::object::AnnotationKind, String, Vec<String>)>> {
+    match &discussion.resolution {
+        Some(CollaborationResolution::IntoAnnotation {
+            annotation_kind,
+            content,
+            tags,
+        }) => Ok(Some((*annotation_kind, content.clone(), tags.clone()))),
+        Some(CollaborationResolution::Annotation { annotation_id }) => {
+            let Some(head) = repo.head().context("resolve repository head")? else {
+                return Ok(None);
+            };
+            let Some(head_state) = repo
+                .store()
+                .get_state(&head)
+                .context("load head state for resolution annotation")?
+            else {
+                return Ok(None);
+            };
+            let Some(root) = context_root_for_state(repo, &head_state)? else {
+                return Ok(None);
+            };
+            let Some((_, blob, index)) = repo
+                .find_annotation(&root, annotation_id)
+                .context("look up resolution annotation")?
+            else {
+                return Ok(None);
+            };
+            let Some(revision) = blob
+                .annotations
+                .get(index)
+                .and_then(|annotation| annotation.current_revision())
+            else {
+                return Ok(None);
+            };
+            Ok(Some((
+                revision.kind,
+                revision.content.clone(),
+                revision.tags.clone(),
+            )))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Fetch hosted discussions for `against` (or repository HEAD) and materialize
@@ -1106,11 +1167,12 @@ fn pull_resolution(
     if pushed_echo
         && matches!(
             existing.resolution,
-            Some(CollaborationResolution::Annotation { ref annotation_id })
-                if Some(annotation_id.as_str())
-                    == hosted_annotation_id(&discussion.resolution)
+            Some(CollaborationResolution::Annotation { .. })
         )
     {
+        // Local already bound a real context annotation id. Weft's
+        // ResolveDiscussion.IntoAnnotation mints a distinct hc- that is
+        // not a context row (heddle#1731). Keep the local id.
         mirror
             .repos
             .get_mut(repo_path)
@@ -2339,6 +2401,93 @@ mod tests {
             Some(CollaborationResolution::Annotation {
                 annotation_id: "ann-1".to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn pushed_real_annotation_echo_keeps_local_context_id() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        repo.snapshot_with_attribution(
+            Some("seed".to_string()),
+            None,
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+        .unwrap();
+
+        assert!(
+            apply_hosted_discussion(
+                &repo,
+                "acme/widgets",
+                None,
+                &hosted("disc-1", "first", "turn-1", HostedResolution::Open),
+            )
+            .unwrap()
+        );
+
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        let existing = store
+            .materialize()
+            .unwrap()
+            .discussions
+            .into_values()
+            .next()
+            .unwrap();
+        write_local_operation(
+            &store,
+            existing.discussion_id,
+            existing.heads.iter().copied().collect(),
+            Attribution::human(Principal::new("Local", "local@example.com")),
+            1_700_000_100_000,
+            CollaborationOperationBodyV1::Resolve {
+                resolution: CollaborationResolution::Annotation {
+                    annotation_id: "local-context-ann".to_string(),
+                },
+            },
+            test_key("resolve-into-real-annotation"),
+        )
+        .unwrap();
+
+        let path = mirror_path(repo.heddle_dir());
+        let mut mirror: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        mirror["repos"]["acme/widgets"]["discussions"][0]["resolved_into_annotation_operation_id"] =
+            serde_json::json!("pushed-op");
+        std::fs::write(&path, serde_json::to_vec_pretty(&mirror).unwrap()).unwrap();
+
+        apply_hosted_discussion(
+            &repo,
+            "acme/widgets",
+            None,
+            &hosted(
+                "disc-1",
+                "first",
+                "turn-1",
+                HostedResolution::IntoAnnotation {
+                    annotation_id: "hc-orphan-from-weft".to_string(),
+                },
+            ),
+        )
+        .unwrap();
+
+        let echoed = store
+            .materialize()
+            .unwrap()
+            .discussions
+            .into_values()
+            .next()
+            .unwrap();
+        assert!(
+            echoed.conflict_operations.is_empty(),
+            "a pushed Annotation echo must not surface as competing collab state"
+        );
+        assert_eq!(
+            echoed.resolution,
+            Some(CollaborationResolution::Annotation {
+                annotation_id: "local-context-ann".to_string(),
+            }),
+            "weft's minted hc- must not replace the real local context id"
         );
     }
 
