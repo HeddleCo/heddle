@@ -1,4 +1,5 @@
 //! Durable execution state shares the command receipt transaction and caller namespace.
+#![allow(clippy::items_after_test_module)]
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};

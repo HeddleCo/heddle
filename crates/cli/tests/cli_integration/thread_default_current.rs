@@ -233,7 +233,7 @@ fn thread_show_without_arg_resolves_via_execution_path_when_detached() {
     let repo = Repository::open(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
     let mut thread = manager
-        .load("feat/probe")
+        .load_id_or_name("feat/probe")
         .unwrap()
         .expect("thread record exists after create");
     thread.execution_path = temp.path().to_path_buf();

@@ -314,14 +314,14 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             )
         })?)
     } else {
-        let land_command = land_local_command(&thread.id);
+        let land_command = land_local_command(&thread.thread);
         // `heddle start` would refuse here — the thread still holds an active
         // reservation, so it returns `active_reservation_advice` and the
         // operator is stuck. `heddle thread switch` rebuilds the dedicated worktree at
         // the recorded `execution_path` from the thread's current state (see
         // `cmd_thread_switch`), which is exactly the path this `land` reads, so
         // the rebuild clears the blocker and the follow-up `land` succeeds.
-        let switch_command = switch_thread_command(&thread.id);
+        let switch_command = switch_thread_command(&thread.thread);
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "thread_worktree_missing",
             format!("Thread '{}' worktree is missing", thread.id),

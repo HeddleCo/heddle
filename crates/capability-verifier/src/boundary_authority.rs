@@ -56,8 +56,11 @@ pub struct OriginalSubjectScope<'a> {
 /// substituted for the current accepting-authority revocation callback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OriginalRevocation<'a> {
+    /// Original signing/minting root key.
     MintRoot(&'a [u8]),
+    /// Original operation publisher/PoP key.
     Publisher(&'a [u8]),
+    /// Typed original credential selector (session, device, etc.).
     Credential(heddle_biscuit_verifier::inspection::RevocationSelector<'a>),
 }
 /// An authenticated assertion, never proof of prior or current action authority.

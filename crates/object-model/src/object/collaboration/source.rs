@@ -29,16 +29,15 @@ impl CollaborationSourceAnchor {
                 .validate()
                 .map_err(|error| CollaborationCodecError::Invalid(error.to_string()))?;
         }
-        if let CollaborationRevision::GitCommit { oid } = &self.revision {
-            if !matches!(oid.len(), 40 | 64)
+        if let CollaborationRevision::GitCommit { oid } = &self.revision
+            && (!matches!(oid.len(), 40 | 64)
                 || !oid
                     .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            {
-                return Err(CollaborationCodecError::Invalid(
-                    "source anchor requires an exact lowercase Git object ID".into(),
-                ));
-            }
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+        {
+            return Err(CollaborationCodecError::Invalid(
+                "source anchor requires an exact lowercase Git object ID".into(),
+            ));
         }
         if self.path.len() > 4096
             || self.symbol_id.len() > 4096

@@ -280,24 +280,24 @@ pub fn prepare(
         }
         if previous.blob != file.blob || previous.status != file.status {
             pairs.insert(*id, (previous.clone(), file.clone()));
-            if let (Some(old), Some(new)) = (previous.blob, file.blob) {
-                if old != new {
-                    let length = store
-                        .decoded_blob_len(&old)?
-                        .unwrap_or(u64::MAX)
-                        .saturating_add(store.decoded_blob_len(&new)?.unwrap_or(u64::MAX));
-                    changed_bytes = changed_bytes.saturating_add(length);
-                    if length > 8 * 1024 * 1024 || changed_bytes > 32 * 1024 * 1024 {
-                        return Err(err("reference changed-file byte budget exceeded"));
-                    }
-                    let old_blob = store
-                        .get_blob(&old)?
-                        .ok_or_else(|| err("old reference file missing"))?;
-                    let new_blob = store
-                        .get_blob(&new)?
-                        .ok_or_else(|| err("new reference file missing"))?;
-                    maps.insert(*id, (old_blob, new_blob));
+            if let (Some(old), Some(new)) = (previous.blob, file.blob)
+                && old != new
+            {
+                let length = store
+                    .decoded_blob_len(&old)?
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(store.decoded_blob_len(&new)?.unwrap_or(u64::MAX));
+                changed_bytes = changed_bytes.saturating_add(length);
+                if length > 8 * 1024 * 1024 || changed_bytes > 32 * 1024 * 1024 {
+                    return Err(err("reference changed-file byte budget exceeded"));
                 }
+                let old_blob = store
+                    .get_blob(&old)?
+                    .ok_or_else(|| err("old reference file missing"))?;
+                let new_blob = store
+                    .get_blob(&new)?
+                    .ok_or_else(|| err("new reference file missing"))?;
+                maps.insert(*id, (old_blob, new_blob));
             }
         }
         let value = map_store.put(file)?;

@@ -143,9 +143,17 @@ impl Repository {
     }
     /// Lookup never creates a Thread or invents a publisher signature.
     pub fn native_thread(&self, name: &str) -> Result<ThreadReplica> {
+        let path = self.heddle_dir().join(crate::local_metadata::DATABASE_NAME);
+        if !path.exists() {
+            return Err(Error::Invalid(format!(
+                "Thread {name:?} has no native identity"
+            )));
+        }
+        // WAL databases cannot be opened SQLITE_OPEN_READ_ONLY; lookup still
+        // refuses to create a missing database (the exists() check above).
         let connection = rusqlite::Connection::open_with_flags(
-            self.heddle_dir().join(crate::local_metadata::DATABASE_NAME),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
         )?;
         let id: Option<Vec<u8>> = connection
             .query_row(
@@ -178,7 +186,7 @@ impl Repository {
         if database.exists() {
             let connection = rusqlite::Connection::open_with_flags(
                 &database,
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
             )?;
             let table_exists: bool = connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='local_thread_names')",
@@ -349,5 +357,31 @@ impl Repository {
                 "local capture was not admitted: {other:?}"
             ))),
         }
+    }
+
+    /// Record a capture on the attached native Thread after a local snapshot.
+    /// Missing native identity is not created here; capture/start own genesis.
+    pub fn record_attached_native_capture(&self, state_id: StateId) -> Result<()> {
+        let name = match self
+            .head_ref()
+            .map_err(|error| Error::Invalid(error.to_string()))?
+        {
+            refs::Head::Attached { thread } => thread.to_string(),
+            refs::Head::Detached { .. } => return Ok(()),
+        };
+        if self.native_thread(&name).is_err() {
+            return Ok(());
+        }
+        let state = self
+            .store()
+            .get_state(&state_id)?
+            .ok_or_else(|| Error::Invalid("captured state unavailable".into()))?;
+        // Captures must declare ancestry; an empty-parent snapshot is genesis
+        // material, not a source operation on an already created Thread.
+        if state.parents.is_empty() {
+            return Ok(());
+        }
+        self.record_native_capture(&name, state_id)?;
+        Ok(())
     }
 }

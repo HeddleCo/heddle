@@ -1004,7 +1004,7 @@ pub fn merge_thread_into_current_transactional(
                 {
                     Some(report.recommended_action.clone())
                 } else {
-                    Some(land_local_command(&thread.id))
+                    Some(land_local_command(&thread.thread))
                 }
             } else {
                 None
@@ -2196,7 +2196,7 @@ fn build_thread_preview_report_with_graph(
     };
     if manual_resolution_current {
         advice.blockers.clear();
-        advice.recommended_action = land_command_for_thread(repo, &thread.id);
+        advice.recommended_action = land_command_for_thread(repo, &thread.thread);
         advice.thread_health = "ready".to_string();
     }
 
@@ -2205,7 +2205,7 @@ fn build_thread_preview_report_with_graph(
     let changed_path_count = all_changed_paths.len();
     let changed_paths = all_changed_paths.into_iter().take(8).collect();
     Ok(ThreadPreviewReport {
-        thread: thread.id.clone(),
+        thread: thread.thread.clone(),
         thread_mode: thread.mode.to_string(),
         thread_state: thread.state.to_string(),
         freshness: thread.freshness.to_string(),

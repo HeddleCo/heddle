@@ -1541,7 +1541,7 @@ fn op_id_local_dedup_is_cross_process_safe() {
     // second `(op-id, verb)` slot from being claimed.
     let store = OperationDedupStore::open(repo_path.join(".heddle")).unwrap();
     assert_eq!(
-        store.len(),
+        store.len().expect("count"),
         1,
         "exactly one dedup entry should persist for the shared op-id"
     );

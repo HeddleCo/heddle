@@ -71,6 +71,7 @@ impl DiscussionTurnV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
+#[allow(clippy::large_enum_variant)] // wire codec; boxing would change MessagePack layout
 pub enum CollaborationResolution {
     AddressedByState {
         state_id: StateId,

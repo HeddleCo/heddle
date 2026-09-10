@@ -2,6 +2,7 @@
 //!
 //! Only enrollment and authenticated account observation may publish this pin.
 //! Incoming device requests cannot bootstrap trust from their own attachments.
+#![allow(clippy::items_after_test_module)]
 use std::{io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};

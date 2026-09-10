@@ -2,6 +2,13 @@
 //! Durable Thread replication over native captures and collaboration operations.
 //! Endpoint adapters must authorize the exact Thread and disclosure facets before
 //! calling receive/export. Signatures prove the publisher, not spool membership.
+#![allow(
+    clippy::collapsible_if,
+    clippy::items_after_test_module,
+    clippy::needless_borrow,
+    clippy::too_many_arguments,
+    clippy::type_complexity
+)]
 pub mod admission;
 #[cfg(test)]
 mod admission_tests;

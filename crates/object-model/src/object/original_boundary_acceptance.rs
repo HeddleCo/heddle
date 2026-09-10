@@ -145,15 +145,14 @@ impl OriginalManifestEntry {
         {
             return Err(invalid("genesis manifest cannot assert an unsigned agent"));
         }
-        if let Some(binding) = &self.authority {
-            if binding.spool.is_nil()
+        if let Some(binding) = &self.authority
+            && (binding.spool.is_nil()
                 || binding.actor.principal_id.is_nil()
                 || binding.actor.agent_id.as_ref().is_some_and(|id| {
                     id.is_empty() || id.len() > 256 || id.chars().any(char::is_control)
-                })
-            {
-                return Err(invalid("invalid original manifest authority"));
-            }
+                }))
+        {
+            return Err(invalid("invalid original manifest authority"));
         }
         Ok(())
     }

@@ -305,8 +305,7 @@ fn boundary_source_receipt_is_atomic_and_relayable_without_original_authority() 
     assert!(
         replica
             .receive_with_authority_admission(&original, &missing, repository.store(), |_| Ok(()))
-            .err()
-            .expect("missing evidence")
+            .expect_err("missing evidence")
             .to_string()
             .contains("basis evidence")
     );

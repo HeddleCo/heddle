@@ -292,8 +292,8 @@ pub fn cmd_thread_resolve(cli: &Cli, thread_id: String) -> Result<()> {
         }
     }
 
-    let summary = super::thread::find_thread_summary(&repo, &thread.id)?
-        .ok_or_else(|| anyhow!(thread_not_found_advice(&thread.id, "resolve thread")))?;
+    let summary = super::thread::find_thread_summary(&repo, &thread.thread)?
+        .ok_or_else(|| anyhow!(thread_not_found_advice(&thread.thread, "resolve thread")))?;
     let mut blockers = if rebase_state_path.exists() {
         Vec::new()
     } else {

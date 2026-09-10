@@ -153,6 +153,7 @@ pub fn read_budget() -> ReadBudget {
 }
 
 impl Peer {
+    #[allow(dead_code)] // used by `thread` example and `thread_workflow` tests
     pub fn prepare_intent(
         &self,
         overview: &ThreadOverview,

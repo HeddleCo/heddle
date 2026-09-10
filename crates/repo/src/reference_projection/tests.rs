@@ -195,7 +195,8 @@ fn replacing_tags_removes_stale_properties_and_rejects_duplicate_keys_before_wri
         key: "severity".into(),
         value: AnnotationValue::Text("high".into()),
     };
-    project_properties(&tx, &scope(1), id(7), &[tag.clone()]).expect("project complete head");
+    project_properties(&tx, &scope(1), id(7), std::slice::from_ref(&tag))
+        .expect("project complete head");
     assert_eq!(
         property_equal(
             &tx,

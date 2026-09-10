@@ -371,7 +371,7 @@ mod tests {
         let lifecycle = operation(&genesis, &value, BTreeSet::from([name_id]));
         assert!(
             lifecycle
-                .validate_parents(&genesis, &[name.clone()])
+                .validate_parents(&genesis, std::slice::from_ref(&name))
                 .expect_err("cannot dominate another field")
                 .to_string()
                 .contains("cross fields")
@@ -465,7 +465,7 @@ mod tests {
         value.actor.agent_id = Some("delegated agent".into());
         assert!(
             operation(&genesis, &value, parent.clone())
-                .validate_parents(&genesis, &[original.clone()])
+                .validate_parents(&genesis, std::slice::from_ref(&original))
                 .expect_err("agent cannot rewrite human decision")
                 .to_string()
                 .contains("original actor")

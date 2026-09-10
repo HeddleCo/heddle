@@ -1387,21 +1387,22 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         refs::Head::Attached { thread } => Some(thread.to_string()),
         refs::Head::Detached { .. } => None,
     };
-    if let (Some(name), Some(previous)) = (native_thread_name.as_deref(), previous_state.as_ref()) {
-        if repo.native_thread(name).is_err() {
-            repo.create_native_thread(name, previous.state_id, None, "")?;
-        }
+    if let (Some(name), Some(previous)) = (native_thread_name.as_deref(), previous_state.as_ref())
+        && repo.native_thread(name).is_err()
+    {
+        repo.create_native_thread(name, previous.state_id, None, "")?;
     }
-    let writer_thread = match native_thread_name.as_deref() {
-        Some(name) => repo.native_thread(name)?.thread_id(),
-        None => {
-            repo::thread_replication::checkout::ThreadCheckout::open(repo.root())?
-                .binding
-                .thread
-        }
+    let actor = format!("cli:{}", std::process::id());
+    let _checkout_writer = match native_thread_name.as_deref() {
+        Some(name) => match repo.native_thread(name) {
+            Ok(replica) => Some(repo.acquire_checkout_writer(replica.thread_id(), &actor)?),
+            Err(_) => None,
+        },
+        None => match repo::thread_replication::checkout::ThreadCheckout::open(repo.root()) {
+            Ok(checkout) => Some(repo.acquire_checkout_writer(checkout.binding.thread, &actor)?),
+            Err(_) => None,
+        },
     };
-    let _checkout_writer =
-        repo.acquire_checkout_writer(writer_thread, &format!("cli:{}", std::process::id()))?;
     let has_current = previous_state.is_some();
     let mut created_new_state = false;
     let mut snapshot_profile = SnapshotProfile::default();
@@ -1549,8 +1550,20 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
             .unwrap_or_else(|| format!("Checkpoint {}", state.state_id.short())),
     };
 
-    if created_new_state {
-        if let Some(name) = native_thread_name.as_deref() {
+    if created_new_state && let Some(name) = native_thread_name.as_deref() {
+        if repo.native_thread(name).is_err() {
+            repo.create_native_thread(
+                name,
+                previous_state
+                    .as_ref()
+                    .map(|previous| previous.state_id)
+                    .unwrap_or(state.state_id),
+                None,
+                "",
+            )?;
+        }
+        let genesis_base = repo.native_thread(name)?.genesis()?.base;
+        if state.state_id != genesis_base && !state.parents.is_empty() {
             repo.record_native_capture(name, state.state_id)?;
         }
     }
