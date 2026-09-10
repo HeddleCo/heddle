@@ -17,8 +17,8 @@ use super::{
 };
 use crate::{
     cli::{
-        Cli, GrantCommands, GrantCreateArgs, GrantDeleteArgs, GrantListArgs, should_output_json,
-        style,
+        Cli, CliContext, GrantCommands, GrantCreateArgs, GrantDeleteArgs, GrantListArgs,
+        should_output_json, style,
     },
     config::UserConfig,
     remote::RemoteTarget,
