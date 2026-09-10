@@ -12,8 +12,10 @@
 
 use serde::Serialize;
 
-use super::command_catalog::{CommandSideEffectFlags, command_side_effect_flags};
-use super::next_action::{NextActionValidationContext, write_full_command_json};
+use super::{
+    command_catalog::{CommandSideEffectFlags, command_side_effect_flags},
+    next_action::{NextActionValidationContext, write_full_command_json},
+};
 use crate::cli::{Cli, should_output_json, style};
 
 /// Stable `output_kind` discriminator for every dry-run plan.

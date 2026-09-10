@@ -36,7 +36,9 @@ fn retained_receipt_is_atomic_with_pending_bytes_and_survives_restart_without_or
         name: "shared".into(),
         intent: "retain exact foreign original author".into(),
         creator: author.public_key().try_into().expect("key"),
-        owner: objects::object::thread_replication::GenesisOwner::LocalKey(author.public_key().try_into().expect("key")),
+        owner: objects::object::thread_replication::GenesisOwner::LocalKey(
+            author.public_key().try_into().expect("key"),
+        ),
         nonce: vec![65; 32],
     };
     let signed_genesis = SignedGenesis::sign(&genesis, &author).expect("creator proof");
@@ -79,7 +81,10 @@ fn retained_receipt_is_atomic_with_pending_bytes_and_survives_restart_without_or
             spool,
             spool_genesis,
             thread: operation.thread,
-            subject: objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(operation.id().expect("ID")),
+            subject:
+                objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(
+                    operation.id().expect("ID"),
+                ),
             actor: control.actor,
             publisher: operation.publisher,
             authority_digest: control.authority_digest,

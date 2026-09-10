@@ -3,15 +3,14 @@
 
 use std::path::Path;
 
-use crate::{
-    object::{ContentHash, ObjectSource, State},
-    util::{ResourceBudget, ResourceKind, scratch_bytes_for_line_counts, visit_lcs_equal_runs},
-};
-
 use super::{
     lookup::{load_blob_within_budget, lookup_blob_at_path},
     mapping::{claim_equal_run, claim_same_blob_maps},
     types::{BlameFrontierRecord, BlameLineMap, BlameSliceError, origin_from_state},
+};
+use crate::{
+    object::{ContentHash, ObjectSource, State},
+    util::{ResourceBudget, ResourceKind, scratch_bytes_for_line_counts, visit_lcs_equal_runs},
 };
 
 pub(super) enum ParentClaim {

@@ -1,7 +1,9 @@
-use crate::object::*;
-use crate::object::{EntryType, TreeEntry};
-use crate::store::{InMemoryStore, ObjectStore};
 use std::path::Path;
+
+use crate::{
+    object::{EntryType, TreeEntry, *},
+    store::{InMemoryStore, ObjectStore},
+};
 
 fn create_blob(store: &InMemoryStore, content: &[u8]) -> ContentHash {
     ObjectStore::put_blob(store, &Blob::from_slice(content)).unwrap()

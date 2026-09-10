@@ -12,10 +12,10 @@ mod visit;
 #[cfg(test)]
 mod tests;
 
-use super::budget::{BudgetExceeded, ResourceUsage};
-
 pub use scratch::scratch_bytes_for_line_counts;
 pub use visit::visit_lcs_equal_runs;
+
+use super::budget::{BudgetExceeded, ResourceUsage};
 
 /// Split UTF-8 content into the same logical lines used by blame.
 pub fn split_text_lines(bytes: &[u8]) -> Option<Vec<String>> {

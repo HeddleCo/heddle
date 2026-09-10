@@ -84,7 +84,9 @@ pub(super) async fn roundtrip(
             "owned source read fixture",
         )
         .expect("admitted local-key source Thread");
-    repository.record_native_capture("content-source", state.id()).expect("original accepted source capture");
+    repository
+        .record_native_capture("content-source", state.id())
+        .expect("original accepted source capture");
     let mut stream = remote
         .api
         .observe::<thread_api::rpc::ContentServiceReadContent>(&request)

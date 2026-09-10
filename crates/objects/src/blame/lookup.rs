@@ -3,10 +3,11 @@
 
 use std::path::{Component, Path};
 
-use crate::object::{Blob, ContentHash, ObjectSource, Tree};
-use crate::util::{ResourceBudget, ResourceKind};
-
 use super::types::BlameSliceError;
+use crate::{
+    object::{Blob, ContentHash, ObjectSource, Tree},
+    util::{ResourceBudget, ResourceKind},
+};
 
 pub(super) fn lookup_blob_at_path<S: ObjectSource>(
     source: &S,

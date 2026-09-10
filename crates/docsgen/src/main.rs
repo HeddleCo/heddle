@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use std::env;
-use std::fmt;
-use std::io;
+use std::{env, fmt, io};
 
 use heddle_docsgen::{FULL_PATH, INDEX_PATH, REGEN_COMMAND, render, repository_root, stale_files};
 

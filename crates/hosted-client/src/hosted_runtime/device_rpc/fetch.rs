@@ -152,8 +152,19 @@ impl DeviceRpc {
                 &self.home,
                 &session,
                 &mut writer,
-                fetch_server_frame::Body::Operations(ReplicationOperations { boundary_acceptances: thread_api::boundary_acceptance::authority_evidence(stored.authority_admission.as_ref())?,
- operations: vec![record], authority_admissions: stored.authority_admission.as_ref().map(thread_api::authority_admission::encode).transpose()?.into_iter().collect() }),
+                fetch_server_frame::Body::Operations(ReplicationOperations {
+                    boundary_acceptances: thread_api::boundary_acceptance::authority_evidence(
+                        stored.authority_admission.as_ref(),
+                    )?,
+                    operations: vec![record],
+                    authority_admissions: stored
+                        .authority_admission
+                        .as_ref()
+                        .map(thread_api::authority_admission::encode)
+                        .transpose()?
+                        .into_iter()
+                        .collect(),
+                }),
                 &mut charged,
                 &mut changes,
                 &prepared.guards,
@@ -259,7 +270,11 @@ async fn send_frame(
     writer.send(frame).await?;
     Ok(())
 }
-pub(super) fn prepare(session: &auth::Session, thread: ContentHash, revision: StateId) -> Result<Prepared> {
+pub(super) fn prepare(
+    session: &auth::Session,
+    thread: ContentHash,
+    revision: StateId,
+) -> Result<Prepared> {
     let repository = repo::Repository::open(&session.spool.root)?;
     let selected = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
     session.authorize_thread(&repository, &selected)?;
@@ -318,7 +333,12 @@ pub(super) fn prepare(session: &auth::Session, thread: ContentHash, revision: St
                 bail!("source proof identity differs")
             }
             seen.insert((owner, operation_id));
-            bytes += signed.canonical.len() + signed.signature.len() + stored.authority_admission.as_ref().map_or(0, |receipt| receipt.canonical.len() + receipt.signature.len()) + 128;
+            bytes += signed.canonical.len()
+                + signed.signature.len()
+                + stored.authority_admission.as_ref().map_or(0, |receipt| {
+                    receipt.canonical.len() + receipt.signature.len()
+                })
+                + 128;
             if bytes > 16 * 1024 * 1024 || operations.len() >= RECORDS {
                 bail!("source proof metadata budget exceeded")
             }

@@ -85,7 +85,11 @@ pub(crate) fn replay(connection: &Connection, command: &Command<'_>) -> Result<O
         None => Ok(None),
     }
 }
-pub(crate) fn receipt(connection: &Connection, command: &Command<'_>, response: &[u8]) -> Result<()> {
+pub(crate) fn receipt(
+    connection: &Connection,
+    command: &Command<'_>,
+    response: &[u8],
+) -> Result<()> {
     connection.execute("INSERT INTO operation_receipts(namespace,operation_id,record_id,verb,request_hash,response,created_at,pending) VALUES(?1,?2,?3,?4,?5,?6,?7,0)",params![command.namespace,command.id.to_string(),crate::operation_dedup::receipt_record_key(command.namespace,command.id).as_bytes(),command.method,command.request_hash.as_slice(),response,chrono::Utc::now().timestamp()])?;
     Ok(())
 }

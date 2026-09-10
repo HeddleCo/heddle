@@ -5,8 +5,8 @@ pub mod hosted_import;
 pub mod integration;
 pub mod local_integration;
 pub mod metadata;
-pub mod source_author;
 pub mod ownership_claim;
+pub mod source_author;
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -191,7 +191,9 @@ impl ThreadOperation {
         if let ThreadOperationBody::Capture(capture) = &self.body {
             return Ok(Some(capture.author.clone()));
         }
-        Ok(self.local_integration()?.map(|integration| integration.author))
+        Ok(self
+            .local_integration()?
+            .map(|integration| integration.author))
     }
 
     pub fn source_result(&self) -> Result<Option<Capture>> {

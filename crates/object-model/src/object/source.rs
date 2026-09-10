@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Read-only object source traits for graph walkers.
 
-use crate::error::Result;
-
 use super::{Blob, ContentHash, State, StateId, Tree};
+use crate::error::Result;
 
 /// Read-only object access needed by object graph walkers.
 pub trait ObjectSource {

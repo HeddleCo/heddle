@@ -1,7 +1,9 @@
-use crate::object::*;
-use crate::object::{Blob, ContentHash, EntryType, Tree, TreeEntry};
-use crate::store::{InMemoryStore, ObjectStore};
 use std::ops::ControlFlow;
+
+use crate::{
+    object::{Blob, ContentHash, EntryType, Tree, TreeEntry, *},
+    store::{InMemoryStore, ObjectStore},
+};
 
 fn create_blob(store: &InMemoryStore, content: &str) -> ContentHash {
     let blob = Blob::from_slice(content.as_bytes());

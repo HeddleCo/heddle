@@ -82,7 +82,8 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     let protocol =
         ClaimProtocol::new(authorization.clone(), authorization, key).with_device(device.clone());
     let budgets = protocol.budgets();
-    let endpoint_signer = Ed25519Signer::from_seed(&endpoint.secret_key().to_bytes()).expect("actual endpoint key");
+    let endpoint_signer =
+        Ed25519Signer::from_seed(&endpoint.secret_key().to_bytes()).expect("actual endpoint key");
     let router = Router::builder(endpoint)
         .accept(NATIVE_ALPN, protocol)
         .spawn();
@@ -426,8 +427,16 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
         .await
         .expect("release writer");
     super::ownership_tests::claim(&remote, &repository, &replica).await;
-    super::fetch_tests::claimed_roundtrip(&remote, &repository, &replica, &endpoint_signer, &owner).await;
-    super::fetch_tests::roundtrip(&remote, &repository, &target_replica, &endpoint_signer, &owner).await;
+    super::fetch_tests::claimed_roundtrip(&remote, &repository, &replica, &endpoint_signer, &owner)
+        .await;
+    super::fetch_tests::roundtrip(
+        &remote,
+        &repository,
+        &target_replica,
+        &endpoint_signer,
+        &owner,
+    )
+    .await;
     // The server must respond before the browser closes its input stream.
     // Metadata received here changes the Thread graph, never either checkout.
     {
@@ -578,14 +587,19 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
             .expect("independently enrolled original owner");
         let source_token = mint_agent_root(&[71; 32]).expect("original source credential");
         let source_mint = biscuit_verifier::PublicKey::from_bytes(
-            publisher.public_key(), biscuit_auth::Algorithm::Ed25519,
-        ).expect("original mint");
+            publisher.public_key(),
+            biscuit_auth::Algorithm::Ed25519,
+        )
+        .expect("original mint");
         let source_token = biscuit_verifier::parse_token(&source_token.token, &[source_mint])
             .expect("verified original source Biscuit");
         let source_proof = repo::thread_replication::metadata::prepare_control_authority(
-            &source_authority, &publisher.public_key().try_into().expect("mint key"),
-            &source_token, source_now,
-        ).expect("sealed source author");
+            &source_authority,
+            &publisher.public_key().try_into().expect("mint key"),
+            &source_token,
+            source_now,
+        )
+        .expect("sealed source author");
         let make_operation = |intent: &str| {
             let mut state = State::new_snapshot(
                 Tree::new().hash(),
@@ -598,21 +612,32 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
                 thread: replica.thread_id(),
                 parents: Default::default(),
                 publisher: publisher.public_key().try_into().expect("key"),
-                body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::account(
-                    state.encode_current_msgpack().expect("State").into(), spool,
-                    objects::object::CollaborationActor {
-                        principal_id: uuid::Uuid::from_bytes([9; 16]), agent_id: None,
-                    }, source_proof.clone(),
-                ).expect("signed original account author")),
+                body: ThreadOperationBody::Capture(
+                    objects::object::thread_replication::AuthoredCapture::account(
+                        state.encode_current_msgpack().expect("State").into(),
+                        spool,
+                        objects::object::CollaborationActor {
+                            principal_id: uuid::Uuid::from_bytes([9; 16]),
+                            agent_id: None,
+                        },
+                        source_proof.clone(),
+                    )
+                    .expect("signed original account author"),
+                ),
             };
             SignedOperation::sign(&operation, &publisher).expect("signed source")
         };
         let incoming = make_operation("browser causal branch");
-        replica.verify_source_authority(
-            &incoming.verify().expect("source original"),
-            &source_authority, &repo::device_catalog::load(home.path(), spool)
-                .expect("registered source Spool").capability_path, source_now,
-        ).expect("independently verified original source author before delivery");
+        replica
+            .verify_source_authority(
+                &incoming.verify().expect("source original"),
+                &source_authority,
+                &repo::device_catalog::load(home.path(), spool)
+                    .expect("registered source Spool")
+                    .capability_path,
+                source_now,
+            )
+            .expect("independently verified original source author before delivery");
 
         let incoming_id = incoming.verify().expect("proof").id().expect("ID");
         assert!(replica.operation(&incoming_id).expect("lookup").is_none());
@@ -621,7 +646,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
                         boundary_acceptances: Vec::new(),
- authority_admissions: Vec::new(),
+                        authority_admissions: Vec::new(),
                         operations: vec![SignedRecord {
                             format: OPERATION_FORMAT.into(),
                             canonical_record: incoming.canonical,
@@ -745,7 +770,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
                         boundary_acceptances: Vec::new(),
- authority_admissions: Vec::new(),
+                        authority_admissions: Vec::new(),
                         operations: vec![SignedRecord {
                             format: OPERATION_FORMAT.into(),
                             canonical_record: signed.canonical.clone(),
@@ -830,7 +855,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
                 body: Some(replicate_thread_request::Body::Operations(
                     ReplicationOperations {
                         boundary_acceptances: Vec::new(),
- authority_admissions: Vec::new(),
+                        authority_admissions: Vec::new(),
                         operations: vec![SignedRecord {
                             format: OPERATION_FORMAT.into(),
                             canonical_record: unowned.canonical,

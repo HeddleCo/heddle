@@ -3,9 +3,10 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
-use crate::object::{Attribution, ContentHash, OperationId, Principal, StateId, VisibilityTier};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use crate::object::{Attribution, ContentHash, OperationId, Principal, StateId, VisibilityTier};
 
 /// How a conflict was resolved.
 ///
@@ -1095,9 +1096,8 @@ impl OpBatch {
 
 #[cfg(test)]
 mod verb_catalog_tests {
-    use crate::object::{ContentHash, StateId, VisibilityTier};
-
     use super::*;
+    use crate::object::{ContentHash, StateId, VisibilityTier};
 
     fn cid() -> StateId {
         StateId::from_bytes([7; 32])

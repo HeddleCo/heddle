@@ -1,4 +1,3 @@
-use crate::replication;
 use crypto::{Ed25519Signer, Signer, thread_operation::SignedOperation};
 use objects::{
     object::{
@@ -8,6 +7,7 @@ use objects::{
 };
 
 use super::*;
+use crate::replication;
 
 fn fixture(
     scratch: &Path,
@@ -51,7 +51,11 @@ fn fixture(
             thread: genesis.id().expect("Thread ID"),
             parents: BTreeSet::new(),
             publisher: signer.public_key().try_into().expect("key"),
-            body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(state.encode_current_msgpack().expect("State").into())),
+            body: ThreadOperationBody::Capture(
+                objects::object::thread_replication::AuthoredCapture::local(
+                    state.encode_current_msgpack().expect("State").into(),
+                ),
+            ),
         },
         &signer,
     )
@@ -192,10 +196,14 @@ fn integrated_fixture(
         thread: source.id().expect("source Thread"),
         parents: BTreeSet::new(),
         publisher: signer.public_key().try_into().expect("key"),
-        body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(source_state
-                .encode_current_msgpack()
-                .expect("source State")
-                .into())),
+        body: ThreadOperationBody::Capture(
+            objects::object::thread_replication::AuthoredCapture::local(
+                source_state
+                    .encode_current_msgpack()
+                    .expect("source State")
+                    .into(),
+            ),
+        ),
     };
     let result = State::new_merge(
         original.tree,
@@ -262,7 +270,8 @@ fn integrated_fixture(
         ],
         vec![ThreadGenesisRecord {
             boundary_acceptances: Vec::new(),
- ownership_claims: vec![], ownership_claim_admissions: vec![],
+            ownership_claims: vec![],
+            ownership_claim_admissions: vec![],
             genesis: Some(source_record),
             creator_authority: vec![],
             admission: None,
@@ -305,24 +314,72 @@ fn source_staging_rejects_missing_or_unrelated_foreign_source_provenance() {
     ));
 }
 
-fn publication_fixture(scratch: &Path, extra: bool) -> (tempfile::TempDir, PublishContentOpen, crate::publication::PublicationOriginals, State) {
+fn publication_fixture(
+    scratch: &Path,
+    extra: bool,
+) -> (
+    tempfile::TempDir,
+    PublishContentOpen,
+    crate::publication::PublicationOriginals,
+    State,
+) {
     let (directory, ready, operations, state) = fixture(scratch, extra);
-    let packs = ["source.pack", "source.idx"].into_iter().enumerate().map(|(index, name)| {
-        let bytes = std::fs::read(directory.path().join(name)).expect("actual uploaded artifact");
-        let address = ObjectAddress { algorithm: "blake3".into(), digest: blake3::hash(&bytes).as_bytes().to_vec() };
-        PackExtent { pack: Some(address.clone()), offset: 0, length: bytes.len() as u64,
-            extent_digest: Some(address), kind: if index == 0 { pack_extent::Kind::NativePack } else { pack_extent::Kind::NativeIndex } as i32 }
-    }).collect();
+    let packs = ["source.pack", "source.idx"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| {
+            let bytes =
+                std::fs::read(directory.path().join(name)).expect("actual uploaded artifact");
+            let address = ObjectAddress {
+                algorithm: "blake3".into(),
+                digest: blake3::hash(&bytes).as_bytes().to_vec(),
+            };
+            PackExtent {
+                pack: Some(address.clone()),
+                offset: 0,
+                length: bytes.len() as u64,
+                extent_digest: Some(address),
+                kind: if index == 0 {
+                    pack_extent::Kind::NativePack
+                } else {
+                    pack_extent::Kind::NativeIndex
+                } as i32,
+            }
+        })
+        .collect();
     let originals = crate::publication::PublicationOriginals {
         geneses: vec![ready.thread_genesis.expect("original genesis")],
-        operations: vec![ReplicationOperations { boundary_acceptances: Vec::new(),
- authority_admissions: vec![], operations: operations.into_iter().map(|signed| {
-            let publisher = signed.verify().expect("original source").publisher;
-            SignedRecord { format: heddle_object_model::object::thread_replication::OPERATION_FORMAT.into(),
-                canonical_record: signed.canonical, signatures: vec![RecordSignature { public_key: publisher.to_vec(), signature: signed.signature }] }
-        }).collect() }],
+        operations: vec![ReplicationOperations {
+            boundary_acceptances: Vec::new(),
+            authority_admissions: vec![],
+            operations: operations
+                .into_iter()
+                .map(|signed| {
+                    let publisher = signed.verify().expect("original source").publisher;
+                    SignedRecord {
+                        format: heddle_object_model::object::thread_replication::OPERATION_FORMAT
+                            .into(),
+                        canonical_record: signed.canonical,
+                        signatures: vec![RecordSignature {
+                            public_key: publisher.to_vec(),
+                            signature: signed.signature,
+                        }],
+                    }
+                })
+                .collect(),
+        }],
     };
-    (directory, PublishContentOpen { thread: ready.thread, revision: ready.current, packs, ..Default::default() }, originals, state)
+    (
+        directory,
+        PublishContentOpen {
+            thread: ready.thread,
+            revision: ready.current,
+            packs,
+            ..Default::default()
+        },
+        originals,
+        state,
+    )
 }
 
 #[test]
@@ -331,13 +388,17 @@ fn publication_staging_validates_originals_actual_artifacts_and_cleanup_twice() 
     for _ in 0..2 {
         let (directory, opening, originals, state) = publication_fixture(scratch.path(), false);
         let path = directory.path().to_owned();
-        let value = crate::publication::validate_source_artifacts(directory, &opening, originals).expect("validated publication");
+        let value = crate::publication::validate_source_artifacts(directory, &opening, originals)
+            .expect("validated publication");
         assert_eq!(value.state().id(), state.id());
         assert_eq!(value.operations().len(), 1);
         assert_eq!(value.geneses().count(), 1);
         assert!(path.exists());
         drop(value);
-        assert!(!path.exists(), "completed staged publication owns scratch cleanup");
+        assert!(
+            !path.exists(),
+            "completed staged publication owns scratch cleanup"
+        );
     }
 }
 
@@ -348,67 +409,206 @@ fn publication_staging_rejects_wrong_inventory_and_unsupplied_originals() {
     let path = directory.path().to_owned();
     opening.packs[0].pack.as_mut().expect("address").digest[0] ^= 1;
     opening.packs[0].extent_digest = opening.packs[0].pack.clone();
-    assert!(matches!(crate::publication::validate_source_artifacts(directory, &opening, originals),
-        Err(Error::Invalid("uploaded artifact digest differs"))), "actual artifact inventory must be checked");
+    assert!(
+        matches!(
+            crate::publication::validate_source_artifacts(directory, &opening, originals),
+            Err(Error::Invalid("uploaded artifact digest differs"))
+        ),
+        "actual artifact inventory must be checked"
+    );
     assert!(!path.exists());
     let (directory, opening, mut originals, _) = publication_fixture(scratch.path(), false);
     originals.operations[0].operations[0].signatures[0].signature[0] ^= 1;
-    assert!(crate::publication::validate_source_artifacts(directory, &opening, originals).is_err(), "original source signatures are necessary");
+    assert!(
+        crate::publication::validate_source_artifacts(directory, &opening, originals).is_err(),
+        "original source signatures are necessary"
+    );
     let (directory, opening, originals, _) = publication_fixture(scratch.path(), true);
-    assert!(crate::publication::validate_source_artifacts(directory, &opening, originals).is_err(), "unselected private objects must not be staged as source");
+    assert!(
+        crate::publication::validate_source_artifacts(directory, &opening, originals).is_err(),
+        "unselected private objects must not be staged as source"
+    );
 }
 
 #[test]
 fn publication_staging_preserves_matched_account_admission_without_trusting_issuer() {
-    use objects::object::{CollaborationActor, thread_replication::{AuthoredCapture, SourceAuthor, integration::TrustedHostedExecutor}, thread_authority_admission::ThreadAuthorityAdmission};
+    use objects::object::{
+        CollaborationActor,
+        thread_authority_admission::ThreadAuthorityAdmission,
+        thread_replication::{AuthoredCapture, SourceAuthor, integration::TrustedHostedExecutor},
+    };
     let scratch = tempfile::tempdir().expect("scratch");
     let (directory, opening, mut originals, state) = publication_fixture(scratch.path(), false);
     let signer = Ed25519Signer::from_seed(&[61; 32]).expect("source author");
-    let mut operation = replication::decode_record(originals.operations[0].operations[0].clone()).expect("source").verify().expect("signature");
+    let mut operation = replication::decode_record(originals.operations[0].operations[0].clone())
+        .expect("source")
+        .verify()
+        .expect("signature");
     let result = operation.source_result().expect("result").expect("capture");
-    let spool = uuid::Uuid::parse_str(&opening.thread.as_ref().expect("Thread").spool.as_ref().expect("Spool").id).expect("Spool UUID");
-    let actor = CollaborationActor { principal_id: uuid::Uuid::from_u128(73), agent_id: Some("original-agent".into()) };
-    let capture = AuthoredCapture::account(result, spool, actor.clone(), b"first-admitted original author envelope".to_vec()).expect("signed author binding");
-    let SourceAuthor::Account { authority_digest, .. } = capture.author else { panic!("account author"); };
+    let spool = uuid::Uuid::parse_str(
+        &opening
+            .thread
+            .as_ref()
+            .expect("Thread")
+            .spool
+            .as_ref()
+            .expect("Spool")
+            .id,
+    )
+    .expect("Spool UUID");
+    let actor = CollaborationActor {
+        principal_id: uuid::Uuid::from_u128(73),
+        agent_id: Some("original-agent".into()),
+    };
+    let capture = AuthoredCapture::account(
+        result,
+        spool,
+        actor.clone(),
+        b"first-admitted original author envelope".to_vec(),
+    )
+    .expect("signed author binding");
+    let SourceAuthor::Account {
+        authority_digest, ..
+    } = capture.author
+    else {
+        panic!("account author");
+    };
     operation.body = ThreadOperationBody::Capture(capture);
     let signed = SignedOperation::sign(&operation, &signer).expect("original source signature");
-    originals.operations[0].operations[0] = SignedRecord { format: objects::object::thread_replication::OPERATION_FORMAT.into(), canonical_record: signed.canonical.clone(), signatures: vec![RecordSignature { public_key: operation.publisher.to_vec(), signature: signed.signature.clone() }] };
+    originals.operations[0].operations[0] = SignedRecord {
+        format: objects::object::thread_replication::OPERATION_FORMAT.into(),
+        canonical_record: signed.canonical.clone(),
+        signatures: vec![RecordSignature {
+            public_key: operation.publisher.to_vec(),
+            signature: signed.signature.clone(),
+        }],
+    };
     let executor = Ed25519Signer::from_seed(&[74; 32]).expect("receipt issuer");
     let statement = ThreadAuthorityAdmission { version: 3,
             basis: heddle_object_model::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority, spool, spool_genesis: ContentHash::from_bytes([75;32]), thread: operation.thread,
         subject: objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(operation.id().expect("operation ID")), actor, publisher: operation.publisher, authority_digest,
         executor: executor.public_key().try_into().expect("executor key"), admitted_at_ms: 100 };
-    let receipt = crypto::thread_authority_admission::SignedAuthorityAdmission::sign(&statement, &executor).expect("historical testimony");
-    originals.operations[0].authority_admissions = vec![crate::authority_admission::encode(&receipt).expect("portable receipt")];
-    let validated = crate::publication::validate_source_artifacts(directory, &opening, originals).expect("matched structurally valid source");
+    let receipt =
+        crypto::thread_authority_admission::SignedAuthorityAdmission::sign(&statement, &executor)
+            .expect("historical testimony");
+    originals.operations[0].authority_admissions =
+        vec![crate::authority_admission::encode(&receipt).expect("portable receipt")];
+    let validated = crate::publication::validate_source_artifacts(directory, &opening, originals)
+        .expect("matched structurally valid source");
     assert_eq!(validated.state().id(), state.id());
-    assert_eq!(validated.authority_admissions().get(&statement.subject.id()), Some(&receipt));
-    let wrong_trust = TrustedHostedExecutor { spool, spool_genesis: statement.spool_genesis, executor: [76;32] };
-    assert!(validated.authority_admissions()[&statement.subject.id()].verify(&signed, &wrong_trust).is_err(), "structural staging never enrolls its issuer");
+    assert_eq!(
+        validated
+            .authority_admissions()
+            .get(&statement.subject.id()),
+        Some(&receipt)
+    );
+    let wrong_trust = TrustedHostedExecutor {
+        spool,
+        spool_genesis: statement.spool_genesis,
+        executor: [76; 32],
+    };
+    assert!(
+        validated.authority_admissions()[&statement.subject.id()]
+            .verify(&signed, &wrong_trust)
+            .is_err(),
+        "structural staging never enrolls its issuer"
+    );
 }
 
 #[test]
 fn source_staging_retains_signed_claim_cutoff_beyond_selected_revision() {
-    use objects::object::{CollaborationActor,thread_replication::{AuthoredCapture,SourceAuthor,ownership_claim::ThreadOwnershipClaim}};
-    let scratch=tempfile::tempdir().expect("scratch");
-    for omit_cutoff in [false,true] {
-        let (directory,mut ready,mut operations,selected)=fixture(scratch.path(),false);
-        let genesis=replication::opening::verify_genesis_record(ready.thread_genesis.as_ref().expect("genesis"),ready.thread.as_ref().expect("Thread")).expect("original genesis");
-        let local=Ed25519Signer::from_seed(&[61;32]).expect("local owner");
-        let account=Ed25519Signer::from_seed(&[69;32]).expect("accepting account key");
-        let future=State::new_snapshot(selected.tree,vec![selected.id()],Attribution::human(Principal::new("owner","owner@example.test")));
-        let next=SignedOperation::sign(&ThreadOperation{version:1,thread:genesis.id().expect("Thread"),parents:BTreeSet::from([operations[0].verify().expect("source").id().expect("source ID")]),publisher:genesis.creator,body:ThreadOperationBody::Capture(AuthoredCapture::local(future.encode_current_msgpack().expect("cutoff source").into()))},&local).expect("future source original");
-        let claim=ThreadOwnershipClaim{version:1,thread:genesis.id().expect("Thread"),prior_local_key:genesis.creator,accepting_publisher:account.public_key().try_into().expect("acceptor"),acceptance:SourceAuthor::account(genesis.spool.parse().expect("Spool"),CollaborationActor{principal_id:uuid::Uuid::from_u128(69),agent_id:Some("delegate".into())},b"independently verified only on installation".to_vec()).expect("signed acceptance binding"),source_frontier:BTreeSet::from([next.verify().expect("future original").id().expect("cutoff ID")])};
-        let proof=crypto::thread_ownership_claim::SignedOwnershipClaim::sign(&claim,&local,&account).expect("both ownership signatures");
-        ready.thread_genesis.as_mut().expect("genesis").ownership_claims=vec![crate::thread_ownership::encode(&proof).expect("portable original")];
-        if !omit_cutoff { operations.push(next.clone()); }
-        let result=validate(directory,ready,operations,vec![]);
+    use objects::object::{
+        CollaborationActor,
+        thread_replication::{
+            AuthoredCapture, SourceAuthor, ownership_claim::ThreadOwnershipClaim,
+        },
+    };
+    let scratch = tempfile::tempdir().expect("scratch");
+    for omit_cutoff in [false, true] {
+        let (directory, mut ready, mut operations, selected) = fixture(scratch.path(), false);
+        let genesis = replication::opening::verify_genesis_record(
+            ready.thread_genesis.as_ref().expect("genesis"),
+            ready.thread.as_ref().expect("Thread"),
+        )
+        .expect("original genesis");
+        let local = Ed25519Signer::from_seed(&[61; 32]).expect("local owner");
+        let account = Ed25519Signer::from_seed(&[69; 32]).expect("accepting account key");
+        let future = State::new_snapshot(
+            selected.tree,
+            vec![selected.id()],
+            Attribution::human(Principal::new("owner", "owner@example.test")),
+        );
+        let next = SignedOperation::sign(
+            &ThreadOperation {
+                version: 1,
+                thread: genesis.id().expect("Thread"),
+                parents: BTreeSet::from([operations[0]
+                    .verify()
+                    .expect("source")
+                    .id()
+                    .expect("source ID")]),
+                publisher: genesis.creator,
+                body: ThreadOperationBody::Capture(AuthoredCapture::local(
+                    future
+                        .encode_current_msgpack()
+                        .expect("cutoff source")
+                        .into(),
+                )),
+            },
+            &local,
+        )
+        .expect("future source original");
+        let claim = ThreadOwnershipClaim {
+            version: 1,
+            thread: genesis.id().expect("Thread"),
+            prior_local_key: genesis.creator,
+            accepting_publisher: account.public_key().try_into().expect("acceptor"),
+            acceptance: SourceAuthor::account(
+                genesis.spool.parse().expect("Spool"),
+                CollaborationActor {
+                    principal_id: uuid::Uuid::from_u128(69),
+                    agent_id: Some("delegate".into()),
+                },
+                b"independently verified only on installation".to_vec(),
+            )
+            .expect("signed acceptance binding"),
+            source_frontier: BTreeSet::from([next
+                .verify()
+                .expect("future original")
+                .id()
+                .expect("cutoff ID")]),
+        };
+        let proof =
+            crypto::thread_ownership_claim::SignedOwnershipClaim::sign(&claim, &local, &account)
+                .expect("both ownership signatures");
+        ready
+            .thread_genesis
+            .as_mut()
+            .expect("genesis")
+            .ownership_claims =
+            vec![crate::thread_ownership::encode(&proof).expect("portable original")];
+        if !omit_cutoff {
+            operations.push(next.clone());
+        }
+        let result = validate(directory, ready, operations, vec![]);
         if omit_cutoff {
-            assert!(result.err().expect("cutoff closure required").to_string().contains("ownership claim cutoff source proof absent or foreign"),"claim must not install with missing cutoff evidence");
+            assert!(
+                result
+                    .err()
+                    .expect("cutoff closure required")
+                    .to_string()
+                    .contains("ownership claim cutoff source proof absent or foreign"),
+                "claim must not install with missing cutoff evidence"
+            );
         } else {
-            let staged=result.expect("later signed ownership cutoff retained with historical selected source");
-            assert_eq!(staged.state().id(),selected.id());
-            assert_eq!(staged.operations().last(),Some(&next),"original cutoff follows causal selected source");
+            let staged = result
+                .expect("later signed ownership cutoff retained with historical selected source");
+            assert_eq!(staged.state().id(), selected.id());
+            assert_eq!(
+                staged.operations().last(),
+                Some(&next),
+                "original cutoff follows causal selected source"
+            );
         }
     }
 }

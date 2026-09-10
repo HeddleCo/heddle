@@ -165,9 +165,9 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{bind_unix_socket, handle_authenticated_unix_connection};
-    use crate::daemon::unix_probe::{UnixSocketProbe, probe_unix_socket};
     use crate::daemon::{
         ERR_UNAUTHORIZED, MOUNT_PROTOCOL_VERSION, MountDaemonRequest, MountDaemonResponse,
+        unix_probe::{UnixSocketProbe, probe_unix_socket},
     };
 
     #[test]

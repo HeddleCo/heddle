@@ -44,11 +44,13 @@ fn genesis(repository: &Repository) -> ThreadGenesis {
             .public_key()
             .try_into()
             .expect("public key"),
-        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(Ed25519Signer::from_seed(&[17; 32])
-            .expect("creator")
-            .public_key()
-            .try_into()
-            .expect("public key")),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(
+            Ed25519Signer::from_seed(&[17; 32])
+                .expect("creator")
+                .public_key()
+                .try_into()
+                .expect("public key"),
+        ),
         nonce: vec![],
     }
 }
@@ -69,7 +71,11 @@ fn capture(
         thread: replica.thread_id(),
         parents: BTreeSet::new(),
         publisher: signer.public_key().try_into().expect("public key"),
-        body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(state.encode_current_msgpack().expect("state").into())),
+        body: ThreadOperationBody::Capture(
+            objects::object::thread_replication::AuthoredCapture::local(
+                state.encode_current_msgpack().expect("state").into(),
+            ),
+        ),
     };
     let id = operation.id().expect("ID");
     assert_eq!(

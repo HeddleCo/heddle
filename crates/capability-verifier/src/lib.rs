@@ -5,6 +5,7 @@
 //! authorization decision. It performs no I/O, obtains no clock, and exposes
 //! no private-key construction or signing API.
 
+pub mod boundary_authority;
 mod canonical;
 mod capability;
 pub mod creation;
@@ -16,7 +17,6 @@ mod limits;
 mod operation;
 mod owner;
 pub mod thread_control_authority;
-pub mod boundary_authority;
 mod transfer;
 
 #[cfg(target_arch = "wasm32")]

@@ -28,7 +28,16 @@ impl DeviceRpc {
         let request = ObserveThreadRequest::decode(body)?;
         let reference = request.thread.as_ref().context("Thread required")?;
         checkout::same_spool(session, reference.spool.as_ref())?;
-        let thread = ContentHash::from_bytes(reference.id.as_ref().context("Thread identity missing")?.value.as_slice().try_into().map_err(|_| anyhow::anyhow!("invalid Thread hash"))?);
+        let thread = ContentHash::from_bytes(
+            reference
+                .id
+                .as_ref()
+                .context("Thread identity missing")?
+                .value
+                .as_slice()
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid Thread hash"))?,
+        );
         let replica = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
         if self.thread_conflict_status(session, &replica)?.is_none() {
             let repository = repo::Repository::open(&session.spool.root)?;
@@ -70,7 +79,12 @@ impl DeviceRpc {
     ) -> Result<Vec<u8>> {
         let repository = repo::Repository::open(&session.spool.root)?;
         if self.thread_conflict_status(session, replica)?.is_some() {
-            return Ok(repo::thread_replication::projection::version(replica.thread_id(), replica.generation()?).as_bytes().to_vec());
+            return Ok(repo::thread_replication::projection::version(
+                replica.thread_id(),
+                replica.generation()?,
+            )
+            .as_bytes()
+            .to_vec());
         }
         session.authorize_thread(&repository, replica)?;
         let version = repo::thread_replication::projection::version(
@@ -128,19 +142,57 @@ impl DeviceRpc {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(ownership) = self.thread_conflict_status(session, replica)? {
             let generation = self.thread_observation_version(session, replica, &[])?;
-            let mut overview = ThreadOverview { r#ref: request.thread.clone(), ownership: Some(ownership), ..Default::default() };
+            let mut overview = ThreadOverview {
+                r#ref: request.thread.clone(),
+                ownership: Some(ownership),
+                ..Default::default()
+            };
             let mut events = Vec::new();
-            for value in request.sections.iter().copied().collect::<std::collections::BTreeSet<_>>() {
+            for value in request
+                .sections
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+            {
                 let section = ThreadSection::try_from(value).context("unknown Thread section")?;
-                if section == ThreadSection::Overview { continue; }
-                ensure!(section != ThreadSection::Unspecified, "Thread section required");
-                let name = section.as_str_name().strip_prefix("THREAD_SECTION_").unwrap_or(section.as_str_name()).to_ascii_lowercase();
-                let status = SectionStatus { section: name.clone(), coverage: Coverage::Unavailable as i32, ..Default::default() };
+                if section == ThreadSection::Overview {
+                    continue;
+                }
+                ensure!(
+                    section != ThreadSection::Unspecified,
+                    "Thread section required"
+                );
+                let name = section
+                    .as_str_name()
+                    .strip_prefix("THREAD_SECTION_")
+                    .unwrap_or(section.as_str_name())
+                    .to_ascii_lowercase();
+                let status = SectionStatus {
+                    section: name.clone(),
+                    coverage: Coverage::Unavailable as i32,
+                    ..Default::default()
+                };
                 overview.sections.push(status.clone());
-                events.push((format!("status:{name}"), event(thread_event::Payload::Status(status))));
+                events.push((
+                    format!("status:{name}"),
+                    event(thread_event::Payload::Status(status)),
+                ));
             }
-            events.insert(0,("overview".into(),event(thread_event::Payload::Overview(overview))));
-            return Ok((events,PageInfo { exhausted:true,..Default::default() },generation));
+            events.insert(
+                0,
+                (
+                    "overview".into(),
+                    event(thread_event::Payload::Overview(overview)),
+                ),
+            );
+            return Ok((
+                events,
+                PageInfo {
+                    exhausted: true,
+                    ..Default::default()
+                },
+                generation,
+            ));
         }
         let repository = repo::Repository::open(&session.spool.root)?;
         session.authorize_thread(&repository, replica)?;

@@ -11,12 +11,11 @@
 use std::path::Path;
 
 use agent_relay::{HarnessCliBridge, RelayCapture};
+pub use agent_relay::{current_process_harness_hint, probe_current_process_harness};
 use anyhow::Result;
 use config::UserConfig;
 use objects::object::StateId;
 use repo::Repository;
-
-pub use agent_relay::{current_process_harness_hint, probe_current_process_harness};
 
 pub(crate) fn relay_harness_event(
     repo: &Repository,
@@ -90,9 +89,10 @@ impl HarnessCliBridge for CliAgentBridge {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use objects::store::ObjectStore;
     use serde_json::Value;
+
+    use super::*;
 
     // Capture-through-relay behavior: these exercise the real CLI capture
     // implementation behind the bridge, so they live here rather than in

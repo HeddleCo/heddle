@@ -83,8 +83,10 @@ mod tests {
     use schemars::schema_for;
     use serde_json::Value;
 
-    use super::super::{command_catalog, schemas};
-    use super::*;
+    use super::{
+        super::{command_catalog, schemas},
+        *,
+    };
     use crate::cli::Cli;
 
     fn property_keys(schema: &Value) -> Vec<String> {

@@ -333,7 +333,9 @@ pub(super) fn thread_visible(
     principal: uuid::Uuid,
     agent: Option<&str>,
 ) -> Result<bool> {
-    if replica.ownership_claims()?.len() > 1 { return Ok(false); }
+    if replica.ownership_claims()?.len() > 1 {
+        return Ok(false);
+    }
     let genesis = replica.genesis()?;
     let local = match genesis.owner {
         objects::object::thread_replication::GenesisOwner::LocalKey(key)

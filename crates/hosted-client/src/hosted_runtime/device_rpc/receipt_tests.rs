@@ -71,7 +71,7 @@ pub(super) async fn roundtrip(
     let id = operation.id().expect("ID");
     let statement = ThreadAuthorityAdmission {
         version: 3,
-            basis: objects::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority,
+        basis: objects::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority,
         spool,
         spool_genesis: ContentHash::compute_typed(
             SPOOL_GENESIS_TRUST_FORMAT,
@@ -82,7 +82,9 @@ pub(super) async fn roundtrip(
                 .encode_to_vec(),
         ),
         thread: operation.thread,
-        subject: objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(id),
+        subject: objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(
+            id,
+        ),
         actor: control.actor,
         publisher: operation.publisher,
         authority_digest: control.authority_digest,
@@ -142,7 +144,7 @@ pub(super) async fn roundtrip(
             body: Some(replicate_thread_request::Body::Operations(
                 ReplicationOperations {
                     boundary_acceptances: Vec::new(),
- operations: vec![wire_original.clone()],
+                    operations: vec![wire_original.clone()],
                     authority_admissions: vec![receipt.clone()],
                 },
             )),

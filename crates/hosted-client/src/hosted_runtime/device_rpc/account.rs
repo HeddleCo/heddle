@@ -81,11 +81,17 @@ impl DeviceRpc {
         };
         if descriptor.streaming == api::StreamingShape::ServerStreaming {
             budget.retain().map_err(anyhow::Error::msg)?;
-            if method.ends_with("/Search") { return self.search_local(session, body, send).await; }
-            if method.ends_with("/ObserveOperations") { return self.observe_operations(&session, body, send).await; }
+            if method.ends_with("/Search") {
+                return self.search_local(session, body, send).await;
+            }
+            if method.ends_with("/ObserveOperations") {
+                return self.observe_operations(&session, body, send).await;
+            }
             return self.observe_account(&session, method, body, send).await;
         }
-        let result = if method.ends_with("/VerifyEvidence") { self.verify_local_evidence(&session,body) } else if method.ends_with("/ResolveResources") {
+        let result = if method.ends_with("/VerifyEvidence") {
+            self.verify_local_evidence(&session, body)
+        } else if method.ends_with("/ResolveResources") {
             self.resolve_local_resources(&session, &ResolveResourcesRequest::decode(body)?)
                 .map(|r| r.encode_to_vec())
         } else {

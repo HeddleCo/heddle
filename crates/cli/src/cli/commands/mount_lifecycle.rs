@@ -18,7 +18,6 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-
 // The FSKit readiness payload lives in cli-contract beside the start wire type.
 pub(crate) use heddle_cli_contract::cli::commands::wire::thread::FskitReadinessReport;
 

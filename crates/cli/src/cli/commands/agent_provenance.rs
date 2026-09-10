@@ -2,6 +2,11 @@
 //! Provider, model, and policy provenance commands.
 
 use anyhow::Result;
+// The provenance wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
+    SegmentEnvelope, SegmentOutput, SessionEnvelope, SessionListOutput, SessionOutput,
+};
 use repo::SessionManager;
 use verbs::session_list_status;
 
@@ -11,12 +16,6 @@ use super::{
     verification_health::build_repository_verification_state,
 };
 use crate::cli::{Cli, should_output_json};
-
-// The provenance wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
-    SegmentEnvelope, SegmentOutput, SessionEnvelope, SessionListOutput, SessionOutput,
-};
 
 pub async fn begin(
     cli: &Cli,

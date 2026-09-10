@@ -2,9 +2,10 @@
 
 //! Rendering and freshness checks for Heddle's agent-facing documentation corpus.
 
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 pub const INDEX_PATH: &str = "docs/llms.txt";
 pub const FULL_PATH: &str = "docs/llms-full.txt";

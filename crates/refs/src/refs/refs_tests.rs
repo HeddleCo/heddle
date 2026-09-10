@@ -784,11 +784,13 @@ mod chokepoint {
     };
     use tempfile::TempDir;
 
-    use super::super::{
-        LoadRequest, Loaded, ReconcileOutcome, RefCommitter, RefExpectation, RefManager,
-        RefReconciler, RefUpdate,
+    use super::{
+        super::{
+            LoadRequest, Loaded, ReconcileOutcome, RefCommitter, RefExpectation, RefManager,
+            RefReconciler, RefUpdate,
+        },
+        test_record,
     };
-    use super::test_record;
 
     fn manager() -> (TempDir, std::path::PathBuf) {
         let temp = TempDir::new().unwrap();

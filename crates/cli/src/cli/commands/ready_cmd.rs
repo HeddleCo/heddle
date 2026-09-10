@@ -3,6 +3,12 @@
 
 use anyhow::Result;
 use chrono::Utc;
+// The ready wire payload lives in cli-contract so the schema registry
+// registers the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::ready_blocked_by_missing_intent;
+pub(crate) use heddle_cli_contract::cli::commands::wire::{
+    ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary,
+};
 use objects::object::Tree;
 use repo::{Repository, ThreadFreshness, ThreadState};
 use verbs::{
@@ -42,13 +48,6 @@ use crate::{
         style, worktree_status_options,
     },
     config::UserConfig,
-};
-
-// The ready wire payload lives in cli-contract so the schema registry
-// registers the real serialization type.
-pub(crate) use heddle_cli_contract::cli::commands::wire::ready_blocked_by_missing_intent;
-pub(crate) use heddle_cli_contract::cli::commands::wire::{
-    ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary,
 };
 
 pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {

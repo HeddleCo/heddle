@@ -202,9 +202,16 @@ impl DeviceRpc {
             let _permit = permit;
             source.check_current(&home)?;
             let repository = repo::Repository::open(&source.spool.root)?;
-            let budget=repo::SemanticParseBudget { cancelled:flag, deadline:std::time::Instant::now()+std::time::Duration::from_secs(30) };
+            let budget = repo::SemanticParseBudget {
+                cancelled: flag,
+                deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+            };
             for state in state {
-                repository.analyze_semantic_index_with_admission(state,budget.clone(), || source.check_current(&home).map_err(|error|repo::HeddleError::InvalidObject(error.to_string())))?;
+                repository.analyze_semantic_index_with_admission(state, budget.clone(), || {
+                    source
+                        .check_current(&home)
+                        .map_err(|error| repo::HeddleError::InvalidObject(error.to_string()))
+                })?;
             }
 
             Ok(())

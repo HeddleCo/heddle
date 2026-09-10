@@ -18,10 +18,10 @@ mod error;
 pub(crate) mod helpers;
 mod human;
 mod hydration;
+mod methods;
 mod native_hydration;
 #[cfg(test)]
 mod native_hydration_tests;
-mod methods;
 #[cfg(test)]
 mod native_transport_tests;
 pub(crate) mod operation_id;
@@ -402,8 +402,10 @@ impl HostedClient {
             private_key_pem: Some(private_key_pem),
             expires_at: Some(root.expires_at.to_rfc3339()),
         };
-        if let Err(error)=crate::hosted_runtime::source_author::retain(&server_key,&updated) {
-            tracing::warn!("credential rotation: failed to retain original device authority: {error}");
+        if let Err(error) = crate::hosted_runtime::source_author::retain(&server_key, &updated) {
+            tracing::warn!(
+                "credential rotation: failed to retain original device authority: {error}"
+            );
         }
         if let Err(error) = config::credentials::store_server_credential(&server_key, updated) {
             tracing::warn!("credential rotation: failed to persist credential: {error}");

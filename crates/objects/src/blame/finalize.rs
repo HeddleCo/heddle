@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Build canonical FileProvenance from a completed origin stream.
 
-use crate::object::{ContentHash, FileProvenance, Origin, OriginSet};
-
 use super::types::{BlameSliceError, OriginRange};
+use crate::object::{ContentHash, FileProvenance, Origin, OriginSet};
 
 /// Assemble [`FileProvenance`] from finalized ranges without holding history.
 ///

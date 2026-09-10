@@ -3,8 +3,6 @@
 
 use std::{cell::RefCell, collections::HashMap, path::Path};
 
-use crate::object::{Blob, ContentHash, FileProvenance, ObjectSource, State, StateId, Tree};
-
 use super::{
     advance::advance_file_blame_slice,
     finalize::finalize_file_provenance,
@@ -14,6 +12,7 @@ use super::{
         OriginRange,
     },
 };
+use crate::object::{Blob, ContentHash, FileProvenance, ObjectSource, State, StateId, Tree};
 
 /// Resolved objects shared by every slice of one local blame walk.
 ///

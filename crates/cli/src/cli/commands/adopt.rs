@@ -4,6 +4,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
+// The wire payload lives in cli-contract so the schema registry registers
+// the real serialization type.
+pub use heddle_cli_contract::cli::commands::wire::remote::AdoptOutput;
 use objects::lock::RepositoryLockExt;
 use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
 use sley::Repository as SleyRepository;
@@ -23,10 +26,6 @@ use crate::{
     cli::{AdoptArgs, Cli, should_output_json, style},
     perf::{ProfileField, emit_profile, instrumentation_enabled},
 };
-
-// The wire payload lives in cli-contract so the schema registry registers
-// the real serialization type.
-pub use heddle_cli_contract::cli::commands::wire::remote::AdoptOutput;
 
 #[derive(Debug)]
 struct AdoptImportStats {

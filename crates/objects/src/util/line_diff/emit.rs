@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Visit Myers equals after Compact left/right slides.
 
-use super::compact::{compact_keeps_right_shift, slide_equal_run, slide_equal_run_right};
-use super::myers::LineView;
-use super::{EqualRun, LineDiffError};
+use super::{
+    EqualRun, LineDiffError,
+    compact::{compact_keeps_right_shift, slide_equal_run, slide_equal_run_right},
+    myers::LineView,
+};
 
 pub(super) struct EqualEmit<'a> {
     pub new_cursor: &'a mut usize,

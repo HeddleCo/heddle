@@ -43,7 +43,9 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
         name: "shared receipt".into(),
         intent: "original authorship survives every relay".into(),
         creator: author.public_key().try_into().expect("key"),
-        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(author.public_key().try_into().expect("key")),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(
+            author.public_key().try_into().expect("key"),
+        ),
         nonce: vec![85; 32],
     };
     let signed_genesis = SignedGenesis::sign(&genesis, &author).expect("genesis");
@@ -119,7 +121,10 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
     };
     let receipt = SignedAuthorityAdmission::sign(&statement, &executor).expect("first admission");
     let mut unknown = statement;
-    unknown.subject = objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(ContentHash::from_bytes([87; 32]));
+    unknown.subject =
+        objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(
+            ContentHash::from_bytes([87; 32]),
+        );
     let unmatched =
         crate::authority_admission::sign(&unknown, &executor).expect("valid unmatched testimony");
     left.receive_with_authority_admission(&original, &receipt, left_repo.store(), |_| Ok(()))

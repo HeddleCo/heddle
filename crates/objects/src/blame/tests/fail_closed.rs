@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::path::Path;
-use std::time::Instant;
-
-use crate::blame::{
-    BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
-    advance_file_blame_slice, blame_file, prepare_file_blame,
-};
-use crate::object::{Attribution, ContentHash, Principal, State, StateId, Tree, TreeEntry};
-use crate::store::ObjectStore;
-use crate::util::ResourceKind;
+use std::{path::Path, time::Instant};
 
 use super::fixture::{put_state_with_file, store};
+use crate::{
+    blame::{
+        BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
+        advance_file_blame_slice, blame_file, prepare_file_blame,
+    },
+    object::{Attribution, ContentHash, Principal, State, StateId, Tree, TreeEntry},
+    store::ObjectStore,
+    util::ResourceKind,
+};
 
 #[test]
 fn missing_parent_state_is_missing_object_not_child_credit() {

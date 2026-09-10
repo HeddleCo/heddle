@@ -802,9 +802,11 @@ fn build_machine_contract_coverage() -> MachineContractCoverage {
 
     let mut catalog_commands_total = 0usize;
     for command in &commands {
-        if command.path.first().is_some_and(|root| {
-            NON_DEFAULT_GATED_ROOTS.contains(&root.as_str())
-        }) {
+        if command
+            .path
+            .first()
+            .is_some_and(|root| NON_DEFAULT_GATED_ROOTS.contains(&root.as_str()))
+        {
             continue;
         }
         catalog_commands_total += 1;

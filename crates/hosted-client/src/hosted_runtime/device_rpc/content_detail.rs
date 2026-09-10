@@ -70,9 +70,18 @@ fn blob(
     );
     Ok(value)
 }
-pub(super) fn state(state: &State, revision: &RevisionRef, emit: &mut impl FnMut(Payload) -> Result<()>) -> Result<()> {
+pub(super) fn state(
+    state: &State,
+    revision: &RevisionRef,
+    emit: &mut impl FnMut(Payload) -> Result<()>,
+) -> Result<()> {
     emit(Payload::State(super::content_summary::summary(state, None)))?;
-    emit(Payload::SelectionComplete(complete("state", revision, Coverage::Complete, None)))
+    emit(Payload::SelectionComplete(complete(
+        "state",
+        revision,
+        Coverage::Complete,
+        None,
+    )))
 }
 pub(super) fn diff(
     repository: &repo::Repository,
