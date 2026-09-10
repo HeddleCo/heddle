@@ -1228,6 +1228,53 @@ impl RecoveryAdvice {
     }
 
     #[cfg(feature = "client")]
+    pub fn grant_denied(spool: &str) -> Self {
+        Self::safety_refusal(
+            "grant_denied",
+            format!("Cannot manage grants on '{spool}': permission denied"),
+            "Only an owner or admin of this spool can create or delete grants. Check roles with `heddle whoami`.",
+            "the caller does not hold GrantWrite on the spool",
+            "no collaborator grant was created or removed",
+            "hosted grants and local checkouts were left unchanged",
+            "heddle whoami".to_string(),
+            vec!["heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn grant_not_found(spool: &str) -> Self {
+        Self::safety_refusal(
+            "grant_not_found",
+            format!("Cannot manage grants: spool '{spool}' was not found"),
+            format!("Check the path with `heddle whoami`, then retry with `--spool {spool}`."),
+            format!("the server has no spool at '{spool}'"),
+            "no collaborator grant was created or removed",
+            "hosted grants and local checkouts were left unchanged",
+            "heddle whoami".to_string(),
+            vec!["heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn grant_failed(spool: &str, error: &str) -> Self {
+        let primary = if spool.is_empty() {
+            "heddle whoami".to_string()
+        } else {
+            format!("heddle grant list --spool {spool}")
+        };
+        Self::safety_refusal(
+            "grant_failed",
+            format!("Cannot manage grants on '{spool}': {error}"),
+            "Fix the reported condition, then retry `heddle grant`. Check identity with `heddle whoami`.",
+            format!("the server refused a grant RPC for '{spool}': {error}"),
+            "no collaborator grant was created or removed",
+            "hosted grants and local checkouts were left unchanged",
+            primary.clone(),
+            vec![primary, "heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
     pub fn promote_failed(full_path: &str, error: &str) -> Self {
         Self::safety_refusal(
             "promote_failed",

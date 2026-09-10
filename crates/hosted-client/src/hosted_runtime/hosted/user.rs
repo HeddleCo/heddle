@@ -373,9 +373,12 @@ impl HostedClient {
         role: &str,
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
+        client_operation_id: impl Into<String>,
     ) -> Result<wire::HostedGrantInfo, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateGrant");
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RegistryService/CreateGrant",
+            client_operation_id,
+        );
         let target = build_target_ref(namespace_path, repo_path)?;
         let grant = authed_call!(
             self,
@@ -412,9 +415,12 @@ impl HostedClient {
         role: &str,
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
+        client_operation_id: impl Into<String>,
     ) -> Result<wire::HostedGrantInfo, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateGrant");
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RegistryService/UpdateGrant",
+            client_operation_id,
+        );
         let target = build_target_ref(namespace_path, repo_path)?;
         let grant = authed_call!(
             self,
@@ -435,9 +441,12 @@ impl HostedClient {
         subject: &str,
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
+        client_operation_id: impl Into<String>,
     ) -> Result<(), ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteGrant");
+        let operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha1.RegistryService/DeleteGrant",
+            client_operation_id,
+        );
         let target = build_target_ref(namespace_path, repo_path)?;
         authed_call!(
             self,
@@ -699,12 +708,12 @@ fn parse_hosted_role_arg(
     use api::heddle::api::v1alpha1::HostedRole;
     match value.trim().to_ascii_lowercase().as_str() {
         "reader" => Ok(HostedRole::Reader),
-        "developer" => Ok(HostedRole::Developer),
+        "contributor" | "developer" => Ok(HostedRole::Developer),
         "maintainer" => Ok(HostedRole::Maintainer),
         "admin" => Ok(HostedRole::Admin),
         "owner" => Ok(HostedRole::Owner),
         other => Err(ProtocolError::InvalidState(format!(
-            "invalid role '{other}': expected reader|developer|maintainer|admin|owner"
+            "invalid role '{other}': expected reader|contributor|developer|maintainer|admin|owner"
         ))),
     }
 }
@@ -792,20 +801,17 @@ mod tests {
             .await;
         client.delete_repository("acme/widgets-new").await.unwrap();
         let _ = client
-            .create_grant("principal:alice", "reader", None, Some("acme/widgets"))
+            .create_grant("principal:alice", "reader", None, Some("acme/widgets"), "")
             .await;
-        assert!(
-            client
-                .list_grants(Some("repo:acme/widgets"))
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        let listed = client.list_grants(Some("repo:acme/widgets")).await.unwrap();
+        assert!(listed.iter().any(|grant| grant.subject == "principal:alice"
+            && grant.role == "reader"
+            && grant.repo_path.as_deref() == Some("acme/widgets")));
         let _ = client
-            .update_grant("principal:alice", "maintainer", Some("acme"), None)
+            .update_grant("principal:alice", "maintainer", Some("acme"), None, "")
             .await;
         client
-            .delete_grant("principal:alice", Some("acme"), None)
+            .delete_grant("principal:alice", Some("acme"), None, "")
             .await
             .unwrap();
         client
@@ -876,6 +882,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spool_grant_create_list_delete_round_trip() {
+        let _home = IsolatedHeddleHome::new();
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+
+        let created = client
+            .create_grant(
+                "alice",
+                "contributor",
+                None,
+                Some("spool/willow-ibis-8e7264/notes"),
+                "grant-create-op",
+            )
+            .await
+            .expect("CreateGrant should persist the collaborator");
+        assert_eq!(created.subject, "alice");
+        assert_eq!(created.role, "developer");
+        assert_eq!(
+            created.repo_path.as_deref(),
+            Some("spool/willow-ibis-8e7264/notes")
+        );
+
+        let listed = client
+            .list_grants(Some("repo:spool/willow-ibis-8e7264/notes"))
+            .await
+            .expect("ListGrants should show the created grant");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].subject, "alice");
+        assert_eq!(listed[0].role, "developer");
+        assert_eq!(
+            listed[0].repo_path.as_deref(),
+            Some("spool/willow-ibis-8e7264/notes")
+        );
+
+        client
+            .delete_grant(
+                "alice",
+                None,
+                Some("spool/willow-ibis-8e7264/notes"),
+                "grant-delete-op",
+            )
+            .await
+            .expect("DeleteGrant should remove the collaborator");
+
+        let after_delete = client
+            .list_grants(Some("repo:spool/willow-ibis-8e7264/notes"))
+            .await
+            .expect("ListGrants after delete");
+        assert!(
+            after_delete.is_empty(),
+            "deleted grant must not remain in ListGrants: {after_delete:?}"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn namespace_and_repository_mutations_use_spool_requests() {
         let (mut client, server, captured) =
             crate::hosted_runtime::hosted::test_server::start_recording_spool_mutations().await;
@@ -921,6 +984,10 @@ mod tests {
     #[test]
     fn parse_hosted_role_arg_accepts_every_role_and_rejects_unknown() {
         assert_eq!(parse_hosted_role_arg("reader").unwrap(), HostedRole::Reader);
+        assert_eq!(
+            parse_hosted_role_arg("contributor").unwrap(),
+            HostedRole::Developer
+        );
         assert_eq!(
             parse_hosted_role_arg(" Developer ").unwrap(),
             HostedRole::Developer

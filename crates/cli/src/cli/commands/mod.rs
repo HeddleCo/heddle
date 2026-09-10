@@ -36,6 +36,8 @@ pub(crate) mod heddleignore_defaults;
 mod history_target;
 mod hook;
 #[cfg(feature = "client")]
+mod grant;
+#[cfg(feature = "client")]
 mod hosted_identity;
 mod import_progress;
 mod init;
@@ -144,6 +146,8 @@ pub use heddle_cli_contract::cli::commands::{
     verification_health,
 };
 pub use hook::cmd_hook;
+#[cfg(feature = "client")]
+pub use grant::cmd_grant;
 #[cfg(feature = "client")]
 pub use hosted_identity::{cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami};
 pub use init::cmd_init;

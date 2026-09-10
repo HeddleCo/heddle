@@ -15,18 +15,20 @@ use api::{
     },
     heddle::api::v1alpha1::{
         AnnotatedFile, BlobResponse, CallFailure, CallFailureCode, ContextRevision,
-        CreateSpoolRequest, DeleteSpoolRequest, Discussion, GetBlobRequest,
-        GetContextHistoryPageEnd, GetContextHistoryRequest, GetContextHistoryResponse,
-        GetCurrentUserSpoolRequest, GetDiscussionRequest, GetSpoolRequest, HostedSpool,
-        ListContextPageEnd, ListContextRequest, ListContextResponse, ListDiscussionsByStateRequest,
-        ListDiscussionsPageEnd, ListDiscussionsResponse, ListRefsPageEnd, ListRefsResponse,
-        ListThreadsPageEnd, ListThreadsResponse, PackChunk, PackStreamKind, PromoteSpoolRequest,
-        PromoteSpoolResponse, PullComplete, PullReady, PullServerFrame, PushClientFrame,
-        PushComplete, PushReady, PushRequest, PushServerFrame, RepoEvent, SignedSpoolOwnerGenesis,
-        StateContextEntry, StateId, SubscribeRepoEventsRequest, TransferCheckpoint, TransportMode,
-        UpdateSpoolRequest, get_context_history_response, list_context_response,
-        list_discussions_response, list_refs_response, list_threads_response, pull_server_frame,
-        push_client_frame, push_server_frame,
+        CreateGrantRequest, CreateSpoolRequest, DeleteGrantRequest, DeleteSpoolRequest, Discussion,
+        GetBlobRequest, GetContextHistoryPageEnd, GetContextHistoryRequest,
+        GetContextHistoryResponse, GetCurrentUserSpoolRequest, GetDiscussionRequest,
+        GetSpoolRequest, GrantTargetRef, HostedGrant, HostedSpool, ListContextPageEnd,
+        ListContextRequest, ListContextResponse, ListDiscussionsByStateRequest,
+        ListDiscussionsPageEnd, ListDiscussionsResponse, ListGrantsRequest, ListGrantsResponse,
+        ListRefsPageEnd, ListRefsResponse, ListThreadsPageEnd, ListThreadsResponse, PackChunk,
+        PackStreamKind, PromoteSpoolRequest, PromoteSpoolResponse, PullComplete, PullReady,
+        PullServerFrame, PushClientFrame, PushComplete, PushReady, PushRequest, PushServerFrame,
+        RepoEvent, SignedSpoolOwnerGenesis, StateContextEntry, StateId, SubscribeRepoEventsRequest,
+        TransferCheckpoint, TransportMode, UpdateGrantRequest, UpdateSpoolRequest,
+        get_context_history_response, list_context_response, list_discussions_response,
+        list_refs_response, list_threads_response, pull_server_frame, push_client_frame,
+        push_server_frame,
     },
     method_descriptor,
 };
@@ -48,6 +50,10 @@ const GET_CURRENT_USER_SPOOL_METHOD: &str =
     "/heddle.api.v1alpha1.RegistryService/GetCurrentUserSpool";
 const GET_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/GetSpool";
 const PROMOTE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/PromoteSpool";
+const CREATE_GRANT_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/CreateGrant";
+const LIST_GRANTS_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/ListGrants";
+const UPDATE_GRANT_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/UpdateGrant";
+const DELETE_GRANT_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/DeleteGrant";
 const GET_DISCUSSION_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/GetDiscussion";
 const LIST_BY_STATE_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/ListByState";
 const LIST_CONTEXT_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/ListContext";
@@ -312,6 +318,11 @@ struct BlobFixture {
     requested: Arc<Mutex<Vec<String>>>,
 }
 
+#[derive(Clone, Default)]
+struct GrantStore {
+    grants: Arc<Mutex<Vec<HostedGrant>>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn start_inner(
     pull: Option<PullFixture>,
@@ -332,6 +343,7 @@ async fn start_inner(
         .await
         .unwrap();
     let server_addr = server.addr();
+    let grants = GrantStore::default();
     let server_task = tokio::spawn(async move {
         let connection = server
             .accept()
@@ -351,6 +363,7 @@ async fn start_inner(
                 context.clone(),
                 collaboration.clone(),
                 registry.clone(),
+                grants.clone(),
             ));
         }
         server.close().await;
@@ -384,6 +397,7 @@ async fn serve_call(
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
     registry: Option<RegistryFixture>,
+    grants: GrantStore,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -412,6 +426,14 @@ async fn serve_call(
                 serve_get_spool(&mut send, &mut recv, &mut request, registry).await;
             } else if method == PROMOTE_SPOOL_METHOD {
                 serve_promote_spool(&mut send, &mut recv, &mut request, registry).await;
+            } else if method == CREATE_GRANT_METHOD {
+                serve_create_grant(&mut send, &mut recv, &mut request, &grants).await;
+            } else if method == LIST_GRANTS_METHOD {
+                serve_list_grants(&mut send, &mut recv, &mut request, &grants).await;
+            } else if method == UPDATE_GRANT_METHOD {
+                serve_update_grant(&mut send, &mut recv, &mut request, &grants).await;
+            } else if method == DELETE_GRANT_METHOD {
+                serve_delete_grant(&mut send, &mut recv, &mut request, &grants).await;
             } else if method == GET_BLOB_METHOD && !blobs.contents.is_empty() {
                 serve_get_blob(&mut send, &mut recv, &mut request, blobs).await;
             } else if method == GET_DISCUSSION_METHOD {
@@ -719,6 +741,165 @@ async fn serve_get_spool(
     ))
     .await
     .unwrap();
+}
+
+async fn serve_create_grant(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    grants: &GrantStore,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| CreateGrantRequest::decode(frame.body).ok());
+    let Some(body) = body else {
+        send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
+            .await
+            .unwrap();
+        return;
+    };
+    let grant = HostedGrant {
+        subject: body.subject,
+        role: body.role,
+        target: body.target,
+    };
+    upsert_grant(grants, grant.clone());
+    send.write_chunk(Bytes::from(
+        encode_success_response(&grant.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_list_grants(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    grants: &GrantStore,
+) {
+    read_request_body(recv, request).await;
+    let resource = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| ListGrantsRequest::decode(frame.body).ok())
+        .map(|body| body.resource)
+        .unwrap_or_default();
+    let stored = grants
+        .grants
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .clone();
+    let listed: Vec<HostedGrant> = stored
+        .into_iter()
+        .filter(|grant| grant_matches_resource(grant, &resource))
+        .collect();
+    let response = ListGrantsResponse { grants: listed };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_update_grant(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    grants: &GrantStore,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| UpdateGrantRequest::decode(frame.body).ok());
+    let Some(body) = body else {
+        send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
+            .await
+            .unwrap();
+        return;
+    };
+    let grant = HostedGrant {
+        subject: body.subject,
+        role: body.role,
+        target: body.target,
+    };
+    upsert_grant(grants, grant.clone());
+    send.write_chunk(Bytes::from(
+        encode_success_response(&grant.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_delete_grant(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    grants: &GrantStore,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| DeleteGrantRequest::decode(frame.body).ok());
+    if let Some(body) = body {
+        let key = grant_identity_key(&body.subject, body.target.as_ref());
+        grants
+            .grants
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .retain(|grant| grant_identity_key(&grant.subject, grant.target.as_ref()) != key);
+    }
+    send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
+        .await
+        .unwrap();
+}
+
+fn upsert_grant(store: &GrantStore, grant: HostedGrant) {
+    let key = grant_identity_key(&grant.subject, grant.target.as_ref());
+    let mut grants = store
+        .grants
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(existing) = grants
+        .iter_mut()
+        .find(|row| grant_identity_key(&row.subject, row.target.as_ref()) == key)
+    {
+        *existing = grant;
+    } else {
+        grants.push(grant);
+    }
+}
+
+fn grant_identity_key(subject: &str, target: Option<&GrantTargetRef>) -> (String, String, String) {
+    let (namespace, repo) = grant_target_paths(target);
+    (
+        subject.to_string(),
+        namespace.unwrap_or_default(),
+        repo.unwrap_or_default(),
+    )
+}
+
+fn grant_target_paths(target: Option<&GrantTargetRef>) -> (Option<String>, Option<String>) {
+    use api::heddle::api::v1alpha1::grant_target_ref::Target;
+    match target.and_then(|target| target.target.clone()) {
+        Some(Target::NamespacePath(path)) if !path.is_empty() => (Some(path), None),
+        Some(Target::RepoPath(repository)) => (
+            None,
+            super::helpers::repository_ref_path(&repository).map(ToOwned::to_owned),
+        ),
+        _ => (None, None),
+    }
+}
+
+fn grant_matches_resource(grant: &HostedGrant, resource: &str) -> bool {
+    if resource.is_empty() {
+        return true;
+    }
+    let (namespace, repo) = grant_target_paths(grant.target.as_ref());
+    let path = resource
+        .strip_prefix("repo:")
+        .or_else(|| resource.strip_prefix("ns:"))
+        .unwrap_or(resource);
+    repo.as_deref() == Some(path) || namespace.as_deref() == Some(path)
 }
 
 async fn serve_promote_spool(

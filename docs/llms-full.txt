@@ -6044,6 +6044,65 @@ before this root.
 
 ---
 
+## `heddle grant create --output json`
+
+Grant a principal a role on a hosted spool. Separate from `heddle auth invite`,
+which is signup-only.
+
+```json
+{
+  "output_kind": "grant_create",
+  "id": "alice",
+  "principal": "alice",
+  "role": "developer",
+  "spool": "spool/willow-ibis-8e7264/notes",
+  "server": "api.preview.heddle.sh",
+  "recommended_action": "heddle grant list --spool spool/willow-ibis-8e7264/notes"
+}
+```
+
+`id` is the principal, the same token `heddle grant delete <id> --spool …`
+accepts. `contributor` on the CLI is stored as the `developer` role.
+
+---
+
+## `heddle grant list --output json`
+
+```json
+{
+  "output_kind": "grant_list",
+  "spool": "spool/willow-ibis-8e7264/notes",
+  "server": "api.preview.heddle.sh",
+  "grants": [
+    {
+      "id": "alice",
+      "principal": "alice",
+      "role": "developer",
+      "spool": "spool/willow-ibis-8e7264/notes"
+    }
+  ],
+  "recommended_action": null
+}
+```
+
+---
+
+## `heddle grant delete --output json`
+
+```json
+{
+  "output_kind": "grant_delete",
+  "id": "alice",
+  "principal": "alice",
+  "spool": "spool/willow-ibis-8e7264/notes",
+  "server": "api.preview.heddle.sh",
+  "deleted": true,
+  "recommended_action": "heddle grant list --spool spool/willow-ibis-8e7264/notes"
+}
+```
+
+---
+
 ## `heddle auth create-service-token --output json`
 
 ```json

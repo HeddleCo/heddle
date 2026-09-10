@@ -185,6 +185,36 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["claim"], &["claim"]),
     #[cfg(feature = "client")]
     sample(&["promote"], &["promote", "spool/willow-ibis-8e7264/notes"]),
+    #[cfg(feature = "client")]
+    sample(
+        &["grant", "create"],
+        &[
+            "grant",
+            "create",
+            "--spool",
+            "spool/willow-ibis-8e7264/notes",
+            "--principal",
+            "alice",
+            "--role",
+            "contributor",
+        ],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["grant", "list"],
+        &["grant", "list", "--spool", "spool/willow-ibis-8e7264/notes"],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["grant", "delete"],
+        &[
+            "grant",
+            "delete",
+            "alice",
+            "--spool",
+            "spool/willow-ibis-8e7264/notes",
+        ],
+    ),
     #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "import"], &["bridge", "git", "import"]),
     #[cfg(feature = "git-overlay")]
@@ -1523,6 +1553,9 @@ fn auth_commands_are_user_scoped() {
         &["auth", "derive-agent"],
         &["auth", "create-service-token"],
         &["claim"],
+        &["grant", "create"],
+        &["grant", "list"],
+        &["grant", "delete"],
     ] {
         let contract = raw_command_contract_for_path(path.iter().copied())
             .unwrap_or_else(|| panic!("missing command contract for `{}`", path.join(" ")));
@@ -1785,6 +1818,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // client-gated hosted verbs.
             "whoami",
             "promote",
+            "grant create",
+            "grant list",
+            "grant delete",
             "bridge git import",
             "bridge git export",
             "sync git",
@@ -2490,6 +2526,6 @@ fn feature_gated_command_roots_are_catalog_owned() {
     // listed here.
     assert_eq!(
         feature_gated_command_roots(),
-        &["auth", "ci", "claim", "promote", "whoami"]
+        &["auth", "ci", "claim", "grant", "promote", "whoami"]
     );
 }
