@@ -324,7 +324,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         let switch_command = switch_thread_command(&thread.thread);
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "thread_worktree_missing",
-            format!("Thread '{}' worktree is missing", thread.id),
+            format!("Thread '{}' worktree is missing", thread.thread),
             format!(
                 "Rebuild the thread's checkout with `{switch_command}` (it re-materializes the recorded worktree from the thread's current state), then retry `{land_command}`.",
             ),
@@ -750,7 +750,10 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 operator: OperatorCommandOutput {
                     status: "blocked".to_string(),
                     action: OperatorAction::Land,
-                    message: format!("Thread '{}' is not eligible for auto-land", merge_thread.id),
+                    message: format!(
+                        "Thread '{}' is not eligible for auto-land",
+                        merge_thread.thread
+                    ),
                     blockers: rendered_blockers,
                     warnings: preview_warnings.clone(),
                     next_action: recommended_action.clone(),
@@ -916,9 +919,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
         status: if integrated { "landed" } else { "blocked" }.to_string(),
         action: OperatorAction::Land,
         message: if integrated {
-            format!("Landed thread '{}'", merge_thread.id)
+            format!("Landed thread '{}'", merge_thread.thread)
         } else {
-            format!("Thread '{}' could not be landed cleanly", merge_thread.id)
+            format!(
+                "Thread '{}' could not be landed cleanly",
+                merge_thread.thread
+            )
         },
         blockers: merge_output.operator.blockers.clone(),
         warnings: preview_warnings,
@@ -1409,7 +1415,7 @@ fn write_already_landed_output(
             operator: OperatorCommandOutput {
                 status: "already_landed".to_string(),
                 action: OperatorAction::Land,
-                message: format!("Thread '{}' is already landed", thread.id),
+                message: format!("Thread '{}' is already landed", thread.thread),
                 blockers: Vec::new(),
                 warnings: Vec::new(),
                 next_action: next_action.clone(),

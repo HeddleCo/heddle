@@ -1598,7 +1598,7 @@ fn merge_preview_message(
     diff_changed_path_count: usize,
 ) -> String {
     let subject = thread
-        .map(|thread| thread.id.as_str())
+        .map(|thread| thread.thread.as_str())
         .unwrap_or(track_name);
     let thread_changed_path_count = thread
         .map(|thread| thread.changed_paths.len())
@@ -2327,7 +2327,7 @@ fn merge_output_from_report(input: MergeReportInput<'_>) -> Result<MergeReport> 
         // command. `land` keeps capture, merge, checkpoint, push, and
         // verification in one loop, so the preview does not bounce users back
         // to the lower-level merge apply command.
-        input.thread.as_ref().map(|t| land_local_command(&t.id))
+        input.thread.as_ref().map(|t| land_local_command(&t.thread))
     } else {
         // Clean apply: nothing to do.
         None

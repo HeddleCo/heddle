@@ -180,7 +180,7 @@ fn thread_cd_without_available_worktree_uses_typed_advice() {
     let repo = Repository::open(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
     let mut thread = manager
-        .load("cd-target")
+        .load_id_or_name("cd-target")
         .unwrap()
         .expect("thread record exists after create");
     thread.execution_path = PathBuf::new();

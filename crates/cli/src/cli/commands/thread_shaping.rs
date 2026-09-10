@@ -137,7 +137,7 @@ pub fn cmd_thread_absorb(
     let child = load_thread(&repo, &thread)?;
     let parent_id = into
         .or(child.parent_thread.clone())
-        .ok_or_else(|| anyhow!(RecoveryAdvice::thread_absorb_parent_required(&child.id)))?;
+        .ok_or_else(|| anyhow!(RecoveryAdvice::thread_absorb_parent_required(&child.thread)))?;
     let parent = load_thread(&repo, &parent_id)?;
     let parent_repo = Repository::open(&parent.execution_path)?;
     let user_config = UserConfig::load_default()?;

@@ -267,16 +267,16 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     }
 
     let message = if decision.already_ready {
-        format!("Thread '{}' is already ready", thread.id)
+        format!("Thread '{}' is already ready", thread.thread)
     } else if decision.ready_without_target {
         format!(
             "Thread '{}' is clean; no integration target is configured",
-            thread.id
+            thread.thread
         )
     } else if thread.state == ThreadState::Ready {
-        format!("Thread '{}' is ready to integrate", thread.id)
+        format!("Thread '{}' is ready to integrate", thread.thread)
     } else {
-        format!("Thread '{}' is blocked", thread.id)
+        format!("Thread '{}' is blocked", thread.thread)
     };
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
@@ -331,7 +331,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     };
     operator.block_success_claim_if_verification_blocked(
         &trust,
-        format!("Thread '{}' readiness", thread.id),
+        format!("Thread '{}' readiness", thread.thread),
         VerificationClaimPolicy::strict().allow_matching_workflow_action(),
     );
     if !matches!(operator.status.as_str(), "blocked" | "failed")
