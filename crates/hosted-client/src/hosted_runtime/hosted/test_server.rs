@@ -763,7 +763,6 @@ async fn serve_create_grant(
         subject: body.subject,
         role: body.role,
         target: body.target,
-        ..HostedGrant::default()
     };
     upsert_grant(grants, grant.clone());
     send.write_chunk(Bytes::from(
@@ -794,10 +793,7 @@ async fn serve_list_grants(
         .into_iter()
         .filter(|grant| grant_matches_resource(grant, &resource))
         .collect();
-    let response = ListGrantsResponse {
-        grants: listed,
-        ..ListGrantsResponse::default()
-    };
+    let response = ListGrantsResponse { grants: listed };
     send.write_chunk(Bytes::from(
         encode_success_response(&response.encode_to_vec()).unwrap(),
     ))
@@ -825,7 +821,6 @@ async fn serve_update_grant(
         subject: body.subject,
         role: body.role,
         target: body.target,
-        ..HostedGrant::default()
     };
     upsert_grant(grants, grant.clone());
     send.write_chunk(Bytes::from(
