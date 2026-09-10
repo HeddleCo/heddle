@@ -287,8 +287,8 @@ Examples:
     ///
     /// `heddle visibility set` binds a tier to a state; `promote` lifts it to
     /// a less-restrictive tier via a superseding record; `show` reports the
-    /// effective tier; `list` enumerates non-public states the current
-    /// audience may know. Capture binds the inherited
+    /// effective declared tier; `list` enumerates non-public sidecar records
+    /// in this store. Capture binds the inherited
     /// `[review.discussion] default_visibility` automatically (Invariant A)
     /// — these verbs are the explicit operator overrides.
     ///

@@ -1022,8 +1022,8 @@ const VISIBILITY_TOPIC: &str = "State visibility — who may see a captured stat
                   — declare an audience. `team-scoped`, `restricted`, and\n\
                     `private` need `--label`. Public stays record-free.\n\
 `promote`         — open to a less-restrictive tier (never a narrowing).\n\
-`show` / `list`   — effective tier; list is the audience this checkout\n\
-                    may know.\n\
+`show` / `list`   — inspect declared sidecar records on this store.\n\
+                    Checkout, clone, and pull withhold separately.\n\
 \n\
 Private is per-state and downward-closed. A later public tip that still\n\
 names blobs introduced by a private ancestor is withheld from public\n\
@@ -1136,7 +1136,7 @@ mod tests {
             "heddle env",
             "heddle redact",
             ".env",
-            "exit 65",
+            "exits 65",
             "Private",
         ] {
             assert!(

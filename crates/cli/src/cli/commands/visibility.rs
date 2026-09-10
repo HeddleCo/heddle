@@ -12,7 +12,7 @@
 use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use objects::object::{StateVisibility, VisibilityTier};
-use repo::{visible, Repository, VisibilityCommitKind};
+use repo::{Repository, VisibilityCommitKind};
 use serde::Serialize;
 use verbs::visibility_tier_label;
 
@@ -156,19 +156,10 @@ fn cmd_visibility_promote(cli: &Cli, repo: &Repository, args: VisibilityPromoteA
 fn cmd_visibility_show(cli: &Cli, repo: &Repository, args: VisibilityShowArgs) -> Result<()> {
     let state = resolve_state(repo, &args.state)?;
     let blob = repo.get_state_visibility_for_state(&state)?;
-    let audience = repo.local_operator_audience()?;
     let effective = blob.latest()?;
-    let recorded_tier = effective
+    let tier = effective
         .map(|r| r.tier.clone())
         .unwrap_or(VisibilityTier::Public);
-    // Audience-view: a Private sidecar the caller cannot see is public-by-absence
-    // for this checkout (heddle#1733). The bytes stay on disk.
-    let visible_here = visible(&recorded_tier, &audience);
-    let tier = if visible_here {
-        recorded_tier
-    } else {
-        VisibilityTier::Public
-    };
     let effective_public = tier == VisibilityTier::Public;
 
     #[derive(Serialize)]
@@ -191,13 +182,9 @@ fn cmd_visibility_show(cli: &Cli, repo: &Repository, args: VisibilityShowArgs) -
         tier: tier.as_str().to_string(),
         label: tier_label(&tier).map(str::to_string),
         effective_public,
-        declarer: visible_here
-            .then(|| effective.map(|r| r.declarer.to_string()))
-            .flatten(),
-        declared_at: visible_here
-            .then(|| effective.map(|r| r.declared_at.to_rfc3339()))
-            .flatten(),
-        record_count: if visible_here { blob.records.len() } else { 0 },
+        declarer: effective.map(|r| r.declarer.to_string()),
+        declared_at: effective.map(|r| r.declared_at.to_rfc3339()),
+        record_count: blob.records.len(),
     };
 
     if should_output_json(cli, Some(repo.config())) {
@@ -227,7 +214,6 @@ fn cmd_visibility_show(cli: &Cli, repo: &Repository, args: VisibilityShowArgs) -
 
 fn cmd_visibility_list(cli: &Cli, repo: &Repository, _args: VisibilityListArgs) -> Result<()> {
     let listing = repo.list_all_state_visibility()?;
-    let audience = repo.local_operator_audience()?;
 
     #[derive(Serialize)]
     struct Row {
@@ -252,7 +238,7 @@ fn cmd_visibility_list(cli: &Cli, repo: &Repository, _args: VisibilityListArgs) 
         let Some(latest) = blob.latest()? else {
             continue;
         };
-        if latest.tier == VisibilityTier::Public || !visible(&latest.tier, &audience) {
+        if latest.tier == VisibilityTier::Public {
             continue;
         }
         rows.push(Row {

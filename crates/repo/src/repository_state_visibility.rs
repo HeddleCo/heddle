@@ -1316,6 +1316,25 @@ mod tests {
     }
 
     #[test]
+    fn missing_ancestor_state_fails_closed_without_serving() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+        let missing = StateId::from_bytes([0xAB; 32]);
+        let withheld = repo
+            .withholding_visibility_for_audience(&missing, &crate::AudienceTier::Public)
+            .unwrap();
+        let (id, tier) = withheld.expect("missing ancestor must withhold");
+        assert_eq!(id, missing);
+        assert_eq!(tier.as_str(), "private");
+        match tier {
+            VisibilityTier::Private { scope_label } => {
+                assert_eq!(scope_label, UNRESOLVED_ANCESTOR_SCOPE);
+            }
+            other => panic!("expected unresolved-ancestor private, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn put_then_read_back_and_has_visibility_true() {
         let (_dir, repo) = fresh_repo();
         let state = StateId::from_bytes([5u8; 32]);

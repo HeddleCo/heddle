@@ -1711,58 +1711,7 @@ mod tests {
         assert!(owner_out.files.contains_key("secrets.env"));
     }
 
-    #[test]
-    fn missing_private_ancestor_fails_closed_without_secret_bytes() {
-        let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
-        fs::write(repo_dir.path().join("public.env"), b"PUBLIC=1\n").unwrap();
-        repo.snapshot(Some("public env".into()), None).unwrap();
-
-        fs::write(
-            repo_dir.path().join("secrets.env"),
-            b"AX_SECRET=do-not-leak\n",
-        )
-        .unwrap();
-        let private = repo
-            .snapshot(Some("private secret path".into()), None)
-            .unwrap();
-        embargo_state_with_tier(
-            &repo,
-            VisibilityTier::Private {
-                scope_label: "ax-secret".into(),
-            },
-        );
-
-        fs::write(repo_dir.path().join("tip.txt"), b"later public work\n").unwrap();
-        repo.snapshot(Some("public tip".into()), None).unwrap();
-
-        let state_path = repo
-            .heddle_dir()
-            .join("objects/states")
-            .join(format!("{}.state", private.state_id.to_string_full()));
-        fs::remove_file(&state_path).expect("drop private ancestor object");
-        let sidecar = repo.state_visibility_path_for_state(&private.state_id);
-        let _ = fs::remove_file(&sidecar);
-
-        let repo = Repository::open(repo_dir.path()).expect("reopen without cached ancestor");
-        let dest_holder = TempDir::new().unwrap();
-        let dest = dest_holder.path().join("out");
-        let out = repo
-            .materialize_thread("main", &dest, &AudienceTier::Public)
-            .unwrap();
-        assert!(out.withheld);
-        assert!(
-            !dest.join("secrets.env").exists(),
-            "missing private ancestor must not fall through to materializing secret bytes"
-        );
-        let stub = fs::read_to_string(dest.join(COURTESY_STUB_FILENAME)).unwrap();
-        assert!(
-            stub.contains("unresolved-ancestor") || stub.contains("private"),
-            "fail-closed stub must name the withhold: {stub}"
-        );
-    }
-
-    /// #316 / PR #528 r6: a worktree root first materialized under-tier (stub
+    /// #316 / PR #528 r6: a worktree root first materialized under-tier (stub)
     /// written) and later re-materialized for an authorized audience must end up
     /// with a clean tree — the real bytes present AND the stale courtesy stub
     /// removed. `materialize_tree` only writes tracked leaves, so without an
