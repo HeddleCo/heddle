@@ -1,3 +1,4 @@
+use crate::replication;
 use crypto::{Ed25519Signer, Signer, thread_operation::SignedOperation};
 use objects::{
     object::{
@@ -260,7 +261,8 @@ fn integrated_fixture(
             SignedOperation::sign(&source_op, &signer).expect("source signature"),
         ],
         vec![ThreadGenesisRecord {
-            ownership_claims: vec![], ownership_claim_admissions: vec![],
+            boundary_acceptances: Vec::new(),
+ ownership_claims: vec![], ownership_claim_admissions: vec![],
             genesis: Some(source_record),
             creator_authority: vec![],
             admission: None,
@@ -313,7 +315,8 @@ fn publication_fixture(scratch: &Path, extra: bool) -> (tempfile::TempDir, Publi
     }).collect();
     let originals = crate::publication::PublicationOriginals {
         geneses: vec![ready.thread_genesis.expect("original genesis")],
-        operations: vec![ReplicationOperations { authority_admissions: vec![], operations: operations.into_iter().map(|signed| {
+        operations: vec![ReplicationOperations { boundary_acceptances: Vec::new(),
+ authority_admissions: vec![], operations: operations.into_iter().map(|signed| {
             let publisher = signed.verify().expect("original source").publisher;
             SignedRecord { format: heddle_object_model::object::thread_replication::OPERATION_FORMAT.into(),
                 canonical_record: signed.canonical, signatures: vec![RecordSignature { public_key: publisher.to_vec(), signature: signed.signature }] }
@@ -371,7 +374,8 @@ fn publication_staging_preserves_matched_account_admission_without_trusting_issu
     let signed = SignedOperation::sign(&operation, &signer).expect("original source signature");
     originals.operations[0].operations[0] = SignedRecord { format: objects::object::thread_replication::OPERATION_FORMAT.into(), canonical_record: signed.canonical.clone(), signatures: vec![RecordSignature { public_key: operation.publisher.to_vec(), signature: signed.signature.clone() }] };
     let executor = Ed25519Signer::from_seed(&[74; 32]).expect("receipt issuer");
-    let statement = ThreadAuthorityAdmission { version: 2, spool, spool_genesis: ContentHash::from_bytes([75;32]), thread: operation.thread,
+    let statement = ThreadAuthorityAdmission { version: 3,
+            basis: heddle_object_model::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority, spool, spool_genesis: ContentHash::from_bytes([75;32]), thread: operation.thread,
         subject: objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(operation.id().expect("operation ID")), actor, publisher: operation.publisher, authority_digest,
         executor: executor.public_key().try_into().expect("executor key"), admitted_at_ms: 100 };
     let receipt = crypto::thread_authority_admission::SignedAuthorityAdmission::sign(&statement, &executor).expect("historical testimony");

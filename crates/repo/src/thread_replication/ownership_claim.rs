@@ -80,7 +80,8 @@ impl ThreadReplica {
         rows.into_iter().map(|(claim,canonical,signature)| {
             let admission = match (canonical,signature) {
                 (None,None) => None,
-                (Some(canonical),Some(signature)) => Some(crypto::thread_authority_admission::SignedAuthorityAdmission {canonical,signature}),
+                (Some(canonical),Some(signature)) => Some(crypto::thread_authority_admission::SignedAuthorityAdmission {boundary_acceptance: super::boundary_evidence::load(&connection,&canonical,&objects::object::thread_authority_admission::ThreadAuthorityAdmission::decode(&canonical)?.basis)?,
+ canonical,signature}),
                 _ => return Err(Error::Invalid("incomplete ownership claim admission".into())),
             };
             Ok((claim,admission))
@@ -118,7 +119,8 @@ impl ThreadReplica {
             params![self.thread.as_bytes(),id.as_bytes()], |row| Ok((row.get(0)?,row.get(1)?)),
         ).optional()?;
         match row {
-            Some((Some(canonical),Some(signature))) => Ok(Some(crypto::thread_authority_admission::SignedAuthorityAdmission { canonical,signature })),
+            Some((Some(canonical),Some(signature))) => Ok(Some(crypto::thread_authority_admission::SignedAuthorityAdmission { boundary_acceptance: super::boundary_evidence::load(&self.connect()?,&canonical,&objects::object::thread_authority_admission::ThreadAuthorityAdmission::decode(&canonical)?.basis)?,
+ canonical,signature })),
             None | Some((None,None)) => Ok(None),
             _ => Err(Error::Invalid("incomplete ownership claim admission".into())),
         }
@@ -178,6 +180,7 @@ impl ThreadReplica {
             let added = if let Some(receipt) = admission {
                 transaction.execute("UPDATE thread_owner_claims SET admission=?3,admission_signature=?4 WHERE thread=?1 AND id=?2 AND admission IS NULL", params![self.thread.as_bytes(),id.as_bytes(),receipt.canonical,receipt.signature])? != 0
             } else { false };
+            if added { if let Some(receipt)=admission { super::boundary_evidence::persist(&transaction,&receipt.canonical,receipt.boundary_acceptance.as_deref())?; } }
             if added { transaction.execute("UPDATE threads SET generation=generation+1 WHERE id=?1", [self.thread.as_bytes()])?; }
             if let Some((command,response)) = command { crate::device_operations::receipt(&transaction,command,response).map_err(|error|Error::Invalid(error.to_string()))?; }
             transaction.commit()?;
@@ -197,6 +200,7 @@ impl ThreadReplica {
             }
         }
         transaction.execute("INSERT INTO thread_owner_claims(thread,id,canonical,local_signature,acceptance_signature,account,admission,admission_signature) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)", params![self.thread.as_bytes(), id.as_bytes(), signed.canonical, signed.local_signature, signed.acceptance_signature, claim.account()?.to_string(), admission.map(|value|value.canonical.as_slice()), admission.map(|value|value.signature.as_slice())])?;
+        if let Some(receipt)=admission { super::boundary_evidence::persist(&transaction,&receipt.canonical,receipt.boundary_acceptance.as_deref())?; }
         for head in &claim.source_frontier {
             transaction.execute("INSERT INTO thread_owner_claim_frontier(thread,claim,operation) VALUES(?1,?2,?3)", params![self.thread.as_bytes(),id.as_bytes(),head.as_bytes()])?;
         }

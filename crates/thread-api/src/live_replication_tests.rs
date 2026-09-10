@@ -756,6 +756,7 @@ async fn committed_receipt_case(with_successor: bool) {
     let bytes = Frame::Operations(ReplicationOperations {
         operations: records,
         authority_admissions: vec![],
+        boundary_acceptances: vec![],
     })
     .request()
     .encode_to_vec();
@@ -840,4 +841,66 @@ async fn committed_receipt_case(with_successor: bool) {
             .expect("driver task")
             .is_err()
     );
+}
+struct ReceiptThenReset(Option<Vec<u8>>);
+impl MessageReader for ReceiptThenReset {
+    type Error = transport::Error;
+    async fn next(&mut self) -> std::result::Result<Option<Vec<u8>>, Self::Error> {
+        self.0.take().map(Some).ok_or(transport::Error::Protocol(
+            "policy reconnect after committed receipt",
+        ))
+    }
+    fn cancel(&mut self) {}
+}
+#[tokio::test]
+async fn client_persists_peer_receipt_before_following_policy_reset() {
+    use heddle_object_model::object::thread_replication::Admission;
+    for _ in 0..2 {
+        let (_directory, repository, replica) = fixture(1);
+        let id = replica
+            .frontier_page(ThreadFacet::Source, None, 1)
+            .expect("accepted source")[0];
+        let (_changes, receiver) = watch::channel(Some(1));
+        let feed = Feed::from_changes(replica.thread_id(), receiver);
+        let session = Session::new(
+            LocalReplica::new(replica.clone(), Arc::new(repository.store().clone())),
+            [7; 32],
+            [ThreadFacet::Source].into(),
+            1,
+        )
+        .expect("session");
+        let (writer, _output) = mpsc::channel(8);
+        let bytes = Frame::Receipt(crate::replication::completion_receipt(
+            id,
+            Admission::Accepted,
+        ))
+        .response()
+        .encode_to_vec();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            run(
+                session,
+                ReceiptThenReset(Some(bytes)),
+                RecordingWriter(writer),
+                Side::Initiator,
+                &feed,
+                |_| std::future::ready(Ok(())),
+            ),
+        )
+        .await
+        .expect("bounded reset");
+        assert!(matches!(
+            result,
+            Err(Error::Transport(transport::Error::Protocol(
+                "policy reconnect after committed receipt"
+            )))
+        ));
+        assert_eq!(
+            replica
+                .peer_receipt([7; 32], id)
+                .expect("fresh durable receipt query"),
+            Some(Admission::Accepted),
+            "client acknowledgement survives following stream reset"
+        );
+    }
 }

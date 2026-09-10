@@ -15,6 +15,8 @@ use crate::{
 pub struct SignedAuthorityAdmission {
     pub canonical: Vec<u8>,
     pub signature: Vec<u8>,
+    pub boundary_acceptance:
+        Option<std::sync::Arc<crate::original_boundary_acceptance::SignedBoundaryAcceptance>>,
 }
 impl SignedAuthorityAdmission {
     pub fn sign(value: &ThreadAuthorityAdmission, signer: &impl Signer) -> Result<Self, Error> {
@@ -26,6 +28,7 @@ impl SignedAuthorityAdmission {
         Ok(Self {
             canonical,
             signature,
+            boundary_acceptance: None,
         })
     }
     /// Signature-only verification does not establish independent executor trust.
@@ -44,7 +47,12 @@ impl SignedAuthorityAdmission {
         trust: &TrustedHostedExecutor,
     ) -> Result<ThreadAuthorityAdmission, Error> {
         let value = self.verify_signature()?;
-        value.authorize(&original.verify()?, trust)?;
+        let evidence = self
+            .boundary_acceptance
+            .as_ref()
+            .map(|value| value.verify_signature())
+            .transpose()?;
+        value.authorize_with_acceptance(&original.verify()?, trust, evidence.as_ref())?;
         Ok(value)
     }
     pub fn verify_claim(
@@ -54,7 +62,17 @@ impl SignedAuthorityAdmission {
         trust: &TrustedHostedExecutor,
     ) -> Result<ThreadAuthorityAdmission, Error> {
         let value = self.verify_signature()?;
-        value.authorize_claim(&original.verify()?, genesis, trust)?;
+        let evidence = self
+            .boundary_acceptance
+            .as_ref()
+            .map(|value| value.verify_signature())
+            .transpose()?;
+        value.authorize_claim_with_acceptance(
+            &original.verify()?,
+            genesis,
+            trust,
+            evidence.as_ref(),
+        )?;
         Ok(value)
     }
 }

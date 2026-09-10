@@ -284,6 +284,43 @@ pub enum AdmissionBasis {
     OriginalAuthority,
     BoundaryAcceptance { acceptance: ContentHash },
 }
+impl AdmissionBasis {
+    /// Structural evidence binding only. The crypto layer verifies its signature;
+    /// an independently pinned per-original executor receipt attests membership.
+    pub fn authorize_evidence(
+        &self,
+        evidence: Option<&OriginalBoundaryAcceptance>,
+        spool: Uuid,
+        account: Uuid,
+        kind: Option<BoundaryOriginalKind>,
+    ) -> Result<()> {
+        match (self, evidence) {
+            (Self::OriginalAuthority, None) => Ok(()),
+            (Self::BoundaryAcceptance { acceptance }, Some(value)) => {
+                let SourceAuthor::Account {
+                    spool: accepting_spool,
+                    ..
+                } = &value.accepting_author
+                else {
+                    return Err(invalid("boundary receipt requires account acceptance"));
+                };
+                if value.id()? != *acceptance
+                    || *accepting_spool != spool
+                    || value.original_account != account
+                    || !kind.is_some_and(|kind| value.kinds.contains(&kind))
+                {
+                    return Err(invalid(
+                        "boundary receipt evidence differs from original authority scope",
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err(invalid(
+                "receipt requires exactly its matched admission basis evidence",
+            )),
+        }
+    }
+}
 fn invalid(message: &str) -> HeddleError {
     HeddleError::InvalidObject(message.into())
 }

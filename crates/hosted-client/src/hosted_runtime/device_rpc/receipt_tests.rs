@@ -70,7 +70,8 @@ pub(super) async fn roundtrip(
     let original = SignedOperation::sign(&operation, &foreign).expect("original agent signature");
     let id = operation.id().expect("ID");
     let statement = ThreadAuthorityAdmission {
-        version: 2,
+        version: 3,
+            basis: objects::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority,
         spool,
         spool_genesis: ContentHash::compute_typed(
             SPOOL_GENESIS_TRUST_FORMAT,
@@ -140,7 +141,8 @@ pub(super) async fn roundtrip(
         .send(&ReplicateThreadRequest {
             body: Some(replicate_thread_request::Body::Operations(
                 ReplicationOperations {
-                    operations: vec![wire_original.clone()],
+                    boundary_acceptances: Vec::new(),
+ operations: vec![wire_original.clone()],
                     authority_admissions: vec![receipt.clone()],
                 },
             )),

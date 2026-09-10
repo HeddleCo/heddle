@@ -187,7 +187,8 @@ fn retained_account_source_admission_requires_exact_original_and_pinned_executor
         executor: executor.public_key().try_into().expect("executor key"),
     };
     let statement = ThreadAuthorityAdmission {
-        version: 2,
+        version: 3,
+            basis: heddle_object_model::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority,
         spool,
         spool_genesis: trust.spool_genesis,
         thread: operation.thread,

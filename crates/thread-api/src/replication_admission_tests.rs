@@ -98,7 +98,8 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
     let original = SignedOperation::sign(&operation, &author).expect("original agent signature");
     let id = operation.id().expect("ID");
     let statement = ThreadAuthorityAdmission {
-        version: 2,
+        version: 3,
+            basis: heddle_object_model::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority,
         spool,
         spool_genesis: ContentHash::compute_typed(
             SPOOL_GENESIS_TRUST_FORMAT,

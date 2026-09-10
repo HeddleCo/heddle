@@ -13,7 +13,7 @@ use prost::Message;
 use tokio::io::AsyncWriteExt;
 
 use super::{Download, Error, Item};
-use crate::{contract::*, replication, transport};
+use crate::{contract::*, transport};
 
 const METADATA_BYTES: usize = 16 * 1024 * 1024;
 const SOURCE_BYTES: u64 = 256 * 1024 * 1024;
@@ -97,8 +97,10 @@ impl<R: MessageReader<Error = transport::Error>> Download<R> {
                 Item::Operations(batch) => {
                     metadata_bytes = metadata_bytes.checked_add(batch.encoded_len()).ok_or(Error::Invalid("source metadata length overflow"))?;
                     if metadata_bytes > METADATA_BYTES { return Err(Error::Invalid("staged source metadata exceeds 16 MiB")); }
-                    for record in batch.operations { operations.push(replication::decode_record(record)?); }
-                    receipt_records.extend(batch.authority_admissions);
+                    for received in crate::authority_admission::match_batch(&batch)? {
+                        operations.push(received.original);
+                        receipt_records.extend(received.authority_admission);
+                    }
                 }
                 Item::ThreadGenesis(record) => {
                     metadata_bytes = metadata_bytes
@@ -138,7 +140,7 @@ fn validate(
 }
 fn validate_with_receipts(
     directory: tempfile::TempDir, ready: TransferReady, operations: Vec<SignedOperation>,
-    dependencies: Vec<ThreadGenesisRecord>, receipt_records: Vec<SignedRecord>,
+    dependencies: Vec<ThreadGenesisRecord>, receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
 ) -> Result<StagedSource, Error> {
     let value = validate_artifacts(directory,
         ready.thread.as_ref().ok_or(Error::Invalid("Thread absent"))?,
@@ -176,7 +178,7 @@ pub(crate) fn validate_artifacts(
     original: &ThreadGenesisRecord,
     operations: Vec<SignedOperation>,
     dependency_records: Vec<ThreadGenesisRecord>,
-    receipt_records: Vec<SignedRecord>,
+    receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
 ) -> Result<ValidatedSourceArtifacts, Error> {
     if operations.is_empty() || operations.len() > 10_000 || dependency_records.len() >= 128 || receipt_records.len() > operations.len() {
         return Err(Error::Invalid("source original graph exceeds bounds"));
@@ -184,7 +186,22 @@ pub(crate) fn validate_artifacts(
     let mut metadata = original.encoded_len();
     for record in &dependency_records { metadata = metadata.saturating_add(record.encoded_len()); }
     for operation in &operations { metadata = metadata.saturating_add(operation.canonical.len() + operation.signature.len()); }
-    for receipt in &receipt_records { metadata = metadata.saturating_add(receipt.encoded_len()); }
+    for receipt in &receipt_records { metadata = metadata.saturating_add(receipt.canonical.len()+receipt.signature.len()); }
+    let mut evidence_ids=BTreeSet::new();
+    for wrapper in std::iter::once(original).chain(&dependency_records) {
+        for record in &wrapper.boundary_acceptances {
+            evidence_ids.insert(heddle_object_model::object::ContentHash::compute_typed(heddle_object_model::object::original_boundary_acceptance::FORMAT,&record.canonical_record));
+            if evidence_ids.len()>crate::boundary_acceptance::MAX_ACCEPTANCES {return Err(Error::Invalid("boundary evidence count exceeded"));}
+        }
+    }
+    for receipt in &receipt_records {
+        if let Some(evidence)=&receipt.boundary_acceptance {
+            if evidence_ids.insert(evidence.verify_signature().map_err(preparation)?.id().map_err(preparation)?) {
+                metadata=metadata.saturating_add(evidence.canonical.len()+evidence.signature.len());
+            }
+            if evidence_ids.len()>crate::boundary_acceptance::MAX_ACCEPTANCES {return Err(Error::Invalid("boundary evidence count exceeded"));}
+        }
+    }
     if metadata > METADATA_BYTES { return Err(Error::Invalid("source metadata exceeds 16 MiB")); }
     if revision.spool != thread.spool { return Err(Error::Invalid("source revision crosses Spool")); }
     let genesis = super::verify_origin(original, thread)?;
@@ -252,14 +269,13 @@ pub(crate) fn validate_artifacts(
         }
     }
     let mut authority_admissions = BTreeMap::new();
-    for record in receipt_records {
-        let receipt = crate::authority_admission::decode(&record)?;
+    for receipt in receipt_records {
         let statement = receipt.verify_signature().map_err(preparation)?;
         let operation_id = statement.subject.operation_id().ok_or(Error::Invalid("source batch cannot carry ownership claim admission"))?;
-        let original = decoded.get(&operation_id).ok_or(Error::Invalid("unmatched source authority receipt"))?;
+        let original = originals.get(&operation_id).ok_or(Error::Invalid("unmatched source authority receipt"))?;
         // Match immutable claims and signatures only. This self-described key
         // is not enrolled here; the receiver must independently pin the issuer.
-        statement.authorize(original, &heddle_object_model::object::thread_replication::integration::TrustedHostedExecutor {
+        receipt.verify(original, &heddle_object_model::object::thread_replication::integration::TrustedHostedExecutor {
             spool: statement.spool, spool_genesis: statement.spool_genesis, executor: statement.executor,
         }).map_err(preparation)?;
         if authority_admissions.insert(operation_id, receipt).is_some() {

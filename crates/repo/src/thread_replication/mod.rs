@@ -3,6 +3,9 @@
 //! Endpoint adapters must authorize the exact Thread and disclosure facets before
 //! calling receive/export. Signatures prove the publisher, not spool membership.
 pub mod admission;
+mod boundary_evidence;
+#[cfg(test)]
+mod boundary_admission_tests;
 #[cfg(test)]
 mod admission_tests;
 pub mod checkout;
@@ -105,6 +108,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
             CREATE TABLE IF NOT EXISTS thread_control_heads(thread BLOB NOT NULL,property TEXT NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,property,operation));
             CREATE TABLE IF NOT EXISTS thread_control_commands(thread BLOB NOT NULL,publisher BLOB NOT NULL,command BLOB NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,publisher,command));")?;
     connection.execute_batch(ownership_claim::SCHEMA)?;
+    connection.execute_batch(boundary_evidence::SCHEMA)?;
     connection.execute_batch(collaboration::SCHEMA)?;
     connection.execute_batch(collaboration_search::SCHEMA)?;
     connection.execute_batch(source_index::SCHEMA)?;
@@ -188,6 +192,7 @@ impl ThreadReplica {
             match existing {
                 (None, None) => {
                     transaction.execute("UPDATE threads SET genesis_admission=?2,genesis_admission_signature=?3 WHERE id=?1",params![this.thread.as_bytes(),admission.canonical,admission.signature])?;
+                    boundary_evidence::persist(&transaction,&admission.canonical,admission.boundary_acceptance.as_deref())?;
                 }
                 (Some(canonical), Some(signature))
                     if canonical == admission.canonical && signature == admission.signature => {}
@@ -243,22 +248,21 @@ impl ThreadReplica {
                 [self.thread.as_bytes()],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?,row.get(3)?,row.get(4)?)),
             )?;
-        let signed = SignedGenesis {
-            canonical,
-            signature,
-        };
-        let genesis = signed.verify()?;
+        let original_genesis = SignedGenesis { canonical, signature };
+        let genesis = original_genesis.verify()?;
         if genesis.id()? != self.thread {
             return Err(Error::Invalid(
                 "stored genesis differs from Thread identity".into(),
             ));
         }
         use api::heddle::api::v2alpha1 as wire;
+        let mut boundary_acceptances = BTreeMap::new();
         let admission = match (admission, admission_signature) {
             (None, None) => None,
             (Some(canonical), Some(signature)) => {
-                let signed = crypto::thread_genesis_admission::SignedGenesisAdmission {
-                    canonical,
+                let mut signed = crypto::thread_genesis_admission::SignedGenesisAdmission {
+                    boundary_acceptance: None,
+ canonical,
                     signature,
                 };
                 let value = signed.verify_signature()?;
@@ -270,7 +274,9 @@ impl ThreadReplica {
                     };
                 // Receipt trust was independently established at insertion. This
                 // checks stored bindings; transport receivers must pin it anew.
-                value.authorize(&genesis, &creator_authority, &trust)?;
+                signed.boundary_acceptance = boundary_evidence::load(&self.connect()?,&signed.canonical,&value.basis)?;
+                signed.verify(&original_genesis, &creator_authority, &trust)?;
+                boundary_evidence::add_wire(&mut boundary_acceptances,signed.boundary_acceptance.as_deref())?;
                 Some(wire::SignedRecord {
                     format: objects::object::thread_genesis_admission::FORMAT.into(),
                     canonical_record: signed.canonical,
@@ -289,15 +295,16 @@ impl ThreadReplica {
             value.validate_genesis(&genesis)?;
             ownership_claims.push(wire::SignedRecord {
                 format: objects::object::thread_replication::ownership_claim::FORMAT.into(),
-                canonical_record: claim.canonical,
+                canonical_record: claim.canonical.clone(),
                 signatures: vec![
-                    wire::RecordSignature { public_key: value.prior_local_key.to_vec(), signature: claim.local_signature },
-                    wire::RecordSignature { public_key: value.accepting_publisher.to_vec(), signature: claim.acceptance_signature },
+                    wire::RecordSignature { public_key: value.prior_local_key.to_vec(), signature: claim.local_signature.clone() },
+                    wire::RecordSignature { public_key: value.accepting_publisher.to_vec(), signature: claim.acceptance_signature.clone() },
                 ],
             });
             if let Some(receipt) = admission {
                 let statement = receipt.verify_signature()?;
-                statement.authorize_claim(&value, &genesis, &self.authority_admission_trust(&receipt)?)?;
+                receipt.verify_claim(&claim, &genesis, &self.authority_admission_trust(&receipt)?)?;
+                boundary_evidence::add_wire(&mut boundary_acceptances,receipt.boundary_acceptance.as_deref())?;
                 ownership_claim_admissions.push(wire::SignedRecord {
                     format: objects::object::thread_authority_admission::FORMAT.into(),
                     canonical_record: receipt.canonical,
@@ -306,14 +313,15 @@ impl ThreadReplica {
             }
         }
         Ok(wire::ThreadGenesisRecord {
-            ownership_claims,
+            boundary_acceptances: boundary_acceptances.into_values().collect(),
+ ownership_claims,
             ownership_claim_admissions,
             genesis: Some(wire::SignedRecord {
                 format: objects::object::thread_replication::GENESIS_FORMAT.into(),
-                canonical_record: signed.canonical,
+                canonical_record: original_genesis.canonical,
                 signatures: vec![wire::RecordSignature {
                     public_key: genesis.creator.to_vec(),
-                    signature: signed.signature,
+                    signature: original_genesis.signature,
                 }],
             }),
             creator_authority,
@@ -534,6 +542,7 @@ impl ThreadReplica {
                 "UPDATE operations SET authority_receipt_canonical=?2,authority_receipt_signature=?3 WHERE id=?1 AND authority_receipt_canonical IS NULL",
                 params![id.as_bytes(), receipt.canonical, receipt.signature],
             )?;
+            if stored > 0 { boundary_evidence::persist(tx,&receipt.canonical,receipt.boundary_acceptance.as_deref())?; }
             if stored > 0 && inserted == 0 {
                 tx.execute(
                     "UPDATE threads SET generation=generation+1 WHERE id=?1",

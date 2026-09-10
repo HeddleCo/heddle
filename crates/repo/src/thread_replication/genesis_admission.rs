@@ -92,7 +92,8 @@ mod tests {
             executor: executor.public_key().try_into().expect("key"),
         };
         let receipt = ThreadGenesisAdmission {
-            version: 1,
+            version: 2,
+            basis: objects::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority,
             spool,
             spool_genesis: trust.spool_genesis,
             thread: genesis.id().expect("id"),

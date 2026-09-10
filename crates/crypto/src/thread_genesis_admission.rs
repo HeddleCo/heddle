@@ -15,6 +15,8 @@ use crate::{
 pub struct SignedGenesisAdmission {
     pub canonical: Vec<u8>,
     pub signature: Vec<u8>,
+    pub boundary_acceptance:
+        Option<std::sync::Arc<crate::original_boundary_acceptance::SignedBoundaryAcceptance>>,
 }
 impl SignedGenesisAdmission {
     pub fn sign(value: &ThreadGenesisAdmission, signer: &impl Signer) -> Result<Self, Error> {
@@ -26,6 +28,7 @@ impl SignedGenesisAdmission {
         Ok(Self {
             canonical,
             signature,
+            boundary_acceptance: None,
         })
     }
     /// Signature-only verification does not establish independent executor trust.
@@ -45,7 +48,12 @@ impl SignedGenesisAdmission {
         trust: &TrustedHostedExecutor,
     ) -> Result<ThreadGenesisAdmission, Error> {
         let value = self.verify_signature()?;
-        value.authorize(&original.verify()?, envelope, trust)?;
+        let evidence = self
+            .boundary_acceptance
+            .as_ref()
+            .map(|value| value.verify_signature())
+            .transpose()?;
+        value.authorize_with_acceptance(&original.verify()?, envelope, trust, evidence.as_ref())?;
         Ok(value)
     }
 }
@@ -93,7 +101,8 @@ mod tests {
             executor: executor.public_key().try_into().expect("executor key"),
         };
         let value = ThreadGenesisAdmission {
-            version: 1,
+            version: 2,
+            basis: heddle_object_model::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority,
             spool: spool.parse().expect("Spool UUID"),
             spool_genesis: trust.spool_genesis,
             thread: genesis.id().expect("Thread"),

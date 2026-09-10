@@ -110,7 +110,8 @@ fn receipt_backfill(repository: &crate::Repository, replica: &ThreadReplica, sig
     let genesis=crate::sign_spool_owner_genesis(&owner,*spool.as_bytes()).expect("Spool genesis");
     let statement=signed.verify().expect("claim");
     let SourceAuthor::Account {actor,authority_digest,..}=statement.acceptance.clone() else { panic!("account claim") };
-    let record=ThreadAuthorityAdmission {version:2,spool,
+    let record=ThreadAuthorityAdmission {version: 3,
+            basis: objects::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority,spool,
         spool_genesis:objects::object::ContentHash::compute_typed(SPOOL_GENESIS_TRUST_FORMAT,&genesis.genesis.as_ref().expect("Spool statement").encode_to_vec()),
         thread:replica.thread_id(),subject:OriginalAuthoritySubject::OwnershipClaim(statement.id().expect("claim ID")),
         actor,publisher:statement.accepting_publisher,authority_digest,executor:executor.public_key().try_into().expect("key"),admitted_at_ms:2000};

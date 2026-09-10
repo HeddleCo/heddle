@@ -228,6 +228,11 @@ pub fn reservation(bytes: &[u8], max: usize) -> Result<usize> {
                     record(data(&f)?)?;
                     objects += 3;
                 }
+                (4, 3) => {
+                    count(&mut third, max)?;
+                    record(data(&f)?)?;
+                    objects += 3;
+                }
                 (5, 1) | (5, 2) => {
                     count(&mut first, max)?;
                     id(&f)?;
@@ -260,6 +265,7 @@ pub fn reservation(bytes: &[u8], max: usize) -> Result<usize> {
         return Err(invalid());
     }
     let container = size_of::<crate::replication::Frame>()
+        + size_of::<crate::replication::InputUnit>()
         + size_of::<SignedRecord>()
         + size_of::<RecordSignature>()
         + size_of::<ReplicationRejection>();
@@ -291,6 +297,7 @@ mod tests {
                 ReplicationOperations {
                     operations,
                     authority_admissions,
+                    boundary_acceptances: vec![],
                 },
             )),
         }
@@ -321,6 +328,34 @@ mod tests {
             "signature shape is checked without allocating decoded vectors"
         );
         assert!(reservation(&[0x22, 0xff], 64).is_err(), "truncated length");
+    }
+    #[test]
+    fn protobuf_shape_bounds_boundary_acceptance_carriers() {
+        let valid = record();
+        let encode = |records| {
+            ReplicateThreadRequest {
+                body: Some(replicate_thread_request::Body::Operations(
+                    ReplicationOperations {
+                        operations: vec![valid.clone()],
+                        authority_admissions: vec![],
+                        boundary_acceptances: records,
+                    },
+                )),
+            }
+            .encode_to_vec()
+        };
+        let maximum = encode(vec![valid.clone(); 64]);
+        assert!(reservation(&maximum, 64).expect("bounded acceptance records") > maximum.len());
+        assert!(
+            reservation(&maximum, 63).is_err(),
+            "acceptance count obeys negotiated bound"
+        );
+        let mut duplicate = valid.clone();
+        duplicate.signatures.push(valid.signatures[0].clone());
+        assert!(
+            reservation(&encode(vec![duplicate]), 64).is_err(),
+            "acceptance signature expansion is rejected before decode"
+        );
     }
     #[test]
     fn protobuf_shape_preserves_legal_receipt_details_and_accounts_nested_layouts() {

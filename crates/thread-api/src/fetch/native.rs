@@ -193,19 +193,12 @@ impl StagedSource {
                         {
                             return Err(Error::Invalid("unknown genesis admission format"));
                         }
-                        let [signature] = receipt.signatures.as_slice() else {
+                        let [_signature] = receipt.signatures.as_slice() else {
                             return Err(Error::Invalid(
                                 "one hosted genesis admission signature required",
                             ));
                         };
-                        let admission = crypto::thread_genesis_admission::SignedGenesisAdmission {
-                            canonical: receipt.canonical_record.clone(),
-                            signature: signature.signature.clone(),
-                        };
-                        let value = admission.verify_signature().map_err(preparation)?;
-                        if signature.public_key != value.executor {
-                            return Err(Error::Invalid("genesis admission key differs"));
-                        }
+                        let admission = crate::boundary_acceptance::genesis_admission(wrapper)?.ok_or(Error::Invalid("genesis admission absent"))?;
                         match trust {
                             Some(trust) => ThreadReplica::create_from_genesis_admission(
                                 repository.heddle_dir(),

@@ -76,22 +76,24 @@ impl ThreadReplica {
         id: &ContentHash,
     ) -> Result<Option<StoredOperation>> {
         let row = self.connect()?.query_row(
-            "SELECT canonical,signature,status,reason,authority_receipt_canonical,authority_receipt_signature FROM operations WHERE id=?1 AND thread=?2",
+            "SELECT o.canonical,o.signature,o.status,o.reason,o.authority_receipt_canonical,o.authority_receipt_signature,b.canonical,b.signature FROM operations o LEFT JOIN boundary_admission_evidence e ON e.receipt=o.authority_receipt_canonical LEFT JOIN boundary_acceptances b ON b.id=e.acceptance WHERE o.id=?1 AND o.thread=?2",
             params![id.as_bytes(), self.thread.as_bytes()],
-            |row| Ok((row.get::<_,Vec<u8>>(0)?,row.get::<_,Vec<u8>>(1)?,row.get::<_,i32>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,Option<Vec<u8>>>(4)?,row.get::<_,Option<Vec<u8>>>(5)?)),
+            |row| Ok((row.get::<_,Vec<u8>>(0)?,row.get::<_,Vec<u8>>(1)?,row.get::<_,i32>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,Option<Vec<u8>>>(4)?,row.get::<_,Option<Vec<u8>>>(5)?,row.get::<_,Option<Vec<u8>>>(6)?,row.get::<_,Option<Vec<u8>>>(7)?)),
         ).optional()?;
         row.map(
-            |(canonical, signature, status, reason, receipt_canonical, receipt_signature)| {
+            |(canonical, signature, status, reason, receipt_canonical, receipt_signature, evidence_canonical, evidence_signature)| {
                 let status = match status {
                     0 => Admission::Pending,
                     1 => Admission::Accepted,
                     2 => Admission::Rejected(reason.unwrap_or_default()),
                     _ => return Err(Error::Invalid("invalid operation admission status".into())),
                 };
+                let evidence=match(evidence_canonical,evidence_signature) {(None,None)=>None,(Some(a),Some(b))=>Some((a,b)),_=>return Err(Error::Invalid("incomplete retained boundary evidence".into()))};
                 let authority_admission = match (receipt_canonical, receipt_signature) {
                     (None, None) => None,
                     (Some(canonical), Some(signature)) => Some(SignedAuthorityAdmission {
-                        canonical,
+                        boundary_acceptance: super::boundary_evidence::matched(evidence, &objects::object::thread_authority_admission::ThreadAuthorityAdmission::decode(&canonical)?.basis)?,
+ canonical,
                         signature,
                     }),
                     _ => {

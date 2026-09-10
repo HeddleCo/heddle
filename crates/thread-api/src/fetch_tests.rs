@@ -82,7 +82,8 @@ pub(super) fn fixture() -> (FetchOpen, TransferReady, EndpointRef, [Vec<u8>; 2])
         ),
         ownership: Some(OwnerState::default()),
         thread_genesis: Some(ThreadGenesisRecord {
-            ownership_claims: vec![], ownership_claim_admissions: vec![],
+            boundary_acceptances: Vec::new(),
+ ownership_claims: vec![], ownership_claim_admissions: vec![],
             genesis: Some(
                 replication::opening::sign_genesis(&genesis, &signer).expect("creator signature"),
             ),

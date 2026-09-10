@@ -17,7 +17,7 @@ use tracing::{Instrument, instrument::WithSubscriber};
 
 use crate::{
     contract::*,
-    replication::{Frame, Outbound, Session, store::ReplicaStore},
+    replication::{Frame, InputUnit, Outbound, Session, store::ReplicaStore},
     transport,
 };
 
@@ -177,49 +177,72 @@ async fn completion<E: std::error::Error + 'static>(
         .await
         .map_err(|_| Error::Worker("replication sender stopped before receipt flush".into()))
 }
-fn requires_disclosure_fence<E: std::error::Error + 'static>(frame: &Frame) -> Result<bool, E> {
-    use heddle_object_model::object::thread_replication::{ThreadFacet, ThreadOperation};
-    let Frame::Operations(batch) = frame else {
+fn requires_disclosure_fence<E: std::error::Error + 'static>(unit: &InputUnit) -> Result<bool, E> {
+    use heddle_object_model::object::thread_replication::{
+        ThreadOperation, ThreadOperationBody,
+        metadata::{Control, ThreadControl},
+    };
+    let InputUnit::Operation(received) = unit else {
         return Ok(false);
     };
-    for record in &batch.operations {
-        let operation = ThreadOperation::decode(&record.canonical_record)
-            .map_err(crate::replication::Error::from)?;
-        // Same-facet causal parents are mandatory in both stores. Any Metadata
-        // parent may settle an already pending policy descendant, so fence the
-        // whole facet, not just a policy-shaped incoming body.
-        if operation.facet() == ThreadFacet::Metadata {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    let operation = ThreadOperation::decode(&received.original.canonical)
+        .map_err(crate::replication::Error::from)?;
+    // Canonical parents must share the exact metadata property. Only these
+    // policy properties can settle another pending policy mutation.
+    let ThreadOperationBody::Metadata(bytes) = &operation.body else {
+        return Ok(false);
+    };
+    let control = ThreadControl::decode(bytes).map_err(crate::replication::Error::from)?;
+    Ok(matches!(
+        control.control,
+        Control::Audience(_) | Control::Retention(_) | Control::Sharing(_)
+    ))
 }
 #[path = "live_replication_input.rs"]
 pub mod input;
-fn retained_record_bytes(record: &SignedRecord) -> usize {
-    record.format.capacity()
-        + record.canonical_record.capacity()
-        + record.signatures.capacity() * std::mem::size_of::<RecordSignature>()
-        + record
-            .signatures
-            .iter()
-            .map(|s| s.public_key.capacity() + s.signature.capacity())
-            .sum::<usize>()
+fn unit_acceptance(
+    unit: &InputUnit,
+) -> Option<&Arc<crypto::original_boundary_acceptance::SignedBoundaryAcceptance>> {
+    let InputUnit::Operation(received) = unit else {
+        return None;
+    };
+    received
+        .authority_admission
+        .as_ref()?
+        .boundary_acceptance
+        .as_ref()
 }
-fn retained_frame_bytes(frame: &Frame) -> usize {
-    match frame {
-        Frame::Operations(batch) => {
-            (batch.operations.capacity() + batch.authority_admissions.capacity())
-                * std::mem::size_of::<SignedRecord>()
-                + batch
-                    .operations
+// Canonical/signature buffers remain owned by parsed units. Shared immutable
+// acceptance bytes are counted once while any remaining unit retains the Arc.
+// The caller separately retains the entire IntoIter backing allocation.
+fn retained_unit_bytes(units: &[InputUnit]) -> usize {
+    units
+        .iter()
+        .enumerate()
+        .map(|(index, unit)| {
+            let InputUnit::Operation(received) = unit else {
+                return 0;
+            };
+            let mut bytes =
+                received.original.canonical.capacity() + received.original.signature.capacity();
+            if let Some(receipt) = &received.authority_admission {
+                bytes += receipt.canonical.capacity() + receipt.signature.capacity();
+            }
+            if let Some(acceptance) = unit_acceptance(unit) {
+                if !units[..index]
                     .iter()
-                    .chain(&batch.authority_admissions)
-                    .map(retained_record_bytes)
-                    .sum::<usize>()
-        }
-        _ => 0,
-    }
+                    .filter_map(unit_acceptance)
+                    .any(|prior| Arc::ptr_eq(prior, acceptance))
+                {
+                    bytes += std::mem::size_of_val(acceptance.as_ref())
+                        + 2 * std::mem::size_of::<usize>()
+                        + acceptance.canonical.capacity()
+                        + acceptance.signature.capacity();
+                }
+            }
+            bytes
+        })
+        .sum()
 }
 
 /// A permission-only recheck must not wait for an output memory reservation
@@ -455,11 +478,11 @@ where
                 let preflight = authorize(Activity::Receive).await?;
                 let units = session.input_units(frame)?;
                 drop(preflight);
-                let container_bytes = units.capacity() * std::mem::size_of::<Frame>();
+                let container_bytes = units.capacity() * std::mem::size_of::<InputUnit>();
                 let mut units = units.into_iter();
-                while let Some(frame) = units.next() {
-                    let immediate_receipt = matches!(&frame, Frame::Operations(_));
-                    let policy = requires_disclosure_fence(&frame)?;
+                while let Some(unit) = units.next() {
+                    let immediate_receipt = matches!(&unit, InputUnit::Operation(_));
+                    let policy = requires_disclosure_fence(&unit)?;
                     let activity = authorize(Activity::Receive).await?;
                     let delivery_guard = if policy {
                         let guard = delivery.lock().await;
@@ -471,18 +494,13 @@ where
                     } else {
                         None
                     };
-                    let output = session.handle_input(frame).await?;
+                    let output = session.handle_unit(unit).await?;
                     drop(activity);
                     drop(delivery_guard);
                     let remaining_bytes = if units.len() == 0 {
                         0
                     } else {
-                        container_bytes
-                            + units
-                                .as_slice()
-                                .iter()
-                                .map(retained_frame_bytes)
-                                .sum::<usize>()
+                        container_bytes + retained_unit_bytes(units.as_slice())
                     };
                     // IntoIter retains its backing allocation until dropped,
                     // including after its final element has been consumed.

@@ -14,7 +14,8 @@ fn retained_claim_testimony_binds_subject_account_and_both_original_signatures()
     let claim = ThreadOwnershipClaim { version:1, thread:genesis.id().expect("Thread"), prior_local_key:key, accepting_publisher:accepting.public_key().try_into().expect("acceptor"), acceptance:SourceAuthor::account(spool,actor.clone(),b"independently checked at original admission".to_vec()).expect("acceptance"), source_frontier:Default::default() };
     let signed = SignedOwnershipClaim::sign(&claim,&local,&accepting).expect("both original signatures");
     let SourceAuthor::Account { authority_digest, .. } = &claim.acceptance else { panic!("account") };
-    let statement = ThreadAuthorityAdmission { version:2, spool, spool_genesis:trust.spool_genesis, thread:claim.thread, subject:OriginalAuthoritySubject::OwnershipClaim(claim.id().expect("claim ID")), actor, publisher:claim.accepting_publisher, authority_digest:*authority_digest, executor:trust.executor, admitted_at_ms:1 };
+    let statement = ThreadAuthorityAdmission { version: 3,
+            basis: heddle_object_model::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority, spool, spool_genesis:trust.spool_genesis, thread:claim.thread, subject:OriginalAuthoritySubject::OwnershipClaim(claim.id().expect("claim ID")), actor, publisher:claim.accepting_publisher, authority_digest:*authority_digest, executor:trust.executor, admitted_at_ms:1 };
     let receipt = SignedAuthorityAdmission::sign(&statement,&executor).expect("first admission");
     assert_eq!(receipt.verify_claim(&signed,&genesis,&trust).expect("retained exact original"),statement);
     let mut changed = statement.clone();

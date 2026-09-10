@@ -1,11 +1,23 @@
 # Original-author admission receipts
 
-`heddle-thread-authority-admission-v2` is executor testimony about the first durable
-receipt of an original signed Thread operation or dual-signed ownership claim. It proves that the host
-verified that original account/agent's authority at that boundary. It does not
-prove causal readiness, current authority, approval, publication consent or
-landing eligibility. The original operation and its original signature remain
-unchanged, including an agent's explicit attribution.
+`heddle-thread-authority-admission-v3` covers an original operation or dual-signed
+ownership claim; `heddle-thread-genesis-admission-v2` covers account genesis. Their
+canonical `AdmissionBasis` distinguishes `OriginalAuthority` (the executor checked
+the original authority at first admission) from `BoundaryAcceptance` (the executor
+admitted unchanged originals under a separate explicit acceptance at that time).
+Older receipt versions are not reinterpreted. Original bytes, signatures, actor,
+publisher and authority-envelope digest remain unchanged.
+
+Boundary receipts require exact `heddle-original-boundary-acceptance-v1` evidence.
+Full verification checks its signature, digest and original account/Spool/kind,
+as well as the per-original receipt signature and independently pinned executor.
+Signature-only decoding is structural; the old model `authorize` entry points
+reject BoundaryAcceptance without evidence. A matched receipt attests membership
+in the prior signed manifest, so a subset relay need not disclose unrelated
+originals. The acceptance alone never proves subset membership or authorizes a
+new endpoint. No normal-sync fallback manufactures acceptance or upgrades an
+OriginalAuthority receipt. Fresh hosted accepting-authority verification and
+client signing UX remain separate integration work.
 
 Trust comes from the receiver's independently enrolled hosted executor pin for
 an immutable Spool genesis. An incoming receipt, author envelope, transport peer
@@ -34,8 +46,14 @@ The operation, durable original-author marker and receipt columns commit in one
 SQLite transaction. A failed parent insertion rolls them all back. The first
 retained receipt is immutable: a later valid receipt cannot replace its timestamp
 or bytes. Pending operations retain this evidence across restart while their
-causal parents arrive. Indexed reads return original bytes, status and receipt in
-one statement, and subsequent peers receive the same signed testimony.
+causal parents arrive. An indexed operation read joins its exact evidence;
+bounded ancestry uses one
+original/receipt query and one DISTINCT evidence lookup, checking evidence lengths
+before copying. Shared immutable acceptance bytes use Arc across receipts and
+committed-prefix units, avoiding per-original copies. Subsequent peers receive the
+same signed testimony through `ReplicationOperations.boundary_acceptances` and
+`ThreadGenesisRecord.boundary_acceptances`. Evidence and its receipt reference
+commit atomically; missing persisted evidence fails closed on reopen/export.
 
 An original already admitted locally can replay under its durable admission;
 fresh authored work without a receipt still requires independently enrolled original
@@ -48,7 +66,7 @@ foreign-account receipt delivery and exact re-export. The hosted issuer separate
 must persist its own first-authority decision and exact receipt in the same
 transaction; receiving a sidecar must never invent a historical hosted decision.
 
-Verification at the portable checkpoint:
+Historical verification of the earlier OriginalAuthority-only checkpoint (not evidence for new boundary consumers):
 
 ```text
 cargo test --locked --offline -p heddle-thread-api --no-default-features \
@@ -98,3 +116,10 @@ The repository run also included the concurrently developed listing projection;
 its registration and leaf are delivered in the separate account-service checkpoint.
 
 The canonical subject distinguishes an original operation from an ownership claim. Both retain the same account/agent, exact envelope digest, independently pinned executor, and first-admission time. A receipt for one subject kind cannot authorize the other.
+
+Current boundary consumer regressions additionally cover source/genesis/claim
+receipt persistence, rollback and reopen, old signature-only admission rejection,
+128 original receipts sharing one 64 KiB acceptance, exact evidence after two native
+receiver relays, missing/unreferenced/changed evidence, wrong original scope and
+unknown executor. Fresh hosted publication under a newly supplied acceptance is
+not claimed by these portable/native relay tests.

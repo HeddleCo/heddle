@@ -53,6 +53,7 @@ pub fn decode(receipt: &wire::SignedRecord) -> Result<SignedAuthorityAdmission, 
         ));
     }
     let signed = SignedAuthorityAdmission {
+        boundary_acceptance: None,
         canonical: receipt.canonical_record.clone(),
         signature: signature.signature.clone(),
     };
@@ -125,7 +126,8 @@ mod tests {
             executor: executor.public_key().try_into().expect("key"),
         };
         let receipt = ThreadAuthorityAdmission {
-            version: 2,
+            version: 3,
+            basis: heddle_object_model::object::original_boundary_acceptance::AdmissionBasis::OriginalAuthority,
             spool: trust.spool,
             spool_genesis: trust.spool_genesis,
             thread: operation.thread,
@@ -172,7 +174,10 @@ mod tests {
         }
         let mut mutations = Vec::new();
         let mut changed = value.clone();
-        changed.subject = objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(ContentHash::from_bytes([47; 32]));
+        changed.subject =
+            objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(
+                ContentHash::from_bytes([47; 32]),
+            );
         mutations.push(changed);
         let mut changed = value.clone();
         changed.thread = ContentHash::from_bytes([48; 32]);
@@ -243,18 +248,31 @@ mod tests {
 /// Decode a bounded batch and match every sidecar to an exact original in that
 /// batch. This verifies signatures and immutable bindings, not issuer trust.
 /// Callers still authorize current disclosure and independently pin receipts.
-pub fn match_batch(batch: &wire::ReplicationOperations) -> Result<Vec<crate::replication::store::ReceivedOperation>, Error> {
+pub fn match_batch(
+    batch: &wire::ReplicationOperations,
+) -> Result<Vec<crate::replication::store::ReceivedOperation>, Error> {
     use std::collections::{BTreeMap, BTreeSet};
+
     use prost::Message;
-    if batch.operations.is_empty() || batch.operations.len() > 128
+    if batch.operations.is_empty()
+        || batch.operations.len() > 128
         || batch.authority_admissions.len() > 128
         || batch.encoded_len() > 1024 * 1024
-    { return Err(Error::Protocol("original authority batch exceeds bounds")); }
+    {
+        return Err(Error::Protocol("original authority batch exceeds bounds"));
+    }
+    let mut evidence = crate::boundary_acceptance::Evidence::default();
+    evidence.add(&batch.boundary_acceptances)?;
     let mut receipts = BTreeMap::new();
     for record in &batch.authority_admissions {
-        let signed = decode(record)?;
-        let statement = signed.verify_signature().map_err(|_| Error::Protocol("invalid authority admission signature"))?;
-        let operation_id = statement.subject.operation_id().ok_or(Error::Protocol("operation batch cannot carry ownership claim admission"))?;
+        let mut signed = decode(record)?;
+        let statement = signed
+            .verify_signature()
+            .map_err(|_| Error::Protocol("invalid authority admission signature"))?;
+        signed.boundary_acceptance = evidence.matched(&statement.basis)?;
+        let operation_id = statement.subject.operation_id().ok_or(Error::Protocol(
+            "operation batch cannot carry ownership claim admission",
+        ))?;
         if receipts.insert(operation_id, (signed, statement)).is_some() {
             return Err(Error::Protocol("duplicate authority admission sidecar"));
         }
@@ -262,17 +280,42 @@ pub fn match_batch(batch: &wire::ReplicationOperations) -> Result<Vec<crate::rep
     let mut ids = BTreeSet::new();
     let mut output = Vec::new();
     for record in &batch.operations {
-        let original = crate::replication::decode_record(record.clone()).map_err(|_| Error::Protocol("invalid original operation signature"))?;
-        let operation = original.verify().map_err(|_| Error::Protocol("invalid original operation signature"))?;
-        let id = operation.id().map_err(|_| Error::Protocol("invalid original operation identity"))?;
-        if !ids.insert(id) { return Err(Error::Protocol("duplicate original operation")); }
+        let original = crate::replication::decode_record(record.clone())
+            .map_err(|_| Error::Protocol("invalid original operation signature"))?;
+        let operation = original
+            .verify()
+            .map_err(|_| Error::Protocol("invalid original operation signature"))?;
+        let id = operation
+            .id()
+            .map_err(|_| Error::Protocol("invalid original operation identity"))?;
+        if !ids.insert(id) {
+            return Err(Error::Protocol("duplicate original operation"));
+        }
         let receipt = if let Some((receipt, statement)) = receipts.remove(&id) {
-            statement.authorize(&operation, &TrustedHostedExecutor { spool: statement.spool, spool_genesis: statement.spool_genesis, executor: statement.executor })
-                .map_err(|_| Error::Protocol("authority receipt differs from original operation"))?;
+            receipt
+                .verify(
+                    &original,
+                    &TrustedHostedExecutor {
+                        spool: statement.spool,
+                        spool_genesis: statement.spool_genesis,
+                        executor: statement.executor,
+                    },
+                )
+                .map_err(|_| {
+                    Error::Protocol("authority receipt differs from original operation")
+                })?;
             Some(receipt)
-        } else { None };
-        output.push(crate::replication::store::ReceivedOperation { original, authority_admission: receipt });
+        } else {
+            None
+        };
+        output.push(crate::replication::store::ReceivedOperation {
+            original,
+            authority_admission: receipt,
+        });
     }
-    if !receipts.is_empty() { return Err(Error::Protocol("unmatched authority admission sidecar")); }
+    if !receipts.is_empty() {
+        return Err(Error::Protocol("unmatched authority admission sidecar"));
+    }
+    evidence.finish()?;
     Ok(output)
 }

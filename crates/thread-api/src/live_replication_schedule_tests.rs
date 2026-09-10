@@ -11,7 +11,10 @@ use heddle_object_model::object::{
     thread_replication::{
         Admission, AuthoredCapture, OPERATION_FORMAT, ThreadFacet, ThreadOperation,
         ThreadOperationBody,
-        metadata::{AUTHORITY_FORMAT, Control, ThreadControl},
+        metadata::{
+            AUTHORITY_FORMAT, Control, ThreadControl,
+            retention::{MaterialRetention, RetentionPolicy},
+        },
     },
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -216,7 +219,13 @@ fn operation(thread: ContentHash, metadata: bool, nonce: u8) -> SignedRecord {
                 authority_envelope: authority.to_vec(),
                 client_operation_id: uuid::Uuid::from_bytes([nonce; 16]),
                 occurred_at_ms: 1,
-                control: Control::Name(format!("metadata-{nonce}")),
+                control: Control::Retention(RetentionPolicy {
+                    source: MaterialRetention::Retain,
+                    collaboration: MaterialRetention::Retain,
+                    evidence: MaterialRetention::Discard,
+                    scrubbed_timeline: MaterialRetention::Retain,
+                    raw_transcripts: MaterialRetention::Discard,
+                }),
             }
             .encode()
             .expect("canonical metadata"),
@@ -259,6 +268,7 @@ async fn saturated_case(metadata: bool, pending: bool, count: usize, half_close:
         let input = Frame::Operations(ReplicationOperations {
             operations: records,
             authority_admissions: vec![],
+            boundary_acceptances: vec![],
         })
         .request()
         .encode_to_vec();
@@ -501,4 +511,94 @@ async fn pending_commit_receipt_precedes_failed_peer_bookkeeping() {
 #[tokio::test]
 async fn half_closed_input_drains_deferred_ordinary_source_output() {
     saturated_case(false, false, 1, true).await;
+}
+
+#[test]
+fn policy_fence_tracks_canonical_property_causality() {
+    use heddle_object_model::object::{
+        StateId,
+        thread_replication::{GenesisOwner, ThreadGenesis},
+    };
+    let record = operation(ContentHash::from_bytes([1; 32]), true, 1);
+    let mut policy = ThreadOperation::decode(&record.canonical_record).expect("policy");
+    let ThreadOperationBody::Metadata(bytes) = &policy.body else {
+        panic!("metadata")
+    };
+    let control = ThreadControl::decode(bytes).expect("control");
+    let mut name = control.clone();
+    name.control = Control::Name("ordinary name".into());
+    policy.body = ThreadOperationBody::Metadata(name.encode().expect("name"));
+    let mut name_record = record.clone();
+    name_record.canonical_record = policy.encode().expect("ordinary operation");
+    let frame = |record: SignedRecord| {
+        InputUnit::Operation(ReceivedOperation::from(SignedOperation {
+            canonical: record.canonical_record,
+            signature: record.signatures[0].signature.clone(),
+        }))
+    };
+    assert!(
+        !requires_disclosure_fence::<transport::Error>(&frame(name_record)).expect("ordinary name")
+    );
+    assert!(requires_disclosure_fence::<transport::Error>(&frame(record)).expect("retention"));
+    let genesis = ThreadGenesis {
+        version: 1,
+        spool: control.spool.to_string(),
+        parent: None,
+        base: StateId::from_content_hash(ContentHash::from_bytes([2; 32])),
+        name: "fixture".into(),
+        intent: String::new(),
+        owner: GenesisOwner::LocalKey(policy.publisher),
+        creator: policy.publisher,
+        nonce: vec![],
+    };
+    assert!(
+        control.validate_parents(&genesis, &[policy]).is_err(),
+        "ordinary Name cannot activate pending Retention"
+    );
+}
+#[test]
+fn retained_acceptance_allocations_include_spare_capacity_once_until_last_user() {
+    use crypto::{
+        original_boundary_acceptance::SignedBoundaryAcceptance,
+        thread_authority_admission::SignedAuthorityAdmission,
+    };
+    // Allocation accounting is independent of signature admission. These small
+    // receipt buffers represent the retained canonical containers only.
+    let mut canonical = vec![1; 64];
+    canonical.reserve(4096);
+    let canonical_capacity = canonical.capacity();
+    let evidence = Arc::new(SignedBoundaryAcceptance {
+        canonical,
+        signature: vec![2; 64],
+    });
+    let make_unit = || {
+        let record = operation(ContentHash::from_bytes([1; 32]), false, 1);
+        InputUnit::Operation(ReceivedOperation {
+            original: SignedOperation {
+                canonical: record.canonical_record,
+                signature: record.signatures[0].signature.clone(),
+            },
+            authority_admission: Some(SignedAuthorityAdmission {
+                canonical: vec![3; 64],
+                signature: vec![4; 64],
+                boundary_acceptance: Some(evidence.clone()),
+            }),
+        })
+    };
+    let units = [make_unit(), make_unit()];
+    let one = retained_unit_bytes(&units[..1]);
+    let both = retained_unit_bytes(&units);
+    assert!(
+        one >= canonical_capacity,
+        "acceptance spare capacity must remain reserved"
+    );
+    assert!(
+        both < 2 * one,
+        "shared acceptance must not be charged once per operation"
+    );
+    assert!(
+        retained_unit_bytes(&units[1..]) >= canonical_capacity,
+        "consuming first original cannot refund evidence retained by successor"
+    );
+    assert_eq!(retained_unit_bytes(&[]), 0);
 }

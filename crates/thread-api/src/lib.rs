@@ -6,6 +6,8 @@ pub mod authority;
 #[cfg(feature = "replication")]
 pub mod authority_admission;
 #[cfg(feature = "replication")]
+pub mod boundary_acceptance;
+#[cfg(feature = "replication")]
 pub mod thread_ownership;
 #[cfg(feature = "semantic-analysis")]
 pub mod behavior;

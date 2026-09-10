@@ -103,7 +103,8 @@ impl ThreadCreation {
     }
     pub fn genesis_record(&self) -> ThreadGenesisRecord {
         ThreadGenesisRecord {
-            ownership_claims: vec![],
+            boundary_acceptances: Vec::new(),
+ ownership_claims: vec![],
             ownership_claim_admissions: vec![],
             genesis: self.request.thread_genesis.clone(),
             creator_authority: self.request.creator_authority.clone(),

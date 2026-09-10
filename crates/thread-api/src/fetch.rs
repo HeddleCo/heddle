@@ -435,31 +435,11 @@ fn verify_origin(
 ) -> Result<heddle_object_model::object::thread_replication::ThreadGenesis, Error> {
     use heddle_object_model::object::thread_replication::integration::TrustedHostedExecutor;
     let genesis = replication::opening::verify_genesis_record(record, thread)?;
-    if let Some(receipt) = &record.admission {
-        if receipt.format != heddle_object_model::object::thread_genesis_admission::FORMAT {
-            return Err(Error::Invalid("unknown genesis admission format"));
-        }
-        let [signature] = receipt.signatures.as_slice() else {
-            return Err(Error::Invalid("one genesis admission signature required"));
-        };
-        let signed = crypto::thread_genesis_admission::SignedGenesisAdmission {
-            canonical: receipt.canonical_record.clone(),
-            signature: signature.signature.clone(),
-        };
-        let value = signed
-            .verify_signature()
-            .map_err(|_| Error::Invalid("invalid genesis admission signature"))?;
-        if signature.public_key != value.executor {
-            return Err(Error::Invalid("genesis admission executor differs"));
-        }
-        let trust = TrustedHostedExecutor {
-            spool: value.spool,
-            spool_genesis: value.spool_genesis,
-            executor: value.executor,
-        };
-        value
-            .authorize(&genesis, &record.creator_authority, &trust)
-            .map_err(|_| Error::Invalid("genesis admission differs from original proof"))?;
+    if let Some(signed) = crate::boundary_acceptance::genesis_admission(record)? {
+        let value=signed.verify_signature().map_err(|_|Error::Invalid("invalid genesis receipt"))?;
+        let trust=TrustedHostedExecutor {spool:value.spool,spool_genesis:value.spool_genesis,executor:value.executor};
+        let evidence=signed.boundary_acceptance.as_ref().map(|value|value.verify_signature()).transpose().map_err(|_|Error::Invalid("invalid boundary evidence"))?;
+        value.authorize_with_acceptance(&genesis,&record.creator_authority,&trust,evidence.as_ref()).map_err(|_|Error::Invalid("genesis admission differs from original proof"))?;
     }
     Ok(genesis)
 }

@@ -8,13 +8,14 @@ use super::{
     thread_replication::{GenesisOwner, ThreadGenesis, integration::TrustedHostedExecutor},
 };
 use crate::error::{HeddleError, Result};
-pub const FORMAT: &str = "heddle-thread-genesis-admission-v1";
+pub const FORMAT: &str = "heddle-thread-genesis-admission-v2";
 pub const ENVELOPE_FORMAT: &str = "heddle-thread-genesis-authority-v1";
 pub const MAX_BYTES: usize = 2048;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ThreadGenesisAdmission {
     pub version: u16,
+    pub basis: super::original_boundary_acceptance::AdmissionBasis,
     pub spool: Uuid,
     pub spool_genesis: ContentHash,
     pub thread: ContentHash,
@@ -26,7 +27,7 @@ pub struct ThreadGenesisAdmission {
 }
 impl ThreadGenesisAdmission {
     pub fn encode(&self) -> Result<Vec<u8>> {
-        if self.version != 1
+        if self.version != 2
             || self.spool.is_nil()
             || self.owner.is_nil()
             || self.creator == [0; 32]
@@ -57,6 +58,21 @@ impl ThreadGenesisAdmission {
         envelope: &[u8],
         trust: &TrustedHostedExecutor,
     ) -> Result<()> {
+        self.authorize_with_acceptance(genesis, envelope, trust, None)
+    }
+    pub fn authorize_with_acceptance(
+        &self,
+        genesis: &ThreadGenesis,
+        envelope: &[u8],
+        trust: &TrustedHostedExecutor,
+        evidence: Option<&super::original_boundary_acceptance::OriginalBoundaryAcceptance>,
+    ) -> Result<()> {
+        self.basis.authorize_evidence(
+            evidence,
+            self.spool,
+            self.owner,
+            Some(super::original_boundary_acceptance::BoundaryOriginalKind::AccountGenesis),
+        )?;
         self.encode()?;
         if self.spool != trust.spool
             || self.spool_genesis != trust.spool_genesis

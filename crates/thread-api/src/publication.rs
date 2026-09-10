@@ -45,6 +45,14 @@ impl PublicationOriginals {
                 "bounded original genesis and source operations required",
             ));
         }
+        let mut acceptances=std::collections::BTreeSet::new();
+        for record in self.geneses.iter().flat_map(|value|&value.boundary_acceptances).chain(self.operations.iter().flat_map(|value|&value.boundary_acceptances)) {
+            if record.canonical_record.len()>96*1024 || record.signatures.len()!=1 || record.signatures[0].signature.len()!=64 || record.signatures[0].public_key.len()!=32 {
+                return Err(Error::Invalid("boundary evidence shape exceeds bounds"));
+            }
+            acceptances.insert(record.canonical_record.as_slice());
+            if acceptances.len()>128 {return Err(Error::Invalid("boundary acceptance count exceeded"));}
+        }
         let mut bytes = 0usize;
         for length in self
             .geneses
@@ -68,7 +76,7 @@ impl PublicationOriginals {
         }) || self
             .operations
             .iter()
-            .flat_map(|batch| batch.operations.iter().chain(&batch.authority_admissions))
+            .flat_map(|batch| batch.operations.iter().chain(&batch.authority_admissions).chain(&batch.boundary_acceptances))
             .any(|record| record.canonical_record.is_empty() || record.signatures.is_empty())
         {
             return Err(Error::Invalid(
@@ -597,11 +605,13 @@ mod tests {
         };
         PublicationOriginals {
             geneses: vec![ThreadGenesisRecord {
-                genesis: Some(record.clone()),
+                boundary_acceptances: Vec::new(),
+ genesis: Some(record.clone()),
                 ..Default::default()
             }],
             operations: vec![ReplicationOperations {
-                operations: vec![record],
+                boundary_acceptances: Vec::new(),
+ operations: vec![record],
                 authority_admissions: vec![],
             }],
         }

@@ -131,6 +131,10 @@ pub struct AcceptedOpening {
 /// Structural and original-signature validation only. Account authority and
 /// hosted admission receipts still require independently retained trust.
 pub fn verify_genesis_record(record: &ThreadGenesisRecord, thread: &ThreadRef) -> Result<ThreadGenesis, Error> {
+    use prost::Message;
+    if record.boundary_acceptances.len()>crate::boundary_acceptance::MAX_ACCEPTANCES || record.encoded_len()>256*1024 {
+        return Err(Error::Protocol("genesis wrapper evidence exceeds bounds"));
+    }
     let signed = record.genesis.as_ref().ok_or(Error::Protocol("original signed genesis missing"))?;
     let genesis = verify_genesis(signed, thread)?;
     if record.creator_authority.len() > 64 * 1024 {
@@ -283,7 +287,8 @@ mod tests {
         let open = ReplicationOpen {
             thread: Some(thread.clone()),
             thread_genesis: Some(ThreadGenesisRecord {
-            ownership_claims: vec![], ownership_claim_admissions: vec![],
+            boundary_acceptances: Vec::new(),
+ ownership_claims: vec![], ownership_claim_admissions: vec![],
                 genesis: Some(signed),
                 creator_authority: vec![],
                 admission: None,
