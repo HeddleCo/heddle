@@ -330,6 +330,18 @@ impl BiscuitFacts {
     /// Every independently revocable credential identity from verified facts.
     /// Session and stored credential IDs complement the signed block chain;
     /// checking only block IDs would miss explicit session revocation.
+    pub fn revocation_selectors(
+        &self,
+    ) -> impl Iterator<Item = crate::inspection::RevocationSelector<'_>> {
+        crate::inspection::credential_selectors(
+            &self.sid,
+            self.credential_id.as_deref(),
+            &self.revocation_ids,
+            self.device_id.as_deref(),
+            self.envelope_device_pubkey_hex.as_deref(),
+        )
+    }
+
     pub fn revocation_identities(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.sid.as_str())
             .chain(self.credential_id.as_deref())
@@ -1589,4 +1601,31 @@ fn revocation_identities_include_session_credential_and_every_block() {
     assert_eq!(facts.revocation_identities().collect::<Vec<_>>(), vec!["session-a", "credential-b", "authority-block", "attenuation-block"]);
     facts.sid.clear(); facts.credential_id = Some(String::new()); facts.revocation_ids.clear();
     assert_eq!(facts.revocation_identities().count(), 0);
+}
+
+#[test]
+fn typed_revocation_selectors_preserve_namespaces_and_empty_filtering() {
+    use crate::inspection::RevocationSelector::*;
+    let mut facts = facts_with(Vec::new(), false);
+    facts.sid = "same-id".into();
+    facts.credential_id = Some("same-id".into());
+    facts.revocation_ids = vec!["block-id".into()];
+    facts.device_id = Some("same-id".into());
+    facts.envelope_device_pubkey_hex = Some("verified-key".into());
+    assert_eq!(
+        facts.revocation_selectors().collect::<Vec<_>>(),
+        vec![
+            Session("same-id"),
+            Credential("same-id"),
+            Block("block-id"),
+            Device("same-id"),
+            EnvelopeDeviceKey("verified-key")
+        ]
+    );
+    facts.sid.clear();
+    facts.credential_id = Some(String::new());
+    facts.revocation_ids = vec![String::new()];
+    facts.device_id = Some(String::new());
+    facts.envelope_device_pubkey_hex = Some(String::new());
+    assert_eq!(facts.revocation_selectors().count(), 0);
 }

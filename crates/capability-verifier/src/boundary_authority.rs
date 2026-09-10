@@ -52,6 +52,14 @@ pub struct OriginalSubjectScope<'a> {
     /// Original agent attribution; absent for human authors.
     pub agent_id: Option<&'a str>,
 }
+/// Original revocations are observations only. This callback type cannot be
+/// substituted for the current accepting-authority revocation callback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OriginalRevocation<'a> {
+    MintRoot(&'a [u8]),
+    Publisher(&'a [u8]),
+    Credential(heddle_biscuit_verifier::inspection::RevocationSelector<'a>),
+}
 /// An authenticated assertion, never proof of prior or current action authority.
 /// Explicit owner-derived acceptance can preserve revoked-agent work without
 /// treating that agent's revoked proof as its own present authorization.
@@ -64,8 +72,8 @@ pub struct InspectedOriginalIdentity {
     pub agent_id: Option<String>,
     /// Declared expiry if present; arbitrary time checks are not reinterpreted.
     pub credential_expiry: Option<u64>,
-    /// Session, credential, and every signed block selector for audit.
-    pub revocation_identities: Vec<String>,
+    /// Complete typed original credential selectors, retained without relabeling.
+    pub revocations: heddle_biscuit_verifier::inspection::CredentialRevocations,
     /// Current revocation observation; does not erase historical identity.
     pub explicitly_revoked: bool,
 }
@@ -75,7 +83,29 @@ pub struct InspectedOriginalIdentity {
 pub fn inspect_original_identity(
     bytes: &[u8],
     context: Context<'_>,
-    is_revoked: impl Fn(Revocation<'_>) -> bool,
+    is_revoked: impl Fn(OriginalRevocation<'_>) -> bool,
+) -> Result<InspectedOriginalIdentity> {
+    inspect_identity(bytes, context, is_revoked, true)
+}
+/// Account genesis signs its account and creator but has no agent field. Derive
+/// agent attribution only from the verified original envelope; the caller must
+/// already bind this account/key/envelope digest to the signed genesis.
+/// This is provenance only, never StartThread or current acceptance permission.
+pub fn inspect_original_genesis_identity(
+    bytes: &[u8],
+    context: Context<'_>,
+    is_revoked: impl Fn(OriginalRevocation<'_>) -> bool,
+) -> Result<InspectedOriginalIdentity> {
+    if context.agent_id.is_some() {
+        return Err(invalid("genesis provenance must derive its original agent"));
+    }
+    inspect_identity(bytes, context, is_revoked, false)
+}
+fn inspect_identity(
+    bytes: &[u8],
+    context: Context<'_>,
+    is_revoked: impl Fn(OriginalRevocation<'_>) -> bool,
+    bind_agent: bool,
 ) -> Result<InspectedOriginalIdentity> {
     let envelope = original::decode_envelope(bytes)?;
     let original_owner = original::verify_original_owner(&envelope, &context)?;
@@ -94,29 +124,31 @@ pub fn inspect_original_identity(
     if !matches!(token.seal(), Err(biscuit_auth::error::Token::AlreadySealed)) {
         return Err(invalid("original identity proof must be sealed"));
     }
-    let facts =
+    let mut facts =
         heddle_biscuit_verifier::inspect_verified_credential(&token, &key).map_err(invalid)?;
     if facts.proof_public_key != context.publisher
         || facts
             .asserted_account
             .is_some_and(|account| account.as_bytes() != context.account_uuid)
-        || facts.agent_id.as_deref() != context.agent_id
+        || (bind_agent && facts.agent_id.as_deref() != context.agent_id)
     {
         return Err(invalid("inspected identity differs from signed original"));
     }
-    let identifiers: Vec<String> = facts.revocation_identities().map(str::to_owned).collect();
-    let revoked = is_revoked(Revocation::MintRoot(&envelope.mint_root_public_key))
-        || is_revoked(Revocation::Publisher(context.publisher))
-        || identifiers
-            .iter()
-            .any(|id| is_revoked(Revocation::Credential(id)));
+    let revoked = is_revoked(OriginalRevocation::MintRoot(&envelope.mint_root_public_key))
+        || is_revoked(OriginalRevocation::Publisher(context.publisher))
+        || facts
+            .revocation_selectors()
+            .any(|selector| is_revoked(OriginalRevocation::Credential(selector)));
+    let agent_id = facts.agent_id.take();
+    let credential_expiry =
+        (facts.expires_at_unix_seconds > 0).then_some(facts.expires_at_unix_seconds);
+    let revocations = facts.into_revocations();
     Ok(InspectedOriginalIdentity {
         account_uuid: *context.account_uuid,
         publisher: *context.publisher,
-        agent_id: facts.agent_id,
-        credential_expiry: (facts.expires_at_unix_seconds > 0)
-            .then_some(facts.expires_at_unix_seconds),
-        revocation_identities: identifiers,
+        agent_id,
+        credential_expiry,
+        revocations,
         explicitly_revoked: revoked,
     })
 }

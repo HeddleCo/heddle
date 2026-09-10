@@ -13,6 +13,14 @@ fn fixture_mint_method(
     attached: bool,
     operation: &str,
 ) -> (Vec<u8>, VerifiedOwnerState, [u8; 32]) {
+    fixture_mint_method_with_facts(agent, attached, operation, "")
+}
+fn fixture_mint_method_with_facts(
+    agent: bool,
+    attached: bool,
+    operation: &str,
+    extra: &str,
+) -> (Vec<u8>, VerifiedOwnerState, [u8; 32]) {
     let owner = TestKey::new(91);
     let publisher = TestKey::new(92).signing.verifying_key().to_bytes();
     let a = TestKey::new(93);
@@ -36,7 +44,7 @@ fn fixture_mint_method(
     } else {
         ""
     };
-    let token = Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); session(\"original-session\"); credential_id(\"original-credential\"); device_pop_key(\"{}\"); {} check if operation(\"{operation}\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};", hex::encode(publisher), agent_fact, expiry.to_rfc3339()).as_str()).expect("facts").build(&pair).expect("token");
+    let token = Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); session(\"original-session\"); credential_id(\"original-credential\"); device_pop_key(\"{}\"); {} {extra} check if operation(\"{operation}\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};", hex::encode(publisher), agent_fact, expiry.to_rfc3339()).as_str()).expect("facts").build(&pair).expect("token");
     let attachment = attached.then(|| {
         let body = crate::wire::MintRootAttachment {
             format_version: 1,
@@ -413,14 +421,14 @@ fn boundary_revoked_expired_original_is_provenance_only_and_acceptor_must_be_cur
     assert!(inspected.explicitly_revoked);
     assert!(
         inspected
-            .revocation_identities
-            .iter()
+            .revocations
+            .identifiers()
             .any(|id| id == "original-session")
     );
     assert!(
         inspected
-            .revocation_identities
-            .iter()
+            .revocations
+            .identifiers()
             .any(|id| id == "original-credential")
     );
     let mut expired = context(&owner, &old_key);
@@ -623,4 +631,132 @@ fn boundary_historical_identity_survives_rotation_and_recovery_without_issuance_
             "inspecting an old issuer never authorizes it to issue now"
         );
     }
+}
+
+#[test]
+fn boundary_genesis_derives_original_agent_without_weakening_signed_actor_checks() {
+    use crate::boundary_authority::{inspect_original_genesis_identity, inspect_original_identity};
+    let method = "/heddle.api.v2alpha1.ThreadService/StartThread";
+    let (bytes, owner, publisher) = fixture_mint_method(true, false, "StartThread");
+    let ctx = || {
+        let mut value = context(&owner, &publisher);
+        value.method = method;
+        value
+    };
+    let current = proof::verify_genesis_with_retained_mint_roots(&bytes, ctx(), &[], |_| false)
+        .expect("ordinary delegated genesis");
+    let original = inspect_original_genesis_identity(&bytes, ctx(), |_| false)
+        .expect("delegated genesis provenance");
+    assert_eq!(original.agent_id.as_deref(), Some("original-session"));
+    assert_eq!(original.agent_id, current.agent_id);
+    assert!(
+        inspect_original_identity(&bytes, ctx(), |_| false).is_err(),
+        "signed Source/Claim actor cannot silently become human"
+    );
+    let mut misleading = ctx();
+    misleading.agent_id = Some("unrelated-agent");
+    assert!(
+        inspect_original_genesis_identity(&bytes, misleading, |_| false).is_err(),
+        "genesis callers cannot provide an agent label"
+    );
+    let mut strict = ctx();
+    strict.agent_id = Some("original-session");
+    inspect_original_identity(&bytes, strict, |_| false)
+        .expect("correct signed source actor still works");
+    let mut wrong = ctx();
+    wrong.publisher = &[7; 32];
+    assert!(
+        inspect_original_genesis_identity(&bytes, wrong, |_| false).is_err(),
+        "genesis provenance keeps exact original creator binding"
+    );
+    let (human, human_owner, human_key) = fixture_mint_method(false, false, "StartThread");
+    let mut human_ctx = context(&human_owner, &human_key);
+    human_ctx.method = method;
+    assert!(
+        inspect_original_genesis_identity(&human, human_ctx, |_| false)
+            .expect("human genesis")
+            .agent_id
+            .is_none()
+    );
+}
+
+#[test]
+fn boundary_original_device_revocation_is_observed_while_acceptor_still_requires_current_authority()
+{
+    use heddle_biscuit_verifier::inspection::RevocationSelector;
+
+    use crate::boundary_authority::{
+        OriginalRevocation, inspect_original_identity, verify_accepting_authority,
+    };
+    let (bytes, owner, publisher) = fixture_mint_method_with_facts(
+        true,
+        true,
+        "PublishContent",
+        "device(\"original-device\");",
+    );
+    let ctx = || {
+        let mut value = context(&owner, &publisher);
+        value.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+        value.agent_id = Some("original-session");
+        value.now = NOW + 200;
+        value
+    };
+    let observed = inspect_original_identity(&bytes, ctx(), |selector| {
+        matches!(
+            selector,
+            OriginalRevocation::Credential(RevocationSelector::Device("original-device"))
+        )
+    })
+    .expect("revoked original device remains authenticated provenance");
+    assert!(
+        observed.explicitly_revoked,
+        "original device selector must reach observation callback"
+    );
+    let selectors = observed.revocations.selectors().collect::<Vec<_>>();
+    assert!(selectors.contains(&RevocationSelector::Session("original-session")));
+    assert!(selectors.contains(&RevocationSelector::Credential("original-credential")));
+    assert!(selectors.contains(&RevocationSelector::Device("original-device")));
+    assert!(
+        selectors
+            .iter()
+            .any(|selector| matches!(selector, RevocationSelector::Block(_)))
+    );
+    let key = hex::encode(TestKey::new(95).signing.verifying_key().to_bytes());
+    assert!(
+        selectors.contains(&RevocationSelector::EnvelopeDeviceKey(&key)),
+        "original verified envelope key is retained independently of delegated publisher"
+    );
+    assert!(
+        !inspect_original_identity(&bytes, ctx(), |_| false)
+            .expect("unrevoked observation")
+            .explicitly_revoked
+    );
+    let (fresh, current, key) = boundary_acceptor("");
+    let thread = [21; 32];
+    let subject = [22; 32];
+    let current_ctx = || {
+        let mut value = context(&current, &key);
+        value.now = NOW + 200;
+        value.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+        value
+    };
+    verify_accepting_authority(
+        &fresh,
+        current_ctx(),
+        boundary_scope(&thread, &subject, &publisher),
+        &[],
+        |_| false,
+    )
+    .expect("different current accepting authority");
+    assert!(
+        verify_accepting_authority(
+            &fresh,
+            current_ctx(),
+            boundary_scope(&thread, &subject, &publisher),
+            &[],
+            |revocation| matches!(revocation, Revocation::Publisher(_))
+        )
+        .is_err(),
+        "current accepting publisher revocation still denies authorization"
+    );
 }

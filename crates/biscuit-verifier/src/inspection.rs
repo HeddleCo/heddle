@@ -3,6 +3,75 @@ use biscuit_auth::{Biscuit, PublicKey};
 
 use crate::{BiscuitError, BiscuitFacts, authorizer_limits};
 
+/// A selector retains its storage namespace; device IDs and proof keys are
+/// not interchangeable with session, credential, or signed-block IDs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevocationSelector<'a> {
+    Session(&'a str),
+    Credential(&'a str),
+    Block(&'a str),
+    Device(&'a str),
+    EnvelopeDeviceKey(&'a str),
+}
+impl<'a> RevocationSelector<'a> {
+    pub fn value(self) -> &'a str {
+        match self {
+            Self::Session(value)
+            | Self::Credential(value)
+            | Self::Block(value)
+            | Self::Device(value)
+            | Self::EnvelopeDeviceKey(value) => value,
+        }
+    }
+}
+pub(crate) fn credential_selectors<'a>(
+    session: &'a str,
+    credential: Option<&'a str>,
+    blocks: &'a [String],
+    device: Option<&'a str>,
+    envelope_key: Option<&'a str>,
+) -> impl Iterator<Item = RevocationSelector<'a>> {
+    std::iter::once(RevocationSelector::Session(session))
+        .chain(credential.map(RevocationSelector::Credential))
+        .chain(
+            blocks
+                .iter()
+                .map(|value| RevocationSelector::Block(value.as_str())),
+        )
+        .chain(device.map(RevocationSelector::Device))
+        .chain(envelope_key.map(RevocationSelector::EnvelopeDeviceKey))
+        .filter(|selector| !selector.value().is_empty())
+}
+/// Owned observations moved from an inspected credential, with no duplicated
+/// flat list. These selectors report provenance; they grant no authority.
+#[derive(Debug)]
+pub struct CredentialRevocations {
+    pub session_id: String,
+    pub credential_id: Option<String>,
+    pub block_ids: Vec<String>,
+    pub device_id: Option<String>,
+    pub envelope_device_pubkey_hex: Option<String>,
+}
+impl CredentialRevocations {
+    pub fn selectors(&self) -> impl Iterator<Item = RevocationSelector<'_>> {
+        credential_selectors(
+            &self.session_id,
+            self.credential_id.as_deref(),
+            &self.block_ids,
+            self.device_id.as_deref(),
+            self.envelope_device_pubkey_hex.as_deref(),
+        )
+    }
+    pub fn identifiers(&self) -> impl Iterator<Item = &str> {
+        self.selectors().filter_map(|selector| match selector {
+            RevocationSelector::Session(value)
+            | RevocationSelector::Credential(value)
+            | RevocationSelector::Block(value) => Some(value),
+            _ => None,
+        })
+    }
+}
+
 /// Cryptographically authenticated metadata, deliberately not an authorization
 /// result. No RPC/check permission is inferred from these inspection fields.
 pub struct InspectedCredential {
@@ -14,9 +83,29 @@ pub struct InspectedCredential {
     pub session_id: String,
     pub device_id: Option<String>,
     pub credential_id: Option<String>,
+    /// Root key supplied by the signature-verifying caller, never a token fact.
+    pub envelope_device_pubkey_hex: Option<String>,
 }
 impl InspectedCredential {
-    /// All revocation selectors; inspection reports identity, not permission.
+    pub fn revocation_selectors(&self) -> impl Iterator<Item = RevocationSelector<'_>> {
+        credential_selectors(
+            &self.session_id,
+            self.credential_id.as_deref(),
+            &self.revocation_ids,
+            self.device_id.as_deref(),
+            self.envelope_device_pubkey_hex.as_deref(),
+        )
+    }
+    pub fn into_revocations(self) -> CredentialRevocations {
+        CredentialRevocations {
+            session_id: self.session_id,
+            credential_id: self.credential_id,
+            block_ids: self.revocation_ids,
+            device_id: self.device_id,
+            envelope_device_pubkey_hex: self.envelope_device_pubkey_hex,
+        }
+    }
+    /// Session, credential, and block IDs; typed selectors also include devices.
     pub fn revocation_identities(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.session_id.as_str())
             .chain(self.credential_id.as_deref())
@@ -63,6 +152,7 @@ pub fn inspect_verified_credential(
         session_id: facts.sid,
         device_id: facts.device_id,
         credential_id: facts.credential_id,
+        envelope_device_pubkey_hex: Some(hex::encode(root.to_bytes())),
     })
 }
 #[cfg(test)]
@@ -96,6 +186,15 @@ mod tests {
             Some("issued-credential")
         );
         assert_eq!(inspected.proof_public_key, root.to_bytes());
+        let root_hex = hex::encode(root.to_bytes());
+        let selectors = inspected.revocation_selectors().collect::<Vec<_>>();
+        assert!(selectors.contains(&RevocationSelector::Device("registered-device")));
+        assert!(
+            selectors.contains(&RevocationSelector::EnvelopeDeviceKey(&root_hex)),
+            "inspection must retain actual verified root selector"
+        );
+        assert!(selectors.contains(&RevocationSelector::Session("inspect-scoped")));
+        assert!(selectors.contains(&RevocationSelector::Credential("issued-credential")));
         assert_eq!(inspected.expires_at_unix_seconds, 946684800);
         assert!(!inspected.revocation_ids.is_empty());
         assert!(
