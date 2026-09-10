@@ -1601,7 +1601,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
             "client",
         ),
     ),
-    entry(&["grant"], feature_gated(user_scoped(GROUP), "client")),
+    entry(
+        &["grant"],
+        feature_gated(
+            CommandContract {
+                help_rank: 193,
+                ..user_scoped(GROUP)
+            },
+            "client",
+        ),
+    ),
     entry(
         &["grant", "create"],
         feature_gated(
