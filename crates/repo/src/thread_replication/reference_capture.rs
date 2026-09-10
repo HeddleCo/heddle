@@ -94,18 +94,16 @@ impl ThreadReplica {
         let genesis = self.genesis()?;
         if let Some(proof) = operation.reference_proof(&genesis)? {
             capture::closure(&Source(store), proof.descriptor, &proof.scope, proof.state)?;
-        } else if let Some(state) = operation.source_state()? {
-            if let Some(parent) = genesis.parent {
-                if state.parents.contains(&genesis.base)
-                    && !descriptor_rows_at(&self.connect()?, parent, genesis.base)?
-                        .1
-                        .is_empty()
-                {
-                    return Err(err(
-                        "source evolution drops inherited fork reference closure",
-                    ));
-                }
-            }
+        } else if let Some(state) = operation.source_state()?
+            && let Some(parent) = genesis.parent
+            && state.parents.contains(&genesis.base)
+            && !descriptor_rows_at(&self.connect()?, parent, genesis.base)?
+                .1
+                .is_empty()
+        {
+            return Err(err(
+                "source evolution drops inherited fork reference closure",
+            ));
         }
         Ok(())
     }
@@ -237,10 +235,10 @@ impl ThreadReplica {
     ) -> Result<Capture> {
         let connection = self.connect()?;
         let existing:Option<Vec<u8>>=connection.query_row("SELECT o.canonical FROM operations o WHERE o.thread=?1 AND o.source_revision=?2 AND o.status=1 ORDER BY o.id LIMIT 1",params![self.thread.as_bytes(),state.id().as_bytes()],|r|r.get(0)).optional()?;
-        if let Some(bytes) = existing {
-            if let Some(capture) = ThreadOperation::decode(&bytes)?.source_result()? {
-                return Ok(capture);
-            }
+        if let Some(bytes) = existing
+            && let Some(capture) = ThreadOperation::decode(&bytes)?.source_result()?
+        {
+            return Ok(capture);
         }
         let scope = self.reference_scope()?;
         let store = repo.store();
@@ -448,8 +446,9 @@ impl ThreadReplica {
             }
         }
         for source in sources {
-            if let Some(target) = &source.source.target {
-                if matches!(target.binding, SourceTargetBinding::ViewedThread) {
+            if let Some(target) = &source.source.target
+                && matches!(target.binding, SourceTargetBinding::ViewedThread)
+            {
                     let scope = self.reference_scope()?;
                     if source.scope.spool != scope.spool {
                         return Err(err("viewed target original evidence crosses Spool"));
@@ -485,7 +484,6 @@ impl ThreadReplica {
                         }
                     }
                     tx.execute("INSERT OR IGNORE INTO reference_seeds(thread,operation,target,source) VALUES(?1,?2,?3,?4)",params![self.thread.as_bytes(),id.as_bytes(),target.target.as_bytes(),capture::encode(&source)?])?;
-                }
             }
         }
         Ok(())

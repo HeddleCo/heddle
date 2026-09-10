@@ -347,17 +347,14 @@ impl StagedSource {
                 if !prior.is_some_and(|prior| {
                     prior.original == *signed
                         && prior.status == objects::object::thread_replication::Admission::Accepted
-                }) {
-                    if let Some(author) = operation.source_author().map_err(preparation)? {
-                        match author {
-                            objects::object::thread_replication::SourceAuthor::LocalKey => replica
-                                .verify_local_source_owner(&operation)
-                                .map_err(preparation)?,
-                            objects::object::thread_replication::SourceAuthor::Account {
-                                ..
-                            } => {
-                                replica.verify_source_authority(&operation, authority.ok_or(Error::Invalid("fresh source requires original authority or retained admission"))?, spool_path, now).map_err(preparation)?;
-                            }
+                }) && let Some(author) = operation.source_author().map_err(preparation)?
+                {
+                    match author {
+                        objects::object::thread_replication::SourceAuthor::LocalKey => replica
+                            .verify_local_source_owner(&operation)
+                            .map_err(preparation)?,
+                        objects::object::thread_replication::SourceAuthor::Account { .. } => {
+                            replica.verify_source_authority(&operation, authority.ok_or(Error::Invalid("fresh source requires original authority or retained admission"))?, spool_path, now).map_err(preparation)?;
                         }
                     }
                 }

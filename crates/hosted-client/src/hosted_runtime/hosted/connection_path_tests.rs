@@ -95,6 +95,10 @@ fn verified_descriptor(
 
 #[tokio::test]
 #[ignore = "release-only hosted endpoint close performance contract"]
+// reason: `lock_test_env` is a process-global serialization mutex (payload
+// `()`) held across the whole async scenario so no other test mutates
+// HEDDLE_HOME/credentials concurrently. Each `#[tokio::test]` runs on its own
+// runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 async fn hosted_endpoint_close_release_contract() {
     let _env_guard = config::credentials::lock_test_env();
@@ -200,6 +204,10 @@ fn percentile_ms(sorted_values: &[f64], percentile: usize) -> f64 {
 }
 
 #[tokio::test]
+// reason: `lock_test_env` is a process-global serialization mutex (payload
+// `()`) held across the whole async scenario so no other test mutates
+// HEDDLE_HOME/credentials concurrently. Each `#[tokio::test]` runs on its own
+// runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 async fn reachable_direct_address_keeps_the_claim_relay_online() {
     use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
@@ -253,6 +261,10 @@ async fn reachable_direct_address_keeps_the_claim_relay_online() {
 }
 
 #[tokio::test]
+// reason: `lock_test_env` is a process-global serialization mutex (payload
+// `()`) held across the whole async scenario so no other test mutates
+// HEDDLE_HOME/credentials concurrently. Each `#[tokio::test]` runs on its own
+// runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 async fn direct_only_descriptor_uses_the_normal_connection_path() {
     let _env_guard = config::credentials::lock_test_env();
@@ -290,6 +302,10 @@ async fn direct_only_descriptor_uses_the_normal_connection_path() {
 }
 
 #[tokio::test]
+// reason: `lock_test_env` is a process-global serialization mutex (payload
+// `()`) held across the whole async scenario so no other test mutates
+// HEDDLE_HOME/credentials concurrently. Each `#[tokio::test]` runs on its own
+// runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 async fn unreachable_direct_address_falls_back_to_signed_relay() {
     let _env_guard = config::credentials::lock_test_env();
@@ -349,6 +365,10 @@ async fn unreachable_direct_address_falls_back_to_signed_relay() {
 }
 
 #[tokio::test]
+// reason: `lock_test_env` is a process-global serialization mutex (payload
+// `()`) held across the whole async scenario so no other test mutates
+// HEDDLE_HOME/credentials concurrently. Each `#[tokio::test]` runs on its own
+// runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
     let _env_guard = config::credentials::lock_test_env();

@@ -8,6 +8,10 @@ use rusqlite::{OptionalExtension, params};
 
 use super::{Error, Result, ThreadReplica};
 
+/// Row shape for a local-integration source lookup: canonical bytes, signature,
+/// status, and the source Thread's genesis bytes.
+type LocalIntegrationSourceRow = (Vec<u8>, Vec<u8>, i32, Vec<u8>);
+
 impl ThreadReplica {
     /// Called only by Repository's verified owner-genesis configuration seam.
     pub(crate) fn pin_hosted_executor(&self, trust: &TrustedHostedExecutor) -> Result<()> {
@@ -95,7 +99,7 @@ impl ThreadReplica {
         let Some(receipt) = operation.local_integration()? else {
             return Ok(());
         };
-        let source:Option<(Vec<u8>,Vec<u8>,i32,Vec<u8>)>=connection.query_row("SELECT o.canonical,o.signature,o.status,t.genesis FROM operations o JOIN threads t ON t.id=o.thread WHERE o.thread=?1 AND o.id=?2",params![receipt.source_thread.as_bytes(),receipt.source_operation.as_bytes()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
+        let source: Option<LocalIntegrationSourceRow> = connection.query_row("SELECT o.canonical,o.signature,o.status,t.genesis FROM operations o JOIN threads t ON t.id=o.thread WHERE o.thread=?1 AND o.id=?2",params![receipt.source_thread.as_bytes(),receipt.source_operation.as_bytes()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
         let (canonical, signature, status, genesis) = source.ok_or_else(|| {
             Error::Invalid("local integration requires original source Thread operation".into())
         })?;

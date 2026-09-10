@@ -1,5 +1,4 @@
 //! Durable execution state shares the command receipt transaction and caller namespace.
-#![allow(clippy::items_after_test_module)]
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
@@ -239,6 +238,75 @@ fn wake(directory: &Path) -> Result<()> {
     Ok(())
 }
 
+/// An executor identity includes OS process identity; a reused PID cannot inherit it.
+pub fn executor_identity() -> Result<String> {
+    let pid = std::process::id();
+    Ok(format!(
+        "{pid}:{}:{}",
+        process_birth(pid)?.unwrap_or_default(),
+        uuid::Uuid::new_v4()
+    ))
+}
+#[cfg(target_os = "linux")]
+fn process_birth(pid: u32) -> Result<Option<String>> {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let fields = stat
+        .rsplit_once(") ")
+        .context("invalid process identity record")?
+        .1;
+    let start = fields
+        .split_whitespace()
+        .nth(19)
+        .context("process start time absent")?;
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+    Ok(Some(format!("{}-{start}", boot.trim())))
+}
+#[cfg(not(target_os = "linux"))]
+fn process_birth(pid: u32) -> Result<Option<String>> {
+    // Without a portable birth identity, only a definite absent process is dead.
+    let pid = i32::try_from(pid)?;
+    let result = unsafe { libc::kill(pid, 0) };
+    if result < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        Ok(None)
+    } else {
+        Ok(Some("present".into()))
+    }
+}
+pub fn executor_is_dead(executor: &str) -> Result<bool> {
+    let mut parts = executor.splitn(3, ':');
+    let pid = parts
+        .next()
+        .context("executor PID absent")?
+        .parse::<u32>()?;
+    let birth = parts.next().context("executor birth absent")?;
+    let current = process_birth(pid)?;
+    Ok(current.as_deref() != Some(birth))
+}
+pub fn recover_if_dead(
+    directory: &Path,
+    namespace: &str,
+    key: ContentHash,
+    executor: &str,
+) -> Result<bool> {
+    if !executor_is_dead(executor)? {
+        return Ok(false);
+    }
+    let failure=api::heddle::api::v1alpha1::CallFailure{code:api::heddle::api::v1alpha1::CallFailureCode::Unavailable as i32,message:"Native executor stopped before acknowledging completion; inspect retained results before retrying".into(),..Default::default()};
+    transition(
+        directory,
+        namespace,
+        key,
+        executor,
+        State::Failed,
+        Some(failure),
+    )?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use api::heddle::api::v2alpha1::{RecordRef, SpoolRef};
@@ -442,71 +510,3 @@ mod tests {
     }
 }
 
-/// An executor identity includes OS process identity; a reused PID cannot inherit it.
-pub fn executor_identity() -> Result<String> {
-    let pid = std::process::id();
-    Ok(format!(
-        "{pid}:{}:{}",
-        process_birth(pid)?.unwrap_or_default(),
-        uuid::Uuid::new_v4()
-    ))
-}
-#[cfg(target_os = "linux")]
-fn process_birth(pid: u32) -> Result<Option<String>> {
-    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => stat,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
-    let fields = stat
-        .rsplit_once(") ")
-        .context("invalid process identity record")?
-        .1;
-    let start = fields
-        .split_whitespace()
-        .nth(19)
-        .context("process start time absent")?;
-    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
-    Ok(Some(format!("{}-{start}", boot.trim())))
-}
-#[cfg(not(target_os = "linux"))]
-fn process_birth(pid: u32) -> Result<Option<String>> {
-    // Without a portable birth identity, only a definite absent process is dead.
-    let pid = i32::try_from(pid)?;
-    let result = unsafe { libc::kill(pid, 0) };
-    if result < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
-        Ok(None)
-    } else {
-        Ok(Some("present".into()))
-    }
-}
-pub fn executor_is_dead(executor: &str) -> Result<bool> {
-    let mut parts = executor.splitn(3, ':');
-    let pid = parts
-        .next()
-        .context("executor PID absent")?
-        .parse::<u32>()?;
-    let birth = parts.next().context("executor birth absent")?;
-    let current = process_birth(pid)?;
-    Ok(current.as_deref() != Some(birth))
-}
-pub fn recover_if_dead(
-    directory: &Path,
-    namespace: &str,
-    key: ContentHash,
-    executor: &str,
-) -> Result<bool> {
-    if !executor_is_dead(executor)? {
-        return Ok(false);
-    }
-    let failure=api::heddle::api::v1alpha1::CallFailure{code:api::heddle::api::v1alpha1::CallFailureCode::Unavailable as i32,message:"Native executor stopped before acknowledging completion; inspect retained results before retrying".into(),..Default::default()};
-    transition(
-        directory,
-        namespace,
-        key,
-        executor,
-        State::Failed,
-        Some(failure),
-    )?;
-    Ok(true)
-}

@@ -75,14 +75,14 @@ impl<I: Iterator<Item = ReceivedOperation>> AuthorityBatches<I> {
                     None => break,
                 },
             };
-            if let Some((id, signed)) = &candidate.acceptance {
-                if let Some(prior) = evidence.get(id) {
-                    if !Arc::ptr_eq(prior, signed) && prior.as_ref() != signed.as_ref() {
-                        return Err(Error::Protocol(
-                            "conflicting boundary acceptance evidence in outgoing batch",
-                        ));
-                    }
-                }
+            if let Some((id, signed)) = &candidate.acceptance
+                && let Some(prior) = evidence.get(id)
+                && !Arc::ptr_eq(prior, signed)
+                && prior.as_ref() != signed.as_ref()
+            {
+                return Err(Error::Protocol(
+                    "conflicting boundary acceptance evidence in outgoing batch",
+                ));
             }
             let acceptance = candidate
                 .acceptance

@@ -340,11 +340,11 @@ pub(crate) fn validate_artifacts(
             .source_state()
             .map_err(preparation)?
             .ok_or(Error::Invalid("non-source operation in source ancestry"))?;
-        if operation.thread == selected_thread && state.id().as_bytes().as_slice() == selected.value
+        if operation.thread == selected_thread
+            && state.id().as_bytes().as_slice() == selected.value
+            && selected_operation.replace((id, state)).is_some()
         {
-            if selected_operation.replace((id, state)).is_some() {
-                return Err(Error::Invalid("ambiguous selected source proof"));
-            }
+            return Err(Error::Invalid("ambiguous selected source proof"));
         }
         originals.insert(id, signed.clone());
         if decoded.insert(id, operation).is_some() {
@@ -395,20 +395,20 @@ pub(crate) fn validate_artifacts(
         let genesis = geneses
             .get(&operation.thread)
             .ok_or(Error::Invalid("source dependency genesis absent"))?;
-        if used_threads.insert(operation.thread) {
-            if let Some(frontier) = claim_frontiers.get(&operation.thread) {
-                for head in frontier {
-                    if decoded
-                        .get(head)
-                        .is_none_or(|source| source.thread != operation.thread)
-                    {
-                        return Err(Error::Invalid(
-                            "ownership claim cutoff source proof absent or foreign",
-                        ));
-                    }
+        if used_threads.insert(operation.thread)
+            && let Some(frontier) = claim_frontiers.get(&operation.thread)
+        {
+            for head in frontier {
+                if decoded
+                    .get(head)
+                    .is_none_or(|source| source.thread != operation.thread)
+                {
+                    return Err(Error::Invalid(
+                        "ownership claim cutoff source proof absent or foreign",
+                    ));
                 }
-                pending.extend(frontier);
             }
+            pending.extend(frontier);
         }
         operation
             .validate_parents(genesis, &parents)

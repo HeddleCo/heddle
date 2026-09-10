@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native v2 client design. Endpoint ownership, credentials and connection
 //! discovery belong to the application; this crate never obtains a Weft token.
-#![allow(clippy::collapsible_if, clippy::items_after_test_module)]
 #[cfg(feature = "native")]
 pub mod authority;
 #[cfg(feature = "replication")]

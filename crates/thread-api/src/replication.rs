@@ -428,10 +428,10 @@ impl<B: ReplicaStore> Session<B> {
                 }
             }
         }
-        if maintenance {
-            if let Some(repair) = self.control().await? {
-                responses.push(Outbound::Frame(repair));
-            }
+        if maintenance
+            && let Some(repair) = self.control().await?
+        {
+            responses.push(Outbound::Frame(repair));
         }
         Ok(responses)
     }

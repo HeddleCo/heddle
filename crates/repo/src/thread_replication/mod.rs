@@ -2,13 +2,6 @@
 //! Durable Thread replication over native captures and collaboration operations.
 //! Endpoint adapters must authorize the exact Thread and disclosure facets before
 //! calling receive/export. Signatures prove the publisher, not spool membership.
-#![allow(
-    clippy::collapsible_if,
-    clippy::items_after_test_module,
-    clippy::needless_borrow,
-    clippy::too_many_arguments,
-    clippy::type_complexity
-)]
 pub mod admission;
 #[cfg(test)]
 mod admission_tests;
@@ -57,6 +50,10 @@ use objects::{
     store::ObjectStore,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+
+/// Row shape for a Thread genesis record: canonical bytes, signature, creator
+/// authority, and the optional admission canonical/signature columns.
+type GenesisRecordRow = (Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>);
 
 const ACCEPTED_PAGE_SQL: &str = "SELECT id,canonical,signature FROM operations WHERE thread=?1 AND status=1 AND facet=?2 AND id>COALESCE(?3,x'') ORDER BY id LIMIT ?4";
 
@@ -256,7 +253,7 @@ impl ThreadReplica {
     }
 
     pub fn genesis_record(&self) -> Result<api::heddle::api::v2alpha1::ThreadGenesisRecord> {
-        let (canonical, signature, creator_authority, admission, admission_signature): (Vec<u8>, Vec<u8>, Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>) =
+        let (canonical, signature, creator_authority, admission, admission_signature): GenesisRecordRow =
             self.connect()?.query_row(
                 "SELECT genesis,genesis_signature,creator_authority,genesis_admission,genesis_admission_signature FROM threads WHERE id=?1",
                 [self.thread.as_bytes()],
@@ -549,7 +546,7 @@ impl ThreadReplica {
                 }
             }
         }
-        self.check_control_command(&tx, &operation, id, compare_frontier)?;
+        self.check_control_command(tx, operation, id, compare_frontier)?;
         let source_revision = match &operation.body {
             ThreadOperationBody::Capture(bytes) => {
                 Some(State::decode_current_msgpack(&bytes.result.state)?.id())
@@ -569,7 +566,7 @@ impl ThreadReplica {
         // installed. Persist its successful admission in this same transaction;
         // missing causal parents may arrive after the original credential expires.
         if objects::object::thread_authority_admission::OriginalAuthorityBinding::from_operation(
-            &operation,
+            operation,
         )?
         .is_some()
         {
@@ -917,10 +914,10 @@ impl ThreadReplica {
         let mut source_heads = BTreeSet::new();
         if let Some(heads) = frontiers.get(&ThreadFacet::Source) {
             for head in heads {
-                if let Some(operation) = accepted.get(head) {
-                    if let Some(state) = operation.source_state()? {
-                        source_heads.insert(state.id());
-                    }
+                if let Some(operation) = accepted.get(head)
+                    && let Some(state) = operation.source_state()?
+                {
+                    source_heads.insert(state.id());
                 }
             }
         }

@@ -2,7 +2,6 @@
 //!
 //! Only enrollment and authenticated account observation may publish this pin.
 //! Incoming device requests cannot bootstrap trust from their own attachments.
-#![allow(clippy::items_after_test_module)]
 use std::{io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};
@@ -260,6 +259,124 @@ pub fn publish(home: &Path, authority: &DeviceAuthority, now: i64) -> Result<()>
     validate(&next, now)?;
     fs_atomic::write_file_atomic_secret(&directory.join("authority.bin"), &next.encode_to_vec())
         .context("persist admitted device account authority")
+}
+
+impl DeviceAuthority {
+    /// Admit a sibling device's public attachment against the independently
+    /// enrolled owner. This proof never installs an account or a new trust root.
+    /// Returns the attachment deadline, if a separate mint key is used.
+    pub fn verify_presented_authority(
+        &self,
+        root_key: &[u8],
+        token: &biscuit_auth::Biscuit,
+        proof: &[u8],
+        now: i64,
+    ) -> Result<Option<i64>> {
+        let root_key: &[u8; 32] = root_key
+            .try_into()
+            .context("device mint root must be Ed25519")?;
+        let current = crate::verify_account_owner_observation(&self.owner, now)?;
+        if proof.is_empty() {
+            self.verify_mint_root(root_key, now)?;
+            if current.authority_key().public_key == root_key.as_slice() {
+                return Ok(None);
+            }
+            return self
+                .mint_roots
+                .iter()
+                .filter_map(|record| record.attachment.as_ref())
+                .filter(|record| {
+                    record
+                        .mint_root_key
+                        .as_ref()
+                        .is_some_and(|key| key.public_key == root_key.as_slice())
+                })
+                .map(|record| record.expires_at_unix_seconds)
+                .filter(|expiry| *expiry > now)
+                .min()
+                .map(Some)
+                .context("mint root deadline unavailable");
+        }
+        if proof.len() > 64 * 1024 {
+            bail!("device authority proof exceeds 64KiB");
+        }
+        let envelope = api::heddle::api::v2alpha1::ThreadControlAuthority::decode(proof)?;
+        if envelope.format != 1
+            || envelope.encode_to_vec() != proof
+            || envelope.mint_root_public_key != root_key.as_slice()
+            || envelope.sealed_biscuit != token.to_vec()?
+            || !matches!(token.seal(), Err(biscuit_auth::error::Token::AlreadySealed))
+        {
+            bail!("device authority proof differs from exact sealed request credential");
+        }
+        let history = envelope
+            .owner
+            .as_ref()
+            .context("device owner history required")?;
+        if history.root != self.owner.root
+            || !self
+                .owner
+                .accepted_transitions
+                .starts_with(&history.accepted_transitions)
+        {
+            bail!("device authority proof is not a prefix of locally enrolled owner history");
+        }
+        let mut observed = self.owner.clone();
+        observed.accepted_transitions = history.accepted_transitions.clone();
+        observed.version = history.state_hash.clone();
+        let original = crate::verify_account_owner_observation(&observed, now)?;
+        let account = current
+            .signed_root()
+            .root
+            .as_ref()
+            .context("locally enrolled account missing")?;
+        let claimed = original
+            .signed_root()
+            .root
+            .as_ref()
+            .context("proof account missing")?;
+        if current.owner_id() != original.owner_id() || account.account_uuid != claimed.account_uuid
+        {
+            bail!("device authority proof is not attached to locally enrolled current owner");
+        }
+        if self.revoked_mint_roots.contains(root_key) {
+            bail!("device mint root revoked");
+        }
+        if current.authority_key().public_key == root_key.as_slice() {
+            if envelope.mint_root_attachment.is_some() {
+                bail!("direct owner proof has an unrelated attachment");
+            }
+            return Ok(None);
+        }
+        let attachment = envelope
+            .mint_root_attachment
+            .as_ref()
+            .context("sibling mint root requires owner certificate")?;
+        if self.mint_roots.contains(attachment) {
+            heddleco_capability_verifier::creation::verify_retained_mint_root_attachment(
+                attachment,
+                &current,
+                &account.account_uuid,
+                root_key,
+                now,
+            )?;
+        } else {
+            heddleco_capability_verifier::creation::verify_mint_root_attachment(
+                attachment,
+                &current,
+                &account.account_uuid,
+                root_key,
+                now,
+            )?;
+        }
+        Ok(Some(
+            attachment
+                .attachment
+                .as_ref()
+                .context("mint certificate missing")?
+                .expires_at_unix_seconds,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -621,120 +738,3 @@ mod tests {
     }
 }
 
-impl DeviceAuthority {
-    /// Admit a sibling device's public attachment against the independently
-    /// enrolled owner. This proof never installs an account or a new trust root.
-    /// Returns the attachment deadline, if a separate mint key is used.
-    pub fn verify_presented_authority(
-        &self,
-        root_key: &[u8],
-        token: &biscuit_auth::Biscuit,
-        proof: &[u8],
-        now: i64,
-    ) -> Result<Option<i64>> {
-        let root_key: &[u8; 32] = root_key
-            .try_into()
-            .context("device mint root must be Ed25519")?;
-        let current = crate::verify_account_owner_observation(&self.owner, now)?;
-        if proof.is_empty() {
-            self.verify_mint_root(root_key, now)?;
-            if current.authority_key().public_key == root_key.as_slice() {
-                return Ok(None);
-            }
-            return self
-                .mint_roots
-                .iter()
-                .filter_map(|record| record.attachment.as_ref())
-                .filter(|record| {
-                    record
-                        .mint_root_key
-                        .as_ref()
-                        .is_some_and(|key| key.public_key == root_key.as_slice())
-                })
-                .map(|record| record.expires_at_unix_seconds)
-                .filter(|expiry| *expiry > now)
-                .min()
-                .map(Some)
-                .context("mint root deadline unavailable");
-        }
-        if proof.len() > 64 * 1024 {
-            bail!("device authority proof exceeds 64KiB");
-        }
-        let envelope = api::heddle::api::v2alpha1::ThreadControlAuthority::decode(proof)?;
-        if envelope.format != 1
-            || envelope.encode_to_vec() != proof
-            || envelope.mint_root_public_key != root_key.as_slice()
-            || envelope.sealed_biscuit != token.to_vec()?
-            || !matches!(token.seal(), Err(biscuit_auth::error::Token::AlreadySealed))
-        {
-            bail!("device authority proof differs from exact sealed request credential");
-        }
-        let history = envelope
-            .owner
-            .as_ref()
-            .context("device owner history required")?;
-        if history.root != self.owner.root
-            || !self
-                .owner
-                .accepted_transitions
-                .starts_with(&history.accepted_transitions)
-        {
-            bail!("device authority proof is not a prefix of locally enrolled owner history");
-        }
-        let mut observed = self.owner.clone();
-        observed.accepted_transitions = history.accepted_transitions.clone();
-        observed.version = history.state_hash.clone();
-        let original = crate::verify_account_owner_observation(&observed, now)?;
-        let account = current
-            .signed_root()
-            .root
-            .as_ref()
-            .context("locally enrolled account missing")?;
-        let claimed = original
-            .signed_root()
-            .root
-            .as_ref()
-            .context("proof account missing")?;
-        if current.owner_id() != original.owner_id() || account.account_uuid != claimed.account_uuid
-        {
-            bail!("device authority proof is not attached to locally enrolled current owner");
-        }
-        if self.revoked_mint_roots.contains(root_key) {
-            bail!("device mint root revoked");
-        }
-        if current.authority_key().public_key == root_key.as_slice() {
-            if envelope.mint_root_attachment.is_some() {
-                bail!("direct owner proof has an unrelated attachment");
-            }
-            return Ok(None);
-        }
-        let attachment = envelope
-            .mint_root_attachment
-            .as_ref()
-            .context("sibling mint root requires owner certificate")?;
-        if self.mint_roots.contains(attachment) {
-            heddleco_capability_verifier::creation::verify_retained_mint_root_attachment(
-                attachment,
-                &current,
-                &account.account_uuid,
-                root_key,
-                now,
-            )?;
-        } else {
-            heddleco_capability_verifier::creation::verify_mint_root_attachment(
-                attachment,
-                &current,
-                &account.account_uuid,
-                root_key,
-                now,
-            )?;
-        }
-        Ok(Some(
-            attachment
-                .attachment
-                .as_ref()
-                .context("mint certificate missing")?
-                .expires_at_unix_seconds,
-        ))
-    }
-}

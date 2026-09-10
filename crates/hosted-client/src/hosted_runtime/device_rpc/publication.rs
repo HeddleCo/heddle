@@ -304,11 +304,13 @@ impl DeviceRpc {
                 outcome: Some(publication_receipt::Outcome::Accepted(Applied::default())),
             };
             let bytes = replica.publish_prepared_source(
-                validated.operations(),
-                validated.authority_admissions(),
+                repo::thread_replication::source_publication::PreparedPublication {
+                    operations: validated.operations(),
+                    authority_admissions: validated.authority_admissions(),
+                    revision,
+                    guards: &guards,
+                },
                 repository.store(),
-                revision,
-                &guards,
                 repo::thread_replication::source_publication::Command {
                     namespace: &namespace,
                     id: operation,

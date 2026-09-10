@@ -13,8 +13,9 @@ use crate::hosted_runtime::{
 };
 
 #[tokio::test]
-// `lock_test_env` serializes process-global HEDDLE_HOME/credential mutation,
-// so the guard is deliberately held across the whole async scenario.
+// reason: `lock_test_env` serializes process-global HEDDLE_HOME/credential
+// mutation, so the guard is deliberately held across the whole async scenario
+// (payload `()`, single per-test runtime — no other task contends, no deadlock).
 #[allow(clippy::await_holding_lock)]
 async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     let _guard = config::credentials::lock_test_env();

@@ -27,17 +27,15 @@ impl Repository {
     pub fn holds_native_owner_key(&self, key: &[u8; 32]) -> Result<bool> {
         if let Some(local) = crate::identity::load_local(
             &self.heddle_dir().join(crate::identity::LOCAL_IDENTITY_FILE),
-        )? {
-            if Ed25519Signer::from_pem(&local.private_key_pem)?.public_key() == key {
-                return Ok(true);
-            }
+        )? && Ed25519Signer::from_pem(&local.private_key_pem)?.public_key() == key
+        {
+            return Ok(true);
         }
         if let Some(device) =
             crate::identity::load_device(&crate::identity::device_identity_path())?
+            && Ed25519Signer::from_pem(&device.private_key_pem)?.public_key() == key
         {
-            if Ed25519Signer::from_pem(&device.private_key_pem)?.public_key() == key {
-                return Ok(true);
-            }
+            return Ok(true);
         }
         Ok(false)
     }

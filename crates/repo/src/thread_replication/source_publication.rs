@@ -16,24 +16,39 @@ pub struct Command<'a> {
     pub method: &'a str,
     pub request_hash: [u8; 32],
 }
+
+/// The already-validated source-publication payload: the original operations,
+/// their independently-verified authority admissions, the state revision, and
+/// the per-dependency Thread guards. Bundled so the commit signature stays under
+/// the argument threshold; behaviour (`store`/`authorize`/`response`) stays out.
+pub struct PreparedPublication<'a> {
+    pub operations: &'a [SignedOperation],
+    pub authority_admissions: &'a std::collections::BTreeMap<
+        objects::object::ContentHash,
+        crypto::thread_authority_admission::SignedAuthorityAdmission,
+    >,
+    pub revision: StateId,
+    pub guards: &'a [(ThreadReplica, i64)],
+}
+
 impl ThreadReplica {
     /// `operations` must already have passed the shared standalone pack/causal
     /// closure validator. `authorize` validates original authors independently
     /// of the current courier. Every dependency Thread was admitted earlier.
     pub fn publish_prepared_source(
         &self,
-        operations: &[SignedOperation],
-        authority_admissions: &std::collections::BTreeMap<
-            objects::object::ContentHash,
-            crypto::thread_authority_admission::SignedAuthorityAdmission,
-        >,
+        prepared: PreparedPublication<'_>,
         store: &impl ObjectStore,
-        revision: StateId,
-        guards: &[(ThreadReplica, i64)],
         command: Command<'_>,
         authorize: impl Fn(&ThreadReplica, &SignedOperation) -> Result<()>,
         response: impl FnOnce() -> Result<Vec<u8>>,
     ) -> Result<Vec<u8>> {
+        let PreparedPublication {
+            operations,
+            authority_admissions,
+            revision,
+            guards,
+        } = prepared;
         if command.namespace.is_empty()
             || command.namespace.len() > 1024
             || command.namespace.contains('\0')
@@ -186,11 +201,13 @@ mod tests {
         };
         let guards = vec![(replica.clone(), replica.generation().expect("generation"))];
         let failed = replica.publish_prepared_source(
-            std::slice::from_ref(&signed),
-            &Default::default(),
+            PreparedPublication {
+                operations: std::slice::from_ref(&signed),
+                authority_admissions: &Default::default(),
+                revision: state.id(),
+                guards: &guards,
+            },
             repository.store(),
-            state.id(),
-            &guards,
             command(),
             |_, _| Ok(()),
             || Err(Error::Invalid("receipt construction failed".into())),
@@ -226,11 +243,13 @@ mod tests {
         );
         let response = replica
             .publish_prepared_source(
-                std::slice::from_ref(&signed),
-                &Default::default(),
+                PreparedPublication {
+                    operations: std::slice::from_ref(&signed),
+                    authority_admissions: &Default::default(),
+                    revision: state.id(),
+                    guards: &guards,
+                },
                 repository.store(),
-                state.id(),
-                &guards,
                 command(),
                 |_, _| Ok(()),
                 || Ok(vec![9]),
@@ -254,11 +273,13 @@ mod tests {
         assert_eq!(
             replica
                 .publish_prepared_source(
-                    std::slice::from_ref(&signed),
-                    &Default::default(),
+                    PreparedPublication {
+                        operations: std::slice::from_ref(&signed),
+                        authority_admissions: &Default::default(),
+                        revision: state.id(),
+                        guards: &guards,
+                    },
                     repository.store(),
-                    state.id(),
-                    &guards,
                     command(),
                     |_, _| Ok(()),
                     || panic!("exact retry must reuse response")
@@ -280,11 +301,13 @@ mod tests {
         assert!(
             replica
                 .publish_prepared_source(
-                    std::slice::from_ref(&signed),
-                    &Default::default(),
+                    PreparedPublication {
+                        operations: std::slice::from_ref(&signed),
+                        authority_admissions: &Default::default(),
+                        revision: state.id(),
+                        guards: &guards,
+                    },
                     repository.store(),
-                    state.id(),
-                    &guards,
                     other,
                     |_, _| Ok(()),
                     || Ok(vec![10])

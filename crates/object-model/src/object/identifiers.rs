@@ -193,12 +193,14 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::cmp_owned)] // exercising PartialEq<String> impl by design
     fn comparison_with_str() {
         let t = ThreadName::from("main");
         assert!(t == "main");
         assert!(t == *"main");
-        assert!(t == String::from("main"));
+        // Bind the owned value so the `PartialEq<String>` impl is still
+        // exercised without triggering `clippy::cmp_owned`.
+        let owned = String::from("main");
+        assert!(t == owned);
     }
 
     #[test]

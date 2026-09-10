@@ -1,6 +1,5 @@
 //! Project real harness sessions and deliver supported controls at hook edges.
 //! Claude output semantics: https://code.claude.com/docs/en/hooks#json-output
-#![allow(clippy::items_after_test_module)]
 use anyhow::{Context, Result};
 use api::heddle::api::v2alpha1 as v2;
 use objects::object::ContentHash;
@@ -264,6 +263,50 @@ pub(crate) fn claude_controls(
     Ok(true)
 }
 
+/// A tool-edge hook reads the indexed binding and pending command queue only.
+/// It does not reopen the session, scan actor files, or rewrite its progress.
+pub(crate) fn claude_tool_edge(
+    repo: &Repository,
+    event: &str,
+    payload: &Value,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
+    let key = crate::probe::claude_actor_key(
+        payload.get("session_id").and_then(Value::as_str),
+        payload.get("agent_id").and_then(Value::as_str),
+    );
+    let run = match (key, RunStore::open_existing(repo.heddle_dir())?) {
+        (Some(key), Some(store)) => store.harness_run(&key)?,
+        _ => None,
+    };
+    if event == "PermissionRequest" {
+        if let Some(run) = run {
+            crate::run_permissions::claude_permission(repo, &run, payload, output)?;
+        }
+        return Ok(());
+    }
+    if let Some(run) = run
+        && claude_controls(
+            repo,
+            &run,
+            event,
+            || crate::claude_hook::pre_tool_use_context(repo, payload),
+            output,
+        )?
+    {
+        return Ok(());
+    }
+    if let Some(context) = crate::claude_hook::pre_tool_use_context(repo, payload)? {
+        serde_json::to_writer(
+            &mut *output,
+            &json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":context}}),
+        )?;
+        output.write_all(b"\n")?;
+        output.flush()?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,46 +539,3 @@ mod tests {
     }
 }
 
-/// A tool-edge hook reads the indexed binding and pending command queue only.
-/// It does not reopen the session, scan actor files, or rewrite its progress.
-pub(crate) fn claude_tool_edge(
-    repo: &Repository,
-    event: &str,
-    payload: &Value,
-    output: &mut impl std::io::Write,
-) -> Result<()> {
-    let key = crate::probe::claude_actor_key(
-        payload.get("session_id").and_then(Value::as_str),
-        payload.get("agent_id").and_then(Value::as_str),
-    );
-    let run = match (key, RunStore::open_existing(repo.heddle_dir())?) {
-        (Some(key), Some(store)) => store.harness_run(&key)?,
-        _ => None,
-    };
-    if event == "PermissionRequest" {
-        if let Some(run) = run {
-            crate::run_permissions::claude_permission(repo, &run, payload, output)?;
-        }
-        return Ok(());
-    }
-    if let Some(run) = run
-        && claude_controls(
-            repo,
-            &run,
-            event,
-            || crate::claude_hook::pre_tool_use_context(repo, payload),
-            output,
-        )?
-    {
-        return Ok(());
-    }
-    if let Some(context) = crate::claude_hook::pre_tool_use_context(repo, payload)? {
-        serde_json::to_writer(
-            &mut *output,
-            &json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":context}}),
-        )?;
-        output.write_all(b"\n")?;
-        output.flush()?;
-    }
-    Ok(())
-}

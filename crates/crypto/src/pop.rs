@@ -77,9 +77,8 @@ fn field_len(key: &str, value: &str) -> usize {
     key.len() + 1 + utf8_byte_len(value).to_string().len() + 1 + value.len() + 1
 }
 
-#[allow(clippy::needless_as_bytes)]
 fn utf8_byte_len(value: &str) -> usize {
-    value.as_bytes().len()
+    value.len()
 }
 
 #[cfg(test)]

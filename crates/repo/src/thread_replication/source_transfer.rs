@@ -104,10 +104,10 @@ impl ThreadReplica {
             max_bytes.saturating_sub(bytes),
         )?;
         for stored in &mut output {
-            if let Some(receipt) = &mut stored.authority_admission {
-                if let objects::object::original_boundary_acceptance::AdmissionBasis::BoundaryAcceptance {acceptance}=receipt.verify_signature()?.basis {
-                    receipt.boundary_acceptance=Some(evidence.get(&acceptance).ok_or_else(||Error::Invalid("missing matched source evidence".into()))?.clone());
-                }
+            if let Some(receipt) = &mut stored.authority_admission
+                && let objects::object::original_boundary_acceptance::AdmissionBasis::BoundaryAcceptance {acceptance}=receipt.verify_signature()?.basis
+            {
+                receipt.boundary_acceptance=Some(evidence.get(&acceptance).ok_or_else(||Error::Invalid("missing matched source evidence".into()))?.clone());
             }
         }
         Ok(output)

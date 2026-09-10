@@ -372,8 +372,9 @@ fn trusted_config(server: &TestHttpsServer) -> config::ClientConfig {
         .with_tls_ca_certificate_pem(server.certificate_pem().to_string())
 }
 
-// HEDDLE_HOME is process-global, so this test helper deliberately holds the
-// repository's shared environment lock across each async scenario.
+// reason: HEDDLE_HOME is process-global, so this test helper deliberately holds
+// the shared environment lock across each async scenario (payload `()`, single
+// per-test runtime — no other task contends for the guard, no deadlock).
 #[allow(clippy::await_holding_lock)]
 async fn with_isolated_home_async<F, Fut, T>(test: F) -> T
 where

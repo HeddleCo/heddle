@@ -83,7 +83,6 @@ pub(crate) use remote_ops::{
 };
 
 /// CLI machine envelope: domain [`PushOutcome`] plus verification next-actions.
-#[allow(clippy::type_complexity)]
 fn push_output_from_outcome(
     outcome: PushOutcome,
     trust: RepositoryVerificationState,
@@ -131,20 +130,24 @@ impl SleyProgressSink for GitPushProgress {
     }
 }
 
-#[allow(clippy::type_complexity)]
+/// Result of pushing local Git-overlay refs: the resolved remote, the current
+/// thread (unless `--all-threads`), any tracking refresh, the refs written, and
+/// the post-push repository verification state.
+struct GitOverlayPushRefs {
+    remote_name: String,
+    current_thread: Option<String>,
+    tracking: Option<GitOverlayTrackingRefresh>,
+    refs_written: Vec<String>,
+    trust: RepositoryVerificationState,
+}
+
 fn push_git_overlay_refs(
     cli: &Cli,
     repo: &Repository,
     remote: Option<&str>,
     all_threads: bool,
     force: bool,
-) -> Result<(
-    String,
-    Option<String>,
-    Option<GitOverlayTrackingRefresh>,
-    Vec<String>,
-    RepositoryVerificationState,
-)> {
+) -> Result<GitOverlayPushRefs> {
     let remote_name = resolve_default_push_remote_name(repo, remote)?;
     let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
     let current_thread = if all_threads {
@@ -196,7 +199,13 @@ fn push_git_overlay_refs(
     finish_line(&progress, "[done] pushed Git refs");
     let tracking = refresh_git_tracking_after_overlay_push(repo, &remote_name)?;
     let trust = build_repository_verification_state(repo);
-    Ok((remote_name, current_thread, tracking, refs_written, trust))
+    Ok(GitOverlayPushRefs {
+        remote_name,
+        current_thread,
+        tracking,
+        refs_written,
+        trust,
+    })
 }
 
 fn git_overlay_push_output(
@@ -320,21 +329,20 @@ pub async fn cmd_push(
         PushPath::LocalGitOverlayRefs {
             all_threads: path_all_threads,
         } => {
-            let (remote_name, current_thread, tracking, refs_written, trust) =
-                push_git_overlay_refs(
-                    cli,
-                    &repo,
-                    remote.as_deref(),
-                    *path_all_threads,
-                    plan.force,
-                )?;
+            let pushed = push_git_overlay_refs(
+                cli,
+                &repo,
+                remote.as_deref(),
+                *path_all_threads,
+                plan.force,
+            )?;
             let output = git_overlay_push_output(
                 &plan,
-                remote_name,
-                current_thread,
-                tracking,
-                refs_written,
-                trust,
+                pushed.remote_name,
+                pushed.current_thread,
+                pushed.tracking,
+                pushed.refs_written,
+                pushed.trust,
             );
             if should_output_json(cli, Some(repo.config())) {
                 write_full_command_json(

@@ -978,7 +978,6 @@ struct AssistantEvent {
 }
 
 #[cfg(test)]
-#[allow(clippy::useless_format, clippy::format_in_format_args)]
 mod tests {
     use super::*;
     use crate::transcript::types::{FileTouch, TouchKind};
@@ -1171,15 +1170,16 @@ mod tests {
         // scanning, a sentence that names `Combobox.svelte` should
         // resolve to that file even when the immediate tool_use is on
         // an unrelated path.
-        let body = format!(
-            "{{\"type\":\"assistant\",\"sessionId\":\"S\",\"cwd\":\"/r\",\
-            \"timestamp\":\"2026-04-21T10:00:00Z\",\"uuid\":\"a\",\
-            \"message\":{{\"content\":[\
-            {{\"type\":\"text\",\"text\":\"Never call parseToken before tenant scope is loaded in Combobox.svelte.\"}},\
-            {{\"type\":\"tool_use\",\"name\":\"Edit\",\"input\":{{\"file_path\":\"/r/auth.rs\",\"old_string\":\"x\",\"new_string\":\"y\"}}}},\
-            {{\"type\":\"tool_use\",\"name\":\"Edit\",\"input\":{{\"file_path\":\"/r/Combobox.svelte\",\"old_string\":\"a\",\"new_string\":\"b\"}}}}\
-            ]}}}}"
-        );
+        let body = concat!(
+            r#"{"type":"assistant","sessionId":"S","cwd":"/r","#,
+            r#""timestamp":"2026-04-21T10:00:00Z","uuid":"a","#,
+            r#""message":{"content":["#,
+            r#"{"type":"text","text":"Never call parseToken before tenant scope is loaded in Combobox.svelte."},"#,
+            r#"{"type":"tool_use","name":"Edit","input":{"file_path":"/r/auth.rs","old_string":"x","new_string":"y"}},"#,
+            r#"{"type":"tool_use","name":"Edit","input":{"file_path":"/r/Combobox.svelte","old_string":"a","new_string":"b"}}"#,
+            r#"]}}"#
+        )
+        .to_string();
         let (_d, path) = write_session(&body);
         let t = make_transcript(path);
         let cands = harvest(&t, &HarvestParams::default()).unwrap();
@@ -1524,14 +1524,15 @@ mod tests {
         // event pairs with the next-event tool target at proximity 0.7.
         let cmd = "apply_patch <<'P'\n*** Begin Patch\n*** Update File: src/auth.rs\n@@\n-old\n+new\n*** End Patch\nP";
         let args = serde_json::json!({"cmd": cmd, "workdir": "/repo"}).to_string();
+        let call = format!(
+            r#"{{"timestamp":"2026-04-21T10:01:00Z","type":"response_item","payload":{{"type":"function_call","name":"exec_command","arguments":{}}}}}"#,
+            serde_json::to_string(&args).unwrap()
+        );
         let body = format!(
             "{}\n{}\n{}",
             r#"{"timestamp":"2026-04-21T10:00:00Z","type":"session_meta","payload":{"id":"S","cwd":"/repo"}}"#,
             r#"{"timestamp":"2026-04-21T10:00:30Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Never mutate the global session lock without first acquiring the tenant scope."}]}}"#,
-            format!(
-                r#"{{"timestamp":"2026-04-21T10:01:00Z","type":"response_item","payload":{{"type":"function_call","name":"exec_command","arguments":{}}}}}"#,
-                serde_json::to_string(&args).unwrap()
-            ),
+            call,
         );
         let (_d, path) = write_session(&body);
         let mut t = make_transcript(path);
@@ -1557,14 +1558,15 @@ mod tests {
 -old\n\
 +new\n\
 *** End Patch\n";
+        let call = format!(
+            r#"{{"timestamp":"2026-04-21T10:01:00Z","type":"response_item","payload":{{"type":"custom_tool_call","status":"completed","name":"apply_patch","input":{}}}}}"#,
+            serde_json::to_string(patch).unwrap()
+        );
         let body = format!(
             "{}\n{}\n{}",
             r#"{"timestamp":"2026-04-21T10:00:00Z","type":"session_meta","payload":{"id":"S","cwd":"/repo"}}"#,
             r#"{"timestamp":"2026-04-21T10:00:30Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Always validate native.rs before updating the generated index."}]}}"#,
-            format!(
-                r#"{{"timestamp":"2026-04-21T10:01:00Z","type":"response_item","payload":{{"type":"custom_tool_call","status":"completed","name":"apply_patch","input":{}}}}}"#,
-                serde_json::to_string(patch).unwrap()
-            ),
+            call,
         );
         let (_d, path) = write_session(&body);
         let mut t = make_transcript(path);
@@ -1588,14 +1590,15 @@ mod tests {
         // mine the encrypted blob.
         let cmd = "apply_patch <<'P'\n*** Begin Patch\n*** Update File: src/x.rs\n@@\n-a\n+b\n*** End Patch\nP";
         let args = serde_json::json!({"cmd": cmd, "workdir": "/repo"}).to_string();
+        let call = format!(
+            r#"{{"timestamp":"2026-04-21T10:01:00Z","type":"response_item","payload":{{"type":"function_call","name":"exec_command","arguments":{}}}}}"#,
+            serde_json::to_string(&args).unwrap()
+        );
         let body = format!(
             "{}\n{}\n{}",
             r#"{"timestamp":"2026-04-21T10:00:00Z","type":"session_meta","payload":{"id":"S","cwd":"/repo"}}"#,
             r#"{"timestamp":"2026-04-21T10:00:30Z","type":"response_item","payload":{"type":"reasoning","summary":[],"content":null,"encrypted_content":"gAAAA..."}}"#,
-            format!(
-                r#"{{"timestamp":"2026-04-21T10:01:00Z","type":"response_item","payload":{{"type":"function_call","name":"exec_command","arguments":{}}}}}"#,
-                serde_json::to_string(&args).unwrap()
-            ),
+            call,
         );
         let (_d, path) = write_session(&body);
         let mut t = make_transcript(path);
@@ -1634,15 +1637,16 @@ mod tests {
         // can pair with it.
         let cmd_in_new = "echo x > out.txt";
         let args = serde_json::json!({"cmd": cmd_in_new}).to_string();
+        let call = format!(
+            r#"{{"timestamp":"2026-04-21T10:01:00Z","type":"response_item","payload":{{"type":"function_call","name":"exec_command","arguments":{}}}}}"#,
+            serde_json::to_string(&args).unwrap()
+        );
         let body = format!(
             "{}\n{}\n{}\n{}",
             r#"{"timestamp":"2026-04-21T10:00:00Z","type":"session_meta","payload":{"id":"S","cwd":"/old"}}"#,
             r#"{"timestamp":"2026-04-21T10:00:10Z","type":"turn_context","payload":{"cwd":"/new"}}"#,
             r#"{"timestamp":"2026-04-21T10:00:30Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Never write to out.txt without locking first."}]}}"#,
-            format!(
-                r#"{{"timestamp":"2026-04-21T10:01:00Z","type":"response_item","payload":{{"type":"function_call","name":"exec_command","arguments":{}}}}}"#,
-                serde_json::to_string(&args).unwrap()
-            ),
+            call,
         );
         let (_d, path) = write_session(&body);
         let mut t = make_transcript(path);

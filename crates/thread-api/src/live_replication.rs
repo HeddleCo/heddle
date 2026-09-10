@@ -228,17 +228,16 @@ fn retained_unit_bytes(units: &[InputUnit]) -> usize {
             if let Some(receipt) = &received.authority_admission {
                 bytes += receipt.canonical.capacity() + receipt.signature.capacity();
             }
-            if let Some(acceptance) = unit_acceptance(unit) {
-                if !units[..index]
+            if let Some(acceptance) = unit_acceptance(unit)
+                && !units[..index]
                     .iter()
                     .filter_map(unit_acceptance)
                     .any(|prior| Arc::ptr_eq(prior, acceptance))
-                {
-                    bytes += std::mem::size_of_val(acceptance.as_ref())
-                        + 2 * std::mem::size_of::<usize>()
-                        + acceptance.canonical.capacity()
-                        + acceptance.signature.capacity();
-                }
+            {
+                bytes += std::mem::size_of_val(acceptance.as_ref())
+                    + 2 * std::mem::size_of::<usize>()
+                    + acceptance.canonical.capacity()
+                    + acceptance.signature.capacity();
             }
             bytes
         })

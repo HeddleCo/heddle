@@ -12,6 +12,10 @@ use rusqlite::{TransactionBehavior, params};
 
 use super::{Error, Result, ThreadReplica};
 
+/// Row shape for an ownership-claim admission lookup: the optional admission
+/// canonical and signature columns.
+type OwnershipClaimAdmissionRow = (Option<Vec<u8>>, Option<Vec<u8>>);
+
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS thread_owner_claims(thread BLOB NOT NULL, id BLOB NOT NULL, canonical BLOB NOT NULL CHECK(length(canonical)<=262144), local_signature BLOB NOT NULL CHECK(length(local_signature)=64), acceptance_signature BLOB NOT NULL CHECK(length(acceptance_signature)=64), account TEXT NOT NULL, admission BLOB, admission_signature BLOB, PRIMARY KEY(thread,id));
 CREATE TABLE IF NOT EXISTS thread_owner_claim_frontier(thread BLOB NOT NULL, claim BLOB NOT NULL, operation BLOB NOT NULL, PRIMARY KEY(thread,claim,operation));
@@ -208,7 +212,7 @@ impl ThreadReplica {
         id: &ContentHash,
     ) -> Result<Option<crypto::thread_authority_admission::SignedAuthorityAdmission>> {
         use rusqlite::OptionalExtension;
-        let row: Option<(Option<Vec<u8>>,Option<Vec<u8>>)> = self.connect()?.query_row(
+        let row: Option<OwnershipClaimAdmissionRow> = self.connect()?.query_row(
             "SELECT admission,admission_signature FROM thread_owner_claims WHERE thread=?1 AND id=?2",
             params![self.thread.as_bytes(),id.as_bytes()], |row| Ok((row.get(0)?,row.get(1)?)),
         ).optional()?;
@@ -305,12 +309,11 @@ impl ThreadReplica {
                 "conflicting Thread ownership claims require explicit resolution".into(),
             ));
         }
-        if let Some((command, _)) = command {
-            if let Some(prior) = crate::device_operations::replay(&transaction, command)
+        if let Some((command, _)) = command
+            && let Some(prior) = crate::device_operations::replay(&transaction, command)
                 .map_err(|error| Error::Invalid(error.to_string()))?
-            {
-                return Ok((id, Some(prior)));
-            }
+        {
+            return Ok((id, Some(prior)));
         }
         let present: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM thread_owner_claims WHERE thread=?1 AND id=?2)",
@@ -323,14 +326,14 @@ impl ThreadReplica {
             } else {
                 false
             };
-            if added {
-                if let Some(receipt) = admission {
-                    super::boundary_evidence::persist(
-                        &transaction,
-                        &receipt.canonical,
-                        receipt.boundary_acceptance.as_deref(),
-                    )?;
-                }
+            if added
+                && let Some(receipt) = admission
+            {
+                super::boundary_evidence::persist(
+                    &transaction,
+                    &receipt.canonical,
+                    receipt.boundary_acceptance.as_deref(),
+                )?;
             }
             if added {
                 transaction.execute(
@@ -389,11 +392,11 @@ impl ThreadReplica {
             "UPDATE threads SET generation=generation+1 WHERE id=?1",
             [self.thread.as_bytes()],
         )?;
-        if count == 0 {
-            if let Some((command, response)) = command {
-                crate::device_operations::receipt(&transaction, command, response)
-                    .map_err(|error| Error::Invalid(error.to_string()))?;
-            }
+        if count == 0
+            && let Some((command, response)) = command
+        {
+            crate::device_operations::receipt(&transaction, command, response)
+                .map_err(|error| Error::Invalid(error.to_string()))?;
         }
         transaction.commit()?;
         drop(connection);

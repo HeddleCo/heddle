@@ -232,7 +232,6 @@ fn signed_payload_with_tag(
 /// input up front and then decode nibble-by-nibble over `as_bytes()`, so every
 /// malformed input returns [`VerifyError::MalformedHex`] — never a panic (a
 /// remotely-triggerable DoS).
-#[allow(clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
 fn decode_hex(field: &'static str, s: &str) -> Result<Vec<u8>, VerifyError> {
     // Reject non-ASCII before touching byte offsets: every hex char is ASCII, and
     // this guarantees `as_bytes()` indices are also char boundaries (no panic path).
@@ -243,7 +242,7 @@ fn decode_hex(field: &'static str, s: &str) -> Result<Vec<u8>, VerifyError> {
         });
     }
     let bytes = s.as_bytes();
-    if bytes.len() % 2 != 0 {
+    if !bytes.len().is_multiple_of(2) {
         return Err(VerifyError::MalformedHex {
             field,
             reason: "odd length".to_string(),
@@ -260,8 +259,9 @@ fn decode_hex(field: &'static str, s: &str) -> Result<Vec<u8>, VerifyError> {
             }),
         }
     };
-    bytes
-        .chunks_exact(2)
+    let (pairs, _remainder) = bytes.as_chunks::<2>();
+    pairs
+        .iter()
         .map(|pair| Ok((nibble(pair[0])? << 4) | nibble(pair[1])?))
         .collect()
 }

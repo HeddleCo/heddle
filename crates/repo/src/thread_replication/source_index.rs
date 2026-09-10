@@ -80,6 +80,60 @@ pub(super) fn summary_in(tx: &Transaction<'_>, thread: ContentHash) -> Result<(u
     Ok((count, heads))
 }
 
+impl super::ThreadReplica {
+    /// Bounded display selectors, not source possession or audience authority.
+    /// Callers must independently authorize every returned revision.
+    pub fn current_source_revisions(&self, limit: usize) -> Result<Vec<StateId>> {
+        if !(1..=128).contains(&limit) {
+            return Err(Error::Invalid(
+                "source frontier limit must be 1..128".into(),
+            ));
+        }
+        let connection = self.connect()?;
+        let mut statement = connection.prepare("SELECT revision FROM thread_source_head_revisions WHERE thread=?1 UNION ALL SELECT revision FROM thread_source_bases WHERE thread=?1 AND NOT EXISTS(SELECT 1 FROM thread_source_head_revisions WHERE thread=?1) ORDER BY revision LIMIT ?2")?;
+        let rows = statement.query_map(
+            rusqlite::params![self.thread.as_bytes(), (limit + 1) as i64],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+        let values = rows
+            .map(|row| Ok(StateId::from_bytes(*hash(&row?)?.as_bytes())))
+            .collect::<Result<Vec<_>>>()?;
+        if values.len() > limit {
+            return Err(Error::Invalid(
+                "source frontier exceeds display budget".into(),
+            ));
+        }
+        Ok(values)
+    }
+    /// Bounded reverse lookup for exact source reads. Candidate membership is
+    /// evidence only; the caller must authorize each owning Thread separately.
+    /// An arbitrary signed genesis.base is not source admission and never adds
+    /// a candidate: knowing another Thread's State hash must not grant access.
+    pub fn source_thread_candidates(
+        directory: &std::path::Path,
+        revision: StateId,
+        after: Option<ContentHash>,
+        limit: usize,
+    ) -> Result<Vec<ContentHash>> {
+        if !(1..=1024).contains(&limit) {
+            return Err(Error::Invalid(
+                "source candidate page must be 1..1024".into(),
+            ));
+        }
+        let connection = crate::local_metadata::open(directory)?;
+        let mut statement=connection.prepare("SELECT thread FROM thread_source_availability WHERE revision=?1 AND (?2 IS NULL OR thread>?2) ORDER BY thread LIMIT ?3")?;
+        let rows = statement.query_map(
+            rusqlite::params![
+                revision.as_bytes(),
+                after.map(|id| id.as_bytes().to_vec()),
+                limit as i64
+            ],
+            |row| row.get::<_, Vec<u8>>(0),
+        )?;
+        rows.map(|row| super::hash(&row?)).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -495,56 +549,3 @@ mod tests {
     }
 }
 
-impl super::ThreadReplica {
-    /// Bounded display selectors, not source possession or audience authority.
-    /// Callers must independently authorize every returned revision.
-    pub fn current_source_revisions(&self, limit: usize) -> Result<Vec<StateId>> {
-        if !(1..=128).contains(&limit) {
-            return Err(Error::Invalid(
-                "source frontier limit must be 1..128".into(),
-            ));
-        }
-        let connection = self.connect()?;
-        let mut statement = connection.prepare("SELECT revision FROM thread_source_head_revisions WHERE thread=?1 UNION ALL SELECT revision FROM thread_source_bases WHERE thread=?1 AND NOT EXISTS(SELECT 1 FROM thread_source_head_revisions WHERE thread=?1) ORDER BY revision LIMIT ?2")?;
-        let rows = statement.query_map(
-            rusqlite::params![self.thread.as_bytes(), (limit + 1) as i64],
-            |row| row.get::<_, Vec<u8>>(0),
-        )?;
-        let values = rows
-            .map(|row| Ok(StateId::from_bytes(*hash(&row?)?.as_bytes())))
-            .collect::<Result<Vec<_>>>()?;
-        if values.len() > limit {
-            return Err(Error::Invalid(
-                "source frontier exceeds display budget".into(),
-            ));
-        }
-        Ok(values)
-    }
-    /// Bounded reverse lookup for exact source reads. Candidate membership is
-    /// evidence only; the caller must authorize each owning Thread separately.
-    /// An arbitrary signed genesis.base is not source admission and never adds
-    /// a candidate: knowing another Thread's State hash must not grant access.
-    pub fn source_thread_candidates(
-        directory: &std::path::Path,
-        revision: StateId,
-        after: Option<ContentHash>,
-        limit: usize,
-    ) -> Result<Vec<ContentHash>> {
-        if !(1..=1024).contains(&limit) {
-            return Err(Error::Invalid(
-                "source candidate page must be 1..1024".into(),
-            ));
-        }
-        let connection = crate::local_metadata::open(directory)?;
-        let mut statement=connection.prepare("SELECT thread FROM thread_source_availability WHERE revision=?1 AND (?2 IS NULL OR thread>?2) ORDER BY thread LIMIT ?3")?;
-        let rows = statement.query_map(
-            rusqlite::params![
-                revision.as_bytes(),
-                after.map(|id| id.as_bytes().to_vec()),
-                limit as i64
-            ],
-            |row| row.get::<_, Vec<u8>>(0),
-        )?;
-        rows.map(|row| super::hash(&row?)).collect()
-    }
-}
