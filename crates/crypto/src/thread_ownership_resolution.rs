@@ -16,10 +16,7 @@ pub struct SignedOwnershipResolution {
     pub owner_signature: Vec<u8>,
 }
 impl SignedOwnershipResolution {
-    pub fn sign(
-        value: &ThreadOwnershipResolution,
-        owner: &impl Signer,
-    ) -> Result<Self, Error> {
+    pub fn sign(value: &ThreadOwnershipResolution, owner: &impl Signer) -> Result<Self, Error> {
         if owner.public_key() != value.owner {
             return Err(Error::Publisher);
         }
