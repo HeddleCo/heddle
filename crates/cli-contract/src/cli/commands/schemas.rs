@@ -46,8 +46,8 @@ use super::{
         },
         auth::{
             AgentAccountCreatedOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput,
-            PromoteOutput, ServiceTokenOutput, SignupInviteCreatedOutput, SignupInviteListOutput,
-            WhoamiOutput,
+            GrantCreateOutput, GrantDeleteOutput, GrantListOutput, PromoteOutput,
+            ServiceTokenOutput, SignupInviteCreatedOutput, SignupInviteListOutput, WhoamiOutput,
         },
         thread::{
             ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, ThreadAbsorbOutput,
@@ -178,6 +178,9 @@ schema_registry! {
     (&["auth trust show", "auth trust replace"], AuthTrustOutput),
     (&["whoami"], WhoamiOutput),
     (&["promote"], PromoteOutput),
+    (&["grant create"], GrantCreateOutput),
+    (&["grant list"], GrantListOutput),
+    (&["grant delete"], GrantDeleteOutput),
     (&["auth create-service-token"], ServiceTokenOutput),
     (&["auth invite"], SignupInviteCreatedOutput),
     (&["auth invite list"], SignupInviteListOutput),

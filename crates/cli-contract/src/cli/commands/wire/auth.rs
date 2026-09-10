@@ -22,6 +22,53 @@ pub struct PromoteOutput {
     pub recommended_action: Option<String>,
 }
 
+/// JSON payload for `heddle grant create`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "GrantCreateSchema")]
+pub struct GrantCreateOutput {
+    pub output_kind: &'static str,
+    pub id: String,
+    pub principal: String,
+    pub role: String,
+    pub spool: String,
+    pub server: String,
+    pub recommended_action: Option<String>,
+}
+
+/// One row from `heddle grant list`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "GrantRowSchema")]
+pub struct GrantRowOutput {
+    pub id: String,
+    pub principal: String,
+    pub role: String,
+    pub spool: String,
+}
+
+/// JSON payload for `heddle grant list`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "GrantListSchema")]
+pub struct GrantListOutput {
+    pub output_kind: &'static str,
+    pub spool: String,
+    pub server: String,
+    pub grants: Vec<GrantRowOutput>,
+    pub recommended_action: Option<String>,
+}
+
+/// JSON payload for `heddle grant delete`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "GrantDeleteSchema")]
+pub struct GrantDeleteOutput {
+    pub output_kind: &'static str,
+    pub id: String,
+    pub principal: String,
+    pub spool: String,
+    pub server: String,
+    pub deleted: bool,
+    pub recommended_action: Option<String>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 #[schemars(rename = "AgentAccountCreatedSchema")]
 pub struct AgentAccountCreatedOutput {

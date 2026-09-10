@@ -138,9 +138,12 @@ impl HeddleExitCode {
             | "env_store_not_found"
             | "env_store_slot_not_found" => Some(Self::DataErr),
             "env_store_denied" | "env_store_expired" => Some(Self::NoPerm),
-            "promote_not_owner" | "promote_account_standing" => Some(Self::NoPerm),
-            "promote_slug_taken" | "promote_failed" => Some(Self::Protocol),
+            "promote_not_owner" | "promote_account_standing" | "grant_denied" => {
+                Some(Self::NoPerm)
+            }
+            "promote_slug_taken" | "promote_failed" | "grant_failed" => Some(Self::Protocol),
             "promote_already_root" => Some(Self::DataErr),
+            "grant_not_found" => Some(Self::Config),
             // Capture aborted on ENOSPC; working tree is intact. Classifies
             // as IO rather than a distinct raw-28 OS code so agents stay on
             // the documented sysexits taxonomy.
@@ -545,6 +548,9 @@ mod tests {
             ("promote_slug_taken", HeddleExitCode::Protocol),
             ("promote_failed", HeddleExitCode::Protocol),
             ("promote_already_root", HeddleExitCode::DataErr),
+            ("grant_denied", HeddleExitCode::NoPerm),
+            ("grant_failed", HeddleExitCode::Protocol),
+            ("grant_not_found", HeddleExitCode::Config),
         ] {
             assert_eq!(
                 HeddleExitCode::from_error(&advice_with_kind(kind)),

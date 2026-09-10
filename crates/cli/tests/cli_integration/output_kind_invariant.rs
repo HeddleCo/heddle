@@ -66,6 +66,9 @@ const SWEPT: &[&str] = &[
     // no override needed).
     "whoami",
     "promote",
+    "grant create",
+    "grant list",
+    "grant delete",
     // heddle#272 — output_kind sweep on the named-by-persona verbs.
     "agent presence list",
     "agent presence show",

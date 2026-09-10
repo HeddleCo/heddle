@@ -14,7 +14,9 @@ use cli::cli::commands::cmd_context_reason_git;
 #[cfg(feature = "semantic")]
 use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "client")]
-use cli::cli::commands::{cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami, cmd_promote};
+use cli::cli::commands::{
+    cmd_grant, cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami, cmd_promote,
+};
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     BridgeCommands, BridgeGitCommands,
@@ -638,6 +640,9 @@ async fn async_main() -> Result<()> {
 
         #[cfg(feature = "client")]
         Commands::Claim(args) => cmd_hosted_claim(args.clone()).await,
+
+        #[cfg(feature = "client")]
+        Commands::Grant { command } => cmd_grant(&cli, command.clone()).await,
 
         #[cfg(feature = "client")]
         Commands::Promote(args) => cmd_promote(&cli, args.clone()).await,

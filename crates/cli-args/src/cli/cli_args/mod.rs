@@ -57,7 +57,8 @@ pub use commands_ci::{CiCommands, CiRunArgs};
 #[cfg(feature = "client")]
 pub use commands_client::{
     AgentTemplateArg, AuthCommands, AuthInviteCommands, AuthTrustCommands, AuthTrustReplaceArgs,
-    AuthTrustShowArgs, ClaimArgs, DEFAULT_CLAIM_WEB_ORIGIN, PromoteArgs,
+    AuthTrustShowArgs, ClaimArgs, DEFAULT_CLAIM_WEB_ORIGIN, GrantCommands, GrantCreateArgs,
+    GrantDeleteArgs, GrantListArgs, GrantRoleArg, PromoteArgs,
 };
 pub use commands_context::ContextCommands;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]

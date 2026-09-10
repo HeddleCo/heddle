@@ -18,7 +18,7 @@ use super::{
     },
 };
 #[cfg(feature = "client")]
-use super::{AuthCommands, ClaimArgs, PromoteArgs};
+use super::{AuthCommands, ClaimArgs, GrantCommands, PromoteArgs};
 
 #[derive(Clone, Debug, Args)]
 pub struct FsckArgs {
@@ -371,6 +371,16 @@ Examples:
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
+    },
+
+    /// Grant a principal access to a hosted spool.
+    ///
+    /// Separate from `heddle auth invite`, which is signup-only. Create,
+    /// list, and delete collaborator grants on a spool you can administer.
+    #[cfg(feature = "client")]
+    Grant {
+        #[command(subcommand)]
+        command: GrantCommands,
     },
 
     /// Promote a personal hosted spool to a root-level spool.
