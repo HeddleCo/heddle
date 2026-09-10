@@ -53,7 +53,8 @@ heddle auth derive-agent \
 Without `--allow`, the command installs the curated safe set: push/pull,
 repository reads, context operations, discussions, `WhoAmI`, and collaborator
 grants at writer or below (`ListGrants` / `CreateGrant` / `DeleteGrant`).
-Admin and owner grants stay human-verified even when those RPCs are allowed.
+Maintainer, admin, and owner grants stay human-verified even when those RPCs
+are allowed.
 Repeating
 `--allow` selects a subset; it cannot opt into an unsafe method. Every derived
 block independently applies the mandatory deny policy in

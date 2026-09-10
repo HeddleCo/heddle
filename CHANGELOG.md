@@ -50,12 +50,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 ### Changed
 
 - **Agent-driven `heddle grant` at writer or below.** Attenuated / derive-agent
-  sessions may create and delete `reader`, `contributor` (developer), and
-  `maintainer` grants without WebAuthn. Admin and owner still require human
+  sessions may create and delete `reader` and `contributor` (developer) grants
+  without WebAuthn. Maintainer, admin, and owner still require human
   verification; the CLI refuses those roles locally when the bearer is a
-  detectable agent session (heddle#1738). Help states the ceiling. Derive-agent
-  children now include `ListGrants` / `CreateGrant` / `DeleteGrant` in the safe
-  operation set.
+  detectable agent session (heddle#1738 / weft#2119). Help states the ceiling.
+  Derive-agent children now include `ListGrants` / `CreateGrant` / `DeleteGrant`
+  in the safe operation set.
 
 - **heddle 0.23.0 on heddle-api 0.30.0 and capability-verifier 0.19.0.**
   Native bootstrap consumes the canonical `heddle_api::descriptor_trust`

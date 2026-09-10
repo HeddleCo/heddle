@@ -721,7 +721,7 @@ fn refuse_privileged_grant_for_agent_bearer(
     let grant_role = GrantRole::from_hosted_role_i32(role as i32);
     if refuse_agent_privileged_grant(token, grant_role) {
         return Err(ProtocolError::AuthorizationFailed(
-            "agent sessions cannot grant admin or owner; those roles require human verification"
+            "agent sessions cannot grant maintainer, admin, or owner; those roles require human verification"
                 .into(),
         ));
     }
@@ -1027,7 +1027,7 @@ mod tests {
         assert_eq!(parse_hosted_role_arg("owner").unwrap(), HostedRole::Owner);
         assert!(GrantRole::from_hosted_role_i32(HostedRole::Reader as i32).agent_may_grant());
         assert!(GrantRole::from_hosted_role_i32(HostedRole::Developer as i32).agent_may_grant());
-        assert!(GrantRole::from_hosted_role_i32(HostedRole::Maintainer as i32).agent_may_grant());
+        assert!(!GrantRole::from_hosted_role_i32(HostedRole::Maintainer as i32).agent_may_grant());
         assert!(!GrantRole::from_hosted_role_i32(HostedRole::Admin as i32).agent_may_grant());
         assert!(!GrantRole::from_hosted_role_i32(HostedRole::Owner as i32).agent_may_grant());
         let err = parse_hosted_role_arg("root").unwrap_err();

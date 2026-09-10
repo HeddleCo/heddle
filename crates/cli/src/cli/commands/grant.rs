@@ -273,8 +273,10 @@ fn map_grant_error(spool: &str, err: &ProtocolError) -> anyhow::Error {
         _ => "",
     };
     let lower = message.to_ascii_lowercase();
-    let advice = if lower.contains("cannot grant admin or owner") {
-        RecoveryAdvice::grant_agent_ceiling(spool, "admin or owner")
+    let advice = if lower.contains("cannot grant maintainer, admin, or owner")
+        || lower.contains("cannot grant admin or owner")
+    {
+        RecoveryAdvice::grant_agent_ceiling(spool, "maintainer, admin, or owner")
     } else if is_human_verification_required(&lower) {
         RecoveryAdvice::grant_needs_human(spool)
     } else if matches!(
@@ -376,7 +378,7 @@ mod tests {
     #[test]
     fn agent_admin_refuse_from_the_hosted_client_is_the_ceiling() {
         let err = ProtocolError::AuthorizationFailed(
-            "agent sessions cannot grant admin or owner; those roles require human verification"
+            "agent sessions cannot grant maintainer, admin, or owner; those roles require human verification"
                 .into(),
         );
         let mapped = map_grant_error("spool/alice/notes", &err);

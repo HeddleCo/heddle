@@ -1277,9 +1277,9 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "grant_agent_ceiling",
             format!(
-                "Cannot grant '{role}' on '{spool}': agent sessions cannot grant admin or owner"
+                "Cannot grant '{role}' on '{spool}': agent sessions cannot grant maintainer, admin, or owner"
             ),
-            "Grant reader, contributor, or maintainer from this session. Admin and owner require a human-verified session (Tapestry or an unattenuated owner credential).",
+            "Grant reader or contributor from this session. Maintainer, admin, and owner require a human-verified session (Tapestry or an unattenuated owner credential).",
             "the active credential is an attenuated agent session and the requested role is above writer",
             "no collaborator grant was created",
             "hosted grants and local checkouts were left unchanged",
@@ -1298,7 +1298,7 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "grant_needs_human",
             format!("Cannot manage grants on '{spool}': human verification required"),
-            "Admin and owner grants require a human-verified session. Agent sessions may grant writer or below (reader, contributor, maintainer) without WebAuthn.",
+            "Maintainer, admin, and owner grants require a human-verified session. Agent sessions may grant writer or below (reader, contributor) without WebAuthn.",
             "the server demanded human verification for this grant write",
             "no collaborator grant was created or removed",
             "hosted grants and local checkouts were left unchanged",

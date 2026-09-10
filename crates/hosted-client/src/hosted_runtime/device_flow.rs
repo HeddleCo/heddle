@@ -285,8 +285,9 @@ pub const SAFE_AGENT_OPERATIONS: &[&str] = &[
     "GetDiscussion",
     // Session identity.
     "WhoAmI",
-    // Collaborator grants at writer or below (heddle#1738). Admin/owner
-    // CreateGrant stays human-gated even when these RPCs are in the ceiling.
+    // Collaborator grants at writer or below (heddle#1738 / weft#2119).
+    // Maintainer/admin/owner CreateGrant stays human-gated even when
+    // these RPCs are in the ceiling.
     "ListGrants",
     "CreateGrant",
     "DeleteGrant",
@@ -337,8 +338,8 @@ const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
     "ResolveDiscussion",
     // Provision the caller's own child spool (host-only auto-provision push).
     "CreateSpool",
-    // Everyday collaborator invites at writer or below. Admin/owner remain
-    // human-gated by role, not by omitting the RPC from the ceiling.
+    // Everyday collaborator invites at writer or below. Maintainer/admin/owner
+    // remain human-gated by role, not by omitting the RPC from the ceiling.
     "CreateGrant",
     "DeleteGrant",
 ];
@@ -360,7 +361,8 @@ pub enum AgentTemplate {
     Reviewer,
     /// Read + collaboration writes: reviewer plus `Push`/`UpdateRef`, context
     /// writes, discussion writes, and writer-or-below collaborator grants.
-    /// No repo/namespace admin. Admin/owner CreateGrant stays human-gated.
+    /// No repo/namespace admin. Maintainer/admin/owner CreateGrant stays
+    /// human-gated.
     ///
     /// This is intentionally the **full safe agent ceiling** — its operation
     /// set equals [`SAFE_AGENT_OPERATIONS`], so `--template contributor` is
@@ -530,7 +532,7 @@ pub fn credential_is_agent_attenuated(token: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Refuse admin/owner (and any role above writer) on a detectable
+/// Refuse maintainer/admin/owner (roles above writer) on a detectable
 /// agent/attenuated session before a CreateGrant / UpdateGrant round-trip.
 pub fn refuse_agent_privileged_grant(token: &str, role: GrantRole) -> bool {
     credential_is_agent_attenuated(token) && !role.agent_may_grant()
@@ -1311,10 +1313,13 @@ mod tests {
         );
         assert!(
             !refuse_agent_privileged_grant(&attenuated, GrantRole::Reader)
-                && !refuse_agent_privileged_grant(&attenuated, GrantRole::Developer)
-                && !refuse_agent_privileged_grant(&attenuated, GrantRole::Maintainer),
+                && !refuse_agent_privileged_grant(&attenuated, GrantRole::Developer),
             "writer and below stay allowed on an attenuated session"
         );
+        assert!(refuse_agent_privileged_grant(
+            &attenuated,
+            GrantRole::Maintainer
+        ));
         assert!(refuse_agent_privileged_grant(&attenuated, GrantRole::Admin));
         assert!(refuse_agent_privileged_grant(&attenuated, GrantRole::Owner));
         assert!(

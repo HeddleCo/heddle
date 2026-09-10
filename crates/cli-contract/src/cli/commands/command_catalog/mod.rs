@@ -1638,7 +1638,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
                     ),
                     (
                         77,
-                        "not permitted to grant on this spool, or agent cannot grant admin/owner",
+                        "not permitted to grant on this spool, or agent cannot grant maintainer/admin/owner",
                     ),
                     (78, "not authenticated or spool path missing"),
                 ],

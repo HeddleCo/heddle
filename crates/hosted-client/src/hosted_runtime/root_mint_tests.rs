@@ -317,7 +317,7 @@ fn authorize_restricted_root(
 
 /// heddle#1738: derive-agent children must be able to call the grant RPCs
 /// so everyday collaborator invites do not fail at the Biscuit layer.
-/// Admin/owner stay human-gated by role, not by omitting CreateGrant.
+/// Maintainer/admin/owner stay human-gated by role, not by omitting CreateGrant.
 #[test]
 fn safe_ceiling_allows_collaborator_grants_at_writer_or_below() {
     for op in ["ListGrants", "CreateGrant", "DeleteGrant"] {

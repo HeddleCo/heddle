@@ -294,8 +294,8 @@ invite — `heddle auth invite` only creates an account-creation code.
 
 Roles: reader, contributor (developer), maintainer, admin, owner.
 
-Agent sessions may grant writer or below (reader, contributor,
-maintainer) without human verification. Admin and owner stay
+Agent sessions may grant writer or below (reader, contributor)
+without human verification. Maintainer, admin, and owner stay
 human-verified and are refused for derive-agent / attenuated sessions.
 
 Examples:
@@ -315,7 +315,7 @@ Examples:
     /// Remove a grant. `ID` is the principal shown by `heddle grant list`.
     #[command(after_help = "\
 Agents may delete writer-or-below grants without human verification.
-Deleting an admin or owner grant still requires a human-verified session.
+Deleting a maintainer, admin, or owner grant still requires a human-verified session.
 
 Examples:
   heddle grant delete alice --spool spool/willow-ibis-8e7264/notes
@@ -766,7 +766,7 @@ mod tests {
         assert_eq!(args.role.as_hosted_role_name(), "developer");
         assert!(args.role.as_grant_role().agent_may_grant());
         assert!(GrantRoleArg::Reader.as_grant_role().agent_may_grant());
-        assert!(GrantRoleArg::Maintainer.as_grant_role().agent_may_grant());
+        assert!(!GrantRoleArg::Maintainer.as_grant_role().agent_may_grant());
         assert!(!GrantRoleArg::Admin.as_grant_role().agent_may_grant());
         assert!(!GrantRoleArg::Owner.as_grant_role().agent_may_grant());
         assert_eq!(args.server.as_deref(), Some("api.preview.heddle.sh"));
