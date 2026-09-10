@@ -449,41 +449,44 @@ impl ThreadReplica {
             if let Some(target) = &source.source.target
                 && matches!(target.binding, SourceTargetBinding::ViewedThread)
             {
-                    let scope = self.reference_scope()?;
-                    if source.scope.spool != scope.spool {
-                        return Err(err("viewed target original evidence crosses Spool"));
+                let scope = self.reference_scope()?;
+                if source.scope.spool != scope.spool {
+                    return Err(err("viewed target original evidence crosses Spool"));
+                }
+                let existing: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM reference_seeds WHERE thread=?1 AND target=?2)",
+                    params![self.thread.as_bytes(), target.target.as_bytes()],
+                    |r| r.get(0),
+                )?;
+                let projected = match crate::reference_projection::root(tx, &scope).map_err(err)? {
+                    Some(root) => crate::reference_projection::resolve_at(
+                        tx,
+                        root,
+                        target.target,
+                        &mut budget(),
+                    )
+                    .map_err(err)?
+                    .is_some(),
+                    None => false,
+                };
+                if !existing && !projected {
+                    let file = SourceFileCore {
+                        scope: source.scope.clone(),
+                        revision: source.source.revision.clone(),
+                        path: source.source.path.clone(),
+                    };
+                    let core = SourceTargetCore {
+                        file: file.id().map_err(err)?,
+                        revision: source.source.revision.clone(),
+                        selector: selector(&source.source)?,
+                    };
+                    if core.id().map_err(err)? != target.target {
+                        return Err(err(
+                            "new source target differs from its signed original evidence",
+                        ));
                     }
-                    let existing:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM reference_seeds WHERE thread=?1 AND target=?2)",params![self.thread.as_bytes(),target.target.as_bytes()],|r|r.get(0))?;
-                    let projected =
-                        match crate::reference_projection::root(tx, &scope).map_err(err)? {
-                            Some(root) => crate::reference_projection::resolve_at(
-                                tx,
-                                root,
-                                target.target,
-                                &mut budget(),
-                            )
-                            .map_err(err)?
-                            .is_some(),
-                            None => false,
-                        };
-                    if !existing && !projected {
-                        let file = SourceFileCore {
-                            scope: source.scope.clone(),
-                            revision: source.source.revision.clone(),
-                            path: source.source.path.clone(),
-                        };
-                        let core = SourceTargetCore {
-                            file: file.id().map_err(err)?,
-                            revision: source.source.revision.clone(),
-                            selector: selector(&source.source)?,
-                        };
-                        if core.id().map_err(err)? != target.target {
-                            return Err(err(
-                                "new source target differs from its signed original evidence",
-                            ));
-                        }
-                    }
-                    tx.execute("INSERT OR IGNORE INTO reference_seeds(thread,operation,target,source) VALUES(?1,?2,?3,?4)",params![self.thread.as_bytes(),id.as_bytes(),target.target.as_bytes(),capture::encode(&source)?])?;
+                }
+                tx.execute("INSERT OR IGNORE INTO reference_seeds(thread,operation,target,source) VALUES(?1,?2,?3,?4)",params![self.thread.as_bytes(),id.as_bytes(),target.target.as_bytes(),capture::encode(&source)?])?;
             }
         }
         Ok(())

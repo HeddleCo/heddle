@@ -737,4 +737,3 @@ mod tests {
             .expect("failed new admission cannot remove existing device");
     }
 }
-

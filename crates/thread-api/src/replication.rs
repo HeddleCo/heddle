@@ -428,9 +428,7 @@ impl<B: ReplicaStore> Session<B> {
                 }
             }
         }
-        if maintenance
-            && let Some(repair) = self.control().await?
-        {
+        if maintenance && let Some(repair) = self.control().await? {
             responses.push(Outbound::Frame(repair));
         }
         Ok(responses)

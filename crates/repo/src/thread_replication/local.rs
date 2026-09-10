@@ -411,12 +411,12 @@ impl Repository {
         let Ok(replica) = self.native_thread(&name) else {
             return Ok(());
         };
-        self.native_thread_signer(&replica).map(|_| ()).map_err(|error| {
-            HeddleError::NativeSourceSignerUnavailable {
+        self.native_thread_signer(&replica)
+            .map(|_| ())
+            .map_err(|error| HeddleError::NativeSourceSignerUnavailable {
                 thread: name,
                 reason: error.to_string(),
-            }
-        })
+            })
     }
 
     /// Record a capture on the attached native Thread after a local snapshot.

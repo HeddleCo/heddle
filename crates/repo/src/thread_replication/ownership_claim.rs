@@ -326,9 +326,7 @@ impl ThreadReplica {
             } else {
                 false
             };
-            if added
-                && let Some(receipt) = admission
-            {
+            if added && let Some(receipt) = admission {
                 super::boundary_evidence::persist(
                     &transaction,
                     &receipt.canonical,
