@@ -7907,7 +7907,8 @@ fn discuss_resolve_into_annotation_creates_context_annotation() {
             "security",
         ],
     );
-    assert_eq!(replayed["disposition"], "idempotent_replay");
+    assert_eq!(replayed["replayed"], true);
+    assert_eq!(replayed["idempotency_status"], "replayed");
     assert_eq!(
         replayed["discussion"]["resolution"]["annotation_id"],
         annotation_id
