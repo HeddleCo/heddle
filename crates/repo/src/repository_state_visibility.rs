@@ -30,7 +30,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use chrono::Utc;
 use objects::{
     fs_atomic::write_file_atomic,
@@ -41,9 +41,9 @@ use objects::{
 use oplog::{OpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
 
 use crate::{
-    namespace_policy::{VisibilityResolutionContext, resolve_default_visibility},
+    namespace_policy::{resolve_default_visibility, VisibilityResolutionContext},
     repository::Repository,
-    visibility::{AudienceTier, visible},
+    visibility::{visible, AudienceTier},
 };
 
 /// Scope label written when a parent state is missing and is not a recorded
@@ -727,13 +727,20 @@ impl Repository {
     /// Blobs that appear in an unserved ancestor's tree and not in any
     /// served ancestor. The tip's own tree is excluded so a public tip
     /// that still names a private-introduced hash does not "serve" it.
+    ///
+    /// A missing ancestor state that is not a recorded shallow boundary,
+    /// or a present ancestor whose tree is missing, is an error: skipping
+    /// would omit that ancestor from the unserved set and serve its
+    /// exclusive hashes (weft fails closed the same way).
     fn private_introduced_blobs(
         &self,
         tip: &StateId,
         audience: &AudienceTier,
     ) -> Result<HashSet<ContentHash>> {
         let Some(tip_state) = self.store().get_state(tip)? else {
-            return Ok(HashSet::new());
+            return Err(anyhow!(
+                "cannot compute private-introduced blobs: missing tip state {tip}"
+            ));
         };
         let mut served = BTreeSet::new();
         let mut unserved = BTreeSet::new();
@@ -745,16 +752,25 @@ impl Repository {
             }
             let ancestor_tier = self.effective_visibility_tier(&id)?;
             let Some(state) = self.store().get_state(&id)? else {
-                continue;
-            };
-            if let Some(tree) = self.store().get_tree(&state.tree)? {
-                let mut blobs = BTreeSet::new();
-                self.collect_blob_hashes(&tree, &mut blobs)?;
-                if visible(&ancestor_tier, audience) {
-                    served.extend(blobs);
-                } else {
-                    unserved.extend(blobs);
+                if self.is_shallow(&id) {
+                    continue;
                 }
+                return Err(anyhow!(
+                    "cannot compute private-introduced blobs: missing ancestor state {id}"
+                ));
+            };
+            let Some(tree) = self.store().get_tree(&state.tree)? else {
+                return Err(anyhow!(
+                    "cannot compute private-introduced blobs: missing tree {} for ancestor state {id}",
+                    state.tree
+                ));
+            };
+            let mut blobs = BTreeSet::new();
+            self.collect_blob_hashes(&tree, &mut blobs)?;
+            if visible(&ancestor_tier, audience) {
+                served.extend(blobs);
+            } else {
+                unserved.extend(blobs);
             }
             if !self.is_shallow(&id) {
                 stack.extend(state.parents.iter().copied());
@@ -876,9 +892,9 @@ impl Repository {
         let _own_lock = if lock_held {
             None
         } else {
-            Some(self.locker().write().with_context(
-                || "acquire repo write lock for capture-time default visibility binding",
-            )?)
+            Some(self.locker().write().with_context(|| {
+                "acquire repo write lock for capture-time default visibility binding"
+            })?)
         };
         let mut record = StateVisibility {
             state: *state,
@@ -1118,7 +1134,9 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use crypto::{Ed25519Signer, Signer};
-    use objects::object::{Principal, VisibilityTier};
+    use objects::object::{
+        Attribution, Blob, ContentHash, Principal, State, Tree, TreeEntry, VisibilityTier,
+    };
     use oplog::OpLogBackend;
     use tempfile::TempDir;
 
@@ -1141,6 +1159,32 @@ mod tests {
         config.save(&config_path).unwrap();
         let repo = Repository::open(dir.path()).unwrap();
         (dir, repo)
+    }
+
+    fn fixture_author() -> Attribution {
+        Attribution::human(Principal::new("Fixture", "fixture@example.com"))
+    }
+
+    fn put_file_state(
+        repo: &Repository,
+        file: &str,
+        content: &[u8],
+        parents: Vec<StateId>,
+    ) -> State {
+        let blob = repo
+            .store()
+            .put_blob(&Blob::from(content))
+            .expect("put fixture blob");
+        let tree = repo
+            .store()
+            .put_tree(&Tree::from_entries(vec![TreeEntry::file(
+                file, blob, false,
+            )
+            .expect("valid fixture path")]))
+            .expect("put fixture tree");
+        let state = State::new(tree, parents, fixture_author());
+        repo.store().put_state(&state).expect("put fixture state");
+        state
     }
 
     fn sample_record(state: StateId, tier: VisibilityTier) -> StateVisibility {
@@ -1280,10 +1324,9 @@ mod tests {
         let signed = StateVisibilityBlob::new(vec![record]).encode().unwrap();
         repo.accept_wire_state_visibility(state, &signed)
             .expect("pinned owner must be able to land their own Private sidecar");
-        assert!(
-            repo.has_visibility_for_state(&state)
-                .expect("owner visibility persisted")
-        );
+        assert!(repo
+            .has_visibility_for_state(&state)
+            .expect("owner visibility persisted"));
         assert_eq!(
             repo.embargo_membership_label()
                 .expect("membership")
@@ -1468,6 +1511,115 @@ mod tests {
     }
 
     #[test]
+    fn missing_unserved_ancestor_tree_fails_closed() {
+        // Withholding sees the Private parent (state present) and would
+        // Filter. If that parent's tree is gone, skipping it would return
+        // an empty omit set and serve secret hashes the tip still names.
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+        let public = put_file_state(&repo, "public.env", b"PUBLIC=1\n", vec![]);
+        let missing_tree = ContentHash::compute(b"no-such-private-tree");
+        let private = State::new(missing_tree, vec![public.id()], fixture_author());
+        repo.store().put_state(&private).expect("put private state");
+        repo.put_state_visibility(sample_record(
+            private.id(),
+            VisibilityTier::Private {
+                scope_label: "ax-secret".into(),
+            },
+        ))
+        .unwrap();
+        let tip = put_file_state(&repo, "tip.txt", b"later\n", vec![private.id()]);
+
+        let err = repo
+            .visibility_serve_decision_for_audience(&tip.id(), &crate::AudienceTier::Public)
+            .expect_err(
+                "missing unserved ancestor tree must fail closed, not Filter with empty omit",
+            );
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("missing tree") && chain.contains(&private.id().to_string()),
+            "error must name the missing tree and the private ancestor, got: {chain}"
+        );
+    }
+
+    #[test]
+    fn missing_deeper_ancestor_state_fails_closed_when_filtering() {
+        // Withholding stops at the first unserved (Private) parent. The
+        // omit walk still reaches a missing grandparent; skipping it
+        // would drop that ancestor's exclusive blobs from the omit set.
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+        let missing_grandparent = StateId::from_bytes([0xCD; 32]);
+        let private = put_file_state(
+            &repo,
+            "secrets.env",
+            b"AX_SECRET=do-not-leak\n",
+            vec![missing_grandparent],
+        );
+        repo.put_state_visibility(sample_record(
+            private.id(),
+            VisibilityTier::Private {
+                scope_label: "ax-secret".into(),
+            },
+        ))
+        .unwrap();
+        let tip = put_file_state(&repo, "tip.txt", b"later\n", vec![private.id()]);
+
+        let err = repo
+            .visibility_serve_decision_for_audience(&tip.id(), &crate::AudienceTier::Public)
+            .expect_err("missing non-shallow grandparent must fail closed");
+        let chain = format!("{err:#}");
+        assert!(
+            chain.contains("missing ancestor state")
+                && chain.contains(&missing_grandparent.to_string()),
+            "error must name the missing grandparent, got: {chain}"
+        );
+    }
+
+    #[test]
+    fn shallow_missing_ancestor_still_omits_private_introduced_blobs() {
+        // A recorded shallow horizon with no state object is not an
+        // unresolved leak. Filter still omits the Private parent's blobs.
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+        let missing_horizon = StateId::from_bytes([0xEF; 32]);
+        repo.set_shallow(&missing_horizon, &[])
+            .expect("record shallow horizon");
+        let private = put_file_state(
+            &repo,
+            "secrets.env",
+            b"AX_SECRET=do-not-leak\n",
+            vec![missing_horizon],
+        );
+        repo.put_state_visibility(sample_record(
+            private.id(),
+            VisibilityTier::Private {
+                scope_label: "ax-secret".into(),
+            },
+        ))
+        .unwrap();
+        let tip = put_file_state(&repo, "tip.txt", b"later\n", vec![private.id()]);
+
+        match repo
+            .visibility_serve_decision_for_audience(&tip.id(), &crate::AudienceTier::Public)
+            .expect("shallow missing ancestor must not fail the omit walk")
+        {
+            crate::VisibilityServeDecision::FilterPrivateIntroduced {
+                omitted_blobs,
+                withheld_id,
+                ..
+            } => {
+                assert_eq!(withheld_id, private.id());
+                assert!(
+                    !omitted_blobs.is_empty(),
+                    "private-introduced blobs must still be omitted at a shallow horizon"
+                );
+            }
+            other => panic!("public tip must be filtered, not {other:?}"),
+        }
+    }
+
+    #[test]
     fn put_then_read_back_and_has_visibility_true() {
         let (_dir, repo) = fresh_repo();
         let state = StateId::from_bytes([5u8; 32]);
@@ -1578,12 +1730,11 @@ mod tests {
             "a state with no record must be public-by-absence (has_visibility_for_state == false)"
         );
         // And its sidecar load is an empty blob, never an error.
-        assert!(
-            repo.get_state_visibility_for_state(&no_record)
-                .expect("read record-free state")
-                .records
-                .is_empty()
-        );
+        assert!(repo
+            .get_state_visibility_for_state(&no_record)
+            .expect("read record-free state")
+            .records
+            .is_empty());
     }
 
     #[test]
