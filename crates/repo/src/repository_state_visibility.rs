@@ -24,7 +24,7 @@
 //! callers to keep public off disk — so the absence genuinely *is* the
 //! public signal.
 
-use std::{fs, path::PathBuf};
+use std::{collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -32,13 +32,20 @@ use objects::{
     fs_atomic::write_file_atomic,
     lock::RepositoryLockExt,
     object::{ContentHash, StateId, StateVisibility, StateVisibilityBlob, VisibilityTier},
+    store::ObjectStore,
 };
 use oplog::{OpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
 
 use crate::{
-    namespace_policy::{VisibilityResolutionContext, resolve_default_visibility},
+    namespace_policy::{resolve_default_visibility, VisibilityResolutionContext},
     repository::Repository,
+    visibility::{visible, AudienceTier},
 };
+
+/// Scope label written when a parent state is missing and is not a recorded
+/// shallow boundary. Checkout withholds rather than materializing a tip whose
+/// ancestry cannot be proven public.
+pub const UNRESOLVED_ANCESTOR_SCOPE: &str = "unresolved-ancestor";
 
 /// Outcome of a visibility put that captured its before/after images
 /// **atomically under the write lock** (heddle#317 / PR #529 P1 r5). The
@@ -597,6 +604,63 @@ impl Repository {
             .unwrap_or(VisibilityTier::Public))
     }
 
+    /// Audience this checkout uses for operator-local clone/pull/goto.
+    ///
+    /// A `Private` / `Restricted` sidecar stamps one `audience_label`. That
+    /// label is [`AudienceTier::Restricted`]; unlabeled local work stays
+    /// [`AudienceTier::Internal`] (owners are not all-Private).
+    pub fn local_operator_audience(&self) -> Result<AudienceTier> {
+        Ok(match self.embargo_membership_label()? {
+            Some(label) => AudienceTier::Restricted(label),
+            None => AudienceTier::Internal,
+        })
+    }
+
+    /// Downward-closed visibility gate (spike #266 §5.0, heddle#1733).
+    ///
+    /// A state is served only when it is visible to `audience` **and** every
+    /// reachable parent is itself served. Git projection already withholds
+    /// descendants of an embargoed ancestor; checkout/clone/pull must agree
+    /// so a later public tip cannot disclose private-ancestor path bytes.
+    ///
+    /// A missing parent that is not a shallow boundary fails closed: the
+    /// tip is withheld instead of materializing a tree we cannot prove is
+    /// public. The walk is local object-store I/O (O(ancestors)), not a
+    /// hosted page.
+    pub fn withholding_visibility_for_audience(
+        &self,
+        state_id: &StateId,
+        audience: &AudienceTier,
+    ) -> Result<Option<(StateId, VisibilityTier)>> {
+        let mut seen = HashSet::new();
+        let mut stack = vec![*state_id];
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let tier = self.effective_visibility_tier(&id)?;
+            if !visible(&tier, audience) {
+                return Ok(Some((id, tier)));
+            }
+            let Some(state) = self.store().get_state(&id)? else {
+                if self.is_shallow(&id) {
+                    continue;
+                }
+                return Ok(Some((
+                    id,
+                    VisibilityTier::Private {
+                        scope_label: UNRESOLVED_ANCESTOR_SCOPE.to_string(),
+                    },
+                )));
+            };
+            if self.is_shallow(&id) {
+                continue;
+            }
+            stack.extend(state.parents.iter().copied());
+        }
+        Ok(None)
+    }
+
     /// Walk every visibility sidecar file in the repo. Returns
     /// `(state_id, blob)` pairs so callers can correlate. Used by listing
     /// surfaces and the GC's "never collect a visibility record" guard.
@@ -710,9 +774,9 @@ impl Repository {
         let _own_lock = if lock_held {
             None
         } else {
-            Some(self.locker().write().with_context(
-                || "acquire repo write lock for capture-time default visibility binding",
-            )?)
+            Some(self.locker().write().with_context(|| {
+                "acquire repo write lock for capture-time default visibility binding"
+            })?)
         };
         let mut record = StateVisibility {
             state: *state,
@@ -1114,10 +1178,9 @@ mod tests {
         let signed = StateVisibilityBlob::new(vec![record]).encode().unwrap();
         repo.accept_wire_state_visibility(state, &signed)
             .expect("pinned owner must be able to land their own Private sidecar");
-        assert!(
-            repo.has_visibility_for_state(&state)
-                .expect("owner visibility persisted")
-        );
+        assert!(repo
+            .has_visibility_for_state(&state)
+            .expect("owner visibility persisted"));
         assert_eq!(
             repo.embargo_membership_label()
                 .expect("membership")
@@ -1203,6 +1266,53 @@ mod tests {
             label.as_deref(),
             &other
         ));
+    }
+
+    #[test]
+    fn withholding_walk_is_downward_closed_for_public_audience() {
+        let dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(dir.path()).unwrap();
+        std::fs::write(dir.path().join("public.env"), b"PUBLIC=1\n").unwrap();
+        repo.snapshot(Some("public".into()), None).unwrap();
+        std::fs::write(dir.path().join("secrets.env"), b"AX_SECRET=do-not-leak\n").unwrap();
+        let private = repo
+            .snapshot(Some("private".into()), None)
+            .unwrap()
+            .state_id;
+        repo.put_state_visibility(sample_record(
+            private,
+            VisibilityTier::Private {
+                scope_label: "ax-secret".into(),
+            },
+        ))
+        .unwrap();
+        std::fs::write(dir.path().join("tip.txt"), b"later\n").unwrap();
+        let tip = repo
+            .snapshot(Some("public tip".into()), None)
+            .unwrap()
+            .state_id;
+
+        let withheld = repo
+            .withholding_visibility_for_audience(&tip, &crate::AudienceTier::Public)
+            .unwrap();
+        assert_eq!(
+            withheld.map(|(id, tier)| (id, tier.as_str().to_string())),
+            Some((private, "private".into())),
+            "public tip must be withheld because of the private ancestor"
+        );
+        assert!(
+            repo.withholding_visibility_for_audience(
+                &tip,
+                &crate::AudienceTier::Restricted("ax-secret".into())
+            )
+            .unwrap()
+            .is_none(),
+            "matching Restricted audience must still be served the public tip"
+        );
+        assert_eq!(
+            repo.local_operator_audience().unwrap(),
+            crate::AudienceTier::Restricted("ax-secret".into())
+        );
     }
 
     #[test]
@@ -1316,12 +1426,11 @@ mod tests {
             "a state with no record must be public-by-absence (has_visibility_for_state == false)"
         );
         // And its sidecar load is an empty blob, never an error.
-        assert!(
-            repo.get_state_visibility_for_state(&no_record)
-                .expect("read record-free state")
-                .records
-                .is_empty()
-        );
+        assert!(repo
+            .get_state_visibility_for_state(&no_record)
+            .expect("read record-free state")
+            .records
+            .is_empty());
     }
 
     #[test]

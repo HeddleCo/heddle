@@ -132,7 +132,8 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
          or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
          `git-overlay`, \
          `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
-         `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`)."
+         `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`, \
+         `visibility`)."
     );
 }
 
@@ -503,6 +504,7 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
         "discuss" | "discussions" => DISCUSS_TOPIC,
         "git-projection" | "git-projections" | "footer" | "notes" => GIT_PROJECTION_TOPIC,
         "signals" | "risk-signals" => SIGNALS_TOPIC,
+        "visibility" | "audience" => VISIBILITY_TOPIC,
         _ => return None,
     })
 }
@@ -1014,6 +1016,34 @@ that client into showing notes, but Heddle itself does not require a Git
 executable on the system.
 "#;
 
+const VISIBILITY_TOPIC: &str = "State visibility — who may see a captured state.\n\
+\n\
+`heddle visibility set <state> --tier <public|internal|team-scoped|restricted|private>`\n\
+                  — declare an audience. `team-scoped`, `restricted`, and\n\
+                    `private` need `--label`. Public stays record-free.\n\
+`promote`         — open to a less-restrictive tier (never a narrowing).\n\
+`show` / `list`   — effective tier; list is the audience this checkout\n\
+                    may know.\n\
+\n\
+Private is per-state and downward-closed. A later public tip that still\n\
+names blobs introduced by a private ancestor is withheld from public\n\
+and internal audiences. Owner / matching `--label` still sees the bytes.\n\
+Clone and pull fail closed: they do not materialize secret path bytes\n\
+for a lesser audience, including when a private ancestor object is missing.\n\
+\n\
+This is not a way to keep one secret file beside a public tip:\n\
+  - Literal `.env` / `.env.local` / `config/.env` are reserved. Capture\n\
+    exits 65. Do not work around that with another env-shaped path.\n\
+  - Runtime secrets that must never enter Source History: `heddle env`.\n\
+  - Path-level hide of a blob already in history: `heddle redact`.\n\
+    Redaction is cooperative render-hide; visibility is serve-withhold.\n\
+\n\
+Visibility sidecars travel with local clone/push/pull. Hosted clones\n\
+need Weft to send the records the audience may know (owner key pinned\n\
+from PullReady). If list/show on a hosted clone is empty while the\n\
+owner still has records, that is a Weft disclosure gap, not a missing\n\
+`.env` capture.\n";
+
 const SIGNALS_TOPIC: &str = "Risk signals — five modules behind a pure trait.\n\
 \n\
 - `invariant_adjacency`        — fires when a changed symbol carries an\n\
@@ -1091,8 +1121,28 @@ mod tests {
             "output-format",
             "output",
             "clone",
+            "visibility",
+            "audience",
         ] {
             assert!(topic_text(topic).is_some(), "{topic}");
+        }
+    }
+
+    #[test]
+    fn visibility_topic_names_env_redact_and_downward_closure() {
+        let text = topic_text("visibility").expect("visibility topic exists");
+        for needle in [
+            "downward-closed",
+            "heddle env",
+            "heddle redact",
+            ".env",
+            "exit 65",
+            "Private",
+        ] {
+            assert!(
+                text.contains(needle),
+                "visibility topic missing `{needle}`: {text}"
+            );
         }
     }
 

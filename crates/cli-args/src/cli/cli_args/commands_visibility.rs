@@ -3,8 +3,10 @@
 //!
 //! The visibility primitive (spike #266) attaches an additive, per-state
 //! `StateVisibility` sidecar record outside the hashed state bytes, so a
-//! tier change never mutates the state or invalidates its signature. The
-//! verb family mirrors `redact`:
+//! tier change never mutates the state or invalidates its signature.
+//! Private is downward-closed: a later public tip that still names
+//! private-ancestor blobs is withheld from lesser audiences (heddle#1733).
+//! The verb family mirrors `redact`:
 //!
 //! - `set` declares a tier on a state (`OpRecord::StateVisibilitySet`).
 //! - `promote` appends a superseding, less-restrictive declaration
@@ -128,11 +130,9 @@ mod tests {
             })
         );
         assert!(VisibilityTierArg::Restricted.into_tier(None).is_err());
-        assert!(
-            VisibilityTierArg::Restricted
-                .into_tier(Some("   ".to_string()))
-                .is_err()
-        );
+        assert!(VisibilityTierArg::Restricted
+            .into_tier(Some("   ".to_string()))
+            .is_err());
     }
 
     #[test]

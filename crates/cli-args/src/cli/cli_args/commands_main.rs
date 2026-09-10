@@ -8,14 +8,14 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
+    commands_args::{
+        AdoptArgs, CloneArgs, DiffArgs, DoctorArgs, InitArgs, LandArgs, LogArgs, PullArgs,
+        PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadStartArgs,
+        UndoArgs, WatchArgs, INIT_VERB,
+    },
     AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, EnvCommands, HookCommands,
     IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
     ShellCommands, ThreadCommands, VisibilityCommands,
-    commands_args::{
-        AdoptArgs, CloneArgs, DiffArgs, DoctorArgs, INIT_VERB, InitArgs, LandArgs, LogArgs,
-        PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs,
-        ThreadStartArgs, UndoArgs, WatchArgs,
-    },
 };
 #[cfg(feature = "client")]
 use super::{AuthCommands, ClaimArgs, PromoteArgs};
@@ -274,6 +274,10 @@ Examples:
     /// redact purge` afterward physically removes the bytes. Both are signed,
     /// attributed, oplog-audited operations. See
     /// `docs/PRINCIPLES.md` (the honesty principle) for context.
+    ///
+    /// Redaction is path/blob hide inside history. It is not `heddle env`
+    /// (runtime secrets; literal `.env` capture is reserved, exit 65) and
+    /// not `heddle visibility` (per-state audience, downward-closed).
     Redact {
         #[command(subcommand)]
         command: RedactCommands,
@@ -283,9 +287,17 @@ Examples:
     ///
     /// `heddle visibility set` binds a tier to a state; `promote` lifts it to
     /// a less-restrictive tier via a superseding record; `show` reports the
-    /// effective tier; `list` enumerates non-public states. Capture binds the
-    /// inherited `[review.discussion] default_visibility` automatically
-    /// (Invariant A) — these verbs are the explicit operator overrides.
+    /// effective tier; `list` enumerates non-public states the current
+    /// audience may know. Capture binds the inherited
+    /// `[review.discussion] default_visibility` automatically (Invariant A)
+    /// — these verbs are the explicit operator overrides.
+    ///
+    /// Private is per-state and downward-closed: a public descendant that
+    /// still names private-ancestor blobs is withheld from lesser audiences.
+    /// It does not hide one path inside a later public tip. Runtime secrets
+    /// belong in `heddle env` (literal `.env` capture is reserved, exit 65);
+    /// path-level hide of bytes already in history is `heddle redact`.
+    /// See `heddle help visibility`.
     Visibility {
         #[command(subcommand)]
         command: VisibilityCommands,
@@ -297,11 +309,19 @@ Examples:
     /// broker to unwrap named slots and injects them into the child
     /// environment only. Values never land in the worktree, the store, or
     /// command JSON. Same-UID callers are cooperative; OS isolation is later.
+    ///
+    /// Literal `.env` / `.env.local` files are reserved (capture exits 65).
+    /// `heddle visibility` does not replace this for secrets beside a public
+    /// tip; `heddle redact` stubs a blob already in history.
     #[command(after_help = "\
 Examples:
   heddle env list
   heddle env create --name local --from-env DATABASE_URL
   heddle env run --profile local -- printenv DATABASE_URL
+
+Literal `.env` capture is reserved (exit 65). Use this verb for runtime
+secrets. `heddle visibility` embargoes a state and its descendants;
+`heddle redact` hides a blob already in history. See `heddle help visibility`.
 ")]
     Env {
         #[command(subcommand)]

@@ -43,7 +43,7 @@ use objects::{
     store::ObjectStore,
     sync::LockExt,
 };
-use repo::{BlobHydrator, Repository, ThreadManager};
+use repo::{BlobHydrator, CheckoutMaterialization, Repository, ThreadManager};
 #[cfg(feature = "client")]
 use repo::{RepositorySourceAuthority, clone_intent::CloneIntent};
 use sley::{
@@ -1310,9 +1310,22 @@ fn checkout_clone_thread(
     track_name: &str,
     state_id: &objects::object::StateId,
 ) -> Result<()> {
-    repo.restore_worktree_state_only(state_id, None)?;
-    if !repo.worktree_matches_state(state_id)? {
-        return Err(anyhow!(clone_checkout_not_attached_advice(track_name)));
+    let state = repo
+        .store()
+        .get_state(state_id)?
+        .ok_or_else(|| anyhow!("missing state object: {state_id}"))?;
+    let audience = repo.local_operator_audience()?;
+    match repo.checkout_state_gated(state_id, &state, repo.root(), &audience)? {
+        CheckoutMaterialization::Withheld { .. } => {
+            // Fail closed: attach the thread without publishing secret bytes.
+            // A public tip that still names a private ancestor is withheld
+            // for this audience (heddle#1733).
+        }
+        CheckoutMaterialization::Materialized { .. } => {
+            if !repo.worktree_matches_state(state_id)? {
+                return Err(anyhow!(clone_checkout_not_attached_advice(track_name)));
+            }
+        }
     }
     publish_attached_clone_thread(repo, track_name, state_id)
 }
