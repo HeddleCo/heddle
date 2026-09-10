@@ -2605,6 +2605,100 @@ point.
   the full stable surface. <TBD: maintainer to confirm.>
 
 ========================================================================
+Source: docs/THREAD_AGENT_EXPERIENCE.md
+========================================================================
+
+# Thread work, discussions, and context
+
+The useful agent-facing unit is a Thread with durable intent, source heads,
+decisions, constraints, and evidence. A checkout is a mutable execution location
+owned by one writer. Agents on the same machine can work on one Thread through
+different checkouts; sharing a Thread does not mean sharing a working directory.
+
+The new replication path implements signed, immutable source and discussion
+operations, causal repair, durable acceptance, and destination-specific ongoing
+sharing. Source heads converge as a set. Integration remains an explicit source
+operation; metadata convergence never chooses a checkout's next HEAD. Hosted
+actions still belong directly on Weft, and private checkout actions belong on
+the owning Heddle device.
+
+## What already holds up
+
+Native collaboration has causal operations, anchored discussions, idempotent
+commands, and explicit resolution conflicts. Concurrent turns are preserved;
+competing resolutions are visible until a later operation resolves them.
+See `crates/object-model/src/object/collaboration/{operation,materialize}.rs`.
+The Thread replication ledger transports those native envelopes instead of
+flattening a discussion into replaceable JSON or arrival-ordered text.
+
+Context already distinguishes constraints, invariants, and rationale. Annotation
+revision history, source anchors, visibility, supersession, and freshness make it
+more useful than a transcript search result. A code binding can establish that
+an annotation describes the current source; it cannot establish that its claim
+is true or that a relevant test passed.
+See `crates/object-model/src/object/state_context.rs` and
+`crates/repo/src/repository_context.rs`.
+
+## The context convergence gap
+
+`union_parent_contexts` currently calls `merge_context_blobs`, which picks one
+annotation by the newest current-revision timestamp, then revision ID. Two
+agents can independently revise the same constraint and one complete annotation
+history loses that selection. The tie-break is deterministic, but it does not
+preserve concurrent knowledge. The source/discussion CRDT does not repair this.
+
+Before enabling live context replication, represent annotation edits as causal
+operations with an observed revision frontier. Preserve concurrent revisions in
+a multi-value register. Explicit supersession or resolution can collapse that
+frontier; wall-clock time should remain attribution metadata. Disagreement in a
+constraint or invariant must remain visible to review and to an agent's work
+brief. This is a proposed next contract extension, not implemented here.
+
+## The next agent experience
+
+Prioritize a bounded **work brief** projected from the Thread: intent, source
+frontier, applicable constraints, unresolved decisions, review requirements, and
+evidence with freshness and coverage. Return a pinned version and explicit
+truncation/continuation. An agent should get a sufficient starting view with one
+call and maintain it with one observation, rather than reconstructing it from a
+timeline and many discovery calls.
+
+Attach a durable **context-consumption receipt** to work boundaries: the brief
+version, source heads, applicable annotation revisions, and evidence IDs the
+agent actually received. This records provenance and supports handoff; it does
+not claim the agent understood or obeyed everything. Existing local context-query
+telemetry is not this receipt. Private brief contents and receipts remain under
+Thread disclosure policy.
+
+Connect resolved discussions to durable rationale, constraints, and evidence.
+A decision should cite the source revision and the observation or test that
+supports it. Changing relevant source can mark that evidence stale and raise a
+specific unresolved requirement. This gives the next agent a precise next step
+without requiring a raw transcript export.
+
+Once these references exist, add semantic conflict previews across concurrent
+source heads: competing edits, incompatible constraints, and invalidated
+assumptions. A preview is evidence for an integration decision, not permission to
+merge source automatically. Preserve a stable explanation and source references
+so humans and agents see the same result.
+
+## Verification and remaining integration
+
+The current native implementation covers independent concurrent checkout
+captures, durable retries, signed source/discussion admission, reordered and
+interrupted ancestry, bounded peer repair, live Iroh propagation, ongoing export
+opt-in, and root detachment while streaming. The owner and ordinary Biscuit
+verifiers are public leaf crates in Heddle; owner-only control remains separate
+from ordinary resource access.
+
+Production CLI routing, Weft's existing account/grant enforcement, native live
+Thread view projection, unknown-Thread creation, and complete source-object
+transfer/install still need their adapters. The current general Thread view
+materializer reads its history; large histories need indexed projections before
+claiming bounded page hydration. Fixture multiplexing demonstrates transport
+stream capacity only, not the throughput of these durable operations.
+
+========================================================================
 Source: docs/VERIFICATION_CLEANUP_PLAN.md
 ========================================================================
 
@@ -3668,6 +3762,197 @@ As of this plan:
 - docs/spec already describe gRPC as the canonical hosted transport
 
 That makes now a good time to do the crate split, because transport boundaries are already much clearer than before.
+
+========================================================================
+Source: docs/device-account-v2.md
+========================================================================
+
+# Device account API v2
+
+The device endpoint composes the locally admitted account directly. Workspace,
+Identity, ownership and Thread-list requests do not select a synthetic Spool and
+do not contact Weft. Request PoP and the actual Biscuit operation/resource checks
+run before a retained-stream permit is acquired. Registered mint roots, accepted
+owner history, publisher revocations and ancestor restrictions remain effective.
+
+The local catalog is `state/device-rpc/catalog.sqlite3`. It contains stable Spool
+registrations, settings, child/mount topology, private bookmark tombstones and
+exact mutation receipts. One transaction commits the mutation and its response;
+reusing an operation ID with different request bytes is rejected. Authorization
+of the requested resource precedes receipt lookup. Tombstoned identities preserve
+that authorization path for historical retries without reviving their data.
+Creation reserves its UUID/name within the catalog transaction, initializes its
+private repository, commits, then idempotently seeds the native default Thread.
+A retry repairs the seed step; a retry after deletion does not resurrect a Spool.
+
+Every catalog commit publishes an atomic generation marker. Account observers
+share an OS watcher and persistent read connection; accepted Thread commits have
+their own marker. Idle subscriptions execute local time-caveat checks over the
+already verified Biscuit without storage polling. A view binds current physical
+registrations before publishing data. Catalog and per-repository generation
+fences prevent committing mixed snapshots; lost continuity requires a reset.
+
+Workspace composes Spools, bounded local Thread lists, the current device and
+private bookmarks. Exact Spool and Thread views include the bookmark's own CAS
+version. Spool and Thread mutation hints use the actual caller's scoped
+permissions and the relevant observed version. Hosted-only administration and
+billing sections report unavailable on the device.
+
+Thread listing reads summaries maintained once at native admission. Concurrent
+name/intent/lifecycle candidates fall back to immutable genesis/default values
+in the list, while exact views retain every conflict candidate. Accepted source
+counts and heads deduplicate State revisions. Name and updated-order pages seek
+through covering indexes, and filter processing advances a bounded candidate
+cursor even when a window contains no matching records. A composed Thread query
+selects at most 64 local Spools and examines at most 4,096 candidate summaries plus one lookahead per Spool;
+individual pages and encoded bytes have separate caps. Readiness remains Unknown
+without hosted policy material. Attention/participant filters explicitly require
+a future local facet index rather than guessing from incomplete history.
+
+========================================================================
+Source: docs/device-thread-controls.md
+========================================================================
+
+# Portable Thread control admission
+
+Native Thread metadata uses an independent causal register for name, intent,
+lifecycle, sharing policy, and each review UUID. An update observes every head of
+its own field. Concurrent candidates remain explicit; unrelated fields compose.
+Changing a review cannot change the original human or agent attribution.
+
+The original caller signs the exact Thread operation, including account/agent,
+Spool, Thread, field, parents, command UUID, value, and a digest-bound original
+authority envelope. The public `ThreadControlAuthority` contract carries sealed
+Biscuit evidence plus independently verifiable account history and mint-root
+attachment. Carrying that evidence never establishes account trust: first
+admission checks the independently enrolled account, original publisher, agent,
+method, current resource path, actual admission time and typed revocations.
+Author-supplied timestamps cannot revive an expired credential.
+
+SQLite writes the successful original-author admission marker in the same
+transaction as immutable pending bytes. Missing causal parents can arrive after
+that receipt, including after restart. Causal readiness cannot create a missing
+admission marker. Exact admitted records retain that proof; current delivery is
+still authorized independently. Later hosted review eligibility and landing
+recheck current policy and roles.
+
+Interactive writes compare the complete current field frontier atomically.
+Historical replication preserves valid concurrent branches. Command UUIDs are
+bound to original publisher, Thread and canonical operation, so a retry cannot
+change its value. Sharing controls express consent and never grant recipient
+resource authority.
+
+`thread_api::thread_control::PreparedControl::sign` consumes the existing
+`ThreadOverview.metadata_frontiers`, typed value, original author evidence and
+signer. It returns request-ready methods for all five controls. Incomplete or
+mismatched frontier versions are rejected before signing. A new review UUID uses
+its canonical empty frontier; missing singleton fields require observation.
+The caller retains the same prepared command for retries. The example's intent
+edit needs discovery, observation and mutation only.
+
+`thread_control_v1.json` contains five Rust-produced canonical fixtures with
+complete operation bytes, signatures, IDs, and empty/populated property versions.
+The API TypeScript implementation checks the same fixtures. UUIDs use MessagePack
+binary values; content hashes and `Vec<u8>` use their existing canonical array
+encoding. Clients use the supplied codecs rather than assembling opaque records.
+
+The daemon now routes StartThread, RenameThread, ReviseIntent, ChangeLifecycle,
+SetSharingPolicy, RecordReview and ObserveThread to real local operations. Name
+and lifecycle compare their own portable field versions, just like intent,
+sharing and each review UUID; edits to other fields do not invalidate them.
+Command journals bind delivery actor, method and exact request, while an exact
+already-admitted operation also survives loss of the response journal.
+
+Thread observation composes overview, source captures, original review decisions,
+exact source/base comparisons and sharing policy. Optional original operations
+retain their signatures. Review diff/evidence composition is still partial;
+collaboration, analysis, checkouts and timeline composition remain explicitly
+unavailable in this adapter until their shared read handlers are connected.
+The independent daemon method inventory remains failing until every advertised
+device method is implemented; route registration is not a completeness claim.
+
+The source count and frontier are durable SQLite indexes changed exactly once
+at source acceptance, in the same transaction. Views read current bounded field
+heads rather than operation history. Filesystem events wake observers, but the
+actual committed Thread revision fences output and checkpoints. Duplicate OS
+hints do not invalidate a stable snapshot. Unchanged idle streams perform local
+clock/caveat checks and no periodic storage reads.
+
+Interactive owner/delegate sharing enables publication consent for that Thread
+once. Later admitted policies from that same account govern ongoing native
+Source, Collaboration and Metadata sync without another consent action. A
+conflicting policy or foreign original actor cannot broaden private device
+consent. Evidence and scrubbed timeline transport remain separate unfinished
+facet integration work. Merely receiving a policy cannot establish initial
+local publication consent.
+
+Ordinary Fetch staging already selects Source alone. Installation also checks
+Source explicitly before accepting any operation: a source verifier callback
+cannot establish Metadata original-author admission. Shared foreign-account
+metadata still needs portable hosted admission evidence bound to its exact
+original operation; the account envelope cannot establish its own trust.
+
+## Verification
+
+On API `2669e52a5abc4724b4ab0198342de88bdb468ee2`:
+
+- `cargo test --locked --offline -p heddle-repo --lib thread_replication -- --nocapture`: 18 passed. Includes real SQLite reordered/concurrent delivery, unrelated fields, stale-CAS rollback, exact retries, restart, missing admission marker and five canonical fixtures.
+- `cargo test --locked --offline -p heddle-thread-api --lib -- --nocapture`: 45 passed. Includes prepared commands, bounded native sync, idle no-work, backpressure and cancellation.
+- `cargo test --locked --offline -p heddle-thread-api --test thread_workflow -- --nocapture`: 10 passed. Snapshot/edit/update uses three RPCs; local preparation adds no read.
+- `cargo test --locked --offline -p heddle-object-model --lib thread_replication::metadata -- --nocapture`: restored 6 passed.
+- `cargo test --locked --offline -p heddleco-capability-verifier --lib -- --nocapture`: 22 passed, 1 preexisting ignored, using the generated public authority envelope.
+- Model controls independently checked original-authority digest substitution and review actor preservation: removing both conditions failed exactly those two tests, with four unaffected tests passing. Guards restored byte-exact.
+- Removing prepared-frontier/version binding made its regression fail because an incomplete parent set produced a signature. Guard restored byte-exact.
+- Removing the pending original-authority marker predicate made its regression fail with `Accepted` instead of `Pending`. Guard restored byte-exact.
+- Earlier field-isolation and current-frontier CAS omission controls also failed at their intended assertions and were restored.
+
+Real repository and Iroh fixtures require access to their existing local
+configuration lock and loopback sockets. A sandboxed run that hit a read-only
+configuration lock failed before repository operations; the authorized restored
+run above passed with the necessary local access.
+
+The daemon adapter follow-up is verified on API
+`104362c71f355c91e0f36c97ad356c28b1ae93ba`:
+
+- `cargo test --locked --offline -p heddle-hosted-client --features client --lib device_rpc::tests -- --nocapture`: restored 1 passed (15.64s). The real no-Weft Iroh workflow now negotiates Metadata, verifies a sealed original-author proof, persists its admission, exports the unchanged original signature, and rejects an unrelated original publisher despite authorized delivery. Existing Checkout/Run/private Source checks remain in this workflow.
+- Temporarily removing Metadata from the owned export facets failed specifically during original Metadata export. Restored byte-exact.
+- Temporarily omitting original-author verification failed because the delivered operation from a mismatched original publisher was accepted. The test asserts the exact denied operation never persists. Restored byte-exact.
+- Current device admission and output checks also honor explicitly revoked publisher keys from independently enrolled authority.
+
+
+## Direct Thread acceptance checkpoint
+
+Against API `104362c71f355c91e0f36c97ad356c28b1ae93ba`:
+
+- Real no-Weft device RPC workflow: 1 passed (21.86s), covering all seven Thread methods alongside existing Checkout, Run and bidirectional replication checks. It proves independent field updates, stale same-field rejection, original creator rejection, exact retry after response-journal loss, signed review push and idle no-heartbeat behavior.
+- Restored native repository suite: 21 passed (6.88s), including durable source count/frontier, out-of-order acceptance, exact replay, concurrent heads, rollback and one-time local policy consent.
+- Source-index controls removed count/bound maintenance and parent-head deletion; all failed at the intended assertions and were restored byte-exact.
+- Device controls independently removed current-field CAS and original creator binding; both failed at their real RPC assertions. Publication actor and shared signature-key binding omission controls also failed at the precise retained-consent and framing assertions. All guards restored byte-exact.
+- Rust Name/Lifecycle builder control replacing the field version with the whole Thread version failed; restored builder suite passed. Shared verifier rejects unknown formats, extra signatures and a substituted publisher key field.
+- Explicit source installation guard: 1 passed (0.38s), with a valid signed Metadata fixture proving denial before durable bytes or original-author admission marker. Public staging was already Source-only; this strengthens the installation boundary rather than claiming a previously reachable public bypass.
+
+Final restored checks on API `988e4bbf0a66f6741a4bfc81e104dbfe918d1a9f`:
+
+- Native repository Thread suite: 22 passed (6.92s).
+- Full shared Thread API library suite: 51 passed (14.96s), including source installation, portable controls, evidence codecs and native stream backpressure/cancellation.
+- Production source page query executes 148 VM instructions for a 16-row first page with 32 Source records, 148 with 10,032 Source plus 10,032 unrelated-facet records, and 147 for a deep cursor. Its covering index and range predicate keep work proportional to the requested page.
+- Removing the covering index caused 704 instructions at the small fixture; restoring the nullable cursor `OR` caused 60,190 instructions at the deep page. Both exceeded the asserted bound and failed; both restored byte-exact.
+- Removing the source-only installation guard admitted the valid signed but unproved Metadata fixture and failed its intended assertion. Guard restored; the complete 51-test client run above includes the final positive.
+- Final restored real no-Weft device RPC workflow on API988: 1 passed (21.48s), retaining all Thread, Checkout, Run, original-author replication and idle checks after every control was restored.
+
+### Retained stream admission
+
+The native router admits at most 32 unfinished handshakes/short commands. After
+local authentication succeeds, each server or bidirectional stream exchanges
+that slot for one of 2,048 retained-stream slots. Incoming method names alone
+cannot trigger promotion. Cancellation, rejected promotion and completed streams
+release their owned permits; no background quota replenishment is needed.
+
+The real Iroh regression holds 40 Thread views while it executes and verifies a
+durable StartThread, then closes all views. It measures all 32 admission slots,
+all 2,048 retained slots, and the shared filesystem feed before and after each of
+two cycles. Removing the admission release fails exactly at the 33rd view. These
+checks establish capacity and cleanup behavior, not a latency benchmark.
 
 ========================================================================
 Source: docs/exit-codes.md
@@ -7770,6 +8055,73 @@ ones do not change meaning.
   by the structured JSON envelope.
 
 ========================================================================
+Source: docs/local-metadata.md
+========================================================================
+
+# Local metadata storage
+
+Heddle's v2 mutable Thread and Run state shares `metadata.sqlite3` under the
+resolved object-store `.heddle` directory. Separate native checkouts resolve that
+same directory while keeping their working trees, HEADs and writer leases local.
+Immutable source objects, packs and retained artifact bodies remain files.
+Device-wide account registration and replay nonces retain their separate stores.
+
+The core SQLite schema contains original signed Thread operations, causal and
+query indexes, sharing policy, Runs, timeline records, command receipts, controls,
+permission decisions and immutable artifact catalog records. Initialization is
+one transaction, with `user_version` checked before use. The alpha cutover has no
+fallback reader for the previous separate Thread and Run database filenames.
+
+WAL and FULL synchronous durability are enabled. Database creation uses owner-only
+permissions. Existing-schema opens do not acquire a write transaction. A reader
+may inspect committed state while another connection owns the single writer;
+network writes, tool execution and filesystem capture work must finish outside
+that transaction. Database transactions do not make working-tree edits atomic.
+
+`metadata_changes` is a bounded wake/resume projection. Triggers write changes in
+the same transaction as the underlying mutation. Rolled-back work produces no
+committed change. Its 4096-entry window reports an expired cursor when a consumer
+must reload authoritative state; truncating it never deletes authored records.
+OS notification files are wake hints, not durability or authorization evidence.
+The existing device observers now watch the common database marker. Their v2
+section cursors remain distinct from the local database change cursor.
+
+This is the common persistence foundation, not a claim that every local store has
+already moved. Actor-presence file scans still require conversion. Command receipts now use
+indexed SQLite storage, with an explicit separate bootstrap database for commands
+that run before a repository exists. Completed receipts have bounded seven-day
+cleanup; pending reservations require explicit cancellation. Rebuildable shared
+reference roots and typed-property equality indexes also live here; capture
+publication, richer predicates and FTS integration remain pending. Cross-subsystem operations must explicitly share a
+transaction; merely sharing the database filename does not combine separate
+method calls into an atomic operation.
+
+Verification covers rollback/commit across Thread state, Run state and a command
+receipt; restart continuity; readers during a writer transaction; bounded change
+history; expired-cursor rejection; and future-schema rejection. Missing-event,
+missing-window-bound and missing-cursor-floor controls fail independently. The
+existing Thread, Run and artifact repository suites also run against this schema.
+
+The daemon owns artifact expiration independently of open browser streams. It
+watches only metadata directory entries, sleeps until the indexed next expiry,
+and deletes bounded batches. Removal from discovery does not cancel a retained
+artifact's TTL. Shutdown cancels the workers; startup resumes overdue cleanup.
+Watcher continuity failures and failed/contended cleanup retry with a delay.
+
+Run/Checkout observations share a committed-change gate. Filesystem changes still
+wake them independently. Exact permission/artifact deadlines trigger projection
+updates; a device-owned CPU-only clock rechecks arbitrary Biscuit time caveats
+without SQL or projection reads on valid ticks. That fallback is necessary
+because an ancestor check can expire before the root's explicit expiry fact.
+
+Source anchors can now sign an explicit shared target binding: follow the viewed
+Thread, follow a named Thread, or stay pinned to an exact revision. The original
+coordinates remain signed evidence. An absent target means exact-location only.
+Rust and browser encoders share independent canonical/signature vectors. Binding
+these roots to signed captures and including their object closure in transfer
+remain required before the capture-driven automatic update path is complete.
+
+========================================================================
 Source: docs/personas.md
 ========================================================================
 
@@ -7929,6 +8281,186 @@ The client-side spans and export are useful independently. End-to-end traces
 also require Weft to extract the propagated context from
 `CallContext.trace.traceparent` and `CallContext.trace.tracestate` in the Iroh
 request opening prelude and use it as the parent of its RPC lifecycle span.
+
+========================================================================
+Source: docs/thread-authority-admission.md
+========================================================================
+
+# Original-author admission receipts
+
+`heddle-thread-authority-admission-v3` covers an original operation or dual-signed
+ownership claim; `heddle-thread-genesis-admission-v2` covers account genesis. Their
+canonical `AdmissionBasis` distinguishes `OriginalAuthority` (the executor checked
+the original authority at first admission) from `BoundaryAcceptance` (the executor
+admitted unchanged originals under a separate explicit acceptance at that time).
+Older receipt versions are not reinterpreted. Original bytes, signatures, actor,
+publisher and authority-envelope digest remain unchanged.
+
+Boundary receipts require exact `heddle-original-boundary-acceptance-v1` evidence.
+Full verification checks its signature, digest and original account/Spool/kind,
+as well as the per-original receipt signature and independently pinned executor.
+Signature-only decoding is structural; the old model `authorize` entry points
+reject BoundaryAcceptance without evidence. A matched receipt attests membership
+in the prior signed manifest, so a subset relay need not disclose unrelated
+originals. The acceptance alone never proves subset membership or authorizes a
+new endpoint. No normal-sync fallback manufactures acceptance or upgrades an
+OriginalAuthority receipt. Fresh hosted accepting-authority verification and
+client signing UX remain separate integration work.
+
+Trust comes from the receiver's independently enrolled hosted executor pin for
+an immutable Spool genesis. An incoming receipt, author envelope, transport peer
+or delivery credential cannot create that pin. The statement commits Spool UUID,
+Spool genesis, Thread ID, typed operation-or-claim subject, original actor (account and optional
+agent), original publisher, authority-envelope digest, executor and the executor's
+first-admission timestamp. No author-supplied timestamp establishes prior rights.
+
+The canonical record is named MessagePack in the Rust model's declared field
+order, with exact re-encoding required. It is at most 2,048 bytes. Signing uses
+Ed25519 over the UTF-8 format identifier, one NUL byte and the canonical record.
+The SignedRecord wrapper requires exactly one signature whose public key equals
+the committed executor. Verification also checks the original operation signature
+and every operation/actor/scope/digest field against the original bytes.
+
+ReplicationOperations carries optional `authority_admissions` sidecars identified
+by their committed operation IDs. A receiver rejects duplicates and sidecars for
+operations absent from that batch. Verified receipt bytes are retained atomically
+with the original pending operation and relayed without regeneration. First
+authority admission can precede causal readiness. Current delivery authorization
+remains separate and must still succeed.
+
+The device store and native replication driver now carry a typed
+`ReceivedOperation` containing the original signature and optional exact receipt.
+The operation, durable original-author marker and receipt columns commit in one
+SQLite transaction. A failed parent insertion rolls them all back. The first
+retained receipt is immutable: a later valid receipt cannot replace its timestamp
+or bytes. Pending operations retain this evidence across restart while their
+causal parents arrive. An indexed operation read joins its exact evidence;
+bounded ancestry uses one
+original/receipt query and one DISTINCT evidence lookup, checking evidence lengths
+before copying. Shared immutable acceptance bytes use Arc across receipts and
+committed-prefix units, avoiding per-original copies. Subsequent peers receive the
+same signed testimony through `ReplicationOperations.boundary_acceptances` and
+`ThreadGenesisRecord.boundary_acceptances`. Evidence and its receipt reference
+commit atomically; missing persisted evidence fails closed on reopen/export.
+
+An original already admitted locally can replay under its durable admission;
+fresh authored work without a receipt still requires independently enrolled original
+account authority. Current browser/device delivery remains freshly authenticated.
+Receipts do not create publication consent: foreign sharing policies cannot expand
+a private device's local export policy.
+
+The local native driver and actual authenticated Iroh device endpoint exercise
+foreign-account receipt delivery and exact re-export. The hosted issuer separately
+must persist its own first-authority decision and exact receipt in the same
+transaction; receiving a sidecar must never invent a historical hosted decision.
+
+Historical verification of the earlier OriginalAuthority-only checkpoint (not evidence for new boundary consumers):
+
+```text
+cargo test --locked --offline -p heddle-thread-api --no-default-features \
+  --features replication --lib authority_admission::tests -- --nocapture
+test result: ok. 2 passed; 0 failed; finished in 0.26s
+```
+
+Four independent temporary omissions failed with test exit 101: executor pin
+comparison, executor signature verification, original signature verification and
+the decoder's pre-parse byte bound. Each failure reached its intended assertion;
+all source guards were restored before the final passing run. These checks cover
+the portable codec and binding layer. Durable storage and transport verification
+are additional checks below.
+
+Device storage and transport checks additionally cover a forced rollback after
+receipt writes, pending receipt retention through restart, original parent arrival,
+exact re-export through three native peers, and foreign original author delivery
+through the actual authenticated Iroh router. No original author credential or
+private signing key is required for subsequent relays.
+
+Six storage/protocol omission controls each failed at their intended assertion:
+executor enrollment, current delivery authorization, receipt persistence,
+first-receipt immutability, duplicate sidecars and unmatched sidecars. All were
+restored before the final suite checks. The real Iroh fixture also retains the
+40-view capacity and cleanup checks and existing checkout/run operations.
+
+Restored native SDK verification:
+
+```text
+cargo test --locked --offline -p heddle-thread-api --lib -- --nocapture
+test result: ok. 55 passed; 0 failed; finished in 15.95s
+```
+
+The real device test `real_device_rpc_captures_without_weft_and_rejects_unowned_authority`
+passed (1 passed, 0 failed, 74.53s), including foreign original authority receipt
+admission and exact re-export. This run preceded the separate account-service
+integration fixture; it does not claim coverage for those additional methods.
+
+Restored repository suite (isolated temporary HEDDLE_HOME/HEDDLE_CONFIG):
+
+```text
+cargo test --locked --offline -p heddle-repo --lib thread_replication:: -- --nocapture
+test result: ok. 26 passed; 0 failed; finished in 7.56s
+```
+
+The repository run also included the concurrently developed listing projection;
+its registration and leaf are delivered in the separate account-service checkpoint.
+
+The canonical subject distinguishes an original operation from an ownership claim. Both retain the same account/agent, exact envelope digest, independently pinned executor, and first-admission time. A receipt for one subject kind cannot authorize the other.
+
+Current boundary consumer regressions additionally cover source/genesis/claim
+receipt persistence, rollback and reopen, old signature-only admission rejection,
+128 original receipts sharing one 64 KiB acceptance, exact evidence after two native
+receiver relays, missing/unreferenced/changed evidence, wrong original scope and
+unknown executor. Fresh hosted publication under a newly supplied acceptance is
+not claimed by these portable/native relay tests.
+
+## Explicit fresh publication preparation
+
+`Thread::prepare_publication` takes the exact `SourcePack`, owned
+`PublicationOriginals`, retry options, and independently known Spool genesis.
+It performs local signature/binding checks and constructs the complete sorted
+original manifest and immutable publication intent. It does not refresh identity,
+contact an authority, or accept work automatically. The ordinary `publish_source`
+path remains available without an acceptance.
+
+Call `PreparedPublication::acceptance` for an external signer, then `accept`, or
+call `sign_acceptance` with an explicitly supplied accepting `SourceAuthor` and
+signer. The separate signature selects exact account/kinds in that complete
+manifest. Original source, genesis, and claim signatures/envelopes remain
+unchanged. `Thread::send_prepared` transmits the exact inventory and originals in
+one Publish exchange. A retry uses the same operation/intent; changing only the
+transport checkpoint does not change the signed intent.
+
+The shared host seam is `validate_proposed_source_artifacts`. It verifies actual
+pack/index bytes and closure, separates retained receipt evidence from fresh
+proposals, recomputes the full manifest/intent, and returns
+`ProposedSourceArtifacts`. Its `acceptances()` plan exposes immutable proposals;
+`ProposedAcceptance::entry` returns only an exact selected descriptor from the
+shared manifest. None of these values grants current permission. The host must
+compare its rebuilt original descriptor, inspect original provenance, verify the
+current accepting capability for each subject, and enforce current audience,
+ownership/cutoff, and courier checks before minting an acceptance-backed receipt.
+Generic live/Fetch evidence matching still rejects unreferenced acceptances.
+
+Account genesis descriptors bind owner, creator, Thread ID, and the exact creator
+envelope digest. Their agent field is always absent because genesis does not sign
+that field; it does not mean human attribution. The host derives the actual agent
+only from verified provenance. Source and claim descriptors retain their exact
+signed actors. Metadata is ineligible, and accepting LocalKey work cannot invent
+an account owner or replace either signature of an explicit ownership claim.
+
+All original metadata remains bounded to 16 MiB, 128 unique acceptances, and
+256 KiB per carrier. A shared manifest is retained once behind `Arc` for all
+proposals. `authority_admission::batches` lazily emits independently complete
+operation carriers, deduplicating acceptance evidence within each carrier. Its
+byte budget covers the `ReplicationOperations` body; callers reserve the outer
+frame overhead. No cross-frame evidence cache is required at a receiver.
+
+Fresh SDK tests cover changed destination, operation ID, inventory, original set,
+and genesis envelope; duplicate/unused selections; metadata and local ownership;
+original claim signatures; explicit prepare/sign/send with a capacity-one
+transport; and actual pack cleanup measured twice. These are structural/client
+checks. Current hosted accepting-authority admission and a real revoked-original
+publication remain separate integration acceptance, not established by these
+SDK tests.
 
 ========================================================================
 Source: docs/undo.md
@@ -8138,3 +8670,191 @@ Counts below are unique primary clippy diagnostics from `cargo clippy --workspac
 | heddle-verbs | 2 | 9 | 0 |
 | heddle-wire | 96 | 2 | 0 |
 | weft-client-shim | 0 | 0 | 0 |
+
+========================================================================
+Source: docs/v2-cutover-checklist.md
+========================================================================
+
+# Alpha v2 cutover acceptance checklist
+
+This is the live completion checklist for API, Heddle, Weft and Tapestry.
+A checkbox means the complete production path and its relevant verification are
+finished. A model/helper, advertised method, or compile-only result is insufficient.
+No legacy adapter or migration bridge is part of the cutover.
+
+## Immediate core implementation order
+
+The current focus is ownership/delegation, source sync, hosted RPCs, and
+privacy/retention. Client polish and final-stack profiling follow this core.
+
+- [ ] Extend the existing signed source-author model to local integration;
+  delegated landing must use the same original-author verification as capture.
+- [ ] Implement explicit signed ownership claim without changing genesis or
+  Thread ID; current effective ownership must govern fresh admission and audience.
+- [ ] Complete receipt-aware source intake on both endpoints, including live
+  historical Account admission and independent original-author audience checks.
+- [ ] Consolidate hosted Thread-scoped admission so an explicit Thread invite
+  can work without granting access to its whole Spool.
+- [ ] Reuse that admission for source, context, discussions, evidence, search,
+  and derived artifacts. Apply audience filtering before counts and pagination.
+- [ ] Derived artifacts retain all source/base Thread dependencies; access
+  requires every dependency, including after policy changes or deletion.
+- [ ] Reuse committed authority invalidation for finite transfers and observers;
+  no separate per-frame SQL authorization loop for each material type.
+- [ ] Give retained material one shared lifetime calculation: immutable origin
+  time, restrictive concurrent-policy resolution, and no TTL extension on replay.
+  Raw-material disclosure remains explicit and separate from ordinary read access.
+- [ ] Complete native remote observation/configuration/synchronization using
+  independently identified remotes with explicit Thread targets, and reuse the
+  import admission/finalization machinery rather than a second worker protocol.
+- [ ] Complete hosted analysis/search/artifact/provider reads through the shared
+  access and retention boundaries, with actual producers and bounded work.
+
+Reuse existing ThreadControlAuthority, SourceAuthor, retained admission receipts,
+Thread audience projections, ReadScope/VisibleState, and committed change dispatch.
+Do not duplicate their policy interpretation in individual RPC handlers. Local
+SQLite and hosted PostgreSQL projections must agree on shared policy fixtures;
+sharing semantics does not require coupling their storage implementations.
+
+## Policy invariants — clarified 2026-09-09
+
+Privacy describes audience, independently of storage destination. Sync policy
+(device-only or synced to Weft), audience (owner, explicitly authorized
+people/agents, or Spool audience), and material retention are independent.
+Uploading and ongoing sync never broaden audience. Sharing and public disclosure
+are distinct explicit actions. Authorized users can read hosted private Threads
+while every device is offline.
+
+- [ ] Signed policy represents sync, audience and retention independently, with owner-only audience as the safe default.
+- [ ] Local-key Threads work before enrollment; attaching one to an account requires an explicit signed claim and never happens as a side effect of upload.
+- [ ] Original genesis owner, creator authority and admission receipts remain bound across devices/Weft; historical owned-device reads do not refresh expired original credentials.
+- [ ] One Thread audience decision protects metadata, source, collaboration, evidence, search, activity, transfer and active streams; Spool membership alone cannot reveal private Threads.
+- [ ] Audience changes require delegated policy-management authority, preserve capability attenuation and invalidate current observations.
+- [ ] Hosted private offline access succeeds for owner/authorized parties and fails for an unrelated Spool member, including names/counts/events and object fetches.
+- [ ] Sync-only and retention-only changes cannot broaden audience; concurrent policy edits cannot accidentally union recipient grants.
+
+## Current verification checkpoint — 2026-09-09
+
+- Shared material retention intersection/deadline calculation: two model tests
+  and three existing artifact retry/expiry/recovery tests pass. Choosing the
+  longer concurrent lifetime failed the restrictive-deadline assertion; exact
+  restoration passed. Device artifacts use the shared deadline calculation;
+  full Thread retention enforcement across other producers remains pending.
+- Hosted audience SQL: owner-only default, exact agent invites, Spool membership
+  denial, explicit Spool sharing and conflict intersection passed against local
+  PostgreSQL. Removing the restrictive-conflict check failed the exact assertion;
+  restoring it passed. This verifies the predicate, not every RPC consumer.
+- Hosted Thread mutations, review, observation, replication and list/collaboration
+  query paths now apply the shared audience ceiling. Full endpoint regression and
+  per-frame SQL consolidation remain pending.
+- Device real-Iroh fixture passed source audience denial, collaboration, operation
+  recovery, Evidence3, integrated Fetch, two 40-view cleanup rounds and quiet idle
+  replication. The subsequent client+semantic fixture also passed real analysis
+  completion, exact retry and queued cancellation with worker acknowledgement.
+- Evidence must bind its original Thread, not merely a source State that could
+  also occur in another audience. Canonical evidence v2, Rust/browser byte vectors and device origin gates pass;
+  hosted origin gating passed 13 PostgreSQL tests. Removing the origin SQL
+  filter failed the cross-Thread budget assertion; restored test passed. Acknowledgement
+  continues to bind the exact original evidence digest.
+- Hosted source closure regression passed; omitting incoming-closure validation
+  admitted private globally retained bytes and failed the assertion, then restoration
+  passed. Possession is distinct from a signed claim that an object exists.
+- Tapestry API candidate is aligned to 2fba1eb2; typecheck reports zero errors and
+  warnings, with 14 focused Thread tests passing. The additional origin-Thread presentation
+  regression failed before the reducer guard and all 11 reducer tests passed after.
+  Full browser acceptance is pending.
+- Raw State reads now return only immutable summaries. Source attachments are
+  removed: risk/conflict/semantic sidecars can carry authored attribution or
+  context. Typed semantic queries remain in Analysis; authored data needs its
+  originating Thread or checkout access. Descriptor absence test failed before
+  removal, then six content/descriptor tests passed; current Heddle semantic
+  client and Tapestry typechecks pass against this schema.
+- Local keys remain owners until an explicit dual-signed claim. Heddle checkpoint
+  `253611c8` verifies the actual Iroh co-signing RPC, immutable genesis/Thread ID,
+  exact receipt replay, independently authenticated acceptor, and source cutoff
+  enforcement inside the SQLite writer transaction. Removing the conflict replay
+  guard failed its targeted regression; the restored test passed. New-recipient
+  claim installation, browser preparation/status, and explicit conflict resolution
+  are still pending.
+- Hosted ClaimThreadOwnership now passes an actual native RPC regression: incomplete
+  proof rejection, complete claim, exact retry, unchanged genesis, committed competing
+  delegated claim, and denied retries after conflict. Hosted artifact reads pass
+  bounded ranges, typed CAS identity, expiry, all-origin audiences, and current signed
+  retention restriction. Neither establishes complete producer/cleanup coverage.
+- Source captures now sign their explicit local-key or account author, including
+  the account authority envelope. Model tests (18) and signature/admission tests
+  (3) pass; omitting the envelope digest comparison failed the intended assertion
+  and restoring it passed. Producer and source-transfer integration is in progress.
+- Native import acceptance passed ordinary credential expiry after admission and
+  rejected a separate queued import after explicit root revocation, publishing no
+  source for the rejected job. This uses staged local provider output; external Git
+  fetching and full-stack worker acceptance remain pending. The server composition
+  now supervises the import worker and passes `cargo check --locked -p weft-server
+  --features postgres,semantic`; this is not the release/install acceptance gate.
+
+## Completed foundation
+
+- [x] Shared signed Thread/control/evidence models and original-author receipts.
+- [x] Device account/Thread/checkout/Run RPC foundation and one writer per checkout.
+- [x] Shared SQLite Thread/Run metadata, indexed command receipts and bounded change history.
+- [x] Bounded device artifact streaming and daemon-owned expiration.
+- [x] Shared Run/Checkout invalidation and CPU-only idle capability checks.
+- [x] Explicit signed viewed/named/pinned target bindings with Rust/browser vectors.
+- [x] Rebuildable reference-map and typed-property equality indexes.
+
+## Path A — production source references (reference_projection)
+
+- [ ] Typed signed capture payload binds source State and scope/frontier-specific reference descriptor.
+- [ ] Canonical descriptor/map/core/resolution objects persisted in the existing object store.
+- [ ] Actual anchor/tag interning and capture update of affected targets without rewriting referrers.
+- [ ] Exact-base fork root sharing; named and pinned references retain explicit scope.
+- [ ] Admission validates closure and atomically publishes projected root/generation; recovery is idempotent.
+- [ ] Fetch/publish closure includes reference objects; missing/corrupt/scope-mismatched closure is rejected.
+- [ ] Production capture/fork/replication tests and independent omission controls pass.
+
+## Path B — complete device RPCs (device_rpc_completion)
+
+- [ ] ReadContent: blob/tree/state/diff/provenance, exact revision, bounded streaming.
+- [ ] Collaboration: ObserveCollaboration, OpenDiscussion, AppendTurn, ResolveDiscussion, ReopenDiscussion, PutContext.
+- [ ] Analysis: ObserveAnalysis and StartAnalysis.
+- [ ] Search: bounded visibility-aware source/context/discussion/tag queries.
+- [ ] Operations: ObserveOperations and CancelOperation with durable receipts/cancellation.
+- [ ] Sync: Fetch and PublishContent with owned-device trust, closure validation and backpressure.
+- [ ] Evidence: RecordEvidence, VerifyEvidence and AcknowledgeCheck; acknowledgement never grants passing status.
+- [ ] Descriptor-driven device completeness gate passes; every handler has behavioral acceptance coverage.
+
+## Path C — complete hosted RPCs (sqlite_dispatch)
+
+- [ ] Attention: ObserveAttention, RecordInteraction, SetAttentionState.
+- [ ] Notifications: ObserveNotifications, MarkNotificationsRead, SetNotificationPreferences, UnsubscribeNotifications.
+- [ ] Integration: provider begin/complete/store/revoke, ObserveIntegrations, SetRemoteLink, ImportSource, SynchronizeRemote.
+- [ ] StartAnalysis, ReadArtifact, Search and ReadProviderExtent.
+- [ ] Activity/integration workers use committed changes; no observer-specific SQL polling.
+- [ ] All schema inventories/fixtures/counts agree with the fresh migration set.
+- [ ] Descriptor-driven hosted completeness gate and real PostgreSQL behavioral tests pass.
+
+## Integration, clients and local query completion (root)
+
+- [ ] Align API/Heddle/Weft Cargo pins and Tapestry vendor SDK; remove stale dependency sources.
+- [x] Browser own-root local authoring renews locally with verified root history/attachment; never revives hosted sessions or expands delegated authority.
+- [ ] Tapestry combined hosted/device Thread pages, discussions/context/evidence, source review and checkout-targeted actions work end to end.
+- [ ] All CLI verbs/JSON/help and hosted adapters use complete v2 paths.
+- [x] Actor/session presence scans become indexed SQLite lookups, separate from checkout writer leases.
+- [ ] Rich typed predicates and full-text context/discussion search use bounded indexes/projections.
+- [ ] All device observers share committed dispatch and appropriate local authority expiry handling.
+- [ ] Remaining transcript producers honor explicit retention opt-in and immutable TTLs.
+- [ ] Hosted billing worker composition and cancellation/notification/integration lifecycle are wired and tested without real external charges/messages.
+
+## Final acceptance (root, assisted by all paths)
+
+- [ ] Whole-repository sweeps remove/repoint stale methods, names, paths, docs, evidence maps and dependency references.
+- [ ] Relevant tests, real negative controls, production build/gates and client typechecks pass; no silently skipped acceptance.
+- [ ] Fresh local full v2 stack runs with real relay https://relay.preview.heddle.sh/.
+- [ ] Create/capture/sync/publish/review/approve/land tested across CLI, browser and Weft, including hosted work with devices offline.
+- [ ] Device-only state remains local; hosted private state retains its explicit audience; delegation/onboarding/rotation/revocation behavior verified.
+- [ ] OTEL traces/metrics show bounded SQL/work/queues, quiet idle streams, backpressure and released resources after cancellation/disconnect.
+- [ ] Draft PRs reflect final implementation and merge order, checks are green and all remaining limitations are explicit.
+
+No deployment, merge, real provider charge, or external message is authorized by
+this checklist. Local provider fixtures exercise those workflows until any real
+external acceptance requiring additional authorization is identified.

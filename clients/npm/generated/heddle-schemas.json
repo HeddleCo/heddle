@@ -16553,6 +16553,54 @@
           "oneOf": [
             {
               "properties": {
+                "end_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "git_commit_oid": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "source",
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "start_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "state_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "symbol_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "path",
+                "symbol_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "kind": {
                   "const": "repository",
                   "type": "string"
@@ -16768,6 +16816,210 @@
               "required": [
                 "kind",
                 "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "context_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "into_context",
+                  "type": "string"
+                },
+                "tags": {
+                  "items": {
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "text"
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "text"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "symbol"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference; current target resolution is separate.",
+                            "type": [
+                              "object",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "source"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "entity"
+                          },
+                          "target": {
+                            "description": "Typed collaboration entity reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "key": {
+                            "pattern": "^[A-Za-z0-9_.\\/-]{1,128}$",
+                            "type": "string"
+                          },
+                          "kind": {
+                            "const": "property"
+                          },
+                          "value": {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "text"
+                                  },
+                                  "value": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "boolean"
+                                  },
+                                  "value": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "integer"
+                                  },
+                                  "value": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "decimal"
+                                  },
+                                  "value": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "coefficient": {
+                                        "type": "integer"
+                                      },
+                                      "scale": {
+                                        "maximum": 9,
+                                        "minimum": 0,
+                                        "type": "integer"
+                                      }
+                                    },
+                                    "required": [
+                                      "coefficient",
+                                      "scale"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "key",
+                          "value"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "maxItems": 128,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "context_id",
+                "content",
+                "tags"
               ],
               "type": "object"
             },
@@ -16936,6 +17188,54 @@
           "oneOf": [
             {
               "properties": {
+                "end_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "git_commit_oid": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "source",
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "start_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "state_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "symbol_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "path",
+                "symbol_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "kind": {
                   "const": "repository",
                   "type": "string"
@@ -17148,6 +17448,210 @@
             },
             {
               "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "context_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "into_context",
+                  "type": "string"
+                },
+                "tags": {
+                  "items": {
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "text"
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "text"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "symbol"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference; current target resolution is separate.",
+                            "type": [
+                              "object",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "source"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "entity"
+                          },
+                          "target": {
+                            "description": "Typed collaboration entity reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "key": {
+                            "pattern": "^[A-Za-z0-9_.\\/-]{1,128}$",
+                            "type": "string"
+                          },
+                          "kind": {
+                            "const": "property"
+                          },
+                          "value": {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "text"
+                                  },
+                                  "value": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "boolean"
+                                  },
+                                  "value": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "integer"
+                                  },
+                                  "value": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "decimal"
+                                  },
+                                  "value": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "coefficient": {
+                                        "type": "integer"
+                                      },
+                                      "scale": {
+                                        "maximum": 9,
+                                        "minimum": 0,
+                                        "type": "integer"
+                                      }
+                                    },
+                                    "required": [
+                                      "coefficient",
+                                      "scale"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "key",
+                          "value"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "maxItems": 128,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "context_id",
+                "content",
+                "tags"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "annotation_kind": {
                   "type": "string"
                 },
@@ -17256,6 +17760,54 @@
       "$defs": {
         "AnchorOutput": {
           "oneOf": [
+            {
+              "properties": {
+                "end_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "git_commit_oid": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "source",
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "start_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "state_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "symbol_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "path",
+                "symbol_id"
+              ],
+              "type": "object"
+            },
             {
               "properties": {
                 "kind": {
@@ -17473,6 +18025,210 @@
               "required": [
                 "kind",
                 "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "context_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "into_context",
+                  "type": "string"
+                },
+                "tags": {
+                  "items": {
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "text"
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "text"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "symbol"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference; current target resolution is separate.",
+                            "type": [
+                              "object",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "source"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "entity"
+                          },
+                          "target": {
+                            "description": "Typed collaboration entity reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "key": {
+                            "pattern": "^[A-Za-z0-9_.\\/-]{1,128}$",
+                            "type": "string"
+                          },
+                          "kind": {
+                            "const": "property"
+                          },
+                          "value": {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "text"
+                                  },
+                                  "value": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "boolean"
+                                  },
+                                  "value": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "integer"
+                                  },
+                                  "value": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "decimal"
+                                  },
+                                  "value": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "coefficient": {
+                                        "type": "integer"
+                                      },
+                                      "scale": {
+                                        "maximum": 9,
+                                        "minimum": 0,
+                                        "type": "integer"
+                                      }
+                                    },
+                                    "required": [
+                                      "coefficient",
+                                      "scale"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "key",
+                          "value"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "maxItems": 128,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "context_id",
+                "content",
+                "tags"
               ],
               "type": "object"
             },
@@ -17641,6 +18397,54 @@
           "oneOf": [
             {
               "properties": {
+                "end_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "git_commit_oid": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "source",
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "start_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "state_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "symbol_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "path",
+                "symbol_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "kind": {
                   "const": "repository",
                   "type": "string"
@@ -17856,6 +18660,210 @@
               "required": [
                 "kind",
                 "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "context_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "into_context",
+                  "type": "string"
+                },
+                "tags": {
+                  "items": {
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "text"
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "text"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "symbol"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference; current target resolution is separate.",
+                            "type": [
+                              "object",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "source"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "entity"
+                          },
+                          "target": {
+                            "description": "Typed collaboration entity reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "key": {
+                            "pattern": "^[A-Za-z0-9_.\\/-]{1,128}$",
+                            "type": "string"
+                          },
+                          "kind": {
+                            "const": "property"
+                          },
+                          "value": {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "text"
+                                  },
+                                  "value": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "boolean"
+                                  },
+                                  "value": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "integer"
+                                  },
+                                  "value": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "decimal"
+                                  },
+                                  "value": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "coefficient": {
+                                        "type": "integer"
+                                      },
+                                      "scale": {
+                                        "maximum": 9,
+                                        "minimum": 0,
+                                        "type": "integer"
+                                      }
+                                    },
+                                    "required": [
+                                      "coefficient",
+                                      "scale"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "key",
+                          "value"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "maxItems": 128,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "context_id",
+                "content",
+                "tags"
               ],
               "type": "object"
             },
@@ -18024,6 +19032,54 @@
           "oneOf": [
             {
               "properties": {
+                "end_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "git_commit_oid": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "source",
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "start_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "state_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "symbol_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "path",
+                "symbol_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "kind": {
                   "const": "repository",
                   "type": "string"
@@ -18244,6 +19300,210 @@
             },
             {
               "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "context_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "into_context",
+                  "type": "string"
+                },
+                "tags": {
+                  "items": {
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "text"
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "text"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "symbol"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference; current target resolution is separate.",
+                            "type": [
+                              "object",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "source"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "entity"
+                          },
+                          "target": {
+                            "description": "Typed collaboration entity reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "key": {
+                            "pattern": "^[A-Za-z0-9_.\\/-]{1,128}$",
+                            "type": "string"
+                          },
+                          "kind": {
+                            "const": "property"
+                          },
+                          "value": {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "text"
+                                  },
+                                  "value": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "boolean"
+                                  },
+                                  "value": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "integer"
+                                  },
+                                  "value": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "decimal"
+                                  },
+                                  "value": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "coefficient": {
+                                        "type": "integer"
+                                      },
+                                      "scale": {
+                                        "maximum": 9,
+                                        "minimum": 0,
+                                        "type": "integer"
+                                      }
+                                    },
+                                    "required": [
+                                      "coefficient",
+                                      "scale"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "key",
+                          "value"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "maxItems": 128,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "context_id",
+                "content",
+                "tags"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
                 "annotation_kind": {
                   "type": "string"
                 },
@@ -18405,6 +19665,54 @@
       "$defs": {
         "AnchorOutput": {
           "oneOf": [
+            {
+              "properties": {
+                "end_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "git_commit_oid": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "kind": {
+                  "const": "source",
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "start_line": {
+                  "format": "uint32",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "state_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "symbol_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "kind",
+                "path",
+                "symbol_id"
+              ],
+              "type": "object"
+            },
             {
               "properties": {
                 "kind": {
@@ -18614,6 +19922,210 @@
               "required": [
                 "kind",
                 "reason"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "context_id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "const": "into_context",
+                  "type": "string"
+                },
+                "tags": {
+                  "items": {
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "text"
+                          },
+                          "text": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "text"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "symbol"
+                          },
+                          "name": {
+                            "type": "string"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference; current target resolution is separate.",
+                            "type": [
+                              "object",
+                              "null"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "name",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "source"
+                          },
+                          "target": {
+                            "description": "Scoped original source reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "kind": {
+                            "const": "entity"
+                          },
+                          "target": {
+                            "description": "Typed collaboration entity reference.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "target"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "key": {
+                            "pattern": "^[A-Za-z0-9_.\\/-]{1,128}$",
+                            "type": "string"
+                          },
+                          "kind": {
+                            "const": "property"
+                          },
+                          "value": {
+                            "oneOf": [
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "text"
+                                  },
+                                  "value": {
+                                    "type": "string"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "boolean"
+                                  },
+                                  "value": {
+                                    "type": "boolean"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "integer"
+                                  },
+                                  "value": {
+                                    "type": "integer"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              },
+                              {
+                                "additionalProperties": false,
+                                "properties": {
+                                  "kind": {
+                                    "const": "decimal"
+                                  },
+                                  "value": {
+                                    "additionalProperties": false,
+                                    "properties": {
+                                      "coefficient": {
+                                        "type": "integer"
+                                      },
+                                      "scale": {
+                                        "maximum": 9,
+                                        "minimum": 0,
+                                        "type": "integer"
+                                      }
+                                    },
+                                    "required": [
+                                      "coefficient",
+                                      "scale"
+                                    ],
+                                    "type": "object"
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "value"
+                                ],
+                                "type": "object"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "key",
+                          "value"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  },
+                  "maxItems": 128,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "kind",
+                "context_id",
+                "content",
+                "tags"
               ],
               "type": "object"
             },

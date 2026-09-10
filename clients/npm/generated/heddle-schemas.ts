@@ -543,7 +543,7 @@ export interface AgentUsageSummary {
   tool_calls?: number | null;
 }
 
-export type AnchorOutput = { kind: string; } | { kind: string; state_id: string; } | { change_id: string; kind: string; } | { kind: string; path: string; state_id: string; } | { kind: string; path: string; state_id: string; symbol: string; };
+export type AnchorOutput = { end_line?: number | null; git_commit_oid?: string | null; kind: string; path: string; start_line?: number | null; state_id?: string | null; symbol_id: string; } | { kind: string; } | { kind: string; state_id: string; } | { change_id: string; kind: string; } | { kind: string; path: string; state_id: string; } | { kind: string; path: string; state_id: string; symbol: string; };
 
 export type Array_of_ThreadApprovalSchema = ThreadApprovalSchema[];
 
@@ -2155,7 +2155,7 @@ export interface RepositoryVerificationState {
 
 export type RequiredNullableNextState = NextStateView | null;
 
-export type ResolutionOutput = { kind: string; state_id: string; } | { change_id: string; kind: string; } | { kind: string; reason: string; } | { annotation_kind: string; content: string; kind: string; tags: string[]; } | { annotation_id: string; kind: string; };
+export type ResolutionOutput = { kind: string; state_id: string; } | { change_id: string; kind: string; } | { kind: string; reason: string; } | { content: string; context_id: string; kind: string; tags: ({ kind: unknown; text: string; } | { kind: unknown; name: string; /** Scoped original source reference; current target resolution is separate. */ target: Record<string, unknown> | null; } | { kind: unknown; /** Scoped original source reference. */ target: Record<string, unknown>; } | { kind: unknown; /** Typed collaboration entity reference. */ target: Record<string, unknown>; } | { key: string; kind: unknown; value: { kind: unknown; value: string; } | { kind: unknown; value: boolean; } | { kind: unknown; value: number; } | { kind: unknown; value: { coefficient: number; scale: number; }; }; })[]; } | { annotation_kind: string; content: string; kind: string; tags: string[]; } | { annotation_id: string; kind: string; };
 
 export interface ResolveReport {
   /** Path-level compatibility/progress surface, including structural conflicts. */

@@ -14,18 +14,24 @@ This index covers Heddle's top-level reference docs. Start an agent at `heddle h
 - [Self-sovereign auth: minting and attenuating your own Biscuit](SELF_SOVEREIGN_AUTH.md): A self-sovereign Heddle client is one that holds its own root
 - [Sley Integration Contract](SLEY_INTEGRATION.md): Status: current Heddle hardening note. Heddle now treats Sley as the Git-format
 - [Heddle 1.0 stability criterion](STABILITY.md): Status: strawman. Every <TBD: maintainer> marker is a policy
+- [Thread work, discussions, and context](THREAD_AGENT_EXPERIENCE.md): The useful agent-facing unit is a Thread with durable intent, source heads,
 - [Verification And Git Projection Cleanup Plan](VERIFICATION_CLEANUP_PLAN.md): Status: cleanup plan from the July 2026 branch review and follow-up design interview.
 - [Heddle Verification State Logic Map](VERIFICATION_STATE_LOGIC_MAP.md): This map documents both the current centralized repository verification
 - [Weft clean-cut handoff](WEFT_CLEAN_CUT_HANDOFF.md): Heddle's codex/agent-native-vcs branch is based on origin/main at
 - [Historical Phase 4 Wire Protocol Summary](WIRE_PROTOCOL.md): Status: historical design record. This page describes the retired
 - [Workspace Split Plan](WORKSPACE_SPLIT_PLAN.md): Status: Phase 1 executed on 2026-05-13. The workspace now lives across three repos:
+- [Device account API v2](device-account-v2.md): The device endpoint composes the locally admitted account directly. Workspace,
+- [Portable Thread control admission](device-thread-controls.md): Native Thread metadata uses an independent causal register for name, intent,
 - [Heddle CLI exit codes](exit-codes.md): The CLI follows BSD sysexits.h so codes mean the same thing to humans, init
 - [.heddleignore](heddleignore.md): .heddleignore is heddle's per-repo file for telling heddle capture,
 - [Heddle JSON output schemas](json-schemas.md): This document is the canonical reference for every CLI verb that emits
+- [Local metadata storage](local-metadata.md): Heddle's v2 mutable Thread and Run state shares metadata.sqlite3 under the
 - [Heddle personas](personas.md): This doc names the three personas heddle's OSS quality is evaluated against. Each round of "persona eval" walks current heddle main from each persona's persp...
 - [CLI trace export](telemetry.md): Heddle can export command traces to an OpenTelemetry collector. The default
+- [Original-author admission receipts](thread-authority-admission.md): heddle-thread-authority-admission-v3 covers an original operation or dual-signed
 - [heddle undo](undo.md): A safety net for the operations a daily user is most likely to want to roll back.
 - [Unwrap and Expect Policy](unwrap-policy.md): Heddle should reach zero production unwrap and expect call sites before 1.0. Until that cleanup is complete, the gate is per-crate: crates that already have...
+- [Alpha v2 cutover acceptance checklist](v2-cutover-checklist.md): This is the live completion checklist for API, Heddle, Weft and Tapestry.
 
 ## Reference directories
 
