@@ -41,7 +41,7 @@ env:
 jobs:
   fast-check:
     name: fast-check
-    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    runs-on: [self-hosted, linux, x64, heddleco]
     timeout-minutes: 30
     env:
       # GNU ld dominates the tail of the workspace-wide, all-targets links
