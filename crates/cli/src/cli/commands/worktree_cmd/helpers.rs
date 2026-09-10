@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use objects::{object::StateId, store::ObjectStore};
-use repo::{AudienceTier, CheckoutMaterialization, Repository};
+use repo::{CheckoutMaterialization, Repository};
 
 use super::super::advice::RecoveryAdvice;
 
@@ -477,6 +477,7 @@ fn worktree_target_existing_heddle_advice(path: &Path) -> RecoveryAdvice {
 mod gate_tests {
     use chrono::Utc;
     use objects::object::{Principal, StateVisibility, ThreadName, VisibilityTier};
+    use repo::AudienceTier;
     use tempfile::TempDir;
 
     use super::*;
