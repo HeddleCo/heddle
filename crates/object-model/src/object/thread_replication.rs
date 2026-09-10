@@ -6,6 +6,7 @@ pub mod integration;
 pub mod local_integration;
 pub mod metadata;
 pub mod ownership_claim;
+pub mod ownership_resolution;
 pub mod source_author;
 use std::collections::BTreeSet;
 
