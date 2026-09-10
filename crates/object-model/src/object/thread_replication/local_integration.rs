@@ -32,7 +32,8 @@ pub struct LocalIntegration {
 impl LocalIntegration {
     pub fn encode(&self) -> Result<Vec<u8>> {
         self.author.validate()?;
-        if matches!(&self.author, super::SourceAuthor::Account { spool, .. } if *spool != self.spool) {
+        if matches!(&self.author, super::SourceAuthor::Account { spool, .. } if *spool != self.spool)
+        {
             return Err(invalid("local integration author crosses Spool scope"));
         }
         if self.version != 1

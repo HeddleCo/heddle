@@ -482,12 +482,20 @@ void Foo<U>::baz() {}
 
 #[test]
 fn bounded_parser_cancellation_does_not_poison_reused_parser() {
-    let budget = ParseBudget { cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)), deadline: std::time::Instant::now() + std::time::Duration::from_secs(10) };
+    let budget = ParseBudget {
+        cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
+    };
     let source = "pub fn answer() -> i32 { 42 }";
     assert!(ParsedFile::parse_bounded(source, Language::Rust, &budget).is_none());
-    budget.cancelled.store(false, std::sync::atomic::Ordering::Release);
+    budget
+        .cancelled
+        .store(false, std::sync::atomic::Ordering::Release);
     assert!(ParsedFile::parse_bounded(source, Language::Rust, &budget).is_some());
-    let expired = ParseBudget { deadline: std::time::Instant::now(), ..budget };
+    let expired = ParseBudget {
+        deadline: std::time::Instant::now(),
+        ..budget
+    };
     assert!(ParsedFile::parse_bounded(source, Language::Rust, &expired).is_none());
     assert!(ParsedFile::parse(source, Language::Rust).is_some());
 }

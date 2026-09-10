@@ -130,7 +130,7 @@ fn boundary_batch_matches_shared_evidence_once_and_rejects_missing_or_unreferenc
         .boundary_acceptance
         .as_ref()
         .expect("evidence");
-    assert_eq!(first.canonical.len() > 64 * 1024, true);
+    assert!(first.canonical.len() > 64 * 1024);
     for received in &matched {
         let receipt = received.authority_admission.as_ref().expect("receipt");
         assert!(
@@ -151,8 +151,7 @@ fn boundary_batch_matches_shared_evidence_once_and_rejects_missing_or_unreferenc
     missing.boundary_acceptances.clear();
     assert!(
         crate::authority_admission::match_batch(&missing)
-            .err()
-            .expect("missing evidence")
+            .expect_err("missing evidence")
             .to_string()
             .contains("missing matched")
     );
@@ -165,8 +164,7 @@ fn boundary_batch_matches_shared_evidence_once_and_rejects_missing_or_unreferenc
     unmatched.authority_admissions.clear();
     assert!(
         crate::authority_admission::match_batch(&unmatched)
-            .err()
-            .expect("unreferenced evidence")
+            .expect_err("unreferenced evidence")
             .to_string()
             .contains("unreferenced")
     );

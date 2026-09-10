@@ -149,7 +149,10 @@ pub(super) async fn roundtrip(
             source: Some(revision),
             kinds: vec![AnalysisKind::SemanticIndex as i32],
             symbols: vec!["answer".into()],
-            observe: Some(ObserveOptions { mode: ObservationMode::Once as i32, ..Default::default() }),
+            observe: Some(ObserveOptions {
+                mode: ObservationMode::Once as i32,
+                ..Default::default()
+            }),
             ..Default::default()
         })
         .await

@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::path::Path;
 
-use proptest::prelude::*;
-use proptest::test_runner::TestCaseError;
-
-use crate::blame::{
-    BlamePreparation, BlameSliceAdvance, BlameSliceLimits, advance_file_blame_slice, blame_file,
-    finalize_file_provenance, prepare_file_blame,
-};
-use crate::object::StateId;
+use proptest::{prelude::*, test_runner::TestCaseError};
 
 use super::fixture::{put_state_with_file, store};
+use crate::{
+    blame::{
+        BlamePreparation, BlameSliceAdvance, BlameSliceLimits, advance_file_blame_slice,
+        blame_file, finalize_file_provenance, prepare_file_blame,
+    },
+    object::StateId,
+};
 
 fn edit_strategy() -> impl Strategy<Value = Vec<String>> {
     prop::collection::vec("[abc\n]{0,24}", 1..8)

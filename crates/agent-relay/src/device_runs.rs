@@ -1,5 +1,6 @@
 //! Project real harness sessions and deliver supported controls at hook edges.
 //! Claude output semantics: https://code.claude.com/docs/en/hooks#json-output
+#![allow(clippy::items_after_test_module)]
 use anyhow::{Context, Result};
 use api::heddle::api::v2alpha1 as v2;
 use objects::object::ContentHash;
@@ -517,16 +518,16 @@ pub(crate) fn claude_tool_edge(
         }
         return Ok(());
     }
-    if let Some(run) = run {
-        if claude_controls(
+    if let Some(run) = run
+        && claude_controls(
             repo,
             &run,
             event,
             || crate::claude_hook::pre_tool_use_context(repo, payload),
             output,
-        )? {
-            return Ok(());
-        }
+        )?
+    {
+        return Ok(());
     }
     if let Some(context) = crate::claude_hook::pre_tool_use_context(repo, payload)? {
         serde_json::to_writer(

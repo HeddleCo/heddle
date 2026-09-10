@@ -348,11 +348,9 @@ fn native_capture_cannot_unignore_heddle_identity_via_gitignore() {
     std::fs::write(temp.path().join("kept.txt"), "captured\n").unwrap();
 
     heddle(&["init"], Some(temp.path())).unwrap();
-    std::fs::write(
-        temp.path().join(".heddle").join("identity.toml"),
-        "secret-key-material\n",
-    )
-    .unwrap();
+    // Root identity.toml is the unclaimed Thread owner key. The reserved-path
+    // check still applies to the real file; overwriting it with non-TOML bait
+    // would fail closed on native capture signing.
     std::fs::create_dir_all(temp.path().join("examples/calculator/.heddle")).unwrap();
     std::fs::write(
         temp.path()

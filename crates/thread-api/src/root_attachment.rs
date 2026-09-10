@@ -179,7 +179,9 @@ pub fn verify(
         now,
     )
     .map_err(|_| Error::Protocol("endpoint attachment credential is not valid"))?;
-    if facts.subject_user_id().is_some_and(|account| account.to_string() != expected_account_id)
+    if facts
+        .subject_user_id()
+        .is_some_and(|account| account.to_string() != expected_account_id)
         || facts.cnf.as_deref() != Some(hex::encode(&binding.subject_public_key).as_str())
         || (facts.exp != 0 && binding.expires_at_unix_seconds as u64 > facts.exp)
     {
@@ -203,7 +205,10 @@ pub fn verify(
     )
     .map_err(|_| Error::Protocol("endpoint attachment outlives credential attenuation"))?;
     verify_possession(attachment, &binding)?;
-    Ok(VerifiedAttachment { binding, credential_revocation_ids: facts.revocation_identities().map(str::to_owned).collect() })
+    Ok(VerifiedAttachment {
+        binding,
+        credential_revocation_ids: facts.revocation_identities().map(str::to_owned).collect(),
+    })
 }
 
 fn validate_binding(binding: &RootAttachmentBinding) -> Result<(), Error> {

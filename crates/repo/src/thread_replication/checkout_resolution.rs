@@ -111,7 +111,12 @@ impl ThreadCheckout {
                 body: ThreadOperationBody::Capture(
                     objects::object::thread_replication::AuthoredCapture {
                         result: replica.prepare_capture(&self.repository, &state)?,
-                        author: replica.source_author_for(&signer.public_key().try_into().map_err(|_| Error::Invalid("source signer length".into()))?)?,
+                        author: replica.source_author_for(
+                            &signer
+                                .public_key()
+                                .try_into()
+                                .map_err(|_| Error::Invalid("source signer length".into()))?,
+                        )?,
                     },
                 ),
             };

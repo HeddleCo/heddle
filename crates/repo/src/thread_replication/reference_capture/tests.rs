@@ -294,7 +294,9 @@ fn signed_scope_corruption_cannot_publish_reference_root_or_advance_admission() 
         thread: replica.thread,
         parents: BTreeSet::new(),
         publisher: signer.public_key().try_into().expect("key"),
-        body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(altered)),
+        body: ThreadOperationBody::Capture(
+            objects::object::thread_replication::AuthoredCapture::local(altered),
+        ),
     };
     let signed = SignedOperation::sign(&operation, &signer).expect("valid publisher signature");
     let before = replica.generation().expect("generation");
@@ -489,7 +491,11 @@ fn capture_cannot_drop_parent_or_fork_reference_closure() {
         thread: replica.thread,
         parents: BTreeSet::from([parent.verify().expect("parent").id().expect("parent ID")]),
         publisher: signer.public_key().try_into().expect("key"),
-        body: ThreadOperationBody::Capture(objects::object::thread_replication::AuthoredCapture::local(next.encode_current_msgpack().expect("State").into())),
+        body: ThreadOperationBody::Capture(
+            objects::object::thread_replication::AuthoredCapture::local(
+                next.encode_current_msgpack().expect("State").into(),
+            ),
+        ),
     };
     let signed = SignedOperation::sign(&omitted, &signer).expect("signed");
     assert!(

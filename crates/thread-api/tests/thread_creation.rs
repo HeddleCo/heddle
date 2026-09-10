@@ -13,7 +13,9 @@ fn genesis(signer: &Ed25519Signer) -> ThreadGenesis {
         name: "independent work".into(),
         intent: "retain identity while publishing".into(),
         creator: signer.public_key().try_into().expect("public key"),
-        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("public key")),
+        owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(
+            signer.public_key().try_into().expect("public key"),
+        ),
         nonce: vec![23; 16],
     }
 }

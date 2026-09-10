@@ -10,10 +10,10 @@ mod account_spool;
 #[cfg(test)]
 mod account_tests;
 mod account_threads;
-mod artifact;
 mod analysis;
 #[cfg(all(test, feature = "semantic"))]
 mod analysis_tests;
+mod artifact;
 pub(crate) mod artifact_retention;
 #[cfg(test)]
 mod artifact_tests;
@@ -21,8 +21,6 @@ mod auth;
 mod authority_clock;
 #[cfg(test)]
 mod capacity_tests;
-#[cfg(test)]
-mod sibling_tests;
 mod checkout;
 mod collaboration;
 mod collaboration_observe;
@@ -30,35 +28,37 @@ mod collaboration_targets;
 #[cfg(test)]
 mod collaboration_tests;
 mod content;
-mod fetch;
-#[cfg(test)]
-mod fetch_tests;
 mod content_detail;
 mod content_summary;
 #[cfg(test)]
 mod content_tests;
+mod evidence;
+#[cfg(test)]
+mod evidence_tests;
+mod fetch;
+#[cfg(test)]
+mod fetch_tests;
 #[cfg(test)]
 mod inventory_tests;
 mod land;
 mod observe;
+mod operations;
+mod ownership;
 #[cfg(test)]
-mod receipt_tests;
-mod replication;
+mod ownership_tests;
 mod publication;
 #[cfg(test)]
 mod publication_tests;
 #[cfg(test)]
-mod ownership_tests;
-mod stream;
+mod receipt_tests;
+mod replication;
 mod search;
-mod operations;
-mod evidence;
 #[cfg(test)]
-mod evidence_tests;
+mod sibling_tests;
+mod stream;
 #[cfg(test)]
 mod tests;
 mod thread;
-mod ownership;
 mod thread_observe;
 #[cfg(test)]
 mod thread_tests;
@@ -77,7 +77,11 @@ use api::heddle::api::{
 use iroh::endpoint::SendStream;
 use prost::Message;
 
-pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread", "/heddle.api.v2alpha1.SyncService/Fetch", "/heddle.api.v2alpha1.SyncService/PublishContent"];
+pub(crate) const STREAM_METHODS: &[&str] = &[
+    "/heddle.api.v2alpha1.SyncService/ReplicateThread",
+    "/heddle.api.v2alpha1.SyncService/Fetch",
+    "/heddle.api.v2alpha1.SyncService/PublishContent",
+];
 pub(crate) const METHODS: &[&str] = &[
     "/heddle.api.v2alpha1.ThreadService/ClaimThreadOwnership",
     "/heddle.api.v2alpha1.AnalysisService/ObserveAnalysis",
@@ -204,16 +208,22 @@ impl DeviceRpc {
         if descriptor.streaming == api::StreamingShape::ServerStreaming {
             budget.retain().map_err(anyhow::Error::msg)?;
         }
-        if method.ends_with("/ObserveAnalysis") { return self.observe_analysis(&session, body, send).await; }
+        if method.ends_with("/ObserveAnalysis") {
+            return self.observe_analysis(&session, body, send).await;
+        }
         #[cfg(feature = "semantic")]
-        if method.ends_with("/StartAnalysis") { return self.start_analysis(session, body, send).await; }
+        if method.ends_with("/StartAnalysis") {
+            return self.start_analysis(session, body, send).await;
+        }
         if method.ends_with("/ReadContent") {
             return self.read_content(session, body, send).await;
         }
         if method.ends_with("/ReadArtifact") {
             return self.read_artifact(session, body, send).await;
         }
-        if method.ends_with("/ObserveCollaboration") { return self.observe_collaboration(&session,body,send).await; }
+        if method.ends_with("/ObserveCollaboration") {
+            return self.observe_collaboration(&session, body, send).await;
+        }
         if method.ends_with("/ObserveThread") {
             return self.observe_thread(&session, body, send).await;
         }
@@ -245,10 +255,18 @@ impl DeviceRpc {
         Ok(())
     }
     fn execute(&self, session: &auth::Session, method: &str, body: &[u8]) -> Result<Vec<u8>> {
-        if method.ends_with("/ClaimThreadOwnership") { return self.claim_thread_ownership(session,body); }
-        if method.ends_with("/CancelOperation") { return self.cancel_operation(session, body); }
-        if method.contains(".EvidenceService/") { return self.evidence_command(session, method, body); }
-        if method.contains(".CollaborationService/") { return self.collaboration_command(session, method, body); }
+        if method.ends_with("/ClaimThreadOwnership") {
+            return self.claim_thread_ownership(session, body);
+        }
+        if method.ends_with("/CancelOperation") {
+            return self.cancel_operation(session, body);
+        }
+        if method.contains(".EvidenceService/") {
+            return self.evidence_command(session, method, body);
+        }
+        if method.contains(".CollaborationService/") {
+            return self.collaboration_command(session, method, body);
+        }
         if method.contains(".ThreadService/") {
             return self.thread_command(session, method, body);
         }
@@ -300,18 +318,44 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
         }};
     }
     let spool = match method.rsplit('/').next().context("method missing")? {
-        "ObserveAnalysis" => scope!(ObserveAnalysisRequest, |r:ObserveAnalysisRequest|r.source.and_then(|v|v.spool)),
-        "ClaimThreadOwnership" => scope!(ClaimThreadOwnershipRequest, |r:ClaimThreadOwnershipRequest|r.thread.and_then(|v|v.spool)),
-        "StartAnalysis" => scope!(StartAnalysisRequest, |r:StartAnalysisRequest|r.source.and_then(|v|v.spool)),
-        "CancelOperation" => scope!(CancelOperationRequest, |r:CancelOperationRequest|r.operation.and_then(|v|v.spool)),
-        "RecordEvidence" => scope!(RecordEvidenceRequest, |r:RecordEvidenceRequest|r.evidence.and_then(|e|e.revision).and_then(|r|r.spool)),
-        "AcknowledgeCheck" => scope!(AcknowledgeCheckRequest, |r:AcknowledgeCheckRequest|r.evidence.and_then(|e|e.spool)),
-        "ObserveCollaboration" => scope!(ObserveCollaborationRequest, |r:ObserveCollaborationRequest|r.spool),
-        "OpenDiscussion" => scope!(OpenDiscussionRequest, |r:OpenDiscussionRequest|r.spool),
-        "AppendTurn" => scope!(AppendDiscussionRequest, |r:AppendDiscussionRequest|r.discussion.and_then(|v|v.spool)),
-        "ResolveDiscussion" => scope!(ResolveDiscussionRequest, |r:ResolveDiscussionRequest|r.discussion.and_then(|v|v.spool)),
-        "ReopenDiscussion" => scope!(ReopenDiscussionRequest, |r:ReopenDiscussionRequest|r.discussion.and_then(|v|v.spool)),
-        "PutContext" => scope!(PutContextRequest, |r:PutContextRequest|r.context.and_then(|v|v.r#ref).and_then(|v|v.spool)),
+        "ObserveAnalysis" => scope!(ObserveAnalysisRequest, |r: ObserveAnalysisRequest| r
+            .source
+            .and_then(|v| v.spool)),
+        "ClaimThreadOwnership" => scope!(
+            ClaimThreadOwnershipRequest,
+            |r: ClaimThreadOwnershipRequest| r.thread.and_then(|v| v.spool)
+        ),
+        "StartAnalysis" => scope!(StartAnalysisRequest, |r: StartAnalysisRequest| r
+            .source
+            .and_then(|v| v.spool)),
+        "CancelOperation" => scope!(CancelOperationRequest, |r: CancelOperationRequest| r
+            .operation
+            .and_then(|v| v.spool)),
+        "RecordEvidence" => scope!(RecordEvidenceRequest, |r: RecordEvidenceRequest| r
+            .evidence
+            .and_then(|e| e.revision)
+            .and_then(|r| r.spool)),
+        "AcknowledgeCheck" => scope!(AcknowledgeCheckRequest, |r: AcknowledgeCheckRequest| r
+            .evidence
+            .and_then(|e| e.spool)),
+        "ObserveCollaboration" => scope!(
+            ObserveCollaborationRequest,
+            |r: ObserveCollaborationRequest| r.spool
+        ),
+        "OpenDiscussion" => scope!(OpenDiscussionRequest, |r: OpenDiscussionRequest| r.spool),
+        "AppendTurn" => scope!(AppendDiscussionRequest, |r: AppendDiscussionRequest| r
+            .discussion
+            .and_then(|v| v.spool)),
+        "ResolveDiscussion" => scope!(ResolveDiscussionRequest, |r: ResolveDiscussionRequest| r
+            .discussion
+            .and_then(|v| v.spool)),
+        "ReopenDiscussion" => scope!(ReopenDiscussionRequest, |r: ReopenDiscussionRequest| r
+            .discussion
+            .and_then(|v| v.spool)),
+        "PutContext" => scope!(PutContextRequest, |r: PutContextRequest| r
+            .context
+            .and_then(|v| v.r#ref)
+            .and_then(|v| v.spool)),
         "ReadArtifact" => scope!(ReadArtifactRequest, |r: ReadArtifactRequest| r
             .artifact
             .and_then(|r| r.spool)),
@@ -333,13 +377,23 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
             .policy
             .and_then(|p| p.thread)
             .and_then(|t| t.spool)),
-        "SetAudiencePolicy" => scope!(SetThreadAudienceRequest, |r: SetThreadAudienceRequest| r.policy.and_then(|p| p.thread).and_then(|t| t.spool)),
-        "SetRetentionPolicy" => scope!(SetThreadRetentionRequest, |r: SetThreadRetentionRequest| r.policy.and_then(|p| p.thread).and_then(|t| t.spool)),
+        "SetAudiencePolicy" => scope!(SetThreadAudienceRequest, |r: SetThreadAudienceRequest| r
+            .policy
+            .and_then(|p| p.thread)
+            .and_then(|t| t.spool)),
+        "SetRetentionPolicy" => {
+            scope!(SetThreadRetentionRequest, |r: SetThreadRetentionRequest| r
+                .policy
+                .and_then(|p| p.thread)
+                .and_then(|t| t.spool))
+        }
         "RecordReview" => scope!(RecordReviewRequest, |r: RecordReviewRequest| r
             .decision
             .and_then(|p| p.thread)
             .and_then(|t| t.spool)),
-        "ReadContent" => scope!(ReadContentRequest, |r: ReadContentRequest| r.revision.and_then(|r| r.spool)),
+        "ReadContent" => scope!(ReadContentRequest, |r: ReadContentRequest| r
+            .revision
+            .and_then(|r| r.spool)),
         "ObserveCheckouts" => scope!(ObserveCheckoutsRequest, |r: ObserveCheckoutsRequest| r
             .spool),
         "Materialize" => scope!(

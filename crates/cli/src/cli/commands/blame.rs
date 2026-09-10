@@ -3,13 +3,12 @@
 
 use std::{collections::HashMap, path::Path};
 
+use anyhow::{Result, anyhow};
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
     AgentInfo, BlameLine, BlameOrigin, BlameOutput, ContextSnippet, PrincipalInfo,
 };
-
-use anyhow::{Result, anyhow};
 use objects::{
     object::{
         AnnotationStatus, Attribution, ContentHash, ContextTarget, FileProvenance, ProvenanceError,

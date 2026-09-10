@@ -8,13 +8,12 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-
 use objects::{
     error::{HeddleError, Result},
     fs_atomic::{create_dir_all_durable, write_file_atomic},
     lock::{RepoLock, WriteLockGuard},
 };
+use serde::{Deserialize, Serialize};
 
 /// Current agent task TOML schema version.
 pub const AGENT_TASK_SCHEMA_VERSION: u32 = 1;

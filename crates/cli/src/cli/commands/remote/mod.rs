@@ -1763,11 +1763,14 @@ async fn auto_provision_hosted_repo(
         relative_path,
         async |parent, slug, leaf| {
             let id = if leaf {
-                repo.native_spool_id().map_err(|error| ProtocolError::InvalidState(error.to_string()))?
+                repo.native_spool_id()
+                    .map_err(|error| ProtocolError::InvalidState(error.to_string()))?
             } else {
                 uuid::Uuid::now_v7()
             };
-            client.create_spool_with_id(parent, slug, leaf, None, id).await
+            client
+                .create_spool_with_id(parent, slug, leaf, None, id)
+                .await
         },
     )
     .await

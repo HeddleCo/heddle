@@ -5,11 +5,12 @@ use std::io::{self, IsTerminal, Read};
 
 use anyhow::{Context, Result, anyhow};
 use repo::{Hook, HookManager};
-
 use serde::Serialize;
 
-use super::advice::RecoveryAdvice;
-use super::next_action::{NextActionValidationContext, write_full_command_json};
+use super::{
+    advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
+};
 use crate::cli::{Cli, HookCommands, HookInstallSource, should_output_json};
 
 #[derive(Serialize)]

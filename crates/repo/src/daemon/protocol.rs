@@ -136,10 +136,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::send_mount_daemon_request;
-    use crate::daemon::{EndpointState, MountDaemonRequest};
-
     #[cfg(unix)]
     use super::{send_json_request_unix, send_json_request_unix_with};
+    use crate::daemon::{EndpointState, MountDaemonRequest};
     #[cfg(unix)]
     use crate::daemon::{
         MOUNT_PROTOCOL_VERSION, MountDaemonResponse, MountStatus,

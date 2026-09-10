@@ -12,8 +12,10 @@ use repo::Repository;
 use serde::Serialize;
 use verbs::{PurgeApplyPlan, plan_purge_apply, purge_apply_message, purge_force_command};
 
-use super::advice::RecoveryAdvice;
-use super::next_action::{NextActionValidationContext, write_full_command_json};
+use super::{
+    advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
+};
 use crate::{
     cli::{Cli, PurgeApplyArgs, PurgeCommands, PurgeListArgs, should_output_json},
     config::UserConfig,

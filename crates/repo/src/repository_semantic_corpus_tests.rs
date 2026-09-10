@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Tests for the capture-time function corpus walk.
 
-use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::PathBuf;
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    path::PathBuf,
+};
 
 use objects::object::{
     ContentHash, ObjectSource, SemanticEntryKind, SemanticFileFacts, SemanticFileNode,

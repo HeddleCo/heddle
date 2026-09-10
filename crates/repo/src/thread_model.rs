@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-use schemars::JsonSchema;
 use std::path::PathBuf;
 
-use crate::actor_presence::AgentUsageSummary;
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::actor_presence::AgentUsageSummary;
 
 /// A validated thread id. Construction from user- or externally-supplied
 /// input goes through [`ThreadId::new`], which rejects anything that is not a

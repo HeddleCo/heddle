@@ -3,11 +3,6 @@
 
 use std::path::Path;
 
-use crate::{
-    object::ObjectSource,
-    util::{ResourceBudget, ResourceKind, ResourceUsage},
-};
-
 use super::{
     lookup::{load_blob_within_budget, lookup_blob_at_path},
     mapping::{
@@ -19,6 +14,10 @@ use super::{
         BlameFrontierGroup, BlameSliceAdvance, BlameSliceError, BlameSliceLimits, OriginRange,
         origin_from_state,
     },
+};
+use crate::{
+    object::ObjectSource,
+    util::{ResourceBudget, ResourceKind, ResourceUsage},
 };
 
 /// Compute one deterministic slice. On success the result is complete; on

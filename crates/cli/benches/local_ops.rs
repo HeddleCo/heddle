@@ -1043,7 +1043,8 @@ fn bench_three_way_merge(c: &mut Criterion) {
 
     c.bench_function("three_way_merge", |b| {
         b.iter(|| {
-            let result = merge_bench_three_way_merge(&repo, &base_tree, &main_tree, &topic_tree).unwrap();
+            let result =
+                merge_bench_three_way_merge(&repo, &base_tree, &main_tree, &topic_tree).unwrap();
             black_box(result.1 + result.2 + result.3);
         });
     });
@@ -1093,7 +1094,8 @@ fn bench_detect_renames(c: &mut Criterion) {
             &file_count,
             |b, _| {
                 b.iter(|| {
-                    let result = merge_bench_detect_renames(&store, &base_tree, &branch_tree).unwrap();
+                    let result =
+                        merge_bench_detect_renames(&store, &base_tree, &branch_tree).unwrap();
                     black_box(result);
                 });
             },

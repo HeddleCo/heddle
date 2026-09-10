@@ -3,13 +3,11 @@
 //! bisect mid-flight, in either the Heddle or the Git overlay state model,
 //! and what should the user run next.
 
+use objects::error::Result;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use objects::error::Result;
-
-use super::overlay::resolve_git_dir;
-use super::{Repository, RepositoryCapability};
+use super::{Repository, RepositoryCapability, overlay::resolve_git_dir};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "kebab-case")]

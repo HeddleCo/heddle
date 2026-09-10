@@ -8,8 +8,8 @@ pub use native::OwnedDeviceBinding;
 mod staging;
 use api::v2::client::{ClientError, MessageReader, Messages, RpcTransport};
 use prost::Message;
-pub use staging::{StagedSource, ValidatedSourceArtifacts};
 pub(crate) use staging::validate_artifacts;
+pub use staging::{StagedSource, ValidatedSourceArtifacts};
 
 use crate::{Remote, contract::*, replication, rpc, transport};
 
@@ -328,14 +328,30 @@ impl Validation {
                 Ok(Item::Pack(chunk))
             }
             fetch_server_frame::Body::Operations(batch) => {
-                self.operations = self.operations.checked_add(batch.operations.len()).ok_or(Error::Invalid("operation count overflow"))?;
-                self.metadata_bytes = self.metadata_bytes.checked_add(batch.encoded_len() as u64).ok_or(Error::Invalid("metadata size overflow"))?;
+                self.operations = self
+                    .operations
+                    .checked_add(batch.operations.len())
+                    .ok_or(Error::Invalid("operation count overflow"))?;
+                self.metadata_bytes = self
+                    .metadata_bytes
+                    .checked_add(batch.encoded_len() as u64)
+                    .ok_or(Error::Invalid("metadata size overflow"))?;
                 if self.operations > self.limits.max_operations
-                    || self.metadata_bytes > self.limits.max_total_bytes.saturating_sub(self.received)
-                { return Err(Error::Invalid("causal metadata exceeds download budget")); }
+                    || self.metadata_bytes
+                        > self.limits.max_total_bytes.saturating_sub(self.received)
+                {
+                    return Err(Error::Invalid("causal metadata exceeds download budget"));
+                }
                 for received in crate::authority_admission::match_batch(&batch)? {
-                    let operation = received.original.verify().map_err(|_| Error::Invalid("invalid original operation signature"))?;
-                    if !self.threads.contains(&operation.thread) || !self.facets.contains(&replication::wire_facet(operation.facet())) {
+                    let operation = received
+                        .original
+                        .verify()
+                        .map_err(|_| Error::Invalid("invalid original operation signature"))?;
+                    if !self.threads.contains(&operation.thread)
+                        || !self
+                            .facets
+                            .contains(&replication::wire_facet(operation.facet()))
+                    {
                         return Err(Error::Invalid("operation crosses Thread or selected facet"));
                     }
                 }
@@ -436,10 +452,28 @@ pub(crate) fn verify_origin(
     use heddle_object_model::object::thread_replication::integration::TrustedHostedExecutor;
     let genesis = replication::opening::verify_genesis_record(record, thread)?;
     if let Some(signed) = crate::boundary_acceptance::genesis_admission(record)? {
-        let value=signed.verify_signature().map_err(|_|Error::Invalid("invalid genesis receipt"))?;
-        let trust=TrustedHostedExecutor {spool:value.spool,spool_genesis:value.spool_genesis,executor:value.executor};
-        let evidence=signed.boundary_acceptance.as_ref().map(|value|value.verify_signature()).transpose().map_err(|_|Error::Invalid("invalid boundary evidence"))?;
-        value.authorize_with_acceptance(&genesis,&record.creator_authority,&trust,evidence.as_ref()).map_err(|_|Error::Invalid("genesis admission differs from original proof"))?;
+        let value = signed
+            .verify_signature()
+            .map_err(|_| Error::Invalid("invalid genesis receipt"))?;
+        let trust = TrustedHostedExecutor {
+            spool: value.spool,
+            spool_genesis: value.spool_genesis,
+            executor: value.executor,
+        };
+        let evidence = signed
+            .boundary_acceptance
+            .as_ref()
+            .map(|value| value.verify_signature())
+            .transpose()
+            .map_err(|_| Error::Invalid("invalid boundary evidence"))?;
+        value
+            .authorize_with_acceptance(
+                &genesis,
+                &record.creator_authority,
+                &trust,
+                evidence.as_ref(),
+            )
+            .map_err(|_| Error::Invalid("genesis admission differs from original proof"))?;
     }
     Ok(genesis)
 }

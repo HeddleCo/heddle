@@ -9,14 +9,16 @@ mod restart;
 
 use std::{cell::RefCell, collections::HashMap, path::Path};
 
-use crate::blame::{
-    BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
-    advance_file_blame_slice, blame_file, prepare_file_blame,
-};
-use crate::object::{Blob, ContentHash, ObjectSource, State, StateId, Tree};
-use crate::util::ResourceKind;
-
 use fixture::{principals_at, put_state_with_file, store};
+
+use crate::{
+    blame::{
+        BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
+        advance_file_blame_slice, blame_file, prepare_file_blame,
+    },
+    object::{Blob, ContentHash, ObjectSource, State, StateId, Tree},
+    util::ResourceKind,
+};
 
 #[test]
 fn missing_path_is_typed() {

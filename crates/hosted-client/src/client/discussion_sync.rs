@@ -1666,10 +1666,11 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use crate::client::discussion_live::{DiscussionEventOutcome, consume_discussion_event};
-    use crate::hosted_runtime::hosted::test_server::CollaborationFixture;
-
     use super::*;
+    use crate::{
+        client::discussion_live::{DiscussionEventOutcome, consume_discussion_event},
+        hosted_runtime::hosted::test_server::CollaborationFixture,
+    };
 
     /// A stable per-turn idempotency key for tests that drive
     /// `write_local_operation` directly (production callers derive theirs from

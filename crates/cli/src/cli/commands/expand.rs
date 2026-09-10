@@ -3,13 +3,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use anyhow::{Result, anyhow};
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
     CollapsedLandOutput, ExpandOutput, ExpandedCaptureOutput,
 };
-
-use anyhow::{Result, anyhow};
 use objects::object::StateId;
 use oplog::{OpLogBackend, OpRecord};
 use repo::{Repository, format_confidence};

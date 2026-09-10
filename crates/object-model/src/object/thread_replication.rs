@@ -5,8 +5,8 @@ pub mod hosted_import;
 pub mod integration;
 pub mod local_integration;
 pub mod metadata;
-pub mod source_author;
 pub mod ownership_claim;
+pub mod source_author;
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
@@ -191,7 +191,9 @@ impl ThreadOperation {
         if let ThreadOperationBody::Capture(capture) = &self.body {
             return Ok(Some(capture.author.clone()));
         }
-        Ok(self.local_integration()?.map(|integration| integration.author))
+        Ok(self
+            .local_integration()?
+            .map(|integration| integration.author))
     }
 
     pub fn source_result(&self) -> Result<Option<Capture>> {
@@ -325,15 +327,14 @@ impl ThreadOperation {
                 {
                     return Err(invalid("collaboration metadata belongs to another Thread"));
                 }
-                if let Some(context) = self.context_revision()? {
-                    if Some(&context.metadata) != decoded.operation.metadata.as_ref()
+                if let Some(context) = self.context_revision()?
+                    && (Some(&context.metadata) != decoded.operation.metadata.as_ref()
                         || context.extracted_from != Some(decoded.operation.discussion_id)
-                        || context.parents.iter().copied().collect::<BTreeSet<_>>() != self.parents
-                    {
-                        return Err(invalid(
-                            "extracted context differs from signed discussion actor, scope or parents",
-                        ));
-                    }
+                        || context.parents.iter().copied().collect::<BTreeSet<_>>() != self.parents)
+                {
+                    return Err(invalid(
+                        "extracted context differs from signed discussion actor, scope or parents",
+                    ));
                 }
                 if decoded.operation.encode().map_err(invalid)? != *bytes {
                     return Err(invalid("non-canonical discussion operation"));
@@ -396,10 +397,10 @@ impl ThreadOperation {
         match &self.body {
             ThreadOperationBody::Capture(bytes) => {
                 bytes.author.validate()?;
-                if let SourceAuthor::Account { spool, .. } = &bytes.author {
-                    if spool.to_string() != genesis.spool {
-                        return Err(invalid("original source author crosses Spool scope"));
-                    }
+                if let SourceAuthor::Account { spool, .. } = &bytes.author
+                    && spool.to_string() != genesis.spool
+                {
+                    return Err(invalid("original source author crosses Spool scope"));
                 }
                 let state = State::decode_current_msgpack(&bytes.result.state)?;
                 let mut source_parents = BTreeSet::new();

@@ -108,7 +108,6 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     use heddle_object_model::op_record::OpRecord;
-
     use objects::{
         error::HeddleError,
         object::{MarkerName, StateId, ThreadName},

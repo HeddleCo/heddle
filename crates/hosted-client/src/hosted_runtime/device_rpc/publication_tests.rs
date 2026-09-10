@@ -145,7 +145,7 @@ pub(super) async fn roundtrip(
             geneses: vec![replica.genesis_record().expect("creator wrapper")],
             operations: vec![ReplicationOperations {
                 boundary_acceptances: Vec::new(),
- operations: vec![super::thread::signed_record(&original).expect("original wire")],
+                operations: vec![super::thread::signed_record(&original).expect("original wire")],
                 authority_admissions: vec![],
             }],
         };
@@ -235,7 +235,7 @@ pub(super) async fn roundtrip(
             geneses: originals.geneses.clone(),
             operations: vec![ReplicationOperations {
                 boundary_acceptances: Vec::new(),
- operations: vec![super::thread::signed_record(&denied).expect("wire")],
+                operations: vec![super::thread::signed_record(&denied).expect("wire")],
                 authority_admissions: vec![],
             }],
         };

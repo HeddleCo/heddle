@@ -360,12 +360,22 @@ impl DeviceRpc {
                 value: replica.thread_id().as_bytes().to_vec(),
             }),
         };
-        let mut source_operations = replica.frontier_page(objects::object::thread_replication::ThreadFacet::Source, None, 129)?;
+        let mut source_operations = replica.frontier_page(
+            objects::object::thread_replication::ThreadFacet::Source,
+            None,
+            129,
+        )?;
         let complete = source_operations.len() <= 128;
         source_operations.truncate(128);
         let mut overview = ThreadOverview {
             ownership: Some(super::ownership::ownership_view(replica)?),
-            source_frontier: Some(SourceOperationFrontier { operation_ids: source_operations.into_iter().map(|id| id.as_bytes().to_vec()).collect(), complete }),
+            source_frontier: Some(SourceOperationFrontier {
+                operation_ids: source_operations
+                    .into_iter()
+                    .map(|id| id.as_bytes().to_vec())
+                    .collect(),
+                complete,
+            }),
             r#ref: Some(reference.clone()),
             name: view.genesis.name.clone(),
             version: projection::version(replica.thread_id(), view.generation)

@@ -1598,8 +1598,18 @@ fn revocation_identities_include_session_credential_and_every_block() {
     facts.sid = "session-a".into();
     facts.credential_id = Some("credential-b".into());
     facts.revocation_ids = vec!["authority-block".into(), "attenuation-block".into()];
-    assert_eq!(facts.revocation_identities().collect::<Vec<_>>(), vec!["session-a", "credential-b", "authority-block", "attenuation-block"]);
-    facts.sid.clear(); facts.credential_id = Some(String::new()); facts.revocation_ids.clear();
+    assert_eq!(
+        facts.revocation_identities().collect::<Vec<_>>(),
+        vec![
+            "session-a",
+            "credential-b",
+            "authority-block",
+            "attenuation-block"
+        ]
+    );
+    facts.sid.clear();
+    facts.credential_id = Some(String::new());
+    facts.revocation_ids.clear();
     assert_eq!(facts.revocation_identities().count(), 0);
 }
 

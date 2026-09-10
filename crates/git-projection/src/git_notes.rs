@@ -19,11 +19,10 @@ use std::{
 };
 
 use objects::object::StateId;
+pub use objects::object::{HeddleNote, NoteAgent, NoteAttribution, OmittedBreakdown, SignalCounts};
 use sley::{ObjectId, Repository};
 
 use super::git_core::{GitProjectionError, GitProjectionResult, git_err};
-
-pub use objects::object::{HeddleNote, NoteAgent, NoteAttribution, OmittedBreakdown, SignalCounts};
 
 /// The notes ref heddle uses. Git-compatible notes readers can opt into
 /// this location, while Heddle reads and writes it natively.

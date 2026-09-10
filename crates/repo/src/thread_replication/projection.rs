@@ -125,7 +125,9 @@ mod tests {
             name: "paging".into(),
             intent: "bounded SQL work".into(),
             creator: signer.public_key().try_into().expect("key"),
-            owner: objects::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
+            owner: objects::object::thread_replication::GenesisOwner::LocalKey(
+                signer.public_key().try_into().expect("key"),
+            ),
             nonce: vec![1],
         };
         let replica = ThreadReplica::create(

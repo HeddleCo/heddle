@@ -45,10 +45,10 @@ impl MaterialRetention {
     }
 
     pub fn validate(self) -> Result<()> {
-        if let Self::Bounded(seconds) = self {
-            if seconds == 0 || seconds > (i64::MAX / 1000) as u64 {
-                return Err(invalid("invalid bounded Thread retention duration"));
-            }
+        if let Self::Bounded(seconds) = self
+            && (seconds == 0 || seconds > (i64::MAX / 1000) as u64)
+        {
+            return Err(invalid("invalid bounded Thread retention duration"));
         }
         Ok(())
     }

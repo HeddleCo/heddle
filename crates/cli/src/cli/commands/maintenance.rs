@@ -2,6 +2,9 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use anyhow::Result;
+// The repack wire payload lives in cli-contract so the schema registry
+// registers the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::bridge::RepackOutput;
 use objects::store::{
     FsRepackOperation, RepackPolicy, RepackResourceLimits, RepackSchedule, RepackScheduler,
 };
@@ -14,10 +17,6 @@ use crate::cli::{
     commands::{cmd_fsck, cmd_fsck_repair_git, cmd_gc, cmd_oplog},
     should_output_json, worktree_status_options,
 };
-
-// The repack wire payload lives in cli-contract so the schema registry
-// registers the real serialization type.
-pub(crate) use heddle_cli_contract::cli::commands::wire::bridge::RepackOutput;
 
 #[derive(Serialize)]
 struct MaintenanceOutput<'a, T> {

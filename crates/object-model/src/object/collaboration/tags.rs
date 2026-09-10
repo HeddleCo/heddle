@@ -143,10 +143,10 @@ pub fn validate_annotation_tags(tags: &[AnnotationTag]) -> Result<(), Collaborat
     }
     for (i, tag) in tags.iter().enumerate() {
         tag.validate()?;
-        if let AnnotationTag::Property { key, .. } = tag {
-            if tags[..i].iter().any(|previous| matches!(previous, AnnotationTag::Property { key: other, .. } if key == other)) {
-                return Err(invalid("property keys must be unique within one revision"));
-            }
+        if let AnnotationTag::Property { key, .. } = tag
+            && tags[..i].iter().any(|previous| matches!(previous, AnnotationTag::Property { key: other, .. } if key == other))
+        {
+            return Err(invalid("property keys must be unique within one revision"));
         }
     }
     Ok(())

@@ -819,10 +819,10 @@ pub fn verify_account_owner_observation(
         let guard = cache
             .lock()
             .map_err(|_| anyhow::anyhow!("owner verification cache poisoned"))?;
-        if guard.second == now_unix_seconds {
-            if let Some(verified) = guard.owners.get(&digest) {
-                return Ok(verified.clone());
-            }
+        if guard.second == now_unix_seconds
+            && let Some(verified) = guard.owners.get(&digest)
+        {
+            return Ok(verified.clone());
         }
     }
     let verified = verify_account_owner_observation_uncached(observed, now_unix_seconds)?;

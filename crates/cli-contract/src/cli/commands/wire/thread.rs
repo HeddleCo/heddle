@@ -3,13 +3,12 @@
 //! `start`, thread refresh/drop/promote, cleanup, resolve, absorb, and the
 //! approval verbs).
 
+use heddle_cli_render::cli::render::RepositoryContextInfo;
 use schemars::JsonSchema;
 use serde::Serialize;
-
-use heddle_cli_render::cli::render::RepositoryContextInfo;
+use verbs::{ActionTemplate, AvailableGitRef, RepositoryVerificationState, ThreadSummary};
 
 use super::operator::OperatorCommandOutput;
-use verbs::{ActionTemplate, AvailableGitRef, RepositoryVerificationState, ThreadSummary};
 
 /// FSKit readiness detail surfaced by `start --workspace virtualized` on
 /// macOS when the CLI took an FSKit-specific decision.

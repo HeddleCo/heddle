@@ -3,11 +3,13 @@
 
 use std::mem::align_of;
 
-use super::super::budget::{ResourceBudget, ResourceKind};
-use super::myers::{LineView, emit_equal_runs};
-use super::scan::{LineOff, count_text_lines, fill_line_offsets};
-use super::scratch::{ConquerJob, align_scratch, layout_sizes, require_scratch};
-use super::{EqualRun, LcsVisitResult, LineDiffError};
+use super::{
+    super::budget::{ResourceBudget, ResourceKind},
+    EqualRun, LcsVisitResult, LineDiffError,
+    myers::{LineView, emit_equal_runs},
+    scan::{LineOff, count_text_lines, fill_line_offsets},
+    scratch::{ConquerJob, align_scratch, layout_sizes, require_scratch},
+};
 
 /// Visit equal index ranges in deterministic Myers order.
 ///

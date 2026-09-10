@@ -1083,12 +1083,15 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // the record's creation instant: the idempotency key folds it, and a
     // crash-retry reuses it from this still-Active record (heddle#356 cid
     // 3335052848 / 3335586969).
+    let native_parent = args
+        .parent_thread
+        .as_deref()
+        .or(current_target_thread.as_deref())
+        .filter(|name| repo.native_thread(name).is_ok());
     let native_thread = repo.create_native_thread(
         &args.name,
         base_state,
-        args.parent_thread
-            .as_deref()
-            .or(current_target_thread.as_deref()),
+        native_parent,
         args.task.as_deref().unwrap_or(""),
     )?;
     let thread_state = Thread {
@@ -1624,7 +1627,10 @@ pub(crate) fn cmd_thread_create(
     };
     let thread_manager = ThreadManager::new(repo.heddle_dir());
     let now = Utc::now();
-    let native_thread = repo.create_native_thread(&name, current, target_thread.as_deref(), "")?;
+    let native_parent = target_thread
+        .as_deref()
+        .filter(|name| repo.native_thread(name).is_ok());
+    let native_thread = repo.create_native_thread(&name, current, native_parent, "")?;
     let thread_state = Thread {
         id: native_thread.thread_id().to_hex(),
         thread: name.clone(),

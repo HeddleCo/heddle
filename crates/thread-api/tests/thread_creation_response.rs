@@ -77,7 +77,9 @@ async fn creation_returns_a_bound_receipt_and_rejects_incomplete_or_unrelated_re
             name: "work".into(),
             intent: "create once".into(),
             creator: signer.public_key().try_into().expect("key"),
-            owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
+            owner: heddle_object_model::object::thread_replication::GenesisOwner::LocalKey(
+                signer.public_key().try_into().expect("key"),
+            ),
             nonce: vec![23; 16],
         },
         &signer,

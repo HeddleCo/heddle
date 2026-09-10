@@ -9,13 +9,11 @@
 
 mod agent_node_identity;
 pub mod auth;
-mod auth_pairing;
-mod source_author;
-mod device_rpc;
 mod auth_login;
 mod auth_login_agent;
 #[cfg(test)]
 mod auth_login_tests;
+mod auth_pairing;
 pub mod auth_requests;
 mod claim_authorization;
 #[cfg(test)]
@@ -25,6 +23,7 @@ mod claim_native;
 pub mod claim_offer;
 pub(crate) mod credential_file;
 pub(crate) mod device_flow;
+mod device_rpc;
 pub mod hosted;
 mod identity_state;
 pub(crate) mod net_endpoint;
@@ -34,6 +33,7 @@ mod owner_root_tests;
 pub(crate) mod root_mint;
 #[cfg(test)]
 mod root_mint_tests;
+mod source_author;
 pub mod websocket;
 pub mod whoami;
 

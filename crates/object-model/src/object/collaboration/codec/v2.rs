@@ -66,6 +66,7 @@ struct WireTurnV1 {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
+#[allow(clippy::large_enum_variant)] // wire codec; boxing would change MessagePack layout
 enum WireResolutionV1 {
     AddressedByState {
         state_id: StateId,

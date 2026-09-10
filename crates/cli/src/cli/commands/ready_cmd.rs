@@ -3,6 +3,12 @@
 
 use anyhow::Result;
 use chrono::Utc;
+// The ready wire payload lives in cli-contract so the schema registry
+// registers the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::ready_blocked_by_missing_intent;
+pub(crate) use heddle_cli_contract::cli::commands::wire::{
+    ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary,
+};
 use objects::object::Tree;
 use repo::{Repository, ThreadFreshness, ThreadState};
 use verbs::{
@@ -42,13 +48,6 @@ use crate::{
         style, worktree_status_options,
     },
     config::UserConfig,
-};
-
-// The ready wire payload lives in cli-contract so the schema registry
-// registers the real serialization type.
-pub(crate) use heddle_cli_contract::cli::commands::wire::ready_blocked_by_missing_intent;
-pub(crate) use heddle_cli_contract::cli::commands::wire::{
-    ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary,
 };
 
 pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
@@ -188,7 +187,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
             let dirty_paths = worktree_dirty_paths(repo, &status_options)?;
             let output = missing_ready_capture_intent_output(
                 repo,
-                Some(&thread.id),
+                Some(&thread.thread),
                 dirty_paths,
                 preflight_trust,
             )?;
@@ -263,7 +262,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     {
         report.thread_health = "ready".to_string();
         report.recommended_action =
-            land_action_for_ready(repo, &thread.id, cli.repo.as_deref(), &cwd);
+            land_action_for_ready(repo, &thread.thread, cli.repo.as_deref(), &cwd);
         report.refresh_recommended_action_metadata();
     }
 
@@ -292,14 +291,19 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     );
     let recommended_action = contextual_thread_action(
         repo,
-        &thread.id,
+        &thread.thread,
         thread.target_thread.as_deref(),
         &recommended_action,
     );
     let report_action_selected = report_recommended_action
         .as_deref()
         .map(|action| {
-            contextual_thread_action(repo, &thread.id, thread.target_thread.as_deref(), action)
+            contextual_thread_action(
+                repo,
+                &thread.thread,
+                thread.target_thread.as_deref(),
+                action,
+            )
         })
         .is_some_and(|action| action == recommended_action);
     if report_action_selected

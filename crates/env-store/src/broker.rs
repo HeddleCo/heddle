@@ -9,8 +9,10 @@
 //! There is no general "get secret" API. The only value-returning path is
 //! private to [`PolicyBroker::run`], which owns the child command until exit.
 
-use std::collections::HashMap;
-use std::process::{Command, ExitStatus};
+use std::{
+    collections::HashMap,
+    process::{Command, ExitStatus},
+};
 
 use crypto::{Signer, SoftwareRecipientSecret};
 use heddle_object_model::object::Attribution;

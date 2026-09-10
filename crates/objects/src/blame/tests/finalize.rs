@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 use chrono::{TimeZone, Utc};
 
-use crate::blame::{BlameSliceError, OriginRange, finalize_file_provenance};
-use crate::object::{Attribution, ContentHash, Origin, Principal, StateId};
+use crate::{
+    blame::{BlameSliceError, OriginRange, finalize_file_provenance},
+    object::{Attribution, ContentHash, Origin, Principal, StateId},
+};
 
 fn origin(name: &str, byte: u8) -> Origin {
     Origin {

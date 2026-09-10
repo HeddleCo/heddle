@@ -1335,6 +1335,8 @@ impl Repository {
                     let tree = self.store.get_tree(&state.tree)?.ok_or_else(|| {
                         HeddleError::NotFound("merge snapshot tree missing".to_string())
                     })?;
+                    self.record_attached_native_capture(state.id())
+                        .map_err(|error| HeddleError::Config(error.to_string()))?;
                     return Ok(SnapshotExecution {
                         state,
                         tree,
@@ -1420,6 +1422,8 @@ impl Repository {
                 &execution.worktree_tree_chain,
             );
             refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
+            self.record_attached_native_capture(execution.state.id())
+                .map_err(|error| HeddleError::Config(error.to_string()))?;
             return Ok(execution);
         }
     }
@@ -1552,6 +1556,8 @@ impl Repository {
             let ref_publish_started = std::time::Instant::now();
             reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
             execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
+            self.record_attached_native_capture(execution.state.id())
+                .map_err(|error| HeddleError::Config(error.to_string()))?;
             return Ok(execution);
         }
     }

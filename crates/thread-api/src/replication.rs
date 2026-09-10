@@ -219,27 +219,51 @@ impl<B: ReplicaStore> Session<B> {
         }
         Ok(units)
     }
-    pub(crate) async fn handle_unit(&mut self, unit: InputUnit) -> StoreResult<Vec<Outbound>, B::Error> {
+    pub(crate) async fn handle_unit(
+        &mut self,
+        unit: InputUnit,
+    ) -> StoreResult<Vec<Outbound>, B::Error> {
         match unit {
-            InputUnit::Frame(frame)=>self.handle_input(frame).await,
-            InputUnit::Operation(received)=>Ok(vec![Outbound::Frame(Frame::Receipt(self.commit_original(received,false).await?))]),
+            InputUnit::Frame(frame) => self.handle_input(frame).await,
+            InputUnit::Operation(received) => Ok(vec![Outbound::Frame(Frame::Receipt(
+                self.commit_original(received, false).await?,
+            ))]),
         }
     }
-    async fn commit_original(&mut self, received: store::ReceivedOperation, maintenance: bool) -> StoreResult<ReplicationReceipt,B::Error> {
-        if self.pending_input_bookkeeping.is_some() {return Err(Error::Protocol("prior input bookkeeping not completed").into());}
-        let operation=received.original.verify().map_err(Error::from)?;
-        if !self.facets.contains(&operation.facet()) {return Err(Error::Protocol("operation is outside admission scope").into());}
-        let id=operation.id().map_err(Error::from)?;
+    async fn commit_original(
+        &mut self,
+        received: store::ReceivedOperation,
+        maintenance: bool,
+    ) -> StoreResult<ReplicationReceipt, B::Error> {
+        if self.pending_input_bookkeeping.is_some() {
+            return Err(Error::Protocol("prior input bookkeeping not completed").into());
+        }
+        let operation = received.original.verify().map_err(Error::from)?;
+        if !self.facets.contains(&operation.facet()) {
+            return Err(Error::Protocol("operation is outside admission scope").into());
+        }
+        let id = operation.id().map_err(Error::from)?;
         self.in_flight.remove(&id);
-        let mut receipt=ReplicationReceipt::default();
-        match self.replica.receive(received).await.map_err(StoreError::Store)? {
-            Admission::Accepted=>receipt.accepted_operation_ids.push(id.as_bytes().to_vec()),
-            Admission::Pending=>{
+        let mut receipt = ReplicationReceipt::default();
+        match self
+            .replica
+            .receive(received)
+            .await
+            .map_err(StoreError::Store)?
+        {
+            Admission::Accepted => receipt.accepted_operation_ids.push(id.as_bytes().to_vec()),
+            Admission::Pending => {
                 receipt.pending_operation_ids.push(id.as_bytes().to_vec());
-                if maintenance {self.replica.remember_peer_heads(self.destination,vec![(operation.facet(),id)]).await.map_err(StoreError::Store)?;}
-                else {self.pending_input_bookkeeping=Some((operation.facet(),id));}
-            },
-            Admission::Rejected(message)=>receipt.rejected.push(rejection(id,message)),
+                if maintenance {
+                    self.replica
+                        .remember_peer_heads(self.destination, vec![(operation.facet(), id)])
+                        .await
+                        .map_err(StoreError::Store)?;
+                } else {
+                    self.pending_input_bookkeeping = Some((operation.facet(), id));
+                }
+            }
+            Admission::Rejected(message) => receipt.rejected.push(rejection(id, message)),
         }
         Ok(receipt)
     }
@@ -342,7 +366,7 @@ impl<B: ReplicaStore> Session<B> {
                 }
                 self.check_count(batch.operations.len())?;
                 self.check_count(batch.authority_admissions.len())?;
-        self.check_count(batch.boundary_acceptances.len())?;
+                self.check_count(batch.boundary_acceptances.len())?;
                 let decoded =
                     crate::authority_admission::match_batch(&batch).map_err(
                         |error| match error {
@@ -361,9 +385,13 @@ impl<B: ReplicaStore> Session<B> {
                 }
                 let mut receipt = ReplicationReceipt::default();
                 for (received, _, _) in operations {
-                    let next=self.commit_original(received,maintenance).await?;
-                    receipt.accepted_operation_ids.extend(next.accepted_operation_ids);
-                    receipt.pending_operation_ids.extend(next.pending_operation_ids);
+                    let next = self.commit_original(received, maintenance).await?;
+                    receipt
+                        .accepted_operation_ids
+                        .extend(next.accepted_operation_ids);
+                    receipt
+                        .pending_operation_ids
+                        .extend(next.pending_operation_ids);
                     receipt.rejected.extend(next.rejected);
                 }
                 responses.push(Outbound::Frame(Frame::Receipt(receipt)));
@@ -468,8 +496,11 @@ impl<B: ReplicaStore> Session<B> {
             return Err(Error::Protocol("operation is outside current sharing policy").into());
         }
         Ok(Frame::Operations(ReplicationOperations {
-            boundary_acceptances: crate::boundary_acceptance::authority_evidence(record.authority_admission.as_ref()).map_err(|_| Error::Protocol("invalid boundary evidence"))?,
- authority_admissions: record
+            boundary_acceptances: crate::boundary_acceptance::authority_evidence(
+                record.authority_admission.as_ref(),
+            )
+            .map_err(|_| Error::Protocol("invalid boundary evidence"))?,
+            authority_admissions: record
                 .authority_admission
                 .as_ref()
                 .map(crate::authority_admission::encode)

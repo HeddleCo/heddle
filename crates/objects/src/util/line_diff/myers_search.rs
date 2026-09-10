@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Middle-snake search and line equality for exact Myers.
 
-use super::super::budget::{BudgetExceeded, ResourceBudget, ResourceKind};
-use super::myers::LineView;
-use super::scan::line_bytes;
+use super::{
+    super::budget::{BudgetExceeded, ResourceBudget, ResourceKind},
+    myers::LineView,
+    scan::line_bytes,
+};
 
 struct V<'a> {
     offset: isize,

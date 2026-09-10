@@ -219,7 +219,9 @@ mod tests {
             name: "original".into(),
             intent: "goal".into(),
             creator: signer.public_key().try_into().expect("key"),
-            owner: objects::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
+            owner: objects::object::thread_replication::GenesisOwner::LocalKey(
+                signer.public_key().try_into().expect("key"),
+            ),
             nonce: vec![7],
         };
         let replica = ThreadReplica::create(
@@ -323,7 +325,9 @@ mod tests {
             name: "zzzz".into(),
             intent: "index fixture".into(),
             creator: signer.public_key().try_into().expect("key"),
-            owner: objects::object::thread_replication::GenesisOwner::LocalKey(signer.public_key().try_into().expect("key")),
+            owner: objects::object::thread_replication::GenesisOwner::LocalKey(
+                signer.public_key().try_into().expect("key"),
+            ),
             nonce: vec![1],
         };
         let replica = ThreadReplica::create(

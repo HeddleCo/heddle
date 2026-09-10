@@ -148,7 +148,11 @@ impl DeviceRpc {
                 .unwrap_or_default();
             let receipt = LocalIntegration {
                 author: target_replica.source_author_for(
-                    &signer.public_key().try_into().map_err(|_| anyhow::anyhow!("invalid publisher key"))?)?,
+                    &signer
+                        .public_key()
+                        .try_into()
+                        .map_err(|_| anyhow::anyhow!("invalid publisher key"))?,
+                )?,
                 version: 1,
                 spool: session.spool.id,
                 device: signer
@@ -183,11 +187,9 @@ impl DeviceRpc {
         };
         let signed = SignedOperation::sign(&operation, &signer)?;
         session.check_current(&self.home)?;
-        if target_replica.receive_prepared_source(
-            &signed,
-            checkout.repository.store(),
-            |_| Ok(()),
-        )? != Admission::Accepted
+        if target_replica
+            .receive_prepared_source(&signed, checkout.repository.store(), |_| Ok(()))?
+            != Admission::Accepted
         {
             bail!("local integration was not admitted");
         }

@@ -128,9 +128,21 @@ fn initialize_changes(connection: &Connection) -> rusqlite::Result<()> {
         ("run_policies", "NEW.spool", "run_policy"),
         ("run_artifacts", "NEW.run", "run"),
         ("actor_presence", "NEW.session_id", "actor"),
-        ("device_operations", "NEW.namespace || '/' || hex(NEW.record_id)", "operation"),
-        ("device_check_records", "NEW.kind || '/' || NEW.id", "evidence"),
-        ("operation_receipts", "NEW.namespace || '/' || NEW.operation_id", "operation"),
+        (
+            "device_operations",
+            "NEW.namespace || '/' || hex(NEW.record_id)",
+            "operation",
+        ),
+        (
+            "device_check_records",
+            "NEW.kind || '/' || NEW.id",
+            "evidence",
+        ),
+        (
+            "operation_receipts",
+            "NEW.namespace || '/' || NEW.operation_id",
+            "operation",
+        ),
     ] {
         // All identifiers and expressions are compile-time literals above.
         for event in ["INSERT", "UPDATE", "DELETE"] {
