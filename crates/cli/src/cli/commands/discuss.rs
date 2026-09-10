@@ -10,11 +10,14 @@ pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
     AnchorOutput, DiscussWaitLineOutput, DiscussionListOutput, DiscussionOutput,
     DiscussionShowOutput, DiscussionWriteOutput, ResolutionOutput, TurnOutput,
 };
-use objects::object::{
-    AnnotationKind, CollabOpId, CollaborationAnchor, CollaborationAnchorStatus,
-    CollaborationIdempotencyKey, CollaborationOperationBodyV1, CollaborationOperationEnvelope,
-    CollaborationResolution, DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion, StateId,
-    VisibilityTier,
+use objects::{
+    lock::RepositoryLockExt,
+    object::{
+        AnnotationKind, AnnotationScope, CollabOpId, CollaborationAnchor,
+        CollaborationAnchorStatus, CollaborationIdempotencyKey, CollaborationOperationBodyV1,
+        CollaborationOperationEnvelope, CollaborationResolution, ContextTarget, DiscussionRecordId,
+        DiscussionTurnV1, MaterializedDiscussion, StateId, VisibilityTier,
+    },
 };
 use repo::{
     CollaborationStore, CollaborationWriteDisposition, CollaborationWriteOutcome,
@@ -202,22 +205,7 @@ fn run_resolve(
                 .ok_or_else(|| anyhow!(RecoveryAdvice::discuss_resolve_missing_dismiss_reason()))?
                 .to_string(),
         },
-        (None, true) => CollaborationResolution::IntoAnnotation {
-            annotation_kind: args
-                .kind
-                .as_deref()
-                .unwrap_or("rationale")
-                .parse::<AnnotationKind>()
-                .map_err(|error| anyhow!(error))?,
-            content: args
-                .body
-                .as_deref()
-                .map(str::trim)
-                .filter(|body| !body.is_empty())
-                .ok_or_else(|| anyhow!("--body must not be empty for --into-annotation"))?
-                .to_string(),
-            tags: args.tag.clone(),
-        },
+        (None, true) => resolve_into_context_annotation(repo, store, args)?,
         _ => {
             return Err(anyhow!(
                 "discuss resolve requires exactly one of --mode or --into-annotation"
@@ -232,6 +220,83 @@ fn run_resolve(
         "discuss_resolve",
         CollaborationOperationBodyV1::Resolve { resolution },
     )
+}
+
+/// Create (or reuse) a real context annotation, then bind the discussion to it.
+fn resolve_into_context_annotation(
+    repo: &repo::Repository,
+    store: &CollaborationStore,
+    args: &DiscussResolveArgs,
+) -> Result<CollaborationResolution> {
+    let discussion_id = parse_discussion_id(&args.discussion_id)?;
+    let discussion = store
+        .materialize_discussion(&discussion_id)?
+        .ok_or_else(|| anyhow!("discussion {discussion_id} not found"))?;
+    let annotation_kind = args
+        .kind
+        .as_deref()
+        .unwrap_or("rationale")
+        .parse::<AnnotationKind>()
+        .map_err(|error| anyhow!(error))?;
+    let content = args
+        .body
+        .as_deref()
+        .map(str::trim)
+        .filter(|body| !body.is_empty())
+        .ok_or_else(|| anyhow!("--body must not be empty for --into-annotation"))?
+        .to_string();
+    let tags = args.tag.clone();
+    let annotation_id = {
+        let _lock = repo.locker().write().map_err(|error| anyhow!("{error}"))?;
+        if let Some(existing) = super::context::find_annotation_resolved_from_discussion(
+            repo,
+            &discussion_id.to_string(),
+        )? {
+            existing.annotation_id
+        } else if let Some(CollaborationResolution::Annotation { annotation_id }) =
+            &discussion.resolution
+        {
+            annotation_id.clone()
+        } else {
+            let (target, scope) = context_target_from_anchor(&discussion.anchor)?;
+            let written = super::context::append_context_annotation(
+                repo,
+                target,
+                scope,
+                annotation_kind,
+                content,
+                tags,
+                Some(discussion_id.to_string()),
+            )?;
+            emit_locality_notice_once(repo, AnnotationSurface::Context);
+            written.annotation.annotation_id
+        }
+    };
+    Ok(CollaborationResolution::Annotation { annotation_id })
+}
+
+fn context_target_from_anchor(
+    anchor: &CollaborationAnchor,
+) -> Result<(ContextTarget, AnnotationScope)> {
+    match anchor {
+        CollaborationAnchor::Symbol { path, symbol, .. } => Ok((
+            ContextTarget::file(path.clone()).map_err(|error| anyhow!(error))?,
+            AnnotationScope::Symbol {
+                name: symbol.clone(),
+                resolved_lines: None,
+            },
+        )),
+        CollaborationAnchor::Path { path, .. } => Ok((
+            ContextTarget::file(path.clone()).map_err(|error| anyhow!(error))?,
+            AnnotationScope::File,
+        )),
+        CollaborationAnchor::State { state_id } => {
+            Ok((ContextTarget::state(*state_id), AnnotationScope::File))
+        }
+        CollaborationAnchor::Repository | CollaborationAnchor::Change { .. } => Err(anyhow!(
+            "discuss resolve --into-annotation needs a file, symbol, or state anchor"
+        )),
+    }
 }
 
 fn run_reopen(
@@ -866,6 +931,21 @@ fn anchor_label(value: &AnchorOutput) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symbol_anchor_maps_to_symbol_context_target() {
+        let (target, scope) = context_target_from_anchor(&CollaborationAnchor::Symbol {
+            state_id: StateId::from_bytes([7; 32]),
+            path: "src/lib.rs".to_string(),
+            symbol: "foo".to_string(),
+        })
+        .expect("symbol anchor");
+        assert_eq!(target.path(), Some("src/lib.rs"));
+        assert!(matches!(
+            scope,
+            AnnotationScope::Symbol { ref name, .. } if name == "foo"
+        ));
+    }
 
     #[test]
     fn skipped_wait_line_carries_the_reason() {

@@ -7812,7 +7812,7 @@ fn discuss_open_named_flags_records_thread_ref() {
 }
 
 #[test]
-fn discuss_resolve_into_annotation_records_complete_resolution() {
+fn discuss_resolve_into_annotation_creates_context_annotation() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
@@ -7832,9 +7832,12 @@ fn discuss_resolve_into_annotation_records_complete_resolution() {
         .as_str()
         .expect("discuss open should return an id");
 
+    let op_id = "11111111-1111-4111-8111-111111111111";
     let resolved = json_value(
         temp.path(),
         &[
+            "--op-id",
+            op_id,
             "discuss",
             "resolve",
             discussion_id,
@@ -7850,21 +7853,77 @@ fn discuss_resolve_into_annotation_records_complete_resolution() {
         ],
     );
     assert_eq!(resolved["output_kind"], "discuss_resolve");
-    assert_eq!(
-        resolved["discussion"]["resolution"]["kind"],
-        "into_annotation"
+    assert_eq!(resolved["discussion"]["resolution"]["kind"], "annotation");
+    let annotation_id = resolved["discussion"]["resolution"]["annotation_id"]
+        .as_str()
+        .expect("resolve --into-annotation must reference a real annotation id");
+    assert!(
+        !annotation_id.is_empty(),
+        "annotation id must not be empty: {resolved}"
     );
+
+    let listed = json_value(temp.path(), &["context", "get", "--path", "src/lib.rs"]);
+    assert_eq!(listed["output_kind"], "context_get");
+    let annotations = listed["annotations"]
+        .as_array()
+        .expect("context get should list annotations");
+    let created = annotations
+        .iter()
+        .find(|annotation| annotation["annotation_id"] == annotation_id)
+        .unwrap_or_else(|| panic!("context get should include {annotation_id}: {listed}"));
+    assert_eq!(created["kind"], "invariant");
+    assert_eq!(created["content"], "The cache key must include visibility");
+    assert_eq!(created["tags"], serde_json::json!(["cache", "security"]));
+    assert_eq!(created["scope"], "symbol:foo");
+
+    let history = json_value(temp.path(), &["context", "history", annotation_id]);
+    assert_eq!(history["output_kind"], "context_history");
+    assert_eq!(history["annotation_id"], annotation_id);
     assert_eq!(
-        resolved["discussion"]["resolution"]["annotation_kind"],
-        "invariant"
-    );
-    assert_eq!(
-        resolved["discussion"]["resolution"]["content"],
+        history["revisions"][0]["content"],
         "The cache key must include visibility"
     );
     assert_eq!(
-        resolved["discussion"]["resolution"]["tags"],
+        history["revisions"][0]["tags"],
         serde_json::json!(["cache", "security"])
+    );
+
+    let replayed = json_value(
+        temp.path(),
+        &[
+            "--op-id",
+            op_id,
+            "discuss",
+            "resolve",
+            discussion_id,
+            "--into-annotation",
+            "--body",
+            "The cache key must include visibility",
+            "--kind",
+            "invariant",
+            "--tag",
+            "cache",
+            "--tag",
+            "security",
+        ],
+    );
+    assert_eq!(replayed["replayed"], true);
+    assert_eq!(replayed["idempotency_status"], "replayed");
+    assert_eq!(
+        replayed["discussion"]["resolution"]["annotation_id"],
+        annotation_id
+    );
+    let after = json_value(temp.path(), &["context", "get", "--path", "src/lib.rs"]);
+    let ids: Vec<&str> = after["annotations"]
+        .as_array()
+        .expect("context get")
+        .iter()
+        .filter_map(|annotation| annotation["annotation_id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![annotation_id],
+        "replaying resolve --into-annotation must not mint a second context row: {after}"
     );
 }
 
