@@ -820,6 +820,8 @@ impl Repository {
         // is a real author capture that bypasses `stage_snapshot_objects`. Last
         // mutation before the write.
         self.put_authored_state(&state)?;
+        self.record_native_source(thread, state.id())
+            .map_err(|error| HeddleError::Config(error.to_string()))?;
         self.set_thread_recorded(&thread_name, &state.id())?;
 
         // 4. Rewrite the manifest to reflect the new state. `root` is

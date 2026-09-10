@@ -1,5 +1,5 @@
 //! Local Thread creation and capture use the same immutable records as remote peers.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crypto::{
     Ed25519Signer, Signer as _,
@@ -7,8 +7,11 @@ use crypto::{
 };
 use objects::{
     object::{
-        ContentHash, StateId,
-        thread_replication::{ThreadGenesis, ThreadOperation, ThreadOperationBody},
+        ContentHash, State, StateId, VisibilityTier,
+        thread_replication::{
+            ThreadFacet, ThreadGenesis, ThreadOperation, ThreadOperationBody,
+            local_integration::{self, LocalIntegration},
+        },
     },
     store::ObjectStore as _,
 };
@@ -359,17 +362,12 @@ impl Repository {
         }
     }
 
-    /// Record a capture on the attached native Thread after a local snapshot.
+    /// Record a capture or local integration on a named native Thread.
     /// Missing native identity is not created here; capture/start own genesis.
-    pub fn record_attached_native_capture(&self, state_id: StateId) -> Result<()> {
-        let name = match self
-            .head_ref()
-            .map_err(|error| Error::Invalid(error.to_string()))?
-        {
-            refs::Head::Attached { thread } => thread.to_string(),
-            refs::Head::Detached { .. } => return Ok(()),
-        };
-        if self.native_thread(&name).is_err() {
+    /// Cross-thread merge snapshots record LocalIntegration, never a Capture
+    /// whose parents include another Thread's revision.
+    pub fn record_native_source(&self, name: &str, state_id: StateId) -> Result<()> {
+        if self.native_thread(name).is_err() {
             return Ok(());
         }
         let state = self
@@ -381,7 +379,255 @@ impl Repository {
         if state.parents.is_empty() {
             return Ok(());
         }
-        self.record_native_capture(&name, state_id)?;
+        match classify_attached_source(self, name, &state)? {
+            AttachedSourceKind::Capture => {
+                self.record_native_capture(name, state_id)?;
+            }
+            AttachedSourceKind::LocalIntegration {
+                source_thread,
+                source_operation,
+                source_revision,
+            } => {
+                self.record_native_local_integration(
+                    name,
+                    state_id,
+                    source_thread,
+                    source_operation,
+                    source_revision,
+                )?;
+            }
+        }
         Ok(())
     }
+
+    /// Fail closed before committing a snapshot when this checkout is attached
+    /// to a native Thread whose owner key cannot sign a source operation.
+    pub fn require_attached_native_source_signer(&self) -> Result<()> {
+        let name = match self
+            .head_ref()
+            .map_err(|error| Error::Invalid(error.to_string()))?
+        {
+            refs::Head::Attached { thread } => thread.to_string(),
+            refs::Head::Detached { .. } => return Ok(()),
+        };
+        let replica = match self.native_thread(&name) {
+            Ok(replica) => replica,
+            Err(_) => return Ok(()),
+        };
+        self.native_thread_signer(&replica)?;
+        Ok(())
+    }
+
+    /// Record a capture on the attached native Thread after a local snapshot.
+    pub fn record_attached_native_source(&self, state_id: StateId) -> Result<()> {
+        let name = match self
+            .head_ref()
+            .map_err(|error| Error::Invalid(error.to_string()))?
+        {
+            refs::Head::Attached { thread } => thread.to_string(),
+            refs::Head::Detached { .. } => return Ok(()),
+        };
+        self.record_native_source(&name, state_id)
+    }
+
+    /// Record a locally produced cross-thread landing once. Causal parents are
+    /// the target Thread's source frontier; the merge State's parents keep the
+    /// explicit source revision. Same-thread Capture must not be used here.
+    pub fn record_native_local_integration(
+        &self,
+        name: &str,
+        state_id: StateId,
+        source_thread: ContentHash,
+        source_operation: ContentHash,
+        source_revision: StateId,
+    ) -> Result<ContentHash> {
+        let _guard = self.native_identity_lock()?;
+        let replica = self.native_thread(name)?;
+        if source_thread == replica.thread_id() {
+            return Err(Error::Invalid(
+                "local integration requires a distinct source Thread".into(),
+            ));
+        }
+        if let Some(existing) = replica.source_operation_page(state_id, None, 1)?.first() {
+            replica.validate_local_source_possession(self.store(), state_id)?;
+            return Ok(*existing);
+        }
+        let state = self
+            .store()
+            .get_state(&state_id)?
+            .ok_or_else(|| Error::Invalid("integrated state unavailable".into()))?;
+        let genesis = replica.genesis()?;
+        let view = replica.view()?;
+        let expected_heads = if view.source_heads.is_empty() {
+            BTreeSet::from([genesis.base])
+        } else {
+            view.source_heads
+        };
+        let local_parents: BTreeSet<StateId> = state
+            .parents
+            .iter()
+            .copied()
+            .filter(|id| *id != source_revision)
+            .collect();
+        if local_parents != expected_heads {
+            return Err(Error::Invalid(
+                "local integration target has unresolved source heads".into(),
+            ));
+        }
+        let frontier = view
+            .frontiers
+            .get(&ThreadFacet::Source)
+            .cloned()
+            .unwrap_or_default();
+        let mut result_visibility = self.resolve_capture_default_visibility();
+        for parent in &state.parents {
+            result_visibility = local_integration::intersect_visibility(
+                &result_visibility,
+                &self
+                    .effective_visibility_tier(parent)
+                    .map_err(|error| Error::Invalid(error.to_string()))?,
+            )?;
+        }
+        let local_policy_version = local_integration_policy_version(&result_visibility)?;
+        let signer = self.native_thread_signer(&replica)?;
+        let publisher: [u8; 32] = signer
+            .public_key()
+            .try_into()
+            .map_err(|_| Error::Invalid("invalid publisher key".into()))?;
+        let receipt = LocalIntegration {
+            author: replica.source_author_for(&publisher)?,
+            version: 1,
+            spool: genesis
+                .spool
+                .parse()
+                .map_err(|error: uuid::Error| Error::Invalid(error.to_string()))?,
+            device: publisher,
+            source_thread,
+            source_operation,
+            source_revision,
+            target_thread: replica.thread_id(),
+            expected_target_frontier: frontier.clone(),
+            result: replica.prepare_integration(self, &state, source_thread, source_operation)?,
+            result_visibility,
+            initiating_request_proof: ContentHash::compute_typed(
+                "heddle-cli-local-integration-request-v1",
+                &[
+                    source_thread.as_bytes().as_slice(),
+                    replica.thread_id().as_bytes().as_slice(),
+                    state_id.as_bytes().as_slice(),
+                ]
+                .concat(),
+            ),
+            local_policy_version,
+            executed_at_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        let operation = ThreadOperation {
+            version: 1,
+            thread: replica.thread_id(),
+            parents: frontier,
+            publisher,
+            body: ThreadOperationBody::LocalIntegration(receipt.encode()?),
+        };
+        let signed = SignedOperation::sign(&operation, &signer)?;
+        match replica.receive_prepared_source(&signed, self.store(), |_| Ok(()))? {
+            Admission::Accepted => Ok(operation.id()?),
+            other => Err(Error::Invalid(format!(
+                "local integration was not admitted: {other:?}"
+            ))),
+        }
+    }
+}
+
+enum AttachedSourceKind {
+    Capture,
+    LocalIntegration {
+        source_thread: ContentHash,
+        source_operation: ContentHash,
+        source_revision: StateId,
+    },
+}
+
+fn classify_attached_source(
+    repo: &Repository,
+    name: &str,
+    state: &State,
+) -> Result<AttachedSourceKind> {
+    let replica = repo.native_thread(name)?;
+    let genesis = replica.genesis()?;
+    let connection = replica.connect()?;
+    let mut foreign: Option<(ContentHash, ContentHash, StateId)> = None;
+    for parent in &state.parents {
+        if *parent == genesis.base {
+            continue;
+        }
+        let local = replica.source_operation_page(*parent, None, 1)?;
+        if !local.is_empty() {
+            continue;
+        }
+        let mut query = connection.prepare(
+            "SELECT thread, MIN(id) FROM operations WHERE source_revision=?1 AND status=1 GROUP BY thread LIMIT 3",
+        )?;
+        let found = query
+            .query_map([parent.as_bytes().as_slice()], |row| {
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let mut by_thread = BTreeMap::new();
+        for (thread, operation) in found {
+            let thread = super::hash(&thread)?;
+            if thread == replica.thread_id() {
+                continue;
+            }
+            by_thread.insert(thread, super::hash(&operation)?);
+        }
+        let mut unique = by_thread.into_iter();
+        match (unique.next(), unique.next()) {
+            (None, _) => {
+                return Err(Error::Invalid(format!(
+                    "capture parent {} has no admitted native operation",
+                    parent.to_string_full()
+                )));
+            }
+            (Some((source_thread, source_operation)), None) => {
+                let candidate = (source_thread, source_operation, *parent);
+                if let Some(existing) = &foreign {
+                    if existing.0 != candidate.0 || existing.2 != candidate.2 {
+                        return Err(Error::Invalid(
+                            "local integration cannot combine multiple source Threads".into(),
+                        ));
+                    }
+                } else {
+                    foreign = Some(candidate);
+                }
+            }
+            (Some(_), Some(_)) => {
+                return Err(Error::Invalid(
+                    "local integration source revision is admitted on multiple Threads".into(),
+                ));
+            }
+        }
+    }
+    match foreign {
+        None => Ok(AttachedSourceKind::Capture),
+        Some((source_thread, source_operation, source_revision)) => {
+            Ok(AttachedSourceKind::LocalIntegration {
+                source_thread,
+                source_operation,
+                source_revision,
+            })
+        }
+    }
+}
+
+fn local_integration_policy_version(visibility: &VisibilityTier) -> Result<ContentHash> {
+    let encoded =
+        serde_json::to_vec(visibility).map_err(|error| Error::Invalid(error.to_string()))?;
+    Ok(ContentHash::compute_typed(
+        "heddle-cli-local-integration-policy-v1",
+        &[
+            b"same-spool;root-derived-source-and-target-authority;explicit-source;all-target-parents;three-way-or-resolved;target-frontier-cas;preserve-audience;no-hosted-approval".as_slice(),
+            encoded.as_slice(),
+        ]
+        .concat(),
+    ))
 }

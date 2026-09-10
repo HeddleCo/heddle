@@ -109,6 +109,10 @@ pub fn verify_control_authority(
 /// Verify first admission of account-owned genesis against the independently
 /// retained account. Local-key ownership uses its explicit local/device trust
 /// path and is never silently attached to this account by this function.
+///
+/// Genesis has no agent field. Attribution is derived from the verified
+/// original credential (`agent_id: None` here); source ops and claims keep
+/// strict signed-actor checks against that same envelope.
 pub fn verify_genesis_authority(
     genesis: &objects::object::thread_replication::ThreadGenesis,
     envelope: &[u8],

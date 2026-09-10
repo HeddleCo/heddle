@@ -47,7 +47,15 @@ fn init_default_persists_and_reuses_stable_main_thread_record() {
         .find_synced_record_by_thread(&repo, "main", Some(main_state))
         .unwrap()
         .expect("init_default must persist main thread metadata");
-    assert!(uuid::Uuid::parse_str(&first.id).is_ok());
+    let native_id = repo
+        .native_thread("main")
+        .expect("init_default must bind native main")
+        .thread_id()
+        .to_hex();
+    assert_eq!(
+        first.id, native_id,
+        "default main's stable id is the signed native Thread identity"
+    );
     assert_eq!(first.thread, "main");
     assert_eq!(
         first.current_state.as_deref(),

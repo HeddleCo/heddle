@@ -125,6 +125,112 @@ fn local_captures_keep_checkout_parentage_and_reuse_the_original_operation() {
 }
 
 #[test]
+fn cross_thread_merge_records_local_integration_not_capture() {
+    use objects::{
+        object::{Attribution, Principal, State, ThreadName, thread_replication::ThreadFacet},
+        store::ObjectStore as _,
+    };
+    use refs::Head;
+    let directory = tempfile::tempdir().expect("repository");
+    let repository = Repository::init_default(directory.path()).expect("native init");
+    let base = repository.head().expect("head").expect("base");
+    let tree = repository
+        .store()
+        .get_state(&base)
+        .expect("base state")
+        .expect("state")
+        .tree;
+    let author = Attribution::human(Principal::new("Developer", "developer@example.test"));
+    let on_main = State::new_snapshot(tree, vec![base], author.clone()).with_intent("main work");
+    repository.store().put_state(&on_main).expect("main state");
+    repository
+        .record_native_capture("main", on_main.id())
+        .expect("record main");
+    repository
+        .set_thread_recorded(&ThreadName::new("main"), &on_main.id())
+        .expect("advance main");
+    repository
+        .write_head_recorded(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .expect("attach main");
+    let source = repository
+        .create_native_thread("feature", on_main.id(), Some("main"), "fork")
+        .expect("feature");
+    let on_feature =
+        State::new_snapshot(tree, vec![on_main.id()], author.clone()).with_intent("feature work");
+    repository
+        .store()
+        .put_state(&on_feature)
+        .expect("feature state");
+    let source_operation = repository
+        .record_native_capture("feature", on_feature.id())
+        .expect("record feature");
+    let merged = repository
+        .snapshot_merge_with_attribution(
+            &on_feature.id(),
+            Some("Refresh feature onto main".into()),
+            None,
+            author,
+            Some(on_main.id()),
+            false,
+        )
+        .expect("cross-thread merge snapshot");
+    let replica = repository.native_thread("main").expect("main replica");
+    let recorded = replica
+        .source_operation_page(merged.id(), None, 4)
+        .expect("recorded merge");
+    assert_eq!(recorded.len(), 1, "merge records one native operation");
+    let (signed, _) = replica
+        .operation(&recorded[0])
+        .expect("load merge operation")
+        .expect("merge operation present");
+    let operation = signed.verify().expect("merge signature");
+    let receipt = operation
+        .local_integration()
+        .expect("decode")
+        .expect("LocalIntegration, not Capture");
+    assert_eq!(receipt.source_thread, source.thread_id());
+    assert_eq!(receipt.source_operation, source_operation);
+    assert_eq!(receipt.source_revision, on_feature.id());
+    assert_eq!(receipt.target_thread, replica.thread_id());
+    let heads = replica.view().expect("view").source_heads;
+    assert_eq!(
+        heads,
+        [merged.id()].into(),
+        "integration replaces the pre-merge target head"
+    );
+    let source_heads = source.view().expect("source view").source_heads;
+    assert_eq!(
+        source_heads,
+        [on_feature.id()].into(),
+        "source Thread is not rewritten by landing into the target"
+    );
+    let facet = replica
+        .accepted_page(ThreadFacet::Source, None, 20)
+        .expect("source facet");
+    assert!(
+        facet.iter().all(|(_, signed)| {
+            signed
+                .verify()
+                .expect("source op")
+                .source_state()
+                .expect("state")
+                .is_some_and(|state| {
+                    state.id() != merged.id()
+                        || signed
+                            .verify()
+                            .expect("source op")
+                            .local_integration()
+                            .expect("kind")
+                            .is_some()
+                })
+        }),
+        "merge snapshot must not be admitted as a Capture"
+    );
+}
+
+#[test]
 fn checkout_mutations_share_exclusive_leases_and_release_temporary_writers() {
     use objects::store::{WriterLeaseStatus, WriterLeaseStore};
     use repo::thread_replication::checkout::ThreadCheckout;

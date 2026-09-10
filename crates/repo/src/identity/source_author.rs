@@ -21,6 +21,8 @@ struct Stored {
 }
 /// This signature-verified inspection binds identity but does not grant any RPC
 /// rights. Original source admission still evaluates all caveats and revocations.
+/// Agent attribution is derived from the verified original credential, never an
+/// explicit courier field. Source ops and claims then keep that signed actor.
 pub fn publish(
     home: &Path,
     authority: &crate::device_authority::DeviceAuthority,

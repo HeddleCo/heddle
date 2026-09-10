@@ -717,7 +717,9 @@ impl ThreadReplica {
                                     )?;
                                 }
                             }
-                            store.put_state(&state)?;
+                            if store.get_state(&state.id())?.is_none() {
+                                store.put_state(&state)?;
+                            }
                         }
                         self.accept_control_heads(tx, &operation, id)?;
                         self.index_reference_sources(tx, &operation, id)?;

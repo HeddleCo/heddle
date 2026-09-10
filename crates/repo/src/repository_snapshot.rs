@@ -1288,6 +1288,8 @@ impl Repository {
                     .locker()
                     .write()
                     .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+                self.require_attached_native_source_signer()
+                    .map_err(|error| HeddleError::Config(error.to_string()))?;
 
                 if let Some(merge_state) = self.merge_state_manager().load()? {
                     let unresolved: Vec<_> = merge_state
@@ -1335,7 +1337,7 @@ impl Repository {
                     let tree = self.store.get_tree(&state.tree)?.ok_or_else(|| {
                         HeddleError::NotFound("merge snapshot tree missing".to_string())
                     })?;
-                    self.record_attached_native_capture(state.id())
+                    self.record_attached_native_source(state.id())
                         .map_err(|error| HeddleError::Config(error.to_string()))?;
                     return Ok(SnapshotExecution {
                         state,
@@ -1413,6 +1415,8 @@ impl Repository {
             #[cfg(test)]
             maybe_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish);
 
+            self.record_attached_native_source(execution.state.id())
+                .map_err(|error| HeddleError::Config(error.to_string()))?;
             let ref_publish_started = std::time::Instant::now();
             reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
             execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
@@ -1422,8 +1426,6 @@ impl Repository {
                 &execution.worktree_tree_chain,
             );
             refresh_materialized_thread_manifest(self, &head, &execution.state, &execution.tree);
-            self.record_attached_native_capture(execution.state.id())
-                .map_err(|error| HeddleError::Config(error.to_string()))?;
             return Ok(execution);
         }
     }
@@ -1491,6 +1493,8 @@ impl Repository {
                     .write()
                     .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
                 reject_unresolved_snapshot_merge(self)?;
+                self.require_attached_native_source_signer()
+                    .map_err(|error| HeddleError::Config(error.to_string()))?;
                 (self.head_ref()?, self.head()?)
             };
             let mut mutation = SnapshotMutation::new(
@@ -1553,11 +1557,11 @@ impl Repository {
             #[cfg(test)]
             maybe_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish);
 
+            self.record_attached_native_source(execution.state.id())
+                .map_err(|error| HeddleError::Config(error.to_string()))?;
             let ref_publish_started = std::time::Instant::now();
             reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
             execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
-            self.record_attached_native_capture(execution.state.id())
-                .map_err(|error| HeddleError::Config(error.to_string()))?;
             return Ok(execution);
         }
     }
@@ -1631,6 +1635,8 @@ impl Repository {
         fold_default_visibility: bool,
         transaction_id: Option<&str>,
     ) -> Result<State> {
+        self.require_attached_native_source_signer()
+            .map_err(|error| HeddleError::Config(error.to_string()))?;
         let tree = self.build_tree(&self.root)?;
         let tree_hash = self.store.put_tree(&tree)?;
 
@@ -1690,6 +1696,8 @@ impl Repository {
                 supersedes: None,
             })?;
         }
+        self.record_attached_native_source(state.id())
+            .map_err(|error| HeddleError::Config(error.to_string()))?;
 
         let head = self.head_ref()?;
         let thread = match &head {

@@ -92,8 +92,8 @@ impl ThreadCheckout {
         Repository::init_worktree(path, source.heddle_dir())?;
         let repository = Repository::open(path)?;
         repository
-            .refs()
-            .write_head(&Head::Detached { state: revision })?;
+            .write_head_recorded(&Head::Detached { state: revision })
+            .map_err(|error| Error::Invalid(error.to_string()))?;
         let binding = CheckoutBinding {
             id: uuid::Uuid::now_v7().to_string(),
             thread: replica.thread_id(),
