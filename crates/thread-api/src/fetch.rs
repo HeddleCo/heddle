@@ -429,7 +429,7 @@ mod tests;
 
 /// Verify original signatures and exact receipt bindings without deriving trust
 /// from the carried executor key. Installation pins executor authority separately.
-fn verify_origin(
+pub(crate) fn verify_origin(
     record: &ThreadGenesisRecord,
     thread: &ThreadRef,
 ) -> Result<heddle_object_model::object::thread_replication::ThreadGenesis, Error> {

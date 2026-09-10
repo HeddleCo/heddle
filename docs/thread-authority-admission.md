@@ -123,3 +123,53 @@ receipt persistence, rollback and reopen, old signature-only admission rejection
 receiver relays, missing/unreferenced/changed evidence, wrong original scope and
 unknown executor. Fresh hosted publication under a newly supplied acceptance is
 not claimed by these portable/native relay tests.
+
+## Explicit fresh publication preparation
+
+`Thread::prepare_publication` takes the exact `SourcePack`, owned
+`PublicationOriginals`, retry options, and independently known Spool genesis.
+It performs local signature/binding checks and constructs the complete sorted
+original manifest and immutable publication intent. It does not refresh identity,
+contact an authority, or accept work automatically. The ordinary `publish_source`
+path remains available without an acceptance.
+
+Call `PreparedPublication::acceptance` for an external signer, then `accept`, or
+call `sign_acceptance` with an explicitly supplied accepting `SourceAuthor` and
+signer. The separate signature selects exact account/kinds in that complete
+manifest. Original source, genesis, and claim signatures/envelopes remain
+unchanged. `Thread::send_prepared` transmits the exact inventory and originals in
+one Publish exchange. A retry uses the same operation/intent; changing only the
+transport checkpoint does not change the signed intent.
+
+The shared host seam is `validate_proposed_source_artifacts`. It verifies actual
+pack/index bytes and closure, separates retained receipt evidence from fresh
+proposals, recomputes the full manifest/intent, and returns
+`ProposedSourceArtifacts`. Its `acceptances()` plan exposes immutable proposals;
+`ProposedAcceptance::entry` returns only an exact selected descriptor from the
+shared manifest. None of these values grants current permission. The host must
+compare its rebuilt original descriptor, inspect original provenance, verify the
+current accepting capability for each subject, and enforce current audience,
+ownership/cutoff, and courier checks before minting an acceptance-backed receipt.
+Generic live/Fetch evidence matching still rejects unreferenced acceptances.
+
+Account genesis descriptors bind owner, creator, Thread ID, and the exact creator
+envelope digest. Their agent field is always absent because genesis does not sign
+that field; it does not mean human attribution. The host derives the actual agent
+only from verified provenance. Source and claim descriptors retain their exact
+signed actors. Metadata is ineligible, and accepting LocalKey work cannot invent
+an account owner or replace either signature of an explicit ownership claim.
+
+All original metadata remains bounded to 16 MiB, 128 unique acceptances, and
+256 KiB per carrier. A shared manifest is retained once behind `Arc` for all
+proposals. `authority_admission::batches` lazily emits independently complete
+operation carriers, deduplicating acceptance evidence within each carrier. Its
+byte budget covers the `ReplicationOperations` body; callers reserve the outer
+frame overhead. No cross-frame evidence cache is required at a receiver.
+
+Fresh SDK tests cover changed destination, operation ID, inventory, original set,
+and genesis envelope; duplicate/unused selections; metadata and local ownership;
+original claim signatures; explicit prepare/sign/send with a capacity-one
+transport; and actual pack cleanup measured twice. These are structural/client
+checks. Current hosted accepting-authority admission and a real revoked-original
+publication remain separate integration acceptance, not established by these
+SDK tests.

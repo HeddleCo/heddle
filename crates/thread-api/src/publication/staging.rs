@@ -112,3 +112,41 @@ pub fn validate_source_artifacts(
 fn preparation(error: impl std::fmt::Display) -> Error {
     Error::Preparation(error.to_string())
 }
+
+/// Structurally verified artifact closure and explicit proposed acceptances.
+/// No acceptance is a current-authority token. The host must authorize every
+/// selected subject and preserve ordinary receipt, claim, and owner-cutoff gates.
+pub struct ProposedSourceArtifacts {
+    artifacts: ValidatedSourceArtifacts,
+    acceptances: super::PublicationAcceptancePlan,
+}
+
+impl ProposedSourceArtifacts {
+    pub fn artifacts(&self) -> &ValidatedSourceArtifacts {
+        &self.artifacts
+    }
+    pub fn acceptances(&self) -> &super::PublicationAcceptancePlan {
+        &self.acceptances
+    }
+    pub fn into_parts(self) -> (ValidatedSourceArtifacts, super::PublicationAcceptancePlan) {
+        (self.artifacts, self.acceptances)
+    }
+}
+
+pub fn validate_proposed_source_artifacts(
+    directory: tempfile::TempDir,
+    opening: &PublishContentClientFrame,
+    originals: PublicationOriginals,
+    spool_genesis: heddle_object_model::object::ContentHash,
+) -> Result<ProposedSourceArtifacts, Error> {
+    let (originals, acceptances) =
+        super::proposed_publication(opening, originals, spool_genesis).map_err(preparation)?;
+    let Some(publish_content_client_frame::Body::Open(open)) = &opening.body else {
+        return Err(Error::Invalid("publication Open required"));
+    };
+    let artifacts = validate_source_artifacts(directory, open, originals)?;
+    Ok(ProposedSourceArtifacts {
+        artifacts,
+        acceptances,
+    })
+}

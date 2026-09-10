@@ -474,14 +474,122 @@ fn boundary_receipt_versions_keep_maximum_basis_inside_storage_bound() {
 
 #[test]
 fn boundary_acceptance_signature_is_required_before_matching_receipts() {
-    let (mut batch,_)=fixture(1);
-    batch.boundary_acceptances[0].signatures[0].signature[0]^=1;
-    assert!(crate::authority_admission::match_batch(&batch).is_err(),"acceptance signature must be verified before receipt matching");
+    let (mut batch, _) = fixture(1);
+    batch.boundary_acceptances[0].signatures[0].signature[0] ^= 1;
+    assert!(
+        crate::authority_admission::match_batch(&batch).is_err(),
+        "acceptance signature must be verified before receipt matching"
+    );
 }
 #[test]
 fn boundary_acceptance_receipt_requires_independent_executor_pin() {
-    let (batch,mut trust)=fixture(1);
-    let received=crate::authority_admission::match_batch(&batch).expect("structural match").remove(0);
-    trust.executor=[88;32];
-    assert!(received.authority_admission.expect("receipt").verify(&received.original,&trust).is_err(),"boundary evidence must never establish its own executor trust");
+    let (batch, mut trust) = fixture(1);
+    let received = crate::authority_admission::match_batch(&batch)
+        .expect("structural match")
+        .remove(0);
+    trust.executor = [88; 32];
+    assert!(
+        received
+            .authority_admission
+            .expect("receipt")
+            .verify(&received.original, &trust)
+            .is_err(),
+        "boundary evidence must never establish its own executor trust"
+    );
+}
+#[test]
+fn outgoing_batches_share_evidence_within_each_independently_verifiable_carrier() {
+    use prost::Message;
+    let (batch, _) = fixture(128);
+    let received = crate::authority_admission::match_batch(&batch).expect("matched originals");
+    let output = crate::authority_admission::batches(received, 256 * 1024, 64)
+        .expect("bounded encoder")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("carriers");
+    assert_eq!(output.len(), 2);
+    for carrier in &output {
+        assert_eq!(carrier.operations.len(), 64);
+        assert_eq!(
+            carrier.boundary_acceptances.len(),
+            1,
+            "one shared acceptance per carrier"
+        );
+        assert!(carrier.encoded_len() <= 256 * 1024);
+        assert_eq!(
+            crate::authority_admission::match_batch(carrier)
+                .expect("no prior frame state required")
+                .len(),
+            64
+        );
+    }
+    let wire_bytes: usize = output.iter().map(Message::encoded_len).sum();
+    assert!(
+        wire_bytes < 512 * 1024,
+        "128 references do not serialize 128 copies of 64 KiB proof"
+    );
+    let received = crate::authority_admission::match_batch(&batch).expect("originals");
+    let observed = std::cell::Cell::new(0);
+    let input = received
+        .into_iter()
+        .inspect(|_| observed.set(observed.get() + 1));
+    let mut batches =
+        crate::authority_admission::batches(input, 256 * 1024, 2).expect("lazy bounded encoder");
+    assert_eq!(
+        batches
+            .next()
+            .expect("carrier")
+            .expect("bounded")
+            .operations
+            .len(),
+        2
+    );
+    assert_eq!(
+        observed.get(),
+        2,
+        "sender does not materialize complete ancestry before first frame"
+    );
+}
+#[test]
+fn outgoing_batches_fail_closed_when_one_complete_proof_exceeds_budget() {
+    let (batch, _) = fixture(1);
+    let received = crate::authority_admission::match_batch(&batch).expect("originals");
+    let mut output = crate::authority_admission::batches(received, 1024, 64).expect("limits");
+    assert!(
+        output
+            .next()
+            .expect("bounded error")
+            .expect_err("complete proof does not fit")
+            .to_string()
+            .contains("exceed batch budget")
+    );
+    assert!(output.next().is_none(), "encoder is fused after denial");
+}
+
+#[test]
+fn outgoing_batches_reject_same_canonical_evidence_with_different_signature() {
+    let (batch, _) = fixture(2);
+    let mut received = crate::authority_admission::match_batch(&batch).expect("matched originals");
+    let changed = received[1]
+        .authority_admission
+        .as_mut()
+        .expect("receipt")
+        .boundary_acceptance
+        .as_mut()
+        .expect("matched evidence");
+    std::sync::Arc::make_mut(changed).signature[0] ^= 1;
+    let mut output =
+        crate::authority_admission::batches(received, 256 * 1024, 64).expect("bounded encoder");
+    let error = output.next().expect("explicit rejection").expect_err(
+        "different retained signature must not be silently replaced by the first evidence",
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("conflicting boundary acceptance evidence in outgoing batch"),
+        "{error}"
+    );
+    assert!(
+        output.next().is_none(),
+        "no partially normalized carrier after rejection"
+    );
 }

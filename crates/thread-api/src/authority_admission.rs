@@ -1,5 +1,7 @@
-//! Hosted original-author receipts. Verification requires receiver-owned executor
-//! trust; carried signatures and transport peers never establish that trust.
+#[path = "authority_batches.rs"]
+mod batching;
+pub use batching::{AuthorityBatches, batches};
+// Hosted original-author receipts require receiver-owned executor trust.
 pub use crypto::thread_authority_admission::SignedAuthorityAdmission;
 use crypto::{Signer, thread_operation::SignedOperation};
 use heddle_object_model::object::thread_authority_admission::FORMAT;

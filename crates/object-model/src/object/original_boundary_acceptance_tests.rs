@@ -116,6 +116,8 @@ fn boundary_manifest_rejects_duplicates_unsorted_and_bounds() {
     );
     let mut other = entry.clone();
     other.subject = ManifestSubject::Genesis(hash(1));
+    other.thread = hash(1);
+    other.authority.as_mut().expect("authority").actor.agent_id = None;
     let mut sorted = OriginalPublicationManifest::new(vec![entry.clone(), other]).expect("sorted");
     sorted.entries.reverse();
     assert!(sorted.encode().is_err());

@@ -8,13 +8,22 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use crate::{Remote, contract::*, rpc, transport};
 
 #[cfg(feature = "source-transfer")]
+mod acceptance;
+#[cfg(feature = "source-transfer")]
+pub use acceptance::{
+    PreparedPublication, ProposedAcceptance, PublicationAcceptancePlan, proposed_publication,
+    publication_intent,
+};
+#[cfg(feature = "source-transfer")]
 mod source;
 #[cfg(feature = "source-transfer")]
 mod staging;
 #[cfg(feature = "source-transfer")]
 pub use source::{PublicationOptions, SourceBudget, SourcePack};
 #[cfg(feature = "source-transfer")]
-pub use staging::validate_source_artifacts;
+pub use staging::{
+    ProposedSourceArtifacts, validate_proposed_source_artifacts, validate_source_artifacts,
+};
 
 /// Exact original creator wrappers and signed source operations, including
 /// every foreign integration dependency. The receiver verifies their authority
@@ -45,13 +54,28 @@ impl PublicationOriginals {
                 "bounded original genesis and source operations required",
             ));
         }
-        let mut acceptances=std::collections::BTreeSet::new();
-        for record in self.geneses.iter().flat_map(|value|&value.boundary_acceptances).chain(self.operations.iter().flat_map(|value|&value.boundary_acceptances)) {
-            if record.canonical_record.len()>96*1024 || record.signatures.len()!=1 || record.signatures[0].signature.len()!=64 || record.signatures[0].public_key.len()!=32 {
+        let mut acceptances = std::collections::BTreeSet::new();
+        for record in self
+            .geneses
+            .iter()
+            .flat_map(|value| &value.boundary_acceptances)
+            .chain(
+                self.operations
+                    .iter()
+                    .flat_map(|value| &value.boundary_acceptances),
+            )
+        {
+            if record.canonical_record.len() > 96 * 1024
+                || record.signatures.len() != 1
+                || record.signatures[0].signature.len() != 64
+                || record.signatures[0].public_key.len() != 32
+            {
                 return Err(Error::Invalid("boundary evidence shape exceeds bounds"));
             }
             acceptances.insert(record.canonical_record.as_slice());
-            if acceptances.len()>128 {return Err(Error::Invalid("boundary acceptance count exceeded"));}
+            if acceptances.len() > 128 {
+                return Err(Error::Invalid("boundary acceptance count exceeded"));
+            }
         }
         let mut bytes = 0usize;
         for length in self
@@ -76,7 +100,13 @@ impl PublicationOriginals {
         }) || self
             .operations
             .iter()
-            .flat_map(|batch| batch.operations.iter().chain(&batch.authority_admissions).chain(&batch.boundary_acceptances))
+            .flat_map(|batch| {
+                batch
+                    .operations
+                    .iter()
+                    .chain(&batch.authority_admissions)
+                    .chain(&batch.boundary_acceptances)
+            })
             .any(|record| record.canonical_record.is_empty() || record.signatures.is_empty())
         {
             return Err(Error::Invalid(
@@ -126,26 +156,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
                 "endpoint, capture and ordered native artifacts required",
             ));
         }
-        let mut inventory = Vec::new();
-        for extent in &open.packs {
-            let Some(address) = &extent.pack else {
-                return Err(Error::Invalid("artifact address required"));
-            };
-            if address.algorithm != "blake3"
-                || address.digest.len() != 32
-                || extent.length == 0
-                || extent.offset != 0
-                || extent.extent_digest.as_ref() != Some(address)
-            {
-                return Err(Error::Invalid(
-                    "complete BLAKE3-addressed artifacts required",
-                ));
-            }
-            extent
-                .encode_length_delimited(&mut inventory)
-                .map_err(|_| Error::Invalid("inventory encoding failed"))?;
-        }
-        let inventory = typed_digest("thread-source-inventory-v1", &inventory);
+        let inventory = inventory_digest(&open.packs)?;
         let mut logical = opening.clone();
         if let Some(publish_content_client_frame::Body::Open(open)) = logical.body.as_mut() {
             open.checkpoint = None;
@@ -324,6 +335,41 @@ fn validate_receipt(
     }
 }
 
+/// Exact ordered complete artifact inventory shared by preparation, intent,
+/// upload, and receipt verification. No pack body is buffered here.
+pub fn inventory_digest(packs: &[PackExtent]) -> Result<[u8; 32], Error> {
+    if packs.len() != 2
+        || packs[0].kind != pack_extent::Kind::NativePack as i32
+        || packs[1].kind != pack_extent::Kind::NativeIndex as i32
+    {
+        return Err(Error::Invalid("ordered native pack and index required"));
+    }
+    let mut inventory = Vec::new();
+    let mut total = 0_u64;
+    for extent in packs {
+        let address = extent
+            .pack
+            .as_ref()
+            .ok_or(Error::Invalid("artifact address required"))?;
+        total = total
+            .checked_add(extent.length)
+            .ok_or(Error::Invalid("artifact length overflow"))?;
+        if address.algorithm != "blake3"
+            || address.digest.len() != 32
+            || extent.length == 0
+            || extent.offset != 0
+            || extent.extent_digest.as_ref() != Some(address)
+            || total > 256 * 1024 * 1024
+        {
+            return Err(Error::Invalid("complete bounded BLAKE3 artifacts required"));
+        }
+        extent
+            .encode_length_delimited(&mut inventory)
+            .map_err(|_| Error::Invalid("inventory encoding failed"))?;
+    }
+    Ok(typed_digest("thread-source-inventory-v1", &inventory))
+}
+
 fn typed_digest(kind: &str, bytes: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(kind.as_bytes());
@@ -343,8 +389,8 @@ mod tests {
 
     use super::*;
 
-    struct Reader(mpsc::Receiver<Vec<u8>>);
-    struct Writer(Option<mpsc::Sender<Vec<u8>>>);
+    pub(super) struct Reader(mpsc::Receiver<Vec<u8>>);
+    pub(super) struct Writer(Option<mpsc::Sender<Vec<u8>>>);
     impl MessageReader for Reader {
         type Error = transport::Error;
         async fn next(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
@@ -372,7 +418,7 @@ mod tests {
             self.0.take();
         }
     }
-    struct Peer {
+    pub(super) struct Peer {
         wrong_receipt: bool,
     }
     impl RpcTransport for Peer {
@@ -536,7 +582,7 @@ mod tests {
         }
     }
 
-    fn fixture(
+    pub(super) fn fixture(
         wrong_receipt: bool,
     ) -> (
         Remote<Peer>,
@@ -606,12 +652,12 @@ mod tests {
         PublicationOriginals {
             geneses: vec![ThreadGenesisRecord {
                 boundary_acceptances: Vec::new(),
- genesis: Some(record.clone()),
+                genesis: Some(record.clone()),
                 ..Default::default()
             }],
             operations: vec![ReplicationOperations {
                 boundary_acceptances: Vec::new(),
- operations: vec![record],
+                operations: vec![record],
                 authority_admissions: vec![],
             }],
         }

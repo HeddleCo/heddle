@@ -13,7 +13,7 @@ use heddle_object_model::object::{
 };
 use heddle_pack::store::pack::{StreamingPackBuilder, build_source_pack_with_references};
 
-use super::{Error, PublicationOriginals, typed_digest};
+use super::{Error, PreparedPublication, PublicationOriginals};
 use crate::{Thread, contract::*, transport};
 
 pub struct SourceBudget {
@@ -119,14 +119,7 @@ impl SourcePack {
 
     /// The same inventory digest verified by the publication receipt.
     pub fn inventory_digest(&self) -> Result<[u8; 32], Error> {
-        use prost::Message;
-        let mut inventory = Vec::new();
-        for extent in &self.artifacts {
-            extent
-                .encode_length_delimited(&mut inventory)
-                .map_err(|_| Error::Invalid("inventory encoding failed"))?;
-        }
-        Ok(typed_digest("thread-source-inventory-v1", &inventory))
+        super::inventory_digest(&self.artifacts)
     }
 }
 
@@ -140,6 +133,55 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
         originals: &PublicationOriginals,
         options: PublicationOptions,
     ) -> Result<PublicationReceipt, Error> {
+        let opening = self.publication_opening(source, options)?;
+        let [pack, index] = source.open_artifacts().await?;
+        self.remote
+            .publish_content(&opening, originals, [pack, index])
+            .await
+    }
+    /// Local preparation over exact source/originals; no network authorization or
+    /// implicit acceptance. Call sign_acceptance explicitly, then send_prepared.
+    pub fn prepare_publication(
+        &self,
+        source: &SourcePack,
+        originals: PublicationOriginals,
+        options: PublicationOptions,
+        spool_genesis: heddle_object_model::object::ContentHash,
+    ) -> Result<PreparedPublication, Error> {
+        Ok(PreparedPublication::new(
+            self.publication_opening(source, options)?,
+            originals,
+            spool_genesis,
+        )?)
+    }
+
+    pub async fn send_prepared(
+        &self,
+        source: &SourcePack,
+        prepared: &PreparedPublication,
+    ) -> Result<PublicationReceipt, Error> {
+        let Some(publish_content_client_frame::Body::Open(open)) = &prepared.opening().body else {
+            return Err(Error::Invalid("prepared Open required"));
+        };
+        if open.thread.as_ref() != Some(&self.reference)
+            || open.packs.as_slice() != source.artifacts()
+            || prepared.plan().intent().revision != source.revision()
+        {
+            return Err(Error::Invalid(
+                "prepared publication differs from selected source",
+            ));
+        }
+        let artifacts = source.open_artifacts().await?;
+        self.remote
+            .publish_content(prepared.opening(), prepared.originals(), artifacts)
+            .await
+    }
+
+    fn publication_opening(
+        &self,
+        source: &SourcePack,
+        options: PublicationOptions,
+    ) -> Result<PublishContentClientFrame, Error> {
         if self
             .reference
             .spool
@@ -164,7 +206,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
             .endpoint
             .clone()
             .ok_or(Error::Invalid("remote endpoint identity missing"))?;
-        let opening = PublishContentClientFrame {
+        Ok(PublishContentClientFrame {
             client_operation_id: options.client_operation_id,
             body: Some(publish_content_client_frame::Body::Open(
                 PublishContentOpen {
@@ -184,11 +226,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
                     destination: Some(destination),
                 },
             )),
-        };
-        let [pack, index] = source.open_artifacts().await?;
-        self.remote
-            .publish_content(&opening, originals, [pack, index])
-            .await
+        })
     }
 }
 

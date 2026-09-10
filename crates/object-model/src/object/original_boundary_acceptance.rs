@@ -11,7 +11,10 @@ use uuid::Uuid;
 use super::{
     ContentHash, StateId,
     thread_authority_admission::OriginalAuthorityBinding,
-    thread_replication::{SourceAuthor, ThreadOperation},
+    thread_replication::{
+        GenesisOwner, SourceAuthor, ThreadGenesis, ThreadOperation, metadata::AUTHORITY_FORMAT,
+        ownership_claim::ThreadOwnershipClaim,
+    },
 };
 use crate::error::{HeddleError, Result};
 
@@ -64,12 +67,83 @@ impl OriginalManifestEntry {
             authority: OriginalAuthorityBinding::from_operation(operation)?,
         })
     }
+    /// Caller verifies the creator signature. Genesis does not directly sign an
+    /// agent field: None here means unspecified, not human attribution. The exact
+    /// envelope digest binds the identity the host subsequently inspects.
+    pub fn from_genesis(genesis: &ThreadGenesis, creator_authority: &[u8]) -> Result<Self> {
+        let authority = match genesis.owner {
+            GenesisOwner::Account(account) => {
+                if creator_authority.is_empty() || creator_authority.len() > 64 * 1024 {
+                    return Err(invalid(
+                        "account genesis requires bounded creator authority",
+                    ));
+                }
+                Some(OriginalAuthorityBinding {
+                    spool: Uuid::parse_str(&genesis.spool)
+                        .map_err(|_| invalid("invalid genesis Spool"))?,
+                    actor: super::CollaborationActor {
+                        principal_id: account,
+                        agent_id: None,
+                    },
+                    authority_digest: ContentHash::compute_typed(
+                        AUTHORITY_FORMAT,
+                        creator_authority,
+                    ),
+                })
+            }
+            GenesisOwner::LocalKey(_) => {
+                if !creator_authority.is_empty() {
+                    return Err(invalid("local genesis has no account authority"));
+                }
+                None
+            }
+        };
+        let id = genesis.id()?;
+        Ok(Self {
+            subject: ManifestSubject::Genesis(id),
+            thread: id,
+            publisher: genesis.creator,
+            authority,
+        })
+    }
+    /// Caller verifies both original claim signatures and its immutable genesis.
+    pub fn from_claim(claim: &ThreadOwnershipClaim) -> Result<Self> {
+        claim.encode()?;
+        let SourceAuthor::Account {
+            spool,
+            actor,
+            authority_digest,
+            ..
+        } = &claim.acceptance
+        else {
+            return Err(invalid("claim requires explicit account authority"));
+        };
+        Ok(Self {
+            subject: ManifestSubject::OwnershipClaim(claim.id()?),
+            thread: claim.thread,
+            publisher: claim.accepting_publisher,
+            authority: Some(OriginalAuthorityBinding {
+                spool: *spool,
+                actor: actor.clone(),
+                authority_digest: *authority_digest,
+            }),
+        })
+    }
     fn validate(&self) -> Result<()> {
         if self.publisher == [0; 32]
             || self.subject.id().as_bytes() == &[0; 32]
             || self.thread.as_bytes() == &[0; 32]
         {
             return Err(invalid("invalid original manifest identity"));
+        }
+        if matches!(self.subject, ManifestSubject::Genesis(_))
+            && (self.subject.id() != self.thread
+                || self
+                    .authority
+                    .as_ref()
+                    .is_some_and(|binding| binding.actor.agent_id.is_some()))
+        {
+            return Err(invalid("genesis manifest cannot assert an unsigned agent"));
         }
         if let Some(binding) = &self.authority {
             if binding.spool.is_nil()
@@ -277,8 +351,8 @@ impl OriginalBoundaryAcceptance {
         Ok(selected)
     }
 }
-/// Receipt integration is a subsequent explicit format change. The old receipt
-/// remains original-author testimony until its consumers support this enum.
+/// Explicit canonical receipt basis; historical original-author testimony is
+/// never reinterpreted as a fresh boundary acceptance.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum AdmissionBasis {
     OriginalAuthority,
