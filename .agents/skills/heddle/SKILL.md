@@ -218,10 +218,11 @@ heddle auth derive-agent \
 ```
 
 - Without `--allow`, a curated safe set is installed (push/pull, repo reads,
-  context, discussions, `WhoAmI`). Repeating `--allow` selects a **subset**; it
-  cannot opt into an unsafe method. A mandatory deny policy always rejects
-  credential issuance, auth-trust mutation, recovery enrollment, and repo/
-  namespace deletion.
+  context, discussions, `WhoAmI`, and writer-or-below collaborator grants).
+  Repeating `--allow` selects a **subset**; it cannot opt into an unsafe method.
+  A mandatory deny policy always rejects credential issuance, auth-trust
+  mutation, recovery enrollment, and repo/namespace deletion. Admin and owner
+  grants stay human-verified even when `CreateGrant` is allowed.
 - By default the child **replaces** the active stored credential for `--server`.
   Use `--out <DIR>` to write a portable 0600 bundle (`token`, `device-key.pem`,
   `metadata.json`) for handing to another process. Token-only `--stdout` export

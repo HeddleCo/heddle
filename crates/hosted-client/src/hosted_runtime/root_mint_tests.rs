@@ -315,6 +315,30 @@ fn authorize_restricted_root(
     authorizer.authorize().map(|_| ())
 }
 
+/// heddle#1738: derive-agent children must be able to call the grant RPCs
+/// so everyday collaborator invites do not fail at the Biscuit layer.
+/// Admin/owner stay human-gated by role, not by omitting CreateGrant.
+#[test]
+fn safe_ceiling_allows_collaborator_grants_at_writer_or_below() {
+    for op in ["ListGrants", "CreateGrant", "DeleteGrant"] {
+        assert!(
+            SAFE_AGENT_OPERATIONS.contains(&op),
+            "agent ceiling missing {op}: derive-agent cannot invite writer-or-below collaborators"
+        );
+        assert!(
+            AgentTemplate::Contributor
+                .operations()
+                .iter()
+                .any(|operation| operation == op),
+            "contributor template must include {op}"
+        );
+    }
+    assert!(
+        !SAFE_AGENT_OPERATIONS.contains(&"UpdateGrant"),
+        "UpdateGrant stays out of the agent ceiling so a child cannot raise a grant to admin"
+    );
+}
+
 /// Regression: the agent ceiling must carry the personal-spool discovery +
 /// provisioning ops. Without them, an unclaimed agent-rooted account's
 /// `heddle push <host>` aborts client-side inside `auto_provision_hosted_repo`

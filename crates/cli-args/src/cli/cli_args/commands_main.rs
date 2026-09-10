@@ -397,6 +397,7 @@ secrets. `heddle visibility` embargoes a state and its descendants;
     ///
     /// Separate from `heddle auth invite`, which is signup-only. Create,
     /// list, and delete collaborator grants on a spool you can administer.
+    /// Agents may grant writer or below; admin and owner stay human-verified.
     #[cfg(feature = "client")]
     Grant {
         #[command(subcommand)]

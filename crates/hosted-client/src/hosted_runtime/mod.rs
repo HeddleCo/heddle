@@ -33,7 +33,9 @@ mod root_mint_tests;
 pub mod websocket;
 pub mod whoami;
 
-pub use device_flow::AgentTemplate;
+pub use device_flow::{
+    AgentTemplate, credential_is_agent_attenuated, refuse_agent_privileged_grant,
+};
 pub use hosted::{
     HostedAuthMode, HostedClient, HostedSession, ServerStream, resolve_active_bearer,
     resolve_hosted_credential,

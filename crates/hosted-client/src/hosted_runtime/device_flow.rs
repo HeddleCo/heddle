@@ -14,6 +14,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use crypto::{Ed25519Signer, Signer};
+use repo::GrantRole;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentAuthOperationDisposition {
@@ -284,6 +285,11 @@ pub const SAFE_AGENT_OPERATIONS: &[&str] = &[
     "GetDiscussion",
     // Session identity.
     "WhoAmI",
+    // Collaborator grants at writer or below (heddle#1738). Admin/owner
+    // CreateGrant stays human-gated even when these RPCs are in the ceiling.
+    "ListGrants",
+    "CreateGrant",
+    "DeleteGrant",
 ];
 
 /// Read-only RPCs shared by every derived-agent template. Every entry is a
@@ -315,6 +321,7 @@ const TEMPLATE_READ_OPERATIONS: &[&str] = &[
     "WhoAmI",
     // Read of the installed owner keyring after BootstrapOwnerRoot (heddle#1600).
     "GetCurrentOwnerKeyring",
+    "ListGrants",
 ];
 
 /// Collaboration writes a `contributor` adds on top of the read set.
@@ -330,6 +337,10 @@ const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
     "ResolveDiscussion",
     // Provision the caller's own child spool (host-only auto-provision push).
     "CreateSpool",
+    // Everyday collaborator invites at writer or below. Admin/owner remain
+    // human-gated by role, not by omitting the RPC from the ceiling.
+    "CreateGrant",
+    "DeleteGrant",
 ];
 
 /// The push/pull/ref-move set a CI lander needs to run `ready`/`land`.
@@ -348,7 +359,8 @@ pub enum AgentTemplate {
     /// Read + review: every read RPC plus `Pull`. No writes, no ref moves.
     Reviewer,
     /// Read + collaboration writes: reviewer plus `Push`/`UpdateRef`, context
-    /// writes, and discussion writes. No repo/namespace admin.
+    /// writes, discussion writes, and writer-or-below collaborator grants.
+    /// No repo/namespace admin. Admin/owner CreateGrant stays human-gated.
     ///
     /// This is intentionally the **full safe agent ceiling** — its operation
     /// set equals [`SAFE_AGENT_OPERATIONS`], so `--template contributor` is
@@ -509,6 +521,21 @@ pub(crate) fn restrict_agent_account_root(
 /// chains off the parent's keys, and the server validates the full
 /// chain against its trust list when the agent presents the token.
 /// The CLI never holds the server's signing key.
+/// True when the bearer has an attenuation block (derive-agent or a
+/// restricted agent-account root). Human browser login stores a
+/// single-block independent root and is not attenuated.
+pub fn credential_is_agent_attenuated(token: &str) -> bool {
+    biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+        .map(|biscuit| biscuit.block_count() > 1)
+        .unwrap_or(false)
+}
+
+/// Refuse admin/owner (and any role above writer) on a detectable
+/// agent/attenuated session before a CreateGrant / UpdateGrant round-trip.
+pub fn refuse_agent_privileged_grant(token: &str, role: GrantRole) -> bool {
+    credential_is_agent_attenuated(token) && !role.agent_may_grant()
+}
+
 pub fn attenuate_for_agent(
     parent_token_b64: &str,
     restrictions: AgentAttenuation,
@@ -1274,6 +1301,26 @@ mod tests {
         // the integration tests where a real server's keypair is
         // available.
         assert!(attenuated.len() > parent.len());
+        assert!(
+            !credential_is_agent_attenuated(&parent),
+            "a single-block parent root is not an attenuated agent session"
+        );
+        assert!(
+            credential_is_agent_attenuated(&attenuated),
+            "derive-agent children must be detectable before a grant round-trip"
+        );
+        assert!(
+            !refuse_agent_privileged_grant(&attenuated, GrantRole::Reader)
+                && !refuse_agent_privileged_grant(&attenuated, GrantRole::Developer)
+                && !refuse_agent_privileged_grant(&attenuated, GrantRole::Maintainer),
+            "writer and below stay allowed on an attenuated session"
+        );
+        assert!(refuse_agent_privileged_grant(&attenuated, GrantRole::Admin));
+        assert!(refuse_agent_privileged_grant(&attenuated, GrantRole::Owner));
+        assert!(
+            !refuse_agent_privileged_grant(&parent, GrantRole::Admin),
+            "an unattenuated root is not refused locally; the server still human-gates admin"
+        );
     }
 
     #[test]

@@ -25,6 +25,12 @@ fn grant_help_exposes_create_list_delete_and_stays_off_signup_invite() {
         "grant help must separate itself from signup invite:\n{parent_out}"
     );
     assert!(
+        parent_out.contains("writer or below")
+            && (parent_out.contains("admin and owner")
+                || parent_out.contains("Admin and owner")),
+        "grant help must state the agent grant ceiling:\n{parent_out}"
+    );
+    assert!(
         !parent_out.contains("auth invite --email"),
         "grant help must not overload auth invite:\n{parent_out}"
     );
@@ -40,6 +46,12 @@ fn grant_help_exposes_create_list_delete_and_stays_off_signup_invite() {
         create_out.contains("signup") || create_out.contains("auth invite"),
         "grant create help must say this is not a signup invite:\n{create_out}"
     );
+    assert!(
+        create_out.contains("writer or below")
+            && create_out.contains("Admin and owner")
+            && (create_out.contains("human-verified") || create_out.contains("human verification")),
+        "grant create help must state the agent grant ceiling:\n{create_out}"
+    );
 
     let list = heddle(&["grant", "list", "--help"]);
     assert_eq!(list.status.code(), Some(0));
@@ -51,6 +63,10 @@ fn grant_help_exposes_create_list_delete_and_stays_off_signup_invite() {
     let delete_out = String::from_utf8_lossy(&delete.stdout);
     assert!(delete_out.contains("<ID>"));
     assert!(delete_out.contains("--spool"));
+    assert!(
+        delete_out.contains("writer-or-below") || delete_out.contains("writer or below"),
+        "grant delete help must state the agent grant ceiling:\n{delete_out}"
+    );
 }
 
 #[test]
