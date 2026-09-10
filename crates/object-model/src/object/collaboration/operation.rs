@@ -11,6 +11,9 @@ use crate::object::{AnnotationKind, Attribution, ChangeId, ContentHash, StateId,
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationAnchor {
+    Source {
+        source: super::CollaborationSourceAnchor,
+    },
     Repository,
     State {
         state_id: StateId,
@@ -78,6 +81,9 @@ pub enum CollaborationResolution {
     Dismissed {
         reason: String,
     },
+    IntoContext {
+        context: super::ContextRevision,
+    },
     IntoAnnotation {
         annotation_kind: AnnotationKind,
         content: String,
@@ -101,6 +107,7 @@ pub enum LegacyDiscussionResolutionV1 {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum CollaborationOperationBodyV1 {
     Open {
+        blocking: bool,
         title: String,
         anchor: CollaborationAnchor,
         visibility: VisibilityTier,
@@ -218,6 +225,7 @@ impl CollaborationOperationBodyV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollaborationOperationEnvelope {
+    pub metadata: Option<super::CollaborationMetadata>,
     pub discussion_id: DiscussionRecordId,
     pub parents: Vec<CollabOpId>,
     pub idempotency_key: CollaborationIdempotencyKey,
@@ -238,6 +246,7 @@ impl CollaborationOperationEnvelope {
         parents.sort();
         parents.dedup();
         let operation = Self {
+            metadata: None,
             discussion_id,
             parents,
             idempotency_key,
@@ -247,6 +256,16 @@ impl CollaborationOperationEnvelope {
         };
         operation.validate()?;
         Ok(operation)
+    }
+
+    /// Attach durable identity and references before signing the canonical record.
+    pub fn with_metadata(
+        mut self,
+        metadata: super::CollaborationMetadata,
+    ) -> Result<Self, CollaborationCodecError> {
+        metadata.validate()?;
+        self.metadata = Some(metadata);
+        Ok(self)
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, CollaborationCodecError> {
@@ -260,6 +279,9 @@ impl CollaborationOperationEnvelope {
     }
 
     pub(crate) fn validate(&self) -> Result<(), CollaborationCodecError> {
+        if let Some(metadata) = &self.metadata {
+            metadata.validate()?;
+        }
         if self.parents.windows(2).any(|ids| ids[0] >= ids[1]) {
             return Err(CollaborationCodecError::Invalid(
                 "parent operation ids must be sorted and unique".to_string(),
@@ -291,8 +313,9 @@ impl CollaborationOperationEnvelope {
     }
 }
 
-fn validate_anchor(anchor: &CollaborationAnchor) -> Result<(), CollaborationCodecError> {
+pub(super) fn validate_anchor(anchor: &CollaborationAnchor) -> Result<(), CollaborationCodecError> {
     match anchor {
+        CollaborationAnchor::Source { source } => source.validate(),
         CollaborationAnchor::Path { path, .. } => require_text(path, "anchor path"),
         CollaborationAnchor::Symbol { path, symbol, .. } => {
             require_text(path, "anchor path")?;
@@ -307,6 +330,7 @@ fn validate_anchor(anchor: &CollaborationAnchor) -> Result<(), CollaborationCode
 fn validate_resolution(value: &CollaborationResolution) -> Result<(), CollaborationCodecError> {
     match value {
         CollaborationResolution::Dismissed { reason } => require_text(reason, "dismiss reason"),
+        CollaborationResolution::IntoContext { context } => context.encode().map(|_| ()),
         CollaborationResolution::IntoAnnotation { content, .. } => {
             require_text(content, "annotation content")
         }

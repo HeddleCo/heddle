@@ -2194,38 +2194,20 @@ fn is_local_git_repository(path: &Path) -> bool {
 // Pure remote URL / location / hosted-path helpers (no network)
 // ---------------------------------------------------------------------------
 
-/// Whether a string looks like a Git remote URL rather than a Heddle remote name.
+/// Network remotes use Git transport only with an explicit `.git` suffix.
+/// Local paths keep their filesystem-based classification.
 pub fn looks_like_git_remote_url(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    lower.starts_with("http://")
-        || lower.starts_with("https://")
-        || lower.starts_with("ssh://")
-        || lower.starts_with("git://")
-        || lower.ends_with(".git")
-        || (value.contains('@') && value.contains(':'))
+    value.ends_with(".git")
+        && (value.starts_with("https://")
+            || value.starts_with("http://")
+            || value.starts_with("ssh://")
+            || value.starts_with("git://")
+            || (!value.contains("://") && value.contains(':')))
 }
 
-/// Whether a remote is a public Git forge (or otherwise unambiguously Git).
-///
-/// Native HTTPS remotes may still be Heddle servers (`https://api.heddle.sh/...`).
-/// This predicate is the fail-closed classifier that keeps those hosts on the
-/// discovery path while refusing to probe github.com / GitLab / `*.git` as if
-/// they published Heddle descriptor trust.
+/// Whether a remote explicitly selects Git transport.
 pub fn looks_like_git_forge_remote(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    if lower.starts_with("file://") {
-        return false;
-    }
-    if looks_like_known_git_host(value) {
-        return true;
-    }
-    if lower.starts_with("ssh://")
-        || lower.starts_with("git://")
-        || (value.contains('@') && value.contains(':') && !lower.starts_with("heddle://"))
-    {
-        return true;
-    }
-    lower.ends_with(".git") && (lower.starts_with("http://") || lower.starts_with("https://"))
+    looks_like_git_remote_url(value)
 }
 
 /// Whether the authority of `value` is a well-known Git hosting hostname.
@@ -2239,7 +2221,6 @@ fn remote_url_host(value: &str) -> Option<&str> {
         .or_else(|| value.strip_prefix("http://"))
         .or_else(|| value.strip_prefix("ssh://"))
         .or_else(|| value.strip_prefix("git://"))
-        .or_else(|| value.strip_prefix("heddle://"))
         .unwrap_or(value);
     let authority = if let Some((user, host_path)) = rest.split_once('@') {
         if user.eq_ignore_ascii_case("git") || !host_path.contains('/') {
@@ -3859,7 +3840,7 @@ mod tests {
         assert!(looks_like_git_remote_url("https://example.com/r.git"));
         assert!(looks_like_git_remote_url("git@github.com:org/r.git"));
         assert!(!looks_like_git_remote_url("origin"));
-        assert!(looks_like_git_forge_remote(
+        assert!(!looks_like_git_forge_remote(
             "https://github.com/luke/tiny-notes"
         ));
         assert!(looks_like_known_git_host(
@@ -3878,7 +3859,7 @@ mod tests {
             "https://api.heddle.sh/luke/tiny-notes"
         ));
         assert!(!looks_like_git_forge_remote(
-            "heddle://api.heddle.sh/luke/tiny-notes"
+            "https://api.heddle.sh/luke/tiny-notes"
         ));
         assert!(looks_like_remote_location("/tmp/repo"));
         assert!(looks_like_remote_location("~/src/repo"));

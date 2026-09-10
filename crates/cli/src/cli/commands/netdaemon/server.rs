@@ -80,13 +80,23 @@ pub async fn run_network_daemon() -> Result<()> {
     .await
     .context("binding persistent device endpoint")?;
     let node_id = endpoint.id().to_string();
+    let reachability_endpoint = endpoint.clone();
+    let reachability_home = heddle_home.clone();
+    let reachability = tokio::spawn(async move {
+        if let Err(error) =
+            hosted_client::network::advertise_reachability(reachability_endpoint, reachability_home)
+                .await
+        {
+            tracing::warn!(%error, "device relay advertisement stopped");
+        }
+    });
 
     // ---- PIECE 3 (heddle#1620): mount the claim-ALPN router ----
     // The endpoint is live, relay-reachable, and pinned to the persisted
-    // node id. Mount the persistent `heddle-claim/1` router on it and
+    // node id. Mount the persistent native v2 router on it and
     // serve its owner-root co-sign bridge for the daemon's lifetime.
     //
-    // The daemon drives Resolve / preConsent / promoteConsent inline
+    // The daemon drives native endpoint discovery and claim admission
     // against the file-backed claim state, but it deliberately holds no
     // agent owner-root signer (decision D3): when a browser reaches the
     // owner-root co-sign, the router forwards it over `claim_socket` to a
@@ -140,6 +150,11 @@ pub async fn run_network_daemon() -> Result<()> {
     // makes the unlink single-writer safe — a successor that raced in
     // keeps its file.
     claim_bridge.abort();
+    reachability.abort();
+    let _ = reachability.await;
+    if let Err(error) = hosted_client::network::remove_reachability(&heddle_home) {
+        tracing::warn!(%error, "removing device relay advertisement");
+    }
     endpoint.close().await;
     remove_endpoint_if_owned(&endpoint_path, &advertised);
     let _ = std::fs::remove_file(&claim_socket);

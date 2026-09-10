@@ -1413,7 +1413,7 @@ fn clone_remote_thread_not_found_advice(track_name: &str, remote_path: &Path) ->
 /// on every process start when given a hostname spec.
 #[cfg(feature = "client")]
 fn hosted_endpoint_spec(remote: &str) -> String {
-    let trimmed = remote.strip_prefix("heddle://").unwrap_or(remote);
+    let trimmed = remote.strip_prefix("https://").unwrap_or(remote);
     // The address ends at the first slash that introduces a repo path.
     trimmed.split('/').next().unwrap_or(trimmed).to_string()
 }
@@ -2508,7 +2508,7 @@ fn monorepo_requires_hosted_remote_advice(remote: &str) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "monorepo_requires_hosted_remote",
         format!("--recursive monorepo clone requires a hosted spool remote; '{remote}' is not one"),
-        "Point `--recursive` at a hosted spool (e.g. `heddle://host/org/root`), or clone this remote without `--recursive`.",
+        "Point `--recursive` at a hosted spool (e.g. `https://host/org/root`), or clone this remote without `--recursive`.",
         format!("remote '{remote}' does not resolve to a hosted spool that can carry a child tree"),
         "a monorepo clone must call ResolveMonorepo on a hosted spool to discover its children",
         "no destination directory, repository metadata, or worktree files were written",
@@ -2751,7 +2751,7 @@ fn configure_hosted_clone_origin(
 
 #[cfg(feature = "client")]
 fn hosted_clone_origin_url(endpoint_spec: &str, repo_path: &str) -> String {
-    format!("heddle://{endpoint_spec}/{repo_path}")
+    format!("https://{endpoint_spec}/{repo_path}")
 }
 
 /// Read-time blob hydrator for **Git-overlay** lazy clones (issue #50).
@@ -2971,7 +2971,7 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("temp");
         let root = temp.path().join("clone");
         CloneIntent {
-            origin: "heddle://127.0.0.1:8421/owner/repo".to_string(),
+            origin: "https://127.0.0.1:8421/owner/repo".to_string(),
             endpoint: "127.0.0.1:8421".to_string(),
             repository: "owner/repo".to_string(),
             thread: Some("main".to_string()),
@@ -3005,7 +3005,7 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("temp");
         let root = temp.path().join("clone");
         CloneIntent {
-            origin: "heddle://127.0.0.1:8421/owner/repo".to_string(),
+            origin: "https://127.0.0.1:8421/owner/repo".to_string(),
             endpoint: "127.0.0.1:8421".to_string(),
             repository: "owner/repo".to_string(),
             thread: Some("main".to_string()),
@@ -3124,7 +3124,7 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("temp");
         let root = temp.path().join("clone");
         CloneIntent {
-            origin: "heddle://127.0.0.1:8421/owner/repo".to_string(),
+            origin: "https://127.0.0.1:8421/owner/repo".to_string(),
             endpoint: "127.0.0.1:8421".to_string(),
             repository: "owner/repo".to_string(),
             thread: Some("main".to_string()),
@@ -3252,6 +3252,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clone_url_suffix_selects_only_the_intended_transport() {
+        for (url, expected) in [
+            ("https://example.com/ns/repo.git", CloneMode::GitOverlayUrl),
+            (
+                "https://example.com/ns/repo",
+                CloneMode::NetworkHosted { recursive: false },
+            ),
+            (
+                "example.com/ns/repo",
+                CloneMode::NetworkHosted { recursive: false },
+            ),
+        ] {
+            let source = match RemoteTarget::parse(url) {
+                Ok(RemoteTarget::Network { repo_path, .. }) => CloneRemoteSource::Network {
+                    has_repo_path: repo_path.is_some(),
+                },
+                Err(_) => CloneRemoteSource::Unparsed,
+                other => panic!("unexpected local remote: {other:?}"),
+            };
+            assert_eq!(
+                verbs::select_clone_mode(url, false, &source).unwrap(),
+                expected,
+                "{url}"
+            );
+        }
+        assert!(RemoteTarget::parse("heddle://example.com/ns/repo").is_err());
+        assert!(
+            verbs::select_clone_mode(
+                "heddle://example.com/ns/repo.git",
+                false,
+                &CloneRemoteSource::Unparsed
+            )
+            .is_err()
+        );
+    }
+
     #[cfg(feature = "client")]
     #[test]
     fn hosted_endpoint_spec_preserves_hostname_with_port() {
@@ -3269,7 +3306,7 @@ mod tests {
     #[test]
     fn hosted_endpoint_spec_strips_scheme_prefix() {
         assert_eq!(
-            hosted_endpoint_spec("heddle://example.heddle.cloud:443"),
+            hosted_endpoint_spec("https://example.heddle.cloud:443"),
             "example.heddle.cloud:443",
         );
     }
@@ -3282,7 +3319,7 @@ mod tests {
             "example.heddle.cloud:443",
         );
         assert_eq!(
-            hosted_endpoint_spec("heddle://example.heddle.cloud:443/org/acme/repo"),
+            hosted_endpoint_spec("https://example.heddle.cloud:443/org/acme/repo"),
             "example.heddle.cloud:443",
         );
     }
@@ -3296,12 +3333,12 @@ mod tests {
         let origin = configure_hosted_clone_origin(&repo, "weft.local:8421", "smoke-cli/project")
             .expect("configure hosted origin");
 
-        assert_eq!(origin, "heddle://weft.local:8421/smoke-cli/project");
+        assert_eq!(origin, "https://weft.local:8421/smoke-cli/project");
         let cfg = RemoteConfig::open(&repo).expect("open remotes");
         assert_eq!(cfg.default_name(), Some("origin"));
         assert_eq!(
             cfg.get("origin").expect("origin remote").url,
-            "heddle://weft.local:8421/smoke-cli/project"
+            "https://weft.local:8421/smoke-cli/project"
         );
     }
 
@@ -3734,7 +3771,7 @@ mod tests {
         let lazy = local_clone_option_unsupported_advice("--lazy", "");
         assert!(lazy.error.contains("--lazy"));
 
-        let advice = clone_default_remote_failed_advice("heddle://host/repo", "disk full".into());
+        let advice = clone_default_remote_failed_advice("https://host/repo", "disk full".into());
         assert_eq!(advice.kind, "clone_default_remote_failed");
         assert!(advice.error.contains("disk full"));
         assert_eq!(advice.primary_command, "heddle remote add origin <url>");
@@ -3937,7 +3974,7 @@ mod tests {
     fn hosted_clone_origin_url_joins_endpoint_and_repo_path() {
         assert_eq!(
             hosted_clone_origin_url("weft.local:8421", "acme/widgets"),
-            "heddle://weft.local:8421/acme/widgets"
+            "https://weft.local:8421/acme/widgets"
         );
     }
 
@@ -4017,7 +4054,7 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("temp");
         let dest = temp.path().join("clone");
         let intent = CloneIntent {
-            origin: "heddle://127.0.0.1:8421/owner/repo".to_string(),
+            origin: "https://127.0.0.1:8421/owner/repo".to_string(),
             endpoint: "127.0.0.1:8421".to_string(),
             repository: "owner/repo".to_string(),
             thread: Some("missing".to_string()),
@@ -4045,7 +4082,7 @@ mod tests {
     #[test]
     fn recover_keeps_non_main_advertised_default() {
         let intent = CloneIntent {
-            origin: "heddle://127.0.0.1:8421/owner/repo".to_string(),
+            origin: "https://127.0.0.1:8421/owner/repo".to_string(),
             endpoint: "127.0.0.1:8421".to_string(),
             repository: "owner/repo".to_string(),
             thread: None,

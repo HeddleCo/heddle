@@ -1083,8 +1083,16 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // the record's creation instant: the idempotency key folds it, and a
     // crash-retry reuses it from this still-Active record (heddle#356 cid
     // 3335052848 / 3335586969).
+    let native_thread = repo.create_native_thread(
+        &args.name,
+        base_state,
+        args.parent_thread
+            .as_deref()
+            .or(current_target_thread.as_deref()),
+        args.task.as_deref().unwrap_or(""),
+    )?;
     let thread_state = Thread {
-        id: args.name.clone(),
+        id: native_thread.thread_id().to_hex(),
         thread: args.name.clone(),
         target_thread: current_target_thread.clone(),
         parent_thread: args.parent_thread.clone(),
@@ -1616,8 +1624,9 @@ pub(crate) fn cmd_thread_create(
     };
     let thread_manager = ThreadManager::new(repo.heddle_dir());
     let now = Utc::now();
+    let native_thread = repo.create_native_thread(&name, current, target_thread.as_deref(), "")?;
     let thread_state = Thread {
-        id: name.clone(),
+        id: native_thread.thread_id().to_hex(),
         thread: name.clone(),
         target_thread,
         parent_thread: None,
@@ -2490,8 +2499,8 @@ pub(crate) fn cmd_thread_rename(
     old: String,
     new: String,
 ) -> Result<()> {
-    // Renaming persists a new thread id, so the destination name is a
-    // user/external creation boundary too — reject an unsafe name here.
+    // Names change while the original signed Thread identity remains stable.
+    // The destination remains an external naming boundary.
     // (heddle#464 close-the-class.)
     ThreadId::new(new.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
     let old_tn = ThreadName::new(&old);
@@ -2540,6 +2549,13 @@ pub(crate) fn cmd_thread_rename(
     }
 
     repo.commit_and_publish(records, &updates)?;
+    repo.rename_native_thread(&old, &new)?;
+    let manager = ThreadManager::new(repo.heddle_dir());
+    if let Some(mut record) = manager.find_by_thread(&old)? {
+        record.thread = new.clone();
+        record.updated_at = Utc::now();
+        manager.save(&record)?;
+    }
 
     let output = thread_op_output(
         "thread_rename",

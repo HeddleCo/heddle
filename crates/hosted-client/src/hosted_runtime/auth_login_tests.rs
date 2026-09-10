@@ -1,25 +1,21 @@
 use std::{ffi::OsString, sync::MutexGuard};
 
-use api::heddle::api::v1alpha1::CreateAgentAccountResponse;
 use chrono::{Duration, Utc};
 use config::credentials::{self, ServerCredential};
 use crypto::{Ed25519Signer, Signer as _};
-use tempfile::TempDir;
-
 use objects::HeddleError;
+use tempfile::TempDir;
 
 use super::{
     agent_node_identity,
     auth::headless_token_metadata,
     auth_login::{LoginInputs, LoginPath, login, login_path, store_agent_root},
     auth_login_agent::{
-        finish_invite_create_from_response, owner_root_pin_probe, remint_with_client_for_test,
-        test_support::start_recording_client,
+        finish_invite_create_from_response, provision_response_for_test,
+        remint_with_client_for_test, test_support::start_recording_client,
     },
     auth_requests::{AuthOptions, LoginPermission},
-    device_flow::{
-        authenticated_subject, effective_pop_public_key_hex, restrict_agent_account_root,
-    },
+    device_flow::restrict_agent_account_root,
     identity_state::{self, ClaimState},
     root_mint::mint_agent_root,
 };
@@ -151,6 +147,7 @@ fn store_device_cred(server: &str, expires_at: Option<chrono::DateTime<Utc>>) ->
     credentials::store_server_credential(
         server,
         ServerCredential {
+            mint_root_attachment: None,
             token: token.clone(),
             subject: "alice".to_string(),
             device_id: None,
@@ -284,12 +281,11 @@ fn login_invite_create_succeeds_with_a_claim_next_directive() {
     let server = "api.claim-next.test";
     let output = finish_invite_create_from_response(
         server,
-        CreateAgentAccountResponse {
-            account_id: "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28".into(),
-            pet_name: "quiet-otter".into(),
-            agent_capability: Vec::new(),
-            web_origin: "https://claims.heddle.test/".into(),
-        },
+        provision_response_for_test(
+            "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28",
+            "quiet-otter",
+            "https://claims.heddle.test/",
+        ),
     )
     .expect("invite create must succeed without a server claim token");
     assert_eq!(output.account_id, "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28");
@@ -346,56 +342,117 @@ async fn remint_uses_claim_state_and_uploads_owner_root_at_enrollment() {
     );
     assert_eq!(
         *calls.lock().unwrap_or_else(|poison| poison.into_inner()),
-        ["/heddle.api.v1alpha1.OwnerAuthorizationService/BootstrapOwnerRoot"],
+        [
+            "/heddle.api.v2alpha1.EndpointService/DescribeEndpoint",
+            "/heddle.api.v2alpha1.OwnerAuthorizationService/BootstrapOwnership"
+        ],
         "remint must install the owner root during enrollment"
     );
 }
 
-/// weft#2041: `auth login --invite` / remint exited 74
-/// (`invalid bearer capability`) because the `BootstrapOwnerRoot` pin ran over a
-/// proof-only session that carried no bearer. Owner chose Option B: pin over the
-/// FULL, unrestricted client-minted root held in memory during login, while the
-/// on-disk credential stays the restricted account root. This locks the token
-/// selection: the pin presents the full root, never the restricted credential.
 #[test]
-fn owner_root_pin_presents_full_unrestricted_root_not_the_stored_credential() {
+fn provisioned_agent_retains_registered_session_and_rejects_changed_key() {
+    use api::heddle::api::v2alpha1 as v2;
     let _home = IsolatedHome::new();
-    let probe = owner_root_pin_probe().expect("mint agent root and resolve the pin bearer");
-
+    let server = "api.native-agent.test";
+    let response = provision_response_for_test(
+        "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28",
+        "quiet-otter",
+        "https://claims.heddle.test/",
+    );
+    for altered in 0..4 {
+        let mut changed = response.clone();
+        let result = changed.credential.as_mut().expect("credential");
+        let Some(v2::credential_result::Outcome::ClientOwned(credential)) = result.outcome.as_mut()
+        else {
+            panic!("client-owned fixture")
+        };
+        match altered {
+            0 => credential.proof_public_key[0] ^= 1,
+            1 => credential.subject = "another-agent".into(),
+            2 => credential.kind = v2::CredentialKind::Device as i32,
+            _ => result.session.as_mut().expect("session").revoked = true,
+        }
+        finish_invite_create_from_response(server, changed)
+            .expect_err("altered agent registration must not be stored");
+        assert!(
+            credentials::get_server_credential(server)
+                .expect("credential store")
+                .is_none()
+        );
+        assert!(identity_state::load().expect("claim state").is_none());
+    }
+    finish_invite_create_from_response(server, response).expect("valid registration");
+    let stored = credentials::get_server_credential(server)
+        .expect("credential")
+        .expect("saved");
     assert_eq!(
-        probe.presented_bearer, probe.full_root_token,
-        "the owner-root pin must present the full unrestricted root token"
-    );
-    assert_ne!(
-        probe.presented_bearer, probe.stored_token,
-        "the pin must never present the restricted credential persisted to disk"
-    );
-
-    // Both tokens speak for the same principal and are proven by the same leaf
-    // proof-of-possession key, so the full root is an accepted bearer for the
-    // account the restricted credential also authenticates.
-    assert_eq!(
-        authenticated_subject(&probe.full_root_token).expect("full-root subject"),
-        authenticated_subject(&probe.stored_token).expect("stored-token subject"),
+        stored.credential_id.as_deref(),
+        Some("fixture-agent-credential")
     );
     assert_eq!(
-        probe.subject,
-        authenticated_subject(&probe.full_root_token).expect("full-root subject"),
-        "PresentedRoot subject must match the bearer's authenticated principal",
+        super::root_mint::authority_session_fact(&stored.token).expect("registered session"),
+        "fixture-agent-session"
     );
-    assert_eq!(
-        effective_pop_public_key_hex(&probe.full_root_token).expect("full-root leaf key"),
-        effective_pop_public_key_hex(&probe.stored_token).expect("stored-token leaf key"),
-    );
-
-    // The persisted credential is a strict attenuation of the full root: it adds
-    // the account-root deny-floor block on top of the same authority block.
-    let full = biscuit_auth::UnverifiedBiscuit::from_base64(probe.full_root_token.as_bytes())
-        .expect("parse full root");
-    let stored = biscuit_auth::UnverifiedBiscuit::from_base64(probe.stored_token.as_bytes())
-        .expect("parse stored credential");
+    let biscuit =
+        biscuit_auth::UnverifiedBiscuit::from_base64(&stored.token).expect("registered Biscuit");
     assert!(
-        stored.block_count() > full.block_count(),
-        "stored credential must add the account-root attenuation block over the full root",
+        biscuit
+            .print_block_source(0)
+            .expect("authority block")
+            .contains("fixture-agent-credential")
+    );
+}
+
+#[test]
+fn provisioning_reuse_recovers_the_original_owner_root_after_local_state_loss() {
+    use api::heddle::api::v2alpha1 as v2;
+    let _home = IsolatedHome::new();
+    let server = "api.native-reuse.test";
+    let mut response = provision_response_for_test(
+        "7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28",
+        "quiet-otter",
+        "https://claims.heddle.test/",
+    );
+    finish_invite_create_from_response(server, response.clone())
+        .expect("first account registration");
+    let original = identity_state::load().expect("state").expect("claim state");
+    let root = super::owner_root::load_recorded_root(&original)
+        .expect("root")
+        .expect("original root");
+    let credential = credentials::get_server_credential(server)
+        .expect("credential")
+        .expect("saved");
+    let signer = Ed25519Signer::from_pem(credential.private_key_pem.as_deref().expect("key"))
+        .expect("signer");
+    let binding = repo::sign_agent_claim_binding(&signer, &root, "fixture-bootstrap")
+        .expect("original binding");
+    let verified = heddleco_capability_verifier::verify_owner_root(&root).expect("verified root");
+    response.ownership = Some(v2::OwnerState {
+        owner: Some(v2::PrincipalRef {
+            id: original.owner_id.to_string(),
+        }),
+        root: Some(root.clone()),
+        binding: Some(binding),
+        version: verified.state_hash().to_vec(),
+        ..Default::default()
+    });
+    std::fs::remove_file(identity_state::state_path())
+        .expect("simulate only local claim-state loss");
+    finish_invite_create_from_response(server, response.clone())
+        .expect("reuse recovers hosted original proof");
+    let recovered = identity_state::load().expect("state").expect("recovered");
+    assert_eq!(
+        super::owner_root::load_recorded_root(&recovered).expect("root"),
+        Some(root)
+    );
+    let persisted = std::fs::read(identity_state::state_path()).expect("persisted state");
+    response.ownership.as_mut().expect("ownership").version[0] ^= 1;
+    finish_invite_create_from_response(server, response)
+        .expect_err("incorrect authority hash rejected");
+    assert_eq!(
+        std::fs::read(identity_state::state_path()).expect("state"),
+        persisted,
+        "failed proof cannot replace the recovered original"
     );
 }

@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod codec;
+mod context;
 mod ids;
 mod materialize;
+mod metadata;
 mod operation;
+mod source;
+mod tags;
 
 pub use codec::{CollaborationCodecError, DecodedCollaborationOperation};
+pub use context::{CONTEXT_FORMAT, ContextRevision};
 pub use ids::{
     CollabOpId, CollabOpIdParseError, CollaborationIdempotencyKey, DiscussionRecordId,
     DiscussionRecordIdParseError, LegacyDiscussionId, LegacySourceLocator,
@@ -14,10 +19,19 @@ pub use materialize::{
     HostedCollaborationSet, MaterializedDiscussion, MaterializedRepositoryCollaboration,
     materialize_repository_collaboration,
 };
+pub use metadata::{
+    CollaborationActor, CollaborationMention, CollaborationMetadata, CollaborationRecordKind,
+    CollaborationScope,
+};
 pub use operation::{
     CollaborationAnchor, CollaborationAnchorStatus, CollaborationOperationBodyV1,
     CollaborationOperationEnvelope, CollaborationResolution, DiscussionTurnV1,
     LegacyDiscussionResolutionV1,
 };
+pub use source::{CollaborationRevision, CollaborationSourceAnchor};
+pub use tags::{
+    AnnotationComparison, AnnotationDecimal, AnnotationQuery, AnnotationSourceReference,
+    AnnotationTag, AnnotationTagPredicate, AnnotationValue, validate_annotation_tags,
+};
 
-pub const COLLABORATION_OPERATION_SCHEMA_VERSION: u16 = 1;
+pub const COLLABORATION_OPERATION_SCHEMA_VERSION: u16 = 2;

@@ -54,6 +54,7 @@ fn store_credential(token: &str, subject: &str, proof_key_pem: Option<String>) {
     credentials::store_server_credential(
         SERVER,
         credentials::ServerCredential {
+            mint_root_attachment: None,
             token: token.to_string(),
             subject: subject.to_string(),
             device_id: None,
@@ -69,6 +70,7 @@ fn write_hcred(path: &Path, subject: &str, token: &str, proof_key_pem: &str) {
     crate::hosted_runtime::credential_file::write_credential_file(
         path,
         &crate::hosted_runtime::credential_file::VerifiedCredential {
+            mint_root_attachment: None,
             server: SERVER.to_string(),
             kind: crate::hosted_runtime::credential_file::CredentialKind::Device,
             subject: subject.to_string(),

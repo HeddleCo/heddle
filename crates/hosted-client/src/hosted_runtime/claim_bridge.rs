@@ -1,30 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Cross-process bridge for the owner-root co-sign step of the browser
-//! claim ceremony (heddle#1620, decision D3).
-//!
-//! The persistent box network daemon (`heddle netd`) hosts the
-//! `heddle-claim/1` router (see [`mount_claim_router`]). It drives the
-//! browser's `Resolve` + `preConsent` + `promoteConsent` calls itself,
-//! but it deliberately **does not hold the agent owner-root signer**.
-//! When a browser reaches the owner-root co-sign (`ClaimOwnerRoot`), the
-//! daemon forwards the call — subject, authorization hash, and the raw
-//! request body — over a same-uid Unix socket to a foreground
-//! `heddle claim` process, which holds `claim_proof_signer()` and a live
-//! [`HostedClient`], completes the co-sign, and returns the reply the
-//! daemon relays back to the browser verbatim.
-//!
-//! The in-process `mpsc` between the router handler and the daemon stays
-//! inside the daemon; only the serialized request/reply cross the socket,
-//! on a connection the foreground worker holds open for the ceremony
-//! window. This keeps the mpsc's oneshot responder daemon-local (it can
-//! never cross the socket) while the signer stays foreground-only.
+//! Same-uid bridge from the device's native claim RPCs to a foreground signer.
+//! The daemon verifies browser possession and the expiring claim secret. It
+//! forwards the exact PrepareAccountClaim / SignAccountClaim body and verified
+//! principal over a bounded Unix socket. Only foreground `heddle claim` holds
+//! the owner signing key; registration completion remains browser-to-Weft.
+
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use api::heddle::api::v1alpha1::{CallFailure, CallFailureCode};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use iroh::{Endpoint, protocol::Router};
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
@@ -35,7 +22,7 @@ use super::{
     claim_offer::handle_owner_root_body,
     hosted::{
         HostedClient,
-        claim_protocol::{CLAIM_ALPN_V1, ClaimProtocol, VerifiedClaimPrincipal},
+        claim_protocol::{ClaimProtocol, NATIVE_ALPN, VerifiedClaimPrincipal},
     },
 };
 
@@ -45,10 +32,12 @@ use super::{
 const MAX_BRIDGE_FRAME: usize = 1024 * 1024;
 
 /// Serialized daemon→worker request: the verified principal plus the raw
-/// `ClaimOwnerRoot` body. The daemon never interprets the body — parsing,
+/// native account-claim body. The daemon never interprets the body — parsing,
 /// signing, and reply encoding all happen in the foreground worker.
 #[derive(Serialize, Deserialize)]
 struct BridgeRequest {
+    method: String,
+    browser_public_key: Vec<u8>,
     subject: String,
     authorization_hash: String,
     body_b64: String,
@@ -85,27 +74,37 @@ pub fn claim_bridge_socket_path(heddle_home: &Path) -> PathBuf {
 /// signer. Held for the daemon's lifetime; dropping it (or completing
 /// [`Self::serve_owner_root_bridge`]) shuts the router down.
 pub struct DaemonClaimRouter {
+    _retention: super::device_rpc::artifact_retention::Retention,
     router: Router,
     owner_root_calls: tokio::sync::mpsc::Receiver<ClaimOwnerRootCall>,
 }
 
-/// Mount the `heddle-claim/1` router on a live daemon endpoint.
-///
-/// The router serves `Resolve` / `preConsent` / `promoteConsent` inline
-/// against the file-backed, lock-serialized claim state (so it works
-/// across daemon restarts on the persisted node id), and routes the
-/// owner-root co-sign out through [`DaemonClaimRouter::serve_owner_root_bridge`].
+/// Mount native endpoint discovery and account claim on the device endpoint.
+/// Private requests use the same framed RPC transport as Weft and forward to
+/// the foreground owner signer through the bridge below.
 #[must_use]
 pub fn mount_claim_router(endpoint: Endpoint) -> DaemonClaimRouter {
     let (authorization, _completion, owner_root_calls) = StoredClaimAuthorization::new();
     let authorization = std::sync::Arc::new(authorization);
+    let endpoint_key = *endpoint.id().as_bytes();
     let router = Router::builder(endpoint)
         .accept(
-            CLAIM_ALPN_V1,
-            ClaimProtocol::new(std::sync::Arc::clone(&authorization), authorization),
+            NATIVE_ALPN,
+            ClaimProtocol::new(
+                std::sync::Arc::clone(&authorization),
+                authorization,
+                endpoint_key,
+            )
+            .with_device(std::sync::Arc::new(super::device_rpc::DeviceRpc::new(
+                repo::identity::heddle_home_dir(),
+                endpoint_key,
+            ))),
         )
         .spawn();
     DaemonClaimRouter {
+        _retention: super::device_rpc::artifact_retention::Retention::start(
+            repo::identity::heddle_home_dir(),
+        ),
         router,
         owner_root_calls,
     }
@@ -185,6 +184,8 @@ struct OwnerRootBridgeCall {
 impl OwnerRootBridgeCall {
     fn new(call: ClaimOwnerRootCall) -> Self {
         let request = serde_json::to_vec(&BridgeRequest {
+            method: call.method().into(),
+            browser_public_key: call.principal().browser_public_key.clone(),
             subject: call.principal().subject.clone(),
             authorization_hash: call.principal().authorization_hash.clone(),
             body_b64: URL_SAFE_NO_PAD.encode(call.body()),
@@ -258,36 +259,6 @@ impl ClaimBridgeWorker {
         write_frame(&mut self.stream, &reply).await?;
         Ok(true)
     }
-
-    /// Await one forwarded owner-root request and answer it with a
-    /// caller-supplied reply, decoding the forwarded principal and body.
-    /// Test-only stand-in for [`Self::serve_next`] that does not need a
-    /// live [`HostedClient`].
-    #[cfg(test)]
-    pub(crate) async fn serve_next_canned<F>(&mut self, respond: F) -> Result<bool>
-    where
-        F: FnOnce(&str, &str, &[u8]) -> std::result::Result<Vec<u8>, CallFailure>,
-    {
-        let Some(request) = read_frame(&mut self.stream).await? else {
-            return Ok(false);
-        };
-        let request: BridgeRequest =
-            serde_json::from_slice(&request).context("decoding forwarded owner-root request")?;
-        let body = URL_SAFE_NO_PAD
-            .decode(&request.body_b64)
-            .context("decoding forwarded owner-root body")?;
-        let reply = match respond(&request.subject, &request.authorization_hash, &body) {
-            Ok(reply) => BridgeReply::Ok {
-                reply_b64: URL_SAFE_NO_PAD.encode(reply),
-            },
-            Err(failure) => BridgeReply::Err {
-                code: failure.code,
-                message: failure.message,
-            },
-        };
-        write_frame(&mut self.stream, &serde_json::to_vec(&reply)?).await?;
-        Ok(true)
-    }
 }
 
 /// Foreground co-sign: parse a forwarded request, run the owner-root
@@ -303,8 +274,9 @@ async fn cosign_owner_root_request(request_frame: &[u8], client: &HostedClient) 
                 let principal = VerifiedClaimPrincipal {
                     subject: request.subject,
                     authorization_hash: request.authorization_hash,
+                    browser_public_key: request.browser_public_key,
                 };
-                match handle_owner_root_body(client, &principal, &body).await {
+                match handle_owner_root_body(client, &request.method, &principal, &body).await {
                     Ok(reply) => BridgeReply::Ok {
                         reply_b64: URL_SAFE_NO_PAD.encode(reply),
                     },

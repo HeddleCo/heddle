@@ -18,7 +18,7 @@ use n0_watcher::Watcher;
 
 use super::{
     DescriptorKeyring, VerifiedEndpointDescriptor,
-    claim_protocol::{CLAIM_ALPN_V1, CLAIM_RESOLVE_METHOD},
+    claim_protocol::{CLAIM_PREPARE_METHOD, NATIVE_ALPN},
     connection::HostedConnection,
 };
 
@@ -393,11 +393,11 @@ async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
         .await
         .unwrap();
     let claim_connection = claim_client
-        .connect(connection.endpoint.addr(), CLAIM_ALPN_V1)
+        .connect(connection.endpoint.addr(), NATIVE_ALPN)
         .await
         .expect("claim ALPN connection");
     let (mut send, mut recv) = claim_connection.open_bi().await.unwrap();
-    let frame = encode_request_frame(CLAIM_RESOLVE_METHOD, &CallContext::default(), b"resolve")
+    let frame = encode_request_frame(CLAIM_PREPARE_METHOD, &CallContext::default(), b"resolve")
         .expect("claim request frame");
     send.write_all(&frame).await.unwrap();
     send.finish().unwrap();

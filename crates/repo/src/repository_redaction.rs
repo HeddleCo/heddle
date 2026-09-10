@@ -25,7 +25,7 @@
 use std::{collections::HashSet, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
-use api::heddle::api::v1alpha1::SidecarAuthorization;
+use api::heddle::api::v2alpha1::SidecarAuthorization;
 use chrono::Utc;
 use crypto::verify_payload_signature;
 use objects::{

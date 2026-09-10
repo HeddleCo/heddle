@@ -10,6 +10,11 @@ mod p256;
 mod pem_loader;
 pub mod pop;
 mod state_signature;
+pub mod thread_authority_admission;
+pub mod original_boundary_acceptance;
+pub mod thread_genesis_admission;
+pub mod thread_operation;
+pub mod thread_ownership_claim;
 
 #[cfg(test)]
 mod behavior_tests;
@@ -29,8 +34,8 @@ pub use ci_verdict::{
 };
 pub use ed25519::Ed25519Signer;
 pub use error::SignerError;
-use objects::object::ContentHash;
-pub use objects::object::SignatureStatus;
+use heddle_object_model::object::ContentHash;
+pub use heddle_object_model::object::SignatureStatus;
 pub use p256::P256Signer;
 pub use pem_loader::{PemKind, classify_pem};
 pub use state_signature::{
@@ -159,7 +164,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
-    use objects::fs_atomic::write_file_atomic_secret;
+    use heddle_fs_prims::fs_atomic::write_file_atomic_secret;
     use tempfile::TempDir;
 
     use super::*;

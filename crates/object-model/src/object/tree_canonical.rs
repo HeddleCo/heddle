@@ -6,7 +6,7 @@
 //! tree. Version 4 stores frames raw. Version 5 groups frames into independently
 //! compressed blocks with raw restart anchors and a fixed-width range index.
 
-use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
+use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
     ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeError,

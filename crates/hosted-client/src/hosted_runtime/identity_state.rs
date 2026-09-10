@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const STATE_FORMAT: &str = "heddle-agent-claim";
-const STATE_VERSION: u32 = 2;
+const STATE_VERSION: u32 = 3;
 const STATE_FILE: &str = "agent-claim.toml";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -21,7 +21,7 @@ enum ClaimStatus {
     Dormant,
     Active,
     Prepared,
-    Claimed,
+    ConsentIssued,
 }
 
 pub(crate) struct ClaimSecret(String);
@@ -35,7 +35,7 @@ impl ClaimSecret {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ClaimIssuanceStatus {
     Active,
-    Claimed,
+    ConsentIssued,
     Expired,
     Replaced,
 }
@@ -65,12 +65,87 @@ pub(crate) struct ClaimState {
     /// Canonical protobuf hex of the claimable SignedOwnerRoot, when minted.
     #[serde(default)]
     pub(crate) signed_owner_root_hex: Option<String>,
-    /// Encoded RegisterPublicKey + ClaimDeferredHuman (tag 16), waiting to send.
     #[serde(default)]
-    pub(crate) pending_register_public_key_hex: Option<String>,
+    command_receipts: Vec<ClaimCommandReceipt>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct ClaimCommandReceipt {
+    method: String,
+    operation_id: String,
+    request_digest: String,
+    response_hex: String,
+}
+
+impl std::fmt::Debug for ClaimCommandReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClaimCommandReceipt")
+            .field("method", &self.method)
+            .field("operation_id", &self.operation_id)
+            .field("request_digest", &self.request_digest)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ClaimState {
+    pub(crate) fn cached_command(
+        &self,
+        method: &str,
+        operation: &str,
+        body: &[u8],
+    ) -> Result<Option<Vec<u8>>> {
+        let digest = hex::encode(Sha256::digest(body));
+        for receipt in &self.command_receipts {
+            if receipt.method == method || receipt.operation_id == operation {
+                if receipt.method != method
+                    || receipt.operation_id != operation
+                    || receipt.request_digest != digest
+                {
+                    bail!("claim command is already bound to a different operation or request");
+                }
+                return Ok(Some(
+                    hex::decode(&receipt.response_hex).context("decode claim receipt")?,
+                ));
+            }
+        }
+        Ok(None)
+    }
+    pub(crate) fn remember_command(
+        &mut self,
+        method: &str,
+        operation: &str,
+        body: &[u8],
+        response: &[u8],
+    ) -> Result<()> {
+        if self.command_receipts.len() >= 2 {
+            bail!("claim ceremony already has its preparation and signature receipts");
+        }
+        self.command_receipts.push(ClaimCommandReceipt {
+            method: method.into(),
+            operation_id: operation.into(),
+            request_digest: hex::encode(Sha256::digest(body)),
+            response_hex: hex::encode(response),
+        });
+        Ok(())
+    }
+    pub(crate) fn prepare_browser(&mut self, handle: &str, browser_key: &[u8]) -> bool {
+        browser_key.len() == 32 && self.prepare(handle, browser_key)
+    }
+    pub(crate) fn accepts_browser(&self, browser_key: &[u8]) -> bool {
+        matches!(self.status, ClaimStatus::Prepared)
+            && browser_key.len() == 32
+            && self.prepared_nonce_hash.as_deref()
+                == Some(hex::encode(Sha256::digest(browser_key)).as_str())
+    }
+    pub(crate) fn finish_browser_claim(&mut self, browser_key: &[u8]) -> bool {
+        if !self.accepts_browser(browser_key) {
+            return false;
+        }
+        self.status = ClaimStatus::ConsentIssued;
+        true
+    }
+
     pub(crate) fn new(
         server: String,
         owner_id: uuid::Uuid,
@@ -96,10 +171,11 @@ impl ClaimState {
             prepared_nonce_hash: None,
             seq0_public_key_hex: None,
             signed_owner_root_hex: None,
-            pending_register_public_key_hex: None,
+            command_receipts: Vec::new(),
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn seq0_public_key(&self) -> Option<Vec<u8>> {
         let hex = self.seq0_public_key_hex.as_deref()?;
         hex::decode(hex).ok()
@@ -114,25 +190,12 @@ impl ClaimState {
         self.signed_owner_root_hex = Some(hex::encode(signed_owner_root));
     }
 
-    pub(crate) fn record_pending_register_public_key(&mut self, encoded: &[u8]) {
-        self.pending_register_public_key_hex = Some(hex::encode(encoded));
-    }
-
-    pub(crate) fn take_pending_register_public_key(&mut self) -> Result<Option<Vec<u8>>> {
-        let Some(hex) = self.pending_register_public_key_hex.take() else {
-            return Ok(None);
-        };
-        Ok(Some(
-            hex::decode(hex).context("decode pending RegisterPublicKey claim")?,
-        ))
-    }
-
     /// Mint and activate a fresh one-time claim capability.
     ///
     /// Only the SHA-256 digest is retained by the state. The returned secret
     /// exists solely long enough for the caller to render the claim link.
     pub(crate) fn activate(&mut self, expires_at_millis: i64) -> Result<Option<ClaimSecret>> {
-        if matches!(self.status, ClaimStatus::Claimed) {
+        if matches!(self.status, ClaimStatus::ConsentIssued) {
             return Ok(None);
         }
         if expires_at_millis <= chrono::Utc::now().timestamp_millis() {
@@ -149,13 +212,14 @@ impl ClaimState {
         self.secret_hash = hex::encode(Sha256::digest(secret));
         self.expires_at_millis = expires_at_millis;
         self.status = ClaimStatus::Active;
+        self.command_receipts.clear();
         self.prepared_handle = None;
         self.prepared_nonce_hash = None;
     }
 
     #[cfg(test)]
     pub(crate) fn reissue(&mut self, secret: &[u8], expires_at_millis: i64) -> bool {
-        if matches!(self.status, ClaimStatus::Claimed) {
+        if matches!(self.status, ClaimStatus::ConsentIssued) {
             return false;
         }
         self.activate_with_secret(secret, expires_at_millis);
@@ -170,7 +234,7 @@ impl ClaimState {
     /// True when this issuance has a bound expiry that has not yet elapsed.
     ///
     /// Promote consent is signed after [`Self::claim`] flips status to
-    /// `Claimed`, so callers that only need the signature TTL must use this
+    /// `ConsentIssued`, so callers that only need the signature TTL must use this
     /// instead of [`Self::is_active`].
     pub(crate) fn consent_unexpired(&self, now: i64) -> bool {
         self.expires_at_millis > 0 && now < self.expires_at_millis
@@ -180,8 +244,8 @@ impl ClaimState {
         self.is_active(now) && self.secret_matches(secret)
     }
 
-    pub(crate) fn accepts_claimed_resolve(&self, secret: &[u8], now: i64) -> bool {
-        matches!(self.status, ClaimStatus::Claimed)
+    pub(crate) fn accepts_consent_retry(&self, secret: &[u8], now: i64) -> bool {
+        matches!(self.status, ClaimStatus::ConsentIssued)
             && self.consent_unexpired(now)
             && self.secret_matches(secret)
     }
@@ -200,8 +264,8 @@ impl ClaimState {
         &self.secret_hash
     }
 
-    pub(crate) fn is_claimed(&self) -> bool {
-        matches!(self.status, ClaimStatus::Claimed)
+    pub(crate) fn consent_issued(&self) -> bool {
+        matches!(self.status, ClaimStatus::ConsentIssued)
     }
 
     pub(crate) fn issuance_status(
@@ -212,8 +276,8 @@ impl ClaimState {
         if self.secret_hash != authorization_hash {
             return ClaimIssuanceStatus::Replaced;
         }
-        if self.is_claimed() {
-            return ClaimIssuanceStatus::Claimed;
+        if self.consent_issued() {
+            return ClaimIssuanceStatus::ConsentIssued;
         }
         if self.is_active(now) {
             ClaimIssuanceStatus::Active
@@ -223,7 +287,7 @@ impl ClaimState {
     }
 
     pub(crate) fn deactivate_issuance(&mut self, authorization_hash: &str) -> bool {
-        if self.secret_hash != authorization_hash || self.is_claimed() {
+        if self.secret_hash != authorization_hash || self.consent_issued() {
             return false;
         }
         self.secret_hash.clear();
@@ -247,43 +311,8 @@ impl ClaimState {
                 self.prepared_handle.as_deref() == Some(handle)
                     && self.prepared_nonce_hash.as_deref() == Some(nonce_hash.as_str())
             }
-            ClaimStatus::Dormant | ClaimStatus::Claimed => false,
+            ClaimStatus::Dormant | ClaimStatus::ConsentIssued => false,
         }
-    }
-
-    pub(crate) fn claim(&mut self, handle: &str) -> bool {
-        if !matches!(self.status, ClaimStatus::Prepared)
-            || self.prepared_handle.as_deref() != Some(handle)
-        {
-            return false;
-        }
-        self.status = ClaimStatus::Claimed;
-        self.prepared_nonce_hash = None;
-        true
-    }
-
-    /// Bind the owner-root exchange to the handle and weft challenge returned
-    /// by this device's authenticated BeginWebAuthnRegistration call.
-    pub(crate) fn prepare_owner_root(&mut self, handle: &str, challenge_id: &str) -> bool {
-        self.prepare(handle, challenge_id.as_bytes())
-    }
-
-    /// Complete only the owner-root exchange opened by
-    /// [`Self::prepare_owner_root`].
-    pub(crate) fn accepts_owner_root_challenge(&self, challenge_id: &str) -> bool {
-        let challenge_hash = hex::encode(Sha256::digest(challenge_id.as_bytes()));
-        matches!(self.status, ClaimStatus::Prepared)
-            && self.prepared_handle.is_some()
-            && self.prepared_nonce_hash.as_deref() == Some(challenge_hash.as_str())
-    }
-
-    pub(crate) fn claim_owner_root(&mut self, challenge_id: &str) -> bool {
-        if !self.accepts_owner_root_challenge(challenge_id) {
-            return false;
-        }
-        self.status = ClaimStatus::Claimed;
-        self.prepared_nonce_hash = None;
-        true
     }
 }
 
@@ -387,14 +416,14 @@ mod tests {
     }
 
     #[test]
-    fn owner_root_completion_is_bound_to_the_exact_weft_challenge() {
+    fn owner_root_completion_is_bound_to_the_prepared_browser() {
         let mut state = state();
         assert!(state.reissue(b"claim-secret", 2_000));
-        assert!(state.prepare_owner_root("human-handle", "challenge-1"));
-        assert!(!state.accepts_owner_root_challenge("challenge-2"));
-        assert!(!state.claim_owner_root("challenge-2"));
-        assert!(state.claim_owner_root("challenge-1"));
-        assert!(state.is_claimed());
+        assert!(state.prepare_browser("human-handle", &[1; 32]));
+        assert!(!state.accepts_browser(&[2; 32]));
+        assert!(!state.finish_browser_claim(&[2; 32]));
+        assert!(state.finish_browser_claim(&[1; 32]));
+        assert!(state.consent_issued());
     }
 
     #[test]
@@ -419,12 +448,12 @@ mod tests {
     fn prepared_claim_is_bound_to_one_handle_and_nonce() {
         let mut state = state();
         assert!(state.reissue(b"claim-secret", 2_000));
-        assert!(state.prepare("human-handle", b"nonce-one"));
-        assert!(state.prepare("human-handle", b"nonce-one"));
-        assert!(!state.prepare("other-handle", b"nonce-one"));
-        assert!(!state.prepare("human-handle", b"nonce-two"));
-        assert!(!state.claim("other-handle"));
-        assert!(state.claim("human-handle"));
+        assert!(state.prepare("human-handle", &[1; 32]));
+        assert!(state.prepare("human-handle", &[1; 32]));
+        assert!(!state.prepare("other-handle", &[1; 32]));
+        assert!(!state.prepare("human-handle", &[2; 32]));
+        assert!(!state.finish_browser_claim(&[2; 32]));
+        assert!(state.finish_browser_claim(&[1; 32]));
         assert!(!state.accepts(b"claim-secret", 1_000));
         assert!(!state.reissue(b"third-secret", 3_000));
     }
@@ -451,7 +480,7 @@ mod tests {
         let contents = format!(
             "\
 format = \"heddle-agent-claim\"
-version = 2
+version = 3
 server = \"api.acme.example\"
 owner_id = \"7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28\"
 subject = \"subject-1\"

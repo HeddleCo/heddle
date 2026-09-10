@@ -1373,6 +1373,7 @@ fn hosted_turn_body(
 ) -> Result<CollaborationOperationBodyV1> {
     if index == 0 {
         Ok(CollaborationOperationBodyV1::Open {
+            blocking: false,
             title: derive_title(&turn.body, &discussion.symbol),
             anchor: hosted_open_anchor(discussion, head_state),
             visibility: parse_visibility_token(&discussion.visibility),
@@ -1913,6 +1914,7 @@ mod tests {
             Attribution::human(Principal::new("Ada", "ada@x")),
             1,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "t".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: StateId::from_bytes([2; 32]),
@@ -2024,6 +2026,7 @@ mod tests {
             author.clone(),
             1_700_000_000_000,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "run contract".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: state,
@@ -2506,6 +2509,7 @@ mod tests {
             Attribution::human(Principal::new("Reviewer", "reviewer@example.com")),
             1_700_000_001_000,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "run contract".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: state,
@@ -2756,6 +2760,7 @@ mod tests {
         let discussion_id = DiscussionRecordId::generate();
         let author = Attribution::human(Principal::new("Reviewer", "reviewer@example.com"));
         let body = || CollaborationOperationBodyV1::Open {
+            blocking: false,
             title: "run contract".to_string(),
             anchor: CollaborationAnchor::Symbol {
                 state_id: state,
@@ -2825,6 +2830,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "a title the clone will not see".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,
@@ -2952,6 +2958,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,
@@ -3076,6 +3083,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,
@@ -3192,6 +3200,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,
@@ -3286,6 +3295,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,
@@ -3402,6 +3412,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,

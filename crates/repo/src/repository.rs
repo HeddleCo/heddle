@@ -831,6 +831,14 @@ impl Repository {
             self.refs.set_thread(&main_thread, &state.id())?;
         }
 
+        let base = self
+            .refs
+            .get_thread(&main_thread)?
+            .ok_or_else(|| HeddleError::Config("default Thread base disappeared".into()))?;
+        if self.native_thread("main").is_err() {
+            self.create_native_thread("main", base, None, "")
+                .map_err(|error| HeddleError::Config(error.to_string()))?;
+        }
         let manager = crate::ThreadManager::new(self.heddle_dir());
         if manager
             .find_or_materialize_synced_record_by_thread(self, "main", None)?

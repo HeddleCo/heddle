@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
+#[cfg(test)]
 use config::credentials;
 use crypto::{Ed25519Signer, Signer as _};
 use objects::{HeddleError, RecoveryDetails};
@@ -117,6 +118,7 @@ fn cred_bound_to_node_key(resolved: &ResolvedHostedCredential, node_id: &str) ->
 }
 
 fn reuse(server: &str, resolved: &ResolvedHostedCredential) -> Result<AuthLoginOutcome> {
+    if let Some(stored)=config::credentials::get_server_credential(server)? {super::source_author::retain(server,&stored)?;}
     if let Some(pem) = resolved.proof_key_pem.as_deref() {
         super::auth_login_agent::record_claimable_root_for_stored_account(server, pem)?;
     }
@@ -152,6 +154,7 @@ fn fail_closed(server: &str) -> Result<AuthLoginOutcome> {
     )))
 }
 
+#[cfg(test)]
 pub(crate) fn store_agent_root(
     server: &str,
     token: String,
@@ -162,6 +165,7 @@ pub(crate) fn store_agent_root(
     credentials::store_server_credential(
         server,
         credentials::ServerCredential {
+            mint_root_attachment: None,
             token,
             subject,
             device_id: None,

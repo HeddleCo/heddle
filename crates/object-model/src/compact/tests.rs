@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{TimeZone, Utc};
-use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
+use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
     CompactError, decode_blob_frame, decode_state_frame, decode_tree_frame, encode_blob_frame,

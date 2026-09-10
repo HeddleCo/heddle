@@ -114,16 +114,16 @@ pub fn run_local_idempotency_if_requested(
             .expect("bootstrap scope should be present for bootstrap store");
         repo_for_eager = None;
         Arc::new(
-            OperationDedupStore::open(bootstrap_op_id_store_dir(scope))
+            OperationDedupStore::open_bootstrap(bootstrap_op_id_store_dir(scope))
                 .context("open bootstrap op-id dedup store")?,
         )
     } else {
         let repo = cli.open_repo()?;
         let bootstrap_scope = bootstrap_op_id_scope_for_root(repo.root().to_path_buf())?;
         let bootstrap_store =
-            OperationDedupStore::open(bootstrap_op_id_store_dir(&bootstrap_scope))
+            OperationDedupStore::open_bootstrap(bootstrap_op_id_store_dir(&bootstrap_scope))
                 .context("open bootstrap op-id dedup store")?;
-        if let Some(existing) = bootstrap_store.metadata_for(op_id, command_name) {
+        if let Some(existing) = bootstrap_store.metadata_for(op_id, command_name)? {
             return Err(anyhow!(RecoveryAdvice::op_id_conflict(
                 command_name,
                 &bootstrap_scope.label,
@@ -171,7 +171,7 @@ pub fn run_local_idempotency_if_requested(
                 .unwrap_or("repository-local .heddle"),
             &normalized_args,
             request_hash,
-            store.metadata_for(op_id, command_name),
+            store.metadata_for(op_id, command_name)?,
         ))),
         DedupOutcome::InFlight => Err(anyhow!(RecoveryAdvice::op_id_in_flight())),
         DedupOutcome::Reserved => {

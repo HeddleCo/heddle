@@ -25,8 +25,7 @@ const DEFAULT_HOSTED_HYDRATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// [`Repository::require_blob`] hits a missing-blob marker left behind by a
 /// lazy hosted clone (`heddle clone --lazy <hosted-url>` /
 /// `--filter blob:none`), the read path delegates here, this hydrator re-runs
-/// a single-object fetch for the requested hash (path-resolved `GetBlob`,
-/// or a scoped pull that wants only that hash), and the read is retried
+/// a native exact-revision `ReadContent` selection for the requested hash, and the read is retried
 /// against the freshly populated store.
 ///
 /// ## Runtime bridge
@@ -114,12 +113,6 @@ impl LazyHostedHydrator {
 
 impl BlobHydrator for LazyHostedHydrator {
     fn hydrate(&self, repo: &Repository, hash: &ContentHash) -> objects::error::Result<()> {
-        // Honor `hash`: fetch that object (plus whatever decode needs),
-        // not every missing blob on the current tip. Partial-fetch
-        // metadata records blake3 only, so the hosted client resolves a
-        // tip-tree path when one exists and GetBlob-s that state. A
-        // moved-path mismatch falls through to a single-hash want.
-
         // Re-resolve the target state from the repo on EVERY call. If a
         // `pull --lazy` advanced the local thread between clone and now,
         // the cached state would point at the OLD tip and we'd leave any
@@ -411,7 +404,7 @@ async fn hydrate_with_rpc_timeout(
 ) -> Result<usize, ProtocolError> {
     match tokio::time::timeout(
         timeout,
-        client.hydrate_blob(repo, repo_path, remote_thread, target_state, hash),
+        client.hydrate_blob(repo, repo_path, target_state, hash),
     )
     .await
     {

@@ -10,6 +10,7 @@ mod action_struct;
 mod annotated_tag;
 mod audience_tier;
 mod blob;
+pub mod check_evidence;
 pub mod collaboration;
 mod diff;
 mod discussion;
@@ -30,6 +31,8 @@ mod semantic_index;
 mod semantic_reverse_deps;
 mod session;
 mod source;
+pub mod source_target;
+pub mod source_target_map;
 mod spool_id;
 mod staleness_core;
 mod state_attachment;
@@ -43,6 +46,9 @@ mod structured_conflict;
 #[cfg(test)]
 mod structured_conflict_tests;
 mod suggestion_core;
+pub mod thread_authority_admission;
+pub mod original_boundary_acceptance;
+pub mod thread_genesis_admission;
 mod timeline;
 mod tree;
 mod tree_canonical;
@@ -184,3 +190,5 @@ pub use tree_stream::{
 };
 pub use tree_walk::{TreeIntegrityEvent, walk_tree_integrity};
 pub use visibility_tier::VisibilityTier;
+
+pub mod thread_replication;

@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Client mint for protocol-1 owner roots and ClaimDeferredHuman.
 //!
-//! Weft verifies; it does not hold the owner private key. Sequence-0 of a
+//! Self-rooted users retain their keys; custodial users have dedicated account keys.
+//! Sequence-0 of a
 //! claimable deferred-human root is the same device/proof key CreateSpool
 //! pins as spool genesis. Claim advances authority with ClaimDeferredHuman
 //! and must not mint a replacement human sequence-0.
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::{
+use api::heddle::api::v2alpha1::{
     AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey,
     OwnerKeyBinding, OwnerKeyBindingKind, OwnerKeyTransition, OwnerKeyTransitionKind, OwnerRoot,
     RecoveryPolicy, SignedOwnerKeyTransition, SignedOwnerRoot, SignedSpoolOwnerGenesis,
@@ -74,6 +75,85 @@ pub fn sign_claimable_deferred_human_root(
     };
     verify_owner_root(&signed).context("minted claimable owner root failed local verify")?;
     Ok(signed)
+}
+
+/// Establish a new server-rooted human account using its two dedicated keys.
+/// The caller must persist both keys in that account's isolated custody before
+/// committing the root. Existing accounts must replay their original root.
+pub fn sign_custodial_owner_root(
+    authority: &impl Signer,
+    recovery: &impl Signer,
+    account_uuid: [u8; 16],
+    nonce: [u8; 32],
+) -> Result<SignedOwnerRoot> {
+    use api::heddle::api::v2alpha1::{RecoveryGuardian, RecoveryGuardianKind};
+    if authority.public_key() == recovery.public_key() {
+        bail!("custodial recovery requires a dedicated account guardian key");
+    }
+    let mut root = OwnerRoot {
+        format_version: OWNER_ROOT_FORMAT_VERSION,
+        account_uuid: account_uuid.to_vec(),
+        authority_key: Some(ed25519_verification_key(authority.public_key())?),
+        recovery_policy: Some(RecoveryPolicy {
+            threshold: 1,
+            guardians: vec![RecoveryGuardian {
+                kind: RecoveryGuardianKind::Weft as i32,
+                key: Some(ed25519_verification_key(recovery.public_key())?),
+            }],
+            window_secs: Some(DEFAULT_RECOVERY_WINDOW_SECS),
+        }),
+        nonce: nonce.to_vec(),
+        ..Default::default()
+    };
+    root.owner_id = domain_digest(OWNER_ROOT_DOMAIN, &owner_root_without_id(&root)?).to_vec();
+    let body = owner_root_body(&root)?;
+    let signed = SignedOwnerRoot {
+        root: Some(root),
+        authority_proof: Some(sign_canonical(authority, OWNER_ROOT_DOMAIN, &body)?),
+        recovery_key_proofs: vec![sign_canonical(recovery, OWNER_ROOT_DOMAIN, &body)?],
+    };
+    verify_owner_root(&signed).context("custodial owner root failed local verification")?;
+    Ok(signed)
+}
+
+/// Bind an original server-rooted owner to its stable account, using the exact
+/// nonce retained by the admitted signup ceremony. No host attestation is added.
+pub fn sign_custodial_owner_binding(
+    authority: &impl Signer,
+    signed_root: &SignedOwnerRoot,
+    challenge_nonce: [u8; 32],
+) -> Result<OwnerKeyBinding> {
+    let state = verify_owner_root(signed_root).context("verify original custodial root")?;
+    let root = signed_root
+        .root
+        .as_ref()
+        .context("custodial root has no body")?;
+    if root.claimable_deferred_human || state.authority_key().public_key != authority.public_key() {
+        bail!("custodial binding must use the original account authority");
+    }
+    let account: [u8; 16] = root
+        .account_uuid
+        .as_slice()
+        .try_into()
+        .context("owner account UUID")?;
+    let mut binding = OwnerKeyBinding {
+        format_version: OWNER_ROOT_FORMAT_VERSION,
+        stable_owner_uuid: account.to_vec(),
+        root_public_key: Some(ed25519_verification_key(authority.public_key())?),
+        root_state_hash: state.state_hash().to_vec(),
+        kind: OwnerKeyBindingKind::ServerRootedCustody as i32,
+        binding_epoch: 1,
+        challenge_nonce: challenge_nonce.to_vec(),
+        root_proof_of_possession: None,
+    };
+    binding.root_proof_of_possession = Some(sign_canonical(
+        authority,
+        OWNER_BINDING_DOMAIN,
+        &owner_binding_body(&binding)?,
+    )?);
+    verify_owner_key_binding(&binding, &state, &account)
+        .context("custodial binding failed local verification")?;
+    Ok(binding)
 }
 
 /// Browser proof material for a ClaimDeferredHuman transition.
@@ -147,6 +227,63 @@ where
     apply_transition(&state, &signed, claim.valid_from_unix_seconds, limits)
         .context("minted ClaimDeferredHuman failed local verify")?;
     Ok(signed)
+}
+
+/// Co-sign an exact browser-produced account-claim proposal. The browser
+/// remains the enrolling request signer; this function returns only the owner
+/// transition and never submits registration or handles the browser private key.
+pub fn sign_proposed_account_claim(
+    current_authority: &impl Signer,
+    signed_root: &SignedOwnerRoot,
+    proposed: &SignedOwnerKeyTransition,
+    registration_public_key: &[u8],
+) -> Result<SignedOwnerKeyTransition> {
+    if !proposed.authorizations.is_empty() {
+        bail!("account claim proposal must not contain originating authorizations");
+    }
+    let transition = proposed
+        .transition
+        .as_ref()
+        .context("account claim has no transition")?;
+    let next = transition
+        .next_authority_key
+        .as_ref()
+        .context("account claim has no next authority")?;
+    if registration_public_key.len() != 32 || next.public_key != registration_public_key {
+        bail!("account claim next authority must equal the browser registration key");
+    }
+    let policy = transition
+        .next_recovery_policy
+        .as_ref()
+        .context("account claim has no recovery policy")?;
+    let nonce = transition
+        .nonce
+        .as_slice()
+        .try_into()
+        .context("account claim nonce must contain 32 bytes")?;
+    let expected = claim_deferred_human_transition(
+        signed_root,
+        next.clone(),
+        policy.clone(),
+        transition.valid_from_unix_seconds,
+        nonce,
+    )?;
+    if transition != &expected {
+        bail!("account claim must preserve the exact verified owner, previous state and sequence");
+    }
+    sign_claim_deferred_human(ClaimDeferredHuman {
+        current_authority,
+        signed_root,
+        next_authority_key: next.clone(),
+        next_authority_key_proof: proposed
+            .next_authority_key_proof
+            .clone()
+            .context("account claim has no next authority proof")?,
+        next_recovery_policy: policy.clone(),
+        next_recovery_key_proofs: proposed.next_recovery_key_proofs.clone(),
+        valid_from_unix_seconds: transition.valid_from_unix_seconds,
+        nonce,
+    })
 }
 
 /// Assemble the canonical sequence-0-to-human transition a browser signs.
@@ -444,7 +581,7 @@ fn verification_key(encoder: &mut Encoder, key: &AuthorizationVerificationKey) -
 
 fn guardian(
     encoder: &mut Encoder,
-    guardian: &api::heddle::api::v1alpha1::RecoveryGuardian,
+    guardian: &api::heddle::api::v2alpha1::RecoveryGuardian,
 ) -> Result<()> {
     encoder.i32(guardian.kind);
     let key = guardian
@@ -571,4 +708,224 @@ pub fn owner_key_transition_body(transition: &OwnerKeyTransition) -> Result<Vec<
     encoder.i64(transition.previous_key_valid_until_unix_seconds);
     encoder.bytes(&transition.nonce)?;
     Ok(encoder.finish())
+}
+
+/// Issue spool genesis only with the authority active in the verified owner
+/// history. Transport possession alone does not establish owner-key authority.
+pub fn sign_current_spool_owner_genesis(
+    signer: &impl Signer,
+    spool_uuid: uuid::Uuid,
+    observed: &api::heddle::api::v2alpha1::OwnerState,
+    now_unix_seconds: i64,
+) -> Result<SignedSpoolOwnerGenesis> {
+    if spool_uuid.is_nil() {
+        bail!("spool identity must not be nil");
+    }
+    let verified = verify_observed_owner(observed, now_unix_seconds)?;
+    if verified.authority_key().public_key != signer.public_key() {
+        bail!(
+            "spool creation needs the current owner authority signer; this device proof key is not that authority"
+        );
+    }
+    Ok(crate::sign_spool_owner_genesis(
+        signer,
+        *spool_uuid.as_bytes(),
+    )?)
+}
+
+fn verify_observed_owner(
+    observed: &api::heddle::api::v2alpha1::OwnerState,
+    now_unix_seconds: i64,
+) -> Result<heddleco_capability_verifier::VerifiedOwnerState> {
+    let owner = observed
+        .owner
+        .as_ref()
+        .context("owner identity is required")?;
+    let account = uuid::Uuid::parse_str(&owner.id).context("owner account must be a UUID")?;
+    let signed_root = observed
+        .root
+        .as_ref()
+        .context("signed owner root is required")?;
+    if account.is_nil()
+        || signed_root
+            .root
+            .as_ref()
+            .context("owner root body missing")?
+            .account_uuid
+            != account.as_bytes()
+    {
+        bail!("owner account differs from the signed root");
+    }
+    if observed.accepted_transitions.len() > VerificationLimits::MAX_TRANSITIONS {
+        bail!("owner transition history exceeds the verification bound");
+    }
+    let limits = VerificationLimits::new(30 * 24 * 60 * 60)?;
+    let mut verified = verify_owner_root(signed_root).context("verify owner root")?;
+    for transition in &observed.accepted_transitions {
+        verified = heddleco_capability_verifier::apply_accepted_transition(
+            &verified,
+            transition,
+            now_unix_seconds,
+            limits,
+        )
+        .context("verify accepted owner transition")?;
+    }
+    if observed.version != verified.state_hash() {
+        bail!("observed owner version differs from verified current authority");
+    }
+    Ok(verified)
+}
+
+/// Verify an account observation's original binding and exact accepted state.
+/// The caller still establishes which account is expected for its request.
+struct OwnerObservationCache {
+    second: i64,
+    owners: std::collections::BTreeMap<[u8; 32], heddleco_capability_verifier::VerifiedOwnerState>,
+}
+static OWNER_OBSERVATION_CACHE: std::sync::OnceLock<std::sync::Mutex<OwnerObservationCache>> =
+    std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn owner_observation_cache_entries() -> Result<usize> {
+    let Some(cache) = OWNER_OBSERVATION_CACHE.get() else {
+        return Ok(0);
+    };
+    Ok(cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("owner verification cache poisoned"))?
+        .owners
+        .len())
+}
+
+/// Memoize only identical pure verifier inputs. Current revocations, resource
+/// scope and request caveats remain separate uncached admission checks.
+pub fn verify_account_owner_observation(
+    observed: &api::heddle::api::v2alpha1::OwnerState,
+    now_unix_seconds: i64,
+) -> Result<heddleco_capability_verifier::VerifiedOwnerState> {
+    use prost::Message as _;
+    let cache = OWNER_OBSERVATION_CACHE.get_or_init(|| {
+        std::sync::Mutex::new(OwnerObservationCache {
+            second: i64::MIN,
+            owners: Default::default(),
+        })
+    });
+    let encoded = observed.encode_to_vec();
+    if encoded.len() > 64 * 1024 {
+        return verify_account_owner_observation_uncached(observed, now_unix_seconds);
+    }
+    let digest = *blake3::hash(&encoded).as_bytes();
+    {
+        let guard = cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("owner verification cache poisoned"))?;
+        if guard.second == now_unix_seconds {
+            if let Some(verified) = guard.owners.get(&digest) {
+                return Ok(verified.clone());
+            }
+        }
+    }
+    let verified = verify_account_owner_observation_uncached(observed, now_unix_seconds)?;
+    let mut guard = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("owner verification cache poisoned"))?;
+    if guard.second != now_unix_seconds {
+        guard.owners.clear();
+        guard.second = now_unix_seconds;
+    }
+    if guard.owners.len() < 128 {
+        guard.owners.insert(digest, verified.clone());
+    }
+    Ok(verified)
+}
+
+fn verify_account_owner_observation_uncached(
+    observed: &api::heddle::api::v2alpha1::OwnerState,
+    now_unix_seconds: i64,
+) -> Result<heddleco_capability_verifier::VerifiedOwnerState> {
+    let current = verify_observed_owner(observed, now_unix_seconds)?;
+    let root = current.signed_root();
+    let initial = verify_owner_root(root)?;
+    let account: [u8; 16] = root
+        .root
+        .as_ref()
+        .context("owner root body missing")?
+        .account_uuid
+        .as_slice()
+        .try_into()
+        .context("owner account UUID must be 16 bytes")?;
+    heddleco_capability_verifier::verify_owner_key_binding(
+        observed
+            .binding
+            .as_ref()
+            .context("original owner binding missing")?,
+        &initial,
+        &account,
+    )?;
+    Ok(current)
+}
+
+/// Verify portable immutable resource ownership before source materialization.
+/// Current account authority and historical transfer witnesses must agree; a
+/// host observation alone cannot establish or replace an owner root.
+pub fn verify_spool_owner_observation(
+    genesis: &SignedSpoolOwnerGenesis,
+    observed: &api::heddle::api::v2alpha1::OwnerState,
+    spool_uuid: uuid::Uuid,
+    now_unix_seconds: i64,
+) -> Result<heddleco_capability_verifier::VerifiedCloneKeyring> {
+    if spool_uuid.is_nil() {
+        bail!("spool identity must not be nil");
+    }
+    let current = verify_observed_owner(observed, now_unix_seconds)?;
+    let keyring = observed
+        .resource_keyring
+        .as_ref()
+        .context("resource ownership keyring is required")?;
+    if keyring.spool_uuid != spool_uuid.as_bytes()
+        || keyring.owner_genesis.as_ref() != Some(genesis)
+    {
+        bail!("resource keyring differs from the fetched spool genesis");
+    }
+    let verified = heddleco_capability_verifier::verify_clone_keyring(
+        keyring.clone(),
+        now_unix_seconds,
+        VerificationLimits::new(30 * 24 * 60 * 60)?,
+        &[],
+    )
+    .context("verify complete spool ownership history")?;
+    let account = uuid::Uuid::parse_str(&observed.owner.as_ref().context("owner required")?.id)?;
+    if verified.current_owner_uuid() != *account.as_bytes() {
+        bail!("observed owner is not the current resource owner");
+    }
+    let (historical_root, transitions) = if let Some(last) = keyring.ownership_transfers.last() {
+        let handoff = last
+            .transfer
+            .as_ref()
+            .and_then(|value| value.acceptance.as_ref())
+            .and_then(|value| value.signed_handoff.as_ref())
+            .and_then(|value| value.handoff.as_ref())
+            .context("verified transfer handoff missing")?;
+        let witness = keyring
+            .transfer_owner_histories
+            .iter()
+            .find(|history| {
+                history.state_hash == handoff.destination_owner_key_state_hash
+                    && history
+                        .root
+                        .as_ref()
+                        .and_then(|signed| signed.root.as_ref())
+                        .is_some_and(|root| root.account_uuid == account.as_bytes())
+            })
+            .context("current resource owner history is missing")?;
+        (witness.root.as_ref(), &witness.accepted_transitions)
+    } else {
+        (keyring.owner_root.as_ref(), &keyring.accepted_transitions)
+    };
+    if historical_root != Some(current.signed_root())
+        || !observed.accepted_transitions.starts_with(transitions)
+    {
+        bail!("current owner authority does not descend from the resource ownership proof");
+    }
+    Ok(verified)
 }

@@ -302,7 +302,7 @@ fn overlay_pull_uses_url_even_when_pushurl_is_hosted() {
     set_git_config(
         &local,
         "remote.origin.pushurl",
-        "heddle://127.0.0.1:1/acme/widget",
+        "https://127.0.0.1:1/acme/widget",
     );
     let second = write_commit(&source, Some(first), b"two\n", b"two\n");
     publish_branch(&source, "main", Some(first), second);
@@ -331,7 +331,7 @@ fn overlay_push_uses_pushurl_even_when_url_is_hosted() {
     set_git_config(
         &local,
         "remote.origin.url",
-        "heddle://127.0.0.1:1/acme/widget",
+        "https://127.0.0.1:1/acme/widget",
     );
     set_git_config(
         &local,

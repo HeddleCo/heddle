@@ -200,7 +200,7 @@ pub fn resolve_remote_with_key_and_insecure(
     Err(RemoteError::InvalidUrl(remote.url))
 }
 
-/// Parse a remote using the repository's source authority to interpret HTTPS.
+/// Parse a remote with the same URL routing for either repository authority.
 pub fn parse_target_for_repository(
     repo: &Repository,
     url: &str,
@@ -230,8 +230,7 @@ pub fn credential_key_from_remote_url(url: &str) -> Option<String> {
 fn credential_key_from_url(url: &str) -> Option<String> {
     // Strip known scheme prefixes.
     let rest = url
-        .strip_prefix("heddle://")
-        .or_else(|| url.strip_prefix("https://"))
+        .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url);
 
@@ -339,7 +338,7 @@ mod tests {
         cfg.add(
             "127.0.0.1:8421",
             Remote {
-                url: "heddle://127.0.0.1:9999/acme/repo".to_string(),
+                url: "https://127.0.0.1:9999/acme/repo".to_string(),
                 insecure: true,
             },
         )

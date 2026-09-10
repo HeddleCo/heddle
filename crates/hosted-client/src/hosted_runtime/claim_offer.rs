@@ -8,18 +8,13 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::{
-    AuthChallengeResponse, BeginWebAuthnRegistrationRequest, CallFailure, CallFailureCode,
-};
+use api::heddle::api::v1alpha1::{CallFailure, CallFailureCode};
 use config::UserConfig;
 
 use super::{
     HostedAuthMode, HostedSession, agent_node_identity,
     auth::resolve_server,
-    claim_authorization::{
-        ClaimOwnerRootOperation, ClaimOwnerRootOperationRef, ClaimOwnerRootResult,
-        encode_owner_root_reply, owner_root_operation, validate_stored_claim_signer,
-    },
+    claim_authorization::validate_stored_claim_signer,
     claim_bridge::ClaimBridgeWorker,
     hosted::{
         canonical_server_authority, claim_protocol::VerifiedClaimPrincipal, server_keys_match,
@@ -28,8 +23,6 @@ use super::{
 };
 
 const HEDDLE_SAAS_API: &str = "https://api.heddle.sh";
-const BEGIN_WEBAUTHN_REGISTRATION: &str =
-    "/heddle.api.v1alpha1.IdentityService/BeginWebAuthnRegistration";
 
 const CLAIM_STATUS_POLL: Duration = Duration::from_millis(200);
 const HEDDLE_SAAS_CLAIM_ORIGIN: &str = "https://app.heddle.sh";
@@ -53,7 +46,7 @@ pub struct ClaimOfferReady {
 /// Terminal state of a claim ceremony.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClaimOutcome {
-    Claimed,
+    ConsentIssued,
     Expired,
     Interrupted,
 }
@@ -67,7 +60,7 @@ struct ActiveClaimOffer {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClaimWaitOutcome {
-    Claimed,
+    ConsentIssued,
     Expired,
     Interrupted,
     Replaced,
@@ -91,6 +84,7 @@ pub async fn claim(
         &server,
     )?;
     validate_stored_claim_signer(&state)?;
+    let relay_url = crate::network::claim_relay_url(&state.node_id)?;
 
     let identity = agent_node_identity::load()?
         .context("no agent node identity exists; create an agent account with `heddle auth login --invite <code>` first")?;
@@ -98,7 +92,7 @@ pub async fn claim(
         bail!("agent-node-identity.toml does not match the account waiting to be claimed");
     }
 
-    // The persistent box network daemon serves the `heddle-claim/1`
+    // The persistent box network daemon serves the native v2
     // router on this device node id (heddle#1620). A foreground
     // `heddle claim` does not host the endpoint or the router; it arms
     // itself as the owner-root co-sign signer over the daemon's UDS
@@ -114,7 +108,7 @@ pub async fn claim(
     )?;
     // Outbound only: an ephemeral endpoint that does not bind the device
     // node id the daemon serves the claim router on.
-    let mut client = session
+    let client = session
         .connect_outbound(&server)
         .await
         .with_context(|| format!("connecting to {server} for the claim ceremony"))?;
@@ -135,7 +129,12 @@ pub async fn claim(
             return Err(error);
         }
     };
-    let claim_link = claim_link(&web_origin, &offer.node_id, offer.secret.as_str());
+    let claim_link = claim_link(
+        &web_origin,
+        &offer.node_id,
+        offer.secret.as_str(),
+        &relay_url,
+    )?;
     let ready = ClaimOfferReady {
         pet_name: offer.pet_name.clone(),
         claim_link,
@@ -156,24 +155,17 @@ pub async fn claim(
         &client,
     )
     .await;
-    let claimed = matches!(outcome, Ok(ClaimWaitOutcome::Claimed));
-    let owner_root_claim = if claimed {
-        super::owner_root::send_pending_register_public_key_claim(&mut client).await
-    } else {
-        Ok(None)
-    };
+    let claimed = matches!(outcome, Ok(ClaimWaitOutcome::ConsentIssued));
     let cleanup = (!claimed)
         .then(|| deactivate_offer(&offer.authorization_hash))
         .transpose();
     client.close().await;
     cleanup?;
-    owner_root_claim?;
 
     match outcome? {
-        // Iroh promotes the handle. Owner-root claim is RegisterPublicKey
-        // plus ClaimDeferredHuman (tag 16) over the existing sequence-0
-        // agent key — never a replacement OwnerRootInstall.
-        ClaimWaitOutcome::Claimed => Ok(ClaimOutcome::Claimed),
+        // Consent preserves the original root. The browser completes
+        // registration directly with Weft using this signed transition.
+        ClaimWaitOutcome::ConsentIssued => Ok(ClaimOutcome::ConsentIssued),
         ClaimWaitOutcome::Expired => Ok(ClaimOutcome::Expired),
         ClaimWaitOutcome::Interrupted => Ok(ClaimOutcome::Interrupted),
         ClaimWaitOutcome::Replaced => {
@@ -192,8 +184,8 @@ fn claimable_state(server: &str) -> Result<ClaimState> {
             state.server
         );
     }
-    if state.is_claimed() {
-        bail!("this agent account has already been claimed");
+    if state.consent_issued() {
+        bail!("owner consent has already been issued; finish the existing browser ceremony");
     }
     Ok(state)
 }
@@ -216,7 +208,7 @@ fn activate_offer(expected: &ClaimState, timeout: Duration) -> Result<ActiveClai
     }
     let secret = state
         .activate(expires_at_millis)?
-        .context("this agent account has already been claimed")?;
+        .context("owner consent has already been issued; finish the existing browser ceremony")?;
     let offer = ActiveClaimOffer {
         secret,
         authorization_hash: state.authorization_hash().to_string(),
@@ -237,7 +229,7 @@ async fn wait_for_claim(
     let mut poll = tokio::time::interval(CLAIM_STATUS_POLL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Arm as the daemon-hosted router's owner-root co-sign signer for this
-    // window. The daemon drives resolve/preConsent/promoteConsent itself
+    // window. The daemon drives native claim admission itself
     // and forwards only the owner-root co-sign here, where the signer lives.
     let mut worker = ClaimBridgeWorker::arm(claim_socket).await.context(
         "arming the owner-root co-sign bridge; is `heddle netd serve` running on this machine?",
@@ -271,7 +263,7 @@ async fn wait_for_claim(
             _ = poll.tick() => {
                 match observe_issuance(authorization_hash)? {
                     ClaimIssuanceStatus::Active => {}
-                    ClaimIssuanceStatus::Claimed => return Ok(ClaimWaitOutcome::Claimed),
+                    ClaimIssuanceStatus::ConsentIssued => return Ok(ClaimWaitOutcome::ConsentIssued),
                     ClaimIssuanceStatus::Expired => return Ok(ClaimWaitOutcome::Expired),
                     ClaimIssuanceStatus::Replaced => return Ok(ClaimWaitOutcome::Replaced),
                 }
@@ -296,8 +288,8 @@ async fn rearm(
     loop {
         match observe_issuance(authorization_hash)? {
             ClaimIssuanceStatus::Active => {}
-            ClaimIssuanceStatus::Claimed => {
-                return Ok(RearmOutcome::Terminal(ClaimWaitOutcome::Claimed));
+            ClaimIssuanceStatus::ConsentIssued => {
+                return Ok(RearmOutcome::Terminal(ClaimWaitOutcome::ConsentIssued));
             }
             ClaimIssuanceStatus::Expired => {
                 return Ok(RearmOutcome::Terminal(ClaimWaitOutcome::Expired));
@@ -332,190 +324,15 @@ fn observe_issuance(authorization_hash: &str) -> Result<ClaimIssuanceStatus> {
 /// agent signer.
 pub(crate) async fn handle_owner_root_body(
     client: &super::hosted::HostedClient,
+    method: &str,
     principal: &VerifiedClaimPrincipal,
     body: &[u8],
 ) -> std::result::Result<Vec<u8>, CallFailure> {
-    let operation = owner_root_operation(body)?;
-    let result = handle_owner_root_call(client, principal, &operation)
-        .await
-        .map_err(CallFailure::from)?;
-    encode_owner_root_reply(&result)
-}
-
-async fn handle_owner_root_call(
-    client: &super::hosted::HostedClient,
-    principal: &VerifiedClaimPrincipal,
-    operation: &ClaimOwnerRootOperation,
-) -> std::result::Result<ClaimOwnerRootResult, OwnerRootFailure> {
-    match operation.as_ref().ok_or_else(|| {
-        owner_root_failure(
-            CallFailureCode::Internal,
-            "claim owner-root operation has an invalid shape",
-        )
-    })? {
-        ClaimOwnerRootOperationRef::Resolve(handle) => {
-            let challenge = client
-                .call_unary::<_, AuthChallengeResponse>(
-                    BEGIN_WEBAUTHN_REGISTRATION,
-                    &BeginWebAuthnRegistrationRequest {
-                        username: handle.to_string(),
-                        display_name: handle.to_string(),
-                        ..Default::default()
-                    },
-                )
-                .await
-                .map_err(owner_root_internal)?;
-            if challenge.challenge_id.is_empty()
-                || challenge.challenge.is_empty()
-                || challenge.username != handle
-            {
-                return Err(owner_root_failure(
-                    CallFailureCode::FailedPrecondition,
-                    "weft returned an invalid owner-root registration challenge",
-                ));
-            }
-            let signed_owner_root = {
-                let _guard = identity_state::write_lock().map_err(owner_root_internal)?;
-                let mut state = active_owner_root_state(principal)?;
-                let signed = super::owner_root::load_recorded_root(&state)
-                    .map_err(owner_root_internal)?
-                    .ok_or_else(|| {
-                        owner_root_failure(
-                            CallFailureCode::FailedPrecondition,
-                            "this device has no claimable sequence-0 owner root",
-                        )
-                    })?;
-                if !state.prepare_owner_root(handle, &challenge.challenge_id) {
-                    return Err(owner_root_failure(
-                        CallFailureCode::FailedPrecondition,
-                        "owner-root claim does not match the active ceremony",
-                    ));
-                }
-                identity_state::store_while_locked(&state).map_err(owner_root_internal)?;
-                signed
-            };
-            Ok(ClaimOwnerRootResult::resolved(signed_owner_root, challenge))
-        }
-        ClaimOwnerRootOperationRef::CoSign {
-            registration,
-            browser_claim,
-        } => {
-            if registration.challenge_id.is_empty() || registration.client_operation_id.is_empty() {
-                return Err(owner_root_failure(
-                    CallFailureCode::InvalidArgument,
-                    "owner-root registration requires challengeId and clientOperationId",
-                ));
-            }
-            let agent = client.claim_proof_signer().ok_or_else(|| {
-                owner_root_failure(
-                    CallFailureCode::FailedPrecondition,
-                    "the agent owner-root signing key is unavailable",
-                )
-            })?;
-            let signed_transition = {
-                let _guard = identity_state::write_lock().map_err(owner_root_internal)?;
-                let mut state = active_owner_root_state(principal)?;
-                if !state.accepts_owner_root_challenge(&registration.challenge_id) {
-                    return Err(owner_root_failure(
-                        CallFailureCode::PermissionDenied,
-                        "owner-root registration challenge does not match this ceremony",
-                    ));
-                }
-                let signed_root = super::owner_root::load_recorded_root(&state)
-                    .map_err(owner_root_internal)?
-                    .ok_or_else(|| {
-                        owner_root_failure(
-                            CallFailureCode::FailedPrecondition,
-                            "this device has no claimable sequence-0 owner root",
-                        )
-                    })?;
-                let signed_transition = super::owner_root::build_claim_deferred_human(
-                    agent,
-                    &signed_root,
-                    browser_claim.clone(),
-                )
-                .map_err(|error| {
-                    tracing::warn!(%error, "browser owner-root proofs were rejected");
-                    owner_root_failure(
-                        CallFailureCode::PermissionDenied,
-                        "browser owner-root proofs do not match this device's sequence-0 root",
-                    )
-                })?;
-                super::owner_root::prepare_register_public_key_claim(
-                    &mut state,
-                    registration.clone(),
-                    signed_transition.clone(),
-                )
-                .map_err(|error| {
-                    tracing::warn!(%error, "owner-root RegisterPublicKey request was rejected");
-                    owner_root_failure(
-                        CallFailureCode::InvalidArgument,
-                        "invalid owner-root RegisterPublicKey request",
-                    )
-                })?;
-                if !state.claim_owner_root(&registration.challenge_id) {
-                    return Err(owner_root_failure(
-                        CallFailureCode::PermissionDenied,
-                        "owner-root registration challenge does not match this ceremony",
-                    ));
-                }
-                identity_state::store_while_locked(&state).map_err(owner_root_internal)?;
-                signed_transition
-            };
-            Ok(ClaimOwnerRootResult::co_signed(signed_transition))
-        }
-    }
-}
-
-fn active_owner_root_state(
-    principal: &VerifiedClaimPrincipal,
-) -> std::result::Result<ClaimState, OwnerRootFailure> {
-    let state = identity_state::load_while_locked()
-        .map_err(owner_root_internal)?
-        .ok_or_else(|| {
-            owner_root_failure(
-                CallFailureCode::Unauthenticated,
-                "claim authorization failed",
-            )
-        })?;
-    if state.owner_id.to_string() != principal.subject
-        || state.authorization_hash() != principal.authorization_hash
-        || !state.is_active(chrono::Utc::now().timestamp_millis())
-    {
-        return Err(owner_root_failure(
-            CallFailureCode::Unauthenticated,
-            "claim authorization failed",
-        ));
-    }
-    Ok(state)
-}
-
-#[derive(Clone, Copy, Debug)]
-struct OwnerRootFailure {
-    code: CallFailureCode,
-    message: &'static str,
-}
-
-impl From<OwnerRootFailure> for CallFailure {
-    fn from(failure: OwnerRootFailure) -> Self {
-        Self {
-            code: failure.code as i32,
-            message: failure.message.to_string(),
-            error: None,
-        }
-    }
-}
-
-fn owner_root_internal(error: impl std::fmt::Display) -> OwnerRootFailure {
-    tracing::warn!(%error, "claim owner-root exchange failed internally");
-    owner_root_failure(
-        CallFailureCode::Internal,
-        "claim owner-root exchange failed",
-    )
-}
-
-fn owner_root_failure(code: CallFailureCode, message: &'static str) -> OwnerRootFailure {
-    OwnerRootFailure { code, message }
+    super::claim_native::handle(client, method, principal, body).map_err(|error| CallFailure {
+        code: CallFailureCode::FailedPrecondition as i32,
+        message: error.to_string(),
+        error: None,
+    })
 }
 
 fn deactivate_offer(authorization_hash: &str) -> Result<()> {
@@ -619,8 +436,20 @@ fn same_registrable_domain(left_host: &str, right_host: &str) -> bool {
     }
 }
 
-fn claim_link(web_origin: &str, node_id: &str, secret: &str) -> String {
-    format!("{web_origin}/claim/{node_id}.{secret}")
+fn claim_link(web_origin: &str, node_id: &str, secret: &str, relay_url: &str) -> Result<String> {
+    let relay = reqwest::Url::parse(relay_url).context("invalid daemon relay URL")?;
+    if relay.scheme() != "https"
+        || relay.host_str().is_none()
+        || !relay.username().is_empty()
+        || relay.password().is_some()
+        || relay.query().is_some()
+        || relay.fragment().is_some()
+    {
+        bail!("browser claim requires an HTTPS relay URL without credentials, query or fragment");
+    }
+    let mut link = reqwest::Url::parse(&format!("{web_origin}/claim/{node_id}.{secret}"))?;
+    link.query_pairs_mut().append_pair("relay", relay.as_str());
+    Ok(link.into())
 }
 
 #[cfg(test)]
@@ -631,9 +460,15 @@ mod tests {
     fn claim_link_uses_the_origin_node_and_bearer_secret() {
         let origin = normalized_web_origin("https://heddle.example:8443/").expect("origin");
         assert_eq!(
-            claim_link(&origin, &"11".repeat(32), "short-lived-secret"),
+            claim_link(
+                &origin,
+                &"11".repeat(32),
+                "short-lived-secret",
+                "https://relay.example"
+            )
+            .expect("claim link"),
             format!(
-                "https://heddle.example:8443/claim/{}.short-lived-secret",
+                "https://heddle.example:8443/claim/{}.short-lived-secret?relay=https%3A%2F%2Frelay.example%2F",
                 "11".repeat(32)
             )
         );

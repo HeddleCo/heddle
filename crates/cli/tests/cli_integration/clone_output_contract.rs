@@ -40,6 +40,68 @@ mod fixture {
     const DESCRIPTOR_PATH: &str = "/.well-known/heddle/iroh-endpoint";
 
     #[test]
+    fn clone_url_suffix_routes_http_requests_to_only_one_transport() {
+        for git in [false, true] {
+            let temp = TempDir::new().expect("fixture directory");
+            let https = TestHttpsServer::start(HashMap::new());
+            let certificate = temp.path().join("ca.pem");
+            std::fs::write(&certificate, &https.certificate_pem).unwrap();
+            let credential = temp.path().join("credential.hcred");
+            write_test_credential(&credential, &https.authority);
+            let remote = format!(
+                "https://{}/owner/repo{}",
+                https.authority,
+                if git { ".git" } else { "" }
+            );
+            let destination = temp.path().join("clone");
+            let home = temp.path().join("home");
+            let output = heddle_output_with_env(
+                &["clone", &remote, destination.to_str().unwrap()],
+                Some(temp.path()),
+                &[
+                    ("HEDDLE_REMOTE_TLS_CA_CERT", certificate.to_str().unwrap()),
+                    ("HEDDLE_HOME", home.to_str().unwrap()),
+                    ("HEDDLE_CREDENTIAL", credential.to_str().unwrap()),
+                ],
+            )
+            .expect("invoke clone");
+            assert!(
+                !output.status.success(),
+                "fixture deliberately returns HTTP 404"
+            );
+            let requests = https.requests.lock().unwrap();
+            assert!(
+                !requests.is_empty(),
+                "clone must reach the HTTP fixture: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if git {
+                assert!(
+                    requests.iter().any(|path| path.contains("git-upload-pack")),
+                    "{requests:?}"
+                );
+                assert!(
+                    !requests
+                        .iter()
+                        .any(|path| path.contains(".well-known/heddle")),
+                    "{requests:?}"
+                );
+            } else {
+                assert!(
+                    requests
+                        .iter()
+                        .any(|path| path.starts_with("/.well-known/heddle/")),
+                    "{requests:?}"
+                );
+                assert!(
+                    !requests.iter().any(|path| path.contains("git-upload-pack")),
+                    "{requests:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn clone_json_peer_disconnect_after_connection_emits_structured_error() {
         let temp = TempDir::new().expect("create clone contract fixture root");
         let (endpoint_id, direct_address, iroh_thread) = disconnecting_iroh_server(None);
@@ -54,7 +116,7 @@ mod fixture {
         let credential = temp.path().join("clone-test.hcred");
         write_test_credential(&credential, &https.authority);
         let destination = temp.path().join("clone");
-        let remote = format!("heddle://{}/owner/repo", https.authority);
+        let remote = format!("https://{}/owner/repo", https.authority);
         let descriptor_public_key = hex::encode(signer.public_key());
         let heddle_home = temp.path().join("heddle-home");
 
@@ -148,7 +210,7 @@ mod fixture {
         let credential = temp.path().join("clone-test.hcred");
         write_test_credential(&credential, &https.authority);
         let destination = temp.path().join("clone");
-        let remote = format!("heddle://{}/owner/repo", https.authority);
+        let remote = format!("https://{}/owner/repo", https.authority);
         let descriptor_public_key = hex::encode(signer.public_key());
         let heddle_home = temp.path().join("heddle-home");
 
@@ -330,6 +392,7 @@ mod fixture {
     struct TestHttpsServer {
         authority: String,
         certificate_pem: String,
+        requests: Arc<Mutex<Vec<String>>>,
         stop: Arc<AtomicBool>,
         thread: Option<thread::JoinHandle<()>>,
     }
@@ -357,12 +420,17 @@ mod fixture {
             let stop = Arc::new(AtomicBool::new(false));
             let thread_stop = Arc::clone(&stop);
             let routes = Arc::new(Mutex::new(routes));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let thread_requests = Arc::clone(&requests);
             let thread = thread::spawn(move || {
                 while !thread_stop.load(Ordering::Acquire) {
                     match listener.accept() {
-                        Ok((stream, _)) => {
-                            serve_https(stream, Arc::clone(&tls), Arc::clone(&routes))
-                        }
+                        Ok((stream, _)) => serve_https(
+                            stream,
+                            Arc::clone(&tls),
+                            Arc::clone(&routes),
+                            Arc::clone(&thread_requests),
+                        ),
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(2));
                         }
@@ -373,6 +441,7 @@ mod fixture {
             Self {
                 authority,
                 certificate_pem,
+                requests,
                 stop,
                 thread: Some(thread),
             }
@@ -394,6 +463,7 @@ mod fixture {
         stream: TcpStream,
         tls: Arc<ServerConfig>,
         routes: Arc<Mutex<HashMap<String, VecDeque<Vec<u8>>>>>,
+        requests: Arc<Mutex<Vec<String>>>,
     ) {
         // Accepted sockets inherit O_NONBLOCK from the listener on macOS, but
         // this synchronous rustls fixture expects blocking handshakes.
@@ -423,6 +493,10 @@ mod fixture {
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
             .unwrap_or("/");
+        requests
+            .lock()
+            .expect("record HTTP request")
+            .push(path.to_string());
         let body = routes
             .lock()
             .expect("lock endpoint descriptor routes")

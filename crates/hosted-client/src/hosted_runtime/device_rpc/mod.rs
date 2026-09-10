@@ -1,0 +1,405 @@
+//! Native direct browser/device RPCs. Device authority is locally admitted;
+//! no handler creates a hosted client or consults Weft to permit local work.
+mod account;
+mod account_auth;
+mod account_feed;
+mod account_identity;
+mod account_observe;
+mod account_resolve;
+mod account_spool;
+#[cfg(test)]
+mod account_tests;
+mod account_threads;
+mod artifact;
+mod analysis;
+#[cfg(all(test, feature = "semantic"))]
+mod analysis_tests;
+pub(crate) mod artifact_retention;
+#[cfg(test)]
+mod artifact_tests;
+mod auth;
+mod authority_clock;
+#[cfg(test)]
+mod capacity_tests;
+#[cfg(test)]
+mod sibling_tests;
+mod checkout;
+mod collaboration;
+mod collaboration_observe;
+mod collaboration_targets;
+#[cfg(test)]
+mod collaboration_tests;
+mod content;
+mod fetch;
+#[cfg(test)]
+mod fetch_tests;
+mod content_detail;
+mod content_summary;
+#[cfg(test)]
+mod content_tests;
+#[cfg(test)]
+mod inventory_tests;
+mod land;
+mod observe;
+#[cfg(test)]
+mod receipt_tests;
+mod replication;
+mod publication;
+#[cfg(test)]
+mod publication_tests;
+#[cfg(test)]
+mod ownership_tests;
+mod stream;
+mod search;
+mod operations;
+mod evidence;
+#[cfg(test)]
+mod evidence_tests;
+#[cfg(test)]
+mod tests;
+mod thread;
+mod ownership;
+mod thread_observe;
+#[cfg(test)]
+mod thread_tests;
+
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, Weak},
+};
+
+use anyhow::{Context, Result, bail};
+use api::heddle::api::{
+    v1alpha1::{CallContext, CallFailure, CallFailureCode},
+    v2alpha1::*,
+};
+use iroh::endpoint::SendStream;
+use prost::Message;
+
+pub(crate) const STREAM_METHODS: &[&str] = &["/heddle.api.v2alpha1.SyncService/ReplicateThread", "/heddle.api.v2alpha1.SyncService/Fetch", "/heddle.api.v2alpha1.SyncService/PublishContent"];
+pub(crate) const METHODS: &[&str] = &[
+    "/heddle.api.v2alpha1.ThreadService/ClaimThreadOwnership",
+    "/heddle.api.v2alpha1.AnalysisService/ObserveAnalysis",
+    #[cfg(feature = "semantic")]
+    "/heddle.api.v2alpha1.AnalysisService/StartAnalysis",
+    "/heddle.api.v2alpha1.OperationService/CancelOperation",
+    "/heddle.api.v2alpha1.SearchService/Search",
+    "/heddle.api.v2alpha1.OperationService/ObserveOperations",
+    "/heddle.api.v2alpha1.EvidenceService/RecordEvidence",
+    "/heddle.api.v2alpha1.EvidenceService/VerifyEvidence",
+    "/heddle.api.v2alpha1.EvidenceService/AcknowledgeCheck",
+    "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration",
+    "/heddle.api.v2alpha1.CollaborationService/OpenDiscussion",
+    "/heddle.api.v2alpha1.CollaborationService/AppendTurn",
+    "/heddle.api.v2alpha1.CollaborationService/ResolveDiscussion",
+    "/heddle.api.v2alpha1.CollaborationService/ReopenDiscussion",
+    "/heddle.api.v2alpha1.CollaborationService/PutContext",
+    "/heddle.api.v2alpha1.ContentService/ReadArtifact",
+    "/heddle.api.v2alpha1.ContentService/ReadContent",
+    "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace",
+    "/heddle.api.v2alpha1.WorkspaceService/ResolveResources",
+    "/heddle.api.v2alpha1.WorkspaceService/SetBookmark",
+    "/heddle.api.v2alpha1.SpoolService/ObserveSpool",
+    "/heddle.api.v2alpha1.SpoolService/CreateSpool",
+    "/heddle.api.v2alpha1.SpoolService/ReviseSpool",
+    "/heddle.api.v2alpha1.SpoolService/DeleteSpool",
+    "/heddle.api.v2alpha1.SpoolService/SetSpoolMount",
+    "/heddle.api.v2alpha1.SpoolService/RemoveSpoolMount",
+    "/heddle.api.v2alpha1.IdentityService/ObserveIdentity",
+    "/heddle.api.v2alpha1.IdentityService/IntrospectCredential",
+    "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership",
+    "/heddle.api.v2alpha1.ThreadService/ObserveThreads",
+    "/heddle.api.v2alpha1.ThreadService/ObserveThread",
+    "/heddle.api.v2alpha1.ThreadService/StartThread",
+    "/heddle.api.v2alpha1.ThreadService/RenameThread",
+    "/heddle.api.v2alpha1.ThreadService/ReviseIntent",
+    "/heddle.api.v2alpha1.ThreadService/ChangeLifecycle",
+    "/heddle.api.v2alpha1.ThreadService/SetSharingPolicy",
+    "/heddle.api.v2alpha1.ThreadService/SetAudiencePolicy",
+    "/heddle.api.v2alpha1.ThreadService/SetRetentionPolicy",
+    "/heddle.api.v2alpha1.ThreadService/RecordReview",
+    "/heddle.api.v2alpha1.SyncService/ReplicateThread",
+    "/heddle.api.v2alpha1.SyncService/Fetch",
+    "/heddle.api.v2alpha1.SyncService/PublishContent",
+    "/heddle.api.v2alpha1.CheckoutService/ObserveCheckouts",
+    "/heddle.api.v2alpha1.CheckoutService/Materialize",
+    "/heddle.api.v2alpha1.CheckoutService/ClaimCheckoutWriter",
+    "/heddle.api.v2alpha1.CheckoutService/ReleaseCheckoutWriter",
+    "/heddle.api.v2alpha1.CheckoutService/Capture",
+    "/heddle.api.v2alpha1.CheckoutService/Refresh",
+    "/heddle.api.v2alpha1.CheckoutService/Resolve",
+    "/heddle.api.v2alpha1.CheckoutService/Recover",
+    "/heddle.api.v2alpha1.CheckoutService/LandCheckout",
+    "/heddle.api.v2alpha1.RunService/ObserveRuns",
+    "/heddle.api.v2alpha1.RunService/ControlRun",
+    "/heddle.api.v2alpha1.RunService/DecidePermission",
+    "/heddle.api.v2alpha1.RunService/PutRunPolicy",
+];
+#[derive(Clone, Debug)]
+pub(crate) struct DeviceRpc {
+    home: PathBuf,
+    endpoint: [u8; 32],
+    feeds: Arc<Mutex<BTreeMap<uuid::Uuid, Weak<observe::Feed>>>>,
+    account_feed: Arc<Mutex<Weak<account_feed::AccountFeed>>>,
+    content_work: Arc<tokio::sync::Semaphore>,
+    analysis: Arc<analysis::Runtime>,
+    authority_clock: Arc<authority_clock::AuthorityClock>,
+    #[cfg(test)]
+    thread_snapshots: Arc<std::sync::atomic::AtomicU64>,
+}
+impl DeviceRpc {
+    pub fn new(home: PathBuf, endpoint: [u8; 32]) -> Self {
+        Self {
+            home,
+            endpoint,
+            feeds: Arc::new(Mutex::new(BTreeMap::new())),
+            account_feed: Arc::new(Mutex::new(Weak::new())),
+            content_work: Arc::new(tokio::sync::Semaphore::new(8)),
+            analysis: Arc::new(analysis::Runtime::default()),
+            authority_clock: Arc::new(authority_clock::AuthorityClock::default()),
+            #[cfg(test)]
+            thread_snapshots: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+    pub fn endpoint(&self) -> EndpointRef {
+        EndpointRef {
+            public_key: self.endpoint.to_vec(),
+            kind: EndpointKind::Device as i32,
+        }
+    }
+    pub async fn serve(
+        &self,
+        method: &str,
+        context: &CallContext,
+        body: &[u8],
+        mut send: SendStream,
+        budget: &mut super::hosted::claim_protocol::CallBudget,
+    ) -> Result<()> {
+        if account::METHODS.contains(&method) {
+            return self
+                .serve_account(method, context, body, send, budget)
+                .await;
+        }
+        let descriptor = api::v2::method_descriptor(method).context("unknown device RPC")?;
+        let prepared = (|| {
+            let id = request_spool(method, body)?;
+            let spool = repo::device_catalog::load(&self.home, id)?;
+            auth::authorize(&self.home, descriptor, context, body, spool)
+        })();
+        let session = match prepared {
+            Ok(session) => session,
+            Err(error) => {
+                let failure = failure(CallFailureCode::Unauthenticated, error);
+                let bytes = if descriptor.streaming == api::StreamingShape::ServerStreaming {
+                    api::framing::encode_stream_failure(&failure)?
+                } else {
+                    api::framing::encode_failure_response(&failure)?
+                };
+                send.write_all(&bytes).await?;
+                send.finish()?;
+                return Ok(());
+            }
+        };
+        if descriptor.streaming == api::StreamingShape::ServerStreaming {
+            budget.retain().map_err(anyhow::Error::msg)?;
+        }
+        if method.ends_with("/ObserveAnalysis") { return self.observe_analysis(&session, body, send).await; }
+        #[cfg(feature = "semantic")]
+        if method.ends_with("/StartAnalysis") { return self.start_analysis(session, body, send).await; }
+        if method.ends_with("/ReadContent") {
+            return self.read_content(session, body, send).await;
+        }
+        if method.ends_with("/ReadArtifact") {
+            return self.read_artifact(session, body, send).await;
+        }
+        if method.ends_with("/ObserveCollaboration") { return self.observe_collaboration(&session,body,send).await; }
+        if method.ends_with("/ObserveThread") {
+            return self.observe_thread(&session, body, send).await;
+        }
+        if method.ends_with("/ObserveCheckouts") || method.ends_with("/ObserveRuns") {
+            return self.observe(&session, method, body, send).await;
+        }
+        let this = self.clone();
+        let body = body.to_vec();
+        let (session, response) = tokio::task::spawn_blocking(move || {
+            let response = session
+                .check_current(&this.home)
+                .and_then(|_| this.execute(&session, descriptor.path, &body));
+            (session, response)
+        })
+        .await?;
+        let response = response.and_then(|body| {
+            session.check_current(&self.home)?;
+            Ok(body)
+        });
+        let bytes = match response {
+            Ok(body) => api::framing::encode_success_response(&body)?,
+            Err(error) => api::framing::encode_failure_response(&failure(
+                CallFailureCode::FailedPrecondition,
+                error,
+            ))?,
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), send.write_all(&bytes)).await??;
+        send.finish()?;
+        Ok(())
+    }
+    fn execute(&self, session: &auth::Session, method: &str, body: &[u8]) -> Result<Vec<u8>> {
+        if method.ends_with("/ClaimThreadOwnership") { return self.claim_thread_ownership(session,body); }
+        if method.ends_with("/CancelOperation") { return self.cancel_operation(session, body); }
+        if method.contains(".EvidenceService/") { return self.evidence_command(session, method, body); }
+        if method.contains(".CollaborationService/") { return self.collaboration_command(session, method, body); }
+        if method.contains(".ThreadService/") {
+            return self.thread_command(session, method, body);
+        }
+        if method.contains(".CheckoutService/") {
+            return self.checkout_command(session, method, body);
+        }
+        let store = repo::device_runs::RunStore::open(&session.spool.heddle_dir)?;
+        let operation = match method.rsplit('/').next().context("method missing")? {
+            "ControlRun" => {
+                let request = ControlRunRequest::decode(body)?;
+                store.enqueue_control(&request, &session.actor)?;
+                request.client_operation_id
+            }
+            "DecidePermission" => {
+                let request = DecideRunPermissionRequest::decode(body)?;
+                store.decide_permission(&request, &session.actor)?;
+                request.client_operation_id
+            }
+            "PutRunPolicy" => {
+                let request = PutRunPolicyRequest::decode(body)?;
+                store.put_policy(&request, &session.actor)?;
+                request.client_operation_id
+            }
+            _ => bail!("unknown run method"),
+        };
+        Ok(MutationResponse {
+            receipt: Some(self.receipt(&operation)),
+        }
+        .encode_to_vec())
+    }
+    fn receipt(&self, operation: &str) -> MutationReceipt {
+        let now = chrono::Utc::now();
+        MutationReceipt {
+            client_operation_id: operation.into(),
+            endpoint: Some(self.endpoint()),
+            outcome: Some(mutation_receipt::Outcome::Applied(Applied::default())),
+            observed_at: Some(prost_types::Timestamp {
+                seconds: now.timestamp(),
+                nanos: now.timestamp_subsec_nanos() as i32,
+            }),
+        }
+    }
+}
+fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
+    macro_rules! scope {
+        ($ty:ty,$field:expr) => {{
+            let request = <$ty>::decode(body)?;
+            $field(request)
+        }};
+    }
+    let spool = match method.rsplit('/').next().context("method missing")? {
+        "ObserveAnalysis" => scope!(ObserveAnalysisRequest, |r:ObserveAnalysisRequest|r.source.and_then(|v|v.spool)),
+        "ClaimThreadOwnership" => scope!(ClaimThreadOwnershipRequest, |r:ClaimThreadOwnershipRequest|r.thread.and_then(|v|v.spool)),
+        "StartAnalysis" => scope!(StartAnalysisRequest, |r:StartAnalysisRequest|r.source.and_then(|v|v.spool)),
+        "CancelOperation" => scope!(CancelOperationRequest, |r:CancelOperationRequest|r.operation.and_then(|v|v.spool)),
+        "RecordEvidence" => scope!(RecordEvidenceRequest, |r:RecordEvidenceRequest|r.evidence.and_then(|e|e.revision).and_then(|r|r.spool)),
+        "AcknowledgeCheck" => scope!(AcknowledgeCheckRequest, |r:AcknowledgeCheckRequest|r.evidence.and_then(|e|e.spool)),
+        "ObserveCollaboration" => scope!(ObserveCollaborationRequest, |r:ObserveCollaborationRequest|r.spool),
+        "OpenDiscussion" => scope!(OpenDiscussionRequest, |r:OpenDiscussionRequest|r.spool),
+        "AppendTurn" => scope!(AppendDiscussionRequest, |r:AppendDiscussionRequest|r.discussion.and_then(|v|v.spool)),
+        "ResolveDiscussion" => scope!(ResolveDiscussionRequest, |r:ResolveDiscussionRequest|r.discussion.and_then(|v|v.spool)),
+        "ReopenDiscussion" => scope!(ReopenDiscussionRequest, |r:ReopenDiscussionRequest|r.discussion.and_then(|v|v.spool)),
+        "PutContext" => scope!(PutContextRequest, |r:PutContextRequest|r.context.and_then(|v|v.r#ref).and_then(|v|v.spool)),
+        "ReadArtifact" => scope!(ReadArtifactRequest, |r: ReadArtifactRequest| r
+            .artifact
+            .and_then(|r| r.spool)),
+        "ObserveThread" => scope!(ObserveThreadRequest, |r: ObserveThreadRequest| r
+            .thread
+            .and_then(|t| t.spool)),
+        "StartThread" => scope!(StartThreadRequest, |r: StartThreadRequest| r.spool),
+        "RenameThread" => scope!(RenameThreadRequest, |r: RenameThreadRequest| r
+            .thread
+            .and_then(|t| t.spool)),
+        "ReviseIntent" => scope!(ReviseIntentRequest, |r: ReviseIntentRequest| r
+            .thread
+            .and_then(|t| t.spool)),
+        "ChangeLifecycle" => scope!(
+            ChangeThreadLifecycleRequest,
+            |r: ChangeThreadLifecycleRequest| r.thread.and_then(|t| t.spool)
+        ),
+        "SetSharingPolicy" => scope!(SetThreadSharingRequest, |r: SetThreadSharingRequest| r
+            .policy
+            .and_then(|p| p.thread)
+            .and_then(|t| t.spool)),
+        "SetAudiencePolicy" => scope!(SetThreadAudienceRequest, |r: SetThreadAudienceRequest| r.policy.and_then(|p| p.thread).and_then(|t| t.spool)),
+        "SetRetentionPolicy" => scope!(SetThreadRetentionRequest, |r: SetThreadRetentionRequest| r.policy.and_then(|p| p.thread).and_then(|t| t.spool)),
+        "RecordReview" => scope!(RecordReviewRequest, |r: RecordReviewRequest| r
+            .decision
+            .and_then(|p| p.thread)
+            .and_then(|t| t.spool)),
+        "ReadContent" => scope!(ReadContentRequest, |r: ReadContentRequest| r.revision.and_then(|r| r.spool)),
+        "ObserveCheckouts" => scope!(ObserveCheckoutsRequest, |r: ObserveCheckoutsRequest| r
+            .spool),
+        "Materialize" => scope!(
+            MaterializeCheckoutRequest,
+            |r: MaterializeCheckoutRequest| r.thread.and_then(|r| r.spool)
+        ),
+        "ClaimCheckoutWriter" => scope!(
+            ClaimCheckoutWriterRequest,
+            |r: ClaimCheckoutWriterRequest| r.checkout.and_then(|r| r.spool)
+        ),
+        "ReleaseCheckoutWriter" => scope!(
+            ReleaseCheckoutWriterRequest,
+            |r: ReleaseCheckoutWriterRequest| r.checkout.and_then(|r| r.spool)
+        ),
+        "Capture" => scope!(CaptureCheckoutRequest, |r: CaptureCheckoutRequest| r
+            .checkout
+            .and_then(|r| r.spool)),
+        "Refresh" => scope!(RefreshCheckoutRequest, |r: RefreshCheckoutRequest| r
+            .checkout
+            .and_then(|r| r.spool)),
+        "Resolve" => scope!(ResolveCheckoutRequest, |r: ResolveCheckoutRequest| r
+            .checkout
+            .and_then(|r| r.spool)),
+        "Recover" => scope!(RecoverCheckoutRequest, |r: RecoverCheckoutRequest| r
+            .checkout
+            .and_then(|r| r.spool)),
+        "LandCheckout" => scope!(LandCheckoutRequest, |r: LandCheckoutRequest| r
+            .checkout
+            .and_then(|r| r.spool)),
+        "ObserveRuns" => scope!(ObserveRunsRequest, |r: ObserveRunsRequest| r.spool),
+        "ControlRun" => scope!(ControlRunRequest, |r: ControlRunRequest| r
+            .run
+            .and_then(|r| r.spool)),
+        "DecidePermission" => scope!(
+            DecideRunPermissionRequest,
+            |r: DecideRunPermissionRequest| r.run.and_then(|r| r.spool)
+        ),
+        "PutRunPolicy" => scope!(PutRunPolicyRequest, |r: PutRunPolicyRequest| r
+            .policy
+            .and_then(|r| r.spool)),
+        _ => bail!("unknown device RPC"),
+    }
+    .context("spool scope required")?;
+    Ok(uuid::Uuid::parse_str(&spool.id)?)
+}
+fn failure(code: CallFailureCode, error: impl std::fmt::Display) -> CallFailure {
+    CallFailure {
+        code: code as i32,
+        message: error.to_string(),
+        error: None,
+    }
+}
+fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take((limit + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        bail!("device record exceeds bound");
+    }
+    Ok(bytes)
+}

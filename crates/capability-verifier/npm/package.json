@@ -1,0 +1,53 @@
+{
+  "name": "@heddleco/capability-verifier-wasm",
+  "version": "0.17.0",
+  "description": "Canonical owner-anchored authorization verifier compiled from heddleco-capability-verifier to WebAssembly",
+  "license": "MIT OR Apache-2.0",
+  "author": "HeddleCo",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HeddleCo/heddle.git"
+  },
+  "homepage": "https://github.com/HeddleCo/heddle/tree/main/crates/capability-verifier#readme",
+  "bugs": {
+    "url": "https://github.com/HeddleCo/heddle/issues"
+  },
+  "keywords": [
+    "authorization",
+    "capability",
+    "ed25519",
+    "wasm"
+  ],
+  "files": [
+    "dist/capability_verifier.js",
+    "dist/capability_verifier.d.ts",
+    "dist/capability_verifier_bg.wasm",
+    "dist/capability_verifier_bg.wasm.d.ts",
+    "dist/snippets/**",
+    "dist/LICENSE-*",
+    "README.md"
+  ],
+  "main": "./dist/capability_verifier.js",
+  "module": "./dist/capability_verifier.js",
+  "types": "./dist/capability_verifier.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/capability_verifier.d.ts",
+      "import": "./dist/capability_verifier.js",
+      "default": "./dist/capability_verifier.js"
+    },
+    "./wasm": "./dist/capability_verifier_bg.wasm"
+  },
+  "sideEffects": [
+    "./dist/capability_verifier.js"
+  ],
+  "scripts": {
+    "build": "cd .. && npm run build",
+    "prepack": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

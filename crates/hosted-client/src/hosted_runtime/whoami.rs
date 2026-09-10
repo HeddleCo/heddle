@@ -375,6 +375,7 @@ mod tests {
     #[test]
     fn local_unauthenticated_identity_has_actionable_output() {
         let resolved = ResolvedHostedCredential {
+            mint_root_attachment: None,
             token: None,
             proof_key_pem: None,
             renewable: None,

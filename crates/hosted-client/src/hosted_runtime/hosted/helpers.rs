@@ -6,7 +6,6 @@ use api::heddle::api::v1alpha1::{
     RepositoryRef, StateAttachmentKind as ProtoStateAttachmentKind, StateId as ProtoStateId,
     TransferCheckpoint, TransportMode, repository_ref::Reference,
 };
-use base64::Engine as _;
 use config::ClientConfig;
 use objects::object::{ContentHash, StateAttachmentId, StateAttachmentKind, StateId};
 use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
@@ -118,19 +117,6 @@ pub(super) fn parse_descriptor_to_info(
         size: 0,
         delta_base: None,
     })
-}
-
-pub(super) fn decode_blob_content(
-    content: String,
-    is_binary: bool,
-) -> Result<Vec<u8>, ProtocolError> {
-    if is_binary {
-        base64::engine::general_purpose::STANDARD
-            .decode(content.as_bytes())
-            .map_err(|err| ProtocolError::Serialization(err.to_string()))
-    } else {
-        Ok(content.into_bytes())
-    }
 }
 
 pub(super) fn parse_object_id(
@@ -319,6 +305,56 @@ pub(super) fn hosted_to_protocol_error(error: HostedError) -> ProtocolError {
         HostedError::Decode(error) => ProtocolError::Serialization(error.to_string()),
         HostedError::Transport(message) => ProtocolError::Io(std::io::Error::other(message)),
         error => ProtocolError::Remote(error.to_string()),
+    }
+}
+
+/// Preserve the shared failure envelope at the native client boundary. Callers
+/// can distinguish retryable conflicts, missing resources and revoked authority.
+pub(super) fn native_client_error(
+    error: api::v2::client::ClientError<thread_api::transport::Error>,
+) -> ProtocolError {
+    use api::v2::client::ClientError;
+    use thread_api::transport::Error;
+    match error {
+        ClientError::Transport(Error::Remote(failure)) => {
+            let detail = match failure.detail() {
+                Ok(detail) => detail,
+                Err(error) => return ProtocolError::Serialization(error.to_string()),
+            };
+            let code = api::heddle::api::v1alpha1::CallFailureCode::try_from(failure.code)
+                .unwrap_or(api::heddle::api::v1alpha1::CallFailureCode::Unknown);
+            if detail.is_none() {
+                match code {
+                    api::heddle::api::v1alpha1::CallFailureCode::AlreadyExists => {
+                        return ProtocolError::AlreadyExists(failure.message);
+                    }
+                    api::heddle::api::v1alpha1::CallFailureCode::NotFound => {
+                        return ProtocolError::ObjectNotFound(failure.message);
+                    }
+                    _ => {}
+                }
+            }
+            ProtocolError::RemoteFailure {
+                code: remote_failure_code(code),
+                message: failure.message,
+                details: detail.into_iter().map(remote_failure_detail).collect(),
+            }
+        }
+        ClientError::Decode(error) => ProtocolError::Serialization(error.to_string()),
+        ClientError::Transport(Error::Io(message)) => {
+            ProtocolError::Io(std::io::Error::other(message))
+        }
+        ClientError::Transport(Error::Timeout) => ProtocolError::RemoteFailure {
+            code: wire::RemoteFailureCode::DeadlineExceeded,
+            message: "native request made no progress before its deadline".into(),
+            details: Vec::new(),
+        },
+        ClientError::NotImplemented(method) => ProtocolError::RemoteFailure {
+            code: wire::RemoteFailureCode::Unimplemented,
+            message: format!("endpoint does not implement {method}"),
+            details: Vec::new(),
+        },
+        error => ProtocolError::InvalidState(error.to_string()),
     }
 }
 
@@ -758,17 +794,6 @@ mod tests {
         let mut bad = to_proto_object_info(&attachment_info);
         bad.attachment_kind = ProtoStateAttachmentKind::Unspecified as i32;
         assert!(parse_descriptor_to_info(bad).is_err());
-    }
-
-    #[test]
-    fn decode_blob_content_handles_text_and_base64() {
-        assert_eq!(
-            decode_blob_content("hello".into(), false).unwrap(),
-            b"hello"
-        );
-        let encoded = base64::engine::general_purpose::STANDARD.encode(b"\0\x01\x02");
-        assert_eq!(decode_blob_content(encoded, true).unwrap(), vec![0, 1, 2]);
-        assert!(decode_blob_content("!!!".into(), true).is_err());
     }
 
     #[test]

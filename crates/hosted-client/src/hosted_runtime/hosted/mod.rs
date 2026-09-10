@@ -18,7 +18,12 @@ mod error;
 pub(crate) mod helpers;
 mod human;
 mod hydration;
+mod native_hydration;
+#[cfg(test)]
+mod native_hydration_tests;
 mod methods;
+#[cfg(test)]
+mod native_transport_tests;
 pub(crate) mod operation_id;
 mod provider_pull;
 mod provider_transport;
@@ -179,16 +184,58 @@ impl std::fmt::Debug for HostedClient {
 }
 
 impl HostedClient {
+    /// Discover the native contract once, then retain this typed client for the
+    /// command. Connection, descriptor trust and credentials come from the same
+    /// assembled session; no legacy request/response is translated here.
+    pub async fn native(
+        &self,
+    ) -> anyhow::Result<
+        thread_api::Remote<
+            thread_api::transport::IrohTransport<thread_api::credentials::Credentials>,
+        >,
+    > {
+        let credentials = self.context.native_credentials()?;
+        let transport = || {
+            thread_api::transport::IrohTransport::new(
+                self.connection.connection.clone(),
+                credentials.clone(),
+                thread_api::replication::opening::FRAME_LIMIT,
+                std::time::Duration::from_secs(30),
+            )
+        };
+        let description = self
+            .connection
+            .native_description
+            .get_or_try_init(|| async {
+                let remote = thread_api::Remote::discover(
+                    transport()?,
+                    *self.connection.connection.remote_id().as_bytes(),
+                    api::heddle::api::v2alpha1::EndpointKind::Weft,
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(remote.description)
+            })
+            .await?
+            .clone();
+        Ok(thread_api::Remote {
+            api: api::v2::client::Client::new(
+                transport()?,
+                description.implemented_methods.clone(),
+            ),
+            description,
+        })
+    }
+
+    pub(crate) fn claim_authority_token(&self) -> &[u8] {
+        self.context.bearer_capability()
+    }
+
     pub fn routes(&self) -> HostedRoutes<'_> {
         HostedRoutes::new(self)
     }
 
     pub(crate) fn claim_proof_signer(&self) -> Option<&crypto::Ed25519Signer> {
         self.context.proof_signer()
-    }
-
-    pub(crate) fn enrolling_device_context(&self) -> Result<CallContextFactory> {
-        self.context.as_enrolling_device_key()
     }
 
     pub async fn connect(descriptor: &VerifiedEndpointDescriptor) -> Result<Self> {
@@ -347,6 +394,7 @@ impl HostedClient {
             }
         };
         let updated = config::credentials::ServerCredential {
+            mint_root_attachment: credential.mint_root_attachment,
             token: root.token.clone(),
             subject: root.subject,
             device_id: credential.device_id,
@@ -354,6 +402,9 @@ impl HostedClient {
             private_key_pem: Some(private_key_pem),
             expires_at: Some(root.expires_at.to_rfc3339()),
         };
+        if let Err(error)=crate::hosted_runtime::source_author::retain(&server_key,&updated) {
+            tracing::warn!("credential rotation: failed to retain original device authority: {error}");
+        }
         if let Err(error) = config::credentials::store_server_credential(&server_key, updated) {
             tracing::warn!("credential rotation: failed to persist credential: {error}");
         }

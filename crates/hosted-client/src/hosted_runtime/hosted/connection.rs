@@ -11,7 +11,7 @@ use tokio::sync::Mutex;
 
 use super::{
     HostedError, Result, VerifiedEndpointDescriptor,
-    claim_protocol::{CLAIM_ALPN_V1, ClaimProtocol},
+    claim_protocol::{ClaimProtocol, NATIVE_ALPN},
     provider_transport::ProviderWebSocketTransport,
 };
 
@@ -28,6 +28,8 @@ pub(super) struct HostedConnection {
     router: Router,
     pub(super) endpoint: Endpoint,
     pub(super) connection: iroh::endpoint::Connection,
+    pub(super) native_description:
+        tokio::sync::OnceCell<api::heddle::api::v2alpha1::DescribeEndpointResponse>,
     provider_transport: Option<ProviderWebSocketTransport>,
     provider_connections:
         Mutex<HashMap<EndpointId, Arc<Mutex<Option<iroh::endpoint::Connection>>>>>,
@@ -132,6 +134,7 @@ impl HostedConnection {
         };
         let router = claim_router(endpoint.clone());
         Ok(Arc::new(Self {
+            native_description: tokio::sync::OnceCell::new(),
             router,
             endpoint,
             connection,
@@ -240,10 +243,11 @@ fn claim_router(endpoint: Endpoint) -> Router {
     let (authorization, _completion, _owner_root_calls) =
         crate::hosted_runtime::claim_authorization::StoredClaimAuthorization::new();
     let authorization = Arc::new(authorization);
+    let endpoint_key = *endpoint.id().as_bytes();
     Router::builder(endpoint)
         .accept(
-            CLAIM_ALPN_V1,
-            ClaimProtocol::new(Arc::clone(&authorization), authorization),
+            NATIVE_ALPN,
+            ClaimProtocol::new(Arc::clone(&authorization), authorization, endpoint_key),
         )
         .spawn()
 }

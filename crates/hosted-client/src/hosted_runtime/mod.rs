@@ -9,6 +9,9 @@
 
 mod agent_node_identity;
 pub mod auth;
+mod auth_pairing;
+mod source_author;
+mod device_rpc;
 mod auth_login;
 mod auth_login_agent;
 #[cfg(test)]
@@ -18,6 +21,7 @@ mod claim_authorization;
 #[cfg(test)]
 mod claim_authorization_tests;
 pub(crate) mod claim_bridge;
+mod claim_native;
 pub mod claim_offer;
 pub(crate) mod credential_file;
 pub(crate) mod device_flow;

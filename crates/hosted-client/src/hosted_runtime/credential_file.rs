@@ -90,6 +90,8 @@ impl CredentialProvenance {
 /// `token` and `proof_key_pem` fields are secrets — this type intentionally
 /// does not implement [`serde::Serialize`] and redacts them in [`Debug`].
 pub struct VerifiedCredential {
+    /// Public association evidence, reverified against current owner history on use.
+    pub mint_root_attachment: Option<Vec<u8>>,
     /// Server address the credential authenticates against.
     pub server: String,
     /// Credential role (audit only).
@@ -129,6 +131,7 @@ impl VerifiedCredential {
     /// round-trips through `credentials.toml`.
     pub fn into_server_credential(self) -> ServerCredential {
         ServerCredential {
+            mint_root_attachment: self.mint_root_attachment,
             token: self.token,
             subject: self.subject,
             device_id: None,
@@ -144,6 +147,8 @@ impl VerifiedCredential {
 /// never be emitted through an accidental `Serialize` on the in-memory type.
 #[derive(Serialize, Deserialize)]
 struct OnDiskCredential {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mint_root_attachment: Option<Vec<u8>>,
     format: String,
     version: u32,
     server: String,
@@ -190,6 +195,7 @@ pub fn write_credential_file(path: &Path, credential: &VerifiedCredential) -> Re
         .filter(|provenance| !provenance.is_empty())
         .cloned();
     let on_disk = OnDiskCredential {
+        mint_root_attachment: credential.mint_root_attachment.clone(),
         format: CREDENTIAL_FORMAT.to_string(),
         version: CREDENTIAL_VERSION,
         server: credential.server.clone(),
@@ -310,6 +316,7 @@ pub fn load_credential_file(path: &Path) -> Result<VerifiedCredential> {
     }
 
     Ok(VerifiedCredential {
+        mint_root_attachment: on_disk.mint_root_attachment,
         server: on_disk.server,
         kind: on_disk.kind,
         subject: metadata.subject,
@@ -391,6 +398,7 @@ mod tests {
         let proof_key_pem = signer.to_pem().expect("proof PEM");
         (
             VerifiedCredential {
+                mint_root_attachment: None,
                 server: "api.heddle.test".to_string(),
                 kind: CredentialKind::Agent,
                 subject: "alice".to_string(),
@@ -407,6 +415,30 @@ mod tests {
             },
             signer,
         )
+    }
+
+    #[test]
+    fn public_mint_root_evidence_survives_hcred_and_keystore_conversion() {
+        let (mut credential, _) = sample_verified();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../capability-verifier/tests/fixtures/mint_root_attachment_v1.json"
+        ))
+        .expect("public proof fixture");
+        let bytes = hex::decode(fixture["record_hex"].as_str().expect("record hex"))
+            .expect("canonical record");
+        credential.mint_root_attachment = Some(bytes.clone());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("agent.hcred");
+        write_credential_file(&path, &credential).expect("write public evidence with credential");
+        let loaded = load_credential_file(&path).expect("load unchanged credential");
+        assert_eq!(
+            loaded.mint_root_attachment.as_deref(),
+            Some(bytes.as_slice())
+        );
+        assert_eq!(
+            loaded.into_server_credential().mint_root_attachment,
+            Some(bytes)
+        );
     }
 
     #[test]
@@ -484,6 +516,7 @@ mod tests {
         let signer = Ed25519Signer::generate().expect("proof key");
         let token = mint_token("alice", &signer, chrono::Duration::hours(-1));
         let credential = VerifiedCredential {
+            mint_root_attachment: None,
             server: "api.heddle.test".to_string(),
             kind: CredentialKind::Agent,
             subject: "alice".to_string(),

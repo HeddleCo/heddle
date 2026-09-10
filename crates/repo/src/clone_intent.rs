@@ -87,7 +87,7 @@ mod tests {
 
     fn intent() -> CloneIntent {
         CloneIntent {
-            origin: "heddle://127.0.0.1:8443/acme/demo".to_string(),
+            origin: "https://127.0.0.1:8443/acme/demo".to_string(),
             endpoint: "127.0.0.1:8443".to_string(),
             repository: "acme/demo".to_string(),
             thread: Some("main".to_string()),

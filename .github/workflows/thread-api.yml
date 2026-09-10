@@ -1,0 +1,80 @@
+name: Thread API
+
+on:
+  pull_request:
+    paths:
+      - 'crates/thread-api/**'
+      - 'crates/semantic/**'
+      - 'crates/repo/src/thread_replication/**'
+      - 'crates/object-model/src/object/thread_replication.rs'
+      - 'crates/objects/src/store/writer_lease.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/thread-api.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  thread-client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - name: Build the portable client for WASM
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check --locked -p heddle-thread-api --no-default-features --target wasm32-unknown-unknown --lib
+          cargo check --locked -p heddle-thread-api --no-default-features --features root-attachment --target wasm32-unknown-unknown --lib
+      - name: Keep client and backend dependencies separate
+        run: |
+          python3 - <<'PYCODE'
+          import subprocess
+          cases = [
+              ("", {"heddle-repo", "heddle-objects", "heddleco-iroh", "biscuit-auth", "tokio"}),
+              ("native", {"heddleco-iroh"}),
+              ("root-attachment", {"heddle-repo", "heddle-objects", "heddleco-iroh", "tokio"}),
+              ("signing", {"heddle-repo", "heddle-objects", "heddleco-iroh", "biscuit-auth", "tokio"}),
+              ("replication", {"heddle-repo", "heddle-objects", "heddleco-iroh", "biscuit-auth"}),
+              ("iroh", {"heddle-repo", "heddle-objects", "biscuit-auth"}),
+          ]
+          for features, forbidden in cases:
+              if features != "native":
+                  forbidden |= {"heddle-semantic", "tree-sitter"}
+              command = ["cargo", "tree", "--locked", "-p", "heddle-thread-api",
+                         "--no-default-features", "--edges", "normal",
+                         "--prefix", "none", "--format", "{p}"]
+              if features:
+                  command += ["--features", features]
+              names = {line.split()[0] for line in subprocess.check_output(command, text=True).splitlines()}
+              assert {"heddle-thread-api", "heddle-api", "prost"} <= names, "missing dependency inventory"
+              assert not names & forbidden, f"{features or 'core'}: unexpected dependencies {names & forbidden}"
+              print(f"{features or 'core'}: dependency boundary holds")
+          PYCODE
+      - run: cargo test --locked -p heddle-thread-api
+      - run: cargo test --locked -p heddle-thread-api --no-default-features --features signing --lib
+      - run: cargo test --locked -p heddle-thread-api --no-default-features --features root-attachment --test root_attachment
+      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features root-attachment --all-targets -- -D warnings
+      - run: cargo check --locked -p heddle-thread-api --no-default-features --features replication --lib
+      - run: cargo test --locked -p heddle-thread-api --no-default-features --lib
+      - run: cargo test --locked -p heddle-thread-api --no-default-features --features native --lib
+      - run: cargo test --locked -p heddle-thread-api --no-default-features --features iroh
+      - run: cargo test --locked -p heddle-semantic --lib
+      - run: cargo test --locked -p heddle-thread-api --no-default-features --features semantic-analysis --test behavior_analysis
+      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features semantic-analysis --all-targets -- -D warnings
+      - run: HEDDLE_PROFILE=1 cargo test --locked -p heddle-thread-api --no-default-features --features iroh --test transport_observation -- --ignored --nocapture
+      - run: cargo test --locked -p heddle-repo --no-default-features --features native,git-overlay thread_replication -- --nocapture
+      - run: cargo test --locked -p heddle-objects writer_lease -- --nocapture
+      - run: cargo clippy --locked -p heddle-thread-api --all-targets -- -D warnings
+      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --all-targets -- -D warnings
+      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features native --all-targets -- -D warnings
+      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features signing --lib -- -D warnings
+      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features replication --lib -- -D warnings
+      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features iroh --all-targets -- -D warnings
+      - run: cargo run --locked -p heddle-thread-api --example thread

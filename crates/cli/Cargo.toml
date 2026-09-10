@@ -191,6 +191,7 @@ client = [
 # compiled as a fallback.
 ingest = ["heddle-cli-args/ingest", "heddle-cli-contract/ingest"]
 semantic = [
+    "hosted-client/semantic",
     "dep:semantic",
     "heddle-cli-args/semantic",
     "heddle-cli-contract/semantic",

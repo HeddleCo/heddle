@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Exclusive writer leases for agent-controlled thread mutations.
+//! Exclusive writers for checkouts; separate checkouts may share a Thread.
 
 use std::path::{Path, PathBuf};
 
@@ -57,6 +57,15 @@ pub struct WriterLease {
 }
 
 impl WriterLease {
+    fn conflicts_with(&self, thread: &str, path: Option<&Path>) -> bool {
+        self.status == WriterLeaseStatus::Active
+            && match (self.path.as_deref(), path) {
+                (Some(owned), Some(requested)) => owned == requested,
+                // An unmaterialized reservation has no narrower checkout scope.
+                _ => self.thread == thread,
+            }
+    }
+
     pub fn lease_expires_at(&self) -> DateTime<Utc> {
         self.heartbeat_at + crate::store::AGENT_LEASE_DURATION
     }
@@ -188,18 +197,55 @@ impl WriterLeaseStore {
         draft: WriterLeaseDraft,
         now: DateTime<Utc>,
     ) -> Result<WriterLeaseReserveOutcome> {
+        self.reserve_prepared(
+            draft,
+            generate_writer_lease_id(),
+            generate_writer_lease_token(),
+            now,
+        )
+    }
+
+    /// A command journal persists these random credentials before reservation.
+    /// Retrying the exact live reservation recovers its token; a different actor,
+    /// path, token or an expired/released reservation can never revive it.
+    pub fn reserve_prepared(
+        &self,
+        mut draft: WriterLeaseDraft,
+        lease_id: String,
+        token: String,
+        now: DateTime<Utc>,
+    ) -> Result<WriterLeaseReserveOutcome> {
+        validate_lease_id(&lease_id)?;
+        if token.len() < 32 || token.len() > 256 {
+            return Err(HeddleError::Config("invalid prepared writer token".into()));
+        }
+        draft.path = draft.path.map(std::fs::canonicalize).transpose()?;
         let _lock = self.write_lock()?;
         self.reap_expired_locked(now)?;
+        if let Some(old) = self.load_path(&self.lease_path(&lease_id)?)? {
+            if old.status == WriterLeaseStatus::Active
+                && old.liveness_at(now) != Liveness::Dead
+                && old.thread == draft.thread
+                && old.path == draft.path
+                && old.actor_session_id == draft.actor_session_id
+                && old.token_hash == token_hash(&token)
+            {
+                return Ok(WriterLeaseReserveOutcome::Reserved(WriterLeaseGrant {
+                    lease: old,
+                    token,
+                }));
+            }
+            return Err(HeddleError::Config(
+                "prepared writer reservation changed or expired".into(),
+            ));
+        }
         if let Some(owner) = self
             .list_locked()?
             .into_iter()
-            .find(|lease| lease.thread == draft.thread && lease.status == WriterLeaseStatus::Active)
+            .find(|lease| lease.conflicts_with(&draft.thread, draft.path.as_deref()))
         {
             return Ok(WriterLeaseReserveOutcome::LiveOwner(owner));
         }
-
-        let lease_id = generate_writer_lease_id();
-        let token = generate_writer_lease_token();
         let lease = WriterLease {
             lease_id,
             thread: draft.thread,
@@ -221,6 +267,15 @@ impl WriterLeaseStore {
             lease,
             token,
         }))
+    }
+
+    /// Advisory preflight. `reserve` repeats this check under the write lock.
+    pub fn live_owner(&self, thread: &str, path: Option<&Path>) -> Result<Option<WriterLease>> {
+        let path = path.map(std::fs::canonicalize).transpose()?;
+        Ok(self
+            .list()?
+            .into_iter()
+            .find(|lease| lease.conflicts_with(thread, path.as_deref())))
     }
 
     pub fn authenticate_and_renew(
@@ -352,6 +407,48 @@ mod tests {
             pid: None,
             boot_id: None,
         }
+    }
+
+    #[test]
+    fn separate_checkouts_of_one_thread_have_independent_writers() {
+        let temp = TempDir::new().expect("lease directory");
+        let store = WriterLeaseStore::new(temp.path());
+        for name in ["agent-a", "agent-b"] {
+            let path = temp.path().join(name);
+            std::fs::create_dir(&path).expect("checkout directory");
+            let mut request = draft("shared-thread");
+            request.path = Some(path);
+            assert!(
+                matches!(
+                    store
+                        .reserve(request, Utc::now())
+                        .expect("reserve checkout"),
+                    WriterLeaseReserveOutcome::Reserved(_)
+                ),
+                "different checkouts must not contend on their Thread"
+            );
+        }
+        assert_eq!(store.list().expect("leases").len(), 2);
+    }
+
+    #[test]
+    fn one_checkout_cannot_have_two_writers_even_under_different_thread_names() {
+        let temp = TempDir::new().expect("lease directory");
+        let store = WriterLeaseStore::new(temp.path());
+        let path = temp.path().join("checkout");
+        std::fs::create_dir(&path).expect("checkout directory");
+        let mut first = draft("thread-a");
+        first.path = Some(path.clone());
+        let mut second = draft("thread-b");
+        second.path = Some(path.join("."));
+        assert!(matches!(
+            store.reserve(first, Utc::now()).expect("first writer"),
+            WriterLeaseReserveOutcome::Reserved(_)
+        ));
+        assert!(matches!(
+            store.reserve(second, Utc::now()).expect("competing writer"),
+            WriterLeaseReserveOutcome::LiveOwner(_)
+        ));
     }
 
     #[test]

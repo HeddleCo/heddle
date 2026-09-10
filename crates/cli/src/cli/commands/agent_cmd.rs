@@ -227,11 +227,8 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     };
 
     let lease_store = WriterLeaseStore::new(repo.heddle_dir());
-    if let Some(owner) = lease_store
-        .list()?
-        .into_iter()
-        .find(|lease| lease.status == WriterLeaseStatus::Active && lease.thread == thread_name)
-    {
+    let reservation_path = existing_thread_execution_path(&repo, &thread_name)?;
+    if let Some(owner) = lease_store.live_owner(&thread_name, reservation_path.as_deref())? {
         return Err(anyhow!(live_owner_conflict_advice(
             &thread_name,
             &anchor_full,
@@ -264,7 +261,6 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     )?;
     let presence_store = ActorPresenceStore::new(repo.heddle_dir());
     let task_assignment_id = task_record.as_ref().map(|task| task.task_id.clone());
-    let reservation_path = existing_thread_execution_path(&repo, &thread_name)?;
     let presence = presence_store.create_generated_entry(|session_id| {
         Ok(ActorPresence {
             session_id: session_id.to_string(),

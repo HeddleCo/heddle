@@ -12,12 +12,15 @@ mod pack_index;
 mod pack_reader;
 mod repack;
 mod shared;
+mod source_pack;
 mod streaming_builder;
 pub(crate) mod varint;
 mod versioned_header;
 
 #[cfg(test)]
 mod pack_tests;
+#[cfg(test)]
+mod source_pack_tests;
 
 pub use compact_frame::compress_compact_frame;
 pub use manager::PackManager;
@@ -38,6 +41,7 @@ pub use shared::{
     write_container_header,
 };
 pub(crate) use shared::{verify_supported_container, verify_supported_container_layout};
+pub use source_pack::{build_source_pack, build_source_pack_with_references};
 pub use streaming_builder::{StreamingPackBuilder, SyncData};
 
 /// Object type for pack entries.

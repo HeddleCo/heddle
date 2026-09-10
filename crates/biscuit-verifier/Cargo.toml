@@ -1,0 +1,40 @@
+[package]
+name = "heddle-biscuit-verifier"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Shared ordinary Biscuit access verification for Heddle, Weft, and browser hosts"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+base64.workspace = true
+biscuit-auth.workspace = true
+# Binds an attenuated capability to its authorized extent set (weft#1055).
+# Pure-Rust fallback keeps the Worker WASM build working.
+blake3.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+thiserror.workspace = true
+uuid = { version = "1", default-features = false }
+
+# biscuit-auth's `wasm` feature pulls `wasm-bindgen` as a *host* crate (not
+# wasm32-gated). Enable it only for the Worker build. `chrono`'s `wasmbind`
+# is already target-gated inside chrono, but `Utc::now()` on wasm32 needs it.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+biscuit-auth = { workspace = true, features = ["wasm"] }
+chrono = { workspace = true, features = ["wasmbind"] }
+# Biscuit's wasm feature supplies bindings but does not select its entropy
+# backend. This leaf must build without a sibling enabling getrandom's JS path.
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+heddle-api = { package = "heddle-api", version = "0.29.0" }
+heddleco-capability-verifier = { path = "../capability-verifier", version = "0.17.0" }
+proptest.workspace = true
+
+[lib]
+path = "src/lib.rs"

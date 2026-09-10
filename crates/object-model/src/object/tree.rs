@@ -4,7 +4,7 @@
 use std::{fmt, path::Path, sync::Arc};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
+use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{ContentHash, SpoolId, StateId};
 

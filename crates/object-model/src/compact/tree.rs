@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
+use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
     Result, invalid,

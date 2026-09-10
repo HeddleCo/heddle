@@ -13,7 +13,7 @@ mod syntax_index;
 mod parser_tests;
 
 pub use comment_walk::{is_comment_node, walk_non_comment_leaves};
-pub use parser_core::ParsedFile;
+pub use parser_core::{ParseBudget, ParsedFile};
 pub use parser_deps::extract_dependencies;
 pub use parser_language::Language;
 #[cfg(test)]

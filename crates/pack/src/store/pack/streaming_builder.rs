@@ -376,7 +376,13 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
     /// varint decoder accepts non-canonical encodings (it walks
     /// continuation bits without enforcing minimum-byte form), so the
     /// padded write decodes back to the same value any reader expects.
-    pub fn add_id(&mut self, id: PackObjectId, obj_type: ObjectType, data: Vec<u8>) -> Result<()> {
+    pub fn add_id(
+        &mut self,
+        id: PackObjectId,
+        obj_type: ObjectType,
+        data: impl AsRef<[u8]>,
+    ) -> Result<()> {
+        let data = data.as_ref();
         // Compute the entry's offset relative to the header from our logical
         // append cursor. Asking the underlying file for its position would
         // flush the BufWriter on every object, which defeats the streaming
@@ -384,13 +390,16 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         let pw = self
             .pack_writer
             .as_mut()
-            .expect("add_id called after finalize");
+            .ok_or_else(|| StoreError::InvalidObject("pack builder is finalized".into()))?;
         let entry_start = self.pack_position;
         let offset = entry_start
             .checked_sub(self.header_offset)
-            .expect("header_offset should never be past current position");
+            .ok_or_else(|| StoreError::InvalidObject("pack position precedes its header".into()))?;
 
-        self.total_uncompressed += data.len() as u64;
+        self.total_uncompressed = self
+            .total_uncompressed
+            .checked_add(data.len() as u64)
+            .ok_or_else(|| StoreError::InvalidObject("pack decoded size overflow".into()))?;
 
         // Phase 1: write the entry header up to (but not including) the
         // compressed-size varint. Always small, fits in `entry_header_buf`.
@@ -448,7 +457,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
                 .ok_or_else(|| {
                     StoreError::InvalidObject("streaming pack position overflow".to_string())
                 })?;
-            pw.write_all(&data).map_err(StoreError::from)?;
+            pw.write_all(data).map_err(StoreError::from)?;
             self.pack_position = self
                 .pack_position
                 .checked_add(data.len() as u64)
@@ -482,7 +491,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
                     // wrote exactly what we promised at finish().
                     enc.set_pledged_src_size(Some(data.len() as u64))
                         .map_err(StoreError::from)?;
-                    enc.write_all(&data).map_err(StoreError::from)?;
+                    enc.write_all(data).map_err(StoreError::from)?;
                     enc.finish().map_err(StoreError::from)?;
                     compressed_size = counting.written;
                 }
@@ -519,7 +528,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
                     inner
                         .seek(SeekFrom::Start(body_start))
                         .map_err(StoreError::from)?;
-                    inner.write_all(&data).map_err(StoreError::from)?;
+                    inner.write_all(data).map_err(StoreError::from)?;
                 }
                 inner
                     .seek(SeekFrom::Start(body_end))
@@ -1263,7 +1272,7 @@ mod tests {
         b.add_id(
             PackObjectId::StateId(state_cid),
             ObjectType::State,
-            b"serialized-state".to_vec(),
+            b"serialized-state",
         )
         .unwrap();
 

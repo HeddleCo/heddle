@@ -39,6 +39,9 @@ pub struct CredentialDefaults {
 /// Credential for a single Heddle server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerCredential {
+    /// Public canonical SignedMintRootAttachment bytes; verified against owner history when used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mint_root_attachment: Option<Vec<u8>>,
     pub token: String,
     pub subject: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -121,7 +124,7 @@ pub fn resolve_credential_for_server(server_key: &str) -> Result<Option<ServerCr
     }
 
     // Try with scheme prefixes (auth login stores the full --server URL as the key).
-    for prefix in &["http://", "https://", "heddle://"] {
+    for prefix in &["http://", "https://"] {
         let prefixed = format!("{prefix}{server_key}");
         if let Some(cred) = store.servers.get(&prefixed) {
             return Ok(Some(cred.clone()));
@@ -131,8 +134,7 @@ pub fn resolve_credential_for_server(server_key: &str) -> Result<Option<ServerCr
     // Try stripping scheme prefixes (in case the key has a scheme but the store doesn't).
     let stripped = server_key
         .strip_prefix("http://")
-        .or_else(|| server_key.strip_prefix("https://"))
-        .or_else(|| server_key.strip_prefix("heddle://"));
+        .or_else(|| server_key.strip_prefix("https://"));
     if let Some(bare) = stripped
         && let Some(cred) = store.servers.get(bare)
     {
@@ -250,6 +252,7 @@ mod tests {
             store.servers.insert(
                 "heddle.example:8421".to_string(),
                 ServerCredential {
+                    mint_root_attachment: None,
                     token: "token-123".to_string(),
                     subject: "dev".to_string(),
                     device_id: Some("device-1".to_string()),
@@ -309,6 +312,7 @@ private_key = "legacy-pem"
             store.servers.insert(
                 "heddle.example:8421".to_string(),
                 ServerCredential {
+                    mint_root_attachment: None,
                     token: "token-123".to_string(),
                     subject: "dev".to_string(),
                     device_id: None,
@@ -346,6 +350,7 @@ private_key = "legacy-pem"
             store.servers.insert(
                 "heddle.example:8421".to_string(),
                 ServerCredential {
+                    mint_root_attachment: None,
                     token: "token-123".to_string(),
                     subject: "dev".to_string(),
                     device_id: None,
@@ -381,6 +386,7 @@ private_key = "legacy-pem"
             store.servers.insert(
                 "http://heddle.example:8421".to_string(),
                 ServerCredential {
+                    mint_root_attachment: None,
                     token: "token-abc".to_string(),
                     subject: "dev".to_string(),
                     device_id: None,

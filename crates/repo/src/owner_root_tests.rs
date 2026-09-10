@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use api::heddle::api::v1alpha1::{
+use api::heddle::api::v2alpha1::{
     AuthorizationSignature, AuthorizationVerificationKey, OwnerKeyBindingKind, OwnerKeyTransition,
     OwnerKeyTransitionKind, RecoveryGuardian, RecoveryGuardianKind, RecoveryPolicy,
     SignedOwnerRoot,
@@ -401,4 +401,259 @@ fn agent_claim_binding_uses_registration_nonce_and_verifies_against_the_root() {
     );
     let state = verify_owner_root(&signed).expect("root");
     verify_owner_key_binding(&binding, &state, &ACCOUNT).expect("weft verifies the binding");
+}
+
+#[test]
+fn proposed_claim_binds_entire_transition_and_browser_registration_key() {
+    let agent = crypto::Ed25519Signer::generate().expect("agent");
+    let human = crypto::Ed25519Signer::generate().expect("human");
+    let g1 = crypto::Ed25519Signer::generate().expect("guardian one");
+    let g2 = crypto::Ed25519Signer::generate().expect("guardian two");
+    let root = sign_claimable_deferred_human_root(&agent, ACCOUNT, [5; 32], NOW).expect("root");
+    let policy = paper_policy(&g1, &g2);
+    let (key, proof, guardians) =
+        browser_claim_proofs(&root, &human, &policy, &[g1, g2], NOW + 1, [8; 32]);
+    let proposed = api::heddle::api::v2alpha1::SignedOwnerKeyTransition {
+        transition: Some(
+            crate::claim_deferred_human_transition(&root, key, policy, NOW + 1, [8; 32])
+                .expect("body"),
+        ),
+        authorizations: vec![],
+        next_authority_key_proof: Some(proof),
+        next_recovery_key_proofs: guardians,
+    };
+    let signed = crate::sign_proposed_account_claim(&agent, &root, &proposed, human.public_key())
+        .expect("cosign exact proposal");
+    assert_eq!(signed.transition, proposed.transition);
+    assert_eq!(signed.authorizations.len(), 1);
+    assert_eq!(
+        signed.next_authority_key_proof,
+        proposed.next_authority_key_proof
+    );
+    assert!(
+        crate::sign_proposed_account_claim(&agent, &root, &proposed, agent.public_key())
+            .expect_err("registration key substitution")
+            .to_string()
+            .contains("registration")
+    );
+    let mut changed = proposed.clone();
+    changed.transition.as_mut().expect("body").sequence = 2;
+    assert!(
+        crate::sign_proposed_account_claim(&agent, &root, &changed, human.public_key())
+            .expect_err("sequence substitution")
+            .to_string()
+            .contains("exact")
+    );
+    let mut changed = proposed.clone();
+    changed.transition.as_mut().expect("body").owner_id = [7; 32].to_vec();
+    assert!(
+        crate::sign_proposed_account_claim(&agent, &root, &changed, human.public_key())
+            .expect_err("owner substitution")
+            .to_string()
+            .contains("exact")
+    );
+    assert!(
+        crate::sign_proposed_account_claim(&agent, &root, &signed, human.public_key())
+            .expect_err("already authorized proposal")
+            .to_string()
+            .contains("authorizations")
+    );
+}
+
+#[test]
+fn spool_genesis_requires_current_authority_and_verifiable_history() {
+    use api::heddle::api::v2alpha1::{OwnerState, PrincipalRef};
+    let old = crypto::Ed25519Signer::generate().expect("original authority");
+    let current = crypto::Ed25519Signer::generate().expect("current authority");
+    let root = sign_claimable_deferred_human_root(&old, ACCOUNT, [7; 32], NOW).expect("root");
+    let left = crypto::Ed25519Signer::generate().expect("guardian");
+    let right = crypto::Ed25519Signer::generate().expect("guardian");
+    let policy = paper_policy(&left, &right);
+    let (next_authority_key, next_authority_key_proof, next_recovery_key_proofs) =
+        browser_claim_proofs(&root, &current, &policy, &[left, right], NOW + 1, [8; 32]);
+    let transition = sign_claim_deferred_human(ClaimDeferredHuman {
+        current_authority: &old,
+        signed_root: &root,
+        next_authority_key,
+        next_authority_key_proof,
+        next_recovery_policy: policy,
+        next_recovery_key_proofs,
+        valid_from_unix_seconds: NOW + 1,
+        nonce: [8; 32],
+    })
+    .expect("owner handoff");
+    let state = apply_transition(
+        &verify_owner_root(&root).expect("root verified"),
+        &transition,
+        NOW + 1,
+        VerificationLimits::new(30 * 24 * 60 * 60).expect("limits"),
+    )
+    .expect("history verified");
+    let owner = OwnerState {
+        owner: Some(PrincipalRef {
+            id: uuid::Uuid::from_bytes(ACCOUNT).to_string(),
+        }),
+        root: Some(root),
+        accepted_transitions: vec![transition],
+        version: state.state_hash().to_vec(),
+        ..Default::default()
+    };
+    let late = NOW + crate::CLAIMABLE_DEFERRED_HUMAN_TTL_SECS + 1;
+    let initial = verify_owner_root(owner.root.as_ref().expect("original root")).expect("root");
+    let accepted = &owner.accepted_transitions[0];
+    assert!(
+        apply_transition(
+            &initial,
+            accepted,
+            late,
+            VerificationLimits::new(30 * 24 * 60 * 60).expect("limits")
+        )
+        .is_err(),
+        "late new claim remains inadmissible"
+    );
+    assert!(
+        matches!(
+            heddleco_capability_verifier::apply_accepted_transition(
+                &initial,
+                accepted,
+                NOW,
+                VerificationLimits::new(30 * 24 * 60 * 60).expect("limits")
+            ),
+            Err(heddleco_capability_verifier::Error::NotYetValid)
+        ),
+        "future activation cannot enter accepted history"
+    );
+    let replayed = heddleco_capability_verifier::apply_accepted_transition(
+        &initial,
+        accepted,
+        late,
+        VerificationLimits::new(30 * 24 * 60 * 60).expect("limits"),
+    )
+    .expect("accepted claim remains verifiable after original deadline");
+    assert_eq!(
+        replayed.state_hash(),
+        state.state_hash(),
+        "replay retains the exact authority state"
+    );
+    crate::sign_current_spool_owner_genesis(&current, uuid::Uuid::now_v7(), &owner, late)
+        .expect("current authority remains usable after original agent claim deadline");
+    let spool = uuid::Uuid::now_v7();
+    let genesis = crate::sign_current_spool_owner_genesis(&current, spool, &owner, NOW + 1)
+        .expect("current authority can create spool");
+    assert_eq!(
+        verify_spool_owner_genesis(&genesis)
+            .expect("spool proof")
+            .spool_uuid(),
+        *spool.as_bytes()
+    );
+    assert!(
+        crate::sign_current_spool_owner_genesis(&old, spool, &owner, NOW + 1).is_err(),
+        "retired original authority cannot issue genesis"
+    );
+    let initial = verify_owner_root(owner.root.as_ref().expect("root")).expect("root");
+    let mut observation = owner.clone();
+    observation.resource_keyring = Some(api::heddle::api::v2alpha1::CloneAuthorizationKeyring {
+        format_version: 1,
+        spool_uuid: spool.as_bytes().to_vec(),
+        canonical_spool_path_segments: vec!["test".into()],
+        pin: Some(api::heddle::api::v2alpha1::CloneOwnerPin {
+            kind: api::heddle::api::v2alpha1::CloneOwnerPinKind::CloneTofu as i32,
+            expected_owner_id: initial.owner_id().to_vec(),
+            first_seen_unix_seconds: NOW,
+        }),
+        owner_root: owner.root.clone(),
+        accepted_transitions: owner.accepted_transitions.clone(),
+        accepted_state_hash: owner.version.clone(),
+        owner_genesis: Some(genesis.clone()),
+        ..Default::default()
+    });
+    crate::verify_spool_owner_observation(&genesis, &observation, spool, NOW + 1)
+        .expect("current issuer proven");
+    let old_genesis =
+        crate::sign_spool_owner_genesis(&old, *spool.as_bytes()).expect("original genesis");
+    observation
+        .resource_keyring
+        .as_mut()
+        .expect("keyring")
+        .owner_genesis = Some(old_genesis.clone());
+    crate::verify_spool_owner_observation(&old_genesis, &observation, spool, NOW + 1)
+        .expect("immutable historical issuer remains valid");
+    assert!(
+        crate::verify_spool_owner_observation(&genesis, &observation, spool, NOW + 1).is_err(),
+        "different advertised genesis rejected"
+    );
+    let temp = tempfile::TempDir::new().expect("owner pin repository");
+    let repo = crate::Repository::init_default(temp.path()).expect("repository");
+    let path = vec!["test".to_owned()];
+    repo.verify_and_pin_owner_observation(&old_genesis, &observation, spool, &path, late)
+        .expect("pin accepted historical ownership");
+    let stored =
+        std::fs::read(repo.heddle_dir().join("owner-authorization.bin")).expect("pin bytes");
+    let mut rollback = observation.clone();
+    rollback.accepted_transitions.clear();
+    rollback.version = initial.state_hash().to_vec();
+    let rollback_keyring = rollback.resource_keyring.as_mut().expect("keyring");
+    rollback_keyring.accepted_transitions.clear();
+    rollback_keyring.accepted_state_hash = initial.state_hash().to_vec();
+    assert!(
+        repo.verify_and_pin_owner_observation(&old_genesis, &rollback, spool, &path, late)
+            .expect_err("accepted current authority cannot roll back")
+            .to_string()
+            .contains("rolls back")
+    );
+    assert_eq!(
+        std::fs::read(repo.heddle_dir().join("owner-authorization.bin")).expect("pin"),
+        stored,
+        "failed observation never replaces stored authority"
+    );
+    let reopened = crate::Repository::open(temp.path()).expect("reopened repository");
+    reopened
+        .verify_and_pin_owner_observation(&old_genesis, &observation, spool, &path, late)
+        .expect("identical accepted state is idempotent across restart");
+    observation.resource_keyring = None;
+    assert!(
+        crate::verify_spool_owner_observation(&old_genesis, &observation, spool, NOW + 1).is_err(),
+        "missing resource history is not authority"
+    );
+    let mut changed = owner.clone();
+    changed.version[0] ^= 1;
+    assert!(crate::sign_current_spool_owner_genesis(&current, spool, &changed, NOW + 1).is_err());
+    changed = owner.clone();
+    changed.accepted_transitions[0].authorizations[0].signature[0] ^= 1;
+    assert!(crate::sign_current_spool_owner_genesis(&current, spool, &changed, NOW + 1).is_err());
+    changed = owner;
+    changed.owner.as_mut().expect("owner").id = uuid::Uuid::now_v7().to_string();
+    assert!(crate::sign_current_spool_owner_genesis(&current, spool, &changed, NOW + 1).is_err());
+}
+
+#[test]
+fn custodial_roots_preserve_dedicated_account_authority_and_recovery() {
+    let authority = crypto::Ed25519Signer::from_seed(&[131; 32]).expect("account authority");
+    let recovery = crypto::Ed25519Signer::from_seed(&[132; 32]).expect("dedicated recovery");
+    let root = crate::sign_custodial_owner_root(&authority, &recovery, ACCOUNT, [133; 32])
+        .expect("custodial root");
+    let state = verify_owner_root(&root).expect("portable verification");
+    assert_eq!(state.authority_key().public_key, authority.public_key());
+    assert_eq!(state.recovery_policy().threshold, 1);
+    assert_eq!(state.recovery_policy().window_secs, Some(604800));
+    assert_eq!(
+        state.recovery_policy().guardians[0]
+            .key
+            .as_ref()
+            .expect("guardian")
+            .public_key,
+        recovery.public_key()
+    );
+    let binding =
+        crate::sign_custodial_owner_binding(&authority, &root, [134; 32]).expect("account binding");
+    verify_owner_key_binding(&binding, &state, &ACCOUNT).expect("exact stable account");
+    assert!(verify_owner_key_binding(&binding, &state, &[9; 16]).is_err());
+    assert!(crate::sign_custodial_owner_binding(&recovery, &root, [134; 32]).is_err());
+    assert!(crate::sign_custodial_owner_root(&authority, &authority, ACCOUNT, [133; 32]).is_err());
+    let mut changed = root;
+    changed.recovery_key_proofs[0].signature[0] ^= 1;
+    assert!(
+        verify_owner_root(&changed).is_err(),
+        "guardian actually proves its dedicated key"
+    );
 }

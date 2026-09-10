@@ -31,6 +31,7 @@ impl CredentialSource {
 }
 
 pub struct ResolvedHostedCredential {
+    pub mint_root_attachment: Option<Vec<u8>>,
     pub token: Option<AuthToken>,
     pub proof_key_pem: Option<String>,
     pub(crate) renewable: Option<RenewableAuthorityCredential>,
@@ -96,6 +97,7 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
             );
         }
         return Ok(ResolvedHostedCredential {
+            mint_root_attachment: verified.mint_root_attachment,
             token: Some(AuthToken::new(verified.token, "hcred-env")),
             proof_key_pem: Some(verified.proof_key_pem),
             renewable: None,
@@ -111,6 +113,7 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
     {
         let renewable = RenewableAuthorityCredential::from_stored(&credential);
         return Ok(ResolvedHostedCredential {
+            mint_root_attachment: credential.mint_root_attachment,
             token: Some(AuthToken::new(credential.token, "credential-store")),
             proof_key_pem: credential.private_key_pem,
             renewable,
@@ -122,6 +125,7 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
     }
 
     Ok(ResolvedHostedCredential {
+        mint_root_attachment: None,
         token: None,
         proof_key_pem: None,
         renewable: None,
@@ -142,7 +146,6 @@ pub(crate) fn server_keys_match(left: &str, right: &str) -> bool {
         value
             .strip_prefix("http://")
             .or_else(|| value.strip_prefix("https://"))
-            .or_else(|| value.strip_prefix("heddle://"))
             .unwrap_or(value)
     }
     without_scheme(left) == without_scheme(right)
@@ -174,6 +177,7 @@ mod tests {
         crate::hosted_runtime::credential_file::write_credential_file(
             path,
             &crate::hosted_runtime::credential_file::VerifiedCredential {
+                mint_root_attachment: None,
                 server: server.to_string(),
                 kind: crate::hosted_runtime::credential_file::CredentialKind::Device,
                 subject: subject.to_string(),
@@ -251,6 +255,7 @@ mod tests {
             config::credentials::store_server_credential(
                 "api.target.test",
                 config::credentials::ServerCredential {
+                    mint_root_attachment: None,
                     token: "keystore-token".to_string(),
                     subject: "human".to_string(),
                     device_id: None,
@@ -278,6 +283,7 @@ mod tests {
             config::credentials::store_server_credential(
                 "api.target.test",
                 config::credentials::ServerCredential {
+                    mint_root_attachment: None,
                     token: "keystore-token".to_string(),
                     subject: "human".to_string(),
                     device_id: None,

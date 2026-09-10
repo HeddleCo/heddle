@@ -61,14 +61,7 @@ impl HarnessActorProbe for ClaudeCodeProbe {
                 .cloned()
                 .or_else(|| argv_value(argv, "--effort"))
                 .or_else(|| input.env_hints.get("THINKING_LEVEL").cloned()),
-            native_actor_key: agent_id
-                .clone()
-                .map(|id| format!("claude-code:agent:{id}"))
-                .or_else(|| {
-                    session_id
-                        .clone()
-                        .map(|id| format!("claude-code:session:{id}"))
-                }),
+            native_actor_key: claude_actor_key(session_id.as_deref(), agent_id.as_deref()),
             native_parent_actor_key: agent_id
                 .as_ref()
                 .and(session_id.as_ref())
@@ -116,4 +109,16 @@ impl HarnessActorProbe for ClaudeCodeProbe {
             ..HarnessProbeResult::default()
         })
     }
+}
+
+/// One identity codec shared by session registration and the lightweight hooks.
+pub(crate) fn claude_actor_key(session: Option<&str>, agent: Option<&str>) -> Option<String> {
+    agent
+        .filter(|id| !id.is_empty())
+        .map(|id| format!("claude-code:agent:{id}"))
+        .or_else(|| {
+            session
+                .filter(|id| !id.is_empty())
+                .map(|id| format!("claude-code:session:{id}"))
+        })
 }

@@ -3,15 +3,20 @@
 //!
 //! Actors are Heddle's native record of an active harness or agent identity
 //! working on a thread. They are user-facing handles over the lightweight
-//! presence stored in `.heddle/actor-presence/`.
+//! presence stored in the shared `.heddle/metadata.sqlite3` database.
 //!
 //! List/show/spawn/done domain assembly and pure planning live in
 //! `verbs::actor`. This module owns implicit session resolution,
 //! thread-ref minting, harness probing, recovery advice, and human/JSON render.
 
 use anyhow::{Result, anyhow};
-use repo::Repository;
-use repo::{ActorPresence, ActorPresenceStore};
+// The presence wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
+    ActorDoneOutput, ActorEnvironmentOutput, ActorExplainDetectedOutput, ActorListOutput,
+    ActorSingleOutput, DetectedActorOutput,
+};
+use repo::{ActorPresence, ActorPresenceStore, Repository};
 use serde::Serialize;
 use verbs::{
     ActorEntryReport, ActorListReport, list_actors, mark_actor_done, plan_actor_done,
@@ -28,13 +33,6 @@ use super::{
     },
 };
 use crate::cli::{Cli, should_output_json};
-
-// The presence wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
-    ActorDoneOutput, ActorEnvironmentOutput, ActorExplainDetectedOutput, ActorListOutput,
-    ActorSingleOutput, DetectedActorOutput,
-};
 
 #[derive(Serialize)]
 struct ActorExplainOutput {

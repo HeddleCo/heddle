@@ -7,8 +7,7 @@ use super::root_mint::{
     mint_agent_root, mint_independent_root, remint_stored_root,
 };
 use crate::hosted_runtime::{
-    auth::headless_token_metadata,
-    device_flow::{AgentTemplate, SAFE_AGENT_OPERATIONS, restrict_agent_account_root},
+    auth::headless_token_metadata, device_flow::restrict_agent_account_root,
 };
 
 #[test]
@@ -172,124 +171,22 @@ fn expired_local_agent_root_remints_the_same_registered_key() {
 }
 
 #[test]
-fn restricted_agent_capability_keeps_the_deny_floor() {
-    let signer = Ed25519Signer::generate().expect("seed");
-    let root = mint_agent_root(&signer.to_seed()).expect("agent root");
-    let restricted =
-        restrict_agent_account_root(&root.token, &signer, root.expires_at).expect("restrict");
-    let metadata = headless_token_metadata(&restricted).expect("metadata");
-    assert!(metadata.is_derived);
-    assert!(is_local_agent_root(
-        &metadata.subject,
-        &metadata.proof_public_key_hex
-    ));
-    let biscuit =
-        biscuit_auth::UnverifiedBiscuit::from_base64(restricted.as_bytes()).expect("parse");
-    let block = biscuit.print_block_source(1).expect("attenuation");
-    for denied in [
-        "CreateServiceAccount",
+fn locally_bound_account_credential_preserves_the_parent_authority() {
+    let signer = Ed25519Signer::generate().expect("owner signer");
+    let root = mint_agent_root(&signer.to_seed()).expect("account root");
+    let bound = restrict_agent_account_root(&root.token, &signer, root.expires_at)
+        .expect("local credential");
+    for operation in [
+        "CreateSignupInvitation",
+        "CreateSpool",
         "DeleteSpool",
-        "BootstrapOwnerRoot",
         "RevokeSession",
-        "CreateAgentAccount",
-        "ClaimHandle",
-        "ClaimSignupInvite",
-        "PromoteAgentAccount",
+        "BootstrapOwnership",
+        "PutGrant",
     ] {
-        assert!(
-            block.contains(&format!(r#"$op != "{denied}""#)),
-            "deny floor missing {denied}: {block}"
-        );
+        authorize_restricted_root(&bound, &signer.to_seed(), operation)
+            .expect("account authority inherited");
     }
-    for everyday in ["CreateSignupInvite", "ListSignupInvites"] {
-        assert!(
-            !block.contains(&format!(r#"$op != "{everyday}""#)),
-            "account-root deny floor must not include {everyday}: {block}"
-        );
-    }
-    assert!(
-        !block.contains("$op =="),
-        "account root must not carry the SAFE child allowlist: {block}"
-    );
-}
-
-/// The unclaimed agent-rooted login root is the account. Remint keeps the
-/// deny floor but not the derive-agent child ceiling, so everyday account
-/// ops including signup-invite mint/list must authorize.
-#[test]
-fn restricted_agent_root_can_mint_and_list_signup_invites() {
-    let signer = Ed25519Signer::generate().expect("seed");
-    let seed = signer.to_seed();
-    let root = mint_agent_root(&seed).expect("agent root");
-    let restricted =
-        restrict_agent_account_root(&root.token, &signer, root.expires_at).expect("restrict");
-    for allowed in ["CreateSignupInvite", "ListSignupInvites", "WhoAmI"] {
-        authorize_restricted_root(&restricted, &seed, allowed)
-            .unwrap_or_else(|error| panic!("account root must authorize {allowed}: {error}"));
-    }
-    for denied in [
-        "CreateServiceAccount",
-        "CreateAgentAccount",
-        "RevokeSession",
-        "ClaimSignupInvite",
-    ] {
-        assert!(
-            authorize_restricted_root(&restricted, &seed, denied).is_err(),
-            "account root must still deny {denied}"
-        );
-    }
-}
-
-/// Derived children stay on the SAFE / template ceiling. Invite mint and
-/// list are everyday account-root ops, not child grants.
-#[test]
-fn derived_contributor_cannot_mint_or_list_signup_invites() {
-    let contributor = AgentTemplate::Contributor.operations();
-    for template in AgentTemplate::ALL {
-        let operations = template.operations();
-        for denied in ["CreateSignupInvite", "ListSignupInvites"] {
-            assert!(
-                !operations.iter().any(|operation| operation == denied),
-                "template {:?} must not grant {denied}",
-                template.as_str()
-            );
-        }
-    }
-    for denied in ["CreateSignupInvite", "ListSignupInvites"] {
-        assert!(
-            !SAFE_AGENT_OPERATIONS.contains(&denied),
-            "SAFE_AGENT_OPERATIONS is the derive-agent child ceiling and must not include {denied}"
-        );
-        assert!(
-            !contributor.iter().any(|operation| operation == denied),
-            "contributor child must not receive {denied}"
-        );
-    }
-}
-
-/// weft#2041 (Option C): owner-root install is performed only by the FULL,
-/// unrestricted client-minted root; the restricted account credential persisted
-/// to disk must be barred from it at the Biscuit layer. Prove both halves: the
-/// full root authorizes `BootstrapOwnerRoot`, and the restricted credential is
-/// REJECTED for it by the deny floor.
-#[test]
-fn only_the_full_root_authorizes_the_owner_root_pin() {
-    let signer = Ed25519Signer::generate().expect("seed");
-    let seed = signer.to_seed();
-    let root = mint_agent_root(&seed).expect("agent root");
-    authorize_restricted_root(&root.token, &seed, "BootstrapOwnerRoot")
-        .expect("the full unrestricted root must authorize the owner-root pin");
-
-    let restricted =
-        restrict_agent_account_root(&root.token, &signer, root.expires_at).expect("restrict");
-    assert!(
-        authorize_restricted_root(&restricted, &seed, "BootstrapOwnerRoot").is_err(),
-        "the restricted on-disk credential must NOT be able to install an owner root"
-    );
-    // The credential still authorizes its everyday account op, so the deny is
-    // scoped to owner-root install, not a blanket lockout.
-    authorize_restricted_root(&restricted, &seed, "CreateSignupInvite")
-        .expect("the account root must still authorize everyday ops");
 }
 
 fn authorize_restricted_root(
@@ -313,50 +210,4 @@ fn authorize_restricted_root(
         .policy("allow if true")?
         .build(&biscuit)?;
     authorizer.authorize().map(|_| ())
-}
-
-/// Regression: the agent ceiling must carry the personal-spool discovery +
-/// provisioning ops. Without them, an unclaimed agent-rooted account's
-/// `heddle push <host>` aborts client-side inside `auto_provision_hosted_repo`
-/// before `GetCurrentUserSpool`/`CreateSpool` are ever sent — the account can
-/// mint, WhoAmI, and ListRefs, but never provision its own spool. weft admits
-/// both server-side for unclaimed agent-rooted accounts (weft#1852/#1853).
-#[test]
-fn safe_ceiling_allows_host_only_spool_provisioning() {
-    for op in [
-        "GetCurrentUserSpool",
-        "CreateSpool",
-        "GetCurrentOwnerKeyring",
-    ] {
-        assert!(
-            SAFE_AGENT_OPERATIONS.contains(&op),
-            "agent ceiling missing {op}: host-only auto-provision / owner-keyring read cannot fire it"
-        );
-    }
-}
-
-/// weft#2041 (Option C): owner-root *install* is deliberately absent from the
-/// agent ceiling. Neither the restricted account root nor any derived child may
-/// carry it; only the full unrestricted root pins. Reads of the owner keyring
-/// stay available.
-#[test]
-fn safe_ceiling_excludes_owner_root_install() {
-    assert!(
-        !SAFE_AGENT_OPERATIONS.contains(&"BootstrapOwnerRoot"),
-        "BootstrapOwnerRoot must not be in the derive-agent child ceiling",
-    );
-    for template in AgentTemplate::ALL {
-        assert!(
-            !template
-                .operations()
-                .iter()
-                .any(|op| op == "BootstrapOwnerRoot"),
-            "template {:?} must not grant owner-root install",
-            template.as_str(),
-        );
-    }
-    assert!(
-        SAFE_AGENT_OPERATIONS.contains(&"GetCurrentOwnerKeyring"),
-        "owner-keyring reads must remain available to agents",
-    );
 }

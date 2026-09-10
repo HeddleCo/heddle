@@ -10,7 +10,7 @@ mod claude_code;
 mod codex;
 mod opencode;
 
-pub(crate) use claude_code::ClaudeCodeProbe;
+pub(crate) use claude_code::{ClaudeCodeProbe, claude_actor_key};
 pub(crate) use codex::{CodexProbe, codex_session_probe_metadata};
 pub(crate) use opencode::OpenCodeProbe;
 

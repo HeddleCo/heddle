@@ -17,7 +17,7 @@ pub use body_details::{
     Conclusion, Execution, FailureClass, FailureDetail, LogRef, Outcome, Repro,
 };
 use chrono::DateTime;
-use objects::object::{ChangeId, ContentHash};
+use heddle_object_model::object::{ChangeId, ContentHash};
 use serde::{Deserialize, Serialize};
 
 use crate::{Signer, SignerError, verify_payload_signature};

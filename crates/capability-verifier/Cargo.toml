@@ -1,0 +1,62 @@
+[package]
+name = "heddleco-capability-verifier"
+version = "0.17.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["HeddleCo"]
+description = "Pure owner-anchored capability verification shared by Heddle and Weft"
+repository = "https://github.com/HeddleCo/heddle"
+license = "MIT OR Apache-2.0"
+keywords = ["authorization", "capability", "ed25519", "security", "wasm"]
+categories = ["authentication", "cryptography", "wasm"]
+readme = "README.md"
+include = [
+  "/src/**",
+  "/tests/**",
+  "/conformance/**",
+  "/Cargo.toml",
+  "/README.md",
+  "/LICENSE-APACHE",
+  "/LICENSE-MIT",
+]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.22.0" }
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+biscuit-auth = { version = "6.0", default-features = false, features = ["datalog-macro"] }
+ed25519-dalek = { version = "3.0", default-features = false, features = ["alloc", "fast"] }
+heddle-api = "0.29"
+hex = "0.4"
+prost = "0.14"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Browser bindings and the browser clock backend must not enter native hosts.
+biscuit-auth = { version = "6.0", default-features = false, features = ["datalog-macro", "wasm"] }
+# biscuit-auth links its token builder even for verification-only consumers.
+# Enabling its transitive entropy backend makes that pure code linkable in a
+# browser Worker; this crate never calls a randomness API.
+getrandom = { version = "0.2", features = ["js"] }
+wasm-bindgen = "=0.2.127"
+
+[dev-dependencies]
+wasm-bindgen-test = "=0.3.77"
+
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
+
+# Current Rust emits bulk-memory instructions. Keep wasm-pack's optimizer
+# aligned with the target features of the binary it validates.
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "--enable-bulk-memory"]

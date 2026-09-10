@@ -1,9 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use objects::{
-    fs_atomic::write_file_atomic_secret,
-    object::{Attribution, ContentHash, Principal, State},
-};
+use heddle_fs_prims::fs_atomic::write_file_atomic_secret;
+use heddle_object_model::object::{Attribution, ContentHash, Principal, State};
 use tempfile::TempDir;
 
 use crate::{
