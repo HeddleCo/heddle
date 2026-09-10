@@ -26,8 +26,7 @@ fn grant_help_exposes_create_list_delete_and_stays_off_signup_invite() {
     );
     assert!(
         parent_out.contains("writer or below")
-            && (parent_out.contains("admin and owner")
-                || parent_out.contains("Admin and owner")),
+            && (parent_out.contains("admin and owner") || parent_out.contains("Admin and owner")),
         "grant help must state the agent grant ceiling:\n{parent_out}"
     );
     assert!(

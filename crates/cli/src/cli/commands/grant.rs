@@ -273,10 +273,10 @@ fn map_grant_error(spool: &str, err: &ProtocolError) -> anyhow::Error {
         _ => "",
     };
     let lower = message.to_ascii_lowercase();
-    let advice = if is_human_verification_required(&lower) {
-        RecoveryAdvice::grant_needs_human(spool)
-    } else if lower.contains("cannot grant admin or owner") {
+    let advice = if lower.contains("cannot grant admin or owner") {
         RecoveryAdvice::grant_agent_ceiling(spool, "admin or owner")
+    } else if is_human_verification_required(&lower) {
+        RecoveryAdvice::grant_needs_human(spool)
     } else if matches!(
         err,
         ProtocolError::AuthorizationFailed(_) | ProtocolError::AuthenticationFailed(_)

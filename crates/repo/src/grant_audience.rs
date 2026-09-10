@@ -211,9 +211,11 @@ mod tests {
     fn agent_may_grant_writer_and_below_but_not_admin_or_owner() {
         assert!(GrantRole::Reader.agent_may_grant());
         assert!(GrantRole::Developer.agent_may_grant());
-        assert!(GrantRole::from_hosted_role_name("contributor")
-            .expect("contributor alias")
-            .agent_may_grant());
+        assert!(
+            GrantRole::from_hosted_role_name("contributor")
+                .expect("contributor alias")
+                .agent_may_grant()
+        );
         assert!(GrantRole::Maintainer.agent_may_grant());
         assert!(!GrantRole::Admin.agent_may_grant());
         assert!(!GrantRole::Owner.agent_may_grant());
