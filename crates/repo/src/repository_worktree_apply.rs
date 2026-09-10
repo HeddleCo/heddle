@@ -2,7 +2,7 @@
 //! Shared worktree apply planning and execution.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -253,7 +253,7 @@ impl Repository {
                 let delete_phase_ms = delete_start.elapsed().as_millis();
 
                 let write_start = Instant::now();
-                let materialized = self.materialize_tree_seeded(tree, dir)?;
+                let materialized = self.materialize_tree_seeded(tree, dir, &HashSet::new())?;
                 let write_phase_ms = write_start.elapsed().as_millis();
 
                 let index_update_start = Instant::now();

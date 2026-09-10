@@ -8,14 +8,14 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    commands_args::{
-        AdoptArgs, CloneArgs, DiffArgs, DoctorArgs, InitArgs, LandArgs, LogArgs, PullArgs,
-        PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadStartArgs,
-        UndoArgs, WatchArgs, INIT_VERB,
-    },
     AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, EnvCommands, HookCommands,
     IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
     ShellCommands, ThreadCommands, VisibilityCommands,
+    commands_args::{
+        AdoptArgs, CloneArgs, DiffArgs, DoctorArgs, INIT_VERB, InitArgs, LandArgs, LogArgs,
+        PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs,
+        ThreadStartArgs, UndoArgs, WatchArgs,
+    },
 };
 #[cfg(feature = "client")]
 use super::{AuthCommands, ClaimArgs, GrantCommands, PromoteArgs};
@@ -293,7 +293,7 @@ Examples:
     /// — these verbs are the explicit operator overrides.
     ///
     /// Private is per-state and downward-closed: a public descendant that
-    /// still names private-ancestor blobs is withheld from lesser audiences.
+    /// still names private-ancestor blobs is served without those blobs.
     /// It does not hide one path inside a later public tip. Runtime secrets
     /// belong in `heddle env` (literal `.env` capture is reserved, exit 65);
     /// path-level hide of bytes already in history is `heddle redact`.

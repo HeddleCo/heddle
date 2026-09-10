@@ -438,18 +438,22 @@ pub(crate) fn write_isolated_checkout(
     // the raw `materialize_tree`. `heddle start --path` reaches the materializer
     // HERE, not through `materialize_thread`, so the gate must live at this
     // chokepoint too or an embargoed state's bytes leak into the checkout
-    // (#316 / PR #528 Finding 2). Operator-local checkouts use the all-seeing
-    // `Internal` audience; a `Private` state is withheld even from `Internal`
-    // (fail closed) and the checkout receives the courtesy stub instead.
+    // (#316 / PR #528 Finding 2).
+    //
+    // Use the operator audience, not hardcoded Internal: after a Private /
+    // Restricted sidecar is accepted, membership is Restricted(label) and the
+    // capturing owner must see real trees (heddle#1739). Internal cannot see
+    // Private, so a hardcoded Internal audience wrongly embargo-stubbed
+    // `start --from` on the owner's own tip.
     //
     // PROPAGATE the gate outcome to the caller (do NOT discard it): when the base
     // state is withheld, only the courtesy stub is on disk — the real tree was
     // intentionally not materialized. The atomic start path uses this to record a
     // WITHHELD-consistent manifest instead of stat-ing the unmaterialized real
-    // tree, so `heddle start` on a Private base yields a withheld checkout rather
-    // than erroring (#316 / PR #528 r9 Finding 3).
-    let outcome =
-        repo.checkout_state_gated(base_state, &state, abs_path, &AudienceTier::Internal)?;
+    // tree, so `heddle start` on a Private base the operator cannot see yields a
+    // withheld checkout rather than erroring (#316 / PR #528 r9 Finding 3).
+    let audience = repo.local_operator_audience()?;
+    let outcome = repo.checkout_state_gated(base_state, &state, abs_path, &audience)?;
     Ok(outcome)
 }
 
@@ -507,13 +511,11 @@ mod gate_tests {
         state_id
     }
 
-    /// #316 / PR #528 Finding 2: `heddle start --path` reaches the materializer
-    /// via `write_isolated_checkout`, not `materialize_thread`. The visibility
-    /// gate must cover this chokepoint too, or an embargoed state's bytes leak
-    /// into the checkout. An under-tier state gets the courtesy stub, never its
-    /// tracked content.
+    /// heddle#1739: `heddle start --path` uses the operator audience.
+    /// Accepting a Private sidecar stamps Restricted membership, so the
+    /// capturing owner gets the real tree, not an embargo stub.
     #[test]
-    fn write_isolated_checkout_withholds_embargoed_state() {
+    fn write_isolated_checkout_serves_owner_private_state() {
         let repo_dir = TempDir::new().unwrap();
         let repo = Repository::init_default(repo_dir.path()).unwrap();
         std::fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
@@ -524,13 +526,37 @@ mod gate_tests {
         let dest = holder.path().join("out");
         write_isolated_checkout(&repo, &dest, &state_id, Some("main")).expect("checkout");
 
+        assert_eq!(
+            std::fs::read(dest.join("secret.rs")).expect("owner start sees secret"),
+            b"fn exploit() {}\n"
+        );
+        assert!(
+            !dest.join(COURTESY_STUB_FILENAME).exists(),
+            "owner start --from must not land the courtesy stub"
+        );
+    }
+
+    #[test]
+    fn write_isolated_checkout_withholds_private_tip_from_public_audience() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        std::fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
+        repo.snapshot(Some("embargoed".into()), None).unwrap();
+        let state_id = embargo_head(&repo);
+
+        let holder = TempDir::new().unwrap();
+        let dest = holder.path().join("out");
+        let state = repo.store().get_state(&state_id).unwrap().unwrap();
+        repo.checkout_state_gated(&state_id, &state, &dest, &AudienceTier::Public)
+            .expect("public checkout");
+
         assert!(
             dest.join(COURTESY_STUB_FILENAME).exists(),
-            "embargoed start --path must write the courtesy stub"
+            "a Private tip itself is withheld from Public"
         );
         assert!(
             !dest.join("secret.rs").exists(),
-            "embargoed bytes must NOT be materialized via write_isolated_checkout"
+            "Private tip bytes must not be materialized for Public"
         );
     }
 

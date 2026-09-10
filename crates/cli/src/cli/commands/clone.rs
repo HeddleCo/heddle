@@ -1313,13 +1313,16 @@ fn checkout_clone_thread(
     let state = repo
         .store()
         .get_state(state_id)?
-        .ok_or_else(|| anyhow!("missing state object: {state_id}"))?;
+        .ok_or_else(|| anyhow!(clone_advertised_tip_missing_advice(state_id)))?;
     let audience = repo.local_operator_audience()?;
     match repo.checkout_state_gated(state_id, &state, repo.root(), &audience)? {
         CheckoutMaterialization::Withheld { .. } => {
-            // Fail closed: attach the thread without publishing secret bytes.
-            // A public tip that still names a private ancestor is withheld
-            // for this audience (heddle#1733).
+            // Tip itself is under-tier or a non-shallow ancestor is missing.
+            // Attach without publishing secret bytes.
+        }
+        CheckoutMaterialization::Filtered { .. } => {
+            // Public tip served with private-introduced blobs omitted
+            // (heddle#1739). Worktree will not match the full tip tree.
         }
         CheckoutMaterialization::Materialized { .. } => {
             if !repo.worktree_matches_state(state_id)? {
@@ -1336,6 +1339,21 @@ fn publish_attached_clone_thread(
     state_id: &objects::object::StateId,
 ) -> Result<()> {
     Ok(repo.publish_clone_checkout(&ThreadName::new(track_name), state_id)?)
+}
+
+fn clone_advertised_tip_missing_advice(state_id: &objects::object::StateId) -> RecoveryAdvice {
+    RecoveryAdvice::safety_refusal(
+        "clone_advertised_tip_missing",
+        format!("Clone advertised tip {state_id} but the tip state object was not received"),
+        "Retry the clone. If this is a hosted remote, the server must send the advertised tip state (weft#2117).",
+        format!(
+            "remote advertised tip {state_id} as HEAD but the pack/transfer omitted that state object"
+        ),
+        "attaching the thread at an advertised tip that is absent would leave a half-clone",
+        "destination objects that did arrive were not published as an attached thread",
+        "heddle clone <remote> <path>",
+        vec!["heddle clone <remote> <path>".to_string()],
+    )
 }
 
 fn clone_checkout_not_attached_advice(track_name: &str) -> RecoveryAdvice {

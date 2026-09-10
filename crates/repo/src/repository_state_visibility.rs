@@ -24,7 +24,11 @@
 //! callers to keep public off disk — so the absence genuinely *is* the
 //! public signal.
 
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fs,
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
@@ -37,15 +41,40 @@ use objects::{
 use oplog::{OpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
 
 use crate::{
-    namespace_policy::{resolve_default_visibility, VisibilityResolutionContext},
+    namespace_policy::{VisibilityResolutionContext, resolve_default_visibility},
     repository::Repository,
-    visibility::{visible, AudienceTier},
+    visibility::{AudienceTier, visible},
 };
 
 /// Scope label written when a parent state is missing and is not a recorded
 /// shallow boundary. Checkout withholds rather than materializing a tip whose
 /// ancestry cannot be proven public.
 pub const UNRESOLVED_ANCESTOR_SCOPE: &str = "unresolved-ancestor";
+
+/// How checkout/clone/pull should serve a named state to an audience
+/// (heddle#1739).
+///
+/// A public tip that still names private-ancestor blobs is served with
+/// those blobs omitted. The tip itself is withheld only when it is
+/// under-tier or a non-shallow ancestor is missing (fail closed).
+#[derive(Clone, Debug)]
+pub enum VisibilityServeDecision {
+    /// Every reachable ancestor is visible; serve the real tree.
+    Serve,
+    /// The tip is visible, but an ancestor is not. Serve the tip tree
+    /// without blobs first introduced by unserved ancestors.
+    FilterPrivateIntroduced {
+        omitted_blobs: HashSet<ContentHash>,
+        withheld_id: StateId,
+        tier: VisibilityTier,
+    },
+    /// The tip itself is under-tier, or a non-shallow ancestor is
+    /// missing so the tree cannot be proven public.
+    Withhold {
+        withheld_id: StateId,
+        tier: VisibilityTier,
+    },
+}
 
 /// Outcome of a visibility put that captured its before/after images
 /// **atomically under the write lock** (heddle#317 / PR #529 P1 r5). The
@@ -616,12 +645,13 @@ impl Repository {
         })
     }
 
-    /// Downward-closed visibility gate (spike #266 §5.0, heddle#1733).
+    /// First unserved ancestor for `audience` (spike #266 §5.0).
     ///
-    /// A state is served only when it is visible to `audience` **and** every
-    /// reachable parent is itself served. Git projection already withholds
-    /// descendants of an embargoed ancestor; checkout/clone/pull must agree
-    /// so a later public tip cannot disclose private-ancestor path bytes.
+    /// Checkout/clone/pull use [`Self::visibility_serve_decision_for_audience`]
+    /// so a public tip that still names private-ancestor blobs is served
+    /// with those blobs omitted (heddle#1739). This walk still names the
+    /// unserved ancestor. Git projection continues to withhold descendants
+    /// from the public mirror.
     ///
     /// A missing parent that is not a shallow boundary fails closed: the
     /// tip is withheld instead of materializing a tree we cannot prove is
@@ -659,6 +689,78 @@ impl Repository {
             stack.extend(state.parents.iter().copied());
         }
         Ok(None)
+    }
+
+    /// Serve decision for checkout/clone/pull (heddle#1739).
+    ///
+    /// [`Self::withholding_visibility_for_audience`] still names the first
+    /// unserved ancestor. This method turns that walk into: serve the tip
+    /// with private-introduced blobs omitted, or withhold the tip when it
+    /// is itself under-tier or an ancestor object is missing.
+    pub fn visibility_serve_decision_for_audience(
+        &self,
+        state_id: &StateId,
+        audience: &AudienceTier,
+    ) -> Result<VisibilityServeDecision> {
+        let Some((withheld_id, tier)) =
+            self.withholding_visibility_for_audience(state_id, audience)?
+        else {
+            return Ok(VisibilityServeDecision::Serve);
+        };
+        if withheld_id == *state_id {
+            return Ok(VisibilityServeDecision::Withhold { withheld_id, tier });
+        }
+        if matches!(
+            &tier,
+            VisibilityTier::Private { scope_label } if scope_label == UNRESOLVED_ANCESTOR_SCOPE
+        ) {
+            return Ok(VisibilityServeDecision::Withhold { withheld_id, tier });
+        }
+        let omitted_blobs = self.private_introduced_blobs(state_id, audience)?;
+        Ok(VisibilityServeDecision::FilterPrivateIntroduced {
+            omitted_blobs,
+            withheld_id,
+            tier,
+        })
+    }
+
+    /// Blobs that appear in an unserved ancestor's tree and not in any
+    /// served ancestor. The tip's own tree is excluded so a public tip
+    /// that still names a private-introduced hash does not "serve" it.
+    fn private_introduced_blobs(
+        &self,
+        tip: &StateId,
+        audience: &AudienceTier,
+    ) -> Result<HashSet<ContentHash>> {
+        let Some(tip_state) = self.store().get_state(tip)? else {
+            return Ok(HashSet::new());
+        };
+        let mut served = BTreeSet::new();
+        let mut unserved = BTreeSet::new();
+        let mut seen = HashSet::new();
+        let mut stack = tip_state.parents.clone();
+        while let Some(id) = stack.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let ancestor_tier = self.effective_visibility_tier(&id)?;
+            let Some(state) = self.store().get_state(&id)? else {
+                continue;
+            };
+            if let Some(tree) = self.store().get_tree(&state.tree)? {
+                let mut blobs = BTreeSet::new();
+                self.collect_blob_hashes(&tree, &mut blobs)?;
+                if visible(&ancestor_tier, audience) {
+                    served.extend(blobs);
+                } else {
+                    unserved.extend(blobs);
+                }
+            }
+            if !self.is_shallow(&id) {
+                stack.extend(state.parents.iter().copied());
+            }
+        }
+        Ok(unserved.difference(&served).copied().collect())
     }
 
     /// Walk every visibility sidecar file in the repo. Returns
@@ -774,9 +876,9 @@ impl Repository {
         let _own_lock = if lock_held {
             None
         } else {
-            Some(self.locker().write().with_context(|| {
-                "acquire repo write lock for capture-time default visibility binding"
-            })?)
+            Some(self.locker().write().with_context(
+                || "acquire repo write lock for capture-time default visibility binding",
+            )?)
         };
         let mut record = StateVisibility {
             state: *state,
@@ -1178,9 +1280,10 @@ mod tests {
         let signed = StateVisibilityBlob::new(vec![record]).encode().unwrap();
         repo.accept_wire_state_visibility(state, &signed)
             .expect("pinned owner must be able to land their own Private sidecar");
-        assert!(repo
-            .has_visibility_for_state(&state)
-            .expect("owner visibility persisted"));
+        assert!(
+            repo.has_visibility_for_state(&state)
+                .expect("owner visibility persisted")
+        );
         assert_eq!(
             repo.embargo_membership_label()
                 .expect("membership")
@@ -1298,8 +1401,25 @@ mod tests {
         assert_eq!(
             withheld.map(|(id, tier)| (id, tier.as_str().to_string())),
             Some((private, "private".into())),
-            "public tip must be withheld because of the private ancestor"
+            "walk still names the private ancestor as the unserved reason"
         );
+        match repo
+            .visibility_serve_decision_for_audience(&tip, &crate::AudienceTier::Public)
+            .unwrap()
+        {
+            crate::VisibilityServeDecision::FilterPrivateIntroduced {
+                omitted_blobs,
+                withheld_id,
+                ..
+            } => {
+                assert_eq!(withheld_id, private);
+                assert!(
+                    !omitted_blobs.is_empty(),
+                    "public tip must omit private-introduced blobs"
+                );
+            }
+            other => panic!("public tip must be filtered, not {other:?}"),
+        }
         assert!(
             repo.withholding_visibility_for_audience(
                 &tip,
@@ -1309,6 +1429,14 @@ mod tests {
             .is_none(),
             "matching Restricted audience must still be served the public tip"
         );
+        assert!(matches!(
+            repo.visibility_serve_decision_for_audience(
+                &tip,
+                &crate::AudienceTier::Restricted("ax-secret".into())
+            )
+            .unwrap(),
+            crate::VisibilityServeDecision::Serve
+        ));
         assert_eq!(
             repo.local_operator_audience().unwrap(),
             crate::AudienceTier::Restricted("ax-secret".into())
@@ -1332,6 +1460,11 @@ mod tests {
             }
             other => panic!("expected unresolved-ancestor private, got {other:?}"),
         }
+        assert!(matches!(
+            repo.visibility_serve_decision_for_audience(&missing, &crate::AudienceTier::Public)
+                .unwrap(),
+            crate::VisibilityServeDecision::Withhold { withheld_id, .. } if withheld_id == missing
+        ));
     }
 
     #[test]
@@ -1445,11 +1578,12 @@ mod tests {
             "a state with no record must be public-by-absence (has_visibility_for_state == false)"
         );
         // And its sidecar load is an empty blob, never an error.
-        assert!(repo
-            .get_state_visibility_for_state(&no_record)
-            .expect("read record-free state")
-            .records
-            .is_empty());
+        assert!(
+            repo.get_state_visibility_for_state(&no_record)
+                .expect("read record-free state")
+                .records
+                .is_empty()
+        );
     }
 
     #[test]

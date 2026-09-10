@@ -598,6 +598,14 @@ fn clone_keeps_private_ancestor_visibility_beside_public_tip() {
         owner_secret, b"AX_SECRET=do-not-leak\n",
         "Restricted(ax-secret) owner clone may still see the secret path"
     );
+    assert_eq!(
+        fs::read(dest.join("tip.txt")).expect("owner clone keeps the public tip file"),
+        b"later public work\n"
+    );
+    assert_eq!(
+        fs::read(dest.join("public.env")).expect("owner clone keeps the earlier public file"),
+        b"PUBLIC=1\n"
+    );
 }
 
 #[test]

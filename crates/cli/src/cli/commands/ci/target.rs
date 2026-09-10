@@ -63,6 +63,10 @@ impl EvaluationTarget {
             repo.checkout_state_gated(&state_id, &state, checkout.path(), &AudienceTier::Internal)?;
         let tree = match materialized {
             CheckoutMaterialization::Materialized { tree } => tree,
+            CheckoutMaterialization::Filtered { .. } => {
+                repo.clear_materialized_root_records(checkout.path())?;
+                bail!("state {spec:?} is a filtered public tip; CI refuses to sign a partial tree");
+            }
             CheckoutMaterialization::Withheld { tier } => {
                 repo.clear_materialized_root_records(checkout.path())?;
                 bail!("state {spec:?} is withheld at visibility tier {tier:?}");

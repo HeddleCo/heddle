@@ -1026,10 +1026,11 @@ const VISIBILITY_TOPIC: &str = "State visibility — who may see a captured stat
                     Checkout, clone, and pull withhold separately.\n\
 \n\
 Private is per-state and downward-closed. A later public tip that still\n\
-names blobs introduced by a private ancestor is withheld from public\n\
-and internal audiences. Owner / matching `--label` still sees the bytes.\n\
-Clone and pull fail closed: they do not materialize secret path bytes\n\
-for a lesser audience, including when a private ancestor object is missing.\n\
+names blobs introduced by a private ancestor is served without those\n\
+blobs: public files stay, secret path bytes are omitted. Owner / matching\n\
+`--label` still sees the full tree. A tip that is itself Private is\n\
+withheld (courtesy stub). Clone and pull fail closed if a remote\n\
+advertises the tip but omits the tip state object.\n\
 \n\
 This is not a way to keep one secret file beside a public tip:\n\
   - Literal `.env` / `.env.local` / `config/.env` are reserved. Capture\n\

@@ -13,7 +13,7 @@
 //! ~zero-cost clonefile share until the agent diverges blocks.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -21,7 +21,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use objects::{
     lock::RepositoryLockExt,
-    object::{FacetKind, State, StateId, ThreadName, Tree, VisibilityTier},
+    object::{ContentHash, FacetKind, State, StateId, ThreadName, Tree, VisibilityTier},
     store::ObjectStore,
 };
 use oplog::OpRecord;
@@ -30,7 +30,7 @@ use tracing::{debug, instrument};
 
 use super::{HeddleError, Repository, Result};
 use crate::{
-    ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError,
+    ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError, VisibilityServeDecision,
     thread_manifest::{ManifestFile, ThreadManifest, read_manifest, write_manifest},
     validate_thread_worktree_target,
     visibility::AudienceTier,
@@ -48,6 +48,14 @@ pub enum CheckoutMaterialization {
     /// to `dest`. Carries the resolved tree so callers can populate a manifest
     /// without a second store lookup.
     Materialized { tree: Tree },
+    /// The tip is visible, but private-ancestor blobs were omitted from the
+    /// worktree (heddle#1739). `tree` is still the tip's real tree so
+    /// manifests can skip missing leaves; `omitted_blobs` are the hashes
+    /// that must not be written.
+    Filtered {
+        tree: Tree,
+        omitted_blobs: HashSet<ContentHash>,
+    },
     /// The state was under-tier for the audience: the operator-local courtesy
     /// stub was written to `dest` and the tracked bytes withheld.
     Withheld { tier: VisibilityTier },
@@ -211,7 +219,8 @@ impl Repository {
                     );
                     Ok(manifest)
                 }
-                CheckoutMaterialization::Materialized { tree } => {
+                CheckoutMaterialization::Materialized { tree }
+                | CheckoutMaterialization::Filtered { tree, .. } => {
                     let mut manifest =
                         ThreadManifest::new(state_id, state.tree, canonical_worktree_path(dest));
                     populate_manifest_from_tree(self, &tree, dest, "", &mut manifest.files)?;
@@ -236,10 +245,9 @@ impl Repository {
     }
 
     /// THE visibility-gated checkout chokepoint. Resolve `state_id`'s
-    /// downward-closed servedness against `audience` and either materialize
-    /// its real tree to `dest` (visible) or write the operator-local courtesy
-    /// stub and withhold the tracked bytes (under-tier, including when a
-    /// still-public descendant names blobs introduced by a private ancestor).
+    /// serve decision against `audience` and either materialize its real
+    /// tree, materialize the tip with private-introduced blobs omitted, or
+    /// write the operator-local courtesy stub.
     ///
     /// Every path that serves a *named committed state*'s content to a local
     /// checkout MUST funnel through here — `materialize_thread` and the CLI's
@@ -251,11 +259,10 @@ impl Repository {
     /// primitive for *computed* trees (merge/cherry-pick results), which are
     /// not a single named state and carry no audience.
     ///
-    /// The courtesy stub is a working-tree convenience on bytes the operator
-    /// already holds — NOT a security boundary and NOT a public-mirror surface
-    /// (the public mirror emits absence, spike §5.3). Git projection already
-    /// downward-closes; this chokepoint is the matching local materialize
-    /// rule (heddle#1733).
+    /// A later public tip that still names private-ancestor blobs is served
+    /// with those blobs omitted (heddle#1739). The tip itself is withheld
+    /// only when it is under-tier or a non-shallow ancestor is missing.
+    /// Git projection still downward-closes the public mirror.
     pub fn checkout_state_gated(
         &self,
         state_id: &StateId,
@@ -263,10 +270,14 @@ impl Repository {
         dest: &Path,
         audience: &AudienceTier,
     ) -> Result<CheckoutMaterialization> {
-        if let Some((withheld_id, tier)) = self
-            .withholding_visibility_for_audience(state_id, audience)
-            .map_err(|e| HeddleError::Config(format!("resolve visibility for {state_id}: {e:#}")))?
-        {
+        let decision = self
+            .visibility_serve_decision_for_audience(state_id, audience)
+            .map_err(|e| {
+                HeddleError::Config(format!("resolve visibility for {state_id}: {e:#}"))
+            })?;
+        if let VisibilityServeDecision::Withhold { withheld_id, tier } = &decision {
+            let withheld_id = *withheld_id;
+            let tier = tier.clone();
             fs::create_dir_all(dest).map_err(HeddleError::Io)?;
             // Canonicalize ONLY after the directory exists. `canonical_worktree_path`
             // falls back to the raw input when `dest` does not yet resolve (a relative
@@ -321,11 +332,17 @@ impl Repository {
             return Ok(CheckoutMaterialization::Withheld { tier });
         }
 
+        let omitted_blobs = match decision {
+            VisibilityServeDecision::FilterPrivateIntroduced { omitted_blobs, .. } => omitted_blobs,
+            VisibilityServeDecision::Serve => HashSet::new(),
+            VisibilityServeDecision::Withhold { .. } => unreachable!("withhold returned above"),
+        };
+
         let tree = self
             .store()
             .get_tree(&state.tree)?
             .ok_or_else(|| HeddleError::Config(format!("tree for {state_id} missing")))?;
-        self.materialize_tree(&tree, dest)?;
+        self.materialize_tree_omitting_blobs(&tree, dest, &omitted_blobs)?;
         // Canonicalize only now that `materialize_tree` (via `create_dir_all`) has made
         // `dest` exist — same read/write-root agreement as the withheld branch above
         // (heddle#316).
@@ -337,7 +354,7 @@ impl Repository {
         // it is removed, so the root holds exactly this tier's content
         // (heddle#316 CLASS 1).
         let mut served_leaves = BTreeSet::new();
-        collect_tree_leaf_paths(self, &tree, "", &mut served_leaves)?;
+        collect_tree_leaf_paths_omitting(self, &tree, "", &omitted_blobs, &mut served_leaves)?;
         self.reconcile_materialized_root(dest, &canonical, &served_leaves, &BTreeSet::new())?;
         // Persist the clobber-proof per-root record of exactly the tracked leaves
         // this visible materialize left on disk, so a later withheld
@@ -364,7 +381,14 @@ impl Repository {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(HeddleError::Io(e)),
         }
-        Ok(CheckoutMaterialization::Materialized { tree })
+        if omitted_blobs.is_empty() {
+            Ok(CheckoutMaterialization::Materialized { tree })
+        } else {
+            Ok(CheckoutMaterialization::Filtered {
+                tree,
+                omitted_blobs,
+            })
+        }
     }
 
     /// Reconcile the worktree root at `dest` so it holds EXACTLY the content the
@@ -890,6 +914,16 @@ fn collect_tree_leaf_paths(
     rel_prefix: &str,
     out: &mut BTreeSet<String>,
 ) -> Result<()> {
+    collect_tree_leaf_paths_omitting(repo, tree, rel_prefix, &HashSet::new(), out)
+}
+
+fn collect_tree_leaf_paths_omitting(
+    repo: &Repository,
+    tree: &Tree,
+    rel_prefix: &str,
+    omit_blobs: &HashSet<ContentHash>,
+    out: &mut BTreeSet<String>,
+) -> Result<()> {
     use objects::object::EntryType;
     for entry in tree.entries() {
         let rel_path = if rel_prefix.is_empty() {
@@ -908,9 +942,18 @@ fn collect_tree_leaf_paths(
                         tree_hash
                     ))
                 })?;
-                collect_tree_leaf_paths(repo, &subtree, &rel_path, out)?;
+                collect_tree_leaf_paths_omitting(repo, &subtree, &rel_path, omit_blobs, out)?;
             }
-            EntryType::Blob | EntryType::Symlink | EntryType::Gitlink => {
+            EntryType::Blob | EntryType::Symlink => {
+                if entry
+                    .leaf_content_hash()
+                    .is_some_and(|hash| omit_blobs.contains(&hash))
+                {
+                    continue;
+                }
+                out.insert(rel_path);
+            }
+            EntryType::Gitlink => {
                 out.insert(rel_path);
             }
             // Native child-spool edge: not a worktree leaf, so it has no
@@ -1644,9 +1687,9 @@ mod tests {
         assert!(manifest.files.contains_key("secret.rs"));
     }
 
-    /// heddle#1733: a later public tip that still names a private ancestor's
-    /// path must not disclose those bytes to a public audience. The matching
-    /// Restricted audience still sees them.
+    /// heddle#1739: a later public tip that still names a private ancestor's
+    /// path is served without those bytes. Public files stay; Restricted
+    /// still sees the secret path.
     #[test]
     fn public_tip_does_not_disclose_private_ancestor_path_to_public_audience() {
         let repo_dir = TempDir::new().unwrap();
@@ -1676,20 +1719,26 @@ mod tests {
         let public_out = repo
             .materialize_thread("main", &public_dest, &AudienceTier::Public)
             .unwrap();
-        assert!(
-            public_dest.join(COURTESY_STUB_FILENAME).exists(),
-            "public audience must receive the withheld stub, not the public tip tree"
+        assert_eq!(
+            fs::read(public_dest.join("public.env")).unwrap(),
+            b"PUBLIC=1\n"
+        );
+        assert_eq!(
+            fs::read(public_dest.join("tip.txt")).unwrap(),
+            b"later public work\n"
         );
         assert!(
             !public_dest.join("secrets.env").exists(),
             "public audience must not see private-ancestor path bytes"
         );
         assert!(
-            !public_dest.join("tip.txt").exists(),
-            "downward-closure withholds the whole descendant, not only the secret path"
+            !public_dest.join(COURTESY_STUB_FILENAME).exists(),
+            "filtered public tip is a complete checkout, not a courtesy stub"
         );
-        assert!(public_out.withheld);
-        assert!(public_out.files.is_empty());
+        assert!(!public_out.withheld);
+        assert!(public_out.files.contains_key("tip.txt"));
+        assert!(public_out.files.contains_key("public.env"));
+        assert!(!public_out.files.contains_key("secrets.env"));
 
         let owner_dest = dest_holder.path().join("owner");
         let owner_out = repo

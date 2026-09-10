@@ -2,7 +2,7 @@
 //! Tree materialization helpers.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     fs,
     num::NonZeroUsize,
     path::{Path, PathBuf},
@@ -277,7 +277,11 @@ impl Repository {
         Ok(stats)
     }
 
-    fn collect_blob_hashes(&self, tree: &Tree, out: &mut BTreeSet<ContentHash>) -> Result<()> {
+    pub(crate) fn collect_blob_hashes(
+        &self,
+        tree: &Tree,
+        out: &mut BTreeSet<ContentHash>,
+    ) -> Result<()> {
         for entry in tree.entries() {
             // Symlink targets are stored as blobs too — they're
             // small, so promotion cost is negligible, and a stored
@@ -321,7 +325,20 @@ impl Repository {
     /// construction rather than by remembering to add a check (#316 Finding 2).
     #[instrument(skip(self, tree), fields(dir = %dir.display(), entries = tree.len()))]
     pub(crate) fn materialize_tree(&self, tree: &Tree, dir: &Path) -> Result<()> {
-        self.materialize_tree_seeded(tree, dir).map(|_| ())
+        self.materialize_tree_omitting_blobs(tree, dir, &HashSet::new())
+    }
+
+    /// Materialize `tree` to `dir`, skipping blob/symlink hashes in
+    /// `omit_blobs`. Used when a public tip still names private-ancestor
+    /// bytes (heddle#1739): serve the tip, omit those hashes.
+    pub(crate) fn materialize_tree_omitting_blobs(
+        &self,
+        tree: &Tree,
+        dir: &Path,
+        omit_blobs: &HashSet<ContentHash>,
+    ) -> Result<()> {
+        self.materialize_tree_seeded(tree, dir, omit_blobs)
+            .map(|_| ())
     }
 
     /// Materialize a *locally-computed* tree to `dir` — a merge or cherry-pick
@@ -338,6 +355,7 @@ impl Repository {
         &self,
         tree: &Tree,
         dir: &Path,
+        omit_blobs: &HashSet<ContentHash>,
     ) -> Result<MaterializedTree> {
         let plan_start = Instant::now();
         let mut plan = MaterializationPlan {
@@ -348,7 +366,7 @@ impl Repository {
             file_count: 0,
             symlink_count: 0,
         };
-        self.plan_materialization(tree, Path::new(""), dir, &mut plan)?;
+        self.plan_materialization(tree, Path::new(""), dir, &mut plan, omit_blobs)?;
         let plan_duration_ms = plan_start.elapsed().as_millis();
 
         let execution_start = Instant::now();
@@ -386,6 +404,7 @@ impl Repository {
         rel_dir: &Path,
         dir: &Path,
         plan: &mut MaterializationPlan,
+        omit_blobs: &HashSet<ContentHash>,
     ) -> Result<()> {
         plan.directory_contexts.push(MaterializedDirectoryContext {
             key: cache_key(rel_dir),
@@ -403,6 +422,9 @@ impl Repository {
             let rel_path = rel_dir.join(entry.name());
             match entry.target() {
                 TreeEntryTarget::Blob { hash, executable } => {
+                    if omit_blobs.contains(hash) {
+                        continue;
+                    }
                     plan.file_count += 1;
                     plan.leaves.push(WorktreeWriteOp::Blob {
                         path,
@@ -416,9 +438,12 @@ impl Repository {
                         .get_tree(hash)?
                         .ok_or_else(|| HeddleError::NotFound(format!("tree {}", hash)))?;
                     plan.directories.push(path.clone());
-                    self.plan_materialization(&subtree, &rel_path, &path, plan)?;
+                    self.plan_materialization(&subtree, &rel_path, &path, plan, omit_blobs)?;
                 }
                 TreeEntryTarget::Symlink { hash } => {
+                    if omit_blobs.contains(hash) {
+                        continue;
+                    }
                     plan.symlink_count += 1;
                     plan.leaves.push(WorktreeWriteOp::Symlink {
                         path,

@@ -1495,16 +1495,12 @@ mod tests {
         );
     }
 
-    /// #316 / PR #528 r9 Finding 3: `heddle start` on a Private base_state must
-    /// yield a WITHHELD checkout, not error. `write_isolated_checkout` used to
-    /// discard the `CheckoutMaterialization::Withheld` outcome, so the start path
-    /// went on to `record_thread_manifest`, which stats the REAL state tree — but
-    /// those files were intentionally not materialized (only the courtesy stub is
-    /// on disk). With the outcome propagated, the manifest stage records a
-    /// withheld-consistent manifest instead, the start succeeds, and a later
-    /// capture of the withheld checkout is a no-op.
+    /// heddle#1739: `heddle start` on a Private base the capturing owner
+    /// declared must materialize the real tree. Membership is stamped when
+    /// the sidecar is accepted; hardcoded Internal wrongly yielded only the
+    /// courtesy stub.
     #[test]
-    fn start_on_private_base_yields_withheld_checkout_not_error() {
+    fn start_on_private_base_materializes_for_owner() {
         use objects::object::{Principal, StateVisibility, VisibilityTier};
 
         // Mirror the gate's operator-local stub filename (the const is
@@ -1512,8 +1508,8 @@ mod tests {
         const COURTESY_STUB_FILENAME: &str = "HEDDLE-EMBARGO.txt";
 
         let (temp, repo, state) = repo_with_state(&[]);
-        // Embargo the base state Private — withheld even from the all-seeing
-        // `Internal` audience the start path materializes under.
+        // Embargo the base state Private. The start path uses the operator
+        // audience; accepting this sidecar stamps Restricted membership.
         repo.put_state_visibility(StateVisibility {
             state,
             tier: VisibilityTier::Private {
@@ -1531,50 +1527,95 @@ mod tests {
         .expect("put visibility");
 
         let checkout = temp.path().join("iso");
-        // Materialized start (so a manifest sidecar is recorded) of a Private
-        // base. Pre-fix this errored; now it must succeed with a withheld
-        // checkout.
         let out = start_thread(&repo, materialized_args("iso", &checkout, &state, false));
         assert!(
             out.is_ok(),
-            "start on a Private base must succeed (withheld checkout), got {:?}",
+            "owner start on a Private base must succeed with a real tree, got {:?}",
             out.err()
         );
 
-        // The worktree holds the courtesy stub and NONE of the base's tracked
-        // bytes.
         assert!(
-            checkout.join(COURTESY_STUB_FILENAME).exists(),
-            "a withheld start must write the courtesy stub"
+            checkout.join("a.txt").exists(),
+            "owner start --from a Private base must materialize the real tree"
         );
         assert!(
-            !checkout.join("a.txt").exists(),
-            "the Private base's tracked bytes must NOT be materialized"
+            !checkout.join(COURTESY_STUB_FILENAME).exists(),
+            "owner start must not land the courtesy stub"
         );
 
-        // The recorded manifest reflects the withheld checkout: marked withheld,
-        // with NO real-tree stat-cache entries.
         let manifest = repo::thread_manifest::read_manifest(repo.heddle_dir(), "iso")
             .unwrap()
             .expect("manifest must be recorded");
         assert!(
-            manifest.withheld,
-            "manifest must mark the checkout withheld"
+            !manifest.withheld,
+            "owner start must not mark the checkout withheld"
         );
         assert!(
-            manifest.files.is_empty(),
-            "withheld manifest must record NO tracked-leaf stat entries, got {:?}",
+            manifest.files.contains_key("a.txt"),
+            "owner start manifest must record the real tree, got {:?}",
             manifest.files.keys().collect::<Vec<_>>()
         );
 
-        // A capture of the withheld checkout is a no-op (non-capturable).
         let outcome = repo
             .capture_thread_from_disk("iso", &checkout)
-            .expect("capture of a withheld checkout must not error");
+            .expect("capture of an owner checkout must not error");
         assert_eq!(
             outcome,
             repo::ThreadCaptureOutcome::NoOp,
-            "a withheld checkout is non-capturable"
+            "unchanged owner checkout is a no-op capture"
+        );
+    }
+
+    #[test]
+    fn start_from_public_tip_with_private_ancestor_serves_owner_tree() {
+        use objects::object::{Principal, StateVisibility, VisibilityTier};
+
+        const COURTESY_STUB_FILENAME: &str = "HEDDLE-EMBARGO.txt";
+
+        let (temp, repo, _) = repo_with_state(&[]);
+        std::fs::write(temp.path().join("public.env"), b"PUBLIC=1\n").unwrap();
+        repo.snapshot(Some("public env".into()), None).unwrap();
+        std::fs::write(temp.path().join("secrets.env"), b"AX_SECRET=do-not-leak\n").unwrap();
+        let private = repo
+            .snapshot(Some("private secret path".into()), None)
+            .unwrap()
+            .state_id;
+        repo.put_state_visibility(StateVisibility {
+            state: private,
+            tier: VisibilityTier::Private {
+                scope_label: "ax-secret".into(),
+            },
+            embargo_until: None,
+            declarer: Principal {
+                name: "Grace Hopper".into(),
+                email: "grace@example.com".into(),
+            },
+            declared_at: chrono::Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .expect("visibility set");
+        std::fs::write(temp.path().join("tip.txt"), b"later public work\n").unwrap();
+        let tip = repo
+            .snapshot(Some("public tip".into()), None)
+            .unwrap()
+            .state_id;
+
+        let checkout = temp.path().join("iso");
+        start_thread(&repo, materialized_args("iso", &checkout, &tip, false))
+            .expect("owner start --from public tip");
+
+        assert_eq!(
+            std::fs::read(checkout.join("tip.txt")).expect("tip"),
+            b"later public work\n"
+        );
+        assert_eq!(
+            std::fs::read(checkout.join("secrets.env")).expect("owner sees secret"),
+            b"AX_SECRET=do-not-leak\n"
+        );
+        assert!(
+            !checkout.join(COURTESY_STUB_FILENAME).exists(),
+            "owner start --from the public tip must not land the embargo stub"
         );
     }
 

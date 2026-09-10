@@ -141,7 +141,8 @@ impl HeddleExitCode {
             "promote_not_owner" | "promote_account_standing" | "grant_denied" => {
                 Some(Self::NoPerm)
             }
-            "promote_slug_taken" | "promote_failed" | "grant_failed" => Some(Self::Protocol),
+            "promote_slug_taken" | "promote_failed" | "grant_failed"
+            | "clone_advertised_tip_missing" => Some(Self::Protocol),
             "promote_already_root" => Some(Self::DataErr),
             "grant_not_found" => Some(Self::Config),
             // Capture aborted on ENOSPC; working tree is intact. Classifies
@@ -551,6 +552,7 @@ mod tests {
             ("grant_denied", HeddleExitCode::NoPerm),
             ("grant_failed", HeddleExitCode::Protocol),
             ("grant_not_found", HeddleExitCode::Config),
+            ("clone_advertised_tip_missing", HeddleExitCode::Protocol),
         ] {
             assert_eq!(
                 HeddleExitCode::from_error(&advice_with_kind(kind)),
