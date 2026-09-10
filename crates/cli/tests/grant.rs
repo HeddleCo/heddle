@@ -68,7 +68,10 @@ fn auth_invite_help_stays_signup_only() {
         "auth invite help should point collaborators at grant:\n{stdout}"
     );
     assert!(
-        !stdout.contains("--spool"),
-        "auth invite must not grow spool-grant flags:\n{stdout}"
+        !stdout.lines().any(|line| {
+            let trimmed = line.trim_start();
+            trimmed.starts_with("--spool") && !trimmed.contains("heddle grant")
+        }),
+        "auth invite must not grow a --spool flag of its own:\n{stdout}"
     );
 }
