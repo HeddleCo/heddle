@@ -1047,6 +1047,45 @@ fn enumerate_state_closure_emits_state_visibility_for_visible_state() {
 }
 
 #[test]
+fn enumerate_state_closure_includes_private_ancestor_visibility_on_public_tip() {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init_default(temp.path()).unwrap();
+    std::fs::write(temp.path().join("public.env"), "PUBLIC=1\n").unwrap();
+    repo.snapshot(Some("public".to_string()), None).unwrap();
+    std::fs::write(temp.path().join("secrets.env"), "AX_SECRET=do-not-leak\n").unwrap();
+    let private = repo.snapshot(Some("private".to_string()), None).unwrap();
+    repo.put_state_visibility(StateVisibility {
+        state: private.state_id,
+        tier: VisibilityTier::Private {
+            scope_label: "ax-secret".into(),
+        },
+        embargo_until: None,
+        declarer: Principal {
+            name: "Tester".into(),
+            email: "tester@heddle.sh".into(),
+        },
+        declared_at: Utc::now(),
+        signature: None,
+        supersedes: None,
+    })
+    .unwrap();
+    std::fs::write(temp.path().join("tip.txt"), "later\n").unwrap();
+    let tip = repo.snapshot(Some("public tip".to_string()), None).unwrap();
+
+    let plan = enumerate_state_closure_plan_with_options(
+        repo.store(),
+        tip.state_id,
+        StateClosureOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        plan.iter().any(|p| p.obj_type == ObjectType::StateVisibility
+            && p.id == ObjectId::StateId(private.state_id)),
+        "public tip closure must carry the private ancestor sidecar"
+    );
+}
+
+#[test]
 fn enumerate_state_closure_emits_state_metadata_blobs() {
     let temp = TempDir::new().unwrap();
     let repo = Repository::init_default(temp.path()).unwrap();

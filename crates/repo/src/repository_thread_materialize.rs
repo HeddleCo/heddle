@@ -33,7 +33,7 @@ use crate::{
     ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError,
     thread_manifest::{ManifestFile, ThreadManifest, read_manifest, write_manifest},
     validate_thread_worktree_target,
-    visibility::{AudienceTier, visible},
+    visibility::AudienceTier,
 };
 
 /// Filename of the operator-local courtesy placeholder written when a
@@ -236,9 +236,10 @@ impl Repository {
     }
 
     /// THE visibility-gated checkout chokepoint. Resolve `state_id`'s
-    /// effective tier against `audience` and either materialize its real tree
-    /// to `dest` (visible) or write the operator-local courtesy stub and
-    /// withhold the tracked bytes (under-tier).
+    /// downward-closed servedness against `audience` and either materialize
+    /// its real tree to `dest` (visible) or write the operator-local courtesy
+    /// stub and withhold the tracked bytes (under-tier, including when a
+    /// still-public descendant names blobs introduced by a private ancestor).
     ///
     /// Every path that serves a *named committed state*'s content to a local
     /// checkout MUST funnel through here — `materialize_thread` and the CLI's
@@ -252,7 +253,9 @@ impl Repository {
     ///
     /// The courtesy stub is a working-tree convenience on bytes the operator
     /// already holds — NOT a security boundary and NOT a public-mirror surface
-    /// (the public mirror emits absence, spike §5.3).
+    /// (the public mirror emits absence, spike §5.3). Git projection already
+    /// downward-closes; this chokepoint is the matching local materialize
+    /// rule (heddle#1733).
     pub fn checkout_state_gated(
         &self,
         state_id: &StateId,
@@ -260,10 +263,10 @@ impl Repository {
         dest: &Path,
         audience: &AudienceTier,
     ) -> Result<CheckoutMaterialization> {
-        let tier = self.effective_visibility_tier(state_id).map_err(|e| {
-            HeddleError::Config(format!("resolve visibility for {state_id}: {e:#}"))
-        })?;
-        if !visible(&tier, audience) {
+        if let Some((withheld_id, tier)) = self
+            .withholding_visibility_for_audience(state_id, audience)
+            .map_err(|e| HeddleError::Config(format!("resolve visibility for {state_id}: {e:#}")))?
+        {
             fs::create_dir_all(dest).map_err(HeddleError::Io)?;
             // Canonicalize ONLY after the directory exists. `canonical_worktree_path`
             // falls back to the raw input when `dest` does not yet resolve (a relative
@@ -302,9 +305,9 @@ impl Repository {
             )
             .map_err(HeddleError::Io)?;
             let embargo_until = self
-                .effective_state_visibility(state_id)
+                .effective_state_visibility(&withheld_id)
                 .map_err(|e| {
-                    HeddleError::Config(format!("resolve visibility for {state_id}: {e:#}"))
+                    HeddleError::Config(format!("resolve visibility for {withheld_id}: {e:#}"))
                 })?
                 .and_then(|record| record.embargo_until);
             let stub = courtesy_stub_text(&tier, embargo_until);
@@ -1641,7 +1644,74 @@ mod tests {
         assert!(manifest.files.contains_key("secret.rs"));
     }
 
-    /// #316 / PR #528 r6: a worktree root first materialized under-tier (stub
+    /// heddle#1733: a later public tip that still names a private ancestor's
+    /// path must not disclose those bytes to a public audience. The matching
+    /// Restricted audience still sees them.
+    #[test]
+    fn public_tip_does_not_disclose_private_ancestor_path_to_public_audience() {
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        fs::write(repo_dir.path().join("public.env"), b"PUBLIC=1\n").unwrap();
+        repo.snapshot(Some("public env".into()), None).unwrap();
+
+        fs::write(
+            repo_dir.path().join("secrets.env"),
+            b"AX_SECRET=do-not-leak\n",
+        )
+        .unwrap();
+        repo.snapshot(Some("private secret path".into()), None)
+            .unwrap();
+        embargo_state_with_tier(
+            &repo,
+            VisibilityTier::Private {
+                scope_label: "ax-secret".into(),
+            },
+        );
+
+        fs::write(repo_dir.path().join("tip.txt"), b"later public work\n").unwrap();
+        repo.snapshot(Some("public tip".into()), None).unwrap();
+
+        let dest_holder = TempDir::new().unwrap();
+        let public_dest = dest_holder.path().join("public");
+        let public_out = repo
+            .materialize_thread("main", &public_dest, &AudienceTier::Public)
+            .unwrap();
+        assert!(
+            public_dest.join(COURTESY_STUB_FILENAME).exists(),
+            "public audience must receive the withheld stub, not the public tip tree"
+        );
+        assert!(
+            !public_dest.join("secrets.env").exists(),
+            "public audience must not see private-ancestor path bytes"
+        );
+        assert!(
+            !public_dest.join("tip.txt").exists(),
+            "downward-closure withholds the whole descendant, not only the secret path"
+        );
+        assert!(public_out.withheld);
+        assert!(public_out.files.is_empty());
+
+        let owner_dest = dest_holder.path().join("owner");
+        let owner_out = repo
+            .materialize_thread(
+                "main",
+                &owner_dest,
+                &AudienceTier::Restricted("ax-secret".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            fs::read(owner_dest.join("secrets.env")).unwrap(),
+            b"AX_SECRET=do-not-leak\n"
+        );
+        assert_eq!(
+            fs::read(owner_dest.join("tip.txt")).unwrap(),
+            b"later public work\n"
+        );
+        assert!(!owner_dest.join(COURTESY_STUB_FILENAME).exists());
+        assert!(owner_out.files.contains_key("secrets.env"));
+    }
+
+    /// #316 / PR #528 r6: a worktree root first materialized under-tier (stub)
     /// written) and later re-materialized for an authorized audience must end up
     /// with a clean tree — the real bytes present AND the stale courtesy stub
     /// removed. `materialize_tree` only writes tracked leaves, so without an
