@@ -156,7 +156,7 @@ async fn list_grant_rows(client: &mut HostedClient, spool: &str) -> Result<Vec<G
     // Same bare `spool/<handle>/<name>` CreateGrant/DeleteGrant send.
     // weft exact-matches that visible path; a `repo:` prefix never hits.
     let grants = client
-        .list_grants(Some(&format!("repo:{spool}")))
+        .list_grants(Some(spool))
         .await
         .map_err(|err| map_grant_error(spool, &err))?;
     Ok(grants.iter().map(|grant| grant_row(grant, spool)).collect())
