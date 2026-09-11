@@ -20068,6 +20068,252 @@
       "title": "ErrorEnvelopeSchema",
       "type": "object"
     },
+    "grant create": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON payload for `heddle grant create`.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "grant_create"
+          ],
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "recommended_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "role": {
+          "type": "string"
+        },
+        "server": {
+          "type": "string"
+        },
+        "spool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "id",
+        "principal",
+        "role",
+        "spool",
+        "server"
+      ],
+      "title": "GrantCreateSchema",
+      "type": "object"
+    },
+    "grant delete": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON payload for `heddle grant delete`.",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "idempotency_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "op_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation_record": {
+          "anyOf": [
+            {
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "idempotency_status": {
+                  "type": "string"
+                },
+                "op_id": {
+                  "type": "string"
+                },
+                "replayed": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "command",
+                "idempotency_status",
+                "op_id",
+                "replayed"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "output_kind": {
+          "enum": [
+            "grant_delete"
+          ],
+          "type": "string"
+        },
+        "principal": {
+          "type": "string"
+        },
+        "recommended_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "replayed": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "server": {
+          "type": "string"
+        },
+        "spool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "id",
+        "principal",
+        "spool",
+        "server",
+        "deleted"
+      ],
+      "title": "GrantDeleteSchema",
+      "type": "object"
+    },
+    "grant list": {
+      "$defs": {
+        "GrantRowSchema": {
+          "description": "One row from `heddle grant list`.",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "principal": {
+              "type": "string"
+            },
+            "role": {
+              "type": "string"
+            },
+            "spool": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "principal",
+            "role",
+            "spool"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON payload for `heddle grant list`.",
+      "properties": {
+        "grants": {
+          "items": {
+            "$ref": "#/$defs/GrantRowSchema"
+          },
+          "type": "array"
+        },
+        "output_kind": {
+          "enum": [
+            "grant_list"
+          ],
+          "type": "string"
+        },
+        "recommended_action": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "server": {
+          "type": "string"
+        },
+        "spool": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "output_kind",
+        "spool",
+        "server",
+        "grants"
+      ],
+      "title": "GrantListSchema",
+      "type": "object"
+    },
     "help": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "additionalProperties": true,
