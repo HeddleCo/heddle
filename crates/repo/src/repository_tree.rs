@@ -14,9 +14,8 @@ use objects::{
     util::gitlink_placeholder_bytes,
     worktree::WorktreeStatus,
 };
-use tracing::{debug, instrument, trace, warn};
-
 use serde::{Deserialize, Serialize};
+use tracing::{debug, instrument, trace, warn};
 
 use super::{
     HeddleError, Repository, Result,
@@ -1516,8 +1515,10 @@ fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Resul
 mod tests {
     use std::path::Path;
 
-    use objects::object::{ContentHash, LeafPolicy, Tree, TreeEntry, resolve_tree_path};
-    use objects::store::ObjectStore;
+    use objects::{
+        object::{ContentHash, LeafPolicy, Tree, TreeEntry, resolve_tree_path},
+        store::ObjectStore,
+    };
     use tempfile::TempDir;
 
     use crate::{

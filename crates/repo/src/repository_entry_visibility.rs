@@ -485,9 +485,8 @@ mod tests {
         // drained ONCE outside the loop, not re-drained per attempt. FALSIFY:
         // revert to draining in `stage_snapshot_objects` and the sidecar is
         // dropped on the retried commit → this assertion fails.
-        let state =
-            with_forced_revalidation_retries(2, || repo.snapshot(Some("cap".into()), None))
-                .unwrap();
+        let state = with_forced_revalidation_retries(2, || repo.snapshot(Some("cap".into()), None))
+            .unwrap();
         assert!(
             repo.get_entry_visibility_bytes(&state.change_id)
                 .unwrap()
