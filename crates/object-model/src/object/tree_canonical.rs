@@ -9,7 +9,8 @@
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
-    ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeError,
+    ContentHash, EntryType, FileMode, PartialTree, PartialTreeLeaf, SpoolId, StateId, Tree,
+    TreeEntry, TreeError, TreeScheme,
     tree::{git_format_from_tag, git_format_to_tag},
     tree_stream::TreeStreamError,
 };
@@ -18,12 +19,22 @@ use super::{
 pub const TREE_ENCODING_VERSION: u8 = 4;
 /// Block-compressed HTR4 variant. Readers accept both v4 and v5.
 pub const TREE_BLOCK_ENCODING_VERSION: u8 = 5;
+/// Body version byte for a salted V4 canonical body (HSR1).
+pub const TREE_SALTED_ENCODING_VERSION: u8 = 1;
+/// Body version byte for a redacted V4 projection (HRT1).
+pub const TREE_REDACTED_ENCODING_VERSION: u8 = 1;
 /// Frame discriminator for a single canonical tree.
 pub const TREE_CANONICAL_MAGIC: &[u8; 4] = b"HTR4";
 /// Lean hot-path tree anchor. The object key supplies the omitted tree hash.
 pub const TREE_LEAN_MAGIC: &[u8; 4] = b"HLR1";
 /// One-hop cumulative delta against a materialized tree anchor.
 pub const TREE_DELTA_MAGIC: &[u8; 4] = b"HDC1";
+/// Salted redactable V4 tree — the canonical stored form for V4. Full custody:
+/// carries every entry's 32-byte salt inline. Rides loose objects and packs.
+pub const TREE_SALTED_MAGIC: &[u8; 4] = b"HSR1";
+/// Redacted V4 projection — serve-only. Visible entries carry salt + frame;
+/// redacted entries carry only their opaque 32-byte leaf hash. NEVER packed.
+pub const TREE_REDACTED_MAGIC: &[u8; 4] = b"HRT1";
 /// Cursor version used by the HLR1 streaming reader.
 pub const TREE_LEAN_ENCODING_VERSION: u8 = 6;
 /// Current HDC1 body version.
@@ -97,14 +108,30 @@ pub fn is_delta_tree(bytes: &[u8]) -> bool {
     bytes.starts_with(TREE_DELTA_MAGIC)
 }
 
+/// True when `bytes` contain a salted V4 canonical body (HSR1).
+pub fn is_salted_tree(bytes: &[u8]) -> bool {
+    bytes.starts_with(TREE_SALTED_MAGIC)
+}
+
+/// True when `bytes` contain a redacted V4 projection (HRT1). These are
+/// serve-only and must be rejected by every pack/stream reader.
+pub fn is_redacted_tree(bytes: &[u8]) -> bool {
+    bytes.starts_with(TREE_REDACTED_MAGIC)
+}
+
 /// True when the body can be paged directly without reconstruction.
 pub fn is_streamable_tree(bytes: &[u8]) -> bool {
     is_canonical_tree(bytes) || is_lean_tree(bytes)
 }
 
 impl Tree {
-    /// Encode this tree as uncompressed HTR4.
+    /// Encode this tree as an uncompressed canonical body: HTR4 for a V3 flat
+    /// tree, HSR1 for a V4 salted tree. Scheme-total: a V4 tree is NEVER
+    /// emitted through the salt-less HTR4 body.
     pub fn encode_canonical(&self) -> Result<Vec<u8>, TreeStreamError> {
+        if self.scheme() == TreeScheme::V4Salted {
+            return self.encode_salted_v4();
+        }
         self.validate()?;
         let tree_id = self.hash();
         let mut payload = Vec::new();
@@ -131,8 +158,18 @@ impl Tree {
         Ok(out)
     }
 
-    /// Decode a complete HTR4 body, validating order incrementally.
+    /// Decode a complete canonical body. Dispatches on the body magic: HTR4 →
+    /// flat V3 decode; HSR1 → salted V4 decode. A redacted projection (HRT1) is
+    /// rejected here — it is serve-only and must never be read as a full tree.
     pub fn decode_canonical(data: &[u8]) -> Result<Self, TreeStreamError> {
+        if is_salted_tree(data) {
+            return decode_salted_v4(data);
+        }
+        if is_redacted_tree(data) {
+            return Err(TreeStreamError::Malformed(
+                "HRT1 redacted projection cannot be decoded as a full tree".into(),
+            ));
+        }
         let header = decode_header(data)?;
         if header.version == TREE_BLOCK_ENCODING_VERSION {
             return Self::decode_canonical_streamed(data);
@@ -191,7 +228,9 @@ impl Tree {
         min_size: usize,
     ) -> Result<Vec<u8>, TreeStreamError> {
         let raw = self.encode_canonical()?;
-        if raw.len() < min_size {
+        // Block compression is an HTR4-only layout (its block index parses an
+        // HTR4 header). A V4 salted body (HSR1) is stored raw.
+        if self.scheme() == TreeScheme::V4Salted || raw.len() < min_size {
             return Ok(raw);
         }
         let blocked = encode_blocked_htr4(&raw, level)?;
@@ -648,6 +687,13 @@ impl Tree {
     /// stays outside the body and must be supplied by the object store while
     /// decoding.
     pub fn encode_lean(&self) -> Result<Vec<u8>, TreeStreamError> {
+        if self.scheme() == TreeScheme::V4Salted {
+            // HLR1 drops the payload bytes a salt commitment needs; a V4 tree
+            // must never be written through a salt-less lean body.
+            return Err(TreeStreamError::Malformed(
+                "cannot encode a v4 salted tree as HLR1 lean; use HSR1".into(),
+            ));
+        }
         self.validate()?;
         encode_lean_entries(self.entries())
     }
@@ -1041,6 +1087,13 @@ pub fn encode_tree_delta(
     current: &Tree,
     ops: &[TreeDeltaOp],
 ) -> Result<Vec<u8>, TreeStreamError> {
+    if anchor.scheme() == TreeScheme::V4Salted || current.scheme() == TreeScheme::V4Salted {
+        // HDC1 deltas are a V3-only hot path; a V4 salted tree is stored as a
+        // full HSR1 body, never a salt-less delta.
+        return Err(TreeStreamError::Malformed(
+            "cannot encode a v4 salted tree as an HDC1 delta; use HSR1".into(),
+        ));
+    }
     anchor.validate()?;
     current.validate()?;
     if anchor.hash() != anchor_id {
@@ -1480,6 +1533,328 @@ fn decode_spoollink(name: String, payload: &[u8]) -> Result<TreeEntry, TreeStrea
             TreeStreamError::Malformed("spoollink state id is not 32 bytes".into())
         })?);
     TreeEntry::spoollink(name, spool_id, state).map_err(TreeStreamError::from)
+}
+
+// ── HSR1 salted-canonical + HRT1 redacted projection ────────────────
+
+/// Fixed HRT1 header: magic + version + declared root + entry count.
+pub const TREE_REDACTED_HEADER_LEN: usize = 4 + 1 + 32 + 8;
+
+/// A salted entry frame: `salt(32) ‖ <HTR4 entry frame>`. The salt rides inside
+/// the length-prefixed frame so the frame machinery (and resume cursors) stay
+/// uniform with HTR4.
+fn encode_salted_entry_frame(
+    entry: &TreeEntry,
+    salt: &[u8; 32],
+) -> Result<Vec<u8>, TreeStreamError> {
+    let inner = encode_entry_frame(entry)?;
+    let mut frame = Vec::with_capacity(32 + inner.len());
+    frame.extend_from_slice(salt);
+    frame.extend_from_slice(&inner);
+    Ok(frame)
+}
+
+pub(crate) fn decode_salted_entry_frame(
+    frame: &[u8],
+) -> Result<([u8; 32], TreeEntry), TreeStreamError> {
+    if frame.len() < 32 {
+        return Err(TreeStreamError::TruncatedFrame { offset: 0 });
+    }
+    let salt: [u8; 32] = frame[..32]
+        .try_into()
+        .map_err(|_| TreeStreamError::Malformed("salted frame salt is not 32 bytes".into()))?;
+    let entry = decode_entry_frame(&frame[32..])?;
+    Ok((salt, entry))
+}
+
+impl Tree {
+    /// Encode a V4 salted tree as HSR1 (full custody: every salt inline).
+    pub(crate) fn encode_salted_v4(&self) -> Result<Vec<u8>, TreeStreamError> {
+        if self.scheme() != TreeScheme::V4Salted {
+            return Err(TreeStreamError::Malformed(
+                "HSR1 encoding requires a v4 salted tree".into(),
+            ));
+        }
+        self.validate()?;
+        let declared_root = self.hash();
+        let mut payload = Vec::new();
+        let mut logical_len = 0u64;
+        for (entry, salt) in self.entries().iter().zip(self.salts().iter()) {
+            logical_len = logical_len
+                .checked_add(entry.encoded_len() as u64)
+                .ok_or_else(|| TreeStreamError::Malformed("logical length overflow".into()))?;
+            let frame = encode_salted_entry_frame(entry, salt)?;
+            let frame_len = u32::try_from(frame.len()).map_err(|_| {
+                TreeStreamError::Malformed(format!("entry '{}' frame exceeds u32", entry.name()))
+            })?;
+            payload.extend_from_slice(&frame_len.to_le_bytes());
+            payload.extend_from_slice(&frame);
+        }
+        let mut out = Vec::with_capacity(TREE_HEADER_LEN + payload.len());
+        out.extend_from_slice(TREE_SALTED_MAGIC);
+        out.push(TREE_SALTED_ENCODING_VERSION);
+        out.extend_from_slice(declared_root.as_bytes());
+        out.extend_from_slice(&(self.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        out.extend_from_slice(&logical_len.to_le_bytes());
+        out.extend_from_slice(&payload);
+        Ok(out)
+    }
+}
+
+/// Decode a complete HSR1 salted-canonical body and verify its declared root.
+pub fn decode_salted_v4(data: &[u8]) -> Result<Tree, TreeStreamError> {
+    if !is_salted_tree(data) {
+        return Err(TreeStreamError::Malformed(
+            "bytes are not an HSR1 salted tree".into(),
+        ));
+    }
+    if data.len() < TREE_HEADER_LEN {
+        return Err(TreeStreamError::TruncatedFrame { offset: 0 });
+    }
+    let version = data[4];
+    if version != TREE_SALTED_ENCODING_VERSION {
+        return Err(TreeStreamError::UnsupportedVersion { found: version });
+    }
+    let declared_root = ContentHash::from_bytes(
+        data[5..37]
+            .try_into()
+            .map_err(|_| TreeStreamError::Malformed("tree id slice is not 32 bytes".into()))?,
+    );
+    let entry_count = u64::from_le_bytes(
+        data[37..45]
+            .try_into()
+            .map_err(|_| TreeStreamError::Malformed("entry count slice is not 8 bytes".into()))?,
+    );
+    let payload_len =
+        u64::from_le_bytes(data[45..53].try_into().map_err(|_| {
+            TreeStreamError::Malformed("payload length slice is not 8 bytes".into())
+        })?);
+    let logical_len =
+        u64::from_le_bytes(data[53..61].try_into().map_err(|_| {
+            TreeStreamError::Malformed("logical length slice is not 8 bytes".into())
+        })?);
+    let expected_len = TREE_HEADER_LEN as u64 + payload_len;
+    if (data.len() as u64) < expected_len {
+        return Err(TreeStreamError::TruncatedFrame {
+            offset: data.len() as u64,
+        });
+    }
+    if (data.len() as u64) > expected_len {
+        return Err(TreeStreamError::TrailingBytes {
+            extra: data.len() as u64 - expected_len,
+        });
+    }
+    let mut entries = Vec::new();
+    let mut salts = Vec::new();
+    let mut offset = TREE_HEADER_LEN;
+    let payload_end = data.len();
+    for _ in 0..entry_count {
+        if offset + 4 > payload_end {
+            return Err(TreeStreamError::TruncatedFrame {
+                offset: offset as u64,
+            });
+        }
+        let frame_len =
+            u32::from_le_bytes(data[offset..offset + 4].try_into().map_err(|_| {
+                TreeStreamError::Malformed("frame length slice is not 4 bytes".into())
+            })?) as usize;
+        let frame_start = offset + 4;
+        let frame_end =
+            frame_start
+                .checked_add(frame_len)
+                .ok_or(TreeStreamError::TruncatedFrame {
+                    offset: offset as u64,
+                })?;
+        if frame_end > payload_end {
+            return Err(TreeStreamError::TruncatedFrame {
+                offset: offset as u64,
+            });
+        }
+        let (salt, entry) = decode_salted_entry_frame(&data[frame_start..frame_end])?;
+        entries.push(entry);
+        salts.push(salt);
+        offset = frame_end;
+    }
+    if offset != payload_end {
+        return Err(TreeStreamError::TrailingBytes {
+            extra: (payload_end - offset) as u64,
+        });
+    }
+    let tree = Tree::try_from_decoded_entries_salted_v4(entries, salts)?;
+    let found = tree.hash();
+    if found != declared_root {
+        return Err(TreeStreamError::HashMismatch {
+            expected: declared_root,
+            found,
+        });
+    }
+    if tree
+        .entries()
+        .iter()
+        .map(|entry| entry.encoded_len() as u64)
+        .sum::<u64>()
+        != logical_len
+    {
+        return Err(TreeStreamError::Malformed(
+            "declared logical length does not match entries".into(),
+        ));
+    }
+    Ok(tree)
+}
+
+/// Encode a redacted V4 projection as HRT1 (serve-only). Visible frames are
+/// written first in strict ascending name order; redacted leaf hashes follow in
+/// strict ascending order.
+pub fn encode_redacted_projection(partial: &PartialTree) -> Result<Vec<u8>, TreeStreamError> {
+    let mut visibles: Vec<(&TreeEntry, &[u8; 32])> = Vec::new();
+    let mut redacted: Vec<ContentHash> = Vec::new();
+    for leaf in partial.leaves() {
+        match leaf {
+            PartialTreeLeaf::Visible { entry, salt } => visibles.push((entry, salt)),
+            PartialTreeLeaf::Redacted { leaf_hash } => redacted.push(*leaf_hash),
+        }
+    }
+    visibles.sort_by(|a, b| a.0.name().cmp(b.0.name()));
+    redacted.sort_unstable();
+    let entry_count = visibles.len() + redacted.len();
+    let mut out = Vec::new();
+    out.extend_from_slice(TREE_REDACTED_MAGIC);
+    out.push(TREE_REDACTED_ENCODING_VERSION);
+    out.extend_from_slice(partial.declared_root().as_bytes());
+    out.extend_from_slice(&(entry_count as u64).to_le_bytes());
+    for (entry, salt) in visibles {
+        out.push(0);
+        let frame = encode_salted_entry_frame(entry, salt)?;
+        let frame_len = u32::try_from(frame.len()).map_err(|_| {
+            TreeStreamError::Malformed(format!("entry '{}' frame exceeds u32", entry.name()))
+        })?;
+        out.extend_from_slice(&frame_len.to_le_bytes());
+        out.extend_from_slice(&frame);
+    }
+    for leaf_hash in redacted {
+        out.push(1);
+        out.extend_from_slice(leaf_hash.as_bytes());
+    }
+    Ok(out)
+}
+
+/// Decode an HRT1 redacted projection and verify it reconstructs its declared
+/// root.
+pub fn decode_redacted_projection(data: &[u8]) -> Result<PartialTree, TreeStreamError> {
+    if !is_redacted_tree(data) {
+        return Err(TreeStreamError::Malformed(
+            "bytes are not an HRT1 redacted projection".into(),
+        ));
+    }
+    if data.len() < TREE_REDACTED_HEADER_LEN {
+        return Err(TreeStreamError::TruncatedFrame { offset: 0 });
+    }
+    let version = data[4];
+    if version != TREE_REDACTED_ENCODING_VERSION {
+        return Err(TreeStreamError::UnsupportedVersion { found: version });
+    }
+    let declared_root = ContentHash::from_bytes(
+        data[5..37]
+            .try_into()
+            .map_err(|_| TreeStreamError::Malformed("tree id slice is not 32 bytes".into()))?,
+    );
+    let entry_count = u64::from_le_bytes(
+        data[37..45]
+            .try_into()
+            .map_err(|_| TreeStreamError::Malformed("entry count slice is not 8 bytes".into()))?,
+    );
+    let mut offset = TREE_REDACTED_HEADER_LEN;
+    let mut leaves = Vec::new();
+    let mut prev_visible_name: Option<String> = None;
+    let mut prev_redacted: Option<ContentHash> = None;
+    let mut seen_redacted = false;
+    for _ in 0..entry_count {
+        let flag = *data.get(offset).ok_or(TreeStreamError::TruncatedFrame {
+            offset: offset as u64,
+        })?;
+        offset += 1;
+        match flag {
+            0 => {
+                if seen_redacted {
+                    return Err(TreeStreamError::Malformed(
+                        "HRT1 visible frame follows a redacted leaf".into(),
+                    ));
+                }
+                if offset + 4 > data.len() {
+                    return Err(TreeStreamError::TruncatedFrame {
+                        offset: offset as u64,
+                    });
+                }
+                let frame_len =
+                    u32::from_le_bytes(data[offset..offset + 4].try_into().map_err(|_| {
+                        TreeStreamError::Malformed("frame length slice is not 4 bytes".into())
+                    })?) as usize;
+                let frame_start = offset + 4;
+                let frame_end =
+                    frame_start
+                        .checked_add(frame_len)
+                        .ok_or(TreeStreamError::TruncatedFrame {
+                            offset: offset as u64,
+                        })?;
+                if frame_end > data.len() {
+                    return Err(TreeStreamError::TruncatedFrame {
+                        offset: offset as u64,
+                    });
+                }
+                let (salt, entry) = decode_salted_entry_frame(&data[frame_start..frame_end])?;
+                if let Some(previous) = &prev_visible_name
+                    && previous.as_str() >= entry.name()
+                {
+                    return Err(TreeStreamError::Malformed(
+                        "HRT1 visible frames must be strictly sorted by name".into(),
+                    ));
+                }
+                prev_visible_name = Some(entry.name().to_string());
+                leaves.push(PartialTreeLeaf::Visible { entry, salt });
+                offset = frame_end;
+            }
+            1 => {
+                seen_redacted = true;
+                let end = offset
+                    .checked_add(32)
+                    .ok_or(TreeStreamError::TruncatedFrame {
+                        offset: offset as u64,
+                    })?;
+                let leaf_hash = ContentHash::from_bytes(
+                    data.get(offset..end)
+                        .ok_or(TreeStreamError::TruncatedFrame {
+                            offset: offset as u64,
+                        })?
+                        .try_into()
+                        .map_err(|_| {
+                            TreeStreamError::Malformed("redacted leaf hash is not 32 bytes".into())
+                        })?,
+                );
+                if let Some(previous) = prev_redacted
+                    && previous >= leaf_hash
+                {
+                    return Err(TreeStreamError::Malformed(
+                        "HRT1 redacted leaves must be strictly sorted by leaf hash".into(),
+                    ));
+                }
+                prev_redacted = Some(leaf_hash);
+                leaves.push(PartialTreeLeaf::Redacted { leaf_hash });
+                offset = end;
+            }
+            other => {
+                return Err(TreeStreamError::Malformed(format!(
+                    "invalid HRT1 leaf flag {other}"
+                )));
+            }
+        }
+    }
+    if offset != data.len() {
+        return Err(TreeStreamError::TrailingBytes {
+            extra: (data.len() - offset) as u64,
+        });
+    }
+    PartialTree::from_leaves_verified(declared_root, leaves).map_err(TreeStreamError::from)
 }
 
 #[cfg(all(test, feature = "zstd"))]

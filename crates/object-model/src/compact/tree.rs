@@ -7,7 +7,9 @@ use super::{
     io::{Reader, Writer, varint_len},
     limits::{MAX_COMPACT_COUNT, MIN_TREE_ENTRY_BYTES, MIN_TREE_ITEM_BYTES},
 };
-use crate::object::{ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry};
+use crate::object::{
+    ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeScheme,
+};
 
 const TREE_MAGIC: &[u8; 4] = b"HCT1";
 
@@ -43,6 +45,16 @@ pub fn encode_tree_frame(trees: &[Tree]) -> Result<Vec<u8>> {
         return Err(invalid(format!(
             "tree entry count {count} exceeds maximum {MAX_COMPACT_COUNT}"
         )));
+    }
+    if trees
+        .iter()
+        .any(|tree| tree.scheme() == TreeScheme::V4Salted)
+    {
+        // HCT1 columns carry no salt; a V4 salted tree must never be written
+        // through this salt-less frame (it would silently re-hash as V3).
+        return Err(invalid(
+            "cannot encode a v4 salted tree in an HCT1 compact frame".to_string(),
+        ));
     }
     let mut output = Writer::new(TREE_MAGIC);
     output.put_u64(trees.len() as u64);

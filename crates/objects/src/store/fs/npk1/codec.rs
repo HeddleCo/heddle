@@ -11,7 +11,7 @@ use super::{
 use crate::{
     object::{
         ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeDeltaOp, TreeEntry,
-        apply_tree_delta,
+        TreeScheme, apply_tree_delta,
     },
     store::Result,
 };
@@ -504,7 +504,19 @@ fn finish_record(tag: u8, prefix: &[usize], raw_blocks: Vec<(u32, Vec<u8>)>) -> 
     Ok(out)
 }
 
+/// NPK1's columnar dictionary carries no per-entry salt, so a V4 salted tree
+/// must never be packed through it (it would silently re-hash as V3). A
+/// salt-carrying NPK1 v4 dictionary is a deferred hot-path decision (design
+/// §6.3); until then, refuse.
+fn reject_salted_tree(tree: &Tree) -> Result<()> {
+    if tree.scheme() == TreeScheme::V4Salted {
+        return Err(invalid("cannot pack a v4 salted tree into an NPK1 record"));
+    }
+    Ok(())
+}
+
 pub(super) fn encode_anchor(tree: &Tree, dictionary: &Dictionary) -> Result<Vec<u8>> {
+    reject_salted_tree(tree)?;
     let mut blocks = Vec::new();
     for entries in tree.entries().chunks(RECORD_BLOCK_ENTRIES) {
         let first_name = entries
@@ -537,6 +549,7 @@ pub(super) fn encode_delta(
     ops: &[TreeDeltaOp],
     dictionary: &Dictionary,
 ) -> Result<Vec<u8>> {
+    reject_salted_tree(current)?;
     if base_distance == 0 {
         return Err(invalid("delta base distance is zero"));
     }
@@ -757,5 +770,51 @@ pub(super) fn note_tree_dictionary_rows(
             let count = targets.entry(target).or_default();
             *count = count.saturating_add(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod v4_reject_tests {
+    use super::*;
+
+    fn v4_tree() -> Tree {
+        Tree::from_entries_salted_v4(
+            vec![
+                TreeEntry::file("a", ContentHash::compute(b"a"), false).unwrap(),
+                TreeEntry::file("b", ContentHash::compute(b"b"), false).unwrap(),
+            ],
+            vec![[0x11; 32], [0x22; 32]],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn encode_anchor_refuses_a_v4_salted_tree() {
+        let tree = v4_tree();
+        let names = tree
+            .entries()
+            .iter()
+            .map(|e| e.name().to_string())
+            .collect();
+        let dictionary = Dictionary::from_counts(names, HashMap::new()).unwrap();
+        assert!(
+            encode_anchor(&tree, &dictionary).is_err(),
+            "NPK1 must never pack a v4 salted tree (no salt column)"
+        );
+    }
+
+    #[test]
+    fn encode_delta_refuses_a_v4_salted_tree() {
+        let tree = v4_tree();
+        let names = tree
+            .entries()
+            .iter()
+            .map(|e| e.name().to_string())
+            .collect();
+        let dictionary = Dictionary::from_counts(names, HashMap::new()).unwrap();
+        assert!(
+            encode_delta(1, &tree, &[], &dictionary).is_err(),
+            "NPK1 delta must never pack a v4 salted tree"
+        );
     }
 }
