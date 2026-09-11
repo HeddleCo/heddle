@@ -8,7 +8,23 @@ use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{ContentHash, SpoolId, StateId};
 
+/// Durable msgpack encoding version for the flat V3 tree body. This is the
+/// serde-representation version, NOT the hash-scheme selector: the scheme is
+/// carried separately by [`TreeScheme`] / the body magic. Leave this at 3.
 const TREE_FORMAT_VERSION: u8 = 3;
+/// Durable msgpack encoding version for a salted V4 tree body. A `version == 4`
+/// msgpack body carries a parallel per-entry `salts` column and decodes to
+/// [`TreeScheme::V4Salted`].
+const TREE_FORMAT_VERSION_V4: u8 = 4;
+/// Domain prefix for a V4 per-entry leaf commitment (routed through
+/// [`ContentHash::typed_hasher`]).
+const TREE_V4_LEAF_PREFIX: &str = "tree-v4-leaf";
+/// Domain prefix for a V4 interior Merkle node.
+const TREE_V4_NODE_PREFIX: &str = "tree-v4-node";
+/// The v3 empty-tree domain prefix. The V4 empty root is defined to equal the
+/// V3 empty-tree hash (`ContentHash::compute_typed("tree", b"")`) so the
+/// import/nothing-adopted anchor sentinels do not diverge (MF-5).
+const TREE_EMPTY_PREFIX: &str = "tree";
 const ENTRY_KIND_BLOB: u8 = 0;
 const ENTRY_KIND_TREE: u8 = 1;
 const ENTRY_KIND_SYMLINK: u8 = 2;
@@ -19,6 +35,20 @@ const ENTRY_KIND_GITLINK: u8 = 3;
 const ENTRY_KIND_SPOOLLINK: u8 = 4;
 const GIT_OBJECT_FORMAT_SHA1: u8 = 1;
 const GIT_OBJECT_FORMAT_SHA256: u8 = 2;
+
+// ── TreeScheme ──────────────────────────────────────────────────────
+
+/// How a [`Tree`]'s content id is computed. The scheme is part of the
+/// in-memory value, so `Tree::hash()` is a pure function of `(scheme, salts,
+/// entries)` and the value determines the id at every call site (MF-4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TreeScheme {
+    /// Flat BLAKE3 over the concatenated entry preimages (the historical hash).
+    V3Flat,
+    /// Salted binary Merkle tree over per-entry leaf commitments, redactable at
+    /// entry granularity. Carries a parallel 32-byte salt per entry.
+    V4Salted,
+}
 
 // ── TreeError ───────────────────────────────────────────────────────
 
@@ -218,20 +248,31 @@ impl TreeEntryTarget {
     }
 
     fn update_hasher(&self, hasher: &mut blake3::Hasher) {
-        hasher.update(&[self.mode().to_byte()]);
-        hasher.update(&[self.entry_type().to_byte()]);
+        self.write_payload(|bytes| {
+            hasher.update(bytes);
+        });
+    }
+
+    /// Emit the canonical `mode ‖ entry_type ‖ target_payload` byte sequence.
+    ///
+    /// This is the single source of truth for both the V3 flat hash
+    /// ([`Self::update_hasher`]) and the V4 leaf preimage
+    /// ([`Tree::v4_leaf_preimage`]), so the two encodings can never drift.
+    fn write_payload(&self, mut emit: impl FnMut(&[u8])) {
+        emit(&[self.mode().to_byte()]);
+        emit(&[self.entry_type().to_byte()]);
         match self {
             TreeEntryTarget::Blob { hash, .. }
             | TreeEntryTarget::Tree { hash }
-            | TreeEntryTarget::Symlink { hash } => hasher.update(hash.as_bytes()),
+            | TreeEntryTarget::Symlink { hash } => emit(hash.as_bytes()),
             TreeEntryTarget::Gitlink { target } => {
-                hasher.update(&[git_format_to_tag(target.format())]);
-                hasher.update(target.as_bytes())
+                emit(&[git_format_to_tag(target.format())]);
+                emit(target.as_bytes());
             }
             TreeEntryTarget::Spoollink { spool_id, state_id } => {
-                hasher.update(&(spool_id.as_str().len() as u32).to_le_bytes());
-                hasher.update(spool_id.as_str().as_bytes());
-                hasher.update(state_id.as_bytes())
+                emit(&(spool_id.as_str().len() as u32).to_le_bytes());
+                emit(spool_id.as_str().as_bytes());
+                emit(state_id.as_bytes());
             }
         };
     }
@@ -474,12 +515,20 @@ pub struct Tree {
     // constructing a replacement tree. Sharing the entry vector makes those
     // read-path clones O(1); insert/remove detach with copy-on-write.
     entries: Arc<Vec<TreeEntry>>,
+    // How this tree's id is computed. V3 trees carry `salts.is_empty()`.
+    scheme: TreeScheme,
+    // Per-entry 32-byte salts, parallel to `entries` (same index / name order).
+    // Non-empty iff `scheme == TreeScheme::V4Salted`, in which case
+    // `salts.len() == entries.len()` is a maintained invariant.
+    salts: Arc<Vec<[u8; 32]>>,
 }
 
 impl Tree {
     pub fn new() -> Self {
         Self {
             entries: Arc::new(Vec::new()),
+            scheme: TreeScheme::V3Flat,
+            salts: Arc::new(Vec::new()),
         }
     }
 
@@ -487,7 +536,32 @@ impl Tree {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         Self {
             entries: Arc::new(entries),
+            scheme: TreeScheme::V3Flat,
+            salts: Arc::new(Vec::new()),
         }
+    }
+
+    /// Build a salted V4 tree from entries and their parallel salts.
+    ///
+    /// `salts[i]` is the salt for `entries[i]` (before sorting); the pair is
+    /// sorted together by entry name so the parallel-vector invariant holds.
+    /// The sticky-salt *inheritance* policy is a later capture-leg concern —
+    /// this constructor carries whatever salts it is given.
+    pub fn from_entries_salted_v4(
+        entries: Vec<TreeEntry>,
+        salts: Vec<[u8; 32]>,
+    ) -> Result<Self, TreeError> {
+        if entries.len() != salts.len() {
+            return Err(TreeError::InvalidStructure(format!(
+                "v4 tree has {} entries but {} salts",
+                entries.len(),
+                salts.len()
+            )));
+        }
+        let mut paired: Vec<(TreeEntry, [u8; 32])> = entries.into_iter().zip(salts).collect();
+        paired.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+        let (entries, salts): (Vec<TreeEntry>, Vec<[u8; 32]>) = paired.into_iter().unzip();
+        Self::try_from_decoded_entries_salted_v4(entries, salts)
     }
 
     /// Build a tree from entries that are already in canonical name order.
@@ -498,12 +572,71 @@ impl Tree {
     pub fn try_from_decoded_entries(entries: Vec<TreeEntry>) -> Result<Self, TreeError> {
         let tree = Self {
             entries: Arc::new(entries),
+            scheme: TreeScheme::V3Flat,
+            salts: Arc::new(Vec::new()),
         };
         tree.validate()?;
         Ok(tree)
     }
 
+    /// Build a salted V4 tree from already-name-ordered entries and their
+    /// parallel salts. Decoders (HSR1, msgpack v4) use this: it does not sort,
+    /// so it rejects the same out-of-order/duplicate encodings V3 does.
+    pub fn try_from_decoded_entries_salted_v4(
+        entries: Vec<TreeEntry>,
+        salts: Vec<[u8; 32]>,
+    ) -> Result<Self, TreeError> {
+        if entries.len() != salts.len() {
+            return Err(TreeError::InvalidStructure(format!(
+                "v4 tree has {} entries but {} salts",
+                entries.len(),
+                salts.len()
+            )));
+        }
+        let tree = Self {
+            entries: Arc::new(entries),
+            scheme: TreeScheme::V4Salted,
+            salts: Arc::new(salts),
+        };
+        tree.validate()?;
+        Ok(tree)
+    }
+
+    /// The hashing scheme this tree's id is computed under.
+    pub fn scheme(&self) -> TreeScheme {
+        self.scheme
+    }
+
+    /// The parallel per-entry salt vector (empty for V3 trees).
+    pub fn salts(&self) -> &[[u8; 32]] {
+        &self.salts
+    }
+
+    /// The salt for the entry at `index` (V4 only), or `None` for V3 / out of
+    /// range.
+    pub fn salt_at(&self, index: usize) -> Option<[u8; 32]> {
+        self.salts.get(index).copied()
+    }
+
     pub fn validate(&self) -> Result<(), TreeError> {
+        match self.scheme {
+            TreeScheme::V3Flat => {
+                if !self.salts.is_empty() {
+                    return Err(TreeError::InvalidStructure(
+                        "v3 tree must not carry per-entry salts".into(),
+                    ));
+                }
+            }
+            TreeScheme::V4Salted => {
+                if self.salts.len() != self.entries.len() {
+                    return Err(TreeError::InvalidStructure(format!(
+                        "v4 tree has {} entries but {} salts",
+                        self.entries.len(),
+                        self.salts.len()
+                    )));
+                }
+            }
+        }
         let mut previous_name: Option<&str> = None;
         for entry in self.entries.iter() {
             entry.validate()?;
@@ -532,17 +665,48 @@ impl Tree {
     }
 
     pub fn insert(&mut self, entry: TreeEntry) {
+        match self.scheme {
+            TreeScheme::V3Flat => {
+                let entries = Arc::make_mut(&mut self.entries);
+                entries.retain(|e| e.name != entry.name);
+                let pos = entries
+                    .iter()
+                    .position(|e| e.name > entry.name)
+                    .unwrap_or(entries.len());
+                entries.insert(pos, entry);
+            }
+            TreeScheme::V4Salted => {
+                // A fresh insert or a changed entry mints a fresh 256-bit salt.
+                // (Sticky-salt *inheritance* on unchanged entries is applied by
+                // the capture leg before it constructs the tree, not here.)
+                self.insert_salted(entry, rand::random());
+            }
+        }
+    }
+
+    /// V4 insert with an explicit salt, maintaining the parallel salt vector.
+    /// Replacing an existing entry of the same name drops its old salt.
+    pub fn insert_salted(&mut self, entry: TreeEntry, salt: [u8; 32]) {
+        debug_assert_eq!(self.scheme, TreeScheme::V4Salted);
         let entries = Arc::make_mut(&mut self.entries);
-        entries.retain(|e| e.name != entry.name);
+        let salts = Arc::make_mut(&mut self.salts);
+        if let Some(existing) = entries.iter().position(|e| e.name == entry.name) {
+            entries.remove(existing);
+            salts.remove(existing);
+        }
         let pos = entries
             .iter()
             .position(|e| e.name > entry.name)
             .unwrap_or(entries.len());
         entries.insert(pos, entry);
+        salts.insert(pos, salt);
     }
 
     pub fn remove(&mut self, name: &str) -> Option<TreeEntry> {
         let pos = self.entries.iter().position(|e| e.name == name)?;
+        if matches!(self.scheme, TreeScheme::V4Salted) {
+            Arc::make_mut(&mut self.salts).remove(pos);
+        }
         Some(Arc::make_mut(&mut self.entries).remove(pos))
     }
 
@@ -555,12 +719,62 @@ impl Tree {
     }
 
     pub fn hash(&self) -> ContentHash {
+        match self.scheme {
+            TreeScheme::V3Flat => self.flat_hash_v3(),
+            TreeScheme::V4Salted => self.merkle_root_v4(),
+        }
+    }
+
+    /// The historical flat hash: typed BLAKE3 over every entry preimage.
+    fn flat_hash_v3(&self) -> ContentHash {
         let total_len: usize = self.entries.iter().map(TreeEntry::encoded_len).sum();
-        ContentHash::compute_typed_with_len("tree", total_len as u64, |hasher| {
+        ContentHash::compute_typed_with_len(TREE_EMPTY_PREFIX, total_len as u64, |hasher| {
             for entry in self.entries.iter() {
                 entry.update_hasher(hasher);
             }
         })
+    }
+
+    /// The V4 salted per-entry leaf commitment for `entries[index]`.
+    ///
+    /// `leaf = typed_hasher("tree-v4-leaf", len)(salt ‖ mode ‖ entry_type ‖
+    /// target_payload ‖ name_len(u16 LE) ‖ name)`, where the
+    /// `mode ‖ entry_type ‖ target_payload` bytes are exactly those
+    /// [`TreeEntryTarget::write_payload`] emits.
+    ///
+    /// Panics only via `debug_assert` if called on a V3 tree or out of range;
+    /// production callers go through [`Self::merkle_root_v4`].
+    fn v4_leaf_hash(entry: &TreeEntry, salt: &[u8; 32]) -> ContentHash {
+        let preimage = Self::v4_leaf_preimage(entry, salt);
+        ContentHash::compute_typed(TREE_V4_LEAF_PREFIX, &preimage)
+    }
+
+    /// The exact byte preimage hashed by [`Self::v4_leaf_hash`].
+    fn v4_leaf_preimage(entry: &TreeEntry, salt: &[u8; 32]) -> Vec<u8> {
+        let name = entry.name.as_bytes();
+        // salt(32) + mode(1) + type(1) + target_payload + name_len(2) + name
+        let mut buf =
+            Vec::with_capacity(32 + 2 + entry.target.encoded_payload_len() + 2 + name.len());
+        buf.extend_from_slice(salt);
+        entry
+            .target
+            .write_payload(|bytes| buf.extend_from_slice(bytes));
+        // Names are bounded to u16::MAX by `validate_name`.
+        buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        buf.extend_from_slice(name);
+        buf
+    }
+
+    /// The V4 Merkle root over the salted per-entry leaves, ordered by leaf
+    /// hash (§2). The empty tree reproduces the V3 empty-tree id (MF-5).
+    fn merkle_root_v4(&self) -> ContentHash {
+        let mut leaves: Vec<ContentHash> = self
+            .entries
+            .iter()
+            .zip(self.salts.iter())
+            .map(|(entry, salt)| Self::v4_leaf_hash(entry, salt))
+            .collect();
+        merkle_root_from_leaves(&mut leaves)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &TreeEntry> {
@@ -577,12 +791,205 @@ impl Tree {
     }
 }
 
+// ── V4 Merkle root + PartialTree ────────────────────────────────────
+
+/// Compute the RFC 6962 Merkle Tree Hash over V4 leaf hashes.
+///
+/// Leaves are sorted ascending by their 32-byte leaf hash first (§2.2): every
+/// party — a full holder recomputing leaves, or a redacted-tip holder handed
+/// opaque leaf hashes — sorts the identical list, so [`Tree`] and
+/// [`PartialTree`] reconstruct byte-identical roots. Ordering is by leaf hash
+/// alone (no preimage tie-break): a 256-bit leaf collision is cryptographically
+/// negligible, and hash-only ordering is what lets a redacted leaf (which
+/// carries no preimage) participate in the same total order.
+fn merkle_root_from_leaves(leaves: &mut [ContentHash]) -> ContentHash {
+    leaves.sort_unstable();
+    merkle_tree_hash(leaves)
+}
+
+/// RFC 6962 Merkle Tree Hash over already-ordered leaves.
+fn merkle_tree_hash(leaves: &[ContentHash]) -> ContentHash {
+    match leaves.len() {
+        // Empty parity (MF-5): the V4 empty root equals the V3 empty-tree id.
+        0 => ContentHash::compute_typed(TREE_EMPTY_PREFIX, b""),
+        1 => leaves[0],
+        n => {
+            // k = largest power of two strictly less than n (RFC 6962:
+            // k < n <= 2k).
+            let k = 1usize << ((usize::BITS - 1) - ((n - 1) as u64).leading_zeros());
+            let left = merkle_tree_hash(&leaves[..k]);
+            let right = merkle_tree_hash(&leaves[k..]);
+            let mut hasher = ContentHash::typed_hasher(TREE_V4_NODE_PREFIX, 64);
+            hasher.update(left.as_bytes());
+            hasher.update(right.as_bytes());
+            ContentHash::from_bytes(hasher.finalize().into())
+        }
+    }
+}
+
+/// One leaf of a [`PartialTree`]: either fully visible (carrying its entry and
+/// salt, so its leaf hash is recomputable) or redacted to an opaque 32-byte
+/// leaf hash (salt, name, and target all withheld).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PartialTreeLeaf {
+    Visible { entry: TreeEntry, salt: [u8; 32] },
+    Redacted { leaf_hash: ContentHash },
+}
+
+impl PartialTreeLeaf {
+    /// The leaf hash this leaf contributes to the Merkle root.
+    pub fn leaf_hash(&self) -> ContentHash {
+        match self {
+            PartialTreeLeaf::Visible { entry, salt } => Tree::v4_leaf_hash(entry, salt),
+            PartialTreeLeaf::Redacted { leaf_hash } => *leaf_hash,
+        }
+    }
+
+    pub fn is_redacted(&self) -> bool {
+        matches!(self, PartialTreeLeaf::Redacted { .. })
+    }
+}
+
+/// A redaction projection of a V4 [`Tree`]: visible entries keep their
+/// preimage + salt; redacted entries are reduced to their opaque 32-byte leaf
+/// hash. A `PartialTree` reconstructs the SAME Merkle root as the full tree, so
+/// a state that commits to the full tree still verifies against the projection.
+///
+/// This is deliberately NOT a `Tree` (a `Tree` requires a resolved name+target
+/// for every entry); a viewer holding redacted leaves cannot author over them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PartialTree {
+    declared_root: ContentHash,
+    leaves: Vec<PartialTreeLeaf>,
+}
+
+impl PartialTree {
+    /// Assemble a partial tree from its declared root and leaves. Callers that
+    /// need the root checked should use [`Self::verify`] or
+    /// [`Self::from_leaves_verified`].
+    pub fn new(declared_root: ContentHash, leaves: Vec<PartialTreeLeaf>) -> Self {
+        Self {
+            declared_root,
+            leaves,
+        }
+    }
+
+    /// Assemble and verify that the leaves reconstruct `declared_root`.
+    pub fn from_leaves_verified(
+        declared_root: ContentHash,
+        leaves: Vec<PartialTreeLeaf>,
+    ) -> Result<Self, TreeError> {
+        let partial = Self::new(declared_root, leaves);
+        partial.verify()?;
+        Ok(partial)
+    }
+
+    /// Project a full V4 tree, redacting every entry whose leaf hash is in
+    /// `redacted`. Entries not in `redacted` stay visible. Errors on a V3 tree
+    /// (nothing to salt) or a broken salt invariant.
+    pub fn project(
+        tree: &Tree,
+        redacted: &std::collections::HashSet<ContentHash>,
+    ) -> Result<Self, TreeError> {
+        if tree.scheme != TreeScheme::V4Salted {
+            return Err(TreeError::InvalidStructure(
+                "cannot project a redacted tree from a non-v4 tree".into(),
+            ));
+        }
+        tree.validate()?;
+        let declared_root = tree.hash();
+        let leaves = tree
+            .entries
+            .iter()
+            .zip(tree.salts.iter())
+            .map(|(entry, salt)| {
+                let leaf_hash = Tree::v4_leaf_hash(entry, salt);
+                if redacted.contains(&leaf_hash) {
+                    PartialTreeLeaf::Redacted { leaf_hash }
+                } else {
+                    PartialTreeLeaf::Visible {
+                        entry: entry.clone(),
+                        salt: *salt,
+                    }
+                }
+            })
+            .collect();
+        Ok(Self {
+            declared_root,
+            leaves,
+        })
+    }
+
+    pub fn declared_root(&self) -> ContentHash {
+        self.declared_root
+    }
+
+    pub fn leaves(&self) -> &[PartialTreeLeaf] {
+        &self.leaves
+    }
+
+    pub fn redacted_count(&self) -> usize {
+        self.leaves.iter().filter(|leaf| leaf.is_redacted()).count()
+    }
+
+    pub fn has_redactions(&self) -> bool {
+        self.leaves.iter().any(PartialTreeLeaf::is_redacted)
+    }
+
+    /// Reconstruct the Merkle root from the (visible + redacted) leaves.
+    pub fn reconstruct_root(&self) -> ContentHash {
+        let mut leaves: Vec<ContentHash> =
+            self.leaves.iter().map(PartialTreeLeaf::leaf_hash).collect();
+        merkle_root_from_leaves(&mut leaves)
+    }
+
+    /// Verify the reconstructed root equals the declared root.
+    pub fn verify(&self) -> Result<(), TreeError> {
+        let found = self.reconstruct_root();
+        if found != self.declared_root {
+            return Err(TreeError::InvalidStructure(format!(
+                "partial tree reconstructs {found} but declares {}",
+                self.declared_root
+            )));
+        }
+        Ok(())
+    }
+
+    /// Losslessly convert a fully-visible partial tree back to a V4 [`Tree`].
+    /// Errors if any leaf is redacted (the name/target are unknown) or the
+    /// reconstructed root does not match the declared root.
+    pub fn into_tree(self) -> Result<Tree, TreeError> {
+        self.verify()?;
+        let mut entries = Vec::with_capacity(self.leaves.len());
+        let mut salts = Vec::with_capacity(self.leaves.len());
+        for leaf in self.leaves {
+            match leaf {
+                PartialTreeLeaf::Visible { entry, salt } => {
+                    entries.push(entry);
+                    salts.push(salt);
+                }
+                PartialTreeLeaf::Redacted { .. } => {
+                    return Err(TreeError::InvalidStructure(
+                        "cannot materialize a redacted leaf into a full tree".into(),
+                    ));
+                }
+            }
+        }
+        Tree::from_entries_salted_v4(entries, salts)
+    }
+}
+
 // ── Durable V2 tree encoding ───────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
 struct EncodedTreeV2 {
     version: u8,
     entries: Vec<EncodedTreeEntryV2>,
+    // Parallel per-entry salts for a V4 salted tree. `default` keeps V3 bodies
+    // byte-identical (the field is omitted entirely for V3), so existing
+    // on-disk caches (`worktree-current-tree.bin`, hot sidecars) are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    salts: Option<Vec<[u8; 32]>>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -641,9 +1048,14 @@ impl From<TreeError> for TreeDecodeError {
 
 impl From<&Tree> for EncodedTreeV2 {
     fn from(tree: &Tree) -> Self {
+        let (version, salts) = match tree.scheme {
+            TreeScheme::V3Flat => (TREE_FORMAT_VERSION, None),
+            TreeScheme::V4Salted => (TREE_FORMAT_VERSION_V4, Some(tree.salts.as_ref().clone())),
+        };
         Self {
-            version: TREE_FORMAT_VERSION,
+            version,
             entries: tree.entries.iter().map(EncodedTreeEntryV2::from).collect(),
+            salts,
         }
     }
 }
@@ -709,17 +1121,31 @@ impl TryFrom<EncodedTreeV2> for Tree {
     type Error = TreeError;
 
     fn try_from(encoded: EncodedTreeV2) -> Result<Self, Self::Error> {
-        if encoded.version != TREE_FORMAT_VERSION {
-            return Err(TreeError::InvalidStructure(format!(
-                "unsupported tree format version {}; this binary writes {}",
-                encoded.version, TREE_FORMAT_VERSION
-            )));
-        }
         let mut entries = Vec::with_capacity(encoded.entries.len());
         for entry in encoded.entries {
             entries.push(TreeEntry::try_from(entry)?);
         }
-        Tree::try_from_decoded_entries(entries)
+        match encoded.version {
+            TREE_FORMAT_VERSION => {
+                if encoded.salts.is_some_and(|salts| !salts.is_empty()) {
+                    return Err(TreeError::InvalidStructure(
+                        "v3 tree body must not carry salts".into(),
+                    ));
+                }
+                Tree::try_from_decoded_entries(entries)
+            }
+            TREE_FORMAT_VERSION_V4 => {
+                let salts = encoded.salts.ok_or_else(|| {
+                    TreeError::InvalidStructure("v4 tree body is missing its salts".into())
+                })?;
+                // `try_from_decoded_entries_salted_v4` re-checks len parity and
+                // strict name ordering.
+                Tree::try_from_decoded_entries_salted_v4(entries, salts)
+            }
+            other => Err(TreeError::InvalidStructure(format!(
+                "unsupported tree format version {other}; this binary writes {TREE_FORMAT_VERSION} (v3) or {TREE_FORMAT_VERSION_V4} (v4)"
+            ))),
+        }
     }
 }
 
@@ -893,6 +1319,10 @@ mod spoollink_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tree_v4_tests.rs"]
+mod tree_v4_tests;
 
 #[cfg(test)]
 mod cow_tests {

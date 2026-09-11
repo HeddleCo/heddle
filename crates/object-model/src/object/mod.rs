@@ -155,18 +155,20 @@ pub use timeline::{
     TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
 };
 pub use tree::{
-    EntryType, FileMode, Tree, TreeDecodeError, TreeEntry, TreeEntryTarget, TreeError,
-    validate_name as validate_tree_entry_name,
+    EntryType, FileMode, PartialTree, PartialTreeLeaf, Tree, TreeDecodeError, TreeEntry,
+    TreeEntryTarget, TreeError, TreeScheme, validate_name as validate_tree_entry_name,
 };
 pub use tree_canonical::{
     TREE_BLOCK_ENCODING_VERSION, TREE_BLOCK_MIN_ENTRIES, TREE_CANONICAL_MAGIC,
     TREE_DELTA_ANCHOR_INTERVAL, TREE_DELTA_ENCODING_VERSION, TREE_DELTA_HEADER_LEN,
     TREE_DELTA_MAGIC, TREE_DELTA_MAX_OPS, TREE_ENCODING_VERSION, TREE_HEADER_LEN,
-    TREE_LEAN_ENCODING_VERSION, TREE_LEAN_MAGIC, TreeDeltaHeader, TreeDeltaOp, TreeHeader,
-    apply_tree_delta, decode_header, decode_lean_prefix, decode_tree_delta,
-    decode_tree_delta_header, decode_tree_delta_header_prefix, decode_tree_delta_ops,
-    decode_tree_delta_ops_prefix, encode_lean_entry, encode_tree_delta, is_canonical_tree,
-    is_delta_tree, is_lean_tree, is_streamable_tree, tree_delta,
+    TREE_LEAN_ENCODING_VERSION, TREE_LEAN_MAGIC, TREE_REDACTED_ENCODING_VERSION,
+    TREE_REDACTED_HEADER_LEN, TREE_REDACTED_MAGIC, TREE_SALTED_ENCODING_VERSION, TREE_SALTED_MAGIC,
+    TreeDeltaHeader, TreeDeltaOp, TreeHeader, apply_tree_delta, decode_header, decode_lean_prefix,
+    decode_redacted_projection, decode_salted_v4, decode_tree_delta, decode_tree_delta_header,
+    decode_tree_delta_header_prefix, decode_tree_delta_ops, decode_tree_delta_ops_prefix,
+    encode_lean_entry, encode_redacted_projection, encode_tree_delta, is_canonical_tree,
+    is_delta_tree, is_lean_tree, is_redacted_tree, is_salted_tree, is_streamable_tree, tree_delta,
 };
 #[cfg(feature = "async-source")]
 pub use tree_diff::diff_trees_visit_async;
