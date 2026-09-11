@@ -136,7 +136,10 @@ impl HeddleExitCode {
             | "merge_eligibility_blocked"
             | "reserved_materialization_path"
             | "env_store_not_found"
-            | "env_store_slot_not_found" => Some(Self::DataErr),
+            | "env_store_slot_not_found"
+            | "ci_filtered_public_tip"
+            | "ci_withheld_state"
+            | "ci_tree_digest_mismatch" => Some(Self::DataErr),
             "env_store_denied" | "env_store_expired" => Some(Self::NoPerm),
             "promote_not_owner" | "promote_account_standing" | "grant_denied" => {
                 Some(Self::NoPerm)
@@ -553,6 +556,9 @@ mod tests {
             ("grant_failed", HeddleExitCode::Protocol),
             ("grant_not_found", HeddleExitCode::Config),
             ("clone_advertised_tip_missing", HeddleExitCode::Protocol),
+            ("ci_filtered_public_tip", HeddleExitCode::DataErr),
+            ("ci_withheld_state", HeddleExitCode::DataErr),
+            ("ci_tree_digest_mismatch", HeddleExitCode::DataErr),
         ] {
             assert_eq!(
                 HeddleExitCode::from_error(&advice_with_kind(kind)),
