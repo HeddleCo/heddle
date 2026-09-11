@@ -98,12 +98,12 @@ pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile, WorktreeStat
 pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeStatusDetailed};
 use sley::Repository as SleyRepository;
 
-#[path = "repository_snapshot.rs"]
-mod repository_snapshot;
 #[path = "repository_capture_v4.rs"]
 mod repository_capture_v4;
 #[path = "repository_entry_visibility.rs"]
 mod repository_entry_visibility;
+#[path = "repository_snapshot.rs"]
+mod repository_snapshot;
 pub use repository_entry_visibility::{EntryVisibilityBinding, EntryVisibilityMark};
 #[cfg(test)]
 #[path = "repository_tests.rs"]

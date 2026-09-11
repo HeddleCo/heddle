@@ -301,8 +301,7 @@ impl AtomicMutation for SnapshotMutation<'_> {
         // batch so one `heddle undo` reverts the snapshot AND the sidecar.
         if let Some(sidecar) = self.staged_entry_visibility.clone() {
             let binding = self.repo.stage_entry_visibility_binding(&sidecar)?;
-            self.staged_entry_visibility_rewind =
-                Some((sidecar.change_id, binding.prior_sidecar));
+            self.staged_entry_visibility_rewind = Some((sidecar.change_id, binding.prior_sidecar));
             records.push(binding.record);
         }
 

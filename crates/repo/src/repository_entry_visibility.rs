@@ -8,19 +8,19 @@
 //! snapshot so one `heddle undo` reverts both. The weft-side accept/persist/
 //! serve seam is a later leg; here we only produce + stage the object.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use objects::{
     error::HeddleError,
     fs_atomic::write_file_atomic,
-    object::{
-        ChangeId, ContentHash, EntryVisibility, EntryVisibilityEntry, Tree, VisibilityTier,
-    },
+    object::{ChangeId, ContentHash, EntryVisibility, EntryVisibilityEntry, Tree, VisibilityTier},
     store::ObjectStore,
     sync::RwLockExt,
 };
 use oplog::OpRecord;
-use std::path::{Path, PathBuf};
 
 use crate::{Repository, Result};
 
@@ -107,7 +107,8 @@ impl Repository {
         }
         let mut entries = Vec::with_capacity(marks.len());
         for mark in marks {
-            let (tree_id, leaf_hash, is_dir) = self.resolve_mark_leaf(root, &by_hash, &mark.path)?;
+            let (tree_id, leaf_hash, is_dir) =
+                self.resolve_mark_leaf(root, &by_hash, &mark.path)?;
             if mark.subtree && !is_dir {
                 return Err(HeddleError::NotFound(format!(
                     "mark_subtree_visibility path '{}' is not a directory entry",
@@ -195,10 +196,12 @@ impl Repository {
         if let Some(tree) = by_hash.get(hash) {
             return Ok(tree.clone());
         }
-        self.store.get_tree(hash)?.ok_or_else(|| HeddleError::MissingObject {
-            object_type: "tree".to_string(),
-            id: hash.to_string(),
-        })
+        self.store
+            .get_tree(hash)?
+            .ok_or_else(|| HeddleError::MissingObject {
+                object_type: "tree".to_string(),
+                id: hash.to_string(),
+            })
     }
 
     // ── sidecar storage (mirrors the per-state visibility sidecar) ──────
@@ -286,9 +289,11 @@ impl Repository {
 mod tests {
     use std::fs;
 
-    use objects::error::HeddleError;
-    use objects::object::{EntryVisibility, VisibilityTier};
-    use objects::store::ObjectStore;
+    use objects::{
+        error::HeddleError,
+        object::{EntryVisibility, VisibilityTier},
+        store::ObjectStore,
+    };
     use oplog::{OpLogBackend, OpRecord};
     use tempfile::TempDir;
 
@@ -328,13 +333,24 @@ mod tests {
         assert_eq!(sidecar.tree_root, state.tree);
         assert_eq!(sidecar.entries.len(), 1);
         let record = &sidecar.entries[0];
-        assert_eq!(record.tier, VisibilityTier::Private { scope_label: "embargo".into() });
+        assert_eq!(
+            record.tier,
+            VisibilityTier::Private {
+                scope_label: "embargo".into()
+            }
+        );
 
         let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
         assert_eq!(record.tree_id, tree.hash());
-        assert_eq!(record.leaf_hash, tree.v4_leaf_hash_for("secret.md").unwrap());
+        assert_eq!(
+            record.leaf_hash,
+            tree.v4_leaf_hash_for("secret.md").unwrap()
+        );
         // The public sibling was not marked and carries no override.
-        assert_ne!(record.leaf_hash, tree.v4_leaf_hash_for("readme.md").unwrap());
+        assert_ne!(
+            record.leaf_hash,
+            tree.v4_leaf_hash_for("readme.md").unwrap()
+        );
     }
 
     #[test]
@@ -371,7 +387,10 @@ mod tests {
                 ..
             } => {
                 assert_eq!(*change_id, state.change_id);
-                assert!(prior_sidecar.is_none(), "genesis binding has no before-image");
+                assert!(
+                    prior_sidecar.is_none(),
+                    "genesis binding has no before-image"
+                );
                 let bytes = repo
                     .get_entry_visibility_bytes(&state.change_id)
                     .unwrap()
@@ -389,11 +408,19 @@ mod tests {
         repo.mark_entry_visibility("secret.md", VisibilityTier::Internal)
             .unwrap();
         let state = repo.snapshot(Some("cap".into()), None).unwrap();
-        assert!(repo.get_entry_visibility_bytes(&state.change_id).unwrap().is_some());
+        assert!(
+            repo.get_entry_visibility_bytes(&state.change_id)
+                .unwrap()
+                .is_some()
+        );
         // Undo's restore point: rolling back to the before-image (None) removes it.
         repo.restore_entry_visibility_sidecar(&state.change_id, None)
             .unwrap();
-        assert!(repo.get_entry_visibility_bytes(&state.change_id).unwrap().is_none());
+        assert!(
+            repo.get_entry_visibility_bytes(&state.change_id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -417,12 +444,19 @@ mod tests {
         repo.mark_subtree_visibility("dir", VisibilityTier::Internal)
             .unwrap();
         let state = repo.snapshot(Some("cap".into()), None).unwrap();
-        let sidecar =
-            EntryVisibility::decode(&repo.get_entry_visibility_bytes(&state.change_id).unwrap().unwrap())
-                .unwrap();
+        let sidecar = EntryVisibility::decode(
+            &repo
+                .get_entry_visibility_bytes(&state.change_id)
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
         let tree = repo.store().get_tree(&state.tree).unwrap().unwrap();
         assert_eq!(sidecar.entries.len(), 1);
-        assert_eq!(sidecar.entries[0].leaf_hash, tree.v4_leaf_hash_for("dir").unwrap());
+        assert_eq!(
+            sidecar.entries[0].leaf_hash,
+            tree.v4_leaf_hash_for("dir").unwrap()
+        );
 
         // A plain entry mark on a directory path is a loud error.
         repo.mark_entry_visibility("dir", VisibilityTier::Internal)

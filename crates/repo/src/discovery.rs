@@ -2,6 +2,8 @@
 //! Repository discovery and bootstrap: root probing, Git-metadata
 //! detection, and the `init`/`open` constructors of `Repository`.
 
+#[cfg(feature = "git-overlay")]
+use std::sync::Arc;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -20,13 +22,10 @@ use refs::{Head, RefManager};
 use sley::Repository as SleyRepository;
 
 #[cfg(feature = "git-overlay")]
-use std::sync::Arc;
-
-#[cfg(feature = "git-overlay")]
 use super::git_overlay_object_source;
-use super::overlay::{detect_git_head, ensure_git_overlay_exclude};
 use super::{
     RepoConfig, Repository, RepositoryCapability, RepositorySourceAuthority, compute_op_scope,
+    overlay::{detect_git_head, ensure_git_overlay_exclude},
     repository_capability_for_authority,
 };
 const HEDDLE_REPOSITORY_MEMBERS: &[&str] = &["HEAD", "objects", "objectstore", "oplog", "refs"];

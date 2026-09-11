@@ -7,13 +7,13 @@
 //! refuses record schema versions 1 through 3 without rewriting their bytes.
 //! Future incompatible record changes must allocate a new schema version.
 
+use serde::Deserialize;
+
+use super::{ConflictResolutionMode, OpRecord, RecordedHead, ThreadUpdateSnapshots};
 use crate::{
     error::{HeddleError, Result},
     object::{Attribution, ChangeId, ContentHash, StateId, VisibilityTier},
 };
-use serde::Deserialize;
-
-use super::{ConflictResolutionMode, OpRecord, RecordedHead, ThreadUpdateSnapshots};
 
 pub const CURRENT_OP_RECORD_SCHEMA_VERSION: u32 = 4;
 const CURRENT_OP_RECORD_SCHEMA_NAME: &str = "state-id-v4";
@@ -409,9 +409,8 @@ impl StrictCurrentOpRecord {
 
 #[cfg(test)]
 mod tests {
-    use crate::object::{Agent, Principal};
-
     use super::*;
+    use crate::object::{Agent, Principal};
 
     fn state(byte: u8) -> StateId {
         StateId::from_bytes([byte; 32])

@@ -87,7 +87,9 @@ impl Repository {
                         .and_then(|parent| parent.get(entry.name()))
                         .and_then(TreeEntry::tree_hash)
                     {
-                        Some(parent_hash) => self.resolve_capture_tree_opt(&parent_hash, pending)?,
+                        Some(parent_hash) => {
+                            self.resolve_capture_tree_opt(&parent_hash, pending)?
+                        }
                         None => None,
                     };
                     // Unchanged subtree already in V4 form: reuse it verbatim
@@ -98,7 +100,8 @@ impl Repository {
                     {
                         child
                     } else {
-                        let converted = self.v4ify_tree(&child, parent_child.as_ref(), pending, out)?;
+                        let converted =
+                            self.v4ify_tree(&child, parent_child.as_ref(), pending, out)?;
                         out.push(converted.clone());
                         converted
                     };
@@ -170,11 +173,9 @@ fn inherit_or_fresh_salt(parent_tree: Option<&Tree>, entry: &TreeEntry) -> [u8; 
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-    use std::fs;
+    use std::{cell::Cell, fs};
 
-    use objects::object::TreeScheme;
-    use objects::store::ObjectStore;
+    use objects::{object::TreeScheme, store::ObjectStore};
     use tempfile::TempDir;
 
     use crate::{RepoConfig, Repository, TreeSchemePolicy};
@@ -208,7 +209,11 @@ mod tests {
     }
 
     /// The salt the captured tree assigned to the top-level entry `name`.
-    fn root_salt_for(repo: &Repository, tree_hash: &objects::object::ContentHash, name: &str) -> [u8; 32] {
+    fn root_salt_for(
+        repo: &Repository,
+        tree_hash: &objects::object::ContentHash,
+        name: &str,
+    ) -> [u8; 32] {
         let tree = repo.store().get_tree(tree_hash).unwrap().expect("tree");
         let index = tree
             .entries()
@@ -241,7 +246,10 @@ mod tests {
         let (_temp2, repo3) = repo_with_scheme(TreeSchemePolicy::V3);
         fs::write(_temp2.path().join("readme.md"), b"hello\n").unwrap();
         let state3 = repo3.snapshot(Some("first".into()), None).unwrap();
-        assert_eq!(state.tree, state3.tree, "v3 capture must be content-addressed");
+        assert_eq!(
+            state.tree, state3.tree,
+            "v3 capture must be content-addressed"
+        );
     }
 
     #[test]
@@ -294,7 +302,10 @@ mod tests {
         // entry kept its salt.
         let _new_salt = root_salt_for(&repo, &second.tree, "new.txt");
         let a_salt_2 = root_salt_for(&repo, &second.tree, "a.txt");
-        assert_eq!(a_salt_1, a_salt_2, "sibling salt must be inherited across a new-file capture");
+        assert_eq!(
+            a_salt_1, a_salt_2,
+            "sibling salt must be inherited across a new-file capture"
+        );
     }
 
     #[test]
@@ -305,7 +316,8 @@ mod tests {
         let first = repo.snapshot(Some("first".into()), None).unwrap();
         // With inheritance disabled, a no-op recapture mints all-new salts and
         // so must NOT reproduce the id — proving inheritance is load-bearing.
-        let second = with_forced_fresh_salts(|| repo.snapshot(Some("second".into()), None).unwrap());
+        let second =
+            with_forced_fresh_salts(|| repo.snapshot(Some("second".into()), None).unwrap());
         assert_ne!(
             first.tree, second.tree,
             "forcing fresh salts must break the no-change-recapture-identical-id invariant"
