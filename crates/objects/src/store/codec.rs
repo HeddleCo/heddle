@@ -165,7 +165,7 @@ pub fn decode_tree(data: &[u8]) -> Result<Tree> {
 
 pub fn decode_tree_serialized(data: &[u8]) -> Result<Tree> {
     if is_redacted_tree(data) {
-        return Err(HeddleError::InvalidObject(
+        return Err(HeddleError::RedactedTree(
             "HRT1 redacted projection cannot be stored or read as a full tree".to_string(),
         ));
     }
@@ -197,7 +197,7 @@ pub fn decode_tree_serialized_with_key(
     anchor: Option<&Tree>,
 ) -> Result<Tree> {
     if is_redacted_tree(data) {
-        return Err(HeddleError::InvalidObject(
+        return Err(HeddleError::RedactedTree(
             "HRT1 redacted projection cannot be stored or read as a full tree".to_string(),
         ));
     }

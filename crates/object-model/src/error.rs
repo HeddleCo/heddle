@@ -260,6 +260,15 @@ pub enum HeddleError {
     InvalidTreeEntry(#[from] TreeError),
     #[error("tree stream error: {0}")]
     TreeStream(TreeStreamError),
+    /// A redacted-tree (HRT1) projection was encountered where a full,
+    /// materializable tree is required — e.g. asked to store, pack, or read an
+    /// `HRT1` body as a `Tree`, or capture over a `PartialTree` whose withheld
+    /// leaves cannot be re-authored. This is a distinct, fail-loud signal (v4
+    /// redactable trees, Fable F): the wire-status mapping is handled by the
+    /// weft serve leg, but the heddle side must never silently drop the
+    /// withheld leaves.
+    #[error("redacted tree: {0}")]
+    RedactedTree(String),
 }
 
 impl From<TreeStreamError> for HeddleError {
