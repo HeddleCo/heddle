@@ -246,6 +246,7 @@ impl Fold {
             | OpRecord::Purge { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::GitCheckpoint { .. } => {}
         }
     }

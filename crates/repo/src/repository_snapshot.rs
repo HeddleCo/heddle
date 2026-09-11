@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use objects::{
     lock::RepositoryLockExt,
     object::{
-        Attribution, Blob, ChangeLineage, ContentHash, State, StateAttachment, StateAttachmentBody,
-        StateId, Tree, TreeEntry, TreeScheme,
+        Attribution, Blob, ChangeId, ChangeLineage, ContentHash, State, StateAttachment,
+        StateAttachmentBody, StateId, Tree, TreeEntry, TreeScheme,
     },
     store::{ObjectStore, SnapshotCommitArtifact, SnapshotCommitDescriptor, TreeWrite},
     worktree::WorktreeStatus,
@@ -152,6 +152,12 @@ struct SnapshotMutation<'a> {
     /// sidecar to that before-image if the batch fails to commit, so a rewound
     /// snapshot never leaves its auto-applied tier behind.
     staged_visibility_rewind: Option<(StateId, Option<Vec<u8>>)>,
+    /// The resolved per-entry visibility sidecar (v4 redactable trees) to stage
+    /// in this snapshot's batch, produced from queued `mark_*` calls during
+    /// `stage_snapshot_objects` once salts are minted. `apply` writes it and
+    /// folds an `EntryVisibilitySet` record in; `rewind` restores the before.
+    staged_entry_visibility: Option<objects::object::EntryVisibility>,
+    staged_entry_visibility_rewind: Option<(ChangeId, Option<Vec<u8>>)>,
     prepared_artifact: Option<PreparedSnapshotArtifact>,
     prepared_execution: Option<SnapshotExecution>,
     /// The pre-v4-conversion (flat V3) worktree tree, kept only to revalidate
@@ -186,6 +192,8 @@ impl<'a> SnapshotMutation<'a> {
             head,
             transaction_id: String::new(),
             staged_visibility_rewind: None,
+            staged_entry_visibility: None,
+            staged_entry_visibility_rewind: None,
             prepared_artifact: None,
             prepared_execution: None,
             worktree_revalidation_tree: None,
@@ -289,6 +297,15 @@ impl AtomicMutation for SnapshotMutation<'_> {
             records.push(binding.record);
         }
 
+        // v4 redactable trees: fold the per-entry visibility sidecar into THIS
+        // batch so one `heddle undo` reverts the snapshot AND the sidecar.
+        if let Some(sidecar) = self.staged_entry_visibility.clone() {
+            let binding = self.repo.stage_entry_visibility_binding(&sidecar)?;
+            self.staged_entry_visibility_rewind =
+                Some((sidecar.change_id, binding.prior_sidecar));
+            records.push(binding.record);
+        }
+
         Ok(StagedCommit::new(execution, records))
     }
 
@@ -300,6 +317,12 @@ impl AtomicMutation for SnapshotMutation<'_> {
         if let Some((state, prior)) = self.staged_visibility_rewind.take() {
             self.repo
                 .restore_state_visibility_sidecar(&state, prior)
+                .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?;
+        }
+        // Roll back the entry-visibility sidecar to its before-image too.
+        if let Some((change_id, prior)) = self.staged_entry_visibility_rewind.take() {
+            self.repo
+                .restore_entry_visibility_sidecar(&change_id, prior)
                 .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?;
         }
         Ok(())
@@ -334,6 +357,7 @@ impl AtomicMutation for SnapshotMutation<'_> {
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::HeadUpdate { .. } => None,
         }) else {
             return Ok(this_run);
@@ -395,6 +419,9 @@ impl SnapshotMutation<'_> {
 
     fn stage_snapshot_objects(&mut self) -> Result<SnapshotExecution> {
         debug!("Building tree from worktree");
+        // Drain any queued per-entry visibility marks; they are resolved against
+        // the freshly salted v4 trees below and staged in this snapshot's batch.
+        let pending_entry_visibility_marks = self.repo.take_pending_entry_visibility_marks();
         let (mut tree, tree_profile, mut supplied_blobs) = match &self.source {
             SnapshotSource::Worktree => {
                 let (tree, profile, revalidation_files, blobs, trees, monitor_token) =
@@ -680,6 +707,21 @@ impl SnapshotMutation<'_> {
             .filter(|(_, trees)| trees.len() <= 32)
             .map(|(_, trees)| trees.iter().map(|write| write.tree.clone()).collect())
             .unwrap_or_default();
+        // v4 redactable trees: resolve queued `mark_*` paths against the freshly
+        // salted trees (fail loud on an unresolvable path) and stash the sidecar
+        // for `apply` to fold into this snapshot's oplog batch.
+        if !pending_entry_visibility_marks.is_empty() {
+            let subtrees: Vec<Tree> = supplied_blobs
+                .as_ref()
+                .map(|(_, trees)| trees.iter().map(|write| write.tree.clone()).collect())
+                .unwrap_or_default();
+            self.staged_entry_visibility = self.repo.resolve_entry_visibility(
+                state.change_id,
+                &tree,
+                &subtrees,
+                &pending_entry_visibility_marks,
+            )?;
+        }
         if let Some((blobs, trees)) = supplied_blobs {
             let parent_tree = self
                 .prev_head

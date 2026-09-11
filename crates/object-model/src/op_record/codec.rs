@@ -12,7 +12,7 @@ use serde::Deserialize;
 use super::{ConflictResolutionMode, OpRecord, RecordedHead, ThreadUpdateSnapshots};
 use crate::{
     error::{HeddleError, Result},
-    object::{Attribution, ContentHash, StateId, VisibilityTier},
+    object::{Attribution, ChangeId, ContentHash, StateId, VisibilityTier},
 };
 
 pub const CURRENT_OP_RECORD_SCHEMA_VERSION: u32 = 4;
@@ -190,6 +190,14 @@ enum StrictCurrentOpRecord {
     HeadUpdate {
         previous: RecordedHead,
         new: RecordedHead,
+    },
+    EntryVisibilitySet {
+        change_id: ChangeId,
+        record_id: ContentHash,
+        #[serde(default)]
+        prior_sidecar: Option<Vec<u8>>,
+        #[serde(default)]
+        new_sidecar: Option<Vec<u8>>,
     },
 }
 
@@ -384,6 +392,17 @@ impl StrictCurrentOpRecord {
                 new_sidecar,
             },
             Self::HeadUpdate { previous, new } => OpRecord::HeadUpdate { previous, new },
+            Self::EntryVisibilitySet {
+                change_id,
+                record_id,
+                prior_sidecar,
+                new_sidecar,
+            } => OpRecord::EntryVisibilitySet {
+                change_id,
+                record_id,
+                prior_sidecar,
+                new_sidecar,
+            },
         }
     }
 }
@@ -543,6 +562,12 @@ mod tests {
                     thread: "main".into(),
                 },
             },
+            OpRecord::EntryVisibilitySet {
+                change_id: crate::object::ChangeId::from_bytes([7u8; 16]),
+                record_id: hash(8),
+                prior_sidecar: None,
+                new_sidecar: Some(vec![9, 9, 9]),
+            },
         ]
     }
 
@@ -572,6 +597,7 @@ mod tests {
             OpRecord::StateVisibilitySet { .. } => "StateVisibilitySet",
             OpRecord::StateVisibilityPromote { .. } => "StateVisibilityPromote",
             OpRecord::HeadUpdate { .. } => "HeadUpdate",
+            OpRecord::EntryVisibilitySet { .. } => "EntryVisibilitySet",
         }
     }
 
@@ -630,6 +656,7 @@ mod tests {
                 "StateVisibilitySet",
                 "StateVisibilityPromote",
                 "HeadUpdate",
+                "EntryVisibilitySet",
             ]
         );
         for record in records {
