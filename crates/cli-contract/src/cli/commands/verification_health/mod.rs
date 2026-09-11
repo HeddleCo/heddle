@@ -941,17 +941,21 @@ fn build_machine_contract_coverage() -> MachineContractCoverage {
     } else {
         "available_with_schema_gaps".to_string()
     };
+    // Count the published catalog, not `commands.len()`. `ci` is a
+    // non-default root and is excluded from `catalog_commands_total` so
+    // a ci-enabled Coverage build and a default Quality build bake the
+    // same snapshot into docs/json-schemas.md.
     let summary = if status == "available" {
         if accepted_opaque_schema_verbs_total == 0 {
             format!(
                 "{} command(s), {} JSON command(s), verified everyday/agent machine surface has concrete schemas",
-                commands.len(),
+                catalog_commands_total,
                 json_commands_total
             )
         } else {
             format!(
                 "{} command(s), {} JSON command(s), {} mutating command(s), {} mutating JSON command(s); verified everyday/agent machine surface has {} concrete schema-backed JSON command(s); advanced/internal/admin surfaces carry {} accepted opaque schema(s) outside clean verification",
-                commands.len(),
+                catalog_commands_total,
                 json_commands_total,
                 catalog_mutating_commands_total,
                 mutating_commands_total,
@@ -962,7 +966,7 @@ fn build_machine_contract_coverage() -> MachineContractCoverage {
     } else if status == "available_with_opaque_schemas" {
         format!(
             "{} command(s), {} JSON command(s), verified everyday/agent machine surface has {} concrete schema-backed and {} accepted opaque schema-backed command(s)",
-            commands.len(),
+            catalog_commands_total,
             json_commands_total,
             verified_scope_json_commands_with_schema,
             verified_scope_json_commands_with_accepted_opaque_schema
@@ -970,7 +974,7 @@ fn build_machine_contract_coverage() -> MachineContractCoverage {
     } else if status == "available_with_doc_gaps" {
         format!(
             "{} command(s), {} JSON command(s), {} concrete schema-backed and {} accepted opaque; {} runtime schema verb(s) need documented samples",
-            commands.len(),
+            catalog_commands_total,
             json_commands_total,
             json_commands_with_schema,
             json_commands_with_accepted_opaque_schema,
@@ -979,7 +983,7 @@ fn build_machine_contract_coverage() -> MachineContractCoverage {
     } else {
         format!(
             "{} command(s), {} JSON command(s), {} concrete schema-backed, {} accepted opaque, {} missing schemas ({} mutating)",
-            commands.len(),
+            catalog_commands_total,
             json_commands_total,
             json_commands_with_schema,
             json_commands_with_accepted_opaque_schema,
