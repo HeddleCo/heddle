@@ -4,14 +4,16 @@
 use std::path::PathBuf;
 
 use crate::object::{
-    Action, ActionId, AnnotatedTag, Blob, ChangeId, ContentHash, OpenedTreeBody, State,
-    StateAttachment, StateAttachmentId, StateId, Tree, TreeEntry, TreeEntryReader,
-    TreeResumeCursor, is_streamable_tree,
+    Action, ActionId, AnnotatedTag, Blob, ChangeId, ContentHash, OpenedTreeBody, PartialTree,
+    State, StateAttachment, StateAttachmentId, StateId, Tree, TreeEntry, TreeEntryReader,
+    TreeResumeCursor, is_redacted_tree, is_streamable_tree,
 };
 
 pub mod codec;
 mod delta_source;
 pub mod fs;
+#[cfg(test)]
+mod partial_tree_tests;
 pub mod liveness;
 #[cfg(any(test, feature = "memory-backend"))]
 pub mod memory;
@@ -222,6 +224,42 @@ pub trait SidecarStore: Send + Sync {
     }
 }
 
+/// The result of resolving a tree hash that may be held either as the full
+/// canonical object or only as a redacted partial projection (HRT1).
+///
+/// A full tree SUPERSEDES a partial for the same hash. `Partial` is distinct
+/// from `Absent` on purpose: a partial clone that withholds an entry must be
+/// distinguishable from a repository that is missing or corrupt, so callers can
+/// present "withheld" rather than "gone".
+#[derive(Clone, Debug)]
+pub enum TreeRead {
+    /// The full canonical tree is held.
+    Full(Tree),
+    /// Only a redacted partial projection is held: its visible entries carry
+    /// their preimage and its withheld entries are marked opaque. Verifies
+    /// against the declared `State.tree` via `PartialTree::reconstruct_root`.
+    Partial(PartialTree),
+    /// Neither a full tree nor a partial projection is held for this hash.
+    Absent,
+}
+
+/// The outcome of storing a redacted partial projection under the monotone
+/// discipline enforced by [`ObjectStore::put_partial_tree`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PartialTreeWrite {
+    /// The projection was written to the partial slot.
+    Stored {
+        /// Number of withheld (redacted) leaves.
+        redacted: usize,
+        /// Number of visible leaves.
+        visible: usize,
+    },
+    /// A full canonical tree for this hash is already held, so the projection
+    /// was dropped rather than stored — a full tree supersedes a partial, and a
+    /// partial never overwrites a full (monotone).
+    SupersededByFull,
+}
+
 /// Trait for object storage backends.
 ///
 /// Sidecars remain a separate implementation seam, but every object store
@@ -361,6 +399,90 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
     fn has_tree_locally(&self, hash: &ContentHash) -> Result<bool> {
         self.has_tree(hash)
     }
+
+    // ── Redacted partial-tree projections (HRT1) ──────────────────────
+    //
+    // A partial projection lives in a slot keyed by the canonical tree hash it
+    // projects, DISTINCT from the full-tree object slot. The full-tree methods
+    // above (`get_tree`/`has_tree`) never see or return a projection; the
+    // methods below are the only way in and out of the partial slot. Backends
+    // that do not model projections inherit the default impls (report "none" /
+    // refuse the write), mirroring the sidecar seam.
+
+    /// Whether the store holds a redacted partial projection keyed by `hash`.
+    /// Independent of [`ObjectStore::has_tree`], which reports the full object.
+    fn has_partial_tree(&self, _hash: &ContentHash) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Raw HRT1 partial-projection bytes for `hash`, or `Ok(None)`. These are
+    /// byte-identical to what [`ObjectStore::put_partial_tree_bytes`] wrote —
+    /// the wire-transfer payload, not a re-serialized view.
+    fn get_partial_tree_bytes(&self, _hash: &ContentHash) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Persist raw HRT1 partial-projection bytes keyed by `hash`. This is the
+    /// low-level slot; callers should prefer [`ObjectStore::put_partial_tree`],
+    /// which verifies the projection and enforces the monotone discipline.
+    fn put_partial_tree_bytes(&self, _hash: &ContentHash, _bytes: &[u8]) -> Result<()> {
+        Err(HeddleError::InvalidObject(
+            "this object store does not support partial tree projections".to_string(),
+        ))
+    }
+
+    /// List every tree hash for which a partial projection is held. Order is
+    /// unspecified; callers that need stable ordering should sort.
+    fn list_partial_trees(&self) -> Result<Vec<ContentHash>> {
+        Ok(Vec::new())
+    }
+
+    /// Drop any partial projection held for `hash`. Idempotent — a no-op when
+    /// none is held. Used to reclaim the partial slot once the full tree is
+    /// backfilled.
+    fn remove_partial_tree(&self, _hash: &ContentHash) -> Result<()> {
+        Ok(())
+    }
+
+    /// Store a redacted partial projection under monotone discipline.
+    ///
+    /// `hrt1` must be an HRT1 body whose visible preimages + withheld leaf
+    /// hashes reconstruct `expected` (verified through
+    /// [`codec::decode_partial_tree`], i.e. Leg 1's `reconstruct_root`).
+    /// Monotone: a partial NEVER overwrites a full tree. If the full canonical
+    /// tree for `expected` is already held, the projection is dropped and
+    /// [`PartialTreeWrite::SupersededByFull`] is returned; otherwise the raw
+    /// bytes land in the partial slot.
+    fn put_partial_tree(&self, expected: &ContentHash, hrt1: &[u8]) -> Result<PartialTreeWrite> {
+        let partial = codec::decode_partial_tree(hrt1, *expected)?;
+        if self.has_tree(expected)? {
+            return Ok(PartialTreeWrite::SupersededByFull);
+        }
+        self.put_partial_tree_bytes(expected, hrt1)?;
+        let redacted = partial.redacted_count();
+        Ok(PartialTreeWrite::Stored {
+            redacted,
+            visible: partial.leaves().len() - redacted,
+        })
+    }
+
+    /// Read the tree for `hash` as the full canonical tree, a redacted partial
+    /// projection, or absent.
+    ///
+    /// A full tree SUPERSEDES a partial: when the full object is held it is
+    /// returned even if a partial projection also exists for the same hash.
+    /// [`ObjectStore::get_tree`] by contrast returns the full tree or `None`
+    /// and NEVER the partial, so a caller that needs the complete tree cannot
+    /// be silently handed a projection.
+    fn read_tree(&self, hash: &ContentHash) -> Result<TreeRead> {
+        if let Some(full) = self.get_tree(hash)? {
+            return Ok(TreeRead::Full(full));
+        }
+        match self.get_partial_tree_bytes(hash)? {
+            Some(bytes) => Ok(TreeRead::Partial(codec::decode_partial_tree(&bytes, *hash)?)),
+            None => Ok(TreeRead::Absent),
+        }
+    }
     /// Open a streamable HTR4 tree body. Store backends use sequential
     /// verify: resume at ordinal > 0 is refused until the bytes are hashed.
     fn open_tree(
@@ -428,6 +550,13 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
     }
 
     fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
+        // An HRT1 redacted projection is not a full tree: route it to the
+        // partial slot (monotone) instead of hard-refusing in the full-tree
+        // decoder.
+        if is_redacted_tree(data) {
+            self.put_partial_tree(&hash, data)?;
+            return Ok(hash);
+        }
         let tree = codec::decode_tree_serialized_with_key(data, hash, None)?;
         self.put_tree(&tree)
     }

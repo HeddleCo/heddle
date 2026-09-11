@@ -15,10 +15,10 @@ use super::{
     FsStore,
     fs_io::{list_hashes_from_dir, read_file_bytes, read_file_header},
     fs_paths::{
-        action_path, actions_dir, annotated_tags_dir, blobs_dir, hash_path, redaction_path,
-        redactions_dir, state_attachment_index_lock_path, state_attachment_index_path,
-        state_attachment_path, state_attachments_dir, state_path, state_visibility_dir,
-        state_visibility_path, states_dir, tree_lineage_path, trees_dir,
+        action_path, actions_dir, annotated_tags_dir, blobs_dir, hash_path, partial_tree_path,
+        partial_trees_dir, redaction_path, redactions_dir, state_attachment_index_lock_path,
+        state_attachment_index_path, state_attachment_path, state_attachments_dir, state_path,
+        state_visibility_dir, state_visibility_path, states_dir, tree_lineage_path, trees_dir,
     },
 };
 use crate::{
@@ -27,7 +27,8 @@ use crate::{
         OpenedTreeBody, State, StateAttachment, StateAttachmentId, StateId, TREE_CANONICAL_MAGIC,
         TREE_DELTA_HEADER_LEN, TREE_DELTA_MAGIC, TREE_LEAN_MAGIC, TREE_SALTED_MAGIC, Tree,
         TreeByteSource, TreeEntry, TreeEntryReader, TreeResumeCursor, decode_tree_delta_header,
-        decode_tree_delta_header_prefix, is_delta_tree, is_salted_tree, is_streamable_tree,
+        decode_tree_delta_header_prefix, is_delta_tree, is_redacted_tree, is_salted_tree,
+        is_streamable_tree,
     },
     store::{
         HeddleError, ObjectCacheControl, ObjectStore, Result, SidecarStore,
@@ -1711,6 +1712,12 @@ impl ObjectStore for FsStore {
 
     #[instrument(skip(self, data), fields(hash = %hash.short(), size = data.len()))]
     fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
+        // An HRT1 redacted projection is not a full tree: route it to the
+        // partial slot (monotone) rather than through the full-tree decoder.
+        if is_redacted_tree(data) {
+            self.put_partial_tree(&hash, data)?;
+            return Ok(hash);
+        }
         let tree = validate_loaded_tree(self.decode_tree_storage_body(hash, data)?)?;
 
         let path = hash_path(&trees_dir(&self.root), &hash);
@@ -1751,6 +1758,60 @@ impl ObjectStore for FsStore {
             return Ok(true);
         }
         Ok(self.reload_packs_if_stale()? && self.try_has_tree_once(hash)?)
+    }
+
+    fn has_partial_tree(&self, hash: &ContentHash) -> Result<bool> {
+        Ok(partial_tree_path(&self.root, hash).exists())
+    }
+
+    fn get_partial_tree_bytes(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
+        let path = partial_tree_path(&self.root, hash);
+        match fs::read(&path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(HeddleError::Io(err)),
+        }
+    }
+
+    fn put_partial_tree_bytes(&self, hash: &ContentHash, bytes: &[u8]) -> Result<()> {
+        let dir = partial_trees_dir(&self.root);
+        if !dir.exists() {
+            crate::fs_atomic::create_dir_all_durable(&dir)?;
+        }
+        let path = partial_tree_path(&self.root, hash);
+        crate::fs_atomic::write_file_atomic(&path, bytes)?;
+        Ok(())
+    }
+
+    fn list_partial_trees(&self) -> Result<Vec<ContentHash>> {
+        let dir = partial_trees_dir(&self.root);
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("bin") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if let Ok(hash) = ContentHash::from_hex(stem) {
+                out.push(hash);
+            }
+        }
+        Ok(out)
+    }
+
+    fn remove_partial_tree(&self, hash: &ContentHash) -> Result<()> {
+        let path = partial_tree_path(&self.root, hash);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(HeddleError::Io(err)),
+        }
     }
 
     #[instrument(skip(self), fields(id = %id.short()))]

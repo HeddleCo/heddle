@@ -10,7 +10,7 @@ use crate::{
     object::{
         Action, ActionId, AnnotatedTag, Blob, BytesTreeSource, ContentHash, OpenedTreeBody, State,
         StateAttachment, StateAttachmentId, StateId, Tree, TreeEntryReader, TreeResumeCursor,
-        TreeScheme, decode_tree_delta_header, is_delta_tree, is_streamable_tree,
+        TreeScheme, decode_tree_delta_header, is_delta_tree, is_redacted_tree, is_streamable_tree,
     },
     store::{HeddleError, ObjectCacheControl, ObjectStore, Result, SidecarStore, codec},
     sync::RwLockExt,
@@ -43,6 +43,9 @@ pub struct InMemoryStore {
     actions: RwLock<HashMap<ActionId, Vec<u8>>>,
     redactions: RwLock<HashMap<ContentHash, Vec<u8>>>,
     state_visibility: RwLock<HashMap<StateId, Vec<u8>>>,
+    /// Raw HRT1 partial projections keyed by the canonical tree hash they
+    /// project — a slot DISTINCT from `trees` (the full-tree slot).
+    partial_trees: RwLock<HashMap<ContentHash, Vec<u8>>>,
 }
 
 impl InMemoryStore {
@@ -192,6 +195,12 @@ impl ObjectStore for InMemoryStore {
     }
 
     fn put_tree_serialized(&self, data: &[u8], hash: ContentHash) -> Result<ContentHash> {
+        // Route an HRT1 redacted projection to the partial slot (monotone)
+        // rather than through the full-tree decoder, which refuses it.
+        if is_redacted_tree(data) {
+            self.put_partial_tree(&hash, data)?;
+            return Ok(hash);
+        }
         let anchor = if is_delta_tree(data) {
             let header = decode_tree_delta_header(data)?;
             self.materialized_tree(&header.anchor)?
@@ -209,6 +218,30 @@ impl ObjectStore for InMemoryStore {
 
     fn list_trees(&self) -> Result<Vec<ContentHash>> {
         Ok(self.trees.read_or_poisoned().keys().copied().collect())
+    }
+
+    fn has_partial_tree(&self, hash: &ContentHash) -> Result<bool> {
+        Ok(self.partial_trees.read_or_poisoned().contains_key(hash))
+    }
+
+    fn get_partial_tree_bytes(&self, hash: &ContentHash) -> Result<Option<Vec<u8>>> {
+        Ok(self.partial_trees.read_or_poisoned().get(hash).cloned())
+    }
+
+    fn put_partial_tree_bytes(&self, hash: &ContentHash, bytes: &[u8]) -> Result<()> {
+        self.partial_trees
+            .write_or_poisoned()
+            .insert(*hash, bytes.to_vec());
+        Ok(())
+    }
+
+    fn list_partial_trees(&self) -> Result<Vec<ContentHash>> {
+        Ok(self.partial_trees.read_or_poisoned().keys().copied().collect())
+    }
+
+    fn remove_partial_tree(&self, hash: &ContentHash) -> Result<()> {
+        self.partial_trees.write_or_poisoned().remove(hash);
+        Ok(())
     }
 
     fn get_state(&self, id: &StateId) -> Result<Option<State>> {
