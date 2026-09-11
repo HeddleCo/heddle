@@ -44,10 +44,10 @@ pub use native_pack::{
     reuse_native_pack_encoded_subset_in,
 };
 pub use object_transfer::{
-    MAX_PULL_FRAME_MESSAGE_SIZE, MAX_RECEIVED_REDACTIONS_BLOB_SIZE,
-    MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE, admit_declared_received_len,
-    check_received_transfer_blob_size, chunk_bounds, chunk_count, chunk_offset, load_object_data,
-    load_requested_object, store_received_object,
+    MAX_PULL_FRAME_MESSAGE_SIZE, MAX_RECEIVED_REDACTED_TREE_SIZE,
+    MAX_RECEIVED_REDACTIONS_BLOB_SIZE, MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE,
+    admit_declared_received_len, check_received_transfer_blob_size, chunk_bounds, chunk_count,
+    chunk_offset, load_object_data, load_requested_object, store_received_object,
 };
 pub use objects::transfer::{
     GitLaneTransferIntent, ObjectAvailabilityPlan, ObjectId, ObjectInfo, ObjectType,

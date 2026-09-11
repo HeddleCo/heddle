@@ -23,6 +23,12 @@ pub const MAX_RECEIVED_REDACTIONS_BLOB_SIZE: u64 = 64 * 1024 * 1024;
 /// same receive-side cap.
 pub const MAX_RECEIVED_STATE_VISIBILITY_BLOB_SIZE: u64 = 64 * 1024 * 1024;
 
+/// Receive-side cap for a REDACTED (HRT1) partial-tree body arriving on the
+/// out-of-pack `RedactedTreeTransfer` pull frame. An HRT1 body is bounded by the
+/// same envelope as a full tree object, so it takes the same 64 MiB cap the
+/// other server-controlled pull-stream buffers use.
+pub const MAX_RECEIVED_REDACTED_TREE_SIZE: u64 = 64 * 1024 * 1024;
+
 /// Envelope headroom added on top of the largest legitimate sidecar blob when
 /// sizing the pull-stream frame decode limit. Covers the protobuf fields that
 /// wrap a max-size sidecar blob in a `PullMessage` — the oneof tag, the

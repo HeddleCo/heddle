@@ -2184,6 +2184,46 @@ impl HostedClient {
                     // hosted list RPC when discussions_from_pack or
                     // context_from_pack is advertised but unconsumable.
                 }
+                Some(pull_server_frame::Frame::RedactedTree(transfer)) => {
+                    // Out-of-pack channel for a REDACTED (HRT1) partial tree
+                    // (structural visibility gate, pull-frame leg). An HRT1 body
+                    // cannot ride the native pack — it is a leaf/content
+                    // projection, not the canonical object — so the server ships
+                    // it here and we install it into the partial-tree slot.
+                    // `store_received_object` detects HRT1 (`put_tree_serialized`
+                    // routes it to `put_partial_tree`), which binds the
+                    // projection's declared root to `tree_hash` via
+                    // `decode_partial_tree` — so a projection cannot masquerade as
+                    // a different tree.
+                    wire::check_received_transfer_blob_size(
+                        transfer.redacted_tree.len(),
+                        wire::MAX_RECEIVED_REDACTED_TREE_SIZE,
+                        "redacted-tree",
+                    )?;
+                    profile.bytes_received = profile
+                        .bytes_received
+                        .saturating_add(transfer.redacted_tree.len());
+                    profile.object_mix.record(ObjectType::Tree);
+                    let tree_hash = ContentHash::from_hex(&transfer.tree_hash).map_err(|err| {
+                        ProtocolError::InvalidState(format!(
+                            "RedactedTreeTransfer.tree_hash is not a valid content hash: {err}"
+                        ))
+                    })?;
+                    let object = wire::ObjectData {
+                        id: wire::ObjectId::Hash(tree_hash),
+                        obj_type: ObjectType::Tree,
+                        data: transfer.redacted_tree,
+                        is_delta: false,
+                    };
+                    let decode_start = Instant::now();
+                    wire::store_received_object(repo.store(), &object).map_err(|err| {
+                        ProtocolError::InvalidState(format!(
+                            "install redacted partial tree {}: {err}",
+                            transfer.tree_hash
+                        ))
+                    })?;
+                    profile.store_receive_object += decode_start.elapsed();
+                }
                 Some(pull_server_frame::Frame::Complete(complete)) => {
                     tx.take();
                     request_pump
