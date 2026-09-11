@@ -446,3 +446,38 @@ fn from_scratch_random_salts_differ() {
         "independent from-scratch captures mint fresh salts => different ids"
     );
 }
+
+// ── fix E: apply_tree_delta refuses a V4 anchor ─────────────────────
+
+#[test]
+fn apply_tree_delta_refuses_a_v4_anchor() {
+    let anchor = sample_v4();
+    assert!(
+        crate::object::apply_tree_delta(&anchor, &[]).is_err(),
+        "applying an HDC1 delta to a v4 anchor must fail loud, not silently \
+         produce a v3 tree"
+    );
+}
+
+// ── fix D: RFC-6962 k split is stable across all arities ────────────
+
+#[test]
+fn merkle_root_is_stable_across_sizes() {
+    let empty = Tree::from_entries_salted_v4(vec![], vec![]).unwrap().hash();
+    for n in 1..=130usize {
+        let entries: Vec<_> = (0..n)
+            .map(|i| {
+                TreeEntry::file(format!("f{i:04}"), ch(format!("b{i}").as_bytes()), false).unwrap()
+            })
+            .collect();
+        let salts: Vec<[u8; 32]> = (0..n).map(|i| [i as u8; 32]).collect();
+        let a = Tree::from_entries_salted_v4(entries.clone(), salts.clone()).unwrap();
+        let b = Tree::from_entries_salted_v4(entries, salts).unwrap();
+        assert_eq!(a.hash(), b.hash(), "n={n} must be deterministic");
+        assert_ne!(
+            a.hash(),
+            empty,
+            "n={n} non-empty root must differ from empty"
+        );
+    }
+}
