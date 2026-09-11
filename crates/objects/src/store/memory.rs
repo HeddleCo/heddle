@@ -236,7 +236,12 @@ impl ObjectStore for InMemoryStore {
     }
 
     fn list_partial_trees(&self) -> Result<Vec<ContentHash>> {
-        Ok(self.partial_trees.read_or_poisoned().keys().copied().collect())
+        Ok(self
+            .partial_trees
+            .read_or_poisoned()
+            .keys()
+            .copied()
+            .collect())
     }
 
     fn remove_partial_tree(&self, hash: &ContentHash) -> Result<()> {

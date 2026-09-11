@@ -12,11 +12,11 @@ use crate::object::{
 pub mod codec;
 mod delta_source;
 pub mod fs;
-#[cfg(test)]
-mod partial_tree_tests;
 pub mod liveness;
 #[cfg(any(test, feature = "memory-backend"))]
 pub mod memory;
+#[cfg(test)]
+mod partial_tree_tests;
 pub use heddle_pack::store::pack;
 pub mod shallow;
 mod snapshot_commit;
@@ -479,7 +479,9 @@ pub trait ObjectStore: SidecarStore + Send + Sync {
             return Ok(TreeRead::Full(full));
         }
         match self.get_partial_tree_bytes(hash)? {
-            Some(bytes) => Ok(TreeRead::Partial(codec::decode_partial_tree(&bytes, *hash)?)),
+            Some(bytes) => Ok(TreeRead::Partial(codec::decode_partial_tree(
+                &bytes, *hash,
+            )?)),
             None => Ok(TreeRead::Absent),
         }
     }

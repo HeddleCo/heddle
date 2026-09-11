@@ -481,7 +481,8 @@ impl Repository {
             }
         }
 
-        fs::create_dir_all(dir).map_err(|e| HeddleError::Io(enrich_fs_error(dir, "creating", e)))?;
+        fs::create_dir_all(dir)
+            .map_err(|e| HeddleError::Io(enrich_fs_error(dir, "creating", e)))?;
         for directory in &plan.directories {
             fs::create_dir_all(directory)
                 .map_err(|e| HeddleError::Io(enrich_fs_error(directory, "creating", e)))?;
@@ -1097,15 +1098,17 @@ fn requested_materialization_threads() -> Option<NonZeroUsize> {
 mod tests {
     use std::{num::NonZeroUsize, path::PathBuf};
 
-    use objects::{fs_clone::filesystem_supports_reflink, object::Blob, store::ObjectStore};
+    use objects::{
+        fs_clone::filesystem_supports_reflink,
+        object::{Blob, ContentHash, PartialTree, Tree, TreeEntry},
+        store::ObjectStore,
+    };
     use tempfile::TempDir;
 
     use super::{
         MaterializationContext, Repository, WorktreeWriteOp, classify_clone_failure,
         materialization_worker_count, remove_materialized_leaf,
     };
-
-    use objects::object::{ContentHash, PartialTree, Tree, TreeEntry};
 
     /// Build a 3-entry V4 salted tree (`readme.md`, `secret.md`, `visible.txt`),
     /// storing each blob, and return `(tree, secret_leaf_hash)` where the
@@ -1152,8 +1155,14 @@ mod tests {
         assert_eq!(outcome.withheld, vec![secret_leaf]);
         assert!(outcome.has_withheld());
 
-        assert!(dest.join("readme.md").exists(), "visible entry must be checked out");
-        assert!(dest.join("visible.txt").exists(), "visible entry must be checked out");
+        assert!(
+            dest.join("readme.md").exists(),
+            "visible entry must be checked out"
+        );
+        assert!(
+            dest.join("visible.txt").exists(),
+            "visible entry must be checked out"
+        );
         assert!(
             !dest.join("secret.md").exists(),
             "withheld entry must be OMITTED, not written"
@@ -1195,7 +1204,8 @@ mod tests {
         let good = PartialTree::project(&tree, &std::collections::HashSet::new()).unwrap();
         // Re-declare the projection under a bogus root: its leaves no longer
         // reconstruct the declared hash.
-        let tampered = PartialTree::new(ContentHash::compute(b"bogus-root"), good.leaves().to_vec());
+        let tampered =
+            PartialTree::new(ContentHash::compute(b"bogus-root"), good.leaves().to_vec());
 
         let dest = temp.path().join("tampered-checkout");
         match repo.materialize_partial_tree(&tampered, &dest) {
@@ -1203,9 +1213,14 @@ mod tests {
                 err.to_string().contains("corruption") || err.to_string().contains("expected"),
                 "expected a root-mismatch corruption error, got: {err}"
             ),
-            Ok(_) => panic!("a projection that does not reconstruct its declared root must fail loud"),
+            Ok(_) => {
+                panic!("a projection that does not reconstruct its declared root must fail loud")
+            }
         }
-        assert!(!dest.join("readme.md").exists(), "nothing must be written on a failed verify");
+        assert!(
+            !dest.join("readme.md").exists(),
+            "nothing must be written on a failed verify"
+        );
     }
 
     /// The generic [`Progress`](objects::Progress) handle installed on a
