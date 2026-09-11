@@ -1682,3 +1682,69 @@ fn test_recent_object_cache_large_shared_read_gets_second_chance() {
     );
     assert!(cache.contains(&CAPACITY), "new entry must be retained");
 }
+
+// ── V4 salted-tree store round-trips (HSR1) ─────────────────────────
+
+#[test]
+fn v4_tree_round_trips_through_fs_put_and_get() {
+    use crate::object::TreeScheme;
+    let (_temp, store) = create_test_store();
+    let tree = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("readme.md", ContentHash::compute(b"readme"), false).unwrap(),
+            TreeEntry::file("secret.md", ContentHash::compute(b"secret"), false).unwrap(),
+            TreeEntry::directory("src", ContentHash::compute(b"src")).unwrap(),
+        ],
+        vec![[0x11; 32], [0x22; 32], [0x33; 32]],
+    )
+    .unwrap();
+    let hash = store.put_tree(&tree).unwrap();
+    assert_eq!(hash, tree.hash());
+
+    // The stored loose body is HSR1 (salted), never HLR1/HTR4.
+    let serialized = store.get_tree_serialized(&hash).unwrap().unwrap();
+    let body = crate::store::codec::decode_tree_body(&serialized).unwrap();
+    assert!(
+        crate::object::is_salted_tree(&body),
+        "a v4 tree must be stored as an HSR1 salted body"
+    );
+
+    let loaded = store.get_tree(&hash).unwrap().unwrap();
+    assert_eq!(loaded, tree);
+    assert_eq!(loaded.hash(), tree.hash());
+    assert_eq!(loaded.scheme(), TreeScheme::V4Salted);
+    assert_eq!(loaded.salts(), tree.salts());
+}
+
+#[test]
+fn v4_tree_round_trips_through_in_memory_store() {
+    use crate::store::InMemoryStore;
+    let store = InMemoryStore::new();
+    let tree = Tree::from_entries_salted_v4(
+        vec![TreeEntry::file("a", ContentHash::compute(b"a"), false).unwrap()],
+        vec![[0x44; 32]],
+    )
+    .unwrap();
+    let hash = store.put_tree(&tree).unwrap();
+    let loaded = store.get_tree(&hash).unwrap().unwrap();
+    assert_eq!(loaded, tree);
+    assert_eq!(loaded.hash(), tree.hash());
+}
+
+#[test]
+fn v4_put_tree_serialized_round_trips_hsr1() {
+    let (_temp, store) = create_test_store();
+    let tree = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("a", ContentHash::compute(b"a"), false).unwrap(),
+            TreeEntry::file("b", ContentHash::compute(b"b"), false).unwrap(),
+        ],
+        vec![[0x55; 32], [0x66; 32]],
+    )
+    .unwrap();
+    let body = tree.encode_canonical().unwrap();
+    let hash = store.put_tree_serialized(&body, tree.hash()).unwrap();
+    assert_eq!(hash, tree.hash());
+    let loaded = store.get_tree(&tree.hash()).unwrap().unwrap();
+    assert_eq!(loaded, tree);
+}
