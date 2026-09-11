@@ -209,3 +209,12 @@ split-debuginfo = "unpacked"
 lto = true
 codegen-units = 1
 strip = true
+
+[patch.crates-io]
+# v4-redactable-tree: replace the published heddle-api 0.30.0 with the additive
+# orchestrator/v4-entry-visibility branch (EntryVisibility sidecar wire
+# transport — a superset of 0.30.0) until that api change is published. Patching
+# crates-io (rather than the workspace `api` dep) unifies EVERY consumer,
+# including heddleco-capability-verifier, onto one heddle-api source and avoids a
+# two-copy type split. Drop this patch once the api change is released.
+heddle-api = { path = "/home/heddleco/HeddleCo/api" }

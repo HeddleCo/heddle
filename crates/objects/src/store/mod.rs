@@ -4,9 +4,9 @@
 use std::path::PathBuf;
 
 use crate::object::{
-    Action, ActionId, AnnotatedTag, Blob, ContentHash, OpenedTreeBody, State, StateAttachment,
-    StateAttachmentId, StateId, Tree, TreeEntry, TreeEntryReader, TreeResumeCursor,
-    is_streamable_tree,
+    Action, ActionId, AnnotatedTag, Blob, ChangeId, ContentHash, OpenedTreeBody, State,
+    StateAttachment, StateAttachmentId, StateId, Tree, TreeEntry, TreeEntryReader,
+    TreeResumeCursor, is_streamable_tree,
 };
 
 pub mod codec;
@@ -193,6 +193,32 @@ pub trait SidecarStore: Send + Sync {
     /// Default impl returns `Ok(vec![])`.
     fn list_states_with_visibility(&self) -> Result<Vec<StateId>> {
         Ok(Vec::new())
+    }
+
+    /// Return the raw rmp-encoded `EntryVisibility` sidecar bytes for the state
+    /// identified by `change`, or `Ok(None)` if no sidecar exists. The bytes are
+    /// the wire-transfer payload for entry visibility (v4 redactable trees).
+    /// Keyed by the rewrite-stable [`ChangeId`], mirroring how state visibility
+    /// is keyed by [`StateId`].
+    ///
+    /// Default impl returns `Ok(None)`.
+    fn get_entry_visibility_bytes_for_change(&self, _change: &ChangeId) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Persist raw `EntryVisibility` sidecar bytes for the state identified by
+    /// `change`.
+    ///
+    /// Default impl returns an "unsupported" error so stores that do not model
+    /// the sidecar refuse instead of dropping it.
+    fn put_entry_visibility_bytes_for_change(
+        &self,
+        _change: &ChangeId,
+        _bytes: &[u8],
+    ) -> Result<()> {
+        Err(HeddleError::InvalidObject(
+            "this object store does not support persisting entry visibility".to_string(),
+        ))
     }
 }
 

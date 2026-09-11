@@ -9,10 +9,10 @@ use std::{
 };
 
 use api::heddle::api::v1alpha1::{
-    ConfidenceBand as ProtoConfidenceBand, GetBlobRequest, GetThreadRequest, GitCheckpointTransfer,
-    GitLaneTransfer, GitObjectAlgorithm, GitObjectId as ProtoGitObjectId, GitPackTransfer,
-    GitRefKind as ProtoGitRefKind, GitRefUpdateTransfer,
-    IntegrationPolicyStatus as ProtoIntegrationPolicyStatus, ListRefsRequest,
+    ConfidenceBand as ProtoConfidenceBand, EntryVisibilityTransfer, GetBlobRequest,
+    GetThreadRequest, GitCheckpointTransfer, GitLaneTransfer, GitObjectAlgorithm,
+    GitObjectId as ProtoGitObjectId, GitPackTransfer, GitRefKind as ProtoGitRefKind,
+    GitRefUpdateTransfer, IntegrationPolicyStatus as ProtoIntegrationPolicyStatus, ListRefsRequest,
     ObjectAvailabilityStatus, ObjectDescriptor, PackChunk, PackStreamKind, PartialFetchStatus,
     ProviderPlanChallenge, PullClientFrame, PullReady, PullRequest, PullServerFrame,
     PushClientFrame, PushRequest, PushServerFrame, RedactionTransfer, RefEntry as ProtoRefEntry,
@@ -432,13 +432,19 @@ fn select_snapshot_pack_reuse_descriptor<'a>(
     }
     let wanted = objects
         .iter()
-        .map(|object| match (&object.id, object.obj_type) {
+        .filter_map(|object| match (&object.id, object.obj_type) {
             (wire::ObjectId::Hash(hash), ObjectType::AnnotatedTag) => {
-                PackObjectId::AnnotatedTag(*hash)
+                Some(PackObjectId::AnnotatedTag(*hash))
             }
-            (wire::ObjectId::Hash(hash), _) => PackObjectId::Hash(*hash),
-            (wire::ObjectId::StateId(state), _) => PackObjectId::StateId(*state),
-            (wire::ObjectId::StateAttachment { id, .. }, _) => PackObjectId::Hash(*id.as_hash()),
+            (wire::ObjectId::Hash(hash), _) => Some(PackObjectId::Hash(*hash)),
+            (wire::ObjectId::StateId(state), _) => Some(PackObjectId::StateId(*state)),
+            (wire::ObjectId::StateAttachment { id, .. }, _) => {
+                Some(PackObjectId::Hash(*id.as_hash()))
+            }
+            // EntryVisibility (change-id-keyed) is never packable-for-push; the
+            // guard above already returns None for a batch containing it. Dropped
+            // here as a backstop so the length check below declines pack reuse.
+            (wire::ObjectId::ChangeId(_), _) => None,
         })
         .collect::<HashSet<_>>();
     if wanted.len() != objects.len() {
@@ -462,6 +468,7 @@ pub struct PullObjectMix {
     pub redactions: usize,
     pub purges: usize,
     pub state_visibilities: usize,
+    pub entry_visibilities: usize,
     pub state_attachments: usize,
     pub key_bindings: usize,
 }
@@ -580,6 +587,7 @@ impl PullObjectMix {
             ObjectTypeBucket::Redaction => self.redactions += 1,
             ObjectTypeBucket::Purge => self.purges += 1,
             ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
+            ObjectTypeBucket::EntryVisibility => self.entry_visibilities += 1,
             ObjectTypeBucket::StateAttachment => self.state_attachments += 1,
             ObjectTypeBucket::KeyBinding => self.key_bindings += 1,
         }
@@ -594,6 +602,7 @@ impl PullObjectMix {
             + self.redactions
             + self.purges
             + self.state_visibilities
+            + self.entry_visibilities
             + self.state_attachments
             + self.key_bindings
     }
@@ -2942,6 +2951,9 @@ fn sidecar_push_message(
         ObjectType::StateVisibility => {
             state_visibility_push_message(repo, info, client_operation_id)
         }
+        ObjectType::EntryVisibility => {
+            entry_visibility_push_message(repo, info, client_operation_id)
+        }
         ObjectType::StateAttachment => {
             state_attachment_push_message(repo, info, client_operation_id)
         }
@@ -3008,6 +3020,46 @@ fn state_visibility_push_message(
             StateVisibilityTransfer {
                 state_id: super::helpers::proto_state_id(state),
                 state_visibility_blob: bytes,
+            },
+        )),
+        client_operation_id: client_operation_id.to_string(),
+    })
+}
+
+/// Build the out-of-pack push carrier for a per-state `EntryVisibility` sidecar
+/// (v4 redactable trees), mirroring [`state_visibility_push_message`]. Keyed by
+/// the rewrite-stable `ChangeId`; the payload is the canonical rmp-encoded
+/// `EntryVisibility` bytes exactly as staged on disk. The server validates and
+/// normalizes it at the Repository boundary (`accept_wire_entry_visibility`,
+/// the weft accept/persist leg).
+fn entry_visibility_push_message(
+    repo: &Repository,
+    info: wire::ObjectInfo,
+    client_operation_id: &str,
+) -> Result<PushClientFrame, ProtocolError> {
+    let wire::ObjectId::ChangeId(change) = info.id else {
+        return Err(ProtocolError::InvalidState(
+            "wanted EntryVisibility must be keyed by ObjectId::ChangeId(change)".to_string(),
+        ));
+    };
+    let change_str = change.to_string_full();
+    let bytes = repo
+        .get_entry_visibility_bytes(&change)
+        .map_err(|err| {
+            ProtocolError::InvalidState(format!(
+                "load entry-visibility sidecar for {change_str}: {err}"
+            ))
+        })?
+        .ok_or_else(|| {
+            ProtocolError::InvalidState(format!(
+                "server wants entry visibility for change {change_str} but sender has no sidecar"
+            ))
+        })?;
+    Ok(PushClientFrame {
+        frame: Some(push_client_frame::Frame::EntryVisibility(
+            EntryVisibilityTransfer {
+                change_id: super::helpers::proto_change_id(change),
+                entry_visibility_blob: bytes,
             },
         )),
         client_operation_id: client_operation_id.to_string(),
@@ -3108,6 +3160,17 @@ fn plan_pull_wants(
             wire::ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
             wire::ObjectId::StateId(state_id) => PackObjectId::StateId(*state_id),
             wire::ObjectId::StateAttachment { id, .. } => PackObjectId::Hash(*id.as_hash()),
+            // EntryVisibility (change-id-keyed) has no pack identity and is not a
+            // client-pull want on this (push transport) leg; the server-serve
+            // side is wired with the weft serve/persist leg. Fail loud rather
+            // than mint a bogus pack id.
+            wire::ObjectId::ChangeId(_) => {
+                return Err(ProtocolError::InvalidState(
+                    "EntryVisibility (change-id-keyed) sidecar pull is wired in the weft \
+                     serve/persist leg, not this push transport leg"
+                        .to_string(),
+                ));
+            }
         };
         let include = if request_full_closure {
             true
@@ -5189,6 +5252,11 @@ mod transfer_id_tests {
             ObjectId::Hash(hash) => PackObjectId::Hash(*hash),
             ObjectId::StateId(state) => PackObjectId::StateId(*state),
             ObjectId::StateAttachment { id, .. } => PackObjectId::Hash(*id.as_hash()),
+            // This test helper only builds packable-object fixtures; the
+            // change-id-keyed EntryVisibility sidecar is never packed.
+            ObjectId::ChangeId(_) => {
+                unreachable!("EntryVisibility (change-id-keyed) sidecars are never packed")
+            }
         }
     }
 
@@ -6999,6 +7067,150 @@ mod attachment_sidecar_tests {
         assert_eq!(transfer.attachment_object, canonical.data);
         assert!(!ObjectType::StateAttachment.packable_for_push());
         assert!(ObjectType::StateAttachment.packable_for_pull());
+    }
+}
+
+#[cfg(test)]
+mod entry_visibility_sidecar_tests {
+    use api::heddle::api::v1alpha1::push_client_frame;
+    use objects::object::{EntryVisibility, VisibilityTier};
+    use repo::{RepoConfig, TreeSchemePolicy};
+    use tempfile::TempDir;
+    use wire::{ObjectId, ObjectInfo, ObjectType};
+
+    use super::{Repository, entry_visibility_push_message, sidecar_push_message};
+
+    fn v4_repo() -> (TempDir, Repository) {
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let config_path = repo.heddle_dir().join("config.toml");
+        let mut config = RepoConfig::load_for_repository(&config_path).expect("load config");
+        config.policies.tree_scheme = TreeSchemePolicy::V4;
+        config.save(&config_path).expect("save config");
+        let repo = Repository::open(temp.path()).expect("reopen repo");
+        (temp, repo)
+    }
+
+    /// Round trip: an object-model `EntryVisibility` (staged by capture) →
+    /// the `ObjectType::EntryVisibility` push builder → the proto
+    /// `EntryVisibilityTransfer` → decode the blob back to the object-model
+    /// type, byte- and semantically identical. Mirrors how a `StateVisibility`
+    /// sidecar rides the push wire, but keyed by `ChangeId` not `StateId`.
+    #[test]
+    fn entry_visibility_push_builder_round_trips_transfer() {
+        let (temp, repo) = v4_repo();
+        std::fs::write(temp.path().join("readme.md"), b"public\n").expect("write readme");
+        std::fs::write(temp.path().join("secret.md"), b"embargoed\n").expect("write secret");
+        repo.mark_entry_visibility(
+            "secret.md",
+            VisibilityTier::Private {
+                scope_label: "embargo".into(),
+            },
+        )
+        .expect("mark entry visibility");
+        let state = repo.snapshot(Some("cap".into()), None).expect("snapshot");
+
+        // The canonical sidecar the capture staged on disk (object-model side).
+        let staged_bytes = repo
+            .get_entry_visibility_bytes(&state.change_id)
+            .expect("read staged sidecar")
+            .expect("sidecar must be staged on a v4 capture with a mark");
+        let staged = EntryVisibility::decode(&staged_bytes).expect("decode staged sidecar");
+
+        // Build the push carrier, keyed by ObjectId::ChangeId — the wire
+        // routing analogue of StateVisibility's ObjectId::StateId.
+        let id = ObjectId::ChangeId(state.change_id);
+        let message = entry_visibility_push_message(
+            &repo,
+            ObjectInfo {
+                id: id.clone(),
+                obj_type: ObjectType::EntryVisibility,
+                size: staged_bytes.len() as u64,
+                delta_base: None,
+            },
+            "op-ev",
+        )
+        .expect("build entry-visibility sidecar carrier");
+        assert_eq!(message.client_operation_id, "op-ev");
+        let Some(push_client_frame::Frame::EntryVisibility(transfer)) = message.frame.clone()
+        else {
+            panic!("expected an EntryVisibilityTransfer frame");
+        };
+
+        // Routing subject: the transfer carries the state's 16-byte ChangeId.
+        let change = transfer.change_id.expect("transfer carries change_id");
+        assert_eq!(change.value, state.change_id.as_bytes().to_vec());
+
+        // Body: byte-identical to the staged canonical sidecar...
+        assert_eq!(transfer.entry_visibility_blob, staged_bytes);
+        // ...and it decodes back to a semantically identical object-model value.
+        let decoded =
+            EntryVisibility::decode(&transfer.entry_visibility_blob).expect("decode transfer blob");
+        assert_eq!(decoded, staged);
+        assert_eq!(decoded.change_id, state.change_id);
+        assert_eq!(decoded.tree_root, state.tree);
+        assert_eq!(decoded.entries.len(), 1);
+        assert_eq!(
+            decoded.entries[0].tier,
+            VisibilityTier::Private {
+                scope_label: "embargo".into()
+            }
+        );
+
+        // The generic sidecar dispatch produces the identical frame.
+        let via_dispatch = sidecar_push_message(
+            &repo,
+            ObjectInfo {
+                id,
+                obj_type: ObjectType::EntryVisibility,
+                size: staged_bytes.len() as u64,
+                delta_base: None,
+            },
+            "op-ev",
+        )
+        .expect("dispatch entry-visibility sidecar");
+        assert_eq!(via_dispatch.frame, message.frame);
+    }
+
+    /// A missing routing key must fail loud rather than mis-route.
+    #[test]
+    fn entry_visibility_push_requires_change_id_key() {
+        let (_temp, repo) = v4_repo();
+        let err = entry_visibility_push_message(
+            &repo,
+            ObjectInfo {
+                id: ObjectId::Hash(objects::object::ContentHash::from_bytes([7; 32])),
+                obj_type: ObjectType::EntryVisibility,
+                size: 0,
+                delta_base: None,
+            },
+            "op",
+        )
+        .expect_err("EntryVisibility keyed by a non-ChangeId id must be rejected");
+        assert!(
+            matches!(err, wire::ProtocolError::InvalidState(m) if m.contains("ObjectId::ChangeId"))
+        );
+    }
+
+    /// The wire type is classified exactly like `StateVisibility`: an out-of-pack
+    /// sidecar, never packable in either direction.
+    #[test]
+    fn entry_visibility_object_type_routes_like_state_visibility() {
+        assert!(!ObjectType::EntryVisibility.packable());
+        assert!(!ObjectType::EntryVisibility.packable_for_push());
+        assert!(!ObjectType::EntryVisibility.packable_for_pull());
+        assert!(ObjectType::EntryVisibility.pack_object_type().is_err());
+        assert_eq!(ObjectType::EntryVisibility.wire_name(), "entry_visibility");
+        assert_eq!(
+            ObjectType::from_wire("entry_visibility").expect("parse entry_visibility"),
+            ObjectType::EntryVisibility
+        );
+        // Same packability classification as the sibling StateVisibility sidecar.
+        assert_eq!(
+            ObjectType::EntryVisibility.packable(),
+            ObjectType::StateVisibility.packable()
+        );
+        assert!(wire::native_pack_excluded_object_types().contains(&ObjectType::EntryVisibility));
     }
 }
 

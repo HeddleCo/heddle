@@ -2,13 +2,14 @@ use core::convert::TryFrom;
 use std::time::Duration;
 
 use api::heddle::api::v1alpha1::{
-    HostedGrant, HostedObjectType, HostedSpool, ObjectAvailabilityStatus, ObjectDescriptor,
-    RepositoryRef, StateAttachmentKind as ProtoStateAttachmentKind, StateId as ProtoStateId,
-    TransferCheckpoint, TransportMode, repository_ref::Reference,
+    ChangeId as ProtoChangeId, HostedGrant, HostedObjectType, HostedSpool,
+    ObjectAvailabilityStatus, ObjectDescriptor, RepositoryRef,
+    StateAttachmentKind as ProtoStateAttachmentKind, StateId as ProtoStateId, TransferCheckpoint,
+    TransportMode, repository_ref::Reference,
 };
 use base64::Engine as _;
 use config::ClientConfig;
-use objects::object::{ContentHash, StateAttachmentId, StateAttachmentKind, StateId};
+use objects::object::{ChangeId, ContentHash, StateAttachmentId, StateAttachmentKind, StateId};
 use wire::{ObjectId, ObjectInfo, ObjectType, ProtocolError};
 
 use super::HostedError;
@@ -145,6 +146,12 @@ pub(super) fn parse_object_id(
                 ProtocolError::InvalidState(err.to_string())
             })?))
         }
+        // The per-state EntryVisibility sidecar is keyed by the rewrite-stable
+        // ChangeId (the object-model type is change-id-keyed), mirroring how
+        // StateVisibility is keyed by StateId above.
+        ObjectType::EntryVisibility => Ok(ObjectId::ChangeId(
+            ChangeId::parse(value).map_err(|err| ProtocolError::InvalidState(err.to_string()))?,
+        )),
         ObjectType::StateAttachment => {
             let (state, attachment) = value.split_once(':').ok_or_else(|| {
                 ProtocolError::InvalidState("invalid state attachment locator".to_string())
@@ -197,6 +204,7 @@ pub(super) fn parse_object_type(value: i32) -> Result<ObjectType, ProtocolError>
         HostedObjectType::Action => Ok(ObjectType::Action),
         HostedObjectType::Redaction => Ok(ObjectType::Redaction),
         HostedObjectType::StateVisibility => Ok(ObjectType::StateVisibility),
+        HostedObjectType::EntryVisibility => Ok(ObjectType::EntryVisibility),
         HostedObjectType::StateAttachment => Ok(ObjectType::StateAttachment),
         HostedObjectType::Purge => Ok(ObjectType::Purge),
         HostedObjectType::Unspecified => Err(ProtocolError::InvalidState(
@@ -218,6 +226,7 @@ fn object_type_to_proto(obj_type: ObjectType) -> i32 {
         ObjectType::Redaction => HostedObjectType::Redaction as i32,
         ObjectType::Purge => HostedObjectType::Purge as i32,
         ObjectType::StateVisibility => HostedObjectType::StateVisibility as i32,
+        ObjectType::EntryVisibility => HostedObjectType::EntryVisibility as i32,
         ObjectType::StateAttachment => HostedObjectType::StateAttachment as i32,
         ObjectType::KeyBinding => HOSTED_OBJECT_TYPE_KEY_BINDING,
     }
@@ -237,12 +246,15 @@ pub(super) fn object_descriptor_with_status(
     // dedup key stays `(id, object_type)`.
     let attachment_kind = match &info.id {
         ObjectId::StateAttachment { kind, .. } => attachment_kind_to_proto(*kind),
-        ObjectId::Hash(_) | ObjectId::StateId(_) => ProtoStateAttachmentKind::Unspecified,
+        ObjectId::Hash(_) | ObjectId::StateId(_) | ObjectId::ChangeId(_) => {
+            ProtoStateAttachmentKind::Unspecified
+        }
     };
     ObjectDescriptor {
         id: match &info.id {
             ObjectId::Hash(hash) => hash.to_hex(),
             ObjectId::StateId(state_id) => state_id.to_string_full(),
+            ObjectId::ChangeId(change_id) => change_id.to_string_full(),
             ObjectId::StateAttachment { state, id, kind: _ } => {
                 format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
             }
@@ -272,6 +284,7 @@ pub(super) fn descriptor_id_from_info(info: &ObjectInfo) -> (String, i32) {
     let id = match &info.id {
         ObjectId::Hash(hash) => hash.to_hex(),
         ObjectId::StateId(state_id) => state_id.to_string_full(),
+        ObjectId::ChangeId(change_id) => change_id.to_string_full(),
         ObjectId::StateAttachment { state, id, kind: _ } => {
             format!("{}:{}", state.to_string_full(), id.as_hash().to_hex())
         }
@@ -448,6 +461,12 @@ pub(crate) fn repository_ref_path(repository: &RepositoryRef) -> Option<&str> {
 pub(super) fn proto_state_id(state_id: StateId) -> Option<ProtoStateId> {
     Some(ProtoStateId {
         value: state_id.as_bytes().to_vec(),
+    })
+}
+
+pub(super) fn proto_change_id(change_id: ChangeId) -> Option<ProtoChangeId> {
+    Some(ProtoChangeId {
+        value: change_id.as_bytes().to_vec(),
     })
 }
 

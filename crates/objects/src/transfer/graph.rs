@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::{HeddleError, Result},
     object::{
-        AnnotatedTag, BindingDelta, ContentHash, RedactionsBlob, ReverseDependencyIndex,
+        AnnotatedTag, BindingDelta, ChangeId, ContentHash, RedactionsBlob, ReverseDependencyIndex,
         SemanticEntryKind, SemanticIndexRoot, SemanticTreeNode, State, StateAttachment,
         StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId, TreeEntryTarget,
         decode_tree_delta_header, is_delta_tree,
@@ -18,6 +18,12 @@ use crate::{
 pub enum ObjectId {
     Hash(ContentHash),
     StateId(StateId),
+    /// The rewrite-stable logical [`ChangeId`] of a state, used to key the
+    /// per-state `EntryVisibility` sidecar on the wire — the object-model
+    /// `EntryVisibility` type is change-id-keyed, exactly as `StateVisibility`
+    /// is `StateId`-keyed. Only sidecar transport uses this variant; it never
+    /// names a content-addressed (packable) object.
+    ChangeId(ChangeId),
     StateAttachment {
         state: StateId,
         id: StateAttachmentId,
@@ -74,6 +80,15 @@ pub enum ObjectType {
     /// is a sidecar record that lives outside the content-addressed pack
     /// and ships via the per-object transfer path, not the pack.
     StateVisibility,
+    /// An `EntryVisibility` sidecar — the rmp-encoded per-entry visibility
+    /// overrides for a v4 salted (redactable-Merkle) tree, declaring the tier
+    /// individual tree entries are served at so a tree can be served with some
+    /// entries redacted to opaque leaf hashes. Keyed on the wire by the
+    /// rewrite-stable `ChangeId` of the state whose trees it covers (the
+    /// object-model `EntryVisibility` type is change-id-keyed). Like
+    /// `StateVisibility`, it is a sidecar record that lives outside the
+    /// content-addressed pack and ships via the out-of-pack transfer path.
+    EntryVisibility,
     StateAttachment,
     /// A content-addressed `KeyBindingRegistry` together with each binding's
     /// revocation/liveness overlay. Hosted materializers append this object to
@@ -92,6 +107,7 @@ pub enum ObjectTypeBucket {
     Redaction,
     Purge,
     StateVisibility,
+    EntryVisibility,
     StateAttachment,
     KeyBinding,
 }
@@ -107,6 +123,7 @@ impl ObjectType {
             ObjectType::Redaction => "redaction",
             ObjectType::Purge => "purge",
             ObjectType::StateVisibility => "state_visibility",
+            ObjectType::EntryVisibility => "entry_visibility",
             ObjectType::StateAttachment => "state_attachment",
             ObjectType::KeyBinding => "key_binding",
         }
@@ -122,6 +139,7 @@ impl ObjectType {
             "redaction" => Ok(ObjectType::Redaction),
             "purge" => Ok(ObjectType::Purge),
             "state_visibility" => Ok(ObjectType::StateVisibility),
+            "entry_visibility" => Ok(ObjectType::EntryVisibility),
             "state_attachment" => Ok(ObjectType::StateAttachment),
             "key_binding" => Ok(ObjectType::KeyBinding),
             _ => Err(HeddleError::InvalidObject(format!(
@@ -146,6 +164,7 @@ impl ObjectType {
             ObjectType::Redaction
                 | ObjectType::Purge
                 | ObjectType::StateVisibility
+                | ObjectType::EntryVisibility
                 | ObjectType::KeyBinding
         )
     }
@@ -194,6 +213,10 @@ impl ObjectType {
                 "StateVisibility sidecar records cannot be packed into the content-addressed object pack"
                     .to_string(),
             )),
+            ObjectType::EntryVisibility => Err(HeddleError::InvalidObject(
+                "EntryVisibility sidecar records cannot be packed into the content-addressed object pack"
+                    .to_string(),
+            )),
             ObjectType::KeyBinding => Err(HeddleError::InvalidObject(
                 "KeyBinding registry objects cannot be packed into the content-addressed object pack"
                     .to_string(),
@@ -211,6 +234,7 @@ impl ObjectType {
             ObjectType::Redaction => ObjectTypeBucket::Redaction,
             ObjectType::Purge => ObjectTypeBucket::Purge,
             ObjectType::StateVisibility => ObjectTypeBucket::StateVisibility,
+            ObjectType::EntryVisibility => ObjectTypeBucket::EntryVisibility,
             ObjectType::StateAttachment => ObjectTypeBucket::StateAttachment,
             ObjectType::KeyBinding => ObjectTypeBucket::KeyBinding,
         }

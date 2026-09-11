@@ -224,11 +224,11 @@ impl Repository {
             .join(format!("{}.bin", change_id.to_string_full()))
     }
 
-    /// The raw sidecar bytes for `change_id`, or `None` if absent.
-    pub(crate) fn get_entry_visibility_bytes(
-        &self,
-        change_id: &ChangeId,
-    ) -> Result<Option<Vec<u8>>> {
+    /// The raw sidecar bytes for `change_id`, or `None` if absent. Public
+    /// because the hosted-sync push builder loads these bytes to fill an
+    /// `EntryVisibilityTransfer`, mirroring the public
+    /// [`Repository::get_state_visibility_bytes_for_state`].
+    pub fn get_entry_visibility_bytes(&self, change_id: &ChangeId) -> Result<Option<Vec<u8>>> {
         let path = self.entry_visibility_path_for_change(change_id);
         match std::fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),

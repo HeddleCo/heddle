@@ -87,7 +87,7 @@ pub fn reuse_native_pack_encoded_subset_in(
         .iter()
         .map(|object| {
             Ok((
-                to_pack_object_id(&object.id, object.obj_type),
+                to_pack_object_id(&object.id, object.obj_type)?,
                 object.obj_type.pack_object_type()?,
                 object.size,
             ))
@@ -307,7 +307,7 @@ impl NativePackStreamingWriter {
         let builder = self.builder.as_mut().ok_or_else(|| {
             ProtocolError::InvalidState("native pack streaming writer is finalized".to_string())
         })?;
-        let pack_id = to_pack_object_id(&object.id, object.obj_type);
+        let pack_id = to_pack_object_id(&object.id, object.obj_type)?;
         builder
             .add_id(pack_id, object.obj_type.pack_object_type()?, object.data)
             .map_err(ProtocolError::from)
@@ -602,6 +602,7 @@ pub fn native_pack_excluded_object_types() -> &'static [ObjectType] {
     &[
         ObjectType::Redaction,
         ObjectType::StateVisibility,
+        ObjectType::EntryVisibility,
         ObjectType::KeyBinding,
     ]
 }
@@ -626,7 +627,7 @@ pub fn build_native_pack(
             continue;
         }
         let object = load_object_data(store, &info.id, info.obj_type)?;
-        let pack_id = to_pack_object_id(&object.id, object.obj_type);
+        let pack_id = to_pack_object_id(&object.id, object.obj_type)?;
         builder.add_id(pack_id, object.obj_type.pack_object_type()?, object.data);
     }
 
@@ -821,12 +822,19 @@ pub(crate) fn unique_spool_dir(base: &Path) -> Result<PathBuf> {
     ))
 }
 
-fn to_pack_object_id(id: &ObjectId, object_type: ObjectType) -> PackObjectId {
+fn to_pack_object_id(id: &ObjectId, object_type: ObjectType) -> Result<PackObjectId> {
     match (id, object_type) {
-        (ObjectId::Hash(hash), ObjectType::AnnotatedTag) => PackObjectId::AnnotatedTag(*hash),
-        (ObjectId::Hash(hash), _) => PackObjectId::Hash(*hash),
-        (ObjectId::StateId(state_id), _) => PackObjectId::StateId(*state_id),
-        (ObjectId::StateAttachment { id, .. }, _) => PackObjectId::Hash(*id.as_hash()),
+        (ObjectId::Hash(hash), ObjectType::AnnotatedTag) => Ok(PackObjectId::AnnotatedTag(*hash)),
+        (ObjectId::Hash(hash), _) => Ok(PackObjectId::Hash(*hash)),
+        (ObjectId::StateId(state_id), _) => Ok(PackObjectId::StateId(*state_id)),
+        (ObjectId::StateAttachment { id, .. }, _) => Ok(PackObjectId::Hash(*id.as_hash())),
+        // Change-id-keyed ids name only the `EntryVisibility` sidecar, which is
+        // never packable (`ObjectType::packable` is false); pack callers filter
+        // it out upstream, so reaching here is a fail-loud invariant breach.
+        (ObjectId::ChangeId(_), _) => Err(ProtocolError::InvalidState(
+            "EntryVisibility (change-id-keyed) sidecars are never packed into the native object pack"
+                .to_string(),
+        )),
     }
 }
 

@@ -166,6 +166,18 @@ pub fn load_requested_object(store: &impl ObjectStore, req: &ObjectRequest) -> R
                     .map_err(object_codec_error)?,
             )
         }
+        ObjectId::ChangeId(_) => {
+            // A change-id-keyed request names the EntryVisibility sidecar, which
+            // shares no id shape with a primary object and cannot be
+            // disambiguated by `ObjectId` alone (see the note above). Callers
+            // must fetch it via `load_object_data` with an explicit
+            // `ObjectType::EntryVisibility`.
+            return Err(ProtocolError::InvalidState(
+                "EntryVisibility sidecars must be loaded via load_object_data with an explicit \
+                 ObjectType::EntryVisibility, not load_requested_object"
+                    .to_string(),
+            ));
+        }
     };
 
     Ok(ObjectData {
@@ -209,6 +221,9 @@ pub fn load_object_data(
         (ObjectId::StateId(state_id), ObjectType::StateVisibility) => store
             .get_state_visibility_bytes_for_state(state_id)?
             .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?,
+        (ObjectId::ChangeId(change_id), ObjectType::EntryVisibility) => store
+            .get_entry_visibility_bytes_for_change(change_id)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(change_id.to_string_full()))?,
         (ObjectId::StateAttachment { state, id, kind: _ }, ObjectType::StateAttachment) => {
             let attachment = store
                 .get_state_attachment(state, id)?
@@ -317,6 +332,17 @@ pub fn store_received_object(store: &impl ObjectStore, data: &ObjectData) -> Res
             // public-by-absence). Refuse raw sidecar writes here.
             return Err(ProtocolError::InvalidState(
                 "StateVisibility objects must be persisted via Repository::accept_wire_state_visibility, \
+                 not store_received_object — sidecar validation is required"
+                    .to_string(),
+            ));
+        }
+        (_, ObjectType::EntryVisibility) => {
+            // Entry visibility, like state visibility, must be validated and
+            // normalized at the Repository boundary
+            // (`accept_wire_entry_visibility`, weft accept/persist leg) before
+            // any bytes hit the sidecar. Refuse raw sidecar writes here.
+            return Err(ProtocolError::InvalidState(
+                "EntryVisibility objects must be persisted via Repository::accept_wire_entry_visibility, \
                  not store_received_object — sidecar validation is required"
                     .to_string(),
             ));
@@ -591,6 +617,21 @@ mod tests {
         .unwrap_err();
         assert!(
             matches!(visibility_error, ProtocolError::InvalidState(message) if message.contains("sidecar validation is required"))
+        );
+
+        let change_id = objects::object::ChangeId::from_bytes([3; 16]);
+        let entry_visibility_error = store_received_object(
+            &store,
+            &ObjectData {
+                id: ObjectId::ChangeId(change_id),
+                obj_type: ObjectType::EntryVisibility,
+                data: b"raw entry visibility bytes".to_vec(),
+                is_delta: false,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(entry_visibility_error, ProtocolError::InvalidState(message) if message.contains("accept_wire_entry_visibility"))
         );
     }
 

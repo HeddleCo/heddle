@@ -58,6 +58,7 @@ pub struct TransferPlanStats {
     pub redactions: usize,
     pub purges: usize,
     pub state_visibilities: usize,
+    pub entry_visibilities: usize,
     pub state_attachments: usize,
     pub key_bindings: usize,
 }
@@ -146,6 +147,7 @@ impl TransferPlanStats {
             ObjectTypeBucket::Redaction => self.redactions += 1,
             ObjectTypeBucket::Purge => self.purges += 1,
             ObjectTypeBucket::StateVisibility => self.state_visibilities += 1,
+            ObjectTypeBucket::EntryVisibility => self.entry_visibilities += 1,
             ObjectTypeBucket::StateAttachment => self.state_attachments += 1,
             ObjectTypeBucket::KeyBinding => self.key_bindings += 1,
         }
@@ -187,12 +189,11 @@ fn object_info_type(object: &ObjectInfo) -> ObjectType {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         object::{ContentHash, StateId},
         transfer::graph::ObjectId,
     };
-
-    use super::*;
 
     fn hash(byte: u8) -> ContentHash {
         ContentHash::from_bytes([byte; 32])

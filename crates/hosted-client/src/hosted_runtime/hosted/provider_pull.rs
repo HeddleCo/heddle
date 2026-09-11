@@ -598,6 +598,15 @@ fn convert_manifest(
                 wire::ObjectId::Hash(hash) => PackObjectId::Hash(hash),
                 wire::ObjectId::StateId(state) => PackObjectId::StateId(state),
                 wire::ObjectId::StateAttachment { id, .. } => PackObjectId::Hash(*id.as_hash()),
+                // Change-id-keyed ids name only the never-packable EntryVisibility
+                // sidecar; the packability guard above already rejects it, so
+                // this arm is a fail-loud invariant backstop.
+                wire::ObjectId::ChangeId(_) => {
+                    return Err(ProtocolError::InvalidState(
+                        "EntryVisibility (change-id-keyed) sidecars are never provider-packed"
+                            .to_string(),
+                    ));
+                }
             };
             objects.push(ProviderPackIndexEntry {
                 id,
