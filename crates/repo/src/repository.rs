@@ -90,7 +90,7 @@ pub use repository_maintenance::{
     PullPlannerCacheInspection, RefCountsInspection, RepositoryMaintenanceRunReport,
     RepositoryPerformanceInspectionReport, WorktreeIndexInspection,
 };
-pub use repository_materialization::WarmCanonicalStoreStats;
+pub use repository_materialization::{PartialMaterialization, WarmCanonicalStoreStats};
 pub use repository_partial_fetch::MissingBlob;
 pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
 pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOutcome};
