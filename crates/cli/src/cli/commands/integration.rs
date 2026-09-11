@@ -727,14 +727,20 @@ fn install_codex(
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
     features
         .as_table_mut()
-        .ok_or_else(|| anyhow!("codex features must be a table"))?
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::integration_config_expected_table(
+                "codex", "features"
+            ))
+        })?
         .insert("hooks".to_string(), toml::Value::Boolean(true));
     let hooks = table
         .entry("hooks")
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    let hooks_table = hooks
-        .as_table_mut()
-        .ok_or_else(|| anyhow!("codex hooks must be a table"))?;
+    let hooks_table = hooks.as_table_mut().ok_or_else(|| {
+        anyhow!(RecoveryAdvice::integration_config_expected_table(
+            "codex", "hooks"
+        ))
+    })?;
     for event in ["SessionStart", "SubagentStart", "PreToolUse", "Stop"] {
         let command = if event == "Stop" {
             format!("{stamp} --expire")

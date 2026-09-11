@@ -558,6 +558,53 @@ impl RecoveryAdvice {
         )
     }
 
+    pub fn semantic_anchor_malformed(raw: &str) -> Self {
+        Self::malformed_option_value(
+            "semantic_anchor_malformed",
+            "<anchor>",
+            raw,
+            "'path:symbol' (for example src/api.rs:greet)",
+            "heddle semantic refs <path>:<symbol>",
+        )
+    }
+
+    pub fn discussion_not_found(discussion_id: &str) -> Self {
+        Self::safety_refusal(
+            "discussion_not_found",
+            format!("Discussion not found: {discussion_id}"),
+            "List discussions with `heddle discuss list`, then retry with an id from that output.",
+            format!("no discussion matched `{discussion_id}` in the collaboration store"),
+            "guessing a discussion id could inspect or mutate the wrong collaboration thread",
+            "no repository objects, refs, metadata, or worktree files were changed",
+            "heddle discuss list",
+            vec!["heddle discuss list".to_string()],
+        )
+    }
+
+    pub fn discuss_into_annotation_body_required() -> Self {
+        Self::missing_option(
+            "discuss_into_annotation_body_required",
+            "--body",
+            "--into-annotation",
+            "heddle discuss resolve <id> --into-annotation --body \"...\"",
+        )
+    }
+
+    pub fn integration_config_expected_table(tool: &'static str, location: &'static str) -> Self {
+        Self::safety_refusal(
+            "integration_config_expected_table",
+            format!("{tool} config is malformed: `{location}` must be a table"),
+            format!(
+                "Edit your {tool} config so `{location}` is a table (or remove the key), then re-run `heddle integration install {tool}`."
+            ),
+            format!("`{location}` in the existing {tool} config is not a table"),
+            format!("continuing would overwrite or misparse the existing {tool} config"),
+            "your existing agent config file and repository state were left unchanged",
+            format!("heddle integration install {tool}"),
+            vec![format!("heddle integration install {tool}")],
+        )
+    }
+
     pub fn thread_absorb_parent_required(thread: &str) -> Self {
         let primary_command = format!("heddle thread absorb {thread} --into <parent-thread>");
         Self::missing_integration_target(
