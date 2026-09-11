@@ -8,10 +8,10 @@ use heddle_format::compression::{
 
 use crate::{
     object::{
-        Action, ActionId, ContentHash, State, TREE_DELTA_ANCHOR_INTERVAL, TREE_DELTA_MAX_OPS, Tree,
-        TreeScheme, decode_tree_delta, decode_tree_delta_header, encode_tree_delta,
-        is_canonical_tree, is_delta_tree, is_lean_tree, is_redacted_tree, is_salted_tree,
-        tree_delta,
+        Action, ActionId, ContentHash, PartialTree, State, TREE_DELTA_ANCHOR_INTERVAL,
+        TREE_DELTA_MAX_OPS, Tree, TreeScheme, decode_redacted_projection, decode_tree_delta,
+        decode_tree_delta_header, encode_tree_delta, is_canonical_tree, is_delta_tree, is_lean_tree,
+        is_redacted_tree, is_salted_tree, tree_delta,
     },
     store::{HeddleError, Result},
 };
@@ -165,8 +165,14 @@ pub fn decode_tree(data: &[u8]) -> Result<Tree> {
 
 pub fn decode_tree_serialized(data: &[u8]) -> Result<Tree> {
     if is_redacted_tree(data) {
+        // A full-tree decoder cannot represent a projection with withheld
+        // entries. The partial-store/partial-read path is
+        // [`decode_partial_tree`] + `ObjectStore::{put,read}_partial_tree`;
+        // this typed error is the backstop for callers that route an HRT1 body
+        // into the full-tree path by mistake.
         return Err(HeddleError::RedactedTree(
-            "HRT1 redacted projection cannot be stored or read as a full tree".to_string(),
+            "HRT1 redacted projection must be read via decode_partial_tree, not as a full tree"
+                .to_string(),
         ));
     }
     // HSR1 carries its declared root inline, so it self-keys and can decode
@@ -197,8 +203,12 @@ pub fn decode_tree_serialized_with_key(
     anchor: Option<&Tree>,
 ) -> Result<Tree> {
     if is_redacted_tree(data) {
+        // See [`decode_tree_serialized`]: an HRT1 body carries withheld entries
+        // and is read through [`decode_partial_tree`] /
+        // `ObjectStore::read_tree`, never as a full [`Tree`].
         return Err(HeddleError::RedactedTree(
-            "HRT1 redacted projection cannot be stored or read as a full tree".to_string(),
+            "HRT1 redacted projection must be read via decode_partial_tree, not as a full tree"
+                .to_string(),
         ));
     }
     let tree = if is_lean_tree(data) {
@@ -228,6 +238,30 @@ pub fn decode_tree_serialized_with_key(
         return Err(HeddleError::Corruption { expected, found });
     }
     Ok(tree)
+}
+
+/// Decode an HRT1 redacted projection body and verify it reconstructs the
+/// externally-declared tree hash `expected`.
+///
+/// This is the partial-tree counterpart to [`decode_tree_serialized_with_key`]:
+/// where that returns a full [`Tree`] and refuses an HRT1 body, this returns a
+/// verified [`PartialTree`] whose visible preimages + withheld leaf hashes
+/// reproduce `expected` (Leg 1's `reconstruct_root` contract). A partial clone
+/// verifies against the tip's declared `State.tree` through this path WITHOUT
+/// holding the withheld content.
+///
+/// [`decode_redacted_projection`] already checks that the projection's leaves
+/// reconstruct its self-declared root; the extra equality below binds that
+/// self-declared root to the externally-expected key, so a projection cannot
+/// masquerade as a different tree (mirroring the `found != expected` corruption
+/// check every full-tree decode performs).
+pub fn decode_partial_tree(data: &[u8], expected: ContentHash) -> Result<PartialTree> {
+    let partial = decode_redacted_projection(data)?;
+    let found = partial.declared_root();
+    if found != expected {
+        return Err(HeddleError::Corruption { expected, found });
+    }
+    Ok(partial)
 }
 
 /// Return the serialized tree body stored in a loose object, decompressing
