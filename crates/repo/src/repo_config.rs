@@ -451,6 +451,39 @@ pub struct OutputConfig {
 pub struct PoliciesConfig {
     #[serde(default)]
     pub default_policy: Option<String>,
+    /// Tree-hashing scheme this spool captures under (v4 redactable trees).
+    ///
+    /// `v3` (the default) captures exactly as today: a flat BLAKE3 tree hash,
+    /// no per-entry salts, byte-identical to the pre-v4 encoding. `v4` selects
+    /// the salted per-entry Merkle scheme ([`TreeScheme::V4Salted`]) so entries
+    /// can later be redacted at leaf granularity. This is **advisory on read**:
+    /// the object model dispatches on the body magic / in-memory scheme, so a
+    /// v3 spool still reads any v4 body it is handed. The flag only chooses what
+    /// a *fresh capture* on this spool produces.
+    #[serde(default)]
+    pub tree_scheme: TreeSchemePolicy,
+}
+
+/// The tree-hashing scheme a spool captures under. Serialized as the lowercase
+/// tokens `v3` / `v4` in `[policies] tree_scheme`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TreeSchemePolicy {
+    /// Flat V3 trees — the historical, redaction-incapable encoding (default).
+    #[default]
+    V3,
+    /// Salted per-entry Merkle V4 trees — redactable at entry granularity.
+    V4,
+}
+
+impl TreeSchemePolicy {
+    /// The object-model [`TreeScheme`] a fresh capture uses under this policy.
+    pub fn tree_scheme(self) -> objects::object::TreeScheme {
+        match self {
+            TreeSchemePolicy::V3 => objects::object::TreeScheme::V3Flat,
+            TreeSchemePolicy::V4 => objects::object::TreeScheme::V4Salted,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
