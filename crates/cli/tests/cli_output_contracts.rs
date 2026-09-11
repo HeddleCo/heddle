@@ -30,5 +30,7 @@ mod output_kind_invariant;
 mod output_kind_runtime;
 #[path = "cli_integration/output_mode_no_auto.rs"]
 mod output_mode_no_auto;
+#[path = "cli_integration/schema_flag.rs"]
+mod schema_flag;
 #[path = "cli_integration/stdout_stderr_split.rs"]
 mod stdout_stderr_split;
