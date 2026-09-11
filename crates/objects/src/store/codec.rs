@@ -9,8 +9,9 @@ use heddle_format::compression::{
 use crate::{
     object::{
         Action, ActionId, ContentHash, State, TREE_DELTA_ANCHOR_INTERVAL, TREE_DELTA_MAX_OPS, Tree,
-        decode_tree_delta, decode_tree_delta_header, encode_tree_delta, is_canonical_tree,
-        is_delta_tree, is_lean_tree, tree_delta,
+        TreeScheme, decode_tree_delta, decode_tree_delta_header, encode_tree_delta,
+        is_canonical_tree, is_delta_tree, is_lean_tree, is_redacted_tree, is_salted_tree,
+        tree_delta,
     },
     store::{HeddleError, Result},
 };
@@ -69,6 +70,17 @@ pub fn encode_tree(tree: &Tree, _config: &CompressionConfig) -> Result<(ContentH
 /// eligible descendants are cumulative HDC1 deltas against the epoch anchor.
 pub fn encode_tree_hot(tree: &Tree, base: Option<TreeDeltaBase<'_>>) -> Result<EncodedTree> {
     let hash = tree.hash();
+    // A V4 salted tree is stored as a full self-keyed HSR1 canonical body. It
+    // is always an anchor (never an HLR1 lean or HDC1 delta — both drop the
+    // per-entry salt), so `base` is irrelevant and it carries the `Lean`
+    // (anchor, nothing to remember) lineage kind.
+    if tree.scheme() == TreeScheme::V4Salted {
+        return Ok(EncodedTree {
+            hash,
+            data: tree.encode_canonical()?,
+            kind: TreeEncodingKind::Lean,
+        });
+    }
     let lean = tree.encode_lean()?;
     let Some(base) = base else {
         return Ok(EncodedTree {
@@ -142,7 +154,14 @@ pub fn decode_tree(data: &[u8]) -> Result<Tree> {
 }
 
 pub fn decode_tree_serialized(data: &[u8]) -> Result<Tree> {
-    if !is_canonical_tree(data) {
+    if is_redacted_tree(data) {
+        return Err(HeddleError::InvalidObject(
+            "HRT1 redacted projection cannot be stored or read as a full tree".to_string(),
+        ));
+    }
+    // HSR1 carries its declared root inline, so it self-keys and can decode
+    // without an external key (its root is verified inside `decode_canonical`).
+    if !is_canonical_tree(data) && !is_salted_tree(data) {
         return Err(HeddleError::InvalidObject(
             "HLR1/HDC1 tree decoding requires the external object key".to_string(),
         ));
@@ -167,6 +186,11 @@ pub fn decode_tree_serialized_with_key(
     expected: ContentHash,
     anchor: Option<&Tree>,
 ) -> Result<Tree> {
+    if is_redacted_tree(data) {
+        return Err(HeddleError::InvalidObject(
+            "HRT1 redacted projection cannot be stored or read as a full tree".to_string(),
+        ));
+    }
     let tree = if is_lean_tree(data) {
         Tree::decode_lean(data, expected)?
     } else if is_delta_tree(data) {
@@ -180,7 +204,9 @@ pub fn decode_tree_serialized_with_key(
             HeddleError::InvalidObject("HDC1 tree is missing its materialized anchor".to_string())
         })?;
         decode_tree_delta(data, anchor, expected)?
-    } else if is_canonical_tree(data) {
+    } else if is_canonical_tree(data) || is_salted_tree(data) {
+        // HTR4 (flat V3) and HSR1 (salted V4) both decode through
+        // `decode_canonical`, which dispatches on the body magic.
         Tree::decode_canonical(data)?
     } else {
         return Err(HeddleError::InvalidObject(

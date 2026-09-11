@@ -10,7 +10,7 @@ use crate::{
     object::{
         Action, ActionId, AnnotatedTag, Blob, BytesTreeSource, ContentHash, OpenedTreeBody, State,
         StateAttachment, StateAttachmentId, StateId, Tree, TreeEntryReader, TreeResumeCursor,
-        decode_tree_delta_header, is_delta_tree, is_streamable_tree,
+        TreeScheme, decode_tree_delta_header, is_delta_tree, is_streamable_tree,
     },
     store::{HeddleError, ObjectCacheControl, ObjectStore, Result, SidecarStore, codec},
     sync::RwLockExt,
@@ -181,9 +181,13 @@ impl ObjectStore for InMemoryStore {
 
     fn put_tree(&self, tree: &Tree) -> Result<ContentHash> {
         let hash = tree.hash();
-        self.trees
-            .write_or_poisoned()
-            .insert(hash, tree.encode_lean()?);
+        // A V4 salted tree is stored as its full HSR1 canonical body; V3 trees
+        // use the cheap HLR1 lean anchor as before.
+        let body = match tree.scheme() {
+            TreeScheme::V4Salted => tree.encode_canonical()?,
+            TreeScheme::V3Flat => tree.encode_lean()?,
+        };
+        self.trees.write_or_poisoned().insert(hash, body);
         Ok(hash)
     }
 
