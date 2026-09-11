@@ -1017,6 +1017,14 @@ pub fn tree_delta(anchor: &Tree, current: &Tree) -> Vec<TreeDeltaOp> {
 
 /// Apply a sorted cumulative delta to its materialized anchor.
 pub fn apply_tree_delta(anchor: &Tree, ops: &[TreeDeltaOp]) -> Result<Tree, TreeStreamError> {
+    if anchor.scheme() == TreeScheme::V4Salted {
+        // Deltas are a V3-only form; applying ops to a V4 anchor would silently
+        // produce a V3 (salt-less) result with a different id. Unreachable via
+        // the store paths today, but this is public API — fail loud.
+        return Err(TreeStreamError::Malformed(
+            "cannot apply an HDC1 delta to a v4 salted anchor".into(),
+        ));
+    }
     let mut entries = Vec::with_capacity(anchor.len().saturating_add(ops.len()));
     let mut anchor_index = 0usize;
     let mut op_index = 0usize;

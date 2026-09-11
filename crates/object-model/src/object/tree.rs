@@ -815,8 +815,10 @@ fn merkle_tree_hash(leaves: &[ContentHash]) -> ContentHash {
         1 => leaves[0],
         n => {
             // k = largest power of two strictly less than n (RFC 6962:
-            // k < n <= 2k).
-            let k = 1usize << ((usize::BITS - 1) - ((n - 1) as u64).leading_zeros());
+            // k < n <= 2k). `leading_zeros` is taken on `usize` (not a widened
+            // u64) so the shift is arch-independent — a crypto path must not
+            // depend on the pointer width (wasm32 has usize::BITS == 32).
+            let k = 1usize << ((usize::BITS - 1) - (n - 1).leading_zeros());
             let left = merkle_tree_hash(&leaves[..k]);
             let right = merkle_tree_hash(&leaves[k..]);
             let mut hasher = ContentHash::typed_hasher(TREE_V4_NODE_PREFIX, 64);
