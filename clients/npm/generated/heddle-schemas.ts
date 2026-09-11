@@ -1306,6 +1306,53 @@ export interface GitUpstreamConfigured {
   remote: string;
 }
 
+/** JSON payload for `heddle grant create`. */
+export interface GrantCreateSchema {
+  id: string;
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "grant_create";
+  principal: string;
+  recommended_action?: string | null;
+  replayed?: boolean | null;
+  role: string;
+  server: string;
+  spool: string;
+}
+
+/** JSON payload for `heddle grant delete`. */
+export interface GrantDeleteSchema {
+  deleted: boolean;
+  id: string;
+  idempotency_status?: string | null;
+  op_id?: string | null;
+  operation_record?: { command: string; idempotency_status: string; op_id: string; replayed: boolean; } | null;
+  output_kind: "grant_delete";
+  principal: string;
+  recommended_action?: string | null;
+  replayed?: boolean | null;
+  server: string;
+  spool: string;
+}
+
+/** JSON payload for `heddle grant list`. */
+export interface GrantListSchema {
+  grants: GrantRowSchema[];
+  output_kind: "grant_list";
+  recommended_action?: string | null;
+  server: string;
+  spool: string;
+}
+
+/** One row from `heddle grant list`. */
+export interface GrantRowSchema {
+  id: string;
+  principal: string;
+  role: string;
+  spool: string;
+}
+
 export interface HealthEntry {
   fire_rate: number;
   module_id: string;
@@ -3581,6 +3628,9 @@ export interface HeddleVerbOutputs {
   "env create": EnvCreateSchema;
   "env list": EnvListSchema;
   error: ErrorEnvelopeSchema;
+  "grant create": GrantCreateSchema;
+  "grant delete": GrantDeleteSchema;
+  "grant list": GrantListSchema;
   help: HelpSchema;
   "hook events": HookEventsSchema;
   "hook install": HookInstallSchema;
@@ -3751,6 +3801,9 @@ export const HEDDLE_SCHEMA_VERBS: readonly HeddleSchemaVerb[] = [
   "env create",
   "env list",
   "error",
+  "grant create",
+  "grant delete",
+  "grant list",
   "help",
   "hook events",
   "hook install",
