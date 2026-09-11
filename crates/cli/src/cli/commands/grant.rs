@@ -152,17 +152,23 @@ async fn create_connected(
     Ok(())
 }
 
+async fn list_grant_rows(client: &mut HostedClient, spool: &str) -> Result<Vec<GrantRowOutput>> {
+    // Same bare `spool/<handle>/<name>` CreateGrant/DeleteGrant send.
+    // weft exact-matches that visible path; a `repo:` prefix never hits.
+    let grants = client
+        .list_grants(Some(spool))
+        .await
+        .map_err(|err| map_grant_error(spool, &err))?;
+    Ok(grants.iter().map(|grant| grant_row(grant, spool)).collect())
+}
+
 async fn list_connected(
     cli: &Cli,
     client: &mut HostedClient,
     server: &str,
     spool: &str,
 ) -> Result<()> {
-    let grants = client
-        .list_grants(Some(&format!("repo:{spool}")))
-        .await
-        .map_err(|err| map_grant_error(spool, &err))?;
-    let rows: Vec<GrantRowOutput> = grants.iter().map(|grant| grant_row(grant, spool)).collect();
+    let rows = list_grant_rows(client, spool).await?;
     if should_output_json(cli, None) {
         write_full_command_json(
             &GrantListOutput {
@@ -306,9 +312,94 @@ fn is_human_verification_required(lowered_message: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{ffi::OsString, sync::MutexGuard};
+
+    use clap::Parser;
     use wire::ProtocolError;
 
-    use super::{grant_row, is_human_verification_required, map_grant_error, resolve_grant_spool};
+    use super::{
+        create_connected, grant_row, is_human_verification_required, list_grant_rows,
+        map_grant_error, resolve_grant_spool,
+    };
+    use crate::cli::Cli;
+
+    struct IsolatedHeddleHome {
+        _guard: MutexGuard<'static, ()>,
+        _temp: tempfile::TempDir,
+        previous_home: Option<OsString>,
+    }
+
+    impl IsolatedHeddleHome {
+        fn new() -> Self {
+            let guard = ::config::credentials::lock_test_env();
+            let temp = tempfile::TempDir::new().expect("temporary Heddle home");
+            let previous_home = std::env::var_os("HEDDLE_HOME");
+            unsafe { std::env::set_var("HEDDLE_HOME", temp.path()) };
+            Self {
+                _guard: guard,
+                _temp: temp,
+                previous_home,
+            }
+        }
+    }
+
+    impl Drop for IsolatedHeddleHome {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.previous_home {
+                    Some(value) => std::env::set_var("HEDDLE_HOME", value),
+                    None => std::env::remove_var("HEDDLE_HOME"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn create_then_list_returns_the_grant_row() {
+        let _home = IsolatedHeddleHome::new();
+        let (mut client, server) =
+            hosted_client::hosted_runtime::hosted::test_server::start().await;
+        let spool = "spool/willow-ibis-8e7264/notes";
+        let cli = Cli::parse_from([
+            "heddle",
+            "--quiet",
+            "grant",
+            "create",
+            "--spool",
+            spool,
+            "--principal",
+            "alice",
+            "--role",
+            "contributor",
+        ]);
+
+        create_connected(
+            &cli,
+            &mut client,
+            "test.invalid",
+            spool,
+            "alice",
+            "contributor",
+        )
+        .await
+        .expect("create grant on the production path");
+
+        let rows = list_grant_rows(&mut client, spool)
+            .await
+            .expect("list grants on the production path");
+        assert_eq!(
+            rows.len(),
+            1,
+            "owner list must return the created grant: {rows:?}"
+        );
+        assert_eq!(rows[0].id, "alice");
+        assert_eq!(rows[0].principal, "alice");
+        assert_eq!(rows[0].role, "developer");
+        assert_eq!(rows[0].spool, spool);
+
+        client.close().await;
+        server.await.unwrap();
+    }
 
     #[test]
     fn url_target_takes_host_and_canonical_path() {

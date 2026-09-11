@@ -306,6 +306,10 @@ Examples:
 
     /// List grants on a hosted spool.
     #[command(after_help = "\
+`--spool` is the same bare path create and delete use
+(`spool/<handle>/<name>`, `<handle>/<name>`, or a hosted URL).
+Do not prefix `repo:`.
+
 Examples:
   heddle grant list --spool spool/willow-ibis-8e7264/notes
   heddle grant list --spool notes --server api.preview.heddle.sh
