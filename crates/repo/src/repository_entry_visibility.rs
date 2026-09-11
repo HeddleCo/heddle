@@ -127,7 +127,9 @@ impl Repository {
                 tier: mark.tier.clone(),
             });
         }
-        Ok(Some(EntryVisibility::new(change_id, root.hash(), entries)))
+        let sidecar = EntryVisibility::new(change_id, root.hash(), entries)
+            .map_err(|e| HeddleError::Config(e.to_string()))?;
+        Ok(Some(sidecar))
     }
 
     /// Walk `path` from `root` to its enclosing tree and return
@@ -165,8 +167,12 @@ impl Repository {
             })?;
             if index + 1 == components.len() {
                 let leaf = current.v4_leaf_hash_for(component).ok_or_else(|| {
-                    HeddleError::RedactedTree(format!(
-                        "entry-visibility path '{}' resolves in a non-v4 tree",
+                    // A precondition/config error (marks require a v4 spool),
+                    // NOT `RedactedTree` — Leg 3 maps `RedactedTree` to a wire
+                    // status and this must not be misclassified as one.
+                    HeddleError::Config(format!(
+                        "entry-visibility mark for '{}' requires a v4 (tree_scheme = v4) spool; \
+                         the captured tree is not salted",
                         path.display()
                     ))
                 })?;
@@ -465,5 +471,56 @@ mod tests {
             repo.snapshot(Some("again".into()), None).unwrap_err(),
             HeddleError::NotFound(_)
         ));
+    }
+
+    #[test]
+    fn marks_survive_a_retried_capture() {
+        use super::super::repository_snapshot::with_forced_revalidation_retries;
+        let (temp, repo) = v4_repo();
+        fs::write(temp.path().join("secret.md"), b"x\n").unwrap();
+        repo.mark_entry_visibility("secret.md", VisibilityTier::Internal)
+            .unwrap();
+        // Force two internal revalidation retries (a prepare/commit race). The
+        // capture still commits and MUST still stage the sidecar — marks are
+        // drained ONCE outside the loop, not re-drained per attempt. FALSIFY:
+        // revert to draining in `stage_snapshot_objects` and the sidecar is
+        // dropped on the retried commit → this assertion fails.
+        let state =
+            with_forced_revalidation_retries(2, || repo.snapshot(Some("cap".into()), None))
+                .unwrap();
+        assert!(
+            repo.get_entry_visibility_bytes(&state.change_id)
+                .unwrap()
+                .is_some(),
+            "a retried-then-committed capture must not drop the entry-visibility sidecar"
+        );
+    }
+
+    #[test]
+    fn merge_capture_with_pending_marks_fails_loud() {
+        let (temp, repo) = v4_repo();
+        fs::write(temp.path().join("a.txt"), b"1\n").unwrap();
+        let first = repo.snapshot(Some("a".into()), None).unwrap();
+        fs::write(temp.path().join("a.txt"), b"2\n").unwrap();
+        let _second = repo.snapshot(Some("b".into()), None).unwrap();
+        repo.mark_entry_visibility("a.txt", VisibilityTier::Internal)
+            .unwrap();
+        // A merge capture builds its own tree and never runs the sidecar path;
+        // pending marks must fail loud (re-mark in a later worktree capture).
+        let attribution = repo.get_attribution().unwrap();
+        let err = repo
+            .snapshot_merge_with_attribution(
+                &first.id(),
+                Some("merge".into()),
+                None,
+                attribution,
+                None,
+                false,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, HeddleError::Config(_)),
+            "merge with pending entry-marks must fail loud: {err:?}"
+        );
     }
 }

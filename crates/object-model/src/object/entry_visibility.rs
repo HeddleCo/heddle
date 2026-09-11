@@ -58,23 +58,47 @@ pub struct EntryVisibility {
 impl EntryVisibility {
     /// Build a sidecar from its overrides, normalizing entry order so equal
     /// override sets encode to identical bytes (and hash identically).
+    ///
+    /// Fails loud on a **conflicting duplicate**: two overrides on the same
+    /// `(tree_id, leaf_hash)` with *different* tiers. Leg 3 keys a serve-time
+    /// map by leaf hash, so a duplicate leaf would be silent first/last-wins
+    /// ambiguity. An exact duplicate (same leaf, same tier) is harmless and is
+    /// de-duplicated.
     pub fn new(
         change_id: ChangeId,
         tree_root: ContentHash,
         mut entries: Vec<EntryVisibilityEntry>,
-    ) -> Self {
+    ) -> Result<Self, EntryVisibilityError> {
         entries.sort_by(|a, b| {
             a.tree_id
                 .as_bytes()
                 .cmp(b.tree_id.as_bytes())
                 .then_with(|| a.leaf_hash.as_bytes().cmp(b.leaf_hash.as_bytes()))
         });
-        Self {
+        // Adjacent equal `(tree_id, leaf_hash)` after the sort: reject a tier
+        // conflict, collapse an exact duplicate.
+        let mut deduped: Vec<EntryVisibilityEntry> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Some(last) = deduped.last()
+                && last.tree_id == entry.tree_id
+                && last.leaf_hash == entry.leaf_hash
+            {
+                if last.tier != entry.tier {
+                    return Err(EntryVisibilityError::ConflictingDuplicate {
+                        tree_id: entry.tree_id.to_hex(),
+                        leaf_hash: entry.leaf_hash.to_hex(),
+                    });
+                }
+                continue;
+            }
+            deduped.push(entry);
+        }
+        Ok(Self {
             format_version: ENTRY_VISIBILITY_FORMAT_VERSION,
             change_id,
             tree_root,
-            entries,
-        }
+            entries: deduped,
+        })
     }
 
     /// `true` iff this sidecar carries at least one override. An empty sidecar
@@ -115,6 +139,10 @@ pub enum EntryVisibilityError {
     UnsupportedVersion(u8),
     #[error("entry-visibility codec error: {0}")]
     Codec(String),
+    #[error(
+        "conflicting entry-visibility overrides for the same entry (tree {tree_id}, leaf {leaf_hash})"
+    )]
+    ConflictingDuplicate { tree_id: String, leaf_hash: String },
 }
 
 #[cfg(test)]
@@ -143,10 +171,10 @@ mod tests {
                 },
             },
         ];
-        let a = EntryVisibility::new(change, root, unordered.clone());
+        let a = EntryVisibility::new(change, root, unordered.clone()).unwrap();
         let mut reversed = unordered;
         reversed.reverse();
-        let b = EntryVisibility::new(change, root, reversed);
+        let b = EntryVisibility::new(change, root, reversed).unwrap();
         assert_eq!(
             a.encode().unwrap(),
             b.encode().unwrap(),
@@ -161,12 +189,52 @@ mod tests {
     #[test]
     fn rejects_unsupported_version() {
         let change = ChangeId::generate();
-        let mut sidecar = EntryVisibility::new(change, hash("root"), Vec::new());
+        let mut sidecar = EntryVisibility::new(change, hash("root"), Vec::new()).unwrap();
         sidecar.format_version = 99;
         let bytes = rmp_serde::to_vec_named(&sidecar).unwrap();
         assert!(matches!(
             EntryVisibility::decode(&bytes),
             Err(EntryVisibilityError::UnsupportedVersion(99))
         ));
+    }
+
+    #[test]
+    fn rejects_conflicting_duplicate_leaf() {
+        let change = ChangeId::generate();
+        let root = hash("root");
+        let conflicting = vec![
+            EntryVisibilityEntry {
+                tree_id: root,
+                leaf_hash: hash("leaf"),
+                tier: VisibilityTier::Internal,
+            },
+            EntryVisibilityEntry {
+                tree_id: root,
+                leaf_hash: hash("leaf"),
+                tier: VisibilityTier::Private {
+                    scope_label: "secret".into(),
+                },
+            },
+        ];
+        assert!(matches!(
+            EntryVisibility::new(change, root, conflicting),
+            Err(EntryVisibilityError::ConflictingDuplicate { .. })
+        ));
+
+        // An exact duplicate (same leaf, same tier) is collapsed, not rejected.
+        let exact = vec![
+            EntryVisibilityEntry {
+                tree_id: root,
+                leaf_hash: hash("leaf"),
+                tier: VisibilityTier::Internal,
+            },
+            EntryVisibilityEntry {
+                tree_id: root,
+                leaf_hash: hash("leaf"),
+                tier: VisibilityTier::Internal,
+            },
+        ];
+        let sidecar = EntryVisibility::new(change, root, exact).unwrap();
+        assert_eq!(sidecar.entries.len(), 1);
     }
 }

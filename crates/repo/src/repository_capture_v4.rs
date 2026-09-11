@@ -323,4 +323,61 @@ mod tests {
             "forcing fresh salts must break the no-change-recapture-identical-id invariant"
         );
     }
+
+    #[test]
+    fn single_file_fast_path_on_v4_spool_does_not_spuriously_conflict() {
+        use objects::worktree::WorktreeStatus;
+        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V4);
+        fs::write(temp.path().join("a.txt"), b"1\n").unwrap();
+        fs::write(temp.path().join("b.txt"), b"1\n").unwrap();
+        let _first = repo.snapshot(Some("first".into()), None).unwrap(); // baseline V4
+        fs::write(temp.path().join("a.txt"), b"2\n").unwrap();
+        // Route through the single-file fast path (`rewrite_single_tracked_file`).
+        // Before the fix it rebuilt via `insert` on the V4 baseline (minting a
+        // salt → V4 root) while the revalidation fingerprint walks V3, so the
+        // ids never matched and the capture spuriously Conflicted.
+        let status = WorktreeStatus {
+            modified: vec![std::path::PathBuf::from("a.txt")],
+            added: Vec::new(),
+            deleted: Vec::new(),
+        };
+        let exec = repo
+            .snapshot_with_attribution_profiled_from_status(
+                Some("edit".into()),
+                None,
+                repo.get_attribution().unwrap(),
+                status,
+                false,
+            )
+            .expect("single-file fast-path capture must not spuriously Conflict on a v4 spool");
+        let tree = repo.store().get_tree(&exec.state.tree).unwrap().unwrap();
+        assert_eq!(tree.scheme(), TreeScheme::V4Salted);
+    }
+
+    #[test]
+    fn if_changed_on_v4_spool_runs_authoritative_rewalk_for_noop() {
+        use super::super::repository_snapshot::{
+            authoritative_rewalk_count, authoritative_rewalk_count_reset,
+        };
+        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V4);
+        fs::write(temp.path().join("a.txt"), b"1\n").unwrap();
+        let _first = repo.snapshot(Some("first".into()), None).unwrap(); // baseline V4
+        authoritative_rewalk_count_reset();
+        // A no-op `*_if_changed` on a v4 spool must still run the authoritative
+        // monitor-off re-walk before reporting NoChanges. Before the fix the
+        // scheme-mixed compare (V3 walk vs V4 baseline) was never equal, so the
+        // re-walk was skipped and fail-closed was weakened.
+        let err = repo
+            .snapshot_with_attribution_profiled_if_changed(
+                Some("noop".into()),
+                None,
+                repo.get_attribution().unwrap(),
+            )
+            .unwrap_err();
+        assert!(matches!(err, objects::error::HeddleError::NoChanges));
+        assert!(
+            authoritative_rewalk_count() >= 1,
+            "the authoritative re-walk must run on a v4 no-op if_changed capture"
+        );
+    }
 }
