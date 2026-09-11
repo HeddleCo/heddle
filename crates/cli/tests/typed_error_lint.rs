@@ -41,11 +41,47 @@ use std::{fs, path::Path};
 /// of the measured 155 sites with the contract surface and re-ratcheted the
 /// remaining facade command tree to 154.
 ///
+/// 2026-09-11 ratchet-DOWN 154 -> 149. `full-ci` (which runs this test)
+/// is path-filtered + weekly, so it went dormant while ~1.5 months of
+/// feature work merged; the count had silently drifted to 157. Rather
+/// than re-pin to the drifted count, the genuinely user-facing new
+/// sites were migrated to typed `RecoveryAdvice` (the real fix), which
+/// took the tree BELOW the old baseline. Migrated in this change:
+///   - discuss.rs "discuss wait requires the hosted client feature"
+///     -> `network_feature_unavailable`
+///   - discuss.rs "discussion {id} not found" (x3)
+///     -> `discussion_not_found`
+///   - discuss.rs "--body must not be empty for --into-annotation"
+///     -> `discuss_into_annotation_body_required`
+///   - semantic_refs_cmd.rs "symbol anchor must be path:symbol"
+///     -> `semantic_anchor_malformed`
+///   - integration.rs "codex features/hooks must be a table"
+///     -> `integration_config_expected_table`
+///
+/// The remaining new sites are internal invariants / low-level input
+/// validation where a typed `RecoveryAdvice` (a user-recovery surface)
+/// would be semantically wrong, so they stay `anyhow` by design:
+///   - ci/target.rs — "state withheld at visibility tier" /
+///     "materialized tree ... does not match its recorded digest"
+///     (repository-integrity invariants)
+///   - clone.rs — "missing state object" (internal graph invariant)
+///   - netdaemon/server.rs — "netd control loop panicked" (panic
+///     propagation from a JoinError)
+///   - review.rs — "resolved state ID has invalid byte length"
+///     (internal length invariant)
+///   - discuss.rs — `map_err(|error| anyhow!("{error}"))` on a
+///     poisoned lock (passthrough of a lock-poison error)
+///   - remote/mod.rs — "native HTTPS discovery requires a network
+///     remote": on closer read this is an internal invariant, not a
+///     user error — the dispatch has already classified the remote as
+///     native-HTTPS before this re-parse, so a non-`Network` target
+///     here is a logic inconsistency, not something a user can act on.
+///
 /// Decrease when you migrate sites to typed `RecoveryAdvice` (PR C-3
 /// and follow-ups). Only increase with explicit justification — every
 /// new untyped site is a future Priya-style "run heddle status" dead
 /// end.
-const MAX_UNTYPED_ANYHOW_SITES: usize = 154;
+const MAX_UNTYPED_ANYHOW_SITES: usize = 149;
 const MIN_SCANNED_RUST_FILES: usize = 50;
 
 #[test]

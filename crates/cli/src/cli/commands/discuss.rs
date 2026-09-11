@@ -80,7 +80,9 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
         }
         #[cfg(not(feature = "client"))]
         DiscussCommands::Wait(_) => {
-            return Err(anyhow!("discuss wait requires the hosted client feature"));
+            return Err(anyhow!(RecoveryAdvice::network_feature_unavailable(
+                "discuss wait"
+            )));
         }
         _ => cli.open_repo().context("open Heddle repository")?,
     };
@@ -231,7 +233,11 @@ fn resolve_into_context_annotation(
     let discussion_id = parse_discussion_id(&args.discussion_id)?;
     let discussion = store
         .materialize_discussion(&discussion_id)?
-        .ok_or_else(|| anyhow!("discussion {discussion_id} not found"))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::discussion_not_found(
+                &discussion_id.to_string()
+            ))
+        })?;
     let annotation_kind = args
         .kind
         .as_deref()
@@ -243,7 +249,7 @@ fn resolve_into_context_annotation(
         .as_deref()
         .map(str::trim)
         .filter(|body| !body.is_empty())
-        .ok_or_else(|| anyhow!("--body must not be empty for --into-annotation"))?
+        .ok_or_else(|| anyhow!(RecoveryAdvice::discuss_into_annotation_body_required()))?
         .to_string();
     let tags = args.tag.clone();
     let annotation_id = {
@@ -328,7 +334,11 @@ fn write_descendant(
     let discussion_id = parse_discussion_id(raw_id)?;
     let discussion = store
         .materialize_discussion(&discussion_id)?
-        .ok_or_else(|| anyhow!("discussion {discussion_id} not found"))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::discussion_not_found(
+                &discussion_id.to_string()
+            ))
+        })?;
     let operation = CollaborationOperationEnvelope::new(
         discussion_id,
         discussion.heads.iter().copied().collect(),
@@ -399,11 +409,13 @@ fn run_list(
 
 #[cfg(feature = "client")]
 async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) -> Result<()> {
-    use hosted_client::client::discussion_live::{
-        DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventOutcome, load_scoped_cursor,
-        paired_thread_scope, save_scoped_cursor, wait_reconnect_backoff,
+    use hosted_client::client::{
+        HostedAuthMode, HostedClient,
+        discussion_live::{
+            DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventOutcome,
+            load_scoped_cursor, paired_thread_scope, save_scoped_cursor, wait_reconnect_backoff,
+        },
     };
-    use hosted_client::client::{HostedAuthMode, HostedClient};
 
     use super::remote::resolve_default_remote_name;
     use crate::remote::{RemoteTarget, resolve_remote_with_key_and_insecure};
@@ -584,7 +596,11 @@ fn run_show(cli: &Cli, store: &CollaborationStore, args: &DiscussShowArgs) -> Re
     let discussion_id = parse_discussion_id(&args.discussion_id)?;
     let discussion = store
         .materialize_discussion(&discussion_id)?
-        .ok_or_else(|| anyhow!("discussion {discussion_id} not found"))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::discussion_not_found(
+                &discussion_id.to_string()
+            ))
+        })?;
     let output = DiscussionShowOutput {
         output_kind: "discuss_show",
         discussion: to_view(store, &discussion)?,
