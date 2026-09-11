@@ -386,12 +386,35 @@ fn find_subcommand_or_alias<'a>(
 }
 
 fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Option<Vec<String>> {
-    if !raw.iter().any(|arg| arg == "--help" || arg == "-h") {
+    command_path_from_raw_trigger(cmd, raw, &|token| token == "--help" || token == "-h")
+}
+
+/// Resolve the deepest selected subcommand path from raw argv for a global
+/// short-circuit flag like `--schema` — the pre-parse equivalent of
+/// [`command_path_from_raw_help_request`], so the flag can print without
+/// tripping clap's required-argument validation (as `--help` does).
+///
+/// Returns `None` when `flag` is absent or only global flags were supplied
+/// (no subcommand selected), so the caller can fall through to clap.
+pub fn command_path_from_raw_flag(
+    cmd: &clap::Command,
+    raw: &[String],
+    flag: &str,
+) -> Option<Vec<String>> {
+    command_path_from_raw_trigger(cmd, raw, &|token| token == flag)
+}
+
+fn command_path_from_raw_trigger(
+    cmd: &clap::Command,
+    raw: &[String],
+    is_trigger: &dyn Fn(&str) -> bool,
+) -> Option<Vec<String>> {
+    if !raw.iter().any(|arg| is_trigger(arg)) {
         return None;
     }
     if raw
         .iter()
-        .all(|arg| arg == "--help" || arg == "-h" || arg.starts_with('-'))
+        .all(|arg| is_trigger(arg) || arg.starts_with('-'))
     {
         return None;
     }
@@ -404,7 +427,7 @@ fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Op
             skip_next = false;
             continue;
         }
-        if token == "--help" || token == "-h" {
+        if is_trigger(token) {
             continue;
         }
         if let Some(takes_value) = global_option_takes_value(current, token) {

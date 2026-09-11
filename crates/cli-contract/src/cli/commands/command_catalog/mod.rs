@@ -2136,17 +2136,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
-    entry(
-        &["doctor", "schemas"],
-        json_discriminators(
-            documented_schemas(READ_JSON, &["doctor schemas"]),
-            &[json_discriminator(
-                Some("doctor schemas"),
-                "output_kind",
-                "doctor_schemas",
-            )],
-        ),
-    ),
     entry(&["maintenance", "oplog"], GROUP),
     entry(
         &["maintenance", "fsck"],
@@ -4606,7 +4595,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Doctor(args) => match &args.command {
             None => vec!["doctor"],
             Some(DoctorCommands::Docs(_)) => vec!["doctor", "docs"],
-            Some(DoctorCommands::Schemas(_)) => vec!["doctor", "schemas"],
         },
         Commands::Start(_) => vec!["start"],
         #[cfg(feature = "ci")]

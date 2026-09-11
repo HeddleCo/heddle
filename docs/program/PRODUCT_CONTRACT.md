@@ -33,7 +33,7 @@ delivery (CLI / future daemon / tests)
 4. **Byte-identical Git round-trip** — for public history, adopt/import → export reproduces identical commit/tree/blob/tag SHAs and `git fsck --full` clean (oracle: `roundtrip_fidelity`, git projection engine tests).
 5. **No runtime `git` executable dependency** for public Git-overlay workflows — Git-format identity and operations via **Sley** (native engine). Tests/fixtures may shell out to `git`.
 6. **Verification-first CLI** — Repository Verification State drives status/doctor/verify advice; mutating commands fail closed when verification is degraded/blocked.
-7. **Machine contracts** — stable JSON fields, explicit nulls, command catalog + schemas as source of truth (`docs/json-schemas.md`, doctor schemas gate).
+7. **Machine contracts** — stable JSON fields, explicit nulls, command catalog + the runtime schema registry as source of truth (`heddle <command> --schema`).
 8. **Compatibility posture** — pre-1.0: prefer current model over legacy shims unless explicitly requested.
 
 ## Oracles and compatibility targets

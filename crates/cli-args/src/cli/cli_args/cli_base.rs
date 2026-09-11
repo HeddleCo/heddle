@@ -61,6 +61,15 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_color: bool,
 
+    // Global short-circuit like `--help`: print the JSON Schema for the
+    // resolved command's `--output json` payload and exit without running
+    // the command. Resolves to the deepest selected verb (including
+    // flag-differentiated payloads like `land --threads`). Kept to one
+    // line on every subcommand's help (heddle#652).
+    /// Print the JSON Schema for this command's `--output json` payload and exit.
+    #[arg(long, global = true)]
+    pub schema: bool,
+
     /// Repository path (default: find .heddle in ancestors).
     #[arg(short = 'C', long, global = true, value_name = "PATH")]
     pub repo: Option<std::path::PathBuf>,

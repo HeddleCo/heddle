@@ -324,8 +324,9 @@ impl JsonSchema for OperatorCommandEnvelope<'_> {
 
 #[cfg(test)]
 mod tests {
+    use verbs::schema_keys::schema_property_keys;
+
     use super::*;
-    use verbs::doctor_schemas_plan::schema_property_keys;
 
     /// Every field the hand-written serializer can emit must be declared on
     /// the shape struct that publishes the schema.

@@ -298,8 +298,8 @@ implementer cannot route around. Hosted consumers rely on the separately owned
 
 - `heddle-cli` — the CLI binary's *Rust* surface is not the
   product; the CLI surface (verbs, flags, JSON shapes) is, and
-  that's covered by `heddle doctor docs` /
-  `heddle doctor schemas` plus the conventions in
+  that's covered by `heddle doctor docs` and the runtime schema
+  registry (`heddle <command> --schema`) plus the conventions in
   [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 - All other workspace crates are internal-shaped today and may absorb churn
   from ongoing work (hosted control plane, semantic diff evolution).
@@ -350,12 +350,12 @@ meet first":
   signing, and retry-key declarations.
 - `heddle doctor docs` — flag names referenced in tracked markdown
   must match the live binary.
-- `heddle doctor schemas` — every documented schema verb registered
-  in the command contract table
+- Runtime JSON schema registry — every `--output json`-capable verb
+  registered in the command contract table
   ([`crates/cli-contract/src/cli/commands/command_catalog/mod.rs`](../crates/cli-contract/src/cli/commands/command_catalog/mod.rs))
-  must produce a schema, and the JSON samples in
-  [`docs/json-schemas.md`](json-schemas.md) must validate against
-  the runtime registry. The output shapes are contracts; changes
+  must produce a schema, retrievable at runtime with `heddle
+  <command> --schema`. A unit test asserts every JSON-capable command
+  has a resolvable schema. The output shapes are contracts; changes
   must be additive (`null` for missing fields, empty arrays
   explicit).
 
@@ -537,8 +537,8 @@ For the crates in §2.1's stable list:
   `VERSION`, sidecar `FORMAT_VERSION`, ref-summary header,
   `heddle.vN` proto package).
 - Removing a Tier-`Everyday` CLI verb or any flag it documents.
-- Changing the wire shape of any JSON output marked as stable by
-  `heddle doctor schemas`.
+- Changing the wire shape of any JSON output covered by the runtime
+  schema registry (`heddle <command> --schema`).
 
 For the crates **not** in §2.1's stable list, there is no breaking-
 change contract within 0.x — they may break their Rust API on any
@@ -610,9 +610,10 @@ When a stable item is to be removed:
   proportionate.
 - **Tier-`Advanced` CLI verbs / flags:** same as Rust APIs: 2
   minors / 6 months.
-- **JSON output fields covered by `heddle doctor schemas`:** same
-  as Tier-`Everyday`. JSON shape changes are silently breaking for
-  agents and need the longer window.
+- **JSON output fields covered by the runtime schema registry
+  (`heddle <command> --schema`):** same as Tier-`Everyday`. JSON
+  shape changes are silently breaking for agents and need the
+  longer window.
 - **Hosted API fields:** compatibility and deprecation are governed by the
   `HeddleCo/api` release policy (§3.6), not by Heddle's crate lifecycle.
 - **Sidecar / oplog format versions:** at least one minor release

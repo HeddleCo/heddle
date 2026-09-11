@@ -292,7 +292,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["discuss", "wait"], &["discuss", "wait"]),
     sample(&["doctor"], &["doctor"]),
     sample(&["doctor", "docs"], &["doctor", "docs"]),
-    sample(&["doctor", "schemas"], &["doctor", "schemas"]),
     sample(&["maintenance", "fsck"], &["maintenance", "fsck"]),
     sample(
         &["maintenance", "fsck", "repair", "git"],
@@ -1857,7 +1856,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "discuss wait",
             "doctor",
             "doctor docs",
-            "doctor schemas",
             "maintenance oplog recover",
             "help",
             "init",

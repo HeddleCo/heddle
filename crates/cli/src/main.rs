@@ -36,14 +36,14 @@ use cli::{
             cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
             cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss, cmd_doctor, cmd_doctor_docs,
-            cmd_doctor_schemas, cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log,
-            cmd_maintenance, cmd_netd_serve, cmd_netd_status, cmd_netd_stop, cmd_pull, cmd_push,
-            cmd_query, cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_revert, cmd_review,
-            cmd_shell, cmd_show, cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread,
-            cmd_undo, cmd_undo_recover, cmd_verify, cmd_watch,
+            cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance,
+            cmd_netd_serve, cmd_netd_status, cmd_netd_stop, cmd_pull, cmd_push, cmd_query,
+            cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_revert, cmd_review, cmd_shell,
+            cmd_show, cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread, cmd_undo,
+            cmd_undo_recover, cmd_verify, cmd_watch, command_path,
             command_runtime_contract_for_command, print_error_with_hint,
             print_or_suggest_parse_error, print_parse_error_json_envelope,
-            recover_incomplete_land_if_present,
+            recover_incomplete_land_if_present, schema_for_verb,
         },
         render::write_json_stdout,
     },
@@ -182,6 +182,28 @@ async fn async_main() -> Result<()> {
             }
             return Ok(());
         }
+        // `heddle <path> --schema`: print the resolved command's `--output
+        // json` schema and exit, like `--help`. Resolving pre-parse lets it
+        // bypass clap's required-argument validation, so an agent can ask
+        // `heddle discuss show --schema` without inventing a discussion id.
+        // Falls through to the post-parse handler when no schema resolves
+        // (that path renders the typed error with a repo-aware hint).
+        if let Some(path) =
+            cli::cli::help::command_path_from_raw_flag(&Cli::command(), &raw, "--schema")
+        {
+            let verb = schema_verb_from_raw_path(&path, &raw);
+            if let Some(schema) = schema_for_verb(&verb) {
+                write_json_stdout(&schema)?;
+                if profile {
+                    emit_command_profile(
+                        "schema",
+                        0,
+                        &[ProfileField::duration("total_ms", total_start.elapsed())],
+                    );
+                }
+                return Ok(());
+            }
+        }
         // `heddle help <topic>` — let clap handle when the user passes
         // the verb explicitly (it dispatches to Commands::Help). A two-
         // arg form `heddle help <topic>` also goes through clap.
@@ -228,6 +250,34 @@ async fn async_main() -> Result<()> {
     // doing this inside each render path would re-query the env on
     // every line and fight the brand goal of restraint.
     cli::cli::style::init_from_cli(&cli);
+    // `heddle <cmd> [sub…] --schema`: print the JSON Schema for the resolved
+    // command's `--output json` payload and exit, without running the command.
+    // Like `--help`, this is a pure short-circuit — it fires before config and
+    // logging init, so it has no side effects. Resolving happens through the
+    // command catalog so a flag-differentiated payload (`land --threads`,
+    // `undo --list`, …) prints its own schema rather than the base verb's.
+    if cli.schema {
+        let verb = schema_verb_for_command(&cli.command);
+        match schema_for_verb(&verb) {
+            Some(schema) => {
+                write_json_stdout(&schema)?;
+                if profile {
+                    emit_command_profile(
+                        "schema",
+                        0,
+                        &[ProfileField::duration("total_ms", total_start.elapsed())],
+                    );
+                }
+                return Ok(());
+            }
+            None => {
+                let err = anyhow::Error::new(NoJsonSchemaForVerb { verb });
+                let code = HeddleExitCode::from_error(&err);
+                print_error_with_hint(&cli, &err);
+                std::process::exit(code.into());
+            }
+        }
+    }
     let command_contract = command_runtime_contract_for_command(&cli.command);
     let command_name = command_contract.display.clone();
     let command_supports_op_id = command_contract.supports_op_id;
@@ -395,9 +445,6 @@ async fn async_main() -> Result<()> {
             None => cmd_doctor(&cli, args.profile),
             Some(cli::cli::DoctorCommands::Docs(docs_args)) => {
                 cmd_doctor_docs(&cli, docs_args.clone())
-            }
-            Some(cli::cli::DoctorCommands::Schemas(schema_args)) => {
-                cmd_doctor_schemas(&cli, schema_args.clone())
             }
         },
 
@@ -1126,6 +1173,68 @@ fn incomplete_land_recovery_start(
             Some(path) => path.clone(),
             None => std::env::current_dir()?,
         })),
+    }
+}
+
+/// Typed error for `--schema` on a command that has no `--output json`
+/// payload schema. Surfaced through the standard error-envelope path so
+/// JSON callers get the structured failure shape rather than a panic.
+#[derive(Debug, thiserror::Error)]
+#[error("no JSON schema for `{verb}`: this command has no `--output json` payload")]
+struct NoJsonSchemaForVerb {
+    verb: String,
+}
+
+/// Resolve the schema-registry verb key for `--schema` from the parsed
+/// command. Most verbs are the space-joined command path
+/// ([`command_path`]), but a handful expose a distinct `--output json`
+/// payload behind a flag (`land --threads`, `undo --list/--redo/--recover`,
+/// `log --reflog/--timeline`, `query --attribution`). Those share a base
+/// command path yet register their own schema, so the flag is folded into
+/// the key here — falling back to the base path when the flagged variant is
+/// not a registered schema verb (e.g. git-overlay verbs in a native build).
+fn schema_verb_for_command(command: &Commands) -> String {
+    let base = command_path(command).join(" ");
+    let flagged = match command {
+        Commands::Land(args) if !args.threads.is_empty() => Some("land --threads"),
+        Commands::Undo(args) if args.list => Some("undo --list"),
+        Commands::Undo(args) if args.redo => Some("undo --redo"),
+        Commands::Undo(args) if args.recover => Some("undo --recover"),
+        Commands::Log(args) if args.reflog => Some("log --reflog"),
+        Commands::Log(args) if args.timeline => Some("log --timeline"),
+        Commands::Query(args) if args.attribution.is_some() => Some("query --attribution"),
+        _ => None,
+    };
+    match flagged {
+        Some(verb) if schema_for_verb(verb).is_some() => verb.to_string(),
+        _ => base,
+    }
+}
+
+/// Pre-parse sibling of [`schema_verb_for_command`]: resolve the schema
+/// verb key from a raw-argv command `path` plus the raw tokens, folding in
+/// the same flag-differentiated payloads (`land --threads`, `undo --list`,
+/// …) by scanning raw argv for their distinguishing flags. Each such flag is
+/// unique to one base command, so a plain token scan is unambiguous.
+fn schema_verb_from_raw_path(path: &[String], raw: &[String]) -> String {
+    let base = path.join(" ");
+    let has = |flag: &str| {
+        raw.iter()
+            .any(|token| token == flag || token.starts_with(&format!("{flag}=")))
+    };
+    let flagged = match base.as_str() {
+        "land" if has("--threads") => Some("land --threads"),
+        "undo" if has("--list") => Some("undo --list"),
+        "undo" if has("--redo") => Some("undo --redo"),
+        "undo" if has("--recover") => Some("undo --recover"),
+        "log" if has("--reflog") => Some("log --reflog"),
+        "log" if has("--timeline") => Some("log --timeline"),
+        "query" if has("--attribution") => Some("query --attribution"),
+        _ => None,
+    };
+    match flagged {
+        Some(verb) if schema_for_verb(verb).is_some() => verb.to_string(),
+        _ => base,
     }
 }
 

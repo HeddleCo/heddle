@@ -316,22 +316,6 @@ impl RecoveryAdvice {
         }
     }
 
-    pub(crate) fn machine_contract_drift(
-        error: impl Into<String>,
-        unsafe_condition: impl Into<String>,
-    ) -> Self {
-        Self::safety_refusal(
-            "machine_contract_drift",
-            error,
-            "Inspect the schema contract with `heddle doctor schemas --output json`, then update the schema registry or documented samples.",
-            unsafe_condition,
-            "continuing to rely on this machine contract could make JSON callers parse stale or undocumented fields",
-            "repository state, refs, metadata, and worktree files were left unchanged",
-            "heddle doctor schemas --output json",
-            vec!["heddle doctor schemas --output json".to_string()],
-        )
-    }
-
     pub fn stale_daemon_protocol(their_version: u32, our_version: u32) -> Self {
         Self::safety_refusal(
             "daemon_protocol_version_mismatch",
