@@ -7,7 +7,7 @@ use objects::{
     lock::RepositoryLockExt,
     object::{
         Attribution, Blob, ChangeLineage, ContentHash, State, StateAttachment, StateAttachmentBody,
-        StateId, Tree, TreeEntry,
+        StateId, Tree, TreeEntry, TreeScheme,
     },
     store::{ObjectStore, SnapshotCommitArtifact, SnapshotCommitDescriptor, TreeWrite},
     worktree::WorktreeStatus,
@@ -154,6 +154,13 @@ struct SnapshotMutation<'a> {
     staged_visibility_rewind: Option<(StateId, Option<Vec<u8>>)>,
     prepared_artifact: Option<PreparedSnapshotArtifact>,
     prepared_execution: Option<SnapshotExecution>,
+    /// The pre-v4-conversion (flat V3) worktree tree, kept only to revalidate
+    /// that the worktree did not change between prepare and commit. Revalidation
+    /// is a worktree-identity check and salts are lineage-derived, not
+    /// worktree-derived — so it runs entirely in V3 against this tree, never the
+    /// committed (possibly V4) tree. For a v3 spool this equals the committed
+    /// tree; for a v4 spool it is the flat tree the walker produced.
+    worktree_revalidation_tree: Option<Tree>,
     worktree_revalidation_files: Option<BTreeMap<String, ManifestFile>>,
     worktree_revalidation_cutoff_ns: Option<i64>,
     worktree_monitor_token: Option<ChangeMonitorToken>,
@@ -181,6 +188,7 @@ impl<'a> SnapshotMutation<'a> {
             staged_visibility_rewind: None,
             prepared_artifact: None,
             prepared_execution: None,
+            worktree_revalidation_tree: None,
             worktree_revalidation_files: None,
             worktree_revalidation_cutoff_ns: None,
             worktree_monitor_token: None,
@@ -353,9 +361,11 @@ impl SnapshotMutation<'_> {
         if !matches!(&self.source, SnapshotSource::Worktree) {
             return Ok(true);
         }
-        let execution = self.prepared_execution.as_ref().ok_or_else(|| {
-            HeddleError::Config("snapshot revalidation reached an unprepared mutation".to_string())
-        })?;
+        if self.prepared_execution.is_none() {
+            return Err(HeddleError::Config(
+                "snapshot revalidation reached an unprepared mutation".to_string(),
+            ));
+        }
         if let Some(prepared_token) = self.worktree_monitor_token.as_ref() {
             let current = ChangeMonitorSession::prepare(
                 self.repo.root(),
@@ -371,15 +381,21 @@ impl SnapshotMutation<'_> {
         let cutoff_ns = self.worktree_revalidation_cutoff_ns.ok_or_else(|| {
             HeddleError::Config("snapshot preparation omitted its timestamp cutoff".to_string())
         })?;
-        Ok(self
-            .repo
-            .snapshot_worktree_fingerprint(&execution.tree, files, cutoff_ns)?
-            == execution.tree.hash())
+        // Revalidate against the flat V3 tree the walker produced, not the
+        // committed (possibly v4) tree. Worktree identity is scheme-independent;
+        // salts are lineage-derived and irrelevant to "did the worktree change".
+        let revalidation_tree = self.worktree_revalidation_tree.as_ref().ok_or_else(|| {
+            HeddleError::Config("snapshot preparation omitted its revalidation tree".to_string())
+        })?;
+        let walked =
+            self.repo
+                .snapshot_worktree_fingerprint(revalidation_tree, files, cutoff_ns)?;
+        Ok(walked.hash() == revalidation_tree.hash())
     }
 
     fn stage_snapshot_objects(&mut self) -> Result<SnapshotExecution> {
         debug!("Building tree from worktree");
-        let (tree, tree_profile, supplied_blobs) = match &self.source {
+        let (mut tree, tree_profile, mut supplied_blobs) = match &self.source {
             SnapshotSource::Worktree => {
                 let (tree, profile, revalidation_files, blobs, trees, monitor_token) =
                     self.build_worktree_tree()?;
@@ -400,9 +416,42 @@ impl SnapshotMutation<'_> {
                 )),
             ),
         };
-        #[cfg(feature = "tree-sitter-symbols")]
-        let mut supplied_blobs = supplied_blobs;
         debug!(duration_ms = tree_profile.tree_walk_ms, "Tree built");
+
+        // Keep the walker's flat V3 tree for prepare→commit worktree
+        // revalidation, which is scheme-agnostic and must not chase v4 salts.
+        if matches!(&self.source, SnapshotSource::Worktree) {
+            self.worktree_revalidation_tree = Some(tree.clone());
+        }
+
+        // v4 redactable trees: a spool whose `[policies] tree_scheme = v4`
+        // captures salted per-entry Merkle trees. The walker always builds flat
+        // V3 trees; convert here, inheriting each unchanged entry's salt from
+        // the lineage parent so a no-op recapture reproduces the same id. Only
+        // the worktree path (which carries its nested subtrees in
+        // `supplied_blobs`) is converted; supplied-tree merge/synthetic sources
+        // stay as provided.
+        if self.repo.capture_tree_scheme() == TreeScheme::V4Salted
+            && let Some((_, trees)) = supplied_blobs.as_ref()
+        {
+            let parent_root = match self.prev_head {
+                Some(id) => self
+                    .repo
+                    .store
+                    .get_state(&id)?
+                    .map(|state| self.repo.store.get_tree(&state.tree))
+                    .transpose()?
+                    .flatten(),
+                None => None,
+            };
+            let (v4_root, v4_subtrees) =
+                self.repo
+                    .v4ify_capture_tree(&tree, trees, parent_root.as_ref())?;
+            tree = v4_root;
+            if let Some((_, trees)) = supplied_blobs.as_mut() {
+                *trees = v4_subtrees.into_iter().map(TreeWrite::anchor).collect();
+            }
+        }
 
         if self.require_worktree_change && matches!(&self.source, SnapshotSource::Worktree) {
             let previous_tree = match self.prev_head {
@@ -1135,7 +1184,7 @@ impl Repository {
         tree: &Tree,
         files: &BTreeMap<String, ManifestFile>,
         racy_cutoff_ns: i64,
-    ) -> Result<ContentHash> {
+    ) -> Result<Tree> {
         let patterns = self.ignore_patterns()?;
         let nested_exclusions = self.nested_thread_worktree_exclusions(&self.root)?;
         let ignore_matcher = WorktreeIgnoreMatcher::new(&patterns)
@@ -1157,11 +1206,7 @@ impl Repository {
         .unwrap_or_default();
         let mut policy =
             SnapshotFingerprintPolicy::new(&self.root, files, racy_cutoff_ns, index, monitor);
-        Ok(
-            walk_worktree(self, &self.root, &ignore_matcher, Some(tree), &mut policy)?
-                .tree
-                .hash(),
-        )
+        Ok(walk_worktree(self, &self.root, &ignore_matcher, Some(tree), &mut policy)?.tree)
     }
 
     /// Create a snapshot of the current worktree.

@@ -70,7 +70,7 @@ pub use refs::SpoolFacet;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use repo_config::{
     HostedConfig, KeyBindingRegistryAnchor, OutputFormat, ProvenanceConfig, RepoConfig,
-    RepoRemoteConfig, RepositorySourceAuthority, TrustedKey,
+    RepoRemoteConfig, RepositorySourceAuthority, TreeSchemePolicy, TrustedKey,
 };
 // Review-epic config types — re-exported here so the new
 // `signals.rs` (and external crates wanting to construct a
@@ -100,6 +100,8 @@ use sley::Repository as SleyRepository;
 
 #[path = "repository_snapshot.rs"]
 mod repository_snapshot;
+#[path = "repository_capture_v4.rs"]
+mod repository_capture_v4;
 #[cfg(test)]
 #[path = "repository_tests.rs"]
 mod repository_tests;
