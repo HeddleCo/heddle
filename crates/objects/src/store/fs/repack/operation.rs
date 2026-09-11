@@ -304,11 +304,37 @@ impl FsRepackOperation {
                 state_ids.push(*id);
             }
         }
+        // A V4 salted (HSR1) tree carries no NPK1 salt column — the columnar
+        // dictionary + `encode_lean` are salt-less and refuse V4 — so it cannot
+        // ride the NPK1 pack. Route V4 trees to the native pack as full HSR1
+        // bodies and keep only V3 trees as NPK1 candidates, so one loose V4 tree
+        // never aborts the whole repack.
+        let mut npk1_tree_hashes = Vec::with_capacity(tree_hashes.len());
+        for hash in tree_hashes {
+            match ObjectStore::get_tree(&self.store, &hash).map_err(BuildError::from)? {
+                Some(tree) if tree.scheme() == crate::object::TreeScheme::V4Salted => {
+                    let data = tree
+                        .encode_canonical()
+                        .map_err(HeddleError::from)
+                        .map_err(BuildError::from)?;
+                    logical_bytes = logical_bytes.saturating_add(data.len() as u64);
+                    // Move the object out of the NPK1 expected set and into the
+                    // native-pack expected set so `verify_staged` accounts for
+                    // it in the right pack.
+                    expected_trees.remove(&hash);
+                    expected.insert(PackObjectId::Hash(hash));
+                    builder
+                        .add_id(PackObjectId::Hash(hash), ObjectType::Tree, data)
+                        .map_err(BuildError::from)?;
+                }
+                _ => npk1_tree_hashes.push(hash),
+            }
+        }
         let compact = add_compact_metadata(
             &self.store,
             &mut builder,
             &state_ids,
-            &tree_hashes,
+            &npk1_tree_hashes,
             &blob_hashes,
             context,
             &mut corrupt_first,

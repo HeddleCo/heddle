@@ -89,6 +89,16 @@ pub fn encode_tree_hot(tree: &Tree, base: Option<TreeDeltaBase<'_>>) -> Result<E
             kind: TreeEncodingKind::Lean,
         });
     };
+    if base.anchor.scheme() == TreeScheme::V4Salted {
+        // A V3 child cannot delta against a V4 salted anchor (different hash
+        // scheme, no shared preimage). Store the child as its own lean anchor
+        // rather than hard-failing the write.
+        return Ok(EncodedTree {
+            hash,
+            data: lean,
+            kind: TreeEncodingKind::Lean,
+        });
+    }
     if hash == base.anchor_id {
         return Ok(EncodedTree {
             hash,
@@ -291,6 +301,40 @@ mod tests {
             assert!(crate::object::is_lean_tree(&encoded));
             assert_eq!(decode_tree_with_key(&encoded, hash, None).unwrap(), tree);
         }
+    }
+
+    #[test]
+    fn v3_child_over_a_v4_anchor_falls_back_to_lean_not_error() {
+        // A V4 salted anchor cannot be a delta base for a V3 child (different
+        // hash scheme). Pre-fix this hit `encode_tree_delta` and Err'd, failing
+        // the write; it must now fall back to a lean anchor.
+        let v4_anchor = Tree::from_entries_salted_v4(
+            vec![
+                TreeEntry::file("a", ContentHash::compute(b"a"), false).unwrap(),
+                TreeEntry::file("b", ContentHash::compute(b"b"), false).unwrap(),
+            ],
+            vec![[0x11; 32], [0x22; 32]],
+        )
+        .unwrap();
+        let v3_child = Tree::from_entries(vec![
+            TreeEntry::file("a", ContentHash::compute(b"a"), false).unwrap(),
+        ]);
+        let encoded = encode_tree_hot(
+            &v3_child,
+            Some(TreeDeltaBase {
+                anchor_id: v4_anchor.hash(),
+                anchor: &v4_anchor,
+                parent_depth: 0,
+            }),
+        )
+        .expect("v3-over-v4 must not error");
+        assert_eq!(encoded.kind, TreeEncodingKind::Lean);
+        assert!(crate::object::is_lean_tree(&encoded.data));
+        assert_eq!(encoded.hash, v3_child.hash());
+        assert_eq!(
+            decode_tree_with_key(&encoded.data, v3_child.hash(), None).unwrap(),
+            v3_child
+        );
     }
 
     #[test]
