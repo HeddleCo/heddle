@@ -1828,11 +1828,37 @@ impl Repository {
             ));
         }
         let tree = self.build_tree(&self.root)?;
-        let tree_hash = self.store.put_tree(&tree)?;
 
         let first_parent = self
             .head()?
             .ok_or_else(|| HeddleError::NotFound("No current state".to_string()))?;
+
+        // Leg 2.5: on a v4 spool, convert the merge tip through the same
+        // sticky-salt path with parent = the FIRST parent's tree, so entries
+        // unchanged from the first-parent lineage inherit its salts (leaf-stable
+        // across merges — embargo-carry) and new/changed mint fresh. `build_tree`
+        // wrote flat V3 subtrees to the store; conversion resolves them via the
+        // store fallback, produces V4 subtrees, and we persist those. Entry
+        // marks are NOT supported on a merge (guarded above); this converts the
+        // tip tree only.
+        let tree = if self.capture_tree_scheme() == TreeScheme::V4Salted {
+            let first_parent_tree = self
+                .store
+                .get_state(&first_parent)?
+                .map(|state| self.store.get_tree(&state.tree))
+                .transpose()?
+                .flatten();
+            let (v4_root, v4_subtrees) =
+                self.v4ify_capture_tree(&tree, &[], first_parent_tree.as_ref())?;
+            for subtree in &v4_subtrees {
+                self.store.put_tree(subtree)?;
+            }
+            v4_root
+        } else {
+            tree
+        };
+        let tree_hash = self.store.put_tree(&tree)?;
+
         let parents = vec![first_parent, *merge_parent];
 
         let mut state = State::new_merge(tree_hash, parents, details.attribution);

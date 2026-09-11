@@ -380,4 +380,64 @@ mod tests {
             "the authoritative re-walk must run on a v4 no-op if_changed capture"
         );
     }
+
+    #[test]
+    fn merge_tip_on_v4_spool_is_salted_and_leaf_stable_to_first_parent() {
+        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V4);
+        fs::write(temp.path().join("a.txt"), b"1\n").unwrap();
+        fs::write(temp.path().join("b.txt"), b"1\n").unwrap();
+        let a = repo.snapshot(Some("a".into()), None).unwrap();
+        fs::write(temp.path().join("a.txt"), b"2\n").unwrap();
+        let b = repo.snapshot(Some("b".into()), None).unwrap(); // head = B = first parent
+        let b_tree = repo.store().get_tree(&b.tree).unwrap().unwrap();
+
+        // Merge current head B with parent A. The worktree content equals B, so
+        // (Leg 2.5) the salted merge tip must inherit B's salts entry-for-entry
+        // and reproduce B's V4 tree id exactly.
+        let merge = repo
+            .snapshot_merge_with_attribution(
+                &a.id(),
+                Some("merge".into()),
+                None,
+                repo.get_attribution().unwrap(),
+                None,
+                false,
+            )
+            .unwrap();
+        let merge_tree = repo.store().get_tree(&merge.tree).unwrap().unwrap();
+        assert_eq!(
+            merge_tree.scheme(),
+            TreeScheme::V4Salted,
+            "merge tip must be salted on a v4 spool"
+        );
+        // Leaf-stable to the first parent: unchanged entries keep the parent salt.
+        assert_eq!(
+            merge_tree.v4_leaf_hash_for("a.txt"),
+            b_tree.v4_leaf_hash_for("a.txt")
+        );
+        assert_eq!(
+            merge_tree.v4_leaf_hash_for("b.txt"),
+            b_tree.v4_leaf_hash_for("b.txt")
+        );
+        assert_eq!(
+            merge.tree, b.tree,
+            "a merge tip over content identical to the first parent is leaf-stable"
+        );
+
+        // Re-merging the same unchanged content stays leaf-stable.
+        let merge2 = repo
+            .snapshot_merge_with_attribution(
+                &a.id(),
+                Some("merge2".into()),
+                None,
+                repo.get_attribution().unwrap(),
+                None,
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            merge2.tree, merge.tree,
+            "re-merging unchanged content must be leaf-stable"
+        );
+    }
 }
