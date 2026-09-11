@@ -13,7 +13,10 @@ use api::heddle::api::v1alpha1::{
     ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
     UpdateSpoolRequest, Visibility, grant_target_ref::Target as GrantTargetKind,
 };
+use repo::GrantRole;
 use wire::ProtocolError;
+
+use crate::hosted_runtime::refuse_agent_privileged_grant;
 
 use super::{
     HostedClient,
@@ -379,6 +382,8 @@ impl HostedClient {
             "heddle.api.v1alpha1.RegistryService/CreateGrant",
             client_operation_id,
         );
+        let parsed_role = parse_hosted_role_arg(role)?;
+        refuse_privileged_grant_for_agent_bearer(self, parsed_role)?;
         let target = build_target_ref(namespace_path, repo_path)?;
         let grant = authed_call!(
             self,
@@ -386,7 +391,7 @@ impl HostedClient {
             "CreateGrant",
             CreateGrantRequest {
                 subject: subject.to_string(),
-                role: parse_hosted_role_arg(role)? as i32,
+                role: parsed_role as i32,
                 target,
                 client_operation_id: operation_id.to_wire(),
             }
@@ -421,6 +426,8 @@ impl HostedClient {
             "heddle.api.v1alpha1.RegistryService/UpdateGrant",
             client_operation_id,
         );
+        let parsed_role = parse_hosted_role_arg(role)?;
+        refuse_privileged_grant_for_agent_bearer(self, parsed_role)?;
         let target = build_target_ref(namespace_path, repo_path)?;
         let grant = authed_call!(
             self,
@@ -428,7 +435,7 @@ impl HostedClient {
             "UpdateGrant",
             UpdateGrantRequest {
                 subject: subject.to_string(),
-                role: parse_hosted_role_arg(role)? as i32,
+                role: parsed_role as i32,
                 target,
                 client_operation_id: operation_id.to_wire(),
             }
@@ -699,6 +706,26 @@ fn build_target_ref(
             "exactly one of namespace_path or repo_path must be set".into(),
         )),
     }
+}
+
+fn refuse_privileged_grant_for_agent_bearer(
+    client: &HostedClient,
+    role: api::heddle::api::v1alpha1::HostedRole,
+) -> Result<(), ProtocolError> {
+    let Ok(token) = std::str::from_utf8(client.context.bearer_capability()) else {
+        return Ok(());
+    };
+    if token.is_empty() {
+        return Ok(());
+    }
+    let grant_role = GrantRole::from_hosted_role_i32(role as i32);
+    if refuse_agent_privileged_grant(token, grant_role) {
+        return Err(ProtocolError::AuthorizationFailed(
+            "agent sessions cannot grant maintainer, admin, or owner; those roles require human verification"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Parse a CLI-supplied role name into the proto `HostedRole` enum.
@@ -998,6 +1025,11 @@ mod tests {
         );
         assert_eq!(parse_hosted_role_arg("admin").unwrap(), HostedRole::Admin);
         assert_eq!(parse_hosted_role_arg("owner").unwrap(), HostedRole::Owner);
+        assert!(GrantRole::from_hosted_role_i32(HostedRole::Reader as i32).agent_may_grant());
+        assert!(GrantRole::from_hosted_role_i32(HostedRole::Developer as i32).agent_may_grant());
+        assert!(!GrantRole::from_hosted_role_i32(HostedRole::Maintainer as i32).agent_may_grant());
+        assert!(!GrantRole::from_hosted_role_i32(HostedRole::Admin as i32).agent_may_grant());
+        assert!(!GrantRole::from_hosted_role_i32(HostedRole::Owner as i32).agent_may_grant());
         let err = parse_hosted_role_arg("root").unwrap_err();
         assert!(err.to_string().contains("invalid role"));
     }

@@ -269,6 +269,17 @@ impl GrantRoleArg {
             Self::Owner => "owner",
         }
     }
+
+    /// Hosted role ordinal used for the agent grant ceiling.
+    pub fn as_grant_role(self) -> repo::GrantRole {
+        match self {
+            Self::Reader => repo::GrantRole::Reader,
+            Self::Contributor | Self::Developer => repo::GrantRole::Developer,
+            Self::Maintainer => repo::GrantRole::Maintainer,
+            Self::Admin => repo::GrantRole::Admin,
+            Self::Owner => repo::GrantRole::Owner,
+        }
+    }
 }
 
 /// Grant another principal access to a hosted spool.
@@ -282,6 +293,10 @@ Adds a collaborator to an existing hosted spool. This is not a signup
 invite — `heddle auth invite` only creates an account-creation code.
 
 Roles: reader, contributor (developer), maintainer, admin, owner.
+
+Agent sessions may grant writer or below (reader, contributor)
+without human verification. Maintainer, admin, and owner stay
+human-verified and are refused for derive-agent / attenuated sessions.
 
 Examples:
   heddle grant create --spool spool/willow-ibis-8e7264/notes --principal alice --role contributor
@@ -299,6 +314,9 @@ Examples:
 
     /// Remove a grant. `ID` is the principal shown by `heddle grant list`.
     #[command(after_help = "\
+Agents may delete writer-or-below grants without human verification.
+Deleting a maintainer, admin, or owner grant still requires a human-verified session.
+
 Examples:
   heddle grant delete alice --spool spool/willow-ibis-8e7264/notes
 ")]
@@ -746,6 +764,11 @@ mod tests {
         assert_eq!(args.principal, "alice");
         assert_eq!(args.role, GrantRoleArg::Contributor);
         assert_eq!(args.role.as_hosted_role_name(), "developer");
+        assert!(args.role.as_grant_role().agent_may_grant());
+        assert!(GrantRoleArg::Reader.as_grant_role().agent_may_grant());
+        assert!(!GrantRoleArg::Maintainer.as_grant_role().agent_may_grant());
+        assert!(!GrantRoleArg::Admin.as_grant_role().agent_may_grant());
+        assert!(!GrantRoleArg::Owner.as_grant_role().agent_may_grant());
         assert_eq!(args.server.as_deref(), Some("api.preview.heddle.sh"));
     }
 

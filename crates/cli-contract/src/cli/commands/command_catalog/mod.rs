@@ -1636,7 +1636,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
                         76,
                         "server rejected the grant; do not retry without changing inputs",
                     ),
-                    (77, "not permitted to grant on this spool"),
+                    (
+                        77,
+                        "not permitted to grant on this spool, or agent cannot grant maintainer/admin/owner",
+                    ),
                     (78, "not authenticated or spool path missing"),
                 ],
             ),

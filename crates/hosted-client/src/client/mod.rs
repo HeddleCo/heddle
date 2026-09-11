@@ -25,6 +25,6 @@ pub use local_sync::LocalSync;
 
 #[cfg(feature = "client")]
 pub use crate::hosted_runtime::{
-    HostedAuthMode, HostedClient, HostedSession, connect_websocket, resolve_active_bearer,
-    resolve_hosted_credential,
+    HostedAuthMode, HostedClient, HostedSession, connect_websocket, credential_is_agent_attenuated,
+    refuse_agent_privileged_grant, resolve_active_bearer, resolve_hosted_credential,
 };

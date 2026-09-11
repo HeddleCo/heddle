@@ -7,8 +7,13 @@ use heddle_cli_contract::cli::commands::wire::auth::{
 };
 use hosted_client::hosted_runtime::{
     auth::resolve_server,
-    hosted::{HostedAuthMode, HostedClient, HostedSession, canonicalize_spool_path},
+    hosted::{
+        HostedAuthMode, HostedClient, HostedSession, canonicalize_spool_path,
+        resolve_hosted_credential,
+    },
+    refuse_agent_privileged_grant,
 };
+use repo::GrantRole;
 use wire::{HostedGrantInfo, ProtocolError};
 
 use super::{
@@ -34,6 +39,7 @@ pub async fn cmd_grant(cli: &Cli, command: GrantCommands) -> Result<()> {
 
 async fn cmd_grant_create(cli: &Cli, args: GrantCreateArgs) -> Result<()> {
     let (server, spool) = resolve_grant_spool(&args.spool, args.server.as_deref())?;
+    refuse_privileged_agent_grant(&server, &spool, args.role.as_grant_role())?;
     let mut session = hosted_connect(&server).await?;
     let result = create_connected(
         cli,
@@ -74,7 +80,37 @@ async fn hosted_connect(server: &str) -> Result<HostedClient> {
     session
         .connect(server)
         .await
+        .map(|client| {
+            client.with_human_signature_callback(
+                hosted_client::client::headless_human_signature_callback(),
+            )
+        })
         .map_err(|err| map_grant_error("", &err))
+}
+
+fn refuse_privileged_agent_grant(server: &str, spool: &str, role: GrantRole) -> Result<()> {
+    let resolved = resolve_hosted_credential(Some(server))?;
+    let Some(token) = resolved.token.as_ref() else {
+        return Ok(());
+    };
+    if refuse_agent_privileged_grant(&token.id, role) {
+        return Err(anyhow!(RecoveryAdvice::grant_agent_ceiling(
+            spool,
+            role_display_name(role)
+        )));
+    }
+    Ok(())
+}
+
+fn role_display_name(role: GrantRole) -> &'static str {
+    match role {
+        GrantRole::Reader => "reader",
+        GrantRole::Developer => "contributor",
+        GrantRole::Maintainer => "maintainer",
+        GrantRole::Admin => "admin",
+        GrantRole::Owner => "owner",
+        GrantRole::Unspecified => "unspecified",
+    }
 }
 
 async fn create_connected(
@@ -214,9 +250,7 @@ fn resolve_grant_spool(spool: &str, server: Option<&str>) -> Result<(String, Str
                 return Ok((authority, full_path));
             }
             Ok(_) | Err(_) => {
-                return Err(anyhow!(
-                    "hosted grant URL must include a spool path, e.g. https://api.heddle.sh/spool/<handle>/<name>"
-                ));
+                return Err(anyhow!(RecoveryAdvice::grant_spool_required()));
             }
         }
     }
@@ -237,7 +271,13 @@ fn map_grant_error(spool: &str, err: &ProtocolError) -> anyhow::Error {
         _ => "",
     };
     let lower = message.to_ascii_lowercase();
-    let advice = if matches!(
+    let advice = if lower.contains("cannot grant maintainer, admin, or owner")
+        || lower.contains("cannot grant admin or owner")
+    {
+        RecoveryAdvice::grant_agent_ceiling(spool, "maintainer, admin, or owner")
+    } else if is_human_verification_required(&lower) {
+        RecoveryAdvice::grant_needs_human(spool)
+    } else if matches!(
         err,
         ProtocolError::AuthorizationFailed(_) | ProtocolError::AuthenticationFailed(_)
     ) || lower.contains("permission")
@@ -258,11 +298,17 @@ fn map_grant_error(spool: &str, err: &ProtocolError) -> anyhow::Error {
     anyhow!(advice)
 }
 
+fn is_human_verification_required(lowered_message: &str) -> bool {
+    lowered_message.contains("user verification required")
+        || lowered_message.contains("human verification")
+        || lowered_message.contains("webauthn")
+}
+
 #[cfg(test)]
 mod tests {
     use wire::ProtocolError;
 
-    use super::{grant_row, map_grant_error, resolve_grant_spool};
+    use super::{grant_row, is_human_verification_required, map_grant_error, resolve_grant_spool};
 
     #[test]
     fn url_target_takes_host_and_canonical_path() {
@@ -273,6 +319,16 @@ mod tests {
         .expect("parse url");
         assert_eq!(server, "api.preview.heddle.sh");
         assert_eq!(path, "spool/willow-ibis-8e7264/notes");
+    }
+
+    #[test]
+    fn hosted_url_without_spool_path_is_typed_usage() {
+        let err = resolve_grant_spool("https://api.preview.heddle.sh/", None)
+            .expect_err("URL without a spool path");
+        let advice = err
+            .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
+            .expect("advice");
+        assert_eq!(advice.kind, "grant_spool_required");
     }
 
     #[test]
@@ -309,6 +365,35 @@ mod tests {
             .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
             .expect("advice");
         assert_eq!(advice.kind, "grant_denied");
+    }
+
+    #[test]
+    fn human_verification_is_not_swallowed_as_a_generic_failure() {
+        assert!(is_human_verification_required(
+            "user verification required for /heddle.api.v1alpha1.RegistryService/CreateGrant"
+        ));
+        let err = ProtocolError::AuthorizationFailed(
+            "user verification required for CreateGrant: use a client with a WebAuthn authenticator"
+                .into(),
+        );
+        let mapped = map_grant_error("spool/alice/notes", &err);
+        let advice = mapped
+            .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
+            .expect("advice");
+        assert_eq!(advice.kind, "grant_needs_human");
+    }
+
+    #[test]
+    fn agent_admin_refuse_from_the_hosted_client_is_the_ceiling() {
+        let err = ProtocolError::AuthorizationFailed(
+            "agent sessions cannot grant maintainer, admin, or owner; those roles require human verification"
+                .into(),
+        );
+        let mapped = map_grant_error("spool/alice/notes", &err);
+        let advice = mapped
+            .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
+            .expect("advice");
+        assert_eq!(advice.kind, "grant_agent_ceiling");
     }
 
     #[test]
