@@ -191,6 +191,9 @@ impl ObjectStore for InMemoryStore {
             TreeScheme::V3Flat => tree.encode_lean()?,
         };
         self.trees.write_or_poisoned().insert(hash, body);
+        // Full tree backfilled: drop any lingering redacted projection so the
+        // DERIVED partial marker clears (no auto-backfill). Idempotent.
+        self.partial_trees.write_or_poisoned().remove(&hash);
         Ok(hash)
     }
 
@@ -209,6 +212,8 @@ impl ObjectStore for InMemoryStore {
         };
         let tree = codec::decode_tree_serialized_with_key(data, hash, anchor.as_ref())?;
         self.trees.write_or_poisoned().insert(hash, data.to_vec());
+        // Full tree backfilled: drop any lingering redacted projection.
+        self.partial_trees.write_or_poisoned().remove(&hash);
         Ok(tree.hash())
     }
 

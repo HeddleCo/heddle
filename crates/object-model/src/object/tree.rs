@@ -980,6 +980,25 @@ impl PartialTree {
         Ok(())
     }
 
+    /// Build a V4 [`Tree`] from ONLY the visible entries of this projection,
+    /// dropping the withheld (redacted) leaves entirely. Unlike
+    /// [`PartialTree::into_tree`], this never errors on redacted leaves — it
+    /// omits them. The result's hash therefore does NOT equal the declared
+    /// root (it has fewer entries); it is the "visible set" view for status
+    /// comparison, where the withheld entries are unknown to this client by
+    /// construction and so must not be reported as local deletions.
+    pub fn visible_tree(&self) -> Result<Tree, TreeError> {
+        let mut entries = Vec::new();
+        let mut salts = Vec::new();
+        for leaf in &self.leaves {
+            if let PartialTreeLeaf::Visible { entry, salt } = leaf {
+                entries.push(entry.clone());
+                salts.push(*salt);
+            }
+        }
+        Tree::from_entries_salted_v4(entries, salts)
+    }
+
     /// Losslessly convert a fully-visible partial tree back to a V4 [`Tree`].
     /// Errors if any leaf is redacted (the name/target are unknown) or the
     /// reconstructed root does not match the declared root.
