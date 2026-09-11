@@ -32,11 +32,11 @@ mod gc;
 mod git_overlay_txn;
 #[cfg(feature = "git-overlay")]
 mod git_projection_io;
+#[cfg(feature = "client")]
+mod grant;
 pub(crate) mod heddleignore_defaults;
 mod history_target;
 mod hook;
-#[cfg(feature = "client")]
-mod grant;
 #[cfg(feature = "client")]
 mod hosted_identity;
 mod import_progress;
@@ -128,7 +128,6 @@ pub use diff::cmd_diff;
 pub use discuss::run as cmd_discuss;
 pub use doctor::cmd_doctor;
 pub use doctor_docs::cmd_doctor_docs;
-pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
 pub use env_cmd::cmd_env;
 pub use error_envelope::{
     print_error_with_hint, print_error_with_hint_with_config, print_or_suggest_parse_error,
@@ -141,13 +140,12 @@ pub use gc::cmd_gc;
 pub use git_projection_io::cmd_context_reason_git;
 #[cfg(feature = "git-overlay")]
 pub use git_projection_io::{cmd_export_git, cmd_import_git, cmd_sync_git};
-pub use heddle_cli_contract::cli::commands::{
-    advice, command_catalog, doctor_docs, doctor_schemas, schemas, surface_conformance,
-    verification_health,
-};
-pub use hook::cmd_hook;
 #[cfg(feature = "client")]
 pub use grant::cmd_grant;
+pub use heddle_cli_contract::cli::commands::{
+    advice, command_catalog, doctor_docs, schemas, surface_conformance, verification_health,
+};
+pub use hook::cmd_hook;
 #[cfg(feature = "client")]
 pub use hosted_identity::{cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami};
 pub use init::cmd_init;

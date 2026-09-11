@@ -68,6 +68,7 @@ mod tests {
                 },
                 output: None,
                 no_color: false,
+                schema: false,
                 repo: None,
                 verbose: 0,
                 quiet: false,

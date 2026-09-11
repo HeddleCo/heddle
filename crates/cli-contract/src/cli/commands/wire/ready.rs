@@ -7,8 +7,10 @@
 //! directly below the serializer — change them together.
 
 use schemars::{JsonSchema, Schema, SchemaGenerator};
-use serde::ser::Error as SerError;
-use serde::{Serialize, Serializer, ser::SerializeStruct};
+use serde::{
+    Serialize, Serializer,
+    ser::{Error as SerError, SerializeStruct},
+};
 use verbs::{
     ActionTemplate, RepositoryVerificationState, ThreadPreviewReport,
     ready_freshness_summary as core_ready_freshness_summary,
@@ -234,8 +236,9 @@ impl JsonSchema for ReadyOutput {
 
 #[cfg(test)]
 mod tests {
+    use verbs::schema_keys::schema_property_keys;
+
     use super::*;
-    use verbs::doctor_schemas_plan::schema_property_keys;
 
     /// Every field the hand-written serializer emits must be declared on the
     /// shape struct that publishes the schema.

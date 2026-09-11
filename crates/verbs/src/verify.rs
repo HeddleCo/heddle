@@ -733,11 +733,11 @@ pub fn build_repository_verification_state_with_worktree_status_and_machine_cont
         None
     };
     if health.clean && !machine_contract_clean {
-        recovery_commands.push("heddle doctor schemas --output json".to_string());
+        recovery_commands.push("heddle help --output json".to_string());
     }
     let recommended_action = if health.clean {
         if !machine_contract_clean {
-            "heddle doctor schemas --output json".to_string()
+            "heddle help --output json".to_string()
         } else {
             workflow_action
                 .clone()
@@ -875,12 +875,11 @@ fn machine_contract_verification_check(coverage: &MachineContractCoverage) -> Ve
         machine_contract_is_clean(coverage),
         machine_contract_status(coverage),
         &coverage.summary,
-        (!machine_contract_is_clean(coverage))
-            .then(|| "heddle doctor schemas --output json".to_string()),
+        (!machine_contract_is_clean(coverage)).then(|| "heddle help --output json".to_string()),
         if machine_contract_is_clean(coverage) {
             Vec::new()
         } else {
-            vec!["heddle doctor schemas --output json".to_string()]
+            vec!["heddle help --output json".to_string()]
         },
     );
     check.details = details;
@@ -1345,8 +1344,8 @@ fn recommended_action_templates() -> Vec<ActionTemplate> {
         ("heddle verify", &["heddle", "verify"][..], &[][..], false),
         ("heddle doctor", &["heddle", "doctor"][..], &[][..], false),
         (
-            "heddle doctor schemas --output json",
-            &["heddle", "doctor", "schemas", "--output", "json"][..],
+            "heddle help --output json",
+            &["heddle", "help", "--output", "json"][..],
             &[][..],
             false,
         ),
