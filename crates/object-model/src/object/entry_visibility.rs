@@ -147,7 +147,11 @@ mod tests {
         let mut reversed = unordered;
         reversed.reverse();
         let b = EntryVisibility::new(change, root, reversed);
-        assert_eq!(a.encode().unwrap(), b.encode().unwrap(), "order must normalize");
+        assert_eq!(
+            a.encode().unwrap(),
+            b.encode().unwrap(),
+            "order must normalize"
+        );
 
         let decoded = EntryVisibility::decode(&a.encode().unwrap()).unwrap();
         assert_eq!(decoded, a);
