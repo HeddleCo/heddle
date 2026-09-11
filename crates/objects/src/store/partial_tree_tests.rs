@@ -83,12 +83,21 @@ fn assert_partial_distinct_from_full(store: &impl ObjectStore) {
     }
 
     // Full-tree accessors never surface the partial.
-    assert!(!store.has_tree(&root).unwrap(), "partial must not be a full tree");
-    assert!(store.get_tree(&root).unwrap().is_none(), "get_tree must not return the partial");
+    assert!(
+        !store.has_tree(&root).unwrap(),
+        "partial must not be a full tree"
+    );
+    assert!(
+        store.get_tree(&root).unwrap().is_none(),
+        "get_tree must not return the partial"
+    );
 
     // Partial slot holds it.
     assert!(store.has_partial_tree(&root).unwrap());
-    assert_eq!(store.get_partial_tree_bytes(&root).unwrap().as_deref(), Some(body.as_slice()));
+    assert_eq!(
+        store.get_partial_tree_bytes(&root).unwrap().as_deref(),
+        Some(body.as_slice())
+    );
     assert_eq!(store.list_partial_trees().unwrap(), vec![root]);
 
     // The typed read model distinguishes withheld from missing/corrupt.
@@ -96,13 +105,22 @@ fn assert_partial_distinct_from_full(store: &impl ObjectStore) {
         TreeRead::Partial(p) => {
             assert_eq!(p.reconstruct_root(), root);
             assert_eq!(p.redacted_count(), 1);
-            assert_eq!(p.leaves()[..].iter().find(|l| l.leaf_hash() == withheld).map(|l| l.is_redacted()), Some(true));
+            assert_eq!(
+                p.leaves()[..]
+                    .iter()
+                    .find(|l| l.leaf_hash() == withheld)
+                    .map(|l| l.is_redacted()),
+                Some(true)
+            );
         }
         other => panic!("expected Partial, got {other:?}"),
     }
 
     // A hash we hold nothing for is Absent, not Partial.
-    assert!(matches!(store.read_tree(&ch(b"absent")).unwrap(), TreeRead::Absent));
+    assert!(matches!(
+        store.read_tree(&ch(b"absent")).unwrap(),
+        TreeRead::Absent
+    ));
 }
 
 /// A full tree SUPERSEDES a partial at read time, and a partial NEVER overwrites
@@ -116,7 +134,10 @@ fn assert_monotone(store: &impl ObjectStore) {
         store.put_partial_tree(&root, &body).unwrap(),
         PartialTreeWrite::SupersededByFull
     );
-    assert!(!store.has_partial_tree(&root).unwrap(), "partial must not overwrite the full");
+    assert!(
+        !store.has_partial_tree(&root).unwrap(),
+        "partial must not overwrite the full"
+    );
     assert!(matches!(store.read_tree(&root).unwrap(), TreeRead::Full(_)));
 }
 
@@ -157,7 +178,10 @@ fn assert_put_tree_serialized_routes_hrt1(store: &impl ObjectStore) {
     assert_eq!(stored, root);
     assert!(store.has_partial_tree(&root).unwrap());
     assert!(!store.has_tree(&root).unwrap());
-    assert!(matches!(store.read_tree(&root).unwrap(), TreeRead::Partial(_)));
+    assert!(matches!(
+        store.read_tree(&root).unwrap(),
+        TreeRead::Partial(_)
+    ));
 }
 
 #[test]

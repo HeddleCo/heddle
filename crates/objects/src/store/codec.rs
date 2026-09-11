@@ -10,8 +10,8 @@ use crate::{
     object::{
         Action, ActionId, ContentHash, PartialTree, State, TREE_DELTA_ANCHOR_INTERVAL,
         TREE_DELTA_MAX_OPS, Tree, TreeScheme, decode_redacted_projection, decode_tree_delta,
-        decode_tree_delta_header, encode_tree_delta, is_canonical_tree, is_delta_tree, is_lean_tree,
-        is_redacted_tree, is_salted_tree, tree_delta,
+        decode_tree_delta_header, encode_tree_delta, is_canonical_tree, is_delta_tree,
+        is_lean_tree, is_redacted_tree, is_salted_tree, tree_delta,
     },
     store::{HeddleError, Result},
 };
