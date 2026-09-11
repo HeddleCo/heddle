@@ -14,10 +14,11 @@ collections come back as `[]` — never omitted. An agent that reads
 `heddle ready --output json` and then `heddle status --output json` finds `change_id`,
 `current_state`, and `confidence` carrying the same meaning in both places.
 
-The full contract lives in [docs/json-schemas.md](json-schemas.md): stable
-field names, explicit `null`, no leakage of unrelated context, empty
-collections serialize, pretty-printing only on `heddle show`. A tooling
-author can write a parser against the doc and expect the binary to match.
+The full contract is the runtime schema registry, retrievable per command
+with `heddle <command> --schema`: stable field names, explicit `null`, no
+leakage of unrelated context, empty collections serialize, pretty-printing
+only on `heddle show`. A tooling author can generate the schema from the
+binary and expect its output to match.
 
 Verification extends down into errors. The filesystem layer in
 [`crates/objects/src/fs_atomic.rs`](../crates/objects/src/fs_atomic.rs)
@@ -117,9 +118,10 @@ longer exist, flags that aren't on a verb, literal values for
 It's built on clap's own `Cli::command()`, so it's always in sync with
 the binary you ship. Wire it into CI and the docs can't rot quietly.
 
-[`docs/json-schemas.md`](json-schemas.md) is the JSON contract — if a
-sample there disagrees with the wire output, one of them is wrong, and
-either way it's a fix. Tests in `crates/objects/` and `crates/cli/`
+The runtime schema registry (`heddle <command> --schema`) is the JSON
+contract — if a command's serialized output disagrees with its registered
+schema, one of them is wrong, and either way it's a fix. Tests in
+`crates/objects/` and `crates/cli/`
 cover the failure-quality predicates and the `blockers`/`warnings`
 schema so the messages an agent sees on a full disk or a dirty merge
 stay specific across refactors.

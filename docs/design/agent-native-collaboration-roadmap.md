@@ -81,12 +81,12 @@ Goal: make the CLI surface ready for agent-native collaboration before changing 
   - `collab_capability_interrupted`
   - `collab_anchor_ambiguous`
   - `collab_anchor_orphaned`
-- Update `docs/json-schemas.md` only after concrete schemas are registered in `crates/cli-contract/src/cli/commands/schemas.rs`.
+- Register concrete schemas in `crates/cli-contract/src/cli/commands/schemas.rs`; `heddle <command> --schema` then reflects them at runtime.
 
 Exit criteria:
 
 - `heddle help --output json` exposes side-effect and op-id metadata for discussion writes.
-- `heddle doctor schemas` can validate the new collaboration JSON samples.
+- `heddle <command> --schema` exposes the new collaboration JSON schemas.
 - Repository collaboration records are the only live `discuss` source. Older
   state-attached discussions require an offline conversion before admission.
 
@@ -400,7 +400,7 @@ First-slice release gate:
 
 - Command metadata is updated.
 - Concrete schemas are registered.
-- JSON samples are documented and pass `heddle doctor schemas`.
+- Concrete schemas are registered and resolvable via `heddle <command> --schema`.
 - Materialization/property tests pass.
 - Basic collaboration `fsck`/`doctor` checks pass.
 - Migration plan/apply tests exist if legacy data exists.
@@ -489,7 +489,7 @@ Exit criteria:
 
 ## Command schema sketches
 
-These are design sketches, not registered schemas. Concrete schemas belong in `crates/cli-contract/src/cli/commands/schemas.rs` and documented samples belong in `docs/json-schemas.md`.
+These are design sketches, not registered schemas. Concrete schemas belong in `crates/cli-contract/src/cli/commands/schemas.rs` and are then retrievable at runtime via `heddle <command> --schema`.
 
 ### Common success envelope
 
@@ -642,7 +642,7 @@ Projection metadata may include imported or hosted project/review fields such as
   - unresolved parents
   - hosted rejection once sync exists
 - Add `fsck`/`doctor` collaboration diagnostics docs.
-- Update `docs/json-schemas.md` after concrete schema registration.
+- Confirm `heddle <command> --schema` reflects the registered schemas.
 - Update release notes to classify each capability:
   - shipped local behavior
   - foundation in place
