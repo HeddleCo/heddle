@@ -106,7 +106,7 @@ pub(crate) struct ContextFixture {
     pub history_requests: Arc<Mutex<Vec<String>>>,
 }
 
-pub(crate) async fn start() -> (HostedClient, JoinHandle<()>) {
+pub async fn start() -> (HostedClient, JoinHandle<()>) {
     start_inner(
         None,
         BlobFixture::default(),
@@ -894,12 +894,11 @@ fn grant_matches_resource(grant: &HostedGrant, resource: &str) -> bool {
     if resource.is_empty() {
         return true;
     }
+    // weft `list_manageable_grants` exact-matches the visible path
+    // (`spool/<handle>/<name>`). Stripping `repo:` here hid the CLI sending
+    // `repo:{spool}` while create/delete send the bare path (heddle#1744).
     let (namespace, repo) = grant_target_paths(grant.target.as_ref());
-    let path = resource
-        .strip_prefix("repo:")
-        .or_else(|| resource.strip_prefix("ns:"))
-        .unwrap_or(resource);
-    repo.as_deref() == Some(path) || namespace.as_deref() == Some(path)
+    repo.as_deref() == Some(resource) || namespace.as_deref() == Some(resource)
 }
 
 async fn serve_promote_spool(
@@ -1331,6 +1330,45 @@ async fn serve_subscribe_repo_events(
             .await
             .unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod grant_filter_tests {
+    use api::heddle::api::v1alpha1::{
+        GrantTargetRef, HostedGrant, RepositoryRef, grant_target_ref::Target,
+        repository_ref::Reference,
+    };
+
+    use super::{grant_matches_resource, grant_target_paths};
+
+    fn repo_grant(path: &str) -> HostedGrant {
+        HostedGrant {
+            subject: "alice".into(),
+            role: 2,
+            target: Some(GrantTargetRef {
+                target: Some(Target::RepoPath(RepositoryRef {
+                    reference: Some(Reference::CanonicalPath(path.to_string())),
+                })),
+            }),
+        }
+    }
+
+    #[test]
+    fn list_filter_matches_bare_spool_path_only() {
+        let grant = repo_grant("spool/willow-ibis-8e7264/notes");
+        let (namespace, repo) = grant_target_paths(grant.target.as_ref());
+        assert_eq!(namespace, None);
+        assert_eq!(repo.as_deref(), Some("spool/willow-ibis-8e7264/notes"));
+        assert!(grant_matches_resource(
+            &grant,
+            "spool/willow-ibis-8e7264/notes"
+        ));
+        assert!(
+            !grant_matches_resource(&grant, "repo:spool/willow-ibis-8e7264/notes"),
+            "weft exact-matches the visible path; repo: prefix must not match"
+        );
+        assert!(grant_matches_resource(&grant, ""));
     }
 }
 

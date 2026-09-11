@@ -16,13 +16,12 @@ use api::heddle::api::v1alpha1::{
 use repo::GrantRole;
 use wire::ProtocolError;
 
-use crate::hosted_runtime::refuse_agent_privileged_grant;
-
 use super::{
     HostedClient,
     helpers::{hosted_to_protocol_error, to_protocol_grant, to_protocol_spool},
     operation_id::ClientOperationId,
 };
+use crate::hosted_runtime::refuse_agent_privileged_grant;
 
 macro_rules! signed_call {
     ($self:ident, $client:ident, $rpc:ident, $path:expr, $msg:expr) => {{
@@ -830,7 +829,7 @@ mod tests {
         let _ = client
             .create_grant("principal:alice", "reader", None, Some("acme/widgets"), "")
             .await;
-        let listed = client.list_grants(Some("repo:acme/widgets")).await.unwrap();
+        let listed = client.list_grants(Some("acme/widgets")).await.unwrap();
         assert!(listed.iter().any(|grant| grant.subject == "principal:alice"
             && grant.role == "reader"
             && grant.repo_path.as_deref() == Some("acme/widgets")));
@@ -931,7 +930,7 @@ mod tests {
         );
 
         let listed = client
-            .list_grants(Some("repo:spool/willow-ibis-8e7264/notes"))
+            .list_grants(Some("spool/willow-ibis-8e7264/notes"))
             .await
             .expect("ListGrants should show the created grant");
         assert_eq!(listed.len(), 1);
@@ -953,7 +952,7 @@ mod tests {
             .expect("DeleteGrant should remove the collaborator");
 
         let after_delete = client
-            .list_grants(Some("repo:spool/willow-ibis-8e7264/notes"))
+            .list_grants(Some("spool/willow-ibis-8e7264/notes"))
             .await
             .expect("ListGrants after delete");
         assert!(

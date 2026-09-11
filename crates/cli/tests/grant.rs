@@ -59,6 +59,14 @@ fn grant_help_exposes_create_list_delete_and_stays_off_signup_invite() {
     assert_eq!(list.status.code(), Some(0));
     let list_out = String::from_utf8_lossy(&list.stdout);
     assert!(list_out.contains("--spool"));
+    assert!(
+        list_out.contains("same bare path") && list_out.contains("Do not prefix `repo:`"),
+        "grant list help must use the create/delete spool path, not repo::\n{list_out}"
+    );
+    assert!(
+        !list_out.contains("repo:spool/") && !list_out.contains("--resource repo:"),
+        "grant list help must not require a repo: filter:\n{list_out}"
+    );
 
     let delete = heddle(&["grant", "delete", "--help"]);
     assert_eq!(delete.status.code(), Some(0));

@@ -96,6 +96,9 @@ client = [
     "dep:tokio-tungstenite",
     "dep:webpki-roots",
 ]
+# In-process hosted fixture for crate tests and CLI grant integration.
+# Production client builds do not enable this.
+test-utils = []
 # Forwarded from the CLI's `telemetry` feature: trace-context propagation on
 # hosted calls.
 telemetry = [
