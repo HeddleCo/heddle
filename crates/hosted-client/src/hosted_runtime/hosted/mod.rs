@@ -32,6 +32,7 @@ mod sync;
 #[cfg(test)]
 mod test_https;
 #[cfg(any(test, feature = "test-utils"))]
+#[allow(dead_code)]
 pub mod test_server;
 mod thread_identity;
 mod thread_metadata;

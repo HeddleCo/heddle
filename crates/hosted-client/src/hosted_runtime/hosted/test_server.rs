@@ -1333,6 +1333,24 @@ async fn serve_subscribe_repo_events(
     }
 }
 
+fn pack_frame(stream_kind: PackStreamKind, data: Vec<u8>) -> Vec<u8> {
+    PullServerFrame {
+        frame: Some(pull_server_frame::Frame::Pack(PackChunk {
+            stream_kind: stream_kind as i32,
+            chunk_length: data.len() as u32,
+            data,
+            transfer: Some(TransferCheckpoint {
+                transfer_id: "pull-pack-test".to_string(),
+                transport_mode: TransportMode::NativePack as i32,
+                is_complete: true,
+                ..TransferCheckpoint::default()
+            }),
+            is_final_chunk: true,
+        })),
+    }
+    .encode_to_vec()
+}
+
 #[cfg(test)]
 mod grant_filter_tests {
     use api::heddle::api::v1alpha1::{
@@ -1370,22 +1388,4 @@ mod grant_filter_tests {
         );
         assert!(grant_matches_resource(&grant, ""));
     }
-}
-
-fn pack_frame(stream_kind: PackStreamKind, data: Vec<u8>) -> Vec<u8> {
-    PullServerFrame {
-        frame: Some(pull_server_frame::Frame::Pack(PackChunk {
-            stream_kind: stream_kind as i32,
-            chunk_length: data.len() as u32,
-            data,
-            transfer: Some(TransferCheckpoint {
-                transfer_id: "pull-pack-test".to_string(),
-                transport_mode: TransportMode::NativePack as i32,
-                is_complete: true,
-                ..TransferCheckpoint::default()
-            }),
-            is_final_chunk: true,
-        })),
-    }
-    .encode_to_vec()
 }
