@@ -556,6 +556,24 @@ impl Repository {
         {
             return Ok(tree);
         }
+        // P5: on a PARTIAL checkout the state's tree is held only as a redacted
+        // projection — `get_tree` (full-only) returns `None` and `require_tree`
+        // would fail loud with MissingObject, so `heddle status` on a partial
+        // clone crashes today. Resolve via `read_tree` and, for a partial root,
+        // compare against the VISIBLE-set tree: the withheld entries are unknown
+        // to this client by construction and were never written to the worktree
+        // (nor to the persisted index), so omitting them keeps status from
+        // mis-reporting a withheld entry as a local deletion. The visible-set
+        // tree is NOT cached (its hash ≠ the declared root).
+        match self.store.read_tree(hash)? {
+            objects::store::TreeRead::Partial(partial) => {
+                return partial.visible_tree().map_err(HeddleError::from);
+            }
+            objects::store::TreeRead::Full(_) | objects::store::TreeRead::Absent => {
+                // Fall through to the caching full-tree path (Absent surfaces as
+                // MissingObject there, unchanged).
+            }
+        }
         let tree = self.require_tree(hash)?;
         if let Ok(bytes) = rmp_serde::to_vec_named(&tree)
             && let Err(error) =

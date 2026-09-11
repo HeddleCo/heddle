@@ -1707,6 +1707,13 @@ impl ObjectStore for FsStore {
             cache.insert(hash, tree.clone());
         }
 
+        // A full canonical tree has landed for this hash — an explicit full
+        // fetch backfilling what a partial clone withheld. Drop any lingering
+        // redacted projection so the DERIVED partial marker
+        // (`list_partial_trees`) clears and the full tree is authoritative.
+        // Idempotent when no partial slot is held.
+        self.remove_partial_tree(&hash)?;
+
         Ok(hash)
     }
 
@@ -1732,6 +1739,10 @@ impl ObjectStore for FsStore {
         if let Ok(mut cache) = self.recent_trees.write() {
             cache.insert(hash, tree);
         }
+
+        // Full tree backfilled: drop any lingering redacted projection for this
+        // hash (no auto-backfill; the DERIVED partial marker clears). Idempotent.
+        self.remove_partial_tree(&hash)?;
 
         Ok(hash)
     }
