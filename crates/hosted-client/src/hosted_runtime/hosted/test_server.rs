@@ -120,6 +120,7 @@ pub async fn start() -> (HostedClient, JoinHandle<()>) {
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn start_with_registry(
     fixture: RegistryFixture,
 ) -> (HostedClient, JoinHandle<()>, RegistryFixture) {
@@ -138,6 +139,7 @@ pub(crate) async fn start_with_registry(
     (client, server, fixture_clone)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_with_collaboration(
     fixture: CollaborationFixture,
 ) -> (HostedClient, JoinHandle<()>, CollaborationFixture) {
@@ -156,6 +158,7 @@ pub(crate) async fn start_with_collaboration(
     (client, server, fixture_clone)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_with_context(
     fixture: ContextFixture,
 ) -> (HostedClient, JoinHandle<()>, ContextFixture) {
@@ -174,6 +177,7 @@ pub(crate) async fn start_with_context(
     (client, server, fixture_clone)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_recording_push()
 -> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<PushRequest>>>) {
     let captured = Arc::new(Mutex::new(Vec::new()));
@@ -191,6 +195,7 @@ pub(crate) async fn start_recording_push()
     (client, server, captured)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_recording_create_spool() -> (
     HostedClient,
     JoinHandle<()>,
@@ -211,6 +216,7 @@ pub(crate) async fn start_recording_create_spool() -> (
     (client, server, captured)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_recording_spool_mutations() -> (
     HostedClient,
     JoinHandle<()>,
@@ -231,6 +237,7 @@ pub(crate) async fn start_recording_spool_mutations() -> (
     (client, server, captured)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_with_remote_state(
     remote_state: StateId,
 ) -> (HostedClient, JoinHandle<()>) {
@@ -250,6 +257,7 @@ pub(crate) async fn start_with_remote_state(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn start_with_pull_pack(
     remote_state: StateId,
     pack_data: Vec<u8>,
@@ -271,12 +279,14 @@ pub(crate) async fn start_with_pull_pack(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn start_with_get_blob_contents(
     blobs: impl IntoIterator<Item = (String, Vec<u8>)>,
 ) -> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
     start_with_get_blob_contents_and_pull(blobs, None).await
 }
 
+#[cfg(test)]
 pub(crate) async fn start_with_get_blob_contents_and_pull_pack(
     blobs: impl IntoIterator<Item = (String, Vec<u8>)>,
     remote_state: StateId,
@@ -293,6 +303,7 @@ pub(crate) async fn start_with_get_blob_contents_and_pull_pack(
     .await
 }
 
+#[cfg(test)]
 async fn start_with_get_blob_contents_and_pull(
     blobs: impl IntoIterator<Item = (String, Vec<u8>)>,
     pull: Option<PullFixture>,
