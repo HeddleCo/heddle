@@ -145,6 +145,7 @@ impl HeddleExitCode {
             }
             "promote_already_root" => Some(Self::DataErr),
             "grant_not_found" => Some(Self::Config),
+            "grant_spool_required" => Some(Self::Usage),
             // Capture aborted on ENOSPC; working tree is intact. Classifies
             // as IO rather than a distinct raw-28 OS code so agents stay on
             // the documented sysexits taxonomy.
@@ -554,6 +555,7 @@ mod tests {
             ("grant_failed", HeddleExitCode::Protocol),
             ("grant_needs_human", HeddleExitCode::Protocol),
             ("grant_not_found", HeddleExitCode::Config),
+            ("grant_spool_required", HeddleExitCode::Usage),
         ] {
             assert_eq!(
                 HeddleExitCode::from_error(&advice_with_kind(kind)),

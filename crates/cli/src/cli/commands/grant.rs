@@ -250,9 +250,7 @@ fn resolve_grant_spool(spool: &str, server: Option<&str>) -> Result<(String, Str
                 return Ok((authority, full_path));
             }
             Ok(_) | Err(_) => {
-                return Err(anyhow!(
-                    "hosted grant URL must include a spool path, e.g. https://api.heddle.sh/spool/<handle>/<name>"
-                ));
+                return Err(anyhow!(RecoveryAdvice::grant_spool_required()));
             }
         }
     }
@@ -321,6 +319,16 @@ mod tests {
         .expect("parse url");
         assert_eq!(server, "api.preview.heddle.sh");
         assert_eq!(path, "spool/willow-ibis-8e7264/notes");
+    }
+
+    #[test]
+    fn hosted_url_without_spool_path_is_typed_usage() {
+        let err = resolve_grant_spool("https://api.preview.heddle.sh/", None)
+            .expect_err("URL without a spool path");
+        let advice = err
+            .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
+            .expect("advice");
+        assert_eq!(advice.kind, "grant_spool_required");
     }
 
     #[test]

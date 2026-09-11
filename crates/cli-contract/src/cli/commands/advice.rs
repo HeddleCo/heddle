@@ -1259,6 +1259,16 @@ impl RecoveryAdvice {
     }
 
     #[cfg(feature = "client")]
+    pub fn grant_spool_required() -> Self {
+        Self::invalid_usage(
+            "grant_spool_required",
+            "hosted grant URL must include a spool path, e.g. https://api.heddle.sh/spool/<handle>/<name>",
+            "Pass `--spool spool/<handle>/<name>` or a hosted URL that includes the spool path.",
+            "heddle grant list --spool spool/<handle>/<name>",
+        )
+    }
+
+    #[cfg(feature = "client")]
     pub fn grant_denied(spool: &str) -> Self {
         Self::safety_refusal(
             "grant_denied",
