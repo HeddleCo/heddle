@@ -163,9 +163,19 @@ fn rewrite_single_tracked_file(
         descendant_trees.push(TreeWrite::descendant(updated_child, child_hash));
         TreeEntry::directory((*name).to_string(), updated_hash)?
     };
-    let mut updated = tree.clone();
-    updated.insert(replacement);
-    Ok(Some(updated))
+    // Rebuild as a flat V3 tree rather than `tree.clone().insert(..)`: the
+    // baseline may be V4, and `Tree::insert` on a V4 tree mints a random salt
+    // for the replaced entry — which would make this fast path emit a V4 root
+    // while the revalidation fingerprint walk builds V3, so the two never match
+    // and every capture that races an fs event spuriously Conflicts. Every
+    // other walker path emits V3 and lets the capture chokepoint apply the
+    // sticky-salt V4 conversion uniformly; this must too.
+    let mut entries: Vec<TreeEntry> = tree.entries().to_vec();
+    match entries.iter().position(|entry| entry.name() == *name) {
+        Some(index) => entries[index] = replacement,
+        None => entries.push(replacement),
+    }
+    Ok(Some(Tree::from_entries(entries)))
 }
 
 impl Repository {

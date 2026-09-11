@@ -172,9 +172,15 @@ struct SnapshotMutation<'a> {
     worktree_monitor_token: Option<ChangeMonitorToken>,
     known_worktree_changes: Option<WorktreeStatus>,
     require_worktree_change: bool,
+    /// Queued per-entry visibility marks for THIS capture. Drained once by the
+    /// public capture call (outside the retry loop) and cloned into each
+    /// attempt's mutation, so a retry that ultimately commits still carries the
+    /// sidecar rather than silently shipping the marked entry unredacted.
+    entry_visibility_marks: Vec<crate::EntryVisibilityMark>,
 }
 
 impl<'a> SnapshotMutation<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         repo: &'a Repository,
         source: SnapshotSource,
@@ -183,6 +189,7 @@ impl<'a> SnapshotMutation<'a> {
         head: Head,
         known_worktree_changes: Option<WorktreeStatus>,
         require_worktree_change: bool,
+        entry_visibility_marks: Vec<crate::EntryVisibilityMark>,
     ) -> Self {
         Self {
             repo,
@@ -202,6 +209,7 @@ impl<'a> SnapshotMutation<'a> {
             worktree_monitor_token: None,
             known_worktree_changes,
             require_worktree_change,
+            entry_visibility_marks,
         }
     }
 
@@ -384,6 +392,10 @@ impl SnapshotMutation<'_> {
         if !matches!(&self.source, SnapshotSource::Worktree) {
             return Ok(true);
         }
+        #[cfg(test)]
+        if take_forced_revalidation_retry() {
+            return Ok(false);
+        }
         if self.prepared_execution.is_none() {
             return Err(HeddleError::Config(
                 "snapshot revalidation reached an unprepared mutation".to_string(),
@@ -418,9 +430,11 @@ impl SnapshotMutation<'_> {
 
     fn stage_snapshot_objects(&mut self) -> Result<SnapshotExecution> {
         debug!("Building tree from worktree");
-        // Drain any queued per-entry visibility marks; they are resolved against
-        // the freshly salted v4 trees below and staged in this snapshot's batch.
-        let pending_entry_visibility_marks = self.repo.take_pending_entry_visibility_marks();
+        // Per-entry visibility marks for this capture. Owned by the mutation and
+        // drained ONCE by the caller outside the retry loop (never re-drained
+        // per attempt), so a retried-then-committed attempt still stages the
+        // sidecar instead of silently shipping the marked entry unredacted.
+        let pending_entry_visibility_marks = self.entry_visibility_marks.clone();
         let (mut tree, tree_profile, mut supplied_blobs) = match &self.source {
             SnapshotSource::Worktree => {
                 let (tree, profile, revalidation_files, blobs, trees, monitor_token) =
@@ -836,11 +850,27 @@ impl SnapshotMutation<'_> {
             manifest_context.as_ref().map(|(_, manifest)| manifest),
             self.known_worktree_changes.as_ref(),
         )?;
-        if self.require_worktree_change
-            && baseline_tree
-                .as_ref()
-                .is_some_and(|baseline| output.0.hash() == baseline.hash())
-        {
+        // Whether the incremental walk looks like a no-op vs the parent. The
+        // walker always emits a flat V3 tree; on a v4 spool the baseline is a V4
+        // tree, so comparing the two raw ids is V3-vs-V4 and NEVER equal — which
+        // would skip the authoritative re-walk below and weaken the
+        // `*_if_changed` fail-closed guarantee. Convert the walk output through
+        // the same sticky-salt path before comparing so the check is scheme-
+        // consistent (a genuine no-op reproduces the baseline id; a change or a
+        // failed conversion counts as "changed" and still triggers the re-walk).
+        let looks_unchanged = baseline_tree.as_ref().is_some_and(|baseline| {
+            if self.repo.capture_tree_scheme() == TreeScheme::V4Salted {
+                self.repo
+                    .v4ify_capture_tree(&output.0, &output.4, Some(baseline))
+                    .map(|(v4_root, _)| v4_root.hash() == baseline.hash())
+                    .unwrap_or(false)
+            } else {
+                output.0.hash() == baseline.hash()
+            }
+        });
+        if self.require_worktree_change && looks_unchanged {
+            #[cfg(test)]
+            note_authoritative_rewalk();
             // A usable monitor can legitimately have no event yet even though
             // the caller raced a just-written change. `*_if_changed` must fail
             // closed only after an authoritative walk, so retry the apparent
@@ -1203,6 +1233,59 @@ fn maybe_snapshot_fault(fault: SnapshotFault) {
     });
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Number of worktree revalidations to force-fail (return "changed") before
+    /// letting the real check run — simulates a prepare→commit race that drives
+    /// the retry loop, so a test can prove queued state (e.g. entry-visibility
+    /// marks) survives a retried-then-committed capture.
+    static FORCE_REVALIDATION_RETRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_forced_revalidation_retries<T>(retries: usize, body: impl FnOnce() -> T) -> T {
+    FORCE_REVALIDATION_RETRIES.with(|c| c.set(retries));
+    let out = body();
+    FORCE_REVALIDATION_RETRIES.with(|c| c.set(0));
+    out
+}
+
+#[cfg(test)]
+fn take_forced_revalidation_retry() -> bool {
+    FORCE_REVALIDATION_RETRIES.with(|c| {
+        let remaining = c.get();
+        if remaining > 0 {
+            c.set(remaining - 1);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Counts entries into the `*_if_changed` authoritative monitor-off re-walk
+    /// branch, so a test can prove it still runs on a v4 spool (the scheme-mixed
+    /// comparison used to skip it).
+    static AUTHORITATIVE_REWALK_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_authoritative_rewalk() {
+    AUTHORITATIVE_REWALK_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn authoritative_rewalk_count_reset() {
+    AUTHORITATIVE_REWALK_COUNT.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn authoritative_rewalk_count() -> usize {
+    AUTHORITATIVE_REWALK_COUNT.with(|c| c.get())
+}
+
 const MAX_HEAD_CHANGE_ATTEMPTS: usize = 16;
 const MAX_HEAD_CONTENTION_BACKOFF_MS: u64 = 32;
 
@@ -1368,6 +1451,11 @@ impl Repository {
         const MAX_WORKTREE_CHANGE_ATTEMPTS: usize = 4;
         let mut worktree_change_attempts = 0;
         let mut head_change_attempts = 0;
+        // Drain queued entry-visibility marks ONCE, outside the retry loop, so a
+        // head-contention or revalidation retry that ultimately commits still
+        // carries the sidecar (draining inside `prepare` per attempt dropped it
+        // on retry and shipped the marked entry unredacted).
+        let entry_visibility_marks = self.take_pending_entry_visibility_marks();
         loop {
             let (head, prev_head) = {
                 let _lock = self
@@ -1376,6 +1464,17 @@ impl Repository {
                     .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
 
                 if let Some(merge_state) = self.merge_state_manager().load()? {
+                    // A merge capture builds its own tree and never runs the
+                    // v4 salt/sidecar path, so pending entry-visibility marks
+                    // would silently attach to nothing. Fail loud (re-mark
+                    // after the merge is a fine v1 semantic).
+                    if !entry_visibility_marks.is_empty() {
+                        return Err(HeddleError::Config(
+                            "entry-visibility marks cannot be applied to a merge capture; \
+                             re-mark after the merge completes"
+                                .to_string(),
+                        ));
+                    }
                     let unresolved: Vec<_> = merge_state
                         .conflicts
                         .iter()
@@ -1445,6 +1544,7 @@ impl Repository {
                 head.clone(),
                 known_worktree_changes.clone(),
                 require_worktree_change,
+                entry_visibility_marks.clone(),
             );
             mutation.prepare()?;
 
@@ -1566,6 +1666,9 @@ impl Repository {
         let authoritative_artifact =
             matches!(&source, SnapshotSource::SuppliedTreeWithBlobs { .. });
         let mut head_change_attempts = 0;
+        // Drain queued entry-visibility marks ONCE (see the worktree loop) so a
+        // head-contention retry that commits still stages the sidecar.
+        let entry_visibility_marks = self.take_pending_entry_visibility_marks();
         loop {
             let (head, prev_head) = {
                 let _lock = self
@@ -1588,6 +1691,7 @@ impl Repository {
                 head.clone(),
                 None,
                 false,
+                entry_visibility_marks.clone(),
             );
             mutation.prepare()?;
 
@@ -1711,6 +1815,18 @@ impl Repository {
         fold_default_visibility: bool,
         transaction_id: Option<&str>,
     ) -> Result<State> {
+        // A merge capture builds its own tree and never runs the v4
+        // salt/sidecar path; queued entry-visibility marks would silently
+        // attach to nothing. Fail loud so they are never dropped (the worktree
+        // locked path already guards before reaching here for its own drained
+        // copy; this covers direct callers of the merge entry points).
+        if !self.take_pending_entry_visibility_marks().is_empty() {
+            return Err(HeddleError::Config(
+                "entry-visibility marks cannot be applied to a merge capture; \
+                 re-mark after the merge completes"
+                    .to_string(),
+            ));
+        }
         let tree = self.build_tree(&self.root)?;
         let tree_hash = self.store.put_tree(&tree)?;
 
