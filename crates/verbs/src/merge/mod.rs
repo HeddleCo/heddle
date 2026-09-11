@@ -1774,6 +1774,7 @@ fn merge_op_targets_state(op: &OpRecord, state: &StateId) -> bool {
         | OpRecord::UndoRecoveryUpdate { .. }
         | OpRecord::StateVisibilitySet { .. }
         | OpRecord::StateVisibilityPromote { .. }
+        | OpRecord::EntryVisibilitySet { .. }
         | OpRecord::HeadUpdate { .. } => false,
     }
 }

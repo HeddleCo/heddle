@@ -3,7 +3,9 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
-use crate::object::{Attribution, ContentHash, OperationId, Principal, StateId, VisibilityTier};
+use crate::object::{
+    Attribution, ChangeId, ContentHash, OperationId, Principal, StateId, VisibilityTier,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -375,6 +377,29 @@ pub enum OpRecord {
         previous: RecordedHead,
         new: RecordedHead,
     },
+    /// A per-entry visibility sidecar ([`EntryVisibility`](crate::object::EntryVisibility))
+    /// was written for a state's v4 salted trees (v4-redactable-tree §8). Staged
+    /// in the SAME oplog batch as the snapshot that produced the trees, so one
+    /// `heddle undo` reverts the snapshot AND its entry-visibility sidecar
+    /// together — reversed exactly like
+    /// [`StateVisibilitySet`](Self::StateVisibilitySet): `prior_sidecar` /
+    /// `new_sidecar` snapshot the whole sidecar around the put (`None` =
+    /// absent). Keyed by the state's rewrite-stable `ChangeId`.
+    ///
+    /// Appended at the tail: rmp-serde encodes enum variants by index, so this
+    /// must stay last to keep pre-existing on-disk oplog entries readable.
+    EntryVisibilitySet {
+        /// The state (by change id) the sidecar applies to.
+        change_id: ChangeId,
+        /// Content id of the persisted `EntryVisibility` sidecar.
+        record_id: ContentHash,
+        /// Full sidecar bytes before the put (`None` = absent). Undo target.
+        #[serde(default)]
+        prior_sidecar: Option<Vec<u8>>,
+        /// Full sidecar bytes after the put (`None` = absent). Redo target.
+        #[serde(default)]
+        new_sidecar: Option<Vec<u8>>,
+    },
 }
 
 /// True when `record` is the atomic transaction commit marker.
@@ -554,6 +579,10 @@ pub fn isolation_keys_for_record(record: &OpRecord, scope: Option<&str>) -> BTre
         | OpRecord::ConflictResolved { .. }
         | OpRecord::TransactionCommit { .. }
         | OpRecord::Redact { .. }
+        // EntryVisibilitySet is only ever staged inside a snapshot batch, whose
+        // Snapshot record already contributes the thread/local-head isolation
+        // key; it needs no key of its own.
+        | OpRecord::EntryVisibilitySet { .. }
         | OpRecord::Purge { .. } => {}
     }
     keys
@@ -710,6 +739,9 @@ impl OpRecord {
             OpRecord::StateVisibilityPromote { state, tier, .. } => {
                 format!("promote visibility {} -> {}", state.short(), tier.as_str())
             }
+            OpRecord::EntryVisibilitySet { change_id, .. } => {
+                format!("set entry visibility on {}", change_id.short())
+            }
             OpRecord::HeadUpdate { new, .. } => match new {
                 RecordedHead::Attached { thread } => format!("attach HEAD to {}", thread),
                 RecordedHead::Detached { state } => {
@@ -789,6 +821,7 @@ op_verb_catalog! {
     UndoRecoveryUpdate => ("undo_recovery_update", checkpoint = false),
     StateVisibilitySet => ("state_visibility_set", checkpoint = false),
     StateVisibilityPromote => ("state_visibility_promote", checkpoint = false),
+    EntryVisibilitySet => ("entry_visibility_set", checkpoint = false),
     HeadUpdate => ("head_update", checkpoint = false),
 }
 
@@ -885,6 +918,7 @@ impl OpRecord {
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::HeadUpdate {
                 previous: RecordedHead::Attached { .. },
                 ..
@@ -925,6 +959,7 @@ impl OpRecord {
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::HeadUpdate {
                 new: RecordedHead::Attached { .. },
                 ..
@@ -962,6 +997,7 @@ impl OpRecord {
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::HeadUpdate { .. } => None,
         }
     }
@@ -996,6 +1032,7 @@ impl OpRecord {
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::HeadUpdate { .. } => RedactionUndoClass::Other,
         }
     }
@@ -1030,6 +1067,7 @@ impl OpRecord {
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::HeadUpdate { .. } => None,
         }
     }
@@ -1144,6 +1182,7 @@ mod verb_catalog_tests {
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::HeadUpdate { .. } => {}
         }
         vec![

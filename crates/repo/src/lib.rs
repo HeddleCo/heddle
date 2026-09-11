@@ -186,7 +186,8 @@ pub use repository::query_history_async;
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,
-    ContextSuggestionTier, DiffKind, GitCheckpointIntent, GitCheckpointIntentPhase,
+    ContextSuggestionTier, DiffKind, EntryVisibilityBinding, EntryVisibilityMark,
+    GitCheckpointIntent, GitCheckpointIntentPhase,
     GitCheckpointRecord, GitImportGuidance, GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD,
     HistoryQuery, HostedConfig, KeyBindingRegistryAnchor, MAJOR_REWRITE_THRESHOLD_PCT,
     MEDIUM_SUGGESTION_THRESHOLD, MissingBlob, OperationKind, OperationScope, OutputFormat,

@@ -281,6 +281,7 @@ fn thread_for(op: &OpRecord) -> Option<String> {
         | OpRecord::UndoRecoveryUpdate { .. }
         | OpRecord::StateVisibilitySet { .. }
         | OpRecord::StateVisibilityPromote { .. }
+        | OpRecord::EntryVisibilitySet { .. }
         | OpRecord::HeadUpdate {
             new: RecordedHead::Detached { .. },
             ..
@@ -318,6 +319,7 @@ fn primary_state_id(op: &OpRecord) -> Option<StateId> {
         | OpRecord::TransactionCommit { .. }
         | OpRecord::ConflictResolved { .. }
         | OpRecord::Purge { .. }
+        | OpRecord::EntryVisibilitySet { .. }
         | OpRecord::FastForward { .. }
         | OpRecord::HeadUpdate {
             new: RecordedHead::Attached { .. },

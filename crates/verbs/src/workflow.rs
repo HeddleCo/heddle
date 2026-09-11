@@ -535,6 +535,7 @@ pub fn op_targets_merge_state(op: &OpRecord, merge_state: &str) -> bool {
         | OpRecord::UndoRecoveryUpdate { .. }
         | OpRecord::StateVisibilitySet { .. }
         | OpRecord::StateVisibilityPromote { .. }
+        | OpRecord::EntryVisibilitySet { .. }
         | OpRecord::HeadUpdate { .. } => false,
     }
 }

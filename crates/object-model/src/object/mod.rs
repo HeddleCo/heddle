@@ -35,6 +35,7 @@ mod staleness_core;
 mod state_attachment;
 mod state_attribution;
 mod state_context;
+mod entry_visibility;
 mod state_core;
 mod state_provenance;
 mod state_review;
@@ -135,6 +136,7 @@ pub use state_review::{
     ReviewKind, ReviewScope, ReviewSignature, ReviewSignatureError, ReviewSignaturesBlob,
     SymbolAnchor, signing_payload,
 };
+pub use entry_visibility::{EntryVisibility, EntryVisibilityEntry, EntryVisibilityError};
 pub use state_visibility::{
     STATE_VISIBILITY_SIGNING_PAYLOAD_VERSION_TAG, StateVisibility, StateVisibilityBlob,
     StateVisibilityError,

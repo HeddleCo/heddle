@@ -248,6 +248,7 @@ fn load_rebase_state_internal(path: &std::path::Path, for_abort: bool) -> Result
                         | OpRecord::UndoRecoveryUpdate { .. }
                         | OpRecord::StateVisibilitySet { .. }
                         | OpRecord::StateVisibilityPromote { .. }
+                        | OpRecord::EntryVisibilitySet { .. }
                         | OpRecord::HeadUpdate { .. } => {
                             if for_abort {
                                 continue;

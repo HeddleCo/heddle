@@ -1445,6 +1445,7 @@ fn op_record_variant_name(record: &OpRecord) -> &'static str {
         OpRecord::UndoRecoveryUpdate { .. } => "UndoRecoveryUpdate",
         OpRecord::StateVisibilitySet { .. } => "StateVisibilitySet",
         OpRecord::StateVisibilityPromote { .. } => "StateVisibilityPromote",
+        OpRecord::EntryVisibilitySet { .. } => "EntryVisibilitySet",
         OpRecord::HeadUpdate { .. } => "HeadUpdate",
     }
 }

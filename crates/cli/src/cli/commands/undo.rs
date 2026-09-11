@@ -568,6 +568,7 @@ fn undo_may_rewrite_worktree(repo: &Repository, batches: &[OpBatch]) -> Result<b
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::HeadUpdate { .. } => false,
         })
     }))

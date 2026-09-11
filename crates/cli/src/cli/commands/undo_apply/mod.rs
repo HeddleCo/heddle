@@ -13,7 +13,7 @@ use heddle_git_projection::git_core::{open_repo as open_git_repo, set_reference}
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     lock::{RepoLock, WriteLockGuard},
-    object::{ContentHash, MarkerName, StateId, ThreadName},
+    object::{ChangeId, ContentHash, MarkerName, StateId, ThreadName},
 };
 use oplog::{
     IsolationKey, OpBatch, OpEntry, OpLogBackend, OpRecord, RecordedHead, isolation_keys_for_record,
@@ -612,6 +612,25 @@ impl<'a> EntrySteps<'_, 'a> {
         )
     }
 
+    /// Restore the per-entry visibility sidecar (v4 redactable trees) to
+    /// `target`, with the inverse restoring `expected_current`. Absolute
+    /// write-or-remove: the entry-visibility sidecar is only ever staged inside
+    /// a snapshot's own batch against a brand-new state, so it is not subject to
+    /// the concurrent-mutation TOCTOU the per-state sidecar guards against.
+    fn restore_entry_visibility_sidecar(
+        &mut self,
+        change_id: ChangeId,
+        expected_current: Option<Vec<u8>>,
+        target: Option<Vec<u8>>,
+    ) -> HeddleResult<()> {
+        let repo = self.repo();
+        let inverse_target = expected_current;
+        self.step(
+            move || repo.restore_entry_visibility_sidecar(&change_id, target),
+            move || repo.restore_entry_visibility_sidecar(&change_id, inverse_target),
+        )
+    }
+
     /// Run one checkout-repo Git write as a capture-restore step against the
     /// pre-entry [`GitState`] `snapshot`. Git checkpoint entries make several
     /// internal writes; restoring to the absolute pre-entry snapshot is
@@ -832,6 +851,20 @@ fn apply_undo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
         } => {
             steps.restore_visibility_sidecar(*state, new_sidecar.clone(), prior_sidecar.clone())?;
         }
+        // v4 entry-visibility sidecar (staged with its snapshot): undo restores
+        // the before-image, same shape as the per-state sidecar above.
+        OpRecord::EntryVisibilitySet {
+            change_id,
+            prior_sidecar,
+            new_sidecar,
+            ..
+        } => {
+            steps.restore_entry_visibility_sidecar(
+                *change_id,
+                new_sidecar.clone(),
+                prior_sidecar.clone(),
+            )?;
+        }
         // No undo inverse: these records don't move a ref the undo chain
         // restores, or their reversal is irreversible / handled outside the
         // oplog replay. Enumerated explicitly (no wildcard) so a new
@@ -1018,6 +1051,18 @@ fn apply_redo_entry(steps: &mut EntrySteps, entry: &OpEntry) -> HeddleResult<()>
             ..
         } => {
             steps.restore_visibility_sidecar(*state, prior_sidecar.clone(), new_sidecar.clone())?;
+        }
+        OpRecord::EntryVisibilitySet {
+            change_id,
+            prior_sidecar,
+            new_sidecar,
+            ..
+        } => {
+            steps.restore_entry_visibility_sidecar(
+                *change_id,
+                prior_sidecar.clone(),
+                new_sidecar.clone(),
+            )?;
         }
         OpRecord::Fork { .. }
         | OpRecord::Checkpoint { .. }

@@ -765,6 +765,29 @@ impl Tree {
         buf
     }
 
+    /// The salted per-entry leaf commitment for the entry at `index`, or `None`
+    /// for a V3 tree / out-of-range index. This is the name-free handle a
+    /// redacted serve projection is keyed by; capture-time entry-visibility
+    /// authoring resolves a path to its enclosing tree + this leaf hash.
+    pub fn v4_leaf_hash_at(&self, index: usize) -> Option<ContentHash> {
+        if self.scheme != TreeScheme::V4Salted {
+            return None;
+        }
+        let entry = self.entries.get(index)?;
+        let salt = self.salts.get(index)?;
+        Some(Self::v4_leaf_hash(entry, salt))
+    }
+
+    /// The salted leaf commitment for the entry named `name`, or `None` if the
+    /// name is absent or this is a V3 tree.
+    pub fn v4_leaf_hash_for(&self, name: &str) -> Option<ContentHash> {
+        let index = self
+            .entries
+            .binary_search_by(|entry| entry.name.as_str().cmp(name))
+            .ok()?;
+        self.v4_leaf_hash_at(index)
+    }
+
     /// The V4 Merkle root over the salted per-entry leaves, ordered by leaf
     /// hash (§2). The empty tree reproduces the V3 empty-tree id (MF-5).
     fn merkle_root_v4(&self) -> ContentHash {
