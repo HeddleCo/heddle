@@ -1748,3 +1748,27 @@ fn v4_put_tree_serialized_round_trips_hsr1() {
     let loaded = store.get_tree(&tree.hash()).unwrap().unwrap();
     assert_eq!(loaded, tree);
 }
+
+#[test]
+fn fs_open_tree_on_a_v4_salted_tree_errors_not_none() {
+    // The paging reader cannot stream an HSR1 (V4) body; it must surface a loud
+    // Err, never a silent Ok(None) that looks like a missing tree.
+    let (_temp, store) = create_test_store();
+    let tree = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("readme.md", ContentHash::compute(b"readme"), false).unwrap(),
+            TreeEntry::file("secret.md", ContentHash::compute(b"secret"), false).unwrap(),
+        ],
+        vec![[0x11; 32], [0x22; 32]],
+    )
+    .unwrap();
+    let hash = store.put_tree(&tree).unwrap();
+    // Eager decode still works.
+    assert_eq!(store.get_tree(&hash).unwrap().unwrap(), tree);
+    // Streaming open must be an Err, not None.
+    match store.open_tree(&hash, None) {
+        Err(_) => {}
+        Ok(None) => panic!("open_tree on a v4 tree must not silently return None"),
+        Ok(Some(_)) => panic!("open_tree must not stream a v4 salted tree"),
+    }
+}
