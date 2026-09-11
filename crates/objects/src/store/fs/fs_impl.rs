@@ -25,9 +25,9 @@ use crate::{
     object::{
         Action, ActionId, AnnotatedTag, Blob, BytesTreeSource, ContentHash, FileTreeSource,
         OpenedTreeBody, State, StateAttachment, StateAttachmentId, StateId, TREE_CANONICAL_MAGIC,
-        TREE_DELTA_HEADER_LEN, TREE_DELTA_MAGIC, TREE_LEAN_MAGIC, Tree, TreeByteSource, TreeEntry,
-        TreeEntryReader, TreeResumeCursor, decode_tree_delta_header,
-        decode_tree_delta_header_prefix, is_delta_tree, is_streamable_tree,
+        TREE_DELTA_HEADER_LEN, TREE_DELTA_MAGIC, TREE_LEAN_MAGIC, TREE_SALTED_MAGIC, Tree,
+        TreeByteSource, TreeEntry, TreeEntryReader, TreeResumeCursor, decode_tree_delta_header,
+        decode_tree_delta_header_prefix, is_delta_tree, is_salted_tree, is_streamable_tree,
     },
     store::{
         HeddleError, ObjectCacheControl, ObjectStore, Result, SidecarStore,
@@ -50,6 +50,19 @@ const BLOB_HEADER_PEEK: usize = 13;
 fn validate_loaded_tree(tree: Tree) -> Result<Tree> {
     tree.validate()?;
     Ok(tree)
+}
+
+/// A V4 salted (HSR1) tree cannot be streamed through the paging reader — its
+/// Merkle-root id is not verifiable by the reader's incremental single-pass
+/// hasher. Surface a loud `Err` (never a silent `Ok(None)` / NotFound) so the
+/// caller falls back to an eager `get_tree` decode instead of mistaking the
+/// tree for missing. Mirrors how `InMemoryStore::open_tree` surfaces an Err
+/// (via `encode_lean` refusing V4).
+fn salted_tree_not_streamable(tree_id: &ContentHash) -> HeddleError {
+    HeddleError::InvalidObject(format!(
+        "tree {tree_id} is an HSR1 salted (v4) tree; the paging reader cannot \
+         stream it — decode it eagerly via get_tree"
+    ))
 }
 
 fn validate_blob_bytes(data: &[u8], hash: ContentHash) -> Result<()> {
@@ -638,6 +651,9 @@ impl FsStore {
                     OpenedTreeBody::File(FileTreeSource::sequential_verify(file, len)),
                 );
             }
+            if header.starts_with(TREE_SALTED_MAGIC) {
+                return Err(salted_tree_not_streamable(tree_id));
+            }
         }
         if path.exists()
             && let Some(data) = read_file_bytes(&path)?
@@ -656,6 +672,9 @@ impl FsStore {
                     cursor,
                     OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(body)),
                 );
+            }
+            if is_salted_tree(&body) {
+                return Err(salted_tree_not_streamable(tree_id));
             }
         }
         let packed = if let Ok(manager) = self.pack_manager().read() {
@@ -677,6 +696,9 @@ impl FsStore {
                     cursor,
                     OpenedTreeBody::Bytes(BytesTreeSource::sequential_verify(data)),
                 );
+            }
+            if is_salted_tree(&data) {
+                return Err(salted_tree_not_streamable(tree_id));
             }
         }
         let npk_tree = if let Ok(manager) = self.npk1_manager().read() {
@@ -1650,6 +1672,8 @@ impl ObjectStore for FsStore {
                 self.get_tree(tree_id)?
                     .ok_or_else(|| HeddleError::NotFound(format!("tree {tree_id}")))?
                     .encode_lean()?
+            } else if is_salted_tree(&data) {
+                return Err(salted_tree_not_streamable(tree_id));
             } else {
                 return Ok(None);
             };
