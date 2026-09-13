@@ -55,8 +55,8 @@ pub enum ProviderFetch<
     W: MessageWriter<Error = transport::Error>,
     R: MessageReader<Error = transport::Error>,
 > {
-    Direct(Download<R>),
-    Provider(ProviderDownload<W, R>),
+    Direct(Box<Download<R>>),
+    Provider(Box<ProviderDownload<W, R>>),
 }
 
 /// Only an issued plan matching the signed candidate can reach this stage.
@@ -520,16 +520,19 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
             direct.delivery = fetch_open::Delivery::Direct as i32;
             let state = Validation::new(direct, ready, Some(&issuer), limits)?;
             sender.finish().await?;
-            return Ok(ProviderFetch::Direct(Download { messages, state }));
+            return Ok(ProviderFetch::Direct(Box::new(Download {
+                messages,
+                state,
+            })));
         }
         let state = Validation::new(open.clone(), ready, Some(&issuer), limits)?;
-        Ok(ProviderFetch::Provider(ProviderDownload {
+        Ok(ProviderFetch::Provider(Box::new(ProviderDownload {
             sender,
             messages,
             state,
             open,
             issuer,
-        }))
+        })))
     }
 }
 

@@ -52,10 +52,10 @@ impl HostedClient {
         let routes = open.routes.clone();
         let remote = self.native().await?;
         match remote.begin_provider_fetch(open, limits).await? {
-            ProviderFetch::Direct(download) => Ok(download.stage(scratch).await?),
+            ProviderFetch::Direct(download) => Ok((*download).stage(scratch).await?),
             ProviderFetch::Provider(download) => {
                 let signer = self.provider_consent()?;
-                let mut session = download.negotiate(&signer).await?;
+                let mut session = (*download).negotiate(&signer).await?;
                 session.receive_inline(scratch).await?;
                 let providers = self
                     .native_provider_remotes(session.plan(), &routes)
