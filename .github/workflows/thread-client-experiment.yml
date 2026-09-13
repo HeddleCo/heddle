@@ -1,0 +1,29 @@
+name: Thread client experiment
+
+on:
+  pull_request:
+    paths:
+      - 'experiments/api-v2-client/**'
+      - '.github/workflows/thread-client-experiment.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  thread-client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: experiments/api-v2-client
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: experiments/api-v2-client
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo run --locked --example thread
