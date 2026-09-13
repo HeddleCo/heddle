@@ -98,6 +98,23 @@ impl CallContextFactory {
         })
     }
 
+    /// Provider reads carry their attenuated capability inside the signed
+    /// `ProviderReadTicket`. Reuse the terminal PoP key without forwarding the
+    /// broader hosted bearer or grant envelope to that provider endpoint.
+    pub(super) fn native_provider_credentials(
+        &self,
+    ) -> Result<thread_api::credentials::Credentials> {
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or(HostedError::SigningIdentityRequired)?;
+        Ok(thread_api::credentials::Credentials::Signed {
+            signer: Arc::clone(signer),
+            biscuit: Vec::new(),
+            grant_envelope: Vec::new(),
+        })
+    }
+
     pub fn bearer_capability(&self) -> &[u8] {
         &self.bearer_capability
     }
@@ -638,6 +655,39 @@ mod tests {
             &bearer.signature,
         )
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn provider_credentials_keep_the_pop_key_without_forwarding_hosted_authority() {
+        use api::v2::client::Rpc as _;
+        use thread_api::transport::Authorize as _;
+
+        let signer = Ed25519Signer::generate().expect("provider proof key");
+        let factory = CallContextFactory::default()
+            .with_bearer_capability(b"hosted bearer must stay local".to_vec())
+            .with_signing_key_pem(
+                &signer.to_pem().expect("proof key PEM"),
+                "principal:provider-reader",
+            )
+            .expect("signed hosted context");
+        let credentials = factory
+            .native_provider_credentials()
+            .expect("provider credentials");
+        let method = thread_api::rpc::SyncServiceReadProviderExtent::METHOD;
+        let context = credentials
+            .context(
+                method,
+                &api::heddle::api::v2alpha1::ReadProviderExtentRequest::default().encode_to_vec(),
+            )
+            .await
+            .expect("provider request context");
+
+        assert!(context.bearer_capability.is_empty());
+        assert!(context.bearer_grant_envelope.is_empty());
+        assert!(
+            context.request_proof.is_some(),
+            "provider still receives proof of the ticketed client's terminal key"
+        );
     }
 
     #[test]

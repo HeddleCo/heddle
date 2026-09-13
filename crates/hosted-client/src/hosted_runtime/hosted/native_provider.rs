@@ -39,8 +39,8 @@ impl HostedClient {
     ) -> anyhow::Result<StagedSource> {
         let delivery = fetch_open::Delivery::try_from(open.delivery)
             .map_err(|_| FetchError::Invalid("unsupported Fetch delivery"))?;
-        let remote = self.native().await?;
         if delivery != fetch_open::Delivery::ProviderPreferred {
+            let remote = self.native().await?;
             return Ok(remote
                 .fetch_content(open, limits)
                 .await?
@@ -50,6 +50,7 @@ impl HostedClient {
 
         validate_routes(&open.routes)?;
         let routes = open.routes.clone();
+        let remote = self.native().await?;
         match remote.begin_provider_fetch(open, limits).await? {
             ProviderFetch::Direct(download) => Ok(download.stage(scratch).await?),
             ProviderFetch::Provider(download) => {
@@ -107,7 +108,7 @@ impl HostedClient {
                 return Err(FetchError::Invalid("provider endpoint identity conflicts").into());
             }
         }
-        let credentials = self.context.native_credentials()?;
+        let credentials = self.context.native_provider_credentials()?;
         let mut providers = Vec::with_capacity(selected.len());
         for (key, provider) in selected {
             let connection = self
