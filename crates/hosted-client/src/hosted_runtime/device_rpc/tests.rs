@@ -44,6 +44,10 @@ async fn real_device_roundtrip(content_only: bool) {
 
 #[allow(clippy::await_holding_lock)]
 async fn real_device_roundtrip_with_partial(content_only: bool, partial_only: bool) {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
+        .with_test_writer()
+        .try_init();
     let _guard = config::credentials::lock_test_env();
     struct Restore(Option<std::ffi::OsString>);
     impl Drop for Restore {

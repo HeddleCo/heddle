@@ -299,8 +299,13 @@ impl Writer {
         }
     }
 
-    #[cfg(feature = "native")]
-    pub(crate) async fn fail(&mut self, failure: &CallFailure) -> Result<(), Error> {
+    /// Send a bounded typed failure and close this accepted response stream.
+    /// A rejected oversized failure leaves the stream available for a smaller
+    /// failure; a successful terminal failure permits no subsequent writes.
+    pub async fn fail(&mut self, failure: &CallFailure) -> Result<(), Error> {
+        if failure.encoded_len() > self.frame_limit {
+            return Err(Error::Protocol("failure exceeds frame budget"));
+        }
         self.write(&framing::encode_stream_failure(failure)?)
             .await?;
         self.finish().await
