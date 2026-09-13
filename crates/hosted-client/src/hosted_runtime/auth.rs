@@ -8,6 +8,8 @@ use base64::Engine;
 use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
 use objects::{HeddleError, RecoveryDetails};
+use prost::Message;
+use serde::{Deserialize, Serialize};
 
 use super::{
     auth_requests::{AuthCommand, AuthOptions, AuthTrustCommand},
@@ -985,8 +987,10 @@ async fn create_service_token(
     // Resolve (and fail-fast reject an existing) credential path BEFORE any
     // server round trip, so a name collision doesn't strand a created service
     // account with no locally-written credential.
-    let credential_path = resolve_service_account_credential_path(&name, out);
-    if std::fs::symlink_metadata(&credential_path).is_ok() {
+    let credential_path = resolve_service_token_credential_path(&name, out);
+    if std::fs::symlink_metadata(&credential_path).is_ok()
+        && std::fs::symlink_metadata(PreparedServiceToken::path(&credential_path)).is_err()
+    {
         bail!(
             "credential destination {} already exists; choose a new --out path",
             credential_path.display()
@@ -994,7 +998,7 @@ async fn create_service_token(
     }
 
     // Select and validate the exact active bearer + matching device proof key
-    // before generating the new service-account key.
+    // before generating the new service delegation key.
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build(
         &user_config,
@@ -1023,13 +1027,7 @@ async fn create_service_token_connected(
     scope: String,
     credential_path: std::path::PathBuf,
 ) -> Result<ServiceTokenCreated> {
-    let method = "heddle.api.v2alpha1.IdentityService/PutDelegation";
-    let create_operation_id =
-        ClientOperationId::caller_or_fresh(method, options.operation_id().unwrap_or_default());
-    let issue_operation_id = ClientOperationId::for_required_method(
-        "heddle.api.v2alpha1.IdentityService/IssueDelegationCredential",
-        create_operation_id.to_wire(),
-    )?;
+    let requested_operation_id = options.operation_id().unwrap_or_default();
     let (principal, _) = auth_client
         .observe_current_identity()
         .await
@@ -1065,58 +1063,169 @@ async fn create_service_token_connected(
         bail!("parent credential root key is invalid");
     }
 
-    let signer = Ed25519Signer::generate().context("generating service credential key")?;
-    let child_key = signer.public_key().to_vec();
-    let private_key_pem = signer
-        .to_pem()
-        .context("exporting service credential key")?;
+    let parent_digest = hex::encode(blake3::hash(&parent_raw).as_bytes());
     let now = current_unix_timestamp_i64()?;
-    let requested_expiry = now
-        .checked_add(SERVICE_TOKEN_TTL_SECS)
-        .context("service credential expiry overflow")?;
-    let expiry = parent_expiry.map_or(requested_expiry, |parent| parent.min(requested_expiry));
-    if expiry <= now + 1 {
-        bail!("active parent credential expires too soon to issue a service credential");
+    if let Some(done) = PreparedServiceToken::with_lock(&credential_path, |path| {
+        let Some(mut prior) = PreparedServiceToken::load(path)? else {
+            return Ok(None);
+        };
+        prior.check_binding(
+            &server,
+            &principal.account_id,
+            &name,
+            &scope,
+            &credential_path,
+            requested_operation_id,
+            &parent_digest,
+        )?;
+        if std::fs::symlink_metadata(&credential_path).is_err() {
+            if prior.completed_digest.is_some() {
+                bail!("completed service credential file is missing; use a new --out path");
+            }
+            return Ok(None);
+        }
+        let bytes =
+            std::fs::read(&credential_path).context("reading completed service credential")?;
+        let digest = hex::encode(blake3::hash(&bytes).as_bytes());
+        if prior
+            .completed_digest
+            .as_ref()
+            .is_some_and(|value| value != &digest)
+        {
+            bail!("completed service credential has changed; refusing operation replay");
+        }
+        let credential = credential_file::load_credential_file(&credential_path)
+            .context("verifying completed service credential")?;
+        if credential.server != server
+            || credential.kind != CredentialKind::Service
+            || credential
+                .provenance
+                .as_ref()
+                .and_then(|value| value.scopes.as_ref())
+                != Some(&vec![scope.clone()])
+        {
+            bail!("credential destination does not match prepared service delegation");
+        }
+        if prior.completed_digest.is_none() {
+            if credential.proof_key_pem != prior.child_key_pem {
+                bail!("credential destination does not match prepared child key");
+            }
+            prior.complete(digest, path)?;
+        }
+        Ok(Some(ServiceTokenCreated {
+            name: name.clone(),
+            scope: scope.clone(),
+            credential_path: credential_path.display().to_string(),
+            expires_in_days: u32::try_from((prior.expiry - now).max(0) / (24 * 3600))?,
+        }))
+    })? {
+        return Ok(done);
     }
-    let delegation_id = uuid::Uuid::now_v7().to_string();
-    let reference = identity::RecordRef {
-        spool: None,
-        id: delegation_id.clone(),
-    };
-    let statement = api::v2::identity_management::DelegationStatement {
-        account_id: principal.account_id.clone(),
-        delegation_id: delegation_id.clone(),
-        label: name.clone(),
-        kind: identity::delegation_record::Kind::Service as i32,
-        root_public_key: root_key.clone(),
-        subject_public_key: child_key.clone(),
-        endpoint_public_key: Vec::new(),
-        scope: scope.clone(),
-        expires_at_unix_seconds: expiry,
-        parent_credential_digest: blake3::hash(&parent_raw).as_bytes().to_vec(),
-    };
-    let canonical = statement.encode().context("encoding service delegation")?;
-    let record = identity::DelegationRecord {
-        r#ref: Some(reference.clone()),
-        label: name.clone(),
-        kind: identity::delegation_record::Kind::Service as i32,
-        subject: Some(identity::RootAttachment {
-            root_public_key: root_key,
+    let prepared = PreparedServiceToken::with_lock(&credential_path, |path| {
+        if let Some(prior) = PreparedServiceToken::load(path)? {
+            prior.check_binding(
+                &server,
+                &principal.account_id,
+                &name,
+                &scope,
+                &credential_path,
+                requested_operation_id,
+                &parent_digest,
+            )?;
+            return Ok(prior);
+        }
+        let create_operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v2alpha1.IdentityService/PutDelegation",
+            requested_operation_id,
+        );
+        let signer = Ed25519Signer::generate().context("generating service credential key")?;
+        let child_key = signer.public_key().to_vec();
+        let child_key_pem = signer
+            .to_pem()
+            .context("exporting service credential key")?;
+        let requested_expiry = now
+            .checked_add(SERVICE_TOKEN_TTL_SECS)
+            .context("service credential expiry overflow")?;
+        let expiry = parent_expiry.map_or(requested_expiry, |parent| parent.min(requested_expiry));
+        if expiry <= now + 1 {
+            bail!("active parent credential expires too soon to issue a service credential");
+        }
+        let delegation_id = uuid::Uuid::now_v7().to_string();
+        let reference = identity::RecordRef {
+            spool: None,
+            id: delegation_id.clone(),
+        };
+        let statement = api::v2::identity_management::DelegationStatement {
+            account_id: principal.account_id.clone(),
+            delegation_id,
+            label: name.clone(),
+            kind: identity::delegation_record::Kind::Service as i32,
+            root_public_key: root_key.clone(),
             subject_public_key: child_key.clone(),
+            endpoint_public_key: Vec::new(),
+            scope: scope.clone(),
+            expires_at_unix_seconds: expiry,
+            parent_credential_digest: blake3::hash(&parent_raw).as_bytes().to_vec(),
+        };
+        let canonical = statement.encode().context("encoding service delegation")?;
+        let record = identity::DelegationRecord {
+            r#ref: Some(reference),
+            label: name.clone(),
+            kind: identity::delegation_record::Kind::Service as i32,
+            subject: Some(identity::RootAttachment {
+                root_public_key: root_key.clone(),
+                subject_public_key: child_key,
+                ..Default::default()
+            }),
+            delegation: Some(sign_identity_record(
+                api::v2::identity_management::DELEGATION,
+                canonical,
+                parent_signer,
+            )?),
             ..Default::default()
-        }),
-        delegation: Some(sign_identity_record(
-            api::v2::identity_management::DELEGATION,
-            canonical,
-            parent_signer,
-        )?),
-        ..Default::default()
-    };
-    let put = identity::PutDelegationRequest {
-        client_operation_id: create_operation_id.to_wire(),
-        delegation: Some(record),
-        ..Default::default()
-    };
+        };
+        let put = identity::PutDelegationRequest {
+            client_operation_id: create_operation_id.to_wire(),
+            delegation: Some(record),
+            ..Default::default()
+        };
+        let prepared = PreparedServiceToken {
+            format: PreparedServiceToken::FORMAT.to_owned(),
+            server: server.clone(),
+            account_id: principal.account_id.clone(),
+            name: name.clone(),
+            scope: scope.clone(),
+            output_path_hex: hex::encode(credential_path.as_os_str().as_encoded_bytes()),
+            operation_id: create_operation_id.to_wire(),
+            parent_digest: parent_digest.clone(),
+            child_key_pem,
+            put_hex: hex::encode(put.encode_to_vec()),
+            issue_hex: None,
+            completed_digest: None,
+            expiry,
+        };
+        prepared.store(path)?;
+        Ok(prepared)
+    })?;
+    let put = identity::PutDelegationRequest::decode(
+        hex::decode(&prepared.put_hex)
+            .context("decoding prepared delegation bytes")?
+            .as_slice(),
+    )
+    .context("decoding prepared delegation request")?;
+    let reference = put
+        .delegation
+        .as_ref()
+        .and_then(|record| record.r#ref.clone())
+        .context("prepared service delegation omitted its reference")?;
+    let delegation_id = reference.id.clone();
+    let signer = Ed25519Signer::from_pem(&prepared.child_key_pem)
+        .context("recovering prepared service credential key")?;
+    let child_key = signer.public_key().to_vec();
+    let expiry = prepared.expiry;
+    if expiry <= now + 1 {
+        bail!("prepared service credential has expired; use a new --out path");
+    }
     let response = remote
         .api
         .call::<thread_api::rpc::IdentityServicePutDelegation>(&put)
@@ -1139,45 +1248,77 @@ async fn create_service_token_connected(
             matches!(&resource.entity, Some(identity::entity_ref::Entity::Delegation(value)) if value == &reference)))
         .context("service delegation receipt omitted its resulting version")?
         .version.clone();
-    let mut issue = identity::IssueDelegationCredentialRequest {
-        client_operation_id: issue_operation_id.to_wire(),
-        delegation: Some(reference),
-        proof_public_key: child_key.clone(),
-        scope: String::new(),
-        expires_at: Some(prost_types::Timestamp {
-            seconds: expiry,
-            nanos: 0,
-        }),
-        expected_delegation_version: version,
-        ..Default::default()
-    };
-    let intent = api::v2::identity_management::issuance(&principal.account_id, &issue)
-        .context("encoding service credential issuance")?;
-    issue.subject_possession = Some(sign_identity_record(
-        api::v2::identity_management::ISSUE_POSSESSION,
-        intent.clone(),
-        &signer,
-    )?);
-    let child: &[u8; 32] = child_key
-        .as_slice()
-        .try_into()
-        .context("generated child key must be 32 bytes")?;
-    let transfer = parent_signer
-        .sign(
-            &biscuit_verifier::key_delegation::statement(parent_token_b64, child)
-                .context("encoding proof-key transfer")?,
-        )
-        .context("signing proof-key transfer")?;
-    if transfer.len() != 64 {
-        bail!("proof-key transfer signature is not Ed25519");
-    }
-    let mut authority = intent;
-    authority.extend_from_slice(&transfer);
-    issue.authority_proof = Some(sign_identity_record(
-        api::v2::identity_management::ISSUE_AUTHORITY,
-        authority,
-        parent_signer,
-    )?);
+    let issue = PreparedServiceToken::with_lock(&credential_path, |path| {
+        let mut current = PreparedServiceToken::load(path)?
+            .context("prepared service delegation disappeared before issuance")?;
+        current.check_binding(
+            &server,
+            &principal.account_id,
+            &name,
+            &scope,
+            &credential_path,
+            &prepared.operation_id,
+            &parent_digest,
+        )?;
+        if let Some(encoded) = &current.issue_hex {
+            let request = identity::IssueDelegationCredentialRequest::decode(
+                hex::decode(encoded)
+                    .context("decoding prepared issuance bytes")?
+                    .as_slice(),
+            )
+            .context("decoding prepared issuance request")?;
+            if request.expected_delegation_version != version {
+                bail!("prepared issuance no longer matches accepted delegation version");
+            }
+            return Ok(request);
+        }
+        let issue_operation_id = ClientOperationId::for_required_method(
+            "heddle.api.v2alpha1.IdentityService/IssueDelegationCredential",
+            prepared.operation_id.clone(),
+        )?;
+        let mut issue = identity::IssueDelegationCredentialRequest {
+            client_operation_id: issue_operation_id.to_wire(),
+            delegation: Some(reference.clone()),
+            proof_public_key: child_key.clone(),
+            scope: String::new(),
+            expires_at: Some(prost_types::Timestamp {
+                seconds: expiry,
+                nanos: 0,
+            }),
+            expected_delegation_version: version,
+            ..Default::default()
+        };
+        let intent = api::v2::identity_management::issuance(&principal.account_id, &issue)
+            .context("encoding service credential issuance")?;
+        issue.subject_possession = Some(sign_identity_record(
+            api::v2::identity_management::ISSUE_POSSESSION,
+            intent.clone(),
+            &signer,
+        )?);
+        let child: &[u8; 32] = child_key
+            .as_slice()
+            .try_into()
+            .context("generated child key must be 32 bytes")?;
+        let transfer = parent_signer
+            .sign(
+                &biscuit_verifier::key_delegation::statement(parent_token_b64, child)
+                    .context("encoding proof-key transfer")?,
+            )
+            .context("signing proof-key transfer")?;
+        if transfer.len() != 64 {
+            bail!("proof-key transfer signature is not Ed25519");
+        }
+        let mut authority = intent;
+        authority.extend_from_slice(&transfer);
+        issue.authority_proof = Some(sign_identity_record(
+            api::v2::identity_management::ISSUE_AUTHORITY,
+            authority,
+            parent_signer,
+        )?);
+        current.issue_hex = Some(hex::encode(issue.encode_to_vec()));
+        current.store(path)?;
+        Ok(issue)
+    })?;
     let response = remote
         .api
         .call::<thread_api::rpc::IdentityServiceIssueDelegationCredential>(&issue)
@@ -1231,7 +1372,7 @@ async fn create_service_token_connected(
         kind: CredentialKind::Service,
         subject,
         token,
-        proof_key_pem: private_key_pem,
+        proof_key_pem: prepared.child_key_pem.clone(),
         expires_at: Some(expires_at),
         credential_id: None,
         provenance: Some(CredentialProvenance {
@@ -1239,7 +1380,38 @@ async fn create_service_token_connected(
             ..CredentialProvenance::default()
         }),
     };
-    credential_file::write_credential_file(&credential_path, &verified)?;
+    match credential_file::write_credential_file(&credential_path, &verified) {
+        Ok(()) => {}
+        Err(error) if std::fs::symlink_metadata(&credential_path).is_ok() => {
+            let existing = credential_file::load_credential_file(&credential_path)
+                .context("verifying concurrently completed service credential")?;
+            if existing.server != verified.server
+                || existing.kind != verified.kind
+                || existing.subject != verified.subject
+                || existing.token != verified.token
+                || existing.proof_key_pem != verified.proof_key_pem
+                || existing.expires_at != verified.expires_at
+            {
+                return Err(error).context("credential destination contains a different token");
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    PreparedServiceToken::with_lock(&credential_path, |path| {
+        let mut current = PreparedServiceToken::load(path)?
+            .context("service-token preparation missing after credential write")?;
+        current.check_binding(
+            &server,
+            &principal.account_id,
+            &name,
+            &scope,
+            &credential_path,
+            &prepared.operation_id,
+            &parent_digest,
+        )?;
+        let bytes = std::fs::read(&credential_path)?;
+        current.complete(hex::encode(blake3::hash(&bytes).as_bytes()), path)
+    })?;
     let credential_path_display = credential_path.display().to_string();
 
     Ok(ServiceTokenCreated {
@@ -1251,11 +1423,11 @@ async fn create_service_token_connected(
     })
 }
 
-/// Resolve where to write the service-account `.hcred` credential.
+/// Resolve where to write the service-token `.hcred` credential.
 ///
 /// Prefers an explicit `--out` path; otherwise writes under
-/// `<heddle_home>/service-accounts/<sanitized-name>.hcred`.
-fn resolve_service_account_credential_path(name: &str, out: Option<&Path>) -> std::path::PathBuf {
+/// `<heddle_home>/service-tokens/<sanitized-name>.hcred`.
+fn resolve_service_token_credential_path(name: &str, out: Option<&Path>) -> std::path::PathBuf {
     if let Some(path) = out {
         return path.to_path_buf();
     }
@@ -1270,11 +1442,112 @@ fn resolve_service_account_credential_path(name: &str, out: Option<&Path>) -> st
         })
         .collect();
     if safe.is_empty() {
-        safe = "service-account".to_string();
+        safe = "service-token".to_string();
     }
     repo::identity::heddle_home_dir()
-        .join("service-accounts")
+        .join("service-tokens")
         .join(format!("{safe}.hcred"))
+}
+
+/// Private, versioned preparation beside the credential destination. The
+/// original signed bytes are retained across process restarts; a retry never
+/// silently signs a different body under the same operation ID.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedServiceToken {
+    format: String,
+    server: String,
+    account_id: String,
+    name: String,
+    scope: String,
+    output_path_hex: String,
+    operation_id: String,
+    parent_digest: String,
+    child_key_pem: String,
+    put_hex: String,
+    issue_hex: Option<String>,
+    completed_digest: Option<String>,
+    expiry: i64,
+}
+
+impl PreparedServiceToken {
+    const FORMAT: &'static str = "heddle.service-token-preparation.v2";
+
+    fn path(output: &Path) -> std::path::PathBuf {
+        let mut name = output.as_os_str().to_os_string();
+        name.push(".pending");
+        std::path::PathBuf::from(name)
+    }
+
+    fn with_lock<T>(output: &Path, action: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+        let path = Self::path(output);
+        if let Some(parent) = path.parent() {
+            objects::fs_atomic::create_private_dir_all(parent)?;
+        }
+        let lock = objects::lock::RepoLock::at(path.with_extension("pending.lock"));
+        let _guard = lock.write().map_err(|error| anyhow::anyhow!(error))?;
+        action(&path)
+    }
+
+    fn load(path: &Path) -> Result<Option<Self>> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+        };
+        if bytes.len() > 256 * 1024 {
+            bail!("service-token preparation exceeds private storage bound");
+        }
+        crypto::reject_group_or_world_readable_key(path)?;
+        let prepared: Self =
+            serde_json::from_slice(&bytes).context("decoding private service-token preparation")?;
+        if prepared.format != Self::FORMAT {
+            bail!("unsupported service-token preparation format");
+        }
+        Ok(Some(prepared))
+    }
+
+    fn store(&self, path: &Path) -> Result<()> {
+        let bytes = serde_json::to_vec(self).context("encoding service-token preparation")?;
+        if bytes.len() > 256 * 1024 {
+            bail!("service-token preparation exceeds private storage bound");
+        }
+        objects::fs_atomic::write_file_atomic_secret(path, &bytes)?;
+        Ok(())
+    }
+
+    fn complete(&mut self, digest: String, path: &Path) -> Result<()> {
+        self.child_key_pem.clear();
+        self.put_hex.clear();
+        self.issue_hex = None;
+        self.completed_digest = Some(digest);
+        self.store(path)
+    }
+
+    fn check_binding(
+        &self,
+        server: &str,
+        account: &str,
+        name: &str,
+        scope: &str,
+        output: &Path,
+        operation: &str,
+        parent_digest: &str,
+    ) -> Result<()> {
+        if self.server != server
+            || self.account_id != account
+            || self.name != name
+            || self.scope != scope
+            || self.output_path_hex != hex::encode(output.as_os_str().as_encoded_bytes())
+            || (!operation.is_empty() && self.operation_id != operation)
+            || self.parent_digest != parent_digest
+        {
+            bail!(
+                "service-token destination is bound to a different account, parent credential or command; choose a new --out path"
+            );
+        }
+        Ok(())
+    }
 }
 
 fn sign_identity_record(
@@ -1628,6 +1901,87 @@ mod tests {
         .expect_err("expired server expiry must fail closed");
         assert!(error.to_string().contains("expired credential"));
         assert!(credential_expiry(None).expect("omitted expiry").is_none());
+    }
+
+    #[test]
+    fn service_token_preparation_replays_exact_signed_bytes_and_retires_secret() {
+        let directory = tempfile::tempdir().expect("private preparation directory");
+        let output = directory.path().join("ci.hcred");
+        let put = identity::PutDelegationRequest {
+            client_operation_id: uuid::Uuid::new_v4().to_string(),
+            delegation: Some(identity::DelegationRecord {
+                label: "ci".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let signed_put = put.encode_to_vec();
+        let prepared = PreparedServiceToken {
+            format: PreparedServiceToken::FORMAT.into(),
+            server: "example.invalid".into(),
+            account_id: uuid::Uuid::new_v4().to_string(),
+            name: "ci".into(),
+            scope: "spool:heddle/platform read write".into(),
+            output_path_hex: hex::encode(output.as_os_str().as_encoded_bytes()),
+            operation_id: put.client_operation_id.clone(),
+            parent_digest: "parent-digest".into(),
+            child_key_pem: "private child key".into(),
+            put_hex: hex::encode(&signed_put),
+            issue_hex: Some(hex::encode(b"exact signed issue bytes")),
+            completed_digest: None,
+            expiry: 1_900_000_000,
+        };
+        PreparedServiceToken::with_lock(&output, |path| prepared.store(path))
+            .expect("durable preparation");
+        let mut replay = PreparedServiceToken::with_lock(&output, |path| {
+            PreparedServiceToken::load(path).map(|value| value.expect("prepared state"))
+        })
+        .expect("load private preparation");
+        replay
+            .check_binding(
+                "example.invalid",
+                &prepared.account_id,
+                "ci",
+                &prepared.scope,
+                &output,
+                &prepared.operation_id,
+                "parent-digest",
+            )
+            .expect("same command resumes");
+        assert_eq!(
+            hex::decode(&replay.put_hex).expect("prepared Put"),
+            signed_put
+        );
+        assert_eq!(
+            hex::decode(replay.issue_hex.as_deref().expect("prepared Issue"))
+                .expect("prepared Issue bytes"),
+            b"exact signed issue bytes"
+        );
+        assert!(
+            replay
+                .check_binding(
+                    "example.invalid",
+                    &prepared.account_id,
+                    "ci",
+                    "spool:other read",
+                    &output,
+                    &prepared.operation_id,
+                    "parent-digest"
+                )
+                .is_err()
+        );
+        PreparedServiceToken::with_lock(&output, |path| {
+            replay.complete("credential-digest".into(), path)
+        })
+        .expect("retire private preparation");
+        let done = PreparedServiceToken::with_lock(&output, |path| {
+            PreparedServiceToken::load(path).map(|value| value.expect("completed state"))
+        })
+        .expect("load completed receipt");
+        assert!(done.child_key_pem.is_empty());
+        assert!(done.put_hex.is_empty());
+        assert!(done.issue_hex.is_none());
+        assert_eq!(done.completed_digest.as_deref(), Some("credential-digest"));
     }
 
     #[test]

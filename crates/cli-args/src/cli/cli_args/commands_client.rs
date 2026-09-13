@@ -233,7 +233,7 @@ It does not grant spool access. Add a collaborator with:
         #[arg(long)]
         server: Option<String>,
         /// Write the `.hcred` credential file to this path
-        /// (default: ~/.heddle/service-accounts/<name>.hcred)
+        /// (default: ~/.heddle/service-tokens/<name>.hcred)
         #[arg(long, value_name = "HCRED_PATH")]
         out: Option<std::path::PathBuf>,
     },
