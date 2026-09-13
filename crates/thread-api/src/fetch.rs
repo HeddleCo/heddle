@@ -6,7 +6,10 @@ mod native;
 #[cfg(feature = "native")]
 pub use native::OwnedDeviceBinding;
 mod provider;
-pub use provider::{Candidate as ProviderCandidate, ProviderConsentSigner};
+pub use provider::{
+    Candidate as ProviderCandidate, ProviderConsentSigner, ProviderDownload, ProviderFetch,
+    ProviderPlanSession,
+};
 mod staging;
 use api::v2::client::{ClientError, MessageReader, Messages, RpcTransport};
 use prost::Message;

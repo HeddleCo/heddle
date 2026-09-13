@@ -20,6 +20,7 @@ mod human;
 mod hydration;
 mod methods;
 mod native_hydration;
+mod native_provider;
 #[cfg(test)]
 mod native_hydration_tests;
 #[cfg(test)]

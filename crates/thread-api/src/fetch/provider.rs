@@ -22,7 +22,7 @@ use heddle_object_model::object::{ContentHash, StateId};
 use heddle_pack::store::pack::PackObjectId;
 use wire::{ProviderPackExtent, ProviderPackIndexEntry, ProviderPackManifest, ProviderPackSpool};
 
-use super::{Error, Item, Limits, StagedSource, Validation};
+use super::{Download, Error, Item, Limits, StagedSource, Validation};
 use crate::{Remote, contract::TransferReady, rpc, transport};
 
 /// Implemented by the same credential that signed the Fetch opening. The
@@ -46,6 +46,17 @@ pub struct ProviderDownload<
     state: Validation,
     open: FetchOpen,
     issuer: EndpointRef,
+}
+
+/// The issuer may explicitly select ordinary direct source delivery when a
+/// preferred provider transfer cannot be offered. Only the admitted Ready
+/// decides the branch; an arbitrary stream error never triggers a retry.
+pub enum ProviderFetch<
+    W: MessageWriter<Error = transport::Error>,
+    R: MessageReader<Error = transport::Error>,
+> {
+    Direct(Download<R>),
+    Provider(ProviderDownload<W, R>),
 }
 
 /// Only an issued plan matching the signed candidate can reach this stage.
@@ -480,7 +491,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         &self,
         open: FetchOpen,
         limits: Limits,
-    ) -> Result<ProviderDownload<T::Writer, T::Reader>, Error> {
+    ) -> Result<ProviderFetch<T::Writer, T::Reader>, Error> {
         if open.delivery != fetch_open::Delivery::ProviderPreferred as i32
             || open.checkpoint.is_some()
         {
@@ -504,14 +515,21 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         let Some(fetch_server_frame::Body::Ready(ready)) = frame.body else {
             return Err(Error::Invalid("first provider response must be Ready"));
         };
+        if !ready.packs.is_empty() {
+            let mut direct = open.clone();
+            direct.delivery = fetch_open::Delivery::Direct as i32;
+            let state = Validation::new(direct, ready, Some(&issuer), limits)?;
+            sender.finish().await?;
+            return Ok(ProviderFetch::Direct(Download { messages, state }));
+        }
         let state = Validation::new(open.clone(), ready, Some(&issuer), limits)?;
-        Ok(ProviderDownload {
+        Ok(ProviderFetch::Provider(ProviderDownload {
             sender,
             messages,
             state,
             open,
             issuer,
-        })
+        }))
     }
 }
 
@@ -736,9 +754,175 @@ impl Candidate {
 
 #[cfg(test)]
 mod tests {
-    use api::heddle::api::v2alpha1::{ObjectAddress, ProviderAssemblyRecord};
+    use std::{
+        collections::VecDeque,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+
+    use api::{
+        heddle::api::v2alpha1::{
+            Coverage, DescribeEndpointResponse, FetchComplete, ObjectAddress, PackChunk,
+            ProviderAssemblyRecord,
+        },
+        v2::{
+            MethodDescriptor,
+            client::{Client, RpcTransport},
+        },
+    };
+    use prost::Message;
 
     use super::*;
+
+    struct Reader(VecDeque<Vec<u8>>);
+    impl MessageReader for Reader {
+        type Error = transport::Error;
+        async fn next(&mut self) -> Result<Option<Vec<u8>>, Self::Error> {
+            Ok(self.0.pop_front())
+        }
+        fn cancel(&mut self) {
+            self.0.clear();
+        }
+    }
+    struct Writer(Arc<AtomicBool>);
+    impl MessageWriter for Writer {
+        type Error = transport::Error;
+        async fn send(&mut self, _: Vec<u8>) -> Result<(), Self::Error> {
+            Err(transport::Error::Protocol("direct fallback sent consent"))
+        }
+        async fn finish(&mut self) -> Result<(), Self::Error> {
+            self.0.store(true, Ordering::Release);
+            Ok(())
+        }
+        fn abort(&mut self) {}
+    }
+    struct Peer {
+        frames: Vec<Vec<u8>>,
+        finished: Arc<AtomicBool>,
+    }
+    impl RpcTransport for Peer {
+        type Error = transport::Error;
+        type Reader = Reader;
+        type Writer = Writer;
+        async fn unary(
+            &self,
+            _: &'static MethodDescriptor,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>, Self::Error> {
+            Err(transport::Error::Protocol("unused"))
+        }
+        async fn observe(
+            &self,
+            _: &'static MethodDescriptor,
+            _: Vec<u8>,
+        ) -> Result<Reader, Self::Error> {
+            Err(transport::Error::Protocol("unused"))
+        }
+        async fn exchange(
+            &self,
+            _: &'static MethodDescriptor,
+            opening: Vec<u8>,
+        ) -> Result<(Writer, Reader), Self::Error> {
+            let frame = FetchClientFrame::decode(opening.as_slice())
+                .map_err(|_| transport::Error::Protocol("bad opening"))?;
+            assert!(
+                matches!(frame.body, Some(fetch_client_frame::Body::Open(FetchOpen {delivery, ..}))
+                if delivery == fetch_open::Delivery::ProviderPreferred as i32)
+            );
+            Ok((
+                Writer(Arc::clone(&self.finished)),
+                Reader(self.frames.clone().into()),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn preferred_ready_with_packs_is_direct_and_terminal_is_checked() {
+        for wrong_terminal in [false, true] {
+            let (mut open, ready, endpoint, artifacts) = super::super::tests::fixture();
+            open.delivery = fetch_open::Delivery::ProviderPreferred as i32;
+            let mut frames = vec![
+                FetchServerFrame {
+                    body: Some(fetch_server_frame::Body::Ready(ready.clone())),
+                }
+                .encode_to_vec(),
+            ];
+            for (index, bytes) in artifacts.iter().enumerate() {
+                frames.push(
+                    FetchServerFrame {
+                        body: Some(fetch_server_frame::Body::Pack(PackChunk {
+                            extent: Some(ready.packs[index].clone()),
+                            data: bytes.clone(),
+                        })),
+                    }
+                    .encode_to_vec(),
+                );
+            }
+            let mut checkpoint = ready.checkpoint.clone().expect("fixture checkpoint");
+            checkpoint.committed_bytes = if wrong_terminal {
+                0
+            } else {
+                artifacts.iter().map(|bytes| bytes.len() as u64).sum()
+            };
+            frames.push(
+                FetchServerFrame {
+                    body: Some(fetch_server_frame::Body::Complete(FetchComplete {
+                        revision: ready.current.clone(),
+                        checkpoint: Some(checkpoint),
+                        closure: Coverage::Complete as i32,
+                        missing: vec![],
+                    })),
+                }
+                .encode_to_vec(),
+            );
+            let finished = Arc::new(AtomicBool::new(false));
+            let remote = Remote {
+                api: Client::new(
+                    Peer {
+                        frames,
+                        finished: Arc::clone(&finished),
+                    },
+                    [rpc::SyncServiceFetch::METHOD.path.into()],
+                ),
+                description: DescribeEndpointResponse {
+                    endpoint: Some(endpoint),
+                    ..Default::default()
+                },
+            };
+            let ProviderFetch::Direct(mut download) = remote
+                .begin_provider_fetch(open, Limits::default())
+                .await
+                .expect("direct fallback")
+            else {
+                panic!("expected direct branch")
+            };
+            assert!(
+                finished.load(Ordering::Acquire),
+                "direct path closes request half"
+            );
+            for _ in 0..2 {
+                assert!(matches!(
+                    download.next().await.expect("pack"),
+                    Some(Item::Pack(_))
+                ));
+            }
+            if wrong_terminal {
+                assert!(matches!(
+                    download.next().await,
+                    Err(Error::Invalid(
+                        "download does not match its exact declared source coverage"
+                    ))
+                ));
+            } else {
+                assert!(matches!(
+                    download.next().await.expect("Complete"),
+                    Some(Item::Complete(_))
+                ));
+            }
+        }
+    }
 
     #[test]
     fn provider_ready_has_no_direct_pack_or_partial_fallback() {

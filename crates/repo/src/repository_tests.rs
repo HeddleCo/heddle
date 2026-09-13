@@ -1152,7 +1152,11 @@ fn native_admission_before_ref_publish_survives_a_crash_between_them() {
         .native_thread("main")
         .expect("init_default binds native main");
 
-    fs::write(temp_dir.path().join("tracked.txt"), "admitted, never published").unwrap();
+    fs::write(
+        temp_dir.path().join("tracked.txt"),
+        "admitted, never published",
+    )
+    .unwrap();
     let crashed = with_snapshot_fault(SnapshotFault::NativeSourceRecordedBeforeRefPublish, || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = repo.snapshot(Some("admitted, never published".to_string()), None);
@@ -3392,21 +3396,56 @@ fn source_authority_transition_compares_against_disk() {
 // RR-PROBE (temporary; not for commit)
 #[test]
 fn rr_probe_crash_windows() {
-    for fault in [SnapshotFault::AtomicCommitBeforeRefPublish, SnapshotFault::NativeSourceRecordedBeforeRefPublish] {
+    for fault in [
+        SnapshotFault::AtomicCommitBeforeRefPublish,
+        SnapshotFault::NativeSourceRecordedBeforeRefPublish,
+    ] {
         let (temp_dir, repo) = create_test_repo();
         fs::write(temp_dir.path().join("tracked.txt"), "baseline").unwrap();
         let baseline = repo.snapshot(Some("baseline".to_string()), None).unwrap();
         let main = repo.native_thread("main").unwrap();
-        eprintln!("RR fault={:?} baseline={} native_heads={:?}", fault as u8, baseline.id(), main.view().unwrap().source_heads);
+        eprintln!(
+            "RR fault={:?} baseline={} native_heads={:?}",
+            fault as u8,
+            baseline.id(),
+            main.view().unwrap().source_heads
+        );
         fs::write(temp_dir.path().join("tracked.txt"), "crashed").unwrap();
-        let _ = with_snapshot_fault(fault, || std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| { let _ = repo.snapshot(Some("crashed".to_string()), None); })));
-        eprintln!("RR after-crash head={:?} native_heads={:?}", repo.head().unwrap(), main.view().unwrap().source_heads);
+        let _ = with_snapshot_fault(fault, || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = repo.snapshot(Some("crashed".to_string()), None);
+            }))
+        });
+        eprintln!(
+            "RR after-crash head={:?} native_heads={:?}",
+            repo.head().unwrap(),
+            main.view().unwrap().source_heads
+        );
         let retried = repo.snapshot(Some("crashed".to_string()), None);
-        eprintln!("RR retry(same tree) => {:?}", retried.as_ref().map(|s| (s.id(), s.parents.clone())).map_err(|e| e.to_string()));
-        eprintln!("RR after-retry head={:?} native_heads={:?}", repo.head().unwrap(), main.view().unwrap().source_heads);
+        eprintln!(
+            "RR retry(same tree) => {:?}",
+            retried
+                .as_ref()
+                .map(|s| (s.id(), s.parents.clone()))
+                .map_err(|e| e.to_string())
+        );
+        eprintln!(
+            "RR after-retry head={:?} native_heads={:?}",
+            repo.head().unwrap(),
+            main.view().unwrap().source_heads
+        );
         fs::write(temp_dir.path().join("tracked.txt"), "different").unwrap();
         let next = repo.snapshot(Some("different".to_string()), None);
-        eprintln!("RR different capture => {:?}", next.as_ref().map(|s| (s.id(), s.parents.clone())).map_err(|e| e.to_string()));
-        eprintln!("RR after-different head={:?} native_heads={:?}", repo.head().unwrap(), main.view().unwrap().source_heads);
+        eprintln!(
+            "RR different capture => {:?}",
+            next.as_ref()
+                .map(|s| (s.id(), s.parents.clone()))
+                .map_err(|e| e.to_string())
+        );
+        eprintln!(
+            "RR after-different head={:?} native_heads={:?}",
+            repo.head().unwrap(),
+            main.view().unwrap().source_heads
+        );
     }
 }
