@@ -45,6 +45,22 @@ impl DeviceRpc {
         if source_thread == target {
             bail!("landing requires distinct source and target Threads");
         }
+        let operation_id: objects::object::OperationId = request.client_operation_id.parse()?;
+        let namespace = format!("device-land/{}/{}", session.principal, session.actor);
+        let request_hash = *blake3::hash(&request.encode_to_vec()).as_bytes();
+        let command = repo::device_operations::Command {
+            namespace: &namespace,
+            id: operation_id,
+            method: "/heddle.api.v2alpha1.ThreadService/LandThread",
+            request_hash,
+        };
+        session.check_current(&self.home)?;
+        if let Some(response) = repo::device_operations::replay_response(
+            &session.spool.heddle_dir,
+            &command,
+        )? {
+            return Ok(response);
+        }
         if request.expected_policy_version != thread_policy_version(&repository)?.as_bytes() {
             bail!("local integration policy changed; observe landing again");
         }
@@ -52,6 +68,9 @@ impl DeviceRpc {
         let target_replica = ThreadReplica::open(&session.spool.heddle_dir, target)?;
         session.authorize_thread(&repository, &source_replica)?;
         session.authorize_thread(&repository, &target_replica)?;
+        if source_replica.view()?.source_heads != BTreeSet::from([source]) {
+            bail!("landing source must be the single current Thread head");
+        }
         let principal = uuid::Uuid::parse_str(&session.principal)?;
         if source_content_visibility(
             &repository,
@@ -74,22 +93,6 @@ impl DeviceRpc {
         .is_none()
         {
             bail!("target revision is unavailable to this caller");
-        }
-        let operation_id: objects::object::OperationId = request.client_operation_id.parse()?;
-        let namespace = format!("device-land/{}/{}", session.principal, session.actor);
-        let request_hash = *blake3::hash(&request.encode_to_vec()).as_bytes();
-        let command = repo::device_operations::Command {
-            namespace: &namespace,
-            id: operation_id,
-            method: "/heddle.api.v2alpha1.ThreadService/LandThread",
-            request_hash,
-        };
-        session.check_current(&self.home)?;
-        if let Some(response) = repo::device_operations::replay_response(
-            &session.spool.heddle_dir,
-            &command,
-        )? {
-            return Ok(response);
         }
         let prepared = target_replica.prepared_local_landing(
             &namespace,

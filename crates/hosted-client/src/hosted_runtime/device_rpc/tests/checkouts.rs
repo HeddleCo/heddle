@@ -226,26 +226,55 @@ pub(super) async fn roundtrip(
     let logical_target = repository
         .create_native_thread("device-logical-target", base, None, "Thread landing")
         .expect("logical target Thread");
+    let logical_target_ref = ThreadRef {
+        spool: Some(spool_ref.clone()),
+        id: Some(ThreadId {
+            value: logical_target.thread_id().as_bytes().to_vec(),
+        }),
+    };
+    let mut landing_view = remote
+        .observe::<thread_api::rpc::ThreadServiceObserveThread>(
+            ObserveThreadRequest {
+                thread: materialize.thread.clone(),
+                source: captured_overview.materialized.clone(),
+                landing_target: Some(logical_target_ref.clone()),
+                observe: Some(ObserveOptions {
+                    mode: ObservationMode::Once as i32,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("target-bound Thread landing view");
+    let landing_snapshot = landing_view
+        .next_commit()
+        .await
+        .expect("landing view protocol")
+        .expect("landing view snapshot");
+    let landing_overview = landing_snapshot
+        .changes
+        .iter()
+        .find_map(|change| match change {
+            thread_event::Payload::Overview(value) => Some(value),
+            _ => None,
+        })
+        .expect("landing overview");
+    let assessment = landing_overview
+        .landing_assessment
+        .as_ref()
+        .expect("exact source and target assessment");
+    assert_eq!(assessment.readiness, ReviewReadiness::Eligible as i32);
+    assert!(landing_overview.actions.iter().any(|action|
+        action.method.ends_with("/LandThread") && action.authorized && action.implemented));
     let logical = LandThreadRequest {
         client_operation_id: uuid::Uuid::new_v4().to_string(),
-        thread: Some(ThreadRef {
-            spool: Some(spool_ref.clone()),
-            id: Some(ThreadId {
-                value: replica.thread_id().as_bytes().to_vec(),
-            }),
-        }),
-        source: captured_overview.materialized.clone(),
-        target: Some(ThreadRef {
-            spool: Some(spool_ref.clone()),
-            id: Some(ThreadId {
-                value: logical_target.thread_id().as_bytes().to_vec(),
-            }),
-        }),
-        expected_target: materialize.revision.clone(),
-        expected_policy_version: super::super::land::thread_policy_version(&repository)
-            .expect("observed local policy")
-            .as_bytes()
-            .to_vec(),
+        thread: materialize.thread.clone(),
+        source: assessment.source.clone(),
+        target: assessment.target.clone(),
+        expected_target: assessment.expected_target.clone(),
+        expected_policy_version: assessment.policy_version.clone(),
     };
     let first_logical = remote
         .api
