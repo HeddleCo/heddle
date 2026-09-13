@@ -529,32 +529,13 @@ fn source_content_projection(
     let Some(local_proof) = repository.collect_content_disclosure(&revision)? else {
         return Ok(None);
     };
+    let lineage = local_proof.states();
     let Some(mut redactions) = local_proof.for_audience(&audience) else {
         return Ok(None);
     };
     let mut floor = repository.effective_visibility_tier(&revision)?;
     let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
-    let mut pending = vec![revision];
-    let mut seen = BTreeSet::new();
-    let mut state_bytes = 0usize;
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        if seen.len() > 4096 {
-            return Ok(None);
-        }
-        let Some(state) = repository.store().get_state(&id)? else {
-            return Ok(None);
-        };
-        let canonical = state.encode_current_msgpack()?;
-        state_bytes = state_bytes.saturating_add(canonical.len());
-        if state.id() != id || state_bytes > 16 * 1024 * 1024 {
-            return Ok(None);
-        }
-        pending.extend(state.parents.iter().copied());
-    }
-    let lineage: Vec<_> = seen.iter().copied().collect();
+    let lineage_set: BTreeSet<_> = lineage.iter().copied().collect();
     let mut originals: BTreeMap<
         objects::object::StateId,
         Vec<objects::object::thread_replication::CaptureVisibility>,
@@ -579,7 +560,7 @@ fn source_content_projection(
         let Some(owner_audience) = reader_audience(repository, &owner, principal, agent)? else {
             return Ok(None);
         };
-        for (id, signed) in owner.accepted_source_originals_for_revisions(&lineage)? {
+        for (id, signed) in owner.accepted_source_originals_for_revisions(lineage)? {
             work += 1;
             bytes = bytes.saturating_add(signed.canonical.len());
             if work > 4096 || bytes > 16 * 1024 * 1024 {
@@ -612,7 +593,7 @@ fn source_content_projection(
                 })
             };
             if let Some((source_thread, source_operation, source_revision)) = dependency {
-                if !seen.contains(&source_revision) || source_thread == owner_id {
+                if !lineage_set.contains(&source_revision) || source_thread == owner_id {
                     return Ok(None);
                 }
                 let source = repo::thread_replication::ThreadReplica::open(
@@ -675,10 +656,10 @@ fn source_content_projection(
         }
     }
     for id in lineage {
-        if id != seed.id() && !originals.contains_key(&id) {
+        if *id != seed.id() && !originals.contains_key(id) {
             return Ok(None);
         }
-        for visibility in originals.get(&id).into_iter().flatten() {
+        for visibility in originals.get(id).into_iter().flatten() {
             redactions.extend_overrides(&visibility.entries, |tier| {
                 objects::object::visible(tier, &audience)
             });

@@ -68,11 +68,18 @@ pub struct PutVisibilityOutcome {
 #[derive(Clone, Debug)]
 pub struct ContentDisclosureProof {
     selected: StateId,
+    states: Vec<StateId>,
     tiers: Vec<(StateId, VisibilityTier)>,
     entries: Vec<objects::object::EntryVisibilityEntry>,
 }
 
 impl ContentDisclosureProof {
+    /// Exact identity-checked ancestry used to collect this proof. The list is
+    /// bounded by the same state and byte limits as the visibility walk.
+    pub fn states(&self) -> &[StateId] {
+        &self.states
+    }
+
     /// Apply the canonical visibility predicate without re-reading sidecars.
     /// An ancestor's Internal/Team tier does not taint the selected tip.
     pub fn for_audience(
@@ -701,6 +708,7 @@ impl Repository {
     ) -> Result<Option<ContentDisclosureProof>> {
         let mut tiers = Vec::new();
         let mut entries = Vec::new();
+        let mut states = Vec::new();
         let unresolved = self.walk_content_visibility(
             state_id,
             |id, tier| {
@@ -708,6 +716,7 @@ impl Repository {
                 false
             },
             |state| {
+                states.push(state.id());
                 let Some(bytes) = self.get_entry_visibility_bytes(&state.change_id)? else {
                     return Ok(0);
                 };
@@ -721,6 +730,7 @@ impl Repository {
         )?;
         Ok(unresolved.is_none().then_some(ContentDisclosureProof {
             selected: *state_id,
+            states,
             tiers,
             entries,
         }))
@@ -1486,6 +1496,9 @@ mod tests {
                 .collect_content_disclosure(&child.id())
                 .expect("checked proof")
                 .expect("complete ancestry");
+            assert_eq!(proof.states().first(), Some(&child.id()));
+            assert!(proof.states().contains(&parent.id()));
+            assert!(proof.states().contains(&base));
             assert_eq!(
                 proof.for_audience(&crate::AudienceTier::Public).is_none(),
                 blocked,
