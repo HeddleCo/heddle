@@ -5,6 +5,8 @@
 mod native;
 #[cfg(feature = "native")]
 pub use native::OwnedDeviceBinding;
+mod provider;
+pub use provider::{Candidate as ProviderCandidate, ProviderConsentSigner};
 mod staging;
 use api::v2::client::{ClientError, MessageReader, Messages, RpcTransport};
 use prost::Message;
@@ -95,6 +97,11 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         open: FetchOpen,
         limits: Limits,
     ) -> Result<Download<T::Reader>, Error> {
+        if open.delivery == fetch_open::Delivery::ProviderPreferred as i32 {
+            return Err(Error::Invalid(
+                "provider delivery requires negotiated Fetch",
+            ));
+        }
         if open.checkpoint.is_some() {
             return Err(Error::Invalid(
                 "a fresh download requires an empty transfer checkpoint",
@@ -199,9 +206,12 @@ impl Validation {
         if ready.encoded_len() > budget.max_frame_bytes as usize {
             return Err(Error::Invalid("admission exceeds frame budget"));
         }
-        if ready.packs.len() != 2
-            || ready.packs[0].kind != pack_extent::Kind::NativePack as i32
-            || ready.packs[1].kind != pack_extent::Kind::NativeIndex as i32
+        let provider = open.delivery == fetch_open::Delivery::ProviderPreferred as i32;
+        if (provider && (!ready.packs.is_empty() || !ready.full_closure_available))
+            || (!provider
+                && (ready.packs.len() != 2
+                    || ready.packs[0].kind != pack_extent::Kind::NativePack as i32
+                    || ready.packs[1].kind != pack_extent::Kind::NativeIndex as i32))
         {
             return Err(Error::Invalid("ordered native pack and index required"));
         }
@@ -446,6 +456,9 @@ impl Validation {
             )),
             fetch_server_frame::Body::ProviderInline(_) => Err(Error::Invalid(
                 "provider inline record requires an admitted provider plan",
+            )),
+            fetch_server_frame::Body::ProviderOffer(_) => Err(Error::Invalid(
+                "provider offer requires explicit client delivery negotiation",
             )),
             fetch_server_frame::Body::Ready(_) => {
                 Err(Error::Invalid("duplicate download admission"))
