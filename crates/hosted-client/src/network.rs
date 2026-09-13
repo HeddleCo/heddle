@@ -42,23 +42,28 @@ pub use crate::hosted_runtime::claim_bridge::{
     DaemonClaimRouter, claim_bridge_socket_path, mount_claim_router,
 };
 
-/// Production and preview Heddle relays. Trailing slashes match the
+/// Home relay for this build flavor. Trailing slash matches the
 /// signed endpoint-descriptor encoding.
 ///
-/// `heddle netd serve` binds this pair so a claim link can reach the
-/// machine from either environment. Hosted CLI connections still take
-/// their relay list from the signed descriptor (`RelayMode::custom`);
-/// this is only the daemon's home-relay map when no descriptor is in
-/// hand. Never fall through to iroh's [`RelayMode::Default`]: that
-/// map is n0's `*.relay.n0.iroh.link` and is not a Heddle relay.
-#[cfg(feature = "client")]
-const HEDDLE_RELAY_URLS: [&str; 2] = [
-    "https://relay.heddle.sh/",
-    "https://relay.preview.heddle.sh/",
-];
+/// Split on `debug_assertions` — the existing cargo profile gate
+/// (`cargo test` / `cargo build` vs `cargo build --release`). Dev and
+/// preview-shaped debug binaries hardcode preview only; shipped
+/// `--release` binaries hardcode production only. The unused URL is
+/// cfg'd out, so a release binary cannot embed preview and a debug
+/// binary cannot embed prod.
+///
+/// Hosted CLI connections still take their relay list from the signed
+/// descriptor (`RelayMode::custom`). This constant is only the netd
+/// home-relay map when no descriptor is in hand. Never
+/// [`RelayMode::Default`]: that map is n0's `*.relay.n0.iroh.link`.
+#[cfg(all(feature = "client", debug_assertions))]
+const HEDDLE_HOME_RELAY_URL: &str = "https://relay.preview.heddle.sh/";
 
-/// Relay mode that keeps the endpoint reachable through Heddle's
-/// relays only.
+#[cfg(all(feature = "client", not(debug_assertions)))]
+const HEDDLE_HOME_RELAY_URL: &str = "https://relay.heddle.sh/";
+
+/// Relay mode that keeps the endpoint reachable through this build's
+/// Heddle home relay.
 ///
 /// The persistent endpoint must stay relay-reachable: a browser
 /// holding only a claim link has no direct path to the machine, so it
@@ -67,14 +72,13 @@ const HEDDLE_RELAY_URLS: [&str; 2] = [
 /// daemon keeps this custom map online for its whole lifetime.
 #[cfg(feature = "client")]
 pub fn default_relay_mode() -> RelayMode {
-    RelayMode::custom(HEDDLE_RELAY_URLS.iter().map(|url| {
-        url.parse().unwrap_or_else(|error| {
-            // Crate constants. A parse failure is a programming error,
-            // not a runtime condition; falling through to Default
-            // would put netd on n0's map.
-            panic!("HEDDLE_RELAY_URLS entry {url:?} must parse as RelayUrl: {error}")
-        })
-    }))
+    let url = HEDDLE_HOME_RELAY_URL.parse().unwrap_or_else(|error| {
+        // Crate constant. A parse failure is a programming error, not
+        // a runtime condition; falling through to Default would put
+        // netd on n0's map.
+        panic!("HEDDLE_HOME_RELAY_URL {HEDDLE_HOME_RELAY_URL:?} must parse as RelayUrl: {error}")
+    });
+    RelayMode::custom([url])
 }
 
 /// Bind the machine's single persistent Iroh endpoint on the device
@@ -103,7 +107,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_relay_mode_is_heddle_custom_not_n0_default() {
+    fn default_relay_mode_is_heddle_custom_for_this_build_flavor() {
         let mode = default_relay_mode();
         assert!(
             matches!(mode, RelayMode::Custom(_)),
@@ -111,34 +115,39 @@ mod tests {
         );
 
         let urls: Vec<iroh::RelayUrl> = mode.relay_map().urls();
-        assert!(
-            !urls.is_empty(),
-            "netd must stay relay-reachable for claim links"
-        );
-
-        let mut hosts: Vec<String> = urls
-            .iter()
-            .map(|url| {
-                url.host_str()
-                    .unwrap_or("")
-                    .trim_end_matches('.')
-                    .to_string()
-            })
-            .collect();
-        hosts.sort();
-        hosts.dedup();
-
-        for host in &hosts {
-            assert!(
-                !host.ends_with("n0.iroh.link") && host != "n0.iroh.link",
-                "n0 default relay leaked into netd bind: {host}"
-            );
-        }
-
         assert_eq!(
-            hosts,
-            ["relay.heddle.sh", "relay.preview.heddle.sh"],
-            "netd home relays must be Heddle's only"
+            urls.len(),
+            1,
+            "this build flavor must hardcode exactly one home relay, got {urls:?}"
         );
+
+        let host = urls[0]
+            .host_str()
+            .unwrap_or("")
+            .trim_end_matches('.')
+            .to_string();
+        assert!(
+            !host.ends_with("n0.iroh.link") && host != "n0.iroh.link",
+            "n0 default relay leaked into netd bind: {host}"
+        );
+
+        #[cfg(debug_assertions)]
+        {
+            assert_eq!(HEDDLE_HOME_RELAY_URL, "https://relay.preview.heddle.sh/");
+            assert!(
+                !HEDDLE_HOME_RELAY_URL.contains("://relay.heddle.sh"),
+                "debug/dev build must not embed the production relay"
+            );
+            assert_eq!(host, "relay.preview.heddle.sh");
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            assert_eq!(HEDDLE_HOME_RELAY_URL, "https://relay.heddle.sh/");
+            assert!(
+                !HEDDLE_HOME_RELAY_URL.contains("preview"),
+                "release build must not embed the preview relay"
+            );
+            assert_eq!(host, "relay.heddle.sh");
+        }
     }
 }
