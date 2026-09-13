@@ -334,6 +334,14 @@ impl HostedClient {
         self.connection.close().await;
     }
 
+    /// Hold the next spawned shutdown future so close hits the 20ms
+    /// detach bound. Test-only: proves content already received is
+    /// still durable after the caller returns.
+    #[cfg(test)]
+    pub(crate) fn hold_next_close_for_test(duration: std::time::Duration) {
+        connection::hold_next_shutdown_for_test(duration);
+    }
+
     pub(super) async fn auto_rotate_if_needed(
         &mut self,
         renewable: Option<&RenewableAuthorityCredential>,

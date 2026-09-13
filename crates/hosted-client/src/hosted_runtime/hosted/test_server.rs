@@ -323,6 +323,31 @@ struct PullFixture {
     pack: Option<(Vec<u8>, Vec<u8>)>,
 }
 
+/// In-memory weft stand-in: accept a push pack, then serve it on clone.
+#[derive(Clone, Default)]
+pub(crate) struct DurableSyncStore {
+    stored: Arc<Mutex<Option<PullFixture>>>,
+}
+
+impl DurableSyncStore {
+    fn pull_fixture(&self) -> Option<PullFixture> {
+        self.stored
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    pub(crate) fn install(&self, remote_state: StateId, pack_data: Vec<u8>, index_data: Vec<u8>) {
+        *self
+            .stored
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(PullFixture {
+            remote_state,
+            pack: Some((pack_data, index_data)),
+        });
+    }
+}
+
 #[derive(Clone, Default)]
 struct BlobFixture {
     contents: HashMap<String, Vec<u8>>,
@@ -375,6 +400,7 @@ async fn start_inner(
                 collaboration.clone(),
                 registry.clone(),
                 grants.clone(),
+                None,
             ));
         }
         server.close().await;
@@ -396,6 +422,93 @@ async fn start_inner(
     (client, server_task)
 }
 
+/// Multi-accept fixture: first client pushes; after bounded close a
+/// fresh client clones the stored pack from the same endpoint address.
+#[cfg(test)]
+pub(crate) async fn start_durable_push_clone() -> (
+    HostedClient,
+    iroh::EndpointAddr,
+    JoinHandle<()>,
+    DurableSyncStore,
+) {
+    let store = DurableSyncStore::default();
+    let server = Endpoint::builder(presets::Minimal)
+        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let server_addr = server.addr();
+    let grants = GrantStore::default();
+    let store_for_server = store.clone();
+    let server_task = tokio::spawn(async move {
+        loop {
+            let Some(incoming) = server.accept().await else {
+                break;
+            };
+            let Ok(connection) = incoming.await else {
+                continue;
+            };
+            let store = store_for_server.clone();
+            let grants = grants.clone();
+            tokio::spawn(async move {
+                while let Ok((send, recv)) = connection.accept_bi().await {
+                    tokio::spawn(serve_call(
+                        send,
+                        recv,
+                        store.pull_fixture(),
+                        BlobFixture::default(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        grants.clone(),
+                        Some(store.clone()),
+                    ));
+                }
+            });
+        }
+        server.close().await;
+    });
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let signer = Ed25519Signer::generate().unwrap();
+    let context = CallContextFactory::default()
+        .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
+        .unwrap();
+    let client = HostedClient::connect_addr_with_context(endpoint, server_addr.clone(), context)
+        .await
+        .unwrap();
+    (client, server_addr, server_task, store)
+}
+
+#[cfg(test)]
+pub(crate) async fn connect_test_client(server_addr: iroh::EndpointAddr) -> HostedClient {
+    let endpoint = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let signer = Ed25519Signer::generate().unwrap();
+    let context = CallContextFactory::default()
+        .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
+        .unwrap();
+    HostedClient::connect_addr_with_context(endpoint, server_addr, context)
+        .await
+        .unwrap()
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn serve_call(
     mut send: iroh::endpoint::SendStream,
@@ -409,6 +522,7 @@ async fn serve_call(
     collaboration: Option<CollaborationFixture>,
     registry: Option<RegistryFixture>,
     grants: GrantStore,
+    durable: Option<DurableSyncStore>,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -506,7 +620,14 @@ async fn serve_call(
         }
         StreamingShape::Bidirectional => {
             if method == "/heddle.api.v1alpha1.RepoSyncService/Push" {
-                serve_push(send, recv, request.split_off(prelude_len), push_requests).await;
+                serve_push(
+                    send,
+                    recv,
+                    request.split_off(prelude_len),
+                    push_requests,
+                    durable,
+                )
+                .await;
                 return;
             }
             tokio::spawn(async move {
@@ -531,6 +652,7 @@ async fn serve_push(
     mut recv: iroh::endpoint::RecvStream,
     mut buffered: Vec<u8>,
     captured: Option<Arc<Mutex<Vec<PushRequest>>>>,
+    durable: Option<DurableSyncStore>,
 ) {
     let request = loop {
         if let Some((frame, consumed)) = decode_stream_frame(&buffered).unwrap() {
@@ -552,6 +674,7 @@ async fn serve_push(
         buffered.extend_from_slice(&chunk);
     };
     let advertised = request.objects.clone();
+    let local_state = request.local_state.clone();
     if let Some(captured) = captured {
         captured
             .lock()
@@ -575,10 +698,16 @@ async fn serve_push(
         .await
         .is_ok_and(|chunk| chunk.is_some())
     {}
+    let accept = durable.is_some() && local_state.is_some();
     let complete = PushServerFrame {
         frame: Some(push_server_frame::Frame::Complete(PushComplete {
-            success: false,
-            error: "test rejection".to_string(),
+            success: accept,
+            new_state: if accept { local_state } else { None },
+            error: if accept {
+                String::new()
+            } else {
+                "test rejection".to_string()
+            },
             ..PushComplete::default()
         })),
     }

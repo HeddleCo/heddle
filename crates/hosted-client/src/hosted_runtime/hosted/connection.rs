@@ -41,6 +41,25 @@ const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 /// then detach the remainder.
 const FOREGROUND_ENDPOINT_DRAIN: Duration = Duration::from_millis(20);
 
+#[cfg(test)]
+static NEXT_SHUTDOWN_HOLD_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+pub(super) fn hold_next_shutdown_for_test(duration: Duration) {
+    NEXT_SHUTDOWN_HOLD_MS.store(duration.as_millis() as u64, Ordering::SeqCst);
+}
+
+fn shutdown_hold_for_test() -> Option<Duration> {
+    #[cfg(test)]
+    {
+        let ms = NEXT_SHUTDOWN_HOLD_MS.swap(0, Ordering::SeqCst);
+        if ms > 0 {
+            return Some(Duration::from_millis(ms));
+        }
+    }
+    None
+}
+
 #[derive(Debug)]
 pub(super) struct HostedConnection {
     inner: HostedTransport,
@@ -569,7 +588,11 @@ where
     F: std::future::Future<Output = std::result::Result<(), E>> + Send + 'static,
     E: std::fmt::Display + Send + 'static,
 {
+    let hold = shutdown_hold_for_test();
     let mut task = tokio::spawn(async move {
+        if let Some(hold) = hold {
+            tokio::time::sleep(hold).await;
+        }
         if let Err(error) = shutdown.await {
             tracing::warn!(%error, "failed to shut down Heddle Iroh router");
         }
