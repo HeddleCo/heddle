@@ -75,6 +75,27 @@ impl SignedAuthorityAdmission {
         )?;
         Ok(value)
     }
+    pub fn verify_resolution(
+        &self,
+        original: &crate::thread_ownership_resolution::SignedOwnershipResolution,
+        winning_claim: &heddle_object_model::object::thread_replication::ownership_claim::ThreadOwnershipClaim,
+        genesis: &heddle_object_model::object::thread_replication::ThreadGenesis,
+        trust: &TrustedHostedExecutor,
+    ) -> Result<ThreadAuthorityAdmission, Error> {
+        let value = self.verify_signature()?;
+        let evidence = self
+            .boundary_acceptance
+            .as_ref()
+            .map(|value| value.verify_signature())
+            .transpose()?;
+        value.authorize_resolution_with_acceptance(
+            &original.verify(winning_claim)?,
+            genesis,
+            trust,
+            evidence.as_ref(),
+        )?;
+        Ok(value)
+    }
 }
 fn signing_bytes(canonical: &[u8]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(FORMAT.len() + 1 + canonical.len());

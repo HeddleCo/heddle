@@ -13,7 +13,7 @@ use super::{
     thread_authority_admission::OriginalAuthorityBinding,
     thread_replication::{
         GenesisOwner, SourceAuthor, ThreadGenesis, ThreadOperation, metadata::AUTHORITY_FORMAT,
-        ownership_claim::ThreadOwnershipClaim,
+        ownership_claim::ThreadOwnershipClaim, ownership_resolution::ThreadOwnershipResolution,
     },
 };
 use crate::error::{HeddleError, Result};
@@ -33,6 +33,7 @@ pub enum ManifestSubject {
     Source(ContentHash),
     OtherOperation(ContentHash),
     OwnershipClaim(ContentHash),
+    OwnershipResolution(ContentHash),
 }
 impl ManifestSubject {
     pub fn id(&self) -> ContentHash {
@@ -40,7 +41,8 @@ impl ManifestSubject {
             Self::Genesis(id)
             | Self::Source(id)
             | Self::OtherOperation(id)
-            | Self::OwnershipClaim(id) => *id,
+            | Self::OwnershipClaim(id)
+            | Self::OwnershipResolution(id) => *id,
         }
     }
 }
@@ -129,6 +131,28 @@ impl OriginalManifestEntry {
             }),
         })
     }
+    pub fn from_resolution(resolution: &ThreadOwnershipResolution) -> Result<Self> {
+        resolution.encode()?;
+        let SourceAuthor::Account {
+            spool,
+            actor,
+            authority_digest,
+            ..
+        } = &resolution.acceptance
+        else {
+            return Err(invalid("resolution requires explicit account acceptance"));
+        };
+        Ok(Self {
+            subject: ManifestSubject::OwnershipResolution(resolution.id()?),
+            thread: resolution.thread,
+            publisher: resolution.accepting_publisher,
+            authority: Some(OriginalAuthorityBinding {
+                spool: *spool,
+                actor: actor.clone(),
+                authority_digest: *authority_digest,
+            }),
+        })
+    }
     fn validate(&self) -> Result<()> {
         if self.publisher == [0; 32]
             || self.subject.id().as_bytes() == &[0; 32]
@@ -188,6 +212,7 @@ impl OriginalPublicationManifest {
                 ManifestSubject::Genesis(_) => 0,
                 ManifestSubject::Source(_) | ManifestSubject::OtherOperation(_) => 1,
                 ManifestSubject::OwnershipClaim(_) => 2,
+                ManifestSubject::OwnershipResolution(_) => 3,
             };
             if !ids.insert((domain, entry.subject.id())) {
                 return Err(invalid("duplicate original manifest identity"));
@@ -226,6 +251,7 @@ pub enum BoundaryOriginalKind {
     Source,
     AccountGenesis,
     OwnershipClaim,
+    OwnershipResolution,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -339,6 +365,9 @@ impl OriginalBoundaryAcceptance {
                     ManifestSubject::Genesis(_) => BoundaryOriginalKind::AccountGenesis,
                     ManifestSubject::Source(_) => BoundaryOriginalKind::Source,
                     ManifestSubject::OwnershipClaim(_) => BoundaryOriginalKind::OwnershipClaim,
+                    ManifestSubject::OwnershipResolution(_) => {
+                        BoundaryOriginalKind::OwnershipResolution
+                    }
                     ManifestSubject::OtherOperation(_) => return false,
                 };
                 self.kinds.contains(&kind)

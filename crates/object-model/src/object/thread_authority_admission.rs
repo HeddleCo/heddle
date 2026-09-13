@@ -21,23 +21,24 @@ pub const MAX_BYTES: usize = 2048;
 pub enum OriginalAuthoritySubject {
     Operation(ContentHash),
     OwnershipClaim(ContentHash),
+    OwnershipResolution(ContentHash),
 }
 impl OriginalAuthoritySubject {
     pub fn id(&self) -> ContentHash {
         match self {
-            Self::Operation(id) | Self::OwnershipClaim(id) => *id,
+            Self::Operation(id) | Self::OwnershipClaim(id) | Self::OwnershipResolution(id) => *id,
         }
     }
     pub fn operation_id(&self) -> Option<ContentHash> {
         match self {
             Self::Operation(id) => Some(*id),
-            Self::OwnershipClaim(_) => None,
+            Self::OwnershipClaim(_) | Self::OwnershipResolution(_) => None,
         }
     }
     pub fn claim_id(&self) -> Option<ContentHash> {
         match self {
             Self::OwnershipClaim(id) => Some(*id),
-            Self::Operation(_) => None,
+            Self::Operation(_) | Self::OwnershipResolution(_) => None,
         }
     }
 }
@@ -231,6 +232,46 @@ impl ThreadAuthorityAdmission {
         {
             return Err(invalid(
                 "authority admission differs from original ownership claim",
+            ));
+        }
+        Ok(())
+    }
+    pub fn authorize_resolution_with_acceptance(
+        &self,
+        resolution: &super::thread_replication::ownership_resolution::ThreadOwnershipResolution,
+        genesis: &super::thread_replication::ThreadGenesis,
+        trust: &TrustedHostedExecutor,
+        evidence: Option<&super::original_boundary_acceptance::OriginalBoundaryAcceptance>,
+    ) -> Result<()> {
+        self.basis.authorize_evidence(
+            evidence,
+            self.spool,
+            self.actor.principal_id,
+            Some(super::original_boundary_acceptance::BoundaryOriginalKind::OwnershipResolution),
+        )?;
+        self.encode()?;
+        resolution.validate_genesis(genesis)?;
+        let SourceAuthor::Account {
+            spool,
+            actor,
+            authority_digest,
+            ..
+        } = &resolution.acceptance
+        else {
+            return Err(invalid("resolution admission requires account acceptance"));
+        };
+        if self.spool != trust.spool
+            || self.spool_genesis != trust.spool_genesis
+            || self.executor != trust.executor
+            || self.subject != OriginalAuthoritySubject::OwnershipResolution(resolution.id()?)
+            || self.thread != resolution.thread
+            || self.publisher != resolution.accepting_publisher
+            || self.actor != *actor
+            || self.spool != *spool
+            || self.authority_digest != *authority_digest
+        {
+            return Err(invalid(
+                "authority admission differs from original ownership resolution",
             ));
         }
         Ok(())
