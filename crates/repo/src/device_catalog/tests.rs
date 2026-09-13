@@ -32,6 +32,47 @@ fn insert(home: &Path, catalog: &mut Catalog) -> SpoolRecord {
         .expect("registration");
     catalog.spool(id).expect("lookup").expect("registered")
 }
+
+#[test]
+fn concurrent_catalog_initialization_commits_one_complete_schema() {
+    use std::sync::Barrier;
+
+    for _ in 0..8 {
+        let home = tempfile::tempdir().expect("fresh shared device home");
+        let start = Barrier::new(16);
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..16)
+                .map(|_| {
+                    let home = home.path();
+                    let start = &start;
+                    scope.spawn(move || {
+                        start.wait();
+                        let catalog = Catalog::open(home).expect("concurrent agent opens catalog");
+                        assert_eq!(catalog.generation().expect("complete schema"), 0);
+                        let mode: String = catalog
+                            .connection
+                            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                            .expect("journal mode");
+                        assert_eq!(mode, "wal");
+                    })
+                })
+                .collect();
+            for worker in workers {
+                worker.join().expect("agent initialization completes");
+            }
+        });
+        let catalog = Catalog::read(home.path())
+            .expect("read committed catalog")
+            .expect("catalog exists");
+        assert!(
+            catalog
+                .registrations()
+                .expect("complete empty catalog")
+                .is_empty()
+        );
+    }
+}
+
 #[test]
 fn catalog_receipts_cas_and_state_commit_atomically() {
     let home = tempfile::tempdir().expect("home");
