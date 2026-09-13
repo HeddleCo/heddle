@@ -226,6 +226,13 @@ impl ThreadControl {
                 if attestation != review.coverage.is_some() {
                     return Err(invalid("review coverage must match attestation kind"));
                 }
+                if matches!(
+                    review.kind,
+                    ReviewKind::AgentPreview | ReviewKind::AgentCoReview
+                ) && self.actor.agent_id.is_none()
+                {
+                    return Err(invalid("agent review attestation requires an agent actor"));
+                }
                 if let Some(ReviewCoverage::Symbols(anchors)) = &review.coverage {
                     if anchors.is_empty() || anchors.len() > 128 {
                         return Err(invalid("review symbol coverage exceeds bounds"));
