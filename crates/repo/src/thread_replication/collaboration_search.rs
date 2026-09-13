@@ -81,8 +81,11 @@ pub struct NativeBatch {
 /// rebuildable Search index itself.
 #[derive(Clone, Debug)]
 pub struct AdmittedSourceTarget {
+    /// Independently authorized owning Thread.
     pub thread: objects::object::ContentHash,
+    /// Exact accepted source State.
     pub revision: objects::object::StateId,
+    /// Explicit salted entry commitments withheld from this reader.
     pub denied_leaves: Vec<objects::object::ContentHash>,
 }
 
@@ -198,7 +201,7 @@ fn search_native_inner(
                c.revision,c.path,c.symbol_id,c.symbol_name,c.start_line,c.end_line
         FROM source_search_fts JOIN source_search_candidates c ON c.rowid=source_search_fts.rowid
         JOIN operations o ON o.id=c.operation
-        JOIN source_search_ready ready ON ready.operation=c.operation AND ready.revision=c.revision AND ready.extractor_version=2
+        JOIN source_search_ready ready ON ready.operation=c.operation AND ready.revision=c.revision AND ready.extractor_version=3
         WHERE source_search_fts MATCH ?1 AND o.status=1 AND o.facet=1
           AND o.thread=c.thread AND o.source_revision=c.revision
           AND ((c.kind=3 AND ?11) OR (c.kind=4 AND ?12))

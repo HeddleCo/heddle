@@ -290,16 +290,6 @@ impl DeviceRpc {
                 };
                 ensure!(position < selected.len() || selected.is_empty(), "search cursor outside Spools");
                 let mut events = Vec::new();
-                for domain in &selection.kinds {
-                    events.push(SearchEvent {
-                        source: Some(this.endpoint()),
-                        payload: Some(search_event::Payload::DomainStatus(SearchDomainStatus {
-                            domain: *domain,
-                            coverage: if matches!(*domain, 4 | 5) { Coverage::Partial } else { Coverage::Complete } as i32,
-                            supported_modes: vec![search_request::Mode::Lexical as i32],
-                        })),
-                    });
-                }
                 let mut examined = 0usize;
                 let mut visible = 0usize;
                 // The final generation fence discards this buffered page if
@@ -317,6 +307,8 @@ impl DeviceRpc {
                 >::new();
                 let mut admitted_sources = vec![Vec::new(); selected.len()];
                 let mut admitted_target_count = 0usize;
+                let mut content_ready = true;
+                let mut symbols_ready = true;
                 if selection.kinds.contains(&(SearchDomain::SourceContent as i32))
                     || selection.kinds.contains(&(SearchDomain::SourceSymbol as i32))
                 {
@@ -332,8 +324,10 @@ impl DeviceRpc {
                                 Ok(objects::object::ContentHash::from_bytes(bytes))
                             }).collect::<Result<Vec<_>>>())
                             .transpose()?;
-                        repo::thread_replication::source_search::visit_indexed_targets(
+                        let search_index = repo::thread_replication::source_search::SourceSearchReader::open(
                             &spool.heddle_dir,
+                        )?;
+                        search_index.visit_indexed_targets(
                             source,
                             selected_threads.as_deref(),
                             |candidate| {
@@ -357,6 +351,11 @@ impl DeviceRpc {
                                 let Some(redactions) = source_projections.get(&key).and_then(Option::as_ref) else { return Ok(()); };
                                 admitted_target_count += 1;
                                 ensure!(admitted_target_count <= 4096, "authorized source search scope exceeds target budget");
+                                let readiness = search_index.readiness_for_authorized_target(
+                                    candidate.thread, candidate.revision,
+                                )?;
+                                content_ready &= readiness.content;
+                                symbols_ready &= readiness.symbols;
                                 admitted_sources[index].push(repo::thread_replication::collaboration_search::AdmittedSourceTarget {
                                     thread: candidate.thread,
                                     revision: candidate.revision,
@@ -366,6 +365,21 @@ impl DeviceRpc {
                             },
                         )?;
                     }
+                }
+                for domain in &selection.kinds {
+                    let ready = match SearchDomain::try_from(*domain)? {
+                        SearchDomain::SourceContent => content_ready,
+                        SearchDomain::SourceSymbol => symbols_ready,
+                        _ => true,
+                    };
+                    events.push(SearchEvent {
+                        source: Some(this.endpoint()),
+                        payload: Some(search_event::Payload::DomainStatus(SearchDomainStatus {
+                            domain: *domain,
+                            coverage: if ready { Coverage::Complete } else { Coverage::Partial } as i32,
+                            supported_modes: vec![search_request::Mode::Lexical as i32],
+                        })),
+                    });
                 }
                 // Candidate-row work is bounded independently of disclosure
                 // preparation. Hidden source targets cannot consume this
@@ -571,8 +585,8 @@ impl DeviceRpc {
                     source: Some(this.endpoint()),
                     payload: Some(search_event::Payload::Complete(SectionStatus {
                         section: "search".into(),
-                        coverage: if selection.kinds.contains(&(SearchDomain::SourceContent as i32))
-                            || selection.kinds.contains(&(SearchDomain::SourceSymbol as i32)) {
+                        coverage: if (selection.kinds.contains(&(SearchDomain::SourceContent as i32)) && !content_ready)
+                            || (selection.kinds.contains(&(SearchDomain::SourceSymbol as i32)) && !symbols_ready) {
                             Coverage::Partial
                         } else { Coverage::Complete } as i32,
                         page: Some(PageInfo {
