@@ -158,6 +158,11 @@ impl DeviceRpc {
                                     }),
                                     summary: hit.snippet,
                                     score: -hit.score,
+                                    thread: Some(ThreadRef {
+                                        spool: Some(SpoolRef { id: spool.id.to_string() }),
+                                        id: Some(ThreadId { value: hit.thread.as_bytes().to_vec() }),
+                                    }),
+                                    causal_id: if hit.kind == 2 { hit.operation.as_bytes().to_vec() } else { Vec::new() },
                                     ..Default::default()
                                 })),
                             });

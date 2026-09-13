@@ -370,6 +370,8 @@ pub(super) async fn roundtrip(
     while let Some(event) = search.next().await.expect("search frame") {
         match event.payload {
             Some(search_event::Payload::Hit(hit)) => {
+                assert_eq!(hit.thread.as_ref().and_then(|thread| thread.id.as_ref()).map(|id| id.value.as_slice()), Some(replica.thread_id().as_bytes().as_slice()));
+                assert_eq!(hit.causal_id.len(), 32, "context hit identifies one accepted revision");
                 assert!(
                     matches!(hit.subject.and_then(|subject|subject.entity),Some(entity_ref::Entity::Context(reference)) if reference.id==context.id.to_string())
                 );
