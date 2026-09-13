@@ -384,7 +384,8 @@ pub(super) async fn roundtrip(
                 first_path = Some(hit.location.expect("source location").path);
             }
             Some(search_event::Payload::Complete(status)) => {
-                assert_eq!(status.coverage, Coverage::Partial as i32);
+                assert_eq!(status.coverage, Coverage::Complete as i32,
+                    "indexed authorized source has complete content coverage");
                 next = status.page.expect("source page").next_page;
             }
             _ => {}
@@ -476,7 +477,11 @@ pub(super) async fn roundtrip(
             Some(search_event::Payload::Hit(hit)) => {
                 visible_paths.push(hit.location.expect("visible location").path);
             }
-            Some(search_event::Payload::Complete(status)) => restricted_page = status.page,
+            Some(search_event::Payload::Complete(status)) => {
+                assert_eq!(status.coverage, Coverage::Complete as i32,
+                    "hidden indexed entry does not make authorized coverage partial");
+                restricted_page = status.page;
+            }
             _ => {}
         }
     }
