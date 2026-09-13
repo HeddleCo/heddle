@@ -6,6 +6,7 @@ mod ids;
 mod materialize;
 mod metadata;
 mod operation;
+mod requirements;
 mod source;
 mod tags;
 
@@ -28,6 +29,7 @@ pub use operation::{
     CollaborationOperationEnvelope, CollaborationResolution, DiscussionTurnV1,
     LegacyDiscussionResolutionV1,
 };
+pub use requirements::{AuthoredSourceRequirement, authored_source_requirements};
 pub use source::{CollaborationRevision, CollaborationSourceAnchor};
 pub use tags::{
     AnnotationComparison, AnnotationDecimal, AnnotationQuery, AnnotationSourceReference,
