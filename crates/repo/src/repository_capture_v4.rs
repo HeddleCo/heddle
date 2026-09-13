@@ -161,8 +161,8 @@ fn inherit_or_fresh_salt(parent_tree: Option<&Tree>, entry: &TreeEntry) -> [u8; 
         && parent.scheme() == TreeScheme::V4Salted
         && let Some(index) = parent
             .entries()
-            .iter()
-            .position(|candidate| candidate.name() == entry.name())
+            .binary_search_by(|candidate| candidate.name().cmp(entry.name()))
+            .ok()
         && parent.entries()[index].target() == entry.target()
         && let Some(salt) = parent.salt_at(index)
     {
