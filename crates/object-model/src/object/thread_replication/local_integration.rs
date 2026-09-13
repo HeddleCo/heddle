@@ -48,7 +48,7 @@ impl LocalIntegration {
         {
             return Err(invalid("invalid local integration receipt"));
         }
-        let state = State::decode_current_msgpack(&self.result.state)?;
+        let state = self.result.validated_state()?;
         if state.encode_current_msgpack()? != self.result.state {
             return Err(invalid("non-canonical local integration State"));
         }
@@ -65,7 +65,7 @@ impl LocalIntegration {
         Ok(receipt)
     }
     pub fn resulting_state(&self) -> Result<State> {
-        State::decode_current_msgpack(&self.result.state)
+        self.result.validated_state()
     }
     /// Supply the independently authenticated original record from the named
     /// source Thread, never a record selected solely by a claimed revision hash.

@@ -565,3 +565,79 @@ fn integration_keeps_competing_branch_locations_ambiguous() {
         ResolutionStatus::Ambiguous
     );
 }
+
+#[test]
+fn original_source_operation_retains_local_privacy_before_publication() {
+    use objects::object::{EntryVisibility, EntryVisibilityEntry, StateVisibility, VisibilityTier};
+    let (_directory, repo, replica, base, _) = fixture();
+    let leaf = repo
+        .store()
+        .put_blob(&Blob::new(b"private source".to_vec()))
+        .expect("blob");
+    let tree = Tree::from_entries_salted_v4(
+        vec![TreeEntry::file("main.rs", leaf, false).expect("file")],
+        vec![[11; 32]],
+    )
+    .expect("salted tree");
+    repo.store().put_tree(&tree).expect("tree");
+    let source = State::new_snapshot(tree.hash(), vec![base.id()], base.attribution.clone());
+    repo.store().put_state(&source).expect("source");
+    repo.put_state_visibility(StateVisibility {
+        state: source.id(),
+        tier: VisibilityTier::Internal,
+        embargo_until: None,
+        declarer: source.attribution.principal.clone(),
+        declared_at: source.created_at,
+        signature: None,
+        supersedes: None,
+    })
+    .expect("local state tier");
+    let entry = EntryVisibility::new(
+        source.change_id,
+        source.tree,
+        vec![EntryVisibilityEntry {
+            tree_id: tree.hash(),
+            leaf_hash: tree.v4_leaf_hash_for("main.rs").expect("leaf"),
+            tier: VisibilityTier::Private {
+                scope_label: "security".into(),
+            },
+        }],
+    )
+    .expect("entry declaration");
+    repo.restore_entry_visibility_sidecar(&source.change_id, Some(entry.encode().expect("bytes")))
+        .expect("local entry tier");
+    let (signed, _) = captured(&repo, &replica, "tracked", &source);
+    let operation = signed.verify().expect("original proof");
+    let capture = operation.source_result().expect("decode").expect("source");
+    let privacy = capture
+        .visibility
+        .as_ref()
+        .expect("original signed privacy");
+    assert_eq!(privacy.state, Some(VisibilityTier::Internal));
+    assert_eq!(
+        privacy.entry_sidecar(&source).expect("sidecar"),
+        Some(entry)
+    );
+    let mut removed = operation;
+    let ThreadOperationBody::Capture(authored) = &mut removed.body else {
+        panic!("authored source")
+    };
+    authored.result.visibility = None;
+    let tampered = SignedOperation {
+        canonical: removed.encode().expect("changed source"),
+        signature: signed.signature,
+    };
+    assert!(
+        tampered.verify().is_err(),
+        "courier cannot omit original privacy declarations"
+    );
+    repo.restore_entry_visibility_sidecar(&source.change_id, None)
+        .expect("clear mutable copy");
+    assert_eq!(
+        replica
+            .prepare_capture(&repo, &source)
+            .expect("retry original"),
+        capture,
+        "retry must reuse signed privacy, not today's mutable sidecars"
+    );
+}

@@ -368,6 +368,7 @@ pub fn prepare(
         capture: Capture {
             state: state.encode_current_msgpack()?,
             source_targets: Some(descriptor),
+            visibility: None,
         },
         blobs: map_store.created,
     })

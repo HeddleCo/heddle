@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Portable Thread identity and immutable replication operations. Source and
 //! discussion causality have separate graphs so selective sharing is closed.
+pub mod capture_visibility;
 pub mod hosted_import;
 pub mod integration;
 pub mod local_integration;
@@ -10,6 +11,7 @@ pub mod ownership_resolution;
 pub mod source_author;
 use std::collections::BTreeSet;
 
+pub use capture_visibility::CaptureVisibility;
 use serde::{Deserialize, Serialize};
 pub use source_author::{AuthoredCapture, SOURCE_AUTHORIZATION_METHOD, SourceAuthor};
 
@@ -126,12 +128,15 @@ pub enum ThreadOperationBody {
 pub struct Capture {
     pub state: Vec<u8>,
     pub source_targets: Option<ContentHash>,
+    /// Original author-signed privacy declarations; independent of the courier.
+    pub visibility: Option<CaptureVisibility>,
 }
 impl From<Vec<u8>> for Capture {
     fn from(state: Vec<u8>) -> Self {
         Self {
             state,
             source_targets: None,
+            visibility: None,
         }
     }
 }
@@ -216,9 +221,7 @@ impl ThreadOperation {
     /// The exact source revision represented by a capture or hosted integration.
     pub fn source_state(&self) -> Result<Option<State>> {
         match &self.body {
-            ThreadOperationBody::Capture(bytes) => {
-                State::decode_current_msgpack(&bytes.result.state).map(Some)
-            }
+            ThreadOperationBody::Capture(bytes) => bytes.result.validated_state().map(Some),
             ThreadOperationBody::Integration(bytes) => {
                 integration::HostedIntegration::decode(bytes)?
                     .resulting_state()
@@ -291,10 +294,7 @@ impl ThreadOperation {
         match &self.body {
             ThreadOperationBody::Capture(bytes) => {
                 bytes.author.validate()?;
-                let state = State::decode_current_msgpack(&bytes.result.state)?;
-                if state.encode_current_msgpack()? != bytes.result.state {
-                    return Err(invalid("non-canonical capture"));
-                }
+                bytes.result.validated_state()?;
             }
             ThreadOperationBody::Integration(bytes) => {
                 integration::HostedIntegration::decode(bytes)?.validate_operation(self)?;

@@ -118,7 +118,7 @@ impl HostedImport {
         ))
     }
     pub fn resulting_state(&self) -> Result<State> {
-        State::decode_current_msgpack(&self.result.state)
+        self.result.validated_state()
     }
     pub(super) fn validate_operation(&self, operation: &ThreadOperation) -> Result<()> {
         if self.target_thread != operation.thread
@@ -268,6 +268,7 @@ mod tests {
                 crate::object::thread_replication::AuthoredCapture::local(Capture {
                     state: state.encode_current_msgpack().expect("capture"),
                     source_targets: receipt.result.source_targets,
+                    visibility: receipt.result.visibility.clone(),
                 }),
             ),
         };

@@ -369,7 +369,29 @@ impl ThreadReplica {
                 return Err(err("prepared reference object hash mismatch"));
             }
         }
-        Ok(prepared.capture)
+        let mut result = prepared.capture;
+        let declaration = repo.effective_state_visibility(&state.id()).map_err(err)?;
+        let entries = match repo.get_entry_visibility_bytes(&state.change_id)? {
+            Some(bytes) => {
+                let sidecar = objects::object::EntryVisibility::decode(&bytes).map_err(err)?;
+                if sidecar.change_id != state.change_id || sidecar.tree_root != state.tree {
+                    return Err(err(
+                        "capture entry visibility belongs to another source tree",
+                    ));
+                }
+                sidecar.entries
+            }
+            None => Vec::new(),
+        };
+        if declaration.is_some() || !entries.is_empty() {
+            result.visibility = Some(objects::object::thread_replication::CaptureVisibility {
+                state: declaration.as_ref().map(|value| value.tier.clone()),
+                embargo_until: declaration.and_then(|value| value.embargo_until),
+                entries,
+            });
+        }
+        result.validated_state()?;
+        Ok(result)
     }
     fn reference_snapshots_at(
         &self,
