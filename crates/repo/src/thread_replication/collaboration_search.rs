@@ -146,7 +146,7 @@ pub fn search_native(
                c.revision,c.path,c.symbol_id,c.symbol_name,c.start_line,c.end_line
         FROM source_search_fts JOIN source_search_candidates c ON c.rowid=source_search_fts.rowid
         JOIN operations o ON o.id=c.operation
-        JOIN source_search_ready ready ON ready.operation=c.operation AND ready.revision=c.revision
+        JOIN source_search_ready ready ON ready.operation=c.operation AND ready.revision=c.revision AND ready.extractor_version=1
         WHERE source_search_fts MATCH ?1 AND o.status=1 AND o.facet=1
           AND o.thread=c.thread AND o.source_revision=c.revision
           AND ((c.kind=3 AND ?11) OR (c.kind=4 AND ?12))

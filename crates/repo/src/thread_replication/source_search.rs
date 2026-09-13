@@ -21,9 +21,11 @@ CREATE VIRTUAL TABLE IF NOT EXISTS source_search_fts USING fts5(text,tokenize='u
 CREATE TABLE IF NOT EXISTS source_search_ready(
  operation BLOB PRIMARY KEY CHECK(length(operation)=32),
  revision BLOB NOT NULL CHECK(length(revision)=32),
+ extractor_version INTEGER NOT NULL CHECK(extractor_version>=1),
  content_ready INTEGER NOT NULL CHECK(content_ready IN(0,1)),
  symbols_ready INTEGER NOT NULL CHECK(symbols_ready IN(0,1))
 );
+CREATE INDEX IF NOT EXISTS source_search_ready_version ON source_search_ready(extractor_version,operation);
 CREATE TABLE IF NOT EXISTS source_search_queue(
  operation BLOB PRIMARY KEY CHECK(length(operation)=32),
  thread BLOB NOT NULL CHECK(length(thread)=32),
@@ -31,13 +33,17 @@ CREATE TABLE IF NOT EXISTS source_search_queue(
  next_attempt INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS source_search_queue_due ON source_search_queue(next_attempt,operation);
-CREATE TABLE IF NOT EXISTS source_search_bootstrap(version INTEGER PRIMARY KEY CHECK(version=1));
+CREATE TABLE IF NOT EXISTS source_search_bootstrap(version INTEGER PRIMARY KEY CHECK(version>=1));
 INSERT OR IGNORE INTO source_search_queue(operation,thread,revision)
 SELECT o.id,o.thread,o.source_revision FROM operations o
 WHERE o.status=1 AND o.facet=1
-  AND NOT EXISTS(SELECT 1 FROM source_search_ready r WHERE r.operation=o.id AND r.revision=o.source_revision)
+  AND NOT EXISTS(SELECT 1 FROM source_search_ready r WHERE r.operation=o.id AND r.revision=o.source_revision AND r.extractor_version=1)
   AND NOT EXISTS(SELECT 1 FROM source_search_bootstrap WHERE version=1);
 INSERT OR IGNORE INTO source_search_bootstrap(version) VALUES(1);
+INSERT OR IGNORE INTO source_search_queue(operation,thread,revision)
+SELECT o.id,o.thread,o.source_revision FROM source_search_ready r
+JOIN operations o ON o.id=r.operation AND o.status=1 AND o.facet=1
+WHERE r.extractor_version<>1;
 CREATE TRIGGER IF NOT EXISTS source_search_admitted_update AFTER UPDATE OF status ON operations
 WHEN OLD.status<>1 AND NEW.status=1 AND NEW.facet=1
 BEGIN
@@ -179,7 +185,7 @@ pub fn publish(
         )?;
     }
     transaction.execute(
-        "INSERT INTO source_search_ready(operation,revision,content_ready,symbols_ready) VALUES(?1,?2,?3,?4) ON CONFLICT(operation) DO UPDATE SET revision=excluded.revision,content_ready=excluded.content_ready,symbols_ready=excluded.symbols_ready",
+        "INSERT INTO source_search_ready(operation,revision,extractor_version,content_ready,symbols_ready) VALUES(?1,?2,1,?3,?4) ON CONFLICT(operation) DO UPDATE SET revision=excluded.revision,extractor_version=excluded.extractor_version,content_ready=excluded.content_ready,symbols_ready=excluded.symbols_ready",
         params![operation.as_bytes(),revision.as_bytes(),content_ready,symbols_ready],
     )?;
     transaction.execute(
@@ -390,5 +396,37 @@ mod tests {
         .expect("historical exact source");
         assert_eq!(exact.hits.len(), 1);
         assert_eq!(exact.hits[0].revision, Some(revision));
+        connection
+            .execute(
+                "UPDATE source_search_ready SET extractor_version=2 WHERE operation=?1",
+                [visible_operation.as_bytes().as_slice()],
+            )
+            .expect("stale extractor projection");
+        let stale = super::super::collaboration_search::search_native(
+            &directory,
+            "alpha",
+            None,
+            4,
+            &[3],
+            None,
+            super::super::collaboration_search::SourceSelection::Retained,
+        )
+        .expect("versioned source query");
+        assert!(
+            stale
+                .hits
+                .iter()
+                .all(|hit| hit.operation != visible_operation),
+            "stale extractor rows must not be served"
+        );
+        connection
+            .execute_batch(SCHEMA)
+            .expect("queue stale projection");
+        assert!(
+            due(&directory, chrono::Utc::now().timestamp(), 4)
+                .expect("stale due")
+                .iter()
+                .any(|item| item.operation == visible_operation)
+        );
     }
 }
