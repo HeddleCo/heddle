@@ -506,12 +506,24 @@ pub(crate) fn validate_artifacts(
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
+    let capture = decoded
+        .get(&selected_id)
+        .ok_or(Error::Invalid("selected source operation absent"))?
+        .source_result()
+        .map_err(preparation)?
+        .ok_or(Error::Invalid("selected operation has no source result"))?;
     PackReader::open(
         &directory.path().join("source.pack"),
         &directory.path().join("source.idx"),
     )
     .map_err(preparation)?
-    .validate_source_closure_with_references(&state, &references, SOURCE_OBJECTS, SOURCE_BYTES)
+    .validate_source_closure_with_metadata(
+        &state,
+        &references,
+        capture.visibility.as_ref(),
+        SOURCE_OBJECTS,
+        SOURCE_BYTES,
+    )
     .map_err(preparation)?;
     // Dependency-first installation makes foreign source authority available
     // before admitting a local integration. Cycles cannot settle this graph.

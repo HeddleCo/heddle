@@ -360,9 +360,10 @@ fn source_pack_exports_and_validates_exact_signed_reference_closure() {
     drop(file);
     let reader = PackReader::open(&path, &index).expect("reader");
     let objects = reader
-        .validate_source_closure_with_references(
+        .validate_source_closure_with_metadata(
             &first,
             std::slice::from_ref(&proof),
+            None,
             1024,
             8 * 1024 * 1024,
         )
@@ -382,7 +383,7 @@ fn source_pack_exports_and_validates_exact_signed_reference_closure() {
     changed.scope.thread = Some(ContentHash::from_bytes([99; 32]));
     assert!(
         reader
-            .validate_source_closure_with_references(&first, &[changed], 1024, 8 * 1024 * 1024)
+            .validate_source_closure_with_metadata(&first, &[changed], None, 1024, 8 * 1024 * 1024)
             .is_err(),
         "valid blob addresses cannot replace scope proof"
     );

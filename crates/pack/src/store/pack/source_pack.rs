@@ -16,6 +16,7 @@ pub(super) fn validate(
     selected: &State,
     max_decoded_bytes: u64,
     references: &[crate::object::source_target::capture::ReferenceProof],
+    visibility: Option<&crate::object::thread_replication::CaptureVisibility>,
 ) -> Result<Vec<PackObjectId>> {
     let canonical = selected.encode_current_msgpack()?;
     let mut available = BTreeMap::new();
@@ -75,6 +76,30 @@ pub(super) fn validate(
                 .ok_or_else(|| invalid("source tree unavailable"))?;
             for (hash, kind) in children(tree) {
                 pending.push((PackObjectId::Hash(hash), kind));
+            }
+        }
+    }
+    if let Some(visibility) = visibility {
+        visibility.validate(selected)?;
+        // Reuse the decoded, closure-checked trees. Compute leaves once per
+        // mentioned tree, not once per override, and never consult ambient storage.
+        let mut leaves = BTreeMap::<ContentHash, BTreeSet<ContentHash>>::new();
+        for entry in &visibility.entries {
+            if !visited.contains(&PackObjectId::Hash(entry.tree_id)) {
+                return Err(invalid("entry visibility tree is outside selected source"));
+            }
+            let tree = trees
+                .get(&entry.tree_id)
+                .ok_or_else(|| invalid("entry visibility subject is not a tree"))?;
+            let actual = leaves.entry(entry.tree_id).or_insert_with(|| {
+                (0..tree.entries().len())
+                    .filter_map(|index| tree.v4_leaf_hash_at(index))
+                    .collect()
+            });
+            if !actual.contains(&entry.leaf_hash) {
+                return Err(invalid(
+                    "entry visibility leaf is absent from selected salted tree",
+                ));
             }
         }
     }

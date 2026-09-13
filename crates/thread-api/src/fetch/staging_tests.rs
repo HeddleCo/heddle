@@ -32,9 +32,11 @@ fn fixture(
     )
     .expect("original Thread");
     let blob = Blob::new(b"selected source".to_vec());
-    let tree = Tree::from_entries(vec![
-        TreeEntry::file("main.rs", blob.hash(), false).expect("entry"),
-    ]);
+    let tree = Tree::from_entries_salted_v4(
+        vec![TreeEntry::file("main.rs", blob.hash(), false).expect("entry")],
+        vec![[22; 32]],
+    )
+    .expect("native salted source");
     let state = State::new_snapshot(
         tree.hash(),
         vec![genesis.base],
@@ -610,6 +612,74 @@ fn source_staging_retains_signed_claim_cutoff_beyond_selected_revision() {
                 staged.operations().last(),
                 Some(&next),
                 "original cutoff follows causal selected source"
+            );
+        }
+    }
+}
+
+#[test]
+fn source_staging_binds_signed_entry_privacy_to_selected_salted_closure() {
+    use objects::object::{
+        EntryVisibilityEntry, VisibilityTier, thread_replication::CaptureVisibility,
+    };
+    let scratch = tempfile::tempdir().expect("scratch");
+    let signer = Ed25519Signer::from_seed(&[61; 32]).expect("author");
+    for variant in 0..3 {
+        let (directory, ready, mut operations, state) = fixture(scratch.path(), false);
+        let reader = PackReader::open(
+            &directory.path().join("source.pack"),
+            &directory.path().join("source.idx"),
+        )
+        .expect("pack");
+        let (_, bytes) = reader
+            .get_hashed_object(&state.tree)
+            .expect("read tree")
+            .expect("tree");
+        let tree = Tree::decode_canonical(&bytes).expect("salted tree");
+        let mut entry = EntryVisibilityEntry {
+            tree_id: tree.hash(),
+            leaf_hash: tree.v4_leaf_hash_for("main.rs").expect("leaf"),
+            tier: VisibilityTier::Private {
+                scope_label: "security".into(),
+            },
+        };
+        if variant == 1 {
+            entry.tree_id = ContentHash::from_bytes([44; 32]);
+        }
+        if variant == 2 {
+            entry.leaf_hash = ContentHash::from_bytes([55; 32]);
+        }
+        let mut original = operations[0].verify().expect("original");
+        let ThreadOperationBody::Capture(capture) = &mut original.body else {
+            panic!("source")
+        };
+        capture.result.visibility = Some(CaptureVisibility {
+            state: None,
+            embargo_until: None,
+            entries: vec![entry],
+        });
+        operations[0] = SignedOperation::sign(&original, &signer).expect("signed declaration");
+        drop(reader);
+        let result = validate(directory, ready, operations, vec![]);
+        if variant == 0 {
+            let retained = result.expect("exact selected entry admitted");
+            let operation = retained.operations()[0]
+                .verify()
+                .expect("retained original");
+            assert_eq!(operation, original, "privacy survives actual staging");
+        } else {
+            let error = match result {
+                Ok(_) => panic!("foreign entry binding must fail {variant}"),
+                Err(error) => error,
+            };
+            let expected = if variant == 1 {
+                "entry visibility tree is outside"
+            } else {
+                "entry visibility leaf is absent"
+            };
+            assert!(
+                error.to_string().contains(expected),
+                "specific binding failure: {error}"
             );
         }
     }
