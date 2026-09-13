@@ -29,7 +29,9 @@ pub use operation::{
     CollaborationOperationEnvelope, CollaborationResolution, DiscussionTurnV1,
     LegacyDiscussionResolutionV1,
 };
-pub use requirements::{AuthoredSourceRequirement, authored_source_requirements};
+pub use requirements::{
+    AuthoredSourceRequirement, authored_review_requirements, authored_source_requirements,
+};
 pub use source::{CollaborationRevision, CollaborationSourceAnchor};
 pub use tags::{
     AnnotationComparison, AnnotationDecimal, AnnotationQuery, AnnotationSourceReference,

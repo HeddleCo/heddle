@@ -8,7 +8,11 @@ use super::{
     AnnotationTag, CollaborationAnchor, CollaborationCodecError, CollaborationRevision,
     CollaborationScope, CollaborationSourceAnchor,
 };
-use crate::object::{ChangeId, ContentHash, source_target::SourceTargetBinding};
+use crate::object::{
+    ChangeId, ContentHash, StateId,
+    source_target::SourceTargetBinding,
+    thread_replication::metadata::{Review, ReviewCoverage},
+};
 
 /// A distinct source permission required to emit an authored anchor or tag.
 /// Revision requirements include the original path, but not line coordinates:
@@ -29,6 +33,13 @@ pub enum AuthoredSourceRequirement {
     Change {
         scope: CollaborationScope,
         change_id: ChangeId,
+    },
+    /// A Read attestation over the complete exact State requires that no
+    /// currently admitted entry in that source is withheld. An empty Revision
+    /// path checks only State visibility and must never represent this rule.
+    WholeSource {
+        scope: CollaborationScope,
+        state_id: StateId,
     },
 }
 
@@ -103,6 +114,79 @@ pub fn authored_source_requirements(
     Ok(requirements.into_values().collect())
 }
 
+/// Source predicates of a signed review, independent of its current display
+/// location. The source and target scopes are explicit because a fork review
+/// can compare a source Thread with its independently shared parent Thread.
+pub fn authored_review_requirements(
+    source_scope: &CollaborationScope,
+    target_scope: &CollaborationScope,
+    review: &Review,
+) -> Result<Vec<AuthoredSourceRequirement>, CollaborationCodecError> {
+    if source_scope.spool != target_scope.spool
+        || source_scope.thread.is_none()
+        || target_scope.thread.is_none()
+    {
+        return Err(CollaborationCodecError::Invalid(
+            "review source and target require exact Threads in one Spool".into(),
+        ));
+    }
+    let mut requirements = BTreeMap::new();
+    let mut insert = |value: AuthoredSourceRequirement| {
+        requirements.insert(value.id()?, value);
+        Ok::<_, CollaborationCodecError>(())
+    };
+    insert(AuthoredSourceRequirement::Revision {
+        scope: source_scope.clone(),
+        revision: CollaborationRevision::State {
+            state_id: review.source,
+        },
+        path: String::new(),
+    })?;
+    insert(AuthoredSourceRequirement::Revision {
+        scope: target_scope.clone(),
+        revision: CollaborationRevision::State {
+            state_id: review.target,
+        },
+        path: String::new(),
+    })?;
+    match &review.coverage {
+        Some(ReviewCoverage::WholeSource) => insert(AuthoredSourceRequirement::WholeSource {
+            scope: source_scope.clone(),
+            state_id: review.source,
+        })?,
+        Some(ReviewCoverage::Symbols(anchors)) => {
+            if anchors.is_empty() || anchors.len() > 128 {
+                return Err(CollaborationCodecError::Invalid(
+                    "review symbol coverage exceeds bounds".into(),
+                ));
+            }
+            for anchor in anchors {
+                if anchor.file.is_empty()
+                    || anchor.file.len() > 4096
+                    || anchor.file.starts_with('/')
+                    || anchor
+                        .file
+                        .split('/')
+                        .any(|part| part.is_empty() || part == "." || part == "..")
+                {
+                    return Err(CollaborationCodecError::Invalid(
+                        "review symbol path must be relative and canonical".into(),
+                    ));
+                }
+                insert(AuthoredSourceRequirement::Revision {
+                    scope: source_scope.clone(),
+                    revision: CollaborationRevision::State {
+                        state_id: review.source,
+                    },
+                    path: anchor.file.clone(),
+                })?;
+            }
+        }
+        None => {}
+    }
+    Ok(requirements.into_values().collect())
+}
+
 fn source_requirements(
     scope: &CollaborationScope,
     source: &CollaborationSourceAnchor,
@@ -127,5 +211,129 @@ fn source_requirements(
                 path: String::new(),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::object::thread_replication::metadata::{ReviewKind, ReviewSymbolAnchor};
+
+    fn review(coverage: Option<ReviewCoverage>) -> Review {
+        Review {
+            id: uuid::Uuid::from_u128(1),
+            source: StateId::from_bytes([11; 32]),
+            target: StateId::from_bytes([12; 32]),
+            policy_version: ContentHash::from_bytes([13; 32]),
+            kind: ReviewKind::Read,
+            explanation: String::new(),
+            revokes: None,
+            expires_at_unix_seconds: None,
+            coverage,
+        }
+    }
+
+    #[test]
+    fn complete_read_requires_whole_source_in_addition_to_both_exact_revisions() {
+        let source = CollaborationScope {
+            spool: uuid::Uuid::from_u128(1),
+            thread: Some(ContentHash::from_bytes([1; 32])),
+        };
+        let target = CollaborationScope {
+            thread: Some(ContentHash::from_bytes([2; 32])),
+            ..source.clone()
+        };
+        let value = review(Some(ReviewCoverage::WholeSource));
+        let requirements = authored_review_requirements(&source, &target, &value)
+            .expect("exact review requirements");
+        assert_eq!(requirements.len(), 3);
+        assert!(
+            requirements.contains(&AuthoredSourceRequirement::WholeSource {
+                scope: source.clone(),
+                state_id: value.source,
+            })
+        );
+        assert!(requirements.contains(&AuthoredSourceRequirement::Revision {
+            scope: target.clone(),
+            revision: CollaborationRevision::State {
+                state_id: value.target
+            },
+            path: String::new(),
+        }));
+        assert_ne!(
+            AuthoredSourceRequirement::WholeSource {
+                scope: source.clone(),
+                state_id: value.source
+            }
+            .id()
+            .expect("whole source key"),
+            AuthoredSourceRequirement::Revision {
+                scope: source,
+                revision: CollaborationRevision::State {
+                    state_id: value.source
+                },
+                path: String::new(),
+            }
+            .id()
+            .expect("state key"),
+        );
+    }
+
+    #[test]
+    fn symbol_read_requires_each_original_path_and_rejects_unscoped_reviews() {
+        let scope = CollaborationScope {
+            spool: uuid::Uuid::from_u128(1),
+            thread: Some(ContentHash::from_bytes([1; 32])),
+        };
+        let value = review(Some(ReviewCoverage::Symbols(vec![
+            ReviewSymbolAnchor {
+                file: "src/main.rs".into(),
+                symbol: "run".into(),
+            },
+            ReviewSymbolAnchor {
+                file: "src/main.rs".into(),
+                symbol: "main".into(),
+            },
+            ReviewSymbolAnchor {
+                file: "src/lib.rs".into(),
+                symbol: "parse".into(),
+            },
+        ])));
+        let requirements = authored_review_requirements(&scope, &scope, &value)
+            .expect("exact symbol requirements");
+        assert_eq!(
+            requirements.len(),
+            4,
+            "two revisions and two distinct paths"
+        );
+        assert!(requirements.contains(&AuthoredSourceRequirement::Revision {
+            scope: scope.clone(),
+            revision: CollaborationRevision::State {
+                state_id: value.source
+            },
+            path: "src/main.rs".into(),
+        }));
+        assert!(
+            authored_review_requirements(
+                &CollaborationScope {
+                    thread: None,
+                    ..scope.clone()
+                },
+                &scope,
+                &value
+            )
+            .is_err()
+        );
+        assert!(
+            authored_review_requirements(
+                &scope,
+                &CollaborationScope {
+                    spool: uuid::Uuid::from_u128(2),
+                    ..scope.clone()
+                },
+                &value
+            )
+            .is_err()
+        );
     }
 }
