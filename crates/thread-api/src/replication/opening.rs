@@ -304,6 +304,8 @@ mod tests {
                 boundary_acceptances: Vec::new(),
                 ownership_claims: vec![],
                 ownership_claim_admissions: vec![],
+                ownership_resolutions: vec![],
+                ownership_resolution_admissions: vec![],
                 genesis: Some(signed),
                 creator_authority: vec![],
                 admission: None,

@@ -1,7 +1,11 @@
 //! Exact ownership proof framing. Verification never enrolls its carried keys.
-use crypto::thread_ownership_claim::{SignedOwnershipAcceptance, SignedOwnershipClaim};
-use heddle_object_model::object::thread_replication::ownership_claim::{
-    FORMAT, ThreadOwnershipClaim,
+use crypto::{
+    thread_ownership_claim::{SignedOwnershipAcceptance, SignedOwnershipClaim},
+    thread_ownership_resolution::SignedOwnershipResolution,
+};
+use heddle_object_model::object::thread_replication::{
+    ownership_claim::{FORMAT, ThreadOwnershipClaim},
+    ownership_resolution::{FORMAT as RESOLUTION_FORMAT, ThreadOwnershipResolution},
 };
 
 use crate::{
@@ -79,5 +83,45 @@ pub fn encode_acceptance(proof: &SignedOwnershipAcceptance) -> Result<SignedReco
             public_key: value.accepting_publisher.to_vec(),
             signature: proof.signature.clone(),
         }],
+    })
+}
+pub fn decode_resolution(record: &SignedRecord) -> Result<SignedOwnershipResolution, Error> {
+    if record.format != RESOLUTION_FORMAT {
+        return Err(Error::Protocol("ownership resolution format required"));
+    }
+    let value = ThreadOwnershipResolution::decode(&record.canonical_record)
+        .map_err(|_| Error::Protocol("invalid canonical ownership resolution"))?;
+    let [local, acceptor] = record.signatures.as_slice() else {
+        return Err(Error::Protocol(
+            "resolution needs ordered owner and recipient signatures",
+        ));
+    };
+    if local.public_key != value.local_owner || acceptor.public_key != value.accepting_publisher {
+        return Err(Error::Protocol(
+            "resolution signature roles differ from canonical record",
+        ));
+    }
+    Ok(SignedOwnershipResolution {
+        canonical: record.canonical_record.clone(),
+        local_signature: local.signature.clone(),
+        acceptance_signature: acceptor.signature.clone(),
+    })
+}
+pub fn encode_resolution(proof: &SignedOwnershipResolution) -> Result<SignedRecord, Error> {
+    let value = ThreadOwnershipResolution::decode(&proof.canonical)
+        .map_err(|_| Error::Protocol("invalid ownership resolution"))?;
+    Ok(SignedRecord {
+        format: RESOLUTION_FORMAT.into(),
+        canonical_record: proof.canonical.clone(),
+        signatures: vec![
+            RecordSignature {
+                public_key: value.local_owner.to_vec(),
+                signature: proof.local_signature.clone(),
+            },
+            RecordSignature {
+                public_key: value.accepting_publisher.to_vec(),
+                signature: proof.acceptance_signature.clone(),
+            },
+        ],
     })
 }

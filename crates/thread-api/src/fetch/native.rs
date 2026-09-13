@@ -194,6 +194,10 @@ impl StagedSource {
             .ok_or(Error::Invalid("Thread genesis absent"))?;
         let mut replicas = std::collections::BTreeMap::new();
         let mut claims = std::collections::BTreeMap::<ContentHash, Vec<PendingClaim>>::new();
+        let mut resolutions = std::collections::BTreeMap::<
+            ContentHash,
+            crate::replication::ownership::OriginalResolution,
+        >::new();
         for wrapper in std::iter::once(main).chain(&self.dependencies) {
             let original = wrapper
                 .genesis
@@ -296,6 +300,15 @@ impl StagedSource {
                     remaining: value.source_frontier,
                 });
             }
+            for resolution in crate::replication::ownership::verify_resolutions(wrapper, &genesis)?
+            {
+                if resolutions
+                    .insert(replica.thread_id(), resolution)
+                    .is_some()
+                {
+                    return Err(Error::Invalid("duplicate ownership resolution"));
+                }
+            }
             claims.insert(replica.thread_id(), pending);
             replicas.insert(replica.thread_id(), replica);
         }
@@ -329,6 +342,17 @@ impl StagedSource {
                     .get(thread)
                     .ok_or(Error::Invalid("claim replica absent"))?,
                 pending,
+                authority,
+                spool_path,
+                now,
+            )?;
+        }
+        for (thread, resolution) in &resolutions {
+            install_ready_resolution(
+                replicas
+                    .get(thread)
+                    .ok_or(Error::Invalid("resolution replica absent"))?,
+                resolution,
                 authority,
                 spool_path,
                 now,
@@ -384,11 +408,39 @@ impl StagedSource {
                 }
                 install_ready_claims(replica, pending, authority, spool_path, now)?;
             }
+            if let Some(resolution) = resolutions.get(&operation.thread) {
+                install_ready_resolution(replica, resolution, authority, spool_path, now)?;
+            }
         }
         if claims.values().any(|claims| !claims.is_empty()) {
             return Err(Error::Invalid(
                 "ownership cutoff did not settle before source completion",
             ));
+        }
+        for (thread, resolution) in &resolutions {
+            let replica = replicas
+                .get(thread)
+                .ok_or(Error::Invalid("resolution replica absent"))?;
+            install_ready_resolution(replica, resolution, authority, spool_path, now)?;
+            if replica
+                .ownership_resolution()
+                .map_err(preparation)?
+                .is_none()
+            {
+                return Err(Error::Invalid(
+                    "ownership resolution frontier did not settle",
+                ));
+            }
+        }
+        for thread in claims
+            .keys()
+            .filter(|thread| !resolutions.contains_key(*thread))
+        {
+            replicas
+                .get(thread)
+                .ok_or(Error::Invalid("claim replica absent"))?
+                .effective_owner()
+                .map_err(preparation)?;
         }
         let main_id = crate::replication::opening::verify_genesis(
             main.genesis
@@ -422,6 +474,54 @@ struct PendingClaim {
     original: crate::replication::ownership::OriginalClaim,
     remaining: std::collections::BTreeSet<ContentHash>,
 }
+fn install_ready_resolution(
+    replica: &ThreadReplica,
+    resolution: &crate::replication::ownership::OriginalResolution,
+    authority: Option<&repo::device_authority::DeviceAuthority>,
+    spool_path: &str,
+    now: i64,
+) -> Result<(), Error> {
+    if replica
+        .ownership_resolution()
+        .map_err(preparation)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let value = heddle_object_model::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&resolution.original.canonical)
+        .map_err(preparation)?;
+    if replica.ownership_claims().map_err(preparation)?.len() != value.conflicting_claims.len() {
+        return Ok(());
+    }
+    for head in &value.frontier {
+        if replica
+            .operation(head)
+            .map_err(preparation)?
+            .is_none_or(|(_, status)| {
+                status != objects::object::thread_replication::Admission::Accepted
+            })
+        {
+            return Ok(());
+        }
+    }
+    if let Some(receipt) = &resolution.authority_admission {
+        replica
+            .resolve_ownership_with_admission(&resolution.original, receipt)
+            .map_err(preparation)?;
+    } else {
+        replica
+            .resolve_ownership(
+                &resolution.original,
+                authority.ok_or(Error::Invalid(
+                    "new ownership resolution requires current recipient authority",
+                ))?,
+                spool_path,
+                now,
+            )
+            .map_err(preparation)?;
+    }
+    Ok(())
+}
 fn install_ready_claims(
     replica: &ThreadReplica,
     pending: &mut Vec<PendingClaim>,
@@ -446,7 +546,7 @@ fn install_ready_claims(
             .contains(&claim.original)
         {
             replica
-                .claim_ownership(
+                .claim_ownership_for_import(
                     &claim.original,
                     authority.ok_or(Error::Invalid("new claim authority absent"))?,
                     spool_path,
@@ -454,7 +554,6 @@ fn install_ready_claims(
                 )
                 .map_err(preparation)?;
         }
-        replica.effective_owner().map_err(preparation)?;
     }
     Ok(())
 }

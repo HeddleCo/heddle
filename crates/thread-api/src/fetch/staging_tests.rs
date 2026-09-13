@@ -272,6 +272,8 @@ fn integrated_fixture(
             boundary_acceptances: Vec::new(),
             ownership_claims: vec![],
             ownership_claim_admissions: vec![],
+            ownership_resolutions: vec![],
+            ownership_resolution_admissions: vec![],
             genesis: Some(source_record),
             creator_authority: vec![],
             admission: None,

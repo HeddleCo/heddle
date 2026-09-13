@@ -106,6 +106,8 @@ impl ThreadCreation {
             boundary_acceptances: Vec::new(),
             ownership_claims: vec![],
             ownership_claim_admissions: vec![],
+            ownership_resolutions: vec![],
+            ownership_resolution_admissions: vec![],
             genesis: self.request.thread_genesis.clone(),
             creator_authority: self.request.creator_authority.clone(),
             admission: None,

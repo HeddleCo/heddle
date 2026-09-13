@@ -18,9 +18,9 @@ pub mod listing;
 mod local;
 pub mod metadata;
 pub mod ownership_claim;
-pub mod ownership_resolution;
 #[cfg(test)]
 mod ownership_claim_tests;
+pub mod ownership_resolution;
 mod peers;
 mod policy_sync;
 pub mod projection;
@@ -348,10 +348,38 @@ impl ThreadReplica {
                 });
             }
         }
+        let mut ownership_resolution_admissions = Vec::new();
+        if let Some(receipt) = self.ownership_resolution_admission()? {
+            let statement = receipt.verify_signature()?;
+            boundary_evidence::add_wire(
+                &mut boundary_acceptances,
+                receipt.boundary_acceptance.as_deref(),
+            )?;
+            ownership_resolution_admissions.push(wire::SignedRecord {
+                format: objects::object::thread_authority_admission::FORMAT.into(),
+                canonical_record: receipt.canonical,
+                signatures: vec![wire::RecordSignature {
+                    public_key: statement.executor.to_vec(),
+                    signature: receipt.signature,
+                }],
+            });
+        }
         Ok(wire::ThreadGenesisRecord {
             boundary_acceptances: boundary_acceptances.into_values().collect(),
             ownership_claims,
             ownership_claim_admissions,
+            ownership_resolutions: self.ownership_resolution()?.into_iter().map(|resolution| {
+                let value = objects::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&resolution.canonical)?;
+                Ok(wire::SignedRecord {
+                    format: objects::object::thread_replication::ownership_resolution::FORMAT.into(),
+                    canonical_record: resolution.canonical,
+                    signatures: vec![
+                        wire::RecordSignature { public_key: value.local_owner.to_vec(), signature: resolution.local_signature },
+                        wire::RecordSignature { public_key: value.accepting_publisher.to_vec(), signature: resolution.acceptance_signature },
+                    ],
+                })
+            }).collect::<Result<Vec<_>>>()?,
+            ownership_resolution_admissions,
             genesis: Some(wire::SignedRecord {
                 format: objects::object::thread_replication::GENESIS_FORMAT.into(),
                 canonical_record: original_genesis.canonical,

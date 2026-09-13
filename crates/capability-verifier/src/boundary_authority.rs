@@ -20,6 +20,8 @@ pub enum BoundarySubjectKind {
     AccountGenesis,
     /// Explicit dual-signed ownership claim.
     OwnershipClaim,
+    /// Original-local-key choice with fresh account recipient acceptance.
+    OwnershipResolution,
 }
 impl BoundarySubjectKind {
     fn method(self) -> &'static str {
@@ -27,6 +29,9 @@ impl BoundarySubjectKind {
             Self::Source => "/heddle.api.v2alpha1.SyncService/PublishContent",
             Self::AccountGenesis => "/heddle.api.v2alpha1.ThreadService/StartThread",
             Self::OwnershipClaim => "/heddle.api.v2alpha1.ThreadService/ClaimThreadOwnership",
+            Self::OwnershipResolution => {
+                "/heddle.api.v2alpha1.ThreadService/ResolveOwnershipConflict"
+            }
         }
     }
     fn label(self) -> &'static str {
@@ -34,6 +39,7 @@ impl BoundarySubjectKind {
             Self::Source => "source",
             Self::AccountGenesis => "account_genesis",
             Self::OwnershipClaim => "ownership_claim",
+            Self::OwnershipResolution => "ownership_resolution",
         }
     }
 }

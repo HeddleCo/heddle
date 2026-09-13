@@ -55,6 +55,7 @@ pub fn sign_mint_root_attachment(
     Ok(SignedMintRootAttachment {
         attachment: Some(attachment),
         owner_signature: Some(signature),
+        passkey_delegation: None,
     })
 }
 

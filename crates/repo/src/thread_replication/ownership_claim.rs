@@ -234,8 +234,34 @@ impl ThreadReplica {
         spool_path: &str,
         now: i64,
     ) -> Result<ContentHash> {
-        self.claim_inner(signed, Some((authority, spool_path, now)), None, None, true)
-            .map(|(id, _)| id)
+        self.claim_inner(
+            signed,
+            Some((authority, spool_path, now)),
+            None,
+            None,
+            true,
+            false,
+        )
+        .map(|(id, _)| id)
+    }
+    /// A transfer may carry both conflicting originals and their signed
+    /// resolution in one bundle. Keep both claims while staging that bundle.
+    pub fn claim_ownership_for_import(
+        &self,
+        signed: &SignedOwnershipClaim,
+        authority: &crate::device_authority::DeviceAuthority,
+        spool_path: &str,
+        now: i64,
+    ) -> Result<ContentHash> {
+        self.claim_inner(
+            signed,
+            Some((authority, spool_path, now)),
+            None,
+            None,
+            false,
+            true,
+        )
+        .map(|(id, _)| id)
     }
     pub fn claim_ownership_with_command(
         &self,
@@ -252,6 +278,7 @@ impl ThreadReplica {
             None,
             Some((command, response)),
             true,
+            false,
         )?
         .1
         .ok_or_else(|| Error::Invalid("ownership command receipt missing".into()))
@@ -263,7 +290,7 @@ impl ThreadReplica {
         signed: &SignedOwnershipClaim,
         admission: &crypto::thread_authority_admission::SignedAuthorityAdmission,
     ) -> Result<ContentHash> {
-        self.claim_inner(signed, None, Some(admission), None, false)
+        self.claim_inner(signed, None, Some(admission), None, false, true)
             .map(|(id, _)| id)
     }
     fn claim_inner(
@@ -273,6 +300,7 @@ impl ThreadReplica {
         admission: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
         command: Option<(&crate::device_operations::Command<'_>, &[u8])>,
         exact_frontier: bool,
+        allow_conflict: bool,
     ) -> Result<(ContentHash, Option<Vec<u8>>)> {
         let claim = signed.verify()?;
         let genesis = self.genesis()?;
@@ -416,7 +444,7 @@ impl ThreadReplica {
         transaction.commit()?;
         drop(connection);
         self.notify_committed()?;
-        if count != 0 {
+        if count != 0 && !allow_conflict {
             return Err(Error::Invalid(
                 "conflicting Thread ownership claims require explicit resolution".into(),
             ));

@@ -282,6 +282,12 @@ pub fn proposed_publication(
                 &mut references,
             );
         }
+        for receipt in &wrapper.ownership_resolution_admissions {
+            reference(
+                &crate::authority_admission::verify_signature(receipt)?.basis,
+                &mut references,
+            );
+        }
         separate(
             &mut wrapper.boundary_acceptances,
             &references,
@@ -383,6 +389,11 @@ fn prepare_plan(
                 OriginalManifestEntry::from_claim(&claim.original.verify().map_err(invalid)?)
                     .map_err(invalid)?,
             );
+        }
+        for resolution in crate::replication::ownership::verify_resolutions(wrapper, &genesis)? {
+            let value = heddle_object_model::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&resolution.original.canonical)
+                .map_err(invalid)?;
+            entries.push(OriginalManifestEntry::from_resolution(&value).map_err(invalid)?);
         }
     }
     if !geneses.contains(&intent.thread) {

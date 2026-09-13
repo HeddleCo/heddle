@@ -316,7 +316,8 @@ pub(crate) fn validate_artifacts(
         .map_err(preparation)?;
         let mut frontier = BTreeSet::new();
         let claims = crate::replication::ownership::verify_claims(wrapper, &genesis)?;
-        if claims.is_empty() {
+        let resolutions = crate::replication::ownership::verify_resolutions(wrapper, &genesis)?;
+        if claims.is_empty() && resolutions.is_empty() {
             continue;
         }
         for claim in claims {
@@ -326,6 +327,12 @@ pub(crate) fn validate_artifacts(
                     .verify()
                     .map_err(preparation)?
                     .source_frontier,
+            );
+        }
+        for resolution in resolutions {
+            frontier.extend(
+                heddle_object_model::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&resolution.original.canonical)
+                    .map_err(preparation)?.frontier,
             );
         }
         claim_frontiers.insert(genesis.id().map_err(preparation)?, frontier);

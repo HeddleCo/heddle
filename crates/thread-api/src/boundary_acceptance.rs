@@ -113,6 +113,8 @@ pub fn wrapper_evidence(record: &wire::ThreadGenesisRecord) -> Result<Evidence, 
     use prost::Message;
     if record.ownership_claims.len() > 2
         || record.ownership_claim_admissions.len() > 2
+        || record.ownership_resolutions.len() > 1
+        || record.ownership_resolution_admissions.len() > 1
         || record.encoded_len() > 256 * 1024
     {
         return Err(Error::Protocol("genesis evidence wrapper exceeds bounds"));
@@ -128,6 +130,9 @@ pub fn wrapper_evidence(record: &wire::ThreadGenesisRecord) -> Result<Evidence, 
         evidence.matched(&value.basis)?;
     }
     for receipt in &record.ownership_claim_admissions {
+        evidence.matched(&crate::authority_admission::verify_signature(receipt)?.basis)?;
+    }
+    for receipt in &record.ownership_resolution_admissions {
         evidence.matched(&crate::authority_admission::verify_signature(receipt)?.basis)?;
     }
     Ok(evidence)

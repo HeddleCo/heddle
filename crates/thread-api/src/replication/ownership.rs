@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use crypto::{
     thread_authority_admission::SignedAuthorityAdmission,
     thread_ownership_claim::SignedOwnershipClaim,
+    thread_ownership_resolution::SignedOwnershipResolution,
 };
 use heddle_object_model::object::{
     ContentHash,
@@ -16,6 +17,106 @@ use crate::{contract::ThreadGenesisRecord, transport::Error};
 pub struct OriginalClaim {
     pub original: SignedOwnershipClaim,
     pub authority_admission: Option<SignedAuthorityAdmission>,
+}
+pub struct OriginalResolution {
+    pub original: SignedOwnershipResolution,
+    pub authority_admission: Option<SignedAuthorityAdmission>,
+}
+pub fn verify_resolutions(
+    record: &ThreadGenesisRecord,
+    genesis: &ThreadGenesis,
+) -> Result<Vec<OriginalResolution>, Error> {
+    if record.ownership_resolutions.len() > 1 || record.ownership_resolution_admissions.len() > 1 {
+        return Err(Error::Protocol(
+            "ownership resolution witness exceeds bound",
+        ));
+    }
+    let claims = verify_claims(record, genesis)?;
+    let mut evidence = crate::boundary_acceptance::wrapper_evidence(record)?;
+    let admission = record
+        .ownership_resolution_admissions
+        .first()
+        .map(|wire| {
+            let mut receipt = crate::authority_admission::decode(wire)?;
+            let statement = receipt
+                .verify_signature()
+                .map_err(|_| Error::Protocol("invalid resolution admission signature"))?;
+            receipt.boundary_acceptance = evidence.matched(&statement.basis)?;
+            Ok::<_, Error>((receipt, statement))
+        })
+        .transpose()?;
+    let Some(wire) = record.ownership_resolutions.first() else {
+        if admission.is_some() {
+            return Err(Error::Protocol("unmatched resolution admission"));
+        }
+        return Ok(Vec::new());
+    };
+    let original = crate::thread_ownership::decode_resolution(wire)?;
+    let value = heddle_object_model::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&original.canonical)
+        .map_err(|_| Error::Protocol("invalid ownership resolution"))?;
+    value
+        .validate_genesis(genesis)
+        .map_err(|_| Error::Protocol("resolution differs from immutable genesis"))?;
+    let claim_ids = claims
+        .iter()
+        .map(|claim| {
+            claim
+                .original
+                .verify()
+                .and_then(|value| value.id().map_err(Into::into))
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(|_| Error::Protocol("invalid ownership claims"))?;
+    if claim_ids != value.conflicting_claims {
+        return Err(Error::Protocol(
+            "resolution differs from exact bundled claim set",
+        ));
+    }
+    let winner = claims
+        .iter()
+        .find(|claim| {
+            claim
+                .original
+                .verify()
+                .and_then(|value| value.id().map_err(Into::into))
+                .ok()
+                == Some(value.winning_claim)
+        })
+        .ok_or(Error::Protocol("winning claim absent"))?;
+    original
+        .verify(
+            &winner
+                .original
+                .verify()
+                .map_err(|_| Error::Protocol("invalid winning claim"))?,
+        )
+        .map_err(|_| Error::Protocol("invalid dual resolution signatures"))?;
+    let authority_admission = admission
+        .map(|(receipt, statement)| {
+            let trust = TrustedHostedExecutor {
+                spool: statement.spool,
+                spool_genesis: statement.spool_genesis,
+                executor: statement.executor,
+            };
+            receipt
+                .verify_resolution(
+                    &original,
+                    &winner
+                        .original
+                        .verify()
+                        .map_err(|_| Error::Protocol("invalid winning claim"))?,
+                    genesis,
+                    &trust,
+                )
+                .map_err(|_| Error::Protocol("resolution admission differs from original"))?;
+            Ok::<_, Error>(receipt)
+        })
+        .transpose()?;
+    evidence.finish()?;
+    Ok(vec![OriginalResolution {
+        original,
+        authority_admission,
+    }])
 }
 /// Conflicts are preserved, never selected by arrival order. The caller admits
 /// each claim independently and treats multiple accepted claims as unavailable.

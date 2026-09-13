@@ -419,6 +419,38 @@ fn explicit_claim_preserves_identity_cutoff_and_conflicts_fail_closed() {
         &account,
     )
     .expect("owner choice and fresh acceptance");
+    let wrong_set = crypto::thread_ownership_resolution::SignedOwnershipResolution::sign(
+        &objects::object::thread_replication::ownership_resolution::ThreadOwnershipResolution {
+            conflicting_claims: [id, objects::object::ContentHash::from_bytes([87; 32])].into(),
+            ..resolution.clone()
+        },
+        &local,
+        &account,
+    )
+    .expect("signed different set");
+    assert!(
+        replica
+            .resolve_ownership(&wrong_set, &authority, "acme/project", 100)
+            .expect_err("complete conflict set is mandatory")
+            .to_string()
+            .contains("complete stored claim set")
+    );
+    let wrong_frontier = crypto::thread_ownership_resolution::SignedOwnershipResolution::sign(
+        &objects::object::thread_replication::ownership_resolution::ThreadOwnershipResolution {
+            frontier: [objects::object::ContentHash::from_bytes([88; 32])].into(),
+            ..resolution.clone()
+        },
+        &local,
+        &account,
+    )
+    .expect("signed stale frontier");
+    assert!(
+        replica
+            .resolve_ownership(&wrong_frontier, &authority, "acme/project", 100)
+            .expect_err("exact frontier is mandatory")
+            .to_string()
+            .contains("frontier changed")
+    );
     let resolution_id = replica
         .resolve_ownership(&signed_resolution, &authority, "acme/project", 100)
         .expect("resolve complete conflict");
