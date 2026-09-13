@@ -107,11 +107,22 @@ impl HostedBridge {
         server: impl Into<String>,
         connection: iroh::endpoint::Connection,
     ) {
+        self.insert_weft_with_expiry_for_test(server, connection, i64::MAX)
+            .await;
+    }
+
+    #[cfg(test)]
+    pub async fn insert_weft_with_expiry_for_test(
+        &self,
+        server: impl Into<String>,
+        connection: iroh::endpoint::Connection,
+        expires_at_unix_millis: i64,
+    ) {
         self.weft.lock().await.insert(
             server.into(),
             CachedWeft {
                 connection,
-                expires_at_unix_millis: i64::MAX,
+                expires_at_unix_millis,
             },
         );
     }
@@ -418,6 +429,7 @@ pub async fn ensure_via_netd(
     }
 }
 
+#[derive(Debug)]
 pub struct EnsureOutcome {
     pub reused: bool,
     pub node_id: EndpointId,
@@ -636,4 +648,393 @@ mod tests {
         let _ = server_task.await;
         server.close().await;
     }
+
+    pub(crate) const TEST_WEFT_SERVER: &str = "https://api.test.heddle.sh";
+
+    pub(crate) struct WarmBridgeFixture {
+        pub home: TempDir,
+        pub socket: PathBuf,
+        pub node_id: iroh::EndpointId,
+        accepts: Arc<AtomicUsize>,
+        serve: Option<tokio::task::JoinHandle<Result<()>>>,
+        server_task: Option<tokio::task::JoinHandle<()>>,
+        server: Option<Endpoint>,
+    }
+
+    impl WarmBridgeFixture {
+        pub async fn start() -> Self {
+            let accepts = Arc::new(AtomicUsize::new(0));
+            let (server, server_task) = echo_server(Arc::clone(&accepts)).await;
+            let netd = Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .bind_addr((Ipv4Addr::LOCALHOST, 0))
+                .unwrap()
+                .bind()
+                .await
+                .unwrap();
+            let node_id = netd.id();
+            let first = netd
+                .connect(server.addr(), api::HOSTED_ALPN_V1)
+                .await
+                .unwrap();
+            let home = TempDir::new().unwrap();
+            let socket = hosted_bridge_socket_path(home.path());
+            if let Some(parent) = socket.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            let bridge = HostedBridge::new(netd, None);
+            bridge.insert_weft_for_test(TEST_WEFT_SERVER, first).await;
+            let serve = tokio::spawn(bridge.serve(socket.clone()));
+            wait_for_socket(&socket).await;
+            Self {
+                home,
+                socket,
+                node_id,
+                accepts,
+                serve: Some(serve),
+                server_task: Some(server_task),
+                server: Some(server),
+            }
+        }
+
+        pub fn accepts(&self) -> usize {
+            self.accepts.load(Ordering::SeqCst)
+        }
+    }
+
+    impl Drop for WarmBridgeFixture {
+        fn drop(&mut self) {
+            if let Some(task) = self.serve.take() {
+                task.abort();
+            }
+            if let Some(task) = self.server_task.take() {
+                task.abort();
+            }
+            if let Some(server) = self.server.take() {
+                tokio::spawn(async move {
+                    server.close().await;
+                });
+            }
+        }
+    }
+
+    pub(crate) struct PinHeddleHome {
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl PinHeddleHome {
+        pub fn new(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("HEDDLE_HOME");
+            unsafe {
+                std::env::set_var("HEDDLE_HOME", path);
+            }
+            Self { previous }
+        }
+    }
+
+    impl Drop for PinHeddleHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+                None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+            }
+        }
+    }
+
+    async fn wait_for_socket(socket: &std::path::Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !socket.exists() {
+            if std::time::Instant::now() >= deadline {
+                panic!("hosted bridge socket did not appear");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn start_empty_bridge() -> (TempDir, PathBuf, tokio::task::JoinHandle<Result<()>>) {
+        let netd = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let home = TempDir::new().unwrap();
+        let socket = hosted_bridge_socket_path(home.path());
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let serve = tokio::spawn(HostedBridge::new(netd, None).serve(socket.clone()));
+        wait_for_socket(&socket).await;
+        (home, socket, serve)
+    }
+
+    #[tokio::test]
+    async fn ensure_without_a_cached_weft_fails_closed() {
+        let (_home, socket, serve) = start_empty_bridge().await;
+        let error = ensure_via_netd(&socket, TEST_WEFT_SERVER, true)
+            .await
+            .expect_err("cold Ensure must not invent a weft session");
+        assert!(
+            !error.to_string().is_empty(),
+            "descriptor fetch failure must surface on Ensure"
+        );
+        serve.abort();
+        let _ = serve.await;
+    }
+
+    #[tokio::test]
+    async fn open_bi_without_a_cached_weft_fails_closed() {
+        let (_home, socket, serve) = start_empty_bridge().await;
+        let error = open_bi_via_netd(&socket, TEST_WEFT_SERVER, false, None)
+            .await
+            .expect_err("cold OpenBi must not invent a weft session");
+        assert!(!error.to_string().is_empty());
+        serve.abort();
+        let _ = serve.await;
+    }
+
+    #[tokio::test]
+    async fn open_bi_provider_without_transport_fails_closed() {
+        let fixture = WarmBridgeFixture::start().await;
+        let endpoint_id = iroh_base::SecretKey::generate().public();
+        let source = ProviderSource {
+            provider_id: "provider-a".to_string(),
+            endpoint_id: endpoint_id.to_string(),
+            direct_url: "wss://127.0.0.1:1/direct?provider=provider-a&ticket=opaque".to_string(),
+            opaque_ticket: "opaque".to_string(),
+            expires_at_unix_millis: u64::MAX,
+        };
+        let error = open_bi_via_netd(&fixture.socket, TEST_WEFT_SERVER, false, Some(&source))
+            .await
+            .expect_err("provider OpenBi on a weft-only bridge must fail closed");
+        assert!(
+            error.to_string().contains("provider transport"),
+            "got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_weft_is_evicted_before_ensure() {
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let (server, server_task) = echo_server(Arc::clone(&accepts)).await;
+        let netd = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let first = netd
+            .connect(server.addr(), api::HOSTED_ALPN_V1)
+            .await
+            .unwrap();
+        let home = TempDir::new().unwrap();
+        let socket = hosted_bridge_socket_path(home.path());
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let bridge = HostedBridge::new(netd, None);
+        bridge
+            .insert_weft_with_expiry_for_test(TEST_WEFT_SERVER, first, 1)
+            .await;
+        let serve = tokio::spawn(bridge.serve(socket.clone()));
+        wait_for_socket(&socket).await;
+        let error = ensure_via_netd(&socket, TEST_WEFT_SERVER, false)
+            .await
+            .expect_err("expired cache must not report reuse");
+        assert!(!error.to_string().is_empty());
+        serve.abort();
+        server_task.abort();
+        let _ = serve.await;
+        let _ = server_task.await;
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn closed_weft_is_evicted_before_ensure() {
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let (server, server_task) = echo_server(Arc::clone(&accepts)).await;
+        let netd = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let first = netd
+            .connect(server.addr(), api::HOSTED_ALPN_V1)
+            .await
+            .unwrap();
+        first.close(0u32.into(), b"test");
+        let home = TempDir::new().unwrap();
+        let socket = hosted_bridge_socket_path(home.path());
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let bridge = HostedBridge::new(netd, None);
+        bridge.insert_weft_for_test(TEST_WEFT_SERVER, first).await;
+        let serve = tokio::spawn(bridge.serve(socket.clone()));
+        wait_for_socket(&socket).await;
+        let error = ensure_via_netd(&socket, TEST_WEFT_SERVER, false)
+            .await
+            .expect_err("a closed weft session must be evicted");
+        assert!(!error.to_string().is_empty());
+        serve.abort();
+        server_task.abort();
+        let _ = serve.await;
+        let _ = server_task.await;
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn missing_bridge_socket_fails_ensure_and_open_bi() {
+        let missing = std::path::Path::new("/tmp/heddle-hosted-missing-e0c3.sock");
+        assert!(
+            ensure_via_netd(missing, TEST_WEFT_SERVER, false)
+                .await
+                .is_err()
+        );
+        assert!(
+            open_bi_via_netd(missing, TEST_WEFT_SERVER, false, None)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_bridge_frame_is_rejected() {
+        let fixture = WarmBridgeFixture::start().await;
+        let mut stream = UnixStream::connect(&fixture.socket).await.unwrap();
+        let length = (MAX_BRIDGE_FRAME as u32).saturating_add(1);
+        stream.write_all(&length.to_be_bytes()).await.unwrap();
+        stream.write_all(&[0u8; 8]).await.unwrap();
+        stream.flush().await.unwrap();
+        let mut reply = Vec::new();
+        let _ = stream.read_to_end(&mut reply).await;
+        assert!(
+            reply.is_empty(),
+            "an oversized frame must close the session without a handshake"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_disconnect_before_request_ends_the_session() {
+        let fixture = WarmBridgeFixture::start().await;
+        let stream = UnixStream::connect(&fixture.socket).await.unwrap();
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let ensured = ensure_via_netd(&fixture.socket, TEST_WEFT_SERVER, false)
+            .await
+            .unwrap();
+        assert!(ensured.reused);
+    }
+
+    #[tokio::test]
+    async fn ensure_rejects_an_opened_response() {
+        let home = TempDir::new().unwrap();
+        let socket = hosted_bridge_socket_path(home.path());
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let serve = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut stream).await;
+            let response =
+                serde_json::to_vec(&HostedBridgeResponse::Opened { reused: true }).unwrap();
+            let _ = write_frame(&mut stream, &response).await;
+        });
+        let error = ensure_via_netd(&socket, TEST_WEFT_SERVER, false)
+            .await
+            .expect_err("Opened is not a valid Ensure reply");
+        assert!(
+            error.to_string().contains("Opened for Ensure"),
+            "got {error}"
+        );
+        serve.abort();
+        let _ = serve.await;
+    }
+
+    #[tokio::test]
+    async fn open_bi_rejects_a_ready_response() {
+        let home = TempDir::new().unwrap();
+        let socket = hosted_bridge_socket_path(home.path());
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let serve = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut stream).await;
+            let response = serde_json::to_vec(&HostedBridgeResponse::Ready {
+                reused: true,
+                node_id: iroh_base::SecretKey::generate().public().to_string(),
+            })
+            .unwrap();
+            let _ = write_frame(&mut stream, &response).await;
+        });
+        let error = open_bi_via_netd(&socket, TEST_WEFT_SERVER, false, None)
+            .await
+            .expect_err("Ready is not a valid OpenBi reply");
+        assert!(
+            error.to_string().contains("Ready for OpenBi"),
+            "got {error}"
+        );
+        serve.abort();
+        let _ = serve.await;
+    }
+
+    #[tokio::test]
+    async fn connect_weft_uses_signed_direct_addresses() {
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let (server, server_task) = echo_server(Arc::clone(&accepts)).await;
+        let descriptor = crate::hosted_runtime::hosted::connection_path_tests::verified_descriptor(
+            server.id(),
+            Vec::new(),
+            server.addr().ip_addrs().map(ToString::to_string).collect(),
+        );
+        let client = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let connection = connect_weft(&client, &descriptor).await.unwrap();
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        send.write_all(b"direct").await.unwrap();
+        send.finish().unwrap();
+        let reply = recv.read_to_end(64 * 1024).await.unwrap();
+        assert_eq!(reply, b"direct");
+        assert_eq!(accepts.load(Ordering::SeqCst), 1);
+        client.close().await;
+        server_task.abort();
+        let _ = server_task.await;
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn connect_weft_fails_closed_when_direct_and_relays_are_gone() {
+        let descriptor = crate::hosted_runtime::hosted::connection_path_tests::verified_descriptor(
+            iroh_base::SecretKey::generate().public(),
+            Vec::new(),
+            vec!["127.0.0.1:9".to_string()],
+        );
+        let client = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let error = connect_weft(&client, &descriptor)
+            .await
+            .expect_err("dead direct + no relays must fail closed");
+        assert!(error.to_string().contains("no relays"), "got {error}");
+        client.close().await;
+    }
 }
+
+#[cfg(test)]
+pub(crate) use tests::{PinHeddleHome, TEST_WEFT_SERVER, WarmBridgeFixture};

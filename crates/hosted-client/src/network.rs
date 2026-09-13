@@ -168,4 +168,26 @@ mod tests {
             assert_eq!(host, "relay.heddle.sh");
         }
     }
+
+    #[tokio::test]
+    async fn bind_persistent_hosted_uses_the_device_endpoint() {
+        let _env_guard = config::credentials::lock_test_env();
+        let home = tempfile::TempDir::new().expect("temp Heddle home");
+        let previous = std::env::var_os("HEDDLE_HOME");
+        unsafe {
+            std::env::set_var("HEDDLE_HOME", home.path());
+        }
+        let (endpoint, _bridge) = bind_persistent_hosted(RelayMode::Disabled)
+            .await
+            .expect("persistent hosted bind");
+        let node_id = persisted_node_id()
+            .expect("read persisted node id")
+            .expect("bind must mint a device identity");
+        assert_eq!(endpoint.id(), node_id);
+        endpoint.close().await;
+        match previous {
+            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+        }
+    }
 }

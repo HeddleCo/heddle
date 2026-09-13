@@ -1023,4 +1023,143 @@ mod tests {
         live.close().await;
         server_task.await.unwrap();
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_via_netd_fails_when_the_bridge_socket_is_missing() {
+        let _env_guard = config::credentials::lock_test_env();
+        let home = tempfile::TempDir::new().unwrap();
+        let _pin = super::hosted_bridge::PinHeddleHome::new(home.path());
+        let error = HostedConnection::connect_via_netd(
+            super::hosted_bridge::TEST_WEFT_SERVER,
+            &config::ClientConfig::default(),
+        )
+        .await
+        .expect_err("connect_via_netd must fail closed without netd");
+        assert!(error.to_string().contains("not running"), "got {error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_via_netd_reuses_warm_weft_and_proxied_streams() {
+        let _env_guard = config::credentials::lock_test_env();
+        let fixture = super::hosted_bridge::WarmBridgeFixture::start().await;
+        let _pin = super::hosted_bridge::PinHeddleHome::new(fixture.home.path());
+        let connection = HostedConnection::connect_via_netd(
+            super::hosted_bridge::TEST_WEFT_SERVER,
+            &config::ClientConfig::default(),
+        )
+        .await
+        .expect("warm netd must be usable");
+        assert!(connection.reused_warm());
+        assert!(connection.supports_provider_transport());
+        assert_eq!(connection.endpoint_id(), fixture.node_id);
+        assert!(connection.local_endpoint().is_none());
+        assert!(connection.quic_connection().is_none());
+
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        send.write_all(b"via-netd").await.unwrap();
+        send.finish().unwrap();
+        let reply = recv.read_to_end(64 * 1024).await.unwrap();
+        assert_eq!(reply, b"via-netd");
+
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        send.write_chunk(bytes::Bytes::from_static(b"chunk"))
+            .await
+            .unwrap();
+        send.finish().unwrap();
+        let chunk = recv.read_chunk(64).await.unwrap();
+        assert_eq!(chunk.as_deref(), Some(b"chunk".as_slice()));
+
+        let (mut send, mut recv) = connection.open_bi().await.unwrap();
+        send.reset(1).unwrap();
+        recv.stop(1).unwrap();
+
+        assert_eq!(
+            fixture.accepts(),
+            1,
+            "proxied OpenBi must stay on the cached weft connection"
+        );
+
+        let started = Instant::now();
+        connection.close().await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "proxied close without a local provider must not drain, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hosted_client_connect_via_netd_runs_a_unary_on_proxied_streams() {
+        let _env_guard = config::credentials::lock_test_env();
+        let fixture = super::hosted_bridge::WarmBridgeFixture::start().await;
+        let _pin = super::hosted_bridge::PinHeddleHome::new(fixture.home.path());
+        let client = crate::hosted_runtime::hosted::HostedClient::connect_via_netd(
+            super::hosted_bridge::TEST_WEFT_SERVER,
+            &config::ClientConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert!(client.reused_warm_connection());
+        let context = crate::hosted_runtime::hosted::CallContextFactory::default()
+            .unary("/heddle.api.v1alpha1.IdentityService/WhoAmI", &[], "")
+            .unwrap()
+            .context;
+        let error = client
+            .unary::<api::heddle::api::v1alpha1::WhoAmIRequest, api::heddle::api::v1alpha1::WhoAmIResponse>(
+                "/heddle.api.v1alpha1.IdentityService/WhoAmI",
+                &context,
+                &api::heddle::api::v1alpha1::WhoAmIRequest {},
+            )
+            .await
+            .expect_err("echo fixture is not a framed WhoAmI server");
+        assert!(!error.to_string().is_empty());
+        client.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_connect_uses_netd_when_the_bridge_is_up() {
+        let _env_guard = config::credentials::lock_test_env();
+        let fixture = super::hosted_bridge::WarmBridgeFixture::start().await;
+        let _pin = super::hosted_bridge::PinHeddleHome::new(fixture.home.path());
+        let session = crate::hosted_runtime::hosted::HostedSession::build(
+            &config::UserConfig::default(),
+            None,
+            crate::hosted_runtime::hosted::HostedAuthMode::Unauthenticated,
+        )
+        .unwrap();
+        let client = session
+            .connect(super::hosted_bridge::TEST_WEFT_SERVER)
+            .await
+            .expect("session.connect must reuse a running hosted bridge");
+        assert!(client.reused_warm_connection());
+        client.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_connect_falls_back_when_netd_is_down() {
+        let _env_guard = config::credentials::lock_test_env();
+        let home = tempfile::TempDir::new().unwrap();
+        let _pin = super::hosted_bridge::PinHeddleHome::new(home.path());
+        let session = crate::hosted_runtime::hosted::HostedSession::build(
+            &config::UserConfig::default(),
+            None,
+            crate::hosted_runtime::hosted::HostedAuthMode::Unauthenticated,
+        )
+        .unwrap();
+        let error = session
+            .connect("https://127.0.0.1:1")
+            .await
+            .expect_err("without netd, connect must fall through to local discovery");
+        assert!(!error.to_string().is_empty());
+        let outbound = session
+            .connect_outbound("https://127.0.0.1:1")
+            .await
+            .expect_err("outbound connect must use the same netd fallback");
+        assert!(!outbound.to_string().is_empty());
+    }
 }
