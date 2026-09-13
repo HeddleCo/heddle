@@ -40,6 +40,12 @@ pub enum VisibilityTier {
 }
 
 impl VisibilityTier {
+    /// A hidden embargo blocks descendants, even when a descendant's own tier
+    /// is visible. Internal and TeamScoped restrict only their own state.
+    pub fn is_embargo(&self) -> bool {
+        matches!(self, Self::Private { .. } | Self::Restricted { .. })
+    }
+
     /// Stable wire/storage token for the tier discriminant. The labelled
     /// variants collapse to their kind name here; the label travels in a
     /// separate field. Shared by the discussion RPC vocabulary and the

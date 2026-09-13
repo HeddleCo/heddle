@@ -42,9 +42,8 @@ use crate::{
     visibility::{visible, AudienceTier},
 };
 
-/// Scope label written when a parent state is missing and is not a recorded
-/// shallow boundary. Checkout withholds rather than materializing a tip whose
-/// ancestry cannot be proven public.
+/// Scope label used when ancestry cannot be established from source metadata.
+/// A local shallow marker carries no proof of the withheld parent's audience.
 pub const UNRESOLVED_ANCESTOR_SCOPE: &str = "unresolved-ancestor";
 
 /// Outcome of a visibility put that captured its before/after images
@@ -616,17 +615,11 @@ impl Repository {
         })
     }
 
-    /// Downward-closed visibility gate (spike #266 §5.0, heddle#1733).
-    ///
-    /// A state is served only when it is visible to `audience` **and** every
-    /// reachable parent is itself served. Git projection already withholds
-    /// descendants of an embargoed ancestor; checkout/clone/pull must agree
-    /// so a later public tip cannot disclose private-ancestor path bytes.
-    ///
-    /// A missing parent that is not a shallow boundary fails closed: the
-    /// tip is withheld instead of materializing a tree we cannot prove is
-    /// public. The walk is local object-store I/O (O(ancestors)), not a
-    /// hosted page.
+    /// Serve only when the tip's own tier is visible and no ancestor has an
+    /// unserved Private/Restricted embargo. Internal/Team ancestors do not taint
+    /// descendants. Every parent's identity and metadata must resolve; a local
+    /// shallow marker cannot establish visibility across an unknown boundary.
+    /// The walk is local object-store I/O, bounded to 4096 states / 16 MiB.
     pub fn withholding_visibility_for_audience(
         &self,
         state_id: &StateId,
@@ -634,27 +627,32 @@ impl Repository {
     ) -> Result<Option<(StateId, VisibilityTier)>> {
         let mut seen = HashSet::new();
         let mut stack = vec![*state_id];
+        let mut decoded_bytes = 0usize;
+        let unresolved = |id| {
+            Some((
+                id,
+                VisibilityTier::Private {
+                    scope_label: UNRESOLVED_ANCESTOR_SCOPE.to_string(),
+                },
+            ))
+        };
         while let Some(id) = stack.pop() {
             if !seen.insert(id) {
                 continue;
             }
+            if seen.len() > 4096 {
+                return Ok(unresolved(id));
+            }
             let tier = self.effective_visibility_tier(&id)?;
-            if !visible(&tier, audience) {
+            if (id == *state_id || tier.is_embargo()) && !visible(&tier, audience) {
                 return Ok(Some((id, tier)));
             }
             let Some(state) = self.store().get_state(&id)? else {
-                if self.is_shallow(&id) {
-                    continue;
-                }
-                return Ok(Some((
-                    id,
-                    VisibilityTier::Private {
-                        scope_label: UNRESOLVED_ANCESTOR_SCOPE.to_string(),
-                    },
-                )));
+                return Ok(unresolved(id));
             };
-            if self.is_shallow(&id) {
-                continue;
+            decoded_bytes = decoded_bytes.saturating_add(state.encode_current_msgpack()?.len());
+            if state.id() != id || decoded_bytes > 16 * 1024 * 1024 {
+                return Ok(unresolved(id));
             }
             stack.extend(state.parents.iter().copied());
         }
