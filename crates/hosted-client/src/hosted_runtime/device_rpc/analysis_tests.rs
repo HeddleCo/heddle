@@ -2,7 +2,10 @@
 use std::sync::Arc;
 
 use objects::{
-    object::{Attribution, Blob, Principal, State, Tree, TreeEntry},
+    object::{
+        Attribution, Blob, EntryVisibility, EntryVisibilityEntry, Principal, State, Tree,
+        TreeEntry, VisibilityTier,
+    },
     store::ObjectStore,
 };
 
@@ -18,8 +21,19 @@ pub(super) async fn roundtrip(
 ) {
     let blob = Blob::from(b"pub fn answer() -> i32 { 42 }\n".to_vec());
     repository.store().put_blob(&blob).expect("Rust source");
-    let mut tree = Tree::new();
-    tree.insert(TreeEntry::file("answer.rs", blob.hash(), false).expect("path"));
+    let hidden_blob = Blob::from(b"pub fn secret() -> i32 { 7 }\n".to_vec());
+    repository
+        .store()
+        .put_blob(&hidden_blob)
+        .expect("second Rust source");
+    let tree = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("answer.rs", blob.hash(), false).expect("visible path"),
+            TreeEntry::file("hidden.rs", hidden_blob.hash(), false).expect("hidden path"),
+        ],
+        vec![[31; 32], [32; 32]],
+    )
+    .expect("salted analysis tree");
     repository.store().put_tree(&tree).expect("tree");
     let base = repository.head().expect("head").expect("base");
     let state = State::new_snapshot(
@@ -28,7 +42,7 @@ pub(super) async fn roundtrip(
         Attribution::human(Principal::new("owner", "")),
     );
     repository.store().put_state(&state).expect("source");
-    repository
+    let thread = repository
         .create_native_thread("analysis-source", base, None, "analysis fixture")
         .expect("Thread");
     repository
@@ -49,10 +63,91 @@ pub(super) async fn roundtrip(
     let request = StartAnalysisRequest {
         client_operation_id: uuid::Uuid::new_v4().to_string(),
         source: Some(revision.clone()),
+        thread: Some(ThreadRef {
+            spool: Some(SpoolRef {
+                id: spool.to_string(),
+            }),
+            id: Some(ThreadId {
+                value: thread.thread_id().as_bytes().to_vec(),
+            }),
+        }),
         kinds: vec![AnalysisKind::SemanticIndex as i32],
         execution_endpoint: Some(device.endpoint()),
         ..Default::default()
     };
+    let unrelated = repository
+        .create_native_thread("analysis-unrelated", base, None, "other Thread")
+        .expect("unrelated Thread");
+    let mut wrong = request.clone();
+    wrong.client_operation_id = uuid::Uuid::new_v4().to_string();
+    wrong.thread = Some(ThreadRef {
+        spool: Some(SpoolRef {
+            id: spool.to_string(),
+        }),
+        id: Some(ThreadId {
+            value: unrelated.thread_id().as_bytes().to_vec(),
+        }),
+    });
+    assert!(
+        remote
+            .api
+            .call::<thread_api::rpc::AnalysisServiceStartAnalysis>(&wrong)
+            .await
+            .is_err(),
+        "same-Spool Thread without this accepted source cannot authorize analysis"
+    );
+    let wrong_view = remote
+        .api
+        .observe::<thread_api::rpc::AnalysisServiceObserveAnalysis>(&ObserveAnalysisRequest {
+            source: Some(revision.clone()),
+            thread: wrong.thread,
+            kinds: vec![AnalysisKind::SemanticIndex as i32],
+            observe: Some(ObserveOptions {
+                mode: ObservationMode::Once as i32,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await;
+    let rejected = match wrong_view {
+        Err(_) => true,
+        Ok(mut stream) => {
+            let mut leaked = false;
+            while let Ok(Some(event)) = stream.next().await {
+                leaked |= matches!(
+                    event.payload,
+                    Some(
+                        analysis_event::Payload::Analysis(_) | analysis_event::Payload::Finding(_)
+                    )
+                );
+            }
+            !leaked
+        }
+    };
+    assert!(
+        rejected,
+        "a readable source object is not an analysis capability on another Thread"
+    );
+    let mut wrong_base = request.clone();
+    wrong_base.client_operation_id = uuid::Uuid::new_v4().to_string();
+    wrong_base.base = Some(revision.clone());
+    wrong_base.base_thread = Some(ThreadRef {
+        spool: Some(SpoolRef {
+            id: spool.to_string(),
+        }),
+        id: Some(ThreadId {
+            value: unrelated.thread_id().as_bytes().to_vec(),
+        }),
+    });
+    wrong_base.kinds = vec![AnalysisKind::SemanticDiff as i32];
+    assert!(
+        remote
+            .api
+            .call::<thread_api::rpc::AnalysisServiceStartAnalysis>(&wrong_base)
+            .await
+            .is_err(),
+        "the comparison Thread must independently admit its selected base"
+    );
     let response = remote
         .api
         .call::<thread_api::rpc::AnalysisServiceStartAnalysis>(&request)
@@ -147,6 +242,7 @@ pub(super) async fn roundtrip(
         .api
         .observe::<thread_api::rpc::AnalysisServiceObserveAnalysis>(&ObserveAnalysisRequest {
             source: Some(revision),
+            thread: request.thread.clone(),
             kinds: vec![AnalysisKind::SemanticIndex as i32],
             symbols: vec!["answer".into()],
             observe: Some(ObserveOptions {
@@ -177,6 +273,65 @@ pub(super) async fn roundtrip(
     }
     assert!(record);
     assert_eq!(symbols, 1, "actual indexed symbol crosses Iroh projection");
+    let hidden_index = tree
+        .entries()
+        .iter()
+        .position(|entry| entry.name() == "hidden.rs")
+        .expect("hidden entry");
+    let sidecar = EntryVisibility::new(
+        state.change_id,
+        tree.hash(),
+        vec![EntryVisibilityEntry {
+            tree_id: tree.hash(),
+            leaf_hash: tree
+                .v4_leaf_hash_at(hidden_index)
+                .expect("hidden leaf commitment"),
+            tier: VisibilityTier::Private {
+                scope_label: "analysis-secret".into(),
+            },
+        }],
+    )
+    .expect("entry visibility declaration");
+    repository
+        .restore_entry_visibility_sidecar(
+            &state.change_id,
+            Some(sidecar.encode().expect("sidecar bytes")),
+        )
+        .expect("restrict source entry");
+    let mut restricted = remote
+        .api
+        .observe::<thread_api::rpc::AnalysisServiceObserveAnalysis>(&ObserveAnalysisRequest {
+            source: Some(RevisionRef {
+                spool: Some(SpoolRef {
+                    id: spool.to_string(),
+                }),
+                revision: Some(revision_ref::Revision::State(
+                    api::heddle::api::v1alpha1::StateId {
+                        value: state.id().as_bytes().to_vec(),
+                    },
+                )),
+            }),
+            thread: request.thread.clone(),
+            kinds: vec![AnalysisKind::SemanticIndex as i32],
+            observe: Some(ObserveOptions {
+                mode: ObservationMode::Once as i32,
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .await
+        .expect("restricted analysis observation");
+    let mut visible_findings = Vec::new();
+    while let Some(event) = restricted.next().await.expect("restricted analysis frame") {
+        if let Some(analysis_event::Payload::Finding(finding)) = event.payload {
+            visible_findings.push(finding.path);
+        }
+    }
+    assert_eq!(
+        visible_findings,
+        vec!["answer.rs"],
+        "a semantic index attachment cannot reveal a withheld source entry"
+    );
     let released = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         device.analysis.workers.clone().acquire_many_owned(2),

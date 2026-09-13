@@ -707,6 +707,7 @@ impl DeviceRpc {
                                 id: key.to_string(),
                             }),
                             source: Some(revision(&reference, state)),
+                            thread: Some(reference.clone()),
                             kind,
                             analyzer: "heddle-semantic-index".into(),
                             analyzer_version: root

@@ -16,6 +16,51 @@ use prost::Message;
 
 use super::{DeviceRpc, auth::Session, checkout};
 
+fn source_thread<'a>(
+    source: &'a Option<ThreadRef>,
+    base: &'a Option<ThreadRef>,
+    has_base: bool,
+) -> Result<(&'a ThreadRef, Option<&'a ThreadRef>)> {
+    let source = source.as_ref().context("analysis source Thread required")?;
+    ensure!(
+        has_base || base.is_none(),
+        "analysis base Thread requires base revision"
+    );
+    Ok((source, has_base.then_some(base.as_ref().unwrap_or(source))))
+}
+
+fn admitted_source(
+    session: &Session,
+    repository: &repo::Repository,
+    thread: &ThreadRef,
+    revision: &RevisionRef,
+) -> Result<(objects::object::StateId, objects::object::EntryRedactions)> {
+    checkout::same_spool(session, thread.spool.as_ref())?;
+    let thread_id: [u8; 32] = thread
+        .id
+        .as_ref()
+        .context("analysis Thread identity required")?
+        .value
+        .as_slice()
+        .try_into()
+        .context("analysis Thread identity must be 32 bytes")?;
+    let replica = repo::thread_replication::ThreadReplica::open(
+        &session.spool.heddle_dir,
+        ContentHash::from_bytes(thread_id),
+    )?;
+    let state = checkout::revision(session, Some(revision))?;
+    let principal = uuid::Uuid::parse_str(&session.principal)?;
+    let redactions = super::auth::source_content_visibility(
+        repository,
+        &replica,
+        principal,
+        session.agent_id.as_deref(),
+        state,
+    )?
+    .context("analysis source unavailable on selected Thread")?;
+    Ok((state, redactions))
+}
+
 #[derive(Debug)]
 pub(super) struct Runtime {
     #[cfg(feature = "semantic")]
@@ -61,7 +106,7 @@ impl Runtime {
 type StartedAnalysis = (
     repo::device_operations::Started,
     ContentHash,
-    Vec<objects::object::StateId>,
+    Vec<(ThreadRef, objects::object::StateId)>,
     String,
     tokio::sync::OwnedSemaphorePermit,
 );
@@ -75,30 +120,101 @@ impl DeviceRpc {
         mut send: iroh::endpoint::SendStream,
     ) -> Result<()> {
         let session = Arc::new(session);
-        let result=(||->Result<(Vec<u8>,Option<StartedAnalysis>)> {
-            let request=StartAnalysisRequest::decode(body)?;
-            ensure!(request.execution_endpoint.as_ref()==Some(&self.endpoint()),"analysis requires this exact execution endpoint");
-            ensure!(request.expected_disclosure_policy_version.is_empty(),"local semantic indexing does not execute provider disclosure policies");
+        let result = (|| -> Result<(Vec<u8>, Option<StartedAnalysis>)> {
+            let request = StartAnalysisRequest::decode(body)?;
+            ensure!(
+                request.execution_endpoint.as_ref() == Some(&self.endpoint()),
+                "analysis requires this exact execution endpoint"
+            );
+            ensure!(
+                request.expected_disclosure_policy_version.is_empty(),
+                "local semantic indexing does not execute provider disclosure policies"
+            );
             ensure!(request.kinds.len()<=6 && request.kinds.iter().all(|kind| matches!(*kind,k if k==AnalysisKind::SemanticIndex as i32||k==AnalysisKind::SemanticDiff as i32)),"this native producer executes semantic index and diff analysis");
-            ensure!(!request.kinds.contains(&(AnalysisKind::SemanticDiff as i32)) || request.base.is_some(),"semantic diff requires exact base revision");
-            let mut state=vec![checkout::revision(&session,request.source.as_ref())?];
-            if let Some(base)=request.base.as_ref() { let base=checkout::revision(&session,Some(base))?;if !state.contains(&base){state.push(base);} }
+            ensure!(
+                !request.kinds.contains(&(AnalysisKind::SemanticDiff as i32))
+                    || request.base.is_some(),
+                "semantic diff requires exact base revision"
+            );
+            let (thread, base_thread) = source_thread(
+                &request.thread,
+                &request.base_thread,
+                request.base.is_some(),
+            )?;
+            let repository = repo::Repository::open(&session.spool.root)?;
+            let source = request
+                .source
+                .as_ref()
+                .context("analysis source required")?;
+            let source_state = admitted_source(&session, &repository, thread, source)?.0;
+            let mut state = vec![(thread.clone(), source_state)];
+            if let Some(base) = request.base.as_ref() {
+                let base_thread = base_thread.context("analysis base Thread required")?;
+                let base_state = admitted_source(&session, &repository, base_thread, base)?.0;
+                if !state
+                    .iter()
+                    .any(|(thread, state)| thread == base_thread && *state == base_state)
+                {
+                    state.push((base_thread.clone(), base_state));
+                }
+            }
             session.check_current(&self.home)?;
-            let namespace=session.command_namespace()?;
-            let id=request.client_operation_id.parse::<OperationId>()?;
-            let key=repo::operation_dedup::receipt_record_key(&namespace,id);
-            let reference=RecordRef{spool:Some(SpoolRef{id:session.spool.id.to_string()}),id:key.to_string()};
-            let mut receipt=self.receipt(&request.client_operation_id);
-            receipt.outcome=Some(mutation_receipt::Outcome::PendingOperation(reference.clone()));
-            let response=MutationResponse{receipt:Some(receipt)}.encode_to_vec();
-            if let Some(replayed) = repo::device_operations::replay_response(&session.spool.heddle_dir, &repo::device_operations::Command { namespace: &namespace, id, method: "/heddle.api.v2alpha1.AnalysisService/StartAnalysis", request_hash: *blake3::hash(body).as_bytes() })? { return Ok((replayed, None)); }
-            let permit=self.analysis.workers.clone().try_acquire_owned().context("native analysis workers are busy")?;
-            let started=repo::device_operations::start(&session.spool.heddle_dir,repo::device_operations::Command{namespace:&namespace,id,method:"/heddle.api.v2alpha1.AnalysisService/StartAnalysis",request_hash:*blake3::hash(body).as_bytes()},self.analysis.executor()?,OperationRecord{
-                r#ref:Some(reference),client_operation_id:request.client_operation_id,state:operation_record::State::Queued as i32,
-                total_units:Some(state.len() as u64),unit:"semantic index".into(),cancellation_supported:true,..Default::default()
-            },response)?;
-            let response=started.response.clone();
-            Ok((response,Some((started,key,state,namespace,permit))))
+            let namespace = session.command_namespace()?;
+            let id = request.client_operation_id.parse::<OperationId>()?;
+            let key = repo::operation_dedup::receipt_record_key(&namespace, id);
+            let reference = RecordRef {
+                spool: Some(SpoolRef {
+                    id: session.spool.id.to_string(),
+                }),
+                id: key.to_string(),
+            };
+            let mut receipt = self.receipt(&request.client_operation_id);
+            receipt.outcome = Some(mutation_receipt::Outcome::PendingOperation(
+                reference.clone(),
+            ));
+            let response = MutationResponse {
+                receipt: Some(receipt),
+            }
+            .encode_to_vec();
+            if let Some(replayed) = repo::device_operations::replay_response(
+                &session.spool.heddle_dir,
+                &repo::device_operations::Command {
+                    namespace: &namespace,
+                    id,
+                    method: "/heddle.api.v2alpha1.AnalysisService/StartAnalysis",
+                    request_hash: *blake3::hash(body).as_bytes(),
+                },
+            )? {
+                return Ok((replayed, None));
+            }
+            let permit = self
+                .analysis
+                .workers
+                .clone()
+                .try_acquire_owned()
+                .context("native analysis workers are busy")?;
+            let started = repo::device_operations::start(
+                &session.spool.heddle_dir,
+                repo::device_operations::Command {
+                    namespace: &namespace,
+                    id,
+                    method: "/heddle.api.v2alpha1.AnalysisService/StartAnalysis",
+                    request_hash: *blake3::hash(body).as_bytes(),
+                },
+                self.analysis.executor()?,
+                OperationRecord {
+                    r#ref: Some(reference),
+                    client_operation_id: request.client_operation_id,
+                    state: operation_record::State::Queued as i32,
+                    total_units: Some(state.len() as u64),
+                    unit: "semantic index".into(),
+                    cancellation_supported: true,
+                    ..Default::default()
+                },
+                response,
+            )?;
+            let response = started.response.clone();
+            Ok((response, Some((started, key, state, namespace, permit))))
         })();
         let response = match result {
             Ok((response, Some((started, key, state, namespace, permit)))) => {
@@ -174,7 +290,7 @@ impl DeviceRpc {
         session: Arc<Session>,
         namespace: String,
         key: ContentHash,
-        state: Vec<objects::object::StateId>,
+        state: Vec<(ThreadRef, objects::object::StateId)>,
         cancelled: Arc<AtomicBool>,
         permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Result<()> {
@@ -217,7 +333,22 @@ impl DeviceRpc {
                 cancelled: flag,
                 deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
             };
-            for state in state {
+            for (thread, state) in state {
+                admitted_source(
+                    &source,
+                    &repository,
+                    &thread,
+                    &RevisionRef {
+                        spool: Some(SpoolRef {
+                            id: source.spool.id.to_string(),
+                        }),
+                        revision: Some(revision_ref::Revision::State(
+                            api::heddle::api::v1alpha1::StateId {
+                                value: state.as_bytes().to_vec(),
+                            },
+                        )),
+                    },
+                )?;
                 repository.analyze_semantic_index_with_admission(state, budget.clone(), || {
                     source
                         .check_current(&home)
@@ -315,9 +446,28 @@ impl DeviceRpc {
         send: iroh::endpoint::SendStream,
     ) -> Result<()> {
         let request = ObserveAnalysisRequest::decode(body)?;
-        checkout::revision(session, request.source.as_ref())?;
-        if request.base.is_some() {
-            checkout::revision(session, request.base.as_ref())?;
+        let (thread, base_thread) = source_thread(
+            &request.thread,
+            &request.base_thread,
+            request.base.is_some(),
+        )?;
+        let repository = repo::Repository::open(&session.spool.root)?;
+        admitted_source(
+            session,
+            &repository,
+            thread,
+            request
+                .source
+                .as_ref()
+                .context("analysis source required")?,
+        )?;
+        if let Some(base) = request.base.as_ref() {
+            admitted_source(
+                session,
+                &repository,
+                base_thread.context("analysis base Thread required")?,
+                base,
+            )?;
         }
         ensure!(
             request.paths.len() <= 128 && request.symbols.len() <= 128 && request.kinds.len() <= 6,
@@ -358,11 +508,24 @@ impl DeviceRpc {
     ) -> Result<super::stream::ViewSnapshot<AnalysisEvent>> {
         let before = analysis_version(session, request)?;
         let repository = repo::Repository::open(&session.spool.root)?;
-        let state = checkout::revision(session, request.source.as_ref())?;
+        let (thread, base_thread) = source_thread(
+            &request.thread,
+            &request.base_thread,
+            request.base.is_some(),
+        )?;
+        let (state, source_redactions) = admitted_source(
+            session,
+            &repository,
+            thread,
+            request
+                .source
+                .as_ref()
+                .context("analysis source required")?,
+        )?;
         let base = request
             .base
             .as_ref()
-            .map(|base| checkout::revision(session, Some(base)))
+            .map(|base| admitted_source(session, &repository, base_thread.unwrap_or(thread), base))
             .transpose()?;
         let kinds: std::collections::BTreeSet<_> = if request.kinds.is_empty() {
             [AnalysisKind::SemanticIndex as i32].into_iter().collect()
@@ -375,7 +538,8 @@ impl DeviceRpc {
             ensure!(kind != AnalysisKind::Unspecified, "analysis kind required");
             let root = repository.attached_semantic_index(&state)?;
             let root_base = base
-                .map(|base| repository.attached_semantic_index(&base))
+                .as_ref()
+                .map(|(base, _)| repository.attached_semantic_index(base))
                 .transpose()?
                 .flatten();
             let supported = matches!(
@@ -390,7 +554,7 @@ impl DeviceRpc {
                     state.as_bytes().as_slice(),
                     &raw_kind.to_be_bytes(),
                     base.as_ref()
-                        .map(|v| v.as_bytes().as_slice())
+                        .map(|(v, _)| v.as_bytes().as_slice())
                         .unwrap_or_default(),
                 ]
                 .concat(),
@@ -404,7 +568,13 @@ impl DeviceRpc {
             let mut findings = Vec::new();
             let mut complete = true;
             if supported && available {
-                let current = semantic_symbols(&repository, state, request, &mut complete)?;
+                let current = semantic_symbols(
+                    &repository,
+                    state,
+                    &source_redactions,
+                    request,
+                    &mut complete,
+                )?;
                 if kind == AnalysisKind::SemanticIndex {
                     for ((path, address), symbol) in current {
                         findings.push(AnalysisFinding {
@@ -420,7 +590,8 @@ impl DeviceRpc {
                 } else {
                     let old = semantic_symbols(
                         &repository,
-                        base.context("semantic diff base")?,
+                        base.as_ref().context("semantic diff base")?.0,
+                        &base.as_ref().context("semantic diff base")?.1,
                         request,
                         &mut complete,
                     )?;
@@ -460,6 +631,8 @@ impl DeviceRpc {
                 r#ref: Some(reference),
                 source: request.source.clone(),
                 base: request.base.clone(),
+                thread: Some(thread.clone()),
+                base_thread: base_thread.cloned(),
                 kind: raw_kind,
                 analyzer: "heddle-semantic-index".into(),
                 analyzer_version: root
@@ -536,11 +709,35 @@ impl DeviceRpc {
 fn analysis_version(session: &Session, request: &ObserveAnalysisRequest) -> Result<Vec<u8>> {
     let repository = repo::Repository::open(&session.spool.root)?;
     let mut hash = blake3::Hasher::new_derive_key("heddle-native-analysis-view-v2");
-    for revision in [request.source.as_ref(), request.base.as_ref()]
-        .into_iter()
-        .flatten()
+    let (thread, base_thread) = source_thread(
+        &request.thread,
+        &request.base_thread,
+        request.base.is_some(),
+    )?;
+    for (thread, revision) in [
+        Some((
+            thread,
+            request
+                .source
+                .as_ref()
+                .context("analysis source required")?,
+        )),
+        request
+            .base
+            .as_ref()
+            .map(|base| (base_thread.unwrap_or(thread), base)),
+    ]
+    .into_iter()
+    .flatten()
     {
-        let state = checkout::revision(session, Some(revision))?;
+        let state = admitted_source(session, &repository, thread, revision)?.0;
+        hash.update(
+            &thread
+                .id
+                .as_ref()
+                .context("analysis Thread identity required")?
+                .value,
+        );
         hash.update(state.as_bytes());
         if let Some(attachment) =
             repository.latest_state_attachment(&state, repo::StateAttachmentKind::SemanticIndex)?
@@ -557,6 +754,7 @@ fn analysis_version(session: &Session, request: &ObserveAnalysisRequest) -> Resu
 fn semantic_symbols(
     repository: &repo::Repository,
     state: objects::object::StateId,
+    redactions: &objects::object::EntryRedactions,
     request: &ObserveAnalysisRequest,
     complete: &mut bool,
 ) -> Result<BTreeMap<(String, String), objects::object::SymbolEntry>> {
@@ -613,8 +811,27 @@ fn semantic_symbols(
             {
                 continue;
             }
+            let source =
+                super::content::path_entry(repository.store(), source_tree, &path, &mut path_work)?;
+            if super::content::visible_path_entry(
+                repository.store(),
+                source_tree,
+                &path,
+                redactions,
+                &mut path_work,
+            )
+            .is_err()
+            {
+                continue;
+            }
             match entry.kind {
-                SemanticEntryKind::Dir => pending.push((path, entry.node, depth + 1)),
+                SemanticEntryKind::Dir => {
+                    ensure!(
+                        source.tree_hash().is_some(),
+                        "semantic directory is not a source directory"
+                    );
+                    pending.push((path, entry.node, depth + 1));
+                }
                 SemanticEntryKind::Opaque => *complete = false,
                 SemanticEntryKind::File => {
                     let length = objects::store::ObjectSource::decoded_blob_len(
@@ -631,12 +848,6 @@ fn semantic_symbols(
                         .get_blob(&entry.node)?
                         .context("semantic file absent")?;
                     let file = SemanticFileNode::decode(blob.content())?;
-                    let source = super::content::path_entry(
-                        repository.store(),
-                        source_tree,
-                        &path,
-                        &mut path_work,
-                    )?;
                     ensure!(
                         source.blob_hash() == Some(file.source_blob),
                         "semantic file does not describe this exact source path"
