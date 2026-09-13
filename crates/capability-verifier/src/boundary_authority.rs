@@ -194,15 +194,7 @@ fn inspect_mint_provenance(
         ));
     }
     let canonical = crate::creation::canonical_mint_root_attachment(body)?;
-    crate::crypto::verify_signature(
-        issuer,
-        signed
-            .owner_signature
-            .as_ref()
-            .ok_or_else(|| invalid("original mint signature missing"))?,
-        crate::creation::MINT_ROOT_DOMAIN,
-        &canonical,
-    )
+    crate::creation::verify_mint_root_signature(signed, body, issuer, &canonical)
 }
 /// Verify current explicit acceptance with all existing capability restrictions.
 /// This returns current accepting authority, never relabels the original actor.

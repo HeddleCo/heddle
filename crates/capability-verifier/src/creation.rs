@@ -206,7 +206,7 @@ pub fn verify_retained_mint_root_attachment(
     verify_mint_root_signature(signed, attachment, issuer, &body)
 }
 
-fn verify_mint_root_signature(
+pub(crate) fn verify_mint_root_signature(
     signed: &SignedMintRootAttachment,
     attachment: &MintRootAttachment,
     issuer: &AuthorizationVerificationKey,
