@@ -62,6 +62,152 @@ fn selected_source_closure_is_complete_without_private_history_or_child_spools()
         "symlink reuse is deduplicated, external spools and provenance are not traversed"
     );
 }
+
+#[test]
+fn visible_source_pack_proves_hidden_leaves_without_reading_their_content() {
+    use crate::object::{
+        AudienceTier, EntryRedactions, EntryVisibilityEntry, PartialTree, PartialTreeLeaf,
+        VisibilityTier, encode_redacted_projection, visible,
+    };
+    let open = Blob::new(b"visible bytes".to_vec());
+    let secret = Blob::new(b"hidden bytes".to_vec());
+    let hidden_tree = ContentHash::compute(b"hidden subtree deliberately absent");
+    let tree = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::directory("private-dir", hidden_tree).expect("directory"),
+            TreeEntry::file("secret-name.txt", secret.hash(), false).expect("secret"),
+            TreeEntry::file("visible.txt", open.hash(), false).expect("visible"),
+        ],
+        vec![[1; 32], [2; 32], [3; 32]],
+    )
+    .expect("salted root");
+    let state = State::new_snapshot(
+        tree.hash(),
+        vec![],
+        Attribution::human(Principal::new("owner", "owner@example.test")),
+    );
+    let mut redactions = EntryRedactions::default();
+    for name in ["private-dir", "secret-name.txt"] {
+        redactions.extend_overrides(
+            &[EntryVisibilityEntry {
+                tree_id: tree.hash(),
+                leaf_hash: tree.v4_leaf_hash_for(name).expect("leaf"),
+                tier: VisibilityTier::Private {
+                    scope_label: "security".into(),
+                },
+            }],
+            |tier| visible(tier, &AudienceTier::Internal),
+        );
+    }
+    // The withheld bytes are absent from the source. Descending into the
+    // hidden directory or reading its sibling blob must fail this build.
+    let source = SelectedSource {
+        entries: vec![
+            (
+                PackObjectId::Hash(tree.hash()),
+                ObjectType::Tree,
+                tree.encode_canonical().expect("tree"),
+            ),
+            (
+                PackObjectId::Hash(open.hash()),
+                ObjectType::Blob,
+                open.content().to_vec(),
+            ),
+        ],
+        blob_reads: std::cell::Cell::new(0),
+    };
+    let temp = tempfile::tempdir().expect("temporary pack");
+    let path = temp.path().join("visible.pack");
+    let index = temp.path().join("visible.idx");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .expect("pack file");
+    let builder = StreamingPackBuilder::new(
+        file,
+        index.clone(),
+        Default::default(),
+        temp.path().join("buckets"),
+    )
+    .expect("builder");
+    build_visible_source_pack(builder, &source, &state, &redactions, 16, 65536)
+        .expect("visible closure requires no hidden bytes");
+    assert_eq!(source.blob_reads.get(), 1);
+    let packed = PackReader::open(&path, &index).expect("pack reader");
+    let verified = packed
+        .validate_visible_source_closure(&state, 16, 65536)
+        .expect("verified disclosure");
+    assert_eq!(verified.objects.len(), 3);
+    assert_eq!(verified.partial_trees.len(), 1);
+    assert_eq!(verified.partial_trees[0].declared_root(), state.tree);
+    assert_eq!(verified.partial_trees[0].redacted_count(), 2);
+    assert!(
+        packed
+            .get_hashed_object(&secret.hash())
+            .expect("lookup hidden blob")
+            .is_none()
+    );
+    assert!(
+        packed
+            .get_hashed_object(&hidden_tree)
+            .expect("lookup hidden tree")
+            .is_none()
+    );
+    assert!(
+        packed.validate_source_closure(&state, 16, 65536).is_err(),
+        "partial disclosure must not become complete source availability"
+    );
+    let mut records = Vec::new();
+    packed
+        .visit_objects(|id, kind, bytes| {
+            if kind == ObjectType::Tree {
+                assert!(
+                    !bytes
+                        .windows(b"secret-name.txt".len())
+                        .any(|part| part == b"secret-name.txt")
+                );
+            }
+            records.push((id, kind, bytes.to_vec()));
+            Ok(())
+        })
+        .expect("inspect disclosed records");
+    let mut extra = records.clone();
+    extra.push((
+        PackObjectId::Hash(secret.hash()),
+        ObjectType::Blob,
+        secret.into_content(),
+    ));
+    assert!(
+        reader(extra)
+            .validate_visible_source_closure(&state, 16, 65536)
+            .is_err(),
+        "hidden bytes cannot be smuggled alongside a valid partial proof"
+    );
+    let partial = &verified.partial_trees[0];
+    let mut forged = partial.leaves().to_vec();
+    let hidden = forged
+        .iter_mut()
+        .find(|leaf| matches!(leaf, PartialTreeLeaf::Redacted { .. }))
+        .expect("redacted leaf");
+    *hidden = PartialTreeLeaf::Redacted {
+        leaf_hash: ContentHash::compute(b"forged commitment"),
+    };
+    let forged = PartialTree::new(state.tree, forged);
+    let forged = encode_redacted_projection(&forged).expect("encode malformed proof fixture");
+    let root = records
+        .iter_mut()
+        .find(|(id, _, _)| *id == PackObjectId::Hash(state.tree))
+        .expect("root record");
+    root.2 = forged;
+    assert!(
+        reader(records)
+            .validate_visible_source_closure(&state, 16, 65536)
+            .is_err(),
+        "a changed opaque commitment no longer proves the selected root"
+    );
+}
 #[test]
 fn publication_rejects_missing_source_and_unselected_objects() {
     let (state, entries) = fixture();

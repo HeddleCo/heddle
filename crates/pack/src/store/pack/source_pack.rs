@@ -7,7 +7,9 @@ use std::{
 
 use super::{ObjectType, PackObjectId, PackReader, PackStats, StreamingPackBuilder, SyncData};
 use crate::{
-    object::{ContentHash, ObjectSource, State, Tree, TreeEntryTarget},
+    object::{
+        ContentHash, EntryRedactions, ObjectSource, PartialTree, State, Tree, TreeEntryTarget,
+    },
     store::{Result, StoreError},
 };
 
@@ -18,9 +20,38 @@ pub(super) fn validate(
     references: &[crate::object::source_target::capture::ReferenceProof],
     visibility: Option<&crate::object::thread_replication::CaptureVisibility>,
 ) -> Result<Vec<PackObjectId>> {
+    Ok(validate_disclosure(
+        reader,
+        selected,
+        max_decoded_bytes,
+        references,
+        visibility,
+        false,
+    )?
+    .objects)
+}
+
+/// Verified visible closure. Partial trees retain their original Merkle root
+/// and must be installed in the partial-tree cache, never the full tree store.
+pub struct VisibleSourceClosure {
+    /// Exact selected State and all visible tree/blob object identities.
+    pub objects: Vec<PackObjectId>,
+    /// Verified Merkle proofs whose hidden leaves remain unavailable.
+    pub partial_trees: Vec<PartialTree>,
+}
+
+pub(super) fn validate_disclosure(
+    reader: &PackReader<'_>,
+    selected: &State,
+    max_decoded_bytes: u64,
+    references: &[crate::object::source_target::capture::ReferenceProof],
+    visibility: Option<&crate::object::thread_replication::CaptureVisibility>,
+    allow_partial: bool,
+) -> Result<VisibleSourceClosure> {
     let canonical = selected.encode_current_msgpack()?;
     let mut available = BTreeMap::new();
     let mut trees = BTreeMap::new();
+    let mut partial_trees = Vec::new();
     let mut decoded = 0_u64;
     reader.visit_objects(|id, kind, data| {
         decoded = decoded
@@ -38,6 +69,18 @@ pub(super) fn validate(
             (PackObjectId::Hash(hash), ObjectType::Blob)
                 if ContentHash::compute_typed("blob", data) == hash => {}
             (PackObjectId::Hash(hash), ObjectType::Tree) => {
+                if allow_partial && crate::object::is_redacted_tree(data) {
+                    let partial = crate::object::decode_redacted_projection(data)?;
+                    partial.verify()?;
+                    if partial.declared_root() != hash || !partial.has_redactions() {
+                        return Err(invalid(
+                            "partial source tree differs from its address or is complete",
+                        ));
+                    }
+                    trees.insert(hash, partial.visible_tree()?);
+                    partial_trees.push(partial);
+                    return Ok(());
+                }
                 // Full tree anchors avoid pulling a private historical delta
                 // base into a selected revision's disclosure closure.
                 let tree = Tree::decode_canonical(data)
@@ -123,7 +166,10 @@ pub(super) fn validate(
             "source pack contains objects outside the selected revision",
         ));
     }
-    Ok(visited.into_iter().collect())
+    Ok(VisibleSourceClosure {
+        objects: visited.into_iter().collect(),
+        partial_trees,
+    })
 }
 fn invalid(message: &str) -> StoreError {
     StoreError::InvalidObject(message.into())
@@ -155,10 +201,53 @@ pub fn build_source_pack<W: Write + Read + Seek + SyncData>(
 }
 
 pub fn build_source_pack_with_references<W: Write + Read + Seek + SyncData>(
+    builder: StreamingPackBuilder<W>,
+    source: &impl ObjectSource,
+    selected: &State,
+    references: &[crate::object::source_target::capture::ReferenceProof],
+    max_objects: usize,
+    max_decoded_bytes: u64,
+) -> Result<(W, PackStats)> {
+    build_disclosure(
+        builder,
+        source,
+        selected,
+        references,
+        None,
+        max_objects,
+        max_decoded_bytes,
+    )
+}
+
+/// Build only source bytes visible under an already-admitted entry projection.
+/// Hidden directories are not traversed; their salted commitments prove the
+/// original tree root without names or targets. Reference descriptor closures
+/// are separate disclosure material and are omitted from this partial transfer.
+pub fn build_visible_source_pack<W: Write + Read + Seek + SyncData>(
+    builder: StreamingPackBuilder<W>,
+    source: &impl ObjectSource,
+    selected: &State,
+    redactions: &EntryRedactions,
+    max_objects: usize,
+    max_decoded_bytes: u64,
+) -> Result<(W, PackStats)> {
+    build_disclosure(
+        builder,
+        source,
+        selected,
+        &[],
+        Some(redactions),
+        max_objects,
+        max_decoded_bytes,
+    )
+}
+
+fn build_disclosure<W: Write + Read + Seek + SyncData>(
     mut builder: StreamingPackBuilder<W>,
     source: &impl ObjectSource,
     selected: &State,
     references: &[crate::object::source_target::capture::ReferenceProof],
+    redactions: Option<&EntryRedactions>,
     max_objects: usize,
     max_decoded_bytes: u64,
 ) -> Result<(W, PackStats)> {
@@ -198,9 +287,24 @@ pub fn build_source_pack_with_references<W: Write + Read + Seek + SyncData>(
                 if tree.hash() != hash {
                     return Err(invalid("source tree differs from its address"));
                 }
-                let canonical = tree.encode_canonical()?;
-                charge_bytes(&mut decoded, canonical.len() as u64, max_decoded_bytes)?;
-                for (hash, kind) in children(&tree) {
+                let full = tree.encode_canonical()?;
+                // Charge examined bytes, including hidden entries, so redaction
+                // cannot turn a bounded disclosure into an unbounded tree walk.
+                charge_bytes(&mut decoded, full.len() as u64, max_decoded_bytes)?;
+                let (canonical, visible_tree) = match redactions {
+                    Some(redactions)
+                        if (0..tree.entries().len())
+                            .any(|index| !redactions.entry_visible(&tree, index)) =>
+                    {
+                        let partial = PartialTree::project(&tree, redactions.leaves())?;
+                        (
+                            crate::object::encode_redacted_projection(&partial)?,
+                            partial.visible_tree()?,
+                        )
+                    }
+                    _ => (full, tree),
+                };
+                for (hash, kind) in children(&visible_tree) {
                     if let Some(expected) = discovered.get(&hash) {
                         if *expected != kind {
                             return Err(invalid(
