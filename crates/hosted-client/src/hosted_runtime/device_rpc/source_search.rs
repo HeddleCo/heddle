@@ -62,12 +62,13 @@ fn index_source(
             }
             if let Some(child) = entry.tree_hash() {
                 pending.push((path, child, depth + 1, leaf_chain));
-            } else if let Some(blob) = entry.blob_hash() {
+            } else if let Some(blob_hash) = entry.blob_hash() {
                 path_leaves.insert(path.clone(), leaf_chain.clone());
-                let Some(blob) = repository.store().get_blob(&blob)? else {
+                let Some(blob) = repository.store().get_blob(&blob_hash)? else {
                     content_ready = false;
                     continue;
                 };
+                ensure!(blob.hash() == blob_hash, "source Search blob identity mismatch");
                 if blob.content().len() > 65536 {
                     content_ready = false;
                     continue;
