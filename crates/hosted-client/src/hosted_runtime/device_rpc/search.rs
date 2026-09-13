@@ -236,16 +236,31 @@ impl DeviceRpc {
                         ensure!(examined < 10_000, "device search candidate work bound exceeded");
                         let remaining = (10_000 - examined).min(256);
                         let kinds: Vec<_> = selection.kinds.iter().copied().map(|kind| kind - 1).collect();
+                        let repository = repo::Repository::open(&spool.root)?;
+                        let query_text = if selection.kinds.len() == 1
+                            && selection.kinds.contains(&(SearchDomain::Revision as i32))
+                            && request.text.trim().starts_with("git:")
+                        {
+                            let oid = request.text.trim().trim_start_matches("git:");
+                            ensure!((oid.len()==40 || oid.len()==64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit()), "invalid Git commit selector");
+                            let Some(mapped) = repository.git_overlay_mapped_state_for_git_commit(&oid.to_ascii_lowercase())? else {
+                                position += 1;
+                                after_operation = None;
+                                continue;
+                            };
+                            mapped.to_string_full()
+                        } else {
+                            request.text.clone()
+                        };
                         let batch = repo::thread_replication::collaboration_search::search_native(
                             &spool.heddle_dir,
-                            &request.text,
+                            &query_text,
                             after_operation,
                             remaining as u32,
                             &kinds,
                             selection.annotations.as_ref(),
                         )?;
                         let exhausted = batch.scanned < remaining;
-                        let repository = repo::Repository::open(&spool.root)?;
                         let facts = worker_session.facts(Some(&spool.capability_path))?;
                         let principal = uuid::Uuid::parse_str(&worker_session.principal)?;
                         for hit in batch.hits {

@@ -76,7 +76,7 @@ pub(super) async fn roundtrip(
         ..Default::default()
     };
     // Accepted captures queue source Search without a browser StartAnalysis call.
-    let _source_maintenance = super::artifact_retention::Retention::start(device.home.clone());
+    let source_maintenance = super::artifact_retention::Retention::start(device.home.clone());
     let automatic = SearchRequest {
         threads: vec![request.thread.clone().expect("selected Thread")],
         domains: vec![SearchDomain::SourceContent as i32],
@@ -86,21 +86,10 @@ pub(super) async fn roundtrip(
     };
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let mut stream = remote
-            .api
-            .observe::<thread_api::rpc::SearchServiceSearch>(&automatic)
-            .await
-            .expect("automatic source Search");
-        let mut found = false;
-        while let Some(event) = stream.next().await.expect("automatic Search frame") {
-            if let Some(search_event::Payload::Hit(hit)) = event.payload {
-                found |= hit
-                    .location
-                    .as_ref()
-                    .is_some_and(|location| location.path == "answer.rs");
-            }
-        }
-        if found {
+        let connection =
+            repo::local_metadata::open(repository.heddle_dir()).expect("source readiness");
+        let ready: i64 = connection.query_row("SELECT EXISTS(SELECT 1 FROM source_search_ready WHERE revision=?1 AND content_ready=1)",[state.id().as_bytes().as_slice()],|row|row.get(0)).expect("indexed source row");
+        if ready != 0 {
             break;
         }
         assert!(
@@ -109,6 +98,69 @@ pub(super) async fn roundtrip(
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+    drop(source_maintenance);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let mut stream = remote
+        .api
+        .observe::<thread_api::rpc::SearchServiceSearch>(&automatic)
+        .await
+        .expect("automatic source Search");
+    let mut found = false;
+    while let Some(event) = stream.next().await.expect("automatic Search frame") {
+        if let Some(search_event::Payload::Hit(hit)) = event.payload {
+            found |= hit
+                .location
+                .as_ref()
+                .is_some_and(|location| location.path == "answer.rs");
+        }
+    }
+    assert!(
+        found,
+        "daemon-indexed source must be served through device Iroh Search"
+    );
+    let ingest = repository.heddle_dir().join("ingest");
+    std::fs::create_dir_all(&ingest).expect("Git ingest mapping directory");
+    let mapping = rusqlite::Connection::open(ingest.join("sha_map.sqlite")).expect("Git mapping");
+    mapping.execute_batch("CREATE TABLE sha_map(git_sha TEXT NOT NULL,kind INTEGER NOT NULL,heddle_repr TEXT NOT NULL)").expect("mapping schema");
+    let oid = "abcdef0123456789abcdef0123456789abcdef01";
+    mapping
+        .execute(
+            "INSERT INTO sha_map(git_sha,kind,heddle_repr) VALUES(?1,0,?2)",
+            rusqlite::params![oid, state.id().to_string_full()],
+        )
+        .expect("imported commit map");
+    assert_eq!(
+        repository
+            .git_overlay_mapped_state_for_git_commit(oid)
+            .expect("exact Git map"),
+        Some(state.id())
+    );
+    let git_revision = SearchRequest {
+        threads: vec![request.thread.clone().expect("selected Thread")],
+        domains: vec![SearchDomain::Revision as i32],
+        text: format!("git:{}", oid.to_ascii_uppercase()),
+        mode: search_request::Mode::Lexical as i32,
+        ..Default::default()
+    };
+    let mut git_hits = remote
+        .api
+        .observe::<thread_api::rpc::SearchServiceSearch>(&git_revision)
+        .await
+        .expect("mapped Git Revision Search");
+    let mut mapped = false;
+    while let Some(event) = git_hits.next().await.expect("Git Search frame") {
+        if let Some(search_event::Payload::Hit(hit)) = event.payload {
+            mapped |= hit
+                .location
+                .as_ref()
+                .and_then(|location| location.revision.as_ref())
+                == Some(&revision);
+        }
+    }
+    assert!(
+        mapped,
+        "mapped Git commit resolves only through accepted source identity"
+    );
     let unrelated = repository
         .create_native_thread("analysis-unrelated", base, None, "other Thread")
         .expect("unrelated Thread");
