@@ -245,8 +245,6 @@ impl DeviceRpc {
                 use verbs::merge::{
                     ConflictLabels, ThreeWayMergeOutcome, try_three_way_merge_between_tips,
                 };
-                let source_current = replica.view()?.source_heads
-                    == std::collections::BTreeSet::from([source_id]);
                 let readiness = match try_three_way_merge_between_tips(
                     &repository,
                     &target_revision,
@@ -254,7 +252,6 @@ impl DeviceRpc {
                     ConflictLabels::DEFAULT,
                 )? {
                     ThreeWayMergeOutcome::Conflicted { .. } => ReviewReadiness::Blocked,
-                    _ if !source_current => ReviewReadiness::Blocked,
                     _ if session.permits("/heddle.api.v2alpha1.ThreadService/LandThread") => {
                         ReviewReadiness::Eligible
                     }

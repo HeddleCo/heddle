@@ -29,7 +29,7 @@ pub(super) fn policy_version(repository: &repo::Repository) -> Result<ContentHas
     Ok(ContentHash::compute_typed("heddle-device-integration-policy-v2", &[b"same-spool;root-derived-source-and-target-authority;writer-lease;explicit-source;all-target-parents;clean-checkout;conflict-free-three-way;target-frontier-cas;preserve-audience;no-hosted-approval".as_slice(),serde_json::to_vec(&repository.resolve_capture_default_visibility())?.as_slice()].concat()))
 }
 pub(super) fn thread_policy_version(repository: &repo::Repository) -> Result<ContentHash> {
-    Ok(ContentHash::compute_typed("heddle-device-thread-landing-policy-v2", &[b"same-spool;independently-authorized-source-and-target;explicit-source;unique-target-head;conflict-free-three-way;target-frontier-cas;preserve-audience;no-checkout-write;no-hosted-approval".as_slice(),serde_json::to_vec(&repository.resolve_capture_default_visibility())?.as_slice()].concat()))
+    Ok(ContentHash::compute_typed("heddle-device-thread-landing-policy-v2", &[b"same-spool;independently-authorized-source-and-target;exact-admitted-source;unique-target-head;conflict-free-three-way;target-frontier-cas;preserve-audience;no-checkout-write;no-hosted-approval".as_slice(),serde_json::to_vec(&repository.resolve_capture_default_visibility())?.as_slice()].concat()))
 }
 impl DeviceRpc {
     pub(super) fn land_thread(
@@ -68,9 +68,6 @@ impl DeviceRpc {
         let target_replica = ThreadReplica::open(&session.spool.heddle_dir, target)?;
         session.authorize_thread(&repository, &source_replica)?;
         session.authorize_thread(&repository, &target_replica)?;
-        if source_replica.view()?.source_heads != BTreeSet::from([source]) {
-            bail!("landing source must be the single current Thread head");
-        }
         let principal = uuid::Uuid::parse_str(&session.principal)?;
         if source_content_visibility(
             &repository,

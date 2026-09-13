@@ -1010,6 +1010,15 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
             supersedes: None,
         })
         .expect("source privacy");
+    let newer = capture(&source_genesis, &signer, &[&original], vec![source_state]);
+    source
+        .receive(&newer, repository.store(), |_| Ok(()))
+        .expect("newer independent draft");
+    assert_eq!(
+        source.view().expect("source after newer draft").source_heads,
+        BTreeSet::from([state_id(&newer)]),
+        "the selected reviewed source is deliberately historical"
+    );
     let mut target_genesis = source_genesis.clone();
     target_genesis.name = "target".into();
     target_genesis.nonce = vec![8];
