@@ -109,6 +109,7 @@ impl DeviceRpc {
                             | "config.toml"
                             | repo::local_metadata::DATABASE_NAME
                             | repo::local_metadata::CHANGE_MARKER_NAME
+                            | "entry_visibility"
                             | "native-checkouts"
                             | "device-checkouts"
                             | "writer-leases"

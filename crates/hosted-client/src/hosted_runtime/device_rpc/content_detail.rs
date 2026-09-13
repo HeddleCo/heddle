@@ -126,25 +126,13 @@ pub(super) fn diff(
     limits: ReadBudget,
     emit: &mut impl FnMut(Payload) -> Result<()>,
 ) -> Result<()> {
-    let base = checkout::revision(session, read.base.as_ref())?;
+    let base = checkout::revision_id(session, read.base.as_ref())?;
     let base_thread = match read.base_thread.as_ref() {
-        Some(reference) => repo::thread_replication::ThreadReplica::open(
-            &session.spool.heddle_dir,
-            checkout::thread(session, Some(reference))?,
-        )?,
-        None => selected_thread.clone(),
+        Some(reference) => checkout::thread(session, Some(reference))?,
+        None => selected_thread.thread_id(),
     };
-    session.authorize_thread(repository, &base_thread)?;
-    let Some(base_redactions) = super::auth::source_content_visibility(
-        repository,
-        &base_thread,
-        uuid::Uuid::parse_str(&session.principal)?,
-        session.agent_id.as_deref(),
-        base,
-    )?
-    else {
-        anyhow::bail!("diff base is unavailable to its selected Thread audience")
-    };
+    let (_, _, base_redactions) =
+        checkout::admitted_source_ids(session, repository, base_thread, base)?;
     let mut union = redactions.clone();
     union.extend(&base_redactions);
     let previous = repository

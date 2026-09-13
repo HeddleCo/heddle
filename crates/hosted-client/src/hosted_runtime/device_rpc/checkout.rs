@@ -548,6 +548,12 @@ pub(super) fn thread(session: &Session, reference: Option<&ThreadRef>) -> Result
     Ok(id)
 }
 pub(super) fn revision(session: &Session, reference: Option<&RevisionRef>) -> Result<StateId> {
+    let state = revision_id(session, reference)?;
+    let repository = repo::Repository::open(&session.spool.root)?;
+    session.authorize_revision(&repository, state)?;
+    Ok(state)
+}
+pub(super) fn revision_id(session: &Session, reference: Option<&RevisionRef>) -> Result<StateId> {
     let reference = reference.context("source revision required")?;
     same_spool(session, reference.spool.as_ref())?;
     let state = match reference.revision.as_ref() {
@@ -559,9 +565,51 @@ pub(super) fn revision(session: &Session, reference: Option<&RevisionRef>) -> Re
         ),
         _ => bail!("checkout needs a native source revision"),
     };
-    let repository = repo::Repository::open(&session.spool.root)?;
-    session.authorize_revision(&repository, state)?;
     Ok(state)
+}
+
+/// Admit a read of an exact State through its explicitly selected owning
+/// Thread. This avoids a reverse source-candidate scan, which cannot establish
+/// that the caller chose this particular Thread as the disclosure scope.
+pub(super) fn admitted_source(
+    session: &Session,
+    repository: &repo::Repository,
+    thread: &ThreadRef,
+    revision: &RevisionRef,
+) -> Result<(ThreadReplica, StateId, objects::object::EntryRedactions)> {
+    same_spool(session, thread.spool.as_ref())?;
+    let thread_id = ContentHash::from_bytes(
+        thread
+            .id
+            .as_ref()
+            .context("Thread identity missing")?
+            .value
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("invalid Thread hash"))?,
+    );
+    let state = revision_id(session, Some(revision))?;
+    admitted_source_ids(session, repository, thread_id, state)
+}
+
+/// The same exact source admission for protocols that already decoded hashes.
+pub(super) fn admitted_source_ids(
+    session: &Session,
+    repository: &repo::Repository,
+    thread: ContentHash,
+    state: StateId,
+) -> Result<(ThreadReplica, StateId, objects::object::EntryRedactions)> {
+    let replica = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
+    session.authorize_thread(repository, &replica)?;
+    let redactions = super::auth::source_content_visibility(
+        repository,
+        &replica,
+        uuid::Uuid::parse_str(&session.principal)?,
+        session.agent_id.as_deref(),
+        state,
+    )?
+    .context("selected source is unavailable to this Thread audience")?;
+    Ok((replica, state, redactions))
 }
 fn wire_revision(session: &Session, state: StateId) -> RevisionRef {
     RevisionRef {

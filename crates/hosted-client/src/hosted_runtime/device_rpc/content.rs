@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use api::heddle::api::{v1alpha1 as shared, v2alpha1::*};
 use iroh::endpoint::SendStream;
 use objects::{
@@ -112,6 +112,13 @@ impl DeviceRpc {
         send: &mut SendStream,
     ) -> Result<()> {
         let request = ReadContentRequest::decode(body)?;
+        let selected_thread = request.thread.clone().context("Thread required")?;
+        let selected_revision = request
+            .revision
+            .clone()
+            .context("exact revision required")?;
+        let feed = self.feed(session)?;
+        let mut changes = feed.changes.subscribe();
         let slot = self
             .content_work
             .clone()
@@ -121,29 +128,20 @@ impl DeviceRpc {
         let home = self.home.clone();
         let response_home = home.clone();
         let (sender, mut receiver) = tokio::sync::mpsc::channel::<Result<Vec<u8>>>(1);
+        let (proof_sender, proof_receiver) = tokio::sync::oneshot::channel();
         let worker = tokio::task::spawn_blocking(move || {
             let _slot = slot;
             current.check_current(&home)?;
             let mut budget = Budget::new(request.budget)?;
-            let thread_id = checkout::thread(&current, request.thread.as_ref())?;
-            let replica = repo::thread_replication::ThreadReplica::open(
-                &current.spool.heddle_dir,
-                thread_id,
-            )?;
             let revision = request.revision.context("exact revision required")?;
-            let state_id = checkout::revision(&current, Some(&revision))?;
             let repository = repo::Repository::open(&current.spool.root)?;
-            current.authorize_thread(&repository, &replica)?;
-            let Some(redactions) = auth::source_content_visibility(
+            let (replica, state_id, redactions) = checkout::admitted_source(
+                &current,
                 &repository,
-                &replica,
-                uuid::Uuid::parse_str(&current.principal)?,
-                current.agent_id.as_deref(),
-                state_id,
-            )?
-            else {
-                bail!("selected source is unavailable to this Thread audience")
-            };
+                request.thread.as_ref().context("Thread required")?,
+                &revision,
+            )?;
+            let _ = proof_sender.send(redactions.leaves().clone());
             let state = repository
                 .store()
                 .get_state(&state_id)?
@@ -280,9 +278,53 @@ impl DeviceRpc {
             }
             Ok::<(), anyhow::Error>(())
         });
+        let initial_leaves = match proof_receiver.await {
+            Ok(leaves) => leaves,
+            Err(_) => {
+                worker.await??;
+                bail!("content source admission interrupted")
+            }
+        };
+        #[cfg(test)]
+        let mut sent_frames = 0usize;
         while let Some(bytes) = receiver.recv().await {
+            #[cfg(test)]
+            if sent_frames > 0 {
+                let gate = self
+                    .content_send_gate
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("content test gate poisoned"))?
+                    .clone();
+                if let Some(gate) = gate {
+                    let _release = gate.acquire().await?;
+                }
+            }
             session.check_current(&response_home)?;
+            if changes.has_changed()? {
+                changes.borrow_and_update();
+                #[cfg(test)]
+                self.content_rechecks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let current = session.clone();
+                let thread = selected_thread.clone();
+                let revision = selected_revision.clone();
+                let leaves = tokio::task::spawn_blocking(move || -> Result<_> {
+                    let repository = repo::Repository::open(&current.spool.root)?;
+                    let (_, _, redactions) =
+                        checkout::admitted_source(&current, &repository, &thread, &revision)?;
+                    Ok(redactions.leaves().clone())
+                })
+                .await??;
+                ensure!(
+                    leaves.is_subset(&initial_leaves),
+                    "source visibility changed during content read"
+                );
+            }
             write(send, bytes?).await?;
+            #[cfg(test)]
+            {
+                sent_frames += 1;
+            }
         }
         worker.await??;
         Ok(())

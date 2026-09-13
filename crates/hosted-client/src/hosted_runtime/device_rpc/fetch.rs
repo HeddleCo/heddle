@@ -330,22 +330,12 @@ pub(super) fn prepare(
     allow_partial: bool,
 ) -> Result<Prepared> {
     let repository = repo::Repository::open(&session.spool.root)?;
-    let selected = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
-    session.authorize_thread(&repository, &selected)?;
     // Signed metadata is not possession of the named global CAS objects.
     // The exact selected Thread is already authorized. Its signed source
     // lineage, including the canonical seed, is checked below. A reverse
     // lookup cannot prove membership for a missing or withheld revision.
-    let Some(redactions) = auth::source_content_visibility(
-        &repository,
-        &selected,
-        uuid::Uuid::parse_str(&session.principal)?,
-        session.agent_id.as_deref(),
-        revision,
-    )?
-    else {
-        bail!("selected source is unavailable to this audience")
-    };
+    let (selected, _, redactions) =
+        checkout::admitted_source_ids(session, &repository, thread, revision)?;
     let genesis = selected.genesis()?;
     let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
     if revision == genesis.base && revision == seed.id() {

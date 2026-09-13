@@ -260,6 +260,8 @@ impl Repository {
                 }
             }
         }
+        crate::local_metadata::signal_sidecar_change(self.heddle_dir(), &change_id.to_string())
+            .map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
         Ok(())
     }
 

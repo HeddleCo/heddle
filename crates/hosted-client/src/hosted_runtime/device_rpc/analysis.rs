@@ -35,29 +35,7 @@ fn admitted_source(
     thread: &ThreadRef,
     revision: &RevisionRef,
 ) -> Result<(objects::object::StateId, objects::object::EntryRedactions)> {
-    checkout::same_spool(session, thread.spool.as_ref())?;
-    let thread_id: [u8; 32] = thread
-        .id
-        .as_ref()
-        .context("analysis Thread identity required")?
-        .value
-        .as_slice()
-        .try_into()
-        .context("analysis Thread identity must be 32 bytes")?;
-    let replica = repo::thread_replication::ThreadReplica::open(
-        &session.spool.heddle_dir,
-        ContentHash::from_bytes(thread_id),
-    )?;
-    let state = checkout::revision(session, Some(revision))?;
-    let principal = uuid::Uuid::parse_str(&session.principal)?;
-    let redactions = super::auth::source_content_visibility(
-        repository,
-        &replica,
-        principal,
-        session.agent_id.as_deref(),
-        state,
-    )?
-    .context("analysis source unavailable on selected Thread")?;
+    let (_, state, redactions) = checkout::admitted_source(session, repository, thread, revision)?;
     Ok((state, redactions))
 }
 

@@ -155,6 +155,10 @@ pub(crate) struct DeviceRpc {
     authority_clock: Arc<authority_clock::AuthorityClock>,
     #[cfg(test)]
     thread_snapshots: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    content_rechecks: Arc<std::sync::atomic::AtomicU64>,
+    #[cfg(test)]
+    content_send_gate: Arc<Mutex<Option<Arc<tokio::sync::Semaphore>>>>,
 }
 impl DeviceRpc {
     pub fn new(home: PathBuf, endpoint: [u8; 32]) -> Self {
@@ -168,6 +172,10 @@ impl DeviceRpc {
             authority_clock: Arc::new(authority_clock::AuthorityClock::default()),
             #[cfg(test)]
             thread_snapshots: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            content_rechecks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            #[cfg(test)]
+            content_send_gate: Arc::new(Mutex::new(None)),
         }
     }
     pub fn endpoint(&self) -> EndpointRef {

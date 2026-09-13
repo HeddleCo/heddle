@@ -11,6 +11,7 @@ pub(super) async fn roundtrip(
         thread_api::transport::IrohTransport<thread_api::credentials::Credentials>,
     >,
     repository: &repo::Repository,
+    device: &DeviceRpc,
     spool: uuid::Uuid,
 ) {
     let selected = Blob::from_slice(b"private source\n");
@@ -138,8 +139,11 @@ pub(super) async fn roundtrip(
             .iter()
             .any(|change| change.path == "hidden.txt")
     );
-    let mut tree = Tree::new();
-    tree.insert(TreeEntry::file("source.txt", selected.hash(), false).expect("entry"));
+    let tree = Tree::from_entries_salted_v4(
+        vec![TreeEntry::file("source.txt", selected.hash(), false).expect("entry")],
+        vec![[41; 32]],
+    )
+    .expect("salted content tree");
     repository.store().put_tree(&tree).expect("tree");
     let state = State::new_snapshot(
         tree.hash(),
@@ -227,11 +231,16 @@ pub(super) async fn roundtrip(
         .observe::<thread_api::rpc::ContentServiceReadContent>(&request)
         .await
         .expect("content stream");
+    device
+        .content_rechecks
+        .store(0, std::sync::atomic::Ordering::Relaxed);
     let mut completions = 0;
+    let mut frames = 0;
     let mut blob = false;
     let mut summary = false;
     let mut entry = false;
     while let Some(event) = stream.next().await.expect("content response") {
+        frames += 1;
         assert_eq!(event.revision.as_ref(), Some(&revision));
         match event.payload.expect("payload") {
             content_event::Payload::Blob(chunk) => {
@@ -257,6 +266,14 @@ pub(super) async fn roundtrip(
     }
     assert!(blob && summary && entry);
     assert_eq!(completions, 3);
+    assert!(frames > 3);
+    assert!(
+        device
+            .content_rechecks
+            .load(std::sync::atomic::Ordering::Relaxed)
+            < frames as u64,
+        "unchanged frames must not repeatedly scan source authority"
+    );
     for source in [
         blob_read::Source::ObjectHash(unrelated.hash().as_bytes().to_vec()),
         blob_read::Source::Path("../source.txt".into()),
@@ -294,4 +311,86 @@ pub(super) async fn roundtrip(
         .await
         .expect("SDK exact blob reader");
     assert_eq!(blobs[0].bytes, b"private source\n");
+
+    let gate = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+    *device.content_send_gate.lock().expect("test gate") = Some(gate.clone());
+    let late = ReadContentRequest {
+        thread: Some(request.thread.expect("admitted thread")),
+        revision: Some(request.revision.expect("admitted revision")),
+        selections: vec![
+            ContentRead {
+                selection_id: "first".into(),
+                selection: Some(content_read::Selection::State(StateRead::default())),
+            },
+            ContentRead {
+                selection_id: "late".into(),
+                selection: Some(content_read::Selection::Blob(BlobRead {
+                    source: Some(blob_read::Source::Path("source.txt".into())),
+                    ..Default::default()
+                })),
+            },
+        ],
+        ..Default::default()
+    };
+    let mut stream = remote
+        .api
+        .observe::<thread_api::rpc::ContentServiceReadContent>(&late)
+        .await
+        .expect("late read");
+    assert!(matches!(
+        stream
+            .next()
+            .await
+            .expect("first frame")
+            .expect("first event")
+            .payload,
+        Some(content_event::Payload::State(_))
+    ));
+    let feed = device
+        .feeds
+        .lock()
+        .expect("feeds")
+        .get(&spool)
+        .and_then(std::sync::Weak::upgrade)
+        .expect("active feed");
+    let mut changes = feed.changes.subscribe();
+    let override_bytes = objects::object::EntryVisibility::new(
+        state.change_id,
+        tree.hash(),
+        vec![objects::object::EntryVisibilityEntry {
+            tree_id: tree.hash(),
+            leaf_hash: tree.v4_leaf_hash_at(0).expect("source leaf"),
+            tier: objects::object::VisibilityTier::Private {
+                scope_label: "late-content".into(),
+            },
+        }],
+    )
+    .expect("late visibility descriptor")
+    .encode()
+    .expect("late visibility bytes");
+    repository
+        .restore_entry_visibility_sidecar(&state.change_id, Some(override_bytes))
+        .expect("committed late visibility override");
+    tokio::time::timeout(std::time::Duration::from_secs(5), changes.changed())
+        .await
+        .expect("feed notification deadline")
+        .expect("feed notification");
+    gate.add_permits(1);
+    let mut disclosed = false;
+    let mut failed = false;
+    loop {
+        match stream.next().await {
+            Ok(Some(event)) => {
+                disclosed |= matches!(event.payload, Some(content_event::Payload::Blob(_)));
+            }
+            Ok(None) => break,
+            Err(_) => {
+                failed = true;
+                break;
+            }
+        }
+    }
+    *device.content_send_gate.lock().expect("test gate") = None;
+    assert!(failed, "late override must fail the buffered read");
+    assert!(!disclosed, "late override must withhold queued blob bytes");
 }

@@ -164,7 +164,7 @@ async fn real_device_roundtrip_with_partial(content_only: bool, partial_only: bo
         return;
     }
     super::artifact_tests::roundtrip(&remote, &repository, spool).await;
-    super::content_tests::roundtrip(&remote, &repository, spool).await;
+    super::content_tests::roundtrip(&remote, &repository, &device, spool).await;
     if content_only {
         drop(remote);
         browser.close().await;

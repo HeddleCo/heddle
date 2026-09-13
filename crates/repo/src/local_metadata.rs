@@ -9,6 +9,26 @@ pub const CHANGE_MARKER_NAME: &str = "metadata.sqlite3.changed";
 pub const SCHEMA_VERSION: i64 = 1;
 pub const CHANGE_WINDOW: i64 = 4096;
 
+/// Publish an external sidecar change into the same committed device change
+/// feed used by SQLite-backed projections. Stores without local metadata do
+/// not acquire a database merely because a filesystem sidecar changed.
+pub fn signal_sidecar_change(heddle_dir: &Path, entity: &str) -> Result<(), Error> {
+    let Some(mut connection) = open_existing(heddle_dir)? else {
+        return Ok(());
+    };
+    let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    tx.execute(
+        "INSERT INTO metadata_changes(topic,entity) VALUES('entry_visibility',?1)",
+        [entity],
+    )?;
+    tx.commit()?;
+    objects::fs_atomic::write_file_atomic(
+        &heddle_dir.join(CHANGE_MARKER_NAME),
+        uuid::Uuid::new_v4().as_bytes(),
+    )?;
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Local metadata filesystem: {0}")]
