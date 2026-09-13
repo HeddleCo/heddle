@@ -23,6 +23,33 @@ pub(super) struct AccountSession {
     scopes: Vec<String>,
 }
 impl AccountSession {
+    pub fn control_authority(
+        &self,
+        authority: &repo::device_authority::DeviceAuthority,
+        now: i64,
+    ) -> Result<Vec<u8>> {
+        if !self.authority_proof.is_empty() {
+            authority.verify_presented_authority(
+                &self.root.to_bytes(),
+                &self.token,
+                &self.authority_proof,
+                now,
+            )?;
+            return Ok(self.authority_proof.clone());
+        }
+        Ok(
+            repo::thread_replication::metadata::prepare_control_authority(
+                authority,
+                &self
+                    .root
+                    .to_bytes()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("mint root key must contain 32 bytes"))?,
+                &self.token,
+                now,
+            )?,
+        )
+    }
     pub fn finish_admission(&self, home: &Path) -> Result<()> {
         self.check_current(home)?;
         if !repo::device_catalog::claim_nonce(

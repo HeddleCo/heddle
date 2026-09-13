@@ -83,16 +83,7 @@ impl DeviceRpc {
             ));
         }
         if query.include_current_credential {
-            let proof = repo::thread_replication::metadata::prepare_control_authority(
-                &authority,
-                &session
-                    .root
-                    .to_bytes()
-                    .try_into()
-                    .map_err(|_| anyhow::anyhow!("mint root key must contain 32 bytes"))?,
-                &session.token,
-                now,
-            )?;
+            let proof = session.control_authority(&authority, now)?;
             let version = blake3::hash(
                 &[
                     authority.owner.version.as_slice(),
