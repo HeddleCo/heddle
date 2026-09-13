@@ -21,8 +21,10 @@ not describe the relay path.
 
 `HostedConnection::close` still *starts* graceful shutdown so the
 endpoint is not dropped dirty. The foreground wait is bounded at
-**20 ms** (`FOREGROUND_ENDPOINT_DRAIN`). The remainder is detached.
-Process exit is no longer gated on `wait_all_draining`.
+**20 ms** (`FOREGROUND_ENDPOINT_DRAIN`). On timeout the `JoinHandle`
+is forgotten so drain keeps running (wrapping the handle in
+`tokio::time::timeout` would drop it on `Elapsed` and cancel
+mid-close). Process exit is no longer gated on `wait_all_draining`.
 
 When `heddle netd serve` is running, hosted verbs reuse the daemon's
 persistent endpoint and a cached weft QUIC connection. Close of a
@@ -67,8 +69,9 @@ error logs and fails if the literal #1143
 test refuses to run as a debug-build gate.
 
 Unit tests in `connection.rs` fail closed if close again blocks ≥~1 s
-on a local fixture after the QUIC session is already LocallyClosed, and
-if a 1 s injected drain is not detached.
+on a local fixture after the QUIC session is already LocallyClosed, if
+a 1 s injected drain is not returned from early, and if a drain that
+outlives the 20 ms bound is aborted instead of completing after detach.
 
 ```sh
 TMPDIR=/home/scratch HEDDLE_HOSTED_CLOSE_NEGATIVE_CONTROL=latency \

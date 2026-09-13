@@ -556,25 +556,32 @@ impl HostedRecvStream {
 }
 
 /// Initiate graceful router/endpoint shutdown without gating the
-/// caller on QUIC drain. The shutdown future is spawned so a
-/// timeout detaches it instead of cancelling mid-close.
+/// caller on QUIC drain. Wait up to [`FOREGROUND_ENDPOINT_DRAIN`];
+/// if close is still running, detach the task so drain continues.
+///
+/// Do not wrap the [`tokio::task::JoinHandle`] in
+/// [`tokio::time::timeout`]: on `Elapsed` that future is dropped,
+/// and a dropped handle must not be what stops close. Race join
+/// against the bound and [`std::mem::forget`] the handle so the
+/// runtime keeps the drain.
 pub(super) async fn bounded_foreground_shutdown<E, F>(shutdown: F)
 where
     F: std::future::Future<Output = std::result::Result<(), E>> + Send + 'static,
     E: std::fmt::Display + Send + 'static,
 {
-    let task = tokio::spawn(async move {
+    let mut task = tokio::spawn(async move {
         if let Err(error) = shutdown.await {
             tracing::warn!(%error, "failed to shut down Heddle Iroh router");
         }
     });
-    match tokio::time::timeout(FOREGROUND_ENDPOINT_DRAIN, task).await {
-        Ok(_) => {}
-        Err(_) => {
+    tokio::select! {
+        _ = &mut task => {}
+        () = tokio::time::sleep(FOREGROUND_ENDPOINT_DRAIN) => {
             tracing::debug!(
                 timeout_ms = FOREGROUND_ENDPOINT_DRAIN.as_millis(),
                 "detached hosted endpoint drain after foreground bound"
             );
+            std::mem::forget(task);
         }
     }
 }
@@ -657,7 +664,10 @@ mod tests {
         collections::HashMap,
         net::Ipv4Addr,
         path::PathBuf,
-        sync::{Arc, atomic::AtomicBool},
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
         time::{Duration, Instant},
     };
 
@@ -778,6 +788,35 @@ mod tests {
             elapsed < Duration::from_millis(200),
             "foreground close must detach a 1s drain, took {elapsed:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn bounded_shutdown_still_completes_after_foreground_detach() {
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&finished);
+        let started = Instant::now();
+        bounded_foreground_shutdown(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            flag.store(true, Ordering::SeqCst);
+            Ok::<(), &'static str>(())
+        })
+        .await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "foreground close must return at the 20ms bound, took {elapsed:?}"
+        );
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "an 80ms drain must still be in flight when the caller returns"
+        );
+        tokio::time::timeout(Duration::from_millis(400), async {
+            while !finished.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("detached drain must still complete after the caller returns");
     }
 
     #[tokio::test]
