@@ -179,14 +179,9 @@ fn operation_id(cli: &Cli) -> Result<uuid::Uuid> {
 async fn review_scope(
     client: &HostedClient,
     address: &str,
-    thread: &str,
-) -> Result<(wire::ThreadRef, Vec<u8>, String)> {
-    let reference = client.resolve_thread_ref(address, thread).await?;
-    let spool = reference
-        .spool
-        .as_ref()
-        .context("Thread has no Spool identity")?;
-    let (_, author) = current_author(spool)?;
+) -> Result<(wire::SpoolRef, Vec<u8>, String)> {
+    let spool = client.resolve_spool_ref(address).await?;
+    let (_, author) = current_author(&spool)?;
     let SourceAuthor::Account { actor, .. } = author else {
         bail!("current account author proof unavailable")
     };
@@ -198,7 +193,13 @@ async fn review_scope(
         .context("hosted endpoint identity absent")?
         .public_key;
     ensure!(endpoint.len() == 32, "hosted endpoint key is invalid");
-    Ok((reference, endpoint, actor.principal_id.to_string()))
+    Ok((spool, endpoint, actor.principal_id.to_string()))
+}
+
+fn stored_reference(decision: &wire::ReviewDecision, spool: &wire::SpoolRef) -> Result<wire::ThreadRef> {
+    let reference = decision.thread.as_ref().context("stored decision has no Thread")?;
+    ensure!(reference.spool.as_ref() == Some(spool), "stored review belongs to another Spool");
+    Ok(reference.clone())
 }
 
 fn replay_matches(
@@ -271,10 +272,12 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
     let repo = cli.open_repo()?;
     let (client, address) = open_hosted_session(&repo, &args.remote).await?;
     let id = operation_id(cli)?;
-    let (reference, endpoint, principal) = review_scope(&client, &address, &args.thread).await?;
+    let (spool, endpoint, principal) = review_scope(&client, &address).await?;
     let mut outbox = ReviewOutbox::open()?;
     let request = match outbox.load(&endpoint, &principal, id)? {
-        Some(StoredReview::Completed(decision)) => {
+        Some(StoredReview::Completed(selector, decision)) => {
+            ensure!(selector == args.thread, "operation ID belongs to another Thread selector");
+            let reference = stored_reference(&decision, &spool)?;
             let previous = wire::RecordReviewRequest { client_operation_id: id.to_string(), decision: Some(decision.clone()), ..Default::default() };
             replay_matches(&previous, &reference, &principal, wire::review_decision::Kind::Approval, None, args.note.as_deref())?;
             client.close().await;
@@ -287,7 +290,9 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
             }
             return Ok(());
         }
-        Some(StoredReview::Pending(stored)) => {
+        Some(StoredReview::Pending(selector, stored)) => {
+            ensure!(selector == args.thread, "operation ID belongs to another Thread selector");
+            let reference = stored_reference(stored.decision.as_ref().context("stored review decision absent")?, &spool)?;
             replay_matches(
                 &stored,
                 &reference,
@@ -299,6 +304,7 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
             stored
         }
         None => {
+            let reference = client.resolve_thread_ref(&address, &args.thread).await?;
             let snapshot = client.observe_review(&address, &args.thread).await?;
             ensure!(
                 snapshot.endpoint_key == endpoint,
@@ -315,7 +321,8 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
                 None,
                 id,
             )?;
-            outbox.save(&endpoint, &principal, id, &prepared)?;
+            ensure!(prepared.decision.as_ref().and_then(|decision| decision.thread.as_ref()) == Some(&reference), "review target changed during preparation");
+            outbox.save(&endpoint, &principal, id, &args.thread, &prepared)?;
             prepared
         }
     };
@@ -387,10 +394,12 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
     let id = uuid::Uuid::parse_str(&args.id).context("review ID must be UUID")?;
     let (client, address) = open_hosted_session(&repo, &args.remote).await?;
     let operation = operation_id(cli)?;
-    let (reference, endpoint, principal) = review_scope(&client, &address, &args.thread).await?;
+    let (spool, endpoint, principal) = review_scope(&client, &address).await?;
     let mut outbox = ReviewOutbox::open()?;
     let request = match outbox.load(&endpoint, &principal, operation)? {
-        Some(StoredReview::Completed(decision)) => {
+        Some(StoredReview::Completed(selector, decision)) => {
+            ensure!(selector == args.thread, "operation ID belongs to another Thread selector");
+            let reference = stored_reference(&decision, &spool)?;
             let previous = wire::RecordReviewRequest { client_operation_id: operation.to_string(), decision: Some(decision), ..Default::default() };
             replay_matches(&previous, &reference, &principal, wire::review_decision::Kind::Revocation, Some(id), None)?;
             client.close().await;
@@ -401,7 +410,9 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
             }
             return Ok(());
         }
-        Some(StoredReview::Pending(stored)) => {
+        Some(StoredReview::Pending(selector, stored)) => {
+            ensure!(selector == args.thread, "operation ID belongs to another Thread selector");
+            let reference = stored_reference(stored.decision.as_ref().context("stored review decision absent")?, &spool)?;
             replay_matches(
                 &stored,
                 &reference,
@@ -413,6 +424,7 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
             stored
         }
         None => {
+            let reference = client.resolve_thread_ref(&address, &args.thread).await?;
             let snapshot = client.observe_review(&address, &args.thread).await?;
             ensure!(
                 snapshot.endpoint_key == endpoint,
@@ -448,7 +460,8 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
                 Some(id),
                 operation,
             )?;
-            outbox.save(&endpoint, &principal, operation, &prepared)?;
+            ensure!(prepared.decision.as_ref().and_then(|decision| decision.thread.as_ref()) == Some(&reference), "review target changed during preparation");
+            outbox.save(&endpoint, &principal, operation, &args.thread, &prepared)?;
             prepared
         }
     };
