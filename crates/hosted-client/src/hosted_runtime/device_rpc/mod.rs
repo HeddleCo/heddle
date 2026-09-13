@@ -84,6 +84,7 @@ pub(crate) const STREAM_METHODS: &[&str] = &[
 ];
 pub(crate) const METHODS: &[&str] = &[
     "/heddle.api.v2alpha1.ThreadService/ClaimThreadOwnership",
+    "/heddle.api.v2alpha1.ThreadService/ResolveOwnershipConflict",
     "/heddle.api.v2alpha1.AnalysisService/ObserveAnalysis",
     #[cfg(feature = "semantic")]
     "/heddle.api.v2alpha1.AnalysisService/StartAnalysis",
@@ -258,6 +259,9 @@ impl DeviceRpc {
         if method.ends_with("/ClaimThreadOwnership") {
             return self.claim_thread_ownership(session, body);
         }
+        if method.ends_with("/ResolveOwnershipConflict") {
+            return self.resolve_ownership_conflict(session, body);
+        }
         if method.ends_with("/CancelOperation") {
             return self.cancel_operation(session, body);
         }
@@ -324,6 +328,10 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
         "ClaimThreadOwnership" => scope!(
             ClaimThreadOwnershipRequest,
             |r: ClaimThreadOwnershipRequest| r.thread.and_then(|v| v.spool)
+        ),
+        "ResolveOwnershipConflict" => scope!(
+            ResolveOwnershipConflictRequest,
+            |r: ResolveOwnershipConflictRequest| r.thread.and_then(|v| v.spool)
         ),
         "StartAnalysis" => scope!(StartAnalysisRequest, |r: StartAnalysisRequest| r
             .source

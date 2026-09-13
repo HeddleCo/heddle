@@ -481,12 +481,13 @@ fn install_ready_resolution(
     spool_path: &str,
     now: i64,
 ) -> Result<(), Error> {
-    if replica
-        .ownership_resolution()
-        .map_err(preparation)?
-        .is_some()
-    {
-        return Ok(());
+    if let Some(existing) = replica.ownership_resolution().map_err(preparation)? {
+        if existing == resolution.original {
+            return Ok(());
+        }
+        return Err(Error::Invalid(
+            "incoming ownership resolution conflicts with retained history",
+        ));
     }
     let value = heddle_object_model::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&resolution.original.canonical)
         .map_err(preparation)?;

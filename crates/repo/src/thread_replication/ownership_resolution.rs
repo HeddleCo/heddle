@@ -117,20 +117,38 @@ impl ThreadReplica {
         spool_path: &str,
         now: i64,
     ) -> Result<ContentHash> {
-        self.resolve_ownership_inner(signed, Some((authority, spool_path, now)), None)
+        self.resolve_ownership_inner(signed, Some((authority, spool_path, now)), None, None)
+    }
+    pub fn resolve_ownership_with_command(
+        &self,
+        signed: &SignedOwnershipResolution,
+        authority: &crate::device_authority::DeviceAuthority,
+        spool_path: &str,
+        now: i64,
+        command: &crate::device_operations::Command<'_>,
+        response: &[u8],
+    ) -> Result<Vec<u8>> {
+        self.resolve_ownership_inner(
+            signed,
+            Some((authority, spool_path, now)),
+            None,
+            Some((command, response)),
+        )?;
+        Ok(response.to_vec())
     }
     pub fn resolve_ownership_with_admission(
         &self,
         signed: &SignedOwnershipResolution,
         admission: &crypto::thread_authority_admission::SignedAuthorityAdmission,
     ) -> Result<ContentHash> {
-        self.resolve_ownership_inner(signed, None, Some(admission))
+        self.resolve_ownership_inner(signed, None, Some(admission), None)
     }
     fn resolve_ownership_inner(
         &self,
         signed: &SignedOwnershipResolution,
         authority: Option<(&crate::device_authority::DeviceAuthority, &str, i64)>,
         admission: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
+        command: Option<(&crate::device_operations::Command<'_>, &[u8])>,
     ) -> Result<ContentHash> {
         let value = ThreadOwnershipResolution::decode(&signed.canonical)?;
         value.validate_genesis(&self.genesis()?)?;
@@ -147,6 +165,11 @@ impl ThreadReplica {
                 && local_signature == signed.local_signature
                 && acceptance_signature == signed.acceptance_signature
             {
+                if let Some((command, response)) = command {
+                    crate::device_operations::receipt(&tx, command, response)
+                        .map_err(|error| Error::Invalid(error.to_string()))?;
+                    tx.commit()?;
+                }
                 return Ok(id);
             }
             return Err(Error::Invalid(
@@ -235,6 +258,10 @@ impl ThreadReplica {
             "UPDATE threads SET generation=generation+1 WHERE id=?1",
             [self.thread.as_bytes()],
         )?;
+        if let Some((command, response)) = command {
+            crate::device_operations::receipt(&tx, command, response)
+                .map_err(|error| Error::Invalid(error.to_string()))?;
+        }
         tx.commit()?;
         drop(connection);
         self.notify_committed()?;
