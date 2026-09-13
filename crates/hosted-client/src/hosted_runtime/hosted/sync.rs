@@ -4920,6 +4920,13 @@ mod native_exchange_tests {
             .id();
         save_thread_record(&repo, state, "thread-stable-main", "main");
         let expected = objects::object::Blob::from(PAYLOAD);
+        let objects = wire::enumerate_state_closure(repo.store(), state).unwrap();
+        let pack = wire::build_native_pack(repo.store(), &objects).unwrap();
+        store.stage(
+            super::super::helpers::proto_state_id(state).expect("state id"),
+            pack.pack_data,
+            pack.index_data,
+        );
 
         let pushed = client
             .push_with_expected_head_profiled(
@@ -4936,17 +4943,6 @@ mod native_exchange_tests {
             .0;
         assert!(pushed.success, "durable fixture must accept the push");
         assert_eq!(pushed.new_state, Some(state));
-
-        // Weft fetches the advertised objects before PushComplete.
-        // The fixture records that receipt as the native pack the
-        // next client will clone — after this process's bounded close.
-        let objects = wire::enumerate_state_closure(repo.store(), state).unwrap();
-        let pack = wire::build_native_pack(repo.store(), &objects).unwrap();
-        store.install(
-            super::super::helpers::proto_state_id(state).expect("state id"),
-            pack.pack_data,
-            pack.index_data,
-        );
 
         HostedClient::hold_next_close_for_test(Duration::from_millis(80));
         let started = Instant::now();

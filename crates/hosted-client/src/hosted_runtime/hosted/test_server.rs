@@ -323,28 +323,46 @@ struct PullFixture {
     pack: Option<(Vec<u8>, Vec<u8>)>,
 }
 
-/// In-memory weft stand-in: accept a push pack, then serve it on clone.
+/// In-memory weft stand-in: a staged pack is unpublished until Push
+/// finishes draining the client stream, then it becomes cloneable.
 #[derive(Clone, Default)]
 pub(crate) struct DurableSyncStore {
-    stored: Arc<Mutex<Option<PullFixture>>>,
+    staged: Arc<Mutex<Option<PullFixture>>>,
+    published: Arc<Mutex<Option<PullFixture>>>,
 }
 
 impl DurableSyncStore {
     fn pull_fixture(&self) -> Option<PullFixture> {
-        self.stored
+        self.published
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clone()
     }
 
-    pub(crate) fn install(&self, remote_state: StateId, pack_data: Vec<u8>, index_data: Vec<u8>) {
+    pub(crate) fn stage(&self, remote_state: StateId, pack_data: Vec<u8>, index_data: Vec<u8>) {
         *self
-            .stored
+            .staged
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()) = Some(PullFixture {
             remote_state,
             pack: Some((pack_data, index_data)),
         });
+    }
+
+    fn publish_staged(&self) -> bool {
+        let staged = self
+            .staged
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
+        let Some(fixture) = staged else {
+            return false;
+        };
+        *self
+            .published
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(fixture);
+        true
     }
 }
 
@@ -698,7 +716,8 @@ async fn serve_push(
         .await
         .is_ok_and(|chunk| chunk.is_some())
     {}
-    let accept = durable.is_some() && local_state.is_some();
+    let accept =
+        durable.as_ref().is_some_and(|store| store.publish_staged()) && local_state.is_some();
     let complete = PushServerFrame {
         frame: Some(push_server_frame::Frame::Complete(PushComplete {
             success: accept,
