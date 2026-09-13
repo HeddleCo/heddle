@@ -99,6 +99,63 @@ fn owner_authorized_passkey_admits_temporary_mint_without_server_or_existing_dev
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
+fn temporary_passkey_thread_landing_is_exact_method_and_spool_bound() {
+    use crate::thread_control_authority as proof;
+
+    let (attachment, state) = fixture();
+    let publisher = TestKey::new(83).signing.verifying_key().to_bytes();
+    let pair = KeyPair::from(
+        &PrivateKey::from_bytes(&[83; 32], Algorithm::Ed25519).expect("temporary mint"),
+    );
+    let expiry = chrono::DateTime::from_timestamp(NOW + 100, 0).expect("expiry");
+    let token = Biscuit::builder()
+        .code(format!(
+            "user(\"11111111-1111-1111-1111-111111111111\"); session(\"passkey-land\"); device_pop_key(\"{}\"); check if operation(\"LandThread\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};",
+            hex::encode(publisher), expiry.to_rfc3339(),
+        ))
+        .expect("land authority facts")
+        .build(&pair)
+        .expect("temporary land credential");
+    let root = signed_root(
+        OWNER_UUID,
+        &TestKey::new(81),
+        &[
+            (&TestKey::new(84), RecoveryGuardianKind::Paper),
+            (&TestKey::new(85), RecoveryGuardianKind::Social),
+        ],
+    );
+    let bytes = proof::encode(
+        &OwnerHistory {
+            root: Some(root),
+            accepted_transitions: vec![],
+            state_hash: state.state_hash().to_vec(),
+        },
+        &publisher,
+        Some(&attachment),
+        &token,
+    )
+    .expect("portable temporary authority");
+    macro_rules! context {
+        ($method:expr, $path:expr) => {
+            proof::Context {
+                owner: &state,
+                account_uuid: &OWNER_UUID,
+                publisher: &publisher,
+                agent_id: None,
+                method: $method,
+                spool_path: $path,
+                now: NOW + 1,
+            }
+        };
+    }
+    proof::verify(&bytes, context!("/heddle.api.v2alpha1.ThreadService/LandThread", "acme/project"), |_| false)
+        .expect("exact passkey Thread landing");
+    assert!(proof::verify(&bytes, context!("/heddle.api.v2alpha1.ThreadService/RecordReview", "acme/project"), |_| false).is_err());
+    assert!(proof::verify(&bytes, context!("/heddle.api.v2alpha1.ThreadService/LandThread", "acme/other"), |_| false).is_err());
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn expired_revoked_passkey_work_keeps_provenance_without_current_authority() {
     use crate::{boundary_authority, thread_control_authority as proof};
 
