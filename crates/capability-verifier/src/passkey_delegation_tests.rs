@@ -88,7 +88,8 @@ fn verify(value: &SignedMintRootAttachment, state: &VerifiedOwnerState) -> Resul
     )
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn owner_authorized_passkey_admits_temporary_mint_without_server_or_existing_device() {
     let (value, state) = fixture();
     verify(&value, &state)
@@ -96,7 +97,8 @@ fn owner_authorized_passkey_admits_temporary_mint_without_server_or_existing_dev
     export_vector("ed25519", &value);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn expired_revoked_passkey_work_keeps_provenance_without_current_authority() {
     use crate::{boundary_authority, thread_control_authority as proof};
 
@@ -210,7 +212,8 @@ fn export_vector(name: &str, value: &SignedMintRootAttachment) {
     }
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn owner_authorized_es256_passkey_accepts_der_assertion() {
     let (mut value, state) = fixture();
     let passkey = p256::ecdsa::SigningKey::from_bytes((&[82_u8; 32]).into()).expect("P256 key");
@@ -235,7 +238,8 @@ fn owner_authorized_es256_passkey_accepts_der_assertion() {
     export_vector("es256", &value);
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn passkey_assertion_binds_exact_mint_origin_rp_and_user_verification() {
     let (valid, state) = fixture();
     verify(&valid, &state).expect("positive control");
@@ -285,7 +289,8 @@ fn passkey_assertion_binds_exact_mint_origin_rp_and_user_verification() {
     }
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn passkey_authority_cannot_extend_lifetime_or_select_another_owner() {
     let (valid, state) = fixture();
     verify(&valid, &state).expect("positive control");
