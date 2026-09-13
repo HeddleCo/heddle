@@ -1142,6 +1142,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn session_connect_falls_back_when_netd_is_down() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let _env_guard = config::credentials::lock_test_env();
         let home = tempfile::TempDir::new().unwrap();
         let _pin = super::hosted_bridge::PinHeddleHome::new(home.path());
