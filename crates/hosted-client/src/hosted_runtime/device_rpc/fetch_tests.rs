@@ -223,6 +223,12 @@ pub(super) async fn partial_roundtrip(
         .expect("private original capture");
 
     let genesis = replica.genesis().expect("selected Thread");
+    let withheld = remote
+        .fetch_content(open(&genesis, private.id()), Default::default())
+        .await
+        .err()
+        .expect("whole-state private source unavailable");
+    assert_fetch_not_found(withheld);
     let mut observed = remote
         .observe::<thread_api::rpc::ThreadServiceObserveThread>(
             ObserveThreadRequest {
@@ -267,6 +273,9 @@ pub(super) async fn partial_roundtrip(
         overview.capture_count.is_none(),
         "unfiltered capture count must not leak"
     );
+    assert!(overview.sections.iter().any(|status|
+        status.section == "source" && status.coverage == Coverage::Partial as i32
+    ), "mixed visible and withheld source tips have explicit partial coverage");
     assert_eq!(
         batch
             .changes
@@ -440,15 +449,25 @@ pub(super) async fn initial_base_roundtrip(
         staged.operations().is_empty(),
         "system seed is not attributed to a human Capture"
     );
+    let unknown = remote
+        .fetch_content(
+            open(&genesis, objects::object::StateId::from_bytes([97; 32])),
+            Default::default(),
+        )
+        .await
+        .err()
+        .expect("arbitrary hash cannot claim the system seed");
+    assert_fetch_not_found(unknown);
+}
+fn assert_fetch_not_found(error: thread_api::fetch::Error) {
     assert!(
-        remote
-            .fetch_content(
-                open(&genesis, objects::object::StateId::from_bytes([97; 32])),
-                Default::default(),
-            )
-            .await
-            .is_err(),
-        "an arbitrary hash never receives the system-seed exception"
+        matches!(&error,
+            thread_api::fetch::Error::Client(api::v2::client::ClientError::Transport(
+                thread_api::transport::Error::Remote(failure)
+            )) if failure.code == api::heddle::api::v1alpha1::CallFailureCode::NotFound as i32
+                && failure.message == "selected source unavailable"
+        ),
+        "missing and withheld source use the same typed public failure: {error}"
     );
 }
 pub(super) async fn claimed_roundtrip(

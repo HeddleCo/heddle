@@ -426,6 +426,16 @@ impl DeviceRpc {
         } else {
             None
         };
+        let source_coverage =
+            if visible_heads.len() == view.source_heads.len() && visible_base.is_some() && complete
+            {
+                Coverage::Complete
+            } else if !visible_heads.is_empty() || visible_base.is_some() {
+                Coverage::Partial
+            } else {
+                Coverage::Unavailable
+            };
+        complete &= source_coverage == Coverage::Complete;
         let mut overview = ThreadOverview {
             ownership: Some(super::ownership::ownership_view(replica)?),
             source_frontier: Some(SourceOperationFrontier {
@@ -433,6 +443,9 @@ impl DeviceRpc {
                 complete,
             }),
             r#ref: Some(reference.clone()),
+            // Name and intent are independently signed Thread metadata under
+            // the Thread audience. They are not inferred from a source State;
+            // the separate source section reports withheld/unavailable tips.
             name: view.genesis.name.clone(),
             version: projection::version(replica.thread_id(), view.generation)
                 .as_bytes()
@@ -447,10 +460,20 @@ impl DeviceRpc {
             readiness: ReviewReadiness::Unknown as i32,
             // Historical accepted originals can include withheld revisions.
             // Their total count is not an authorized projection.
-            capture_count: None,
+            capture_count: (view.capture_count == 0).then_some(0),
+            sections: vec![SectionStatus {
+                section: "source".into(),
+                coverage: source_coverage as i32,
+                ..Default::default()
+            }],
             ..Default::default()
         };
         for (property, candidates) in &view.fields {
+            if matches!(property, Property::Review(_))
+                && !review_candidates_visible(repository, replica, principal, agent, candidates)?
+            {
+                continue;
+            }
             let ids = candidates
                 .iter()
                 .map(|(id, _)| *id)
@@ -596,18 +619,73 @@ impl DeviceRpc {
             ..Default::default()
         });
         if let Some(parent) = view.genesis.parent {
-            overview.relationships.push(ThreadRelationship {
-                thread: Some(ThreadRef {
-                    spool: reference.spool.clone(),
-                    id: Some(ThreadId {
-                        value: parent.as_bytes().to_vec(),
+            let parent_replica = ThreadReplica::open(repository.heddle_dir(), parent)?;
+            if parent_replica.genesis()?.spool == view.genesis.spool
+                && super::auth::thread_visible(&repository, &parent_replica, principal, agent)?
+            {
+                overview.relationships.push(ThreadRelationship {
+                    thread: Some(ThreadRef {
+                        spool: reference.spool.clone(),
+                        id: Some(ThreadId {
+                            value: parent.as_bytes().to_vec(),
+                        }),
                     }),
-                }),
-                kind: thread_relationship::Kind::Parent as i32,
-            });
+                    kind: thread_relationship::Kind::Parent as i32,
+                });
+            }
         }
         Ok(overview)
     }
+}
+pub(super) fn review_candidates_visible(
+    repository: &repo::Repository,
+    replica: &ThreadReplica,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+    candidates: &[(
+        objects::object::ContentHash,
+        crypto::thread_operation::SignedOperation,
+    )],
+) -> Result<bool> {
+    let genesis = replica.genesis()?;
+    let target = if let Some(parent) = genesis.parent {
+        ThreadReplica::open(repository.heddle_dir(), parent)?
+    } else {
+        replica.clone()
+    };
+    if target.genesis()?.spool != genesis.spool {
+        return Ok(false);
+    }
+    for (_, signed) in candidates {
+        let operation = signed.verify()?;
+        let ThreadOperationBody::Metadata(bytes) = operation.body else {
+            bail!("review property names another facet")
+        };
+        let control = objects::object::thread_replication::metadata::ThreadControl::decode(&bytes)?;
+        let Control::Review(review) = control.control else {
+            bail!("review property names another control")
+        };
+        if super::auth::source_content_visibility(
+            repository,
+            replica,
+            principal,
+            agent,
+            review.source,
+        )?
+        .is_none()
+            || super::auth::source_content_visibility(
+                repository,
+                &target,
+                principal,
+                agent,
+                review.target,
+            )?
+            .is_none()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 pub(super) fn revision(reference: &ThreadRef, state: objects::object::StateId) -> RevisionRef {
     RevisionRef {

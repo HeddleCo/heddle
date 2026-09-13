@@ -338,7 +338,7 @@ pub(super) fn thread_visible(
     principal: uuid::Uuid,
     agent: Option<&str>,
 ) -> Result<bool> {
-    if replica.ownership_claims()?.len() > 1 {
+    if replica.ownership_claims()?.len() > 1 && replica.ownership_resolution()?.is_none() {
         return Ok(false);
     }
     let genesis = replica.genesis()?;
@@ -532,14 +532,23 @@ pub(super) fn source_content_visibility(
         objects::object::StateId,
         Vec<objects::object::thread_replication::CaptureVisibility>,
     > = BTreeMap::new();
-    let mut owner = replica.clone();
+    // A local/hosted Integration imports one exact original from its source
+    // Thread. That signed edge, or an independently admitted fork parent,
+    // justifies entering another Thread; a matching State in the same Spool
+    // does not. Every entered Thread gets its own current audience check.
+    let mut pending_threads = vec![replica.thread_id()];
     let mut owner_ids = BTreeSet::new();
     let mut work = 0usize;
     let mut bytes = 0usize;
-    for _ in 0..128 {
-        if !owner_ids.insert(owner.thread_id()) {
+    while let Some(owner_id) = pending_threads.pop() {
+        if !owner_ids.insert(owner_id) {
+            continue;
+        }
+        if owner_ids.len() + pending_threads.len() > 128 {
             return Ok(None);
         }
+        let owner =
+            repo::thread_replication::ThreadReplica::open(repository.heddle_dir(), owner_id)?;
         let Some(owner_audience) = reader_audience(repository, &owner, principal, agent)? else {
             return Ok(None);
         };
@@ -560,6 +569,46 @@ pub(super) fn source_content_visibility(
             if state.id() != id {
                 return Ok(None);
             }
+            let dependency = if let Some(integration) = operation.local_integration()? {
+                Some((
+                    integration.source_thread,
+                    integration.source_operation,
+                    integration.source_revision,
+                ))
+            } else {
+                operation.integration()?.map(|integration| {
+                    (
+                        integration.source_thread,
+                        integration.source_operation,
+                        integration.source_revision,
+                    )
+                })
+            };
+            if let Some((source_thread, source_operation, source_revision)) = dependency {
+                if !seen.contains(&source_revision) || source_thread == owner_id {
+                    return Ok(None);
+                }
+                let source = repo::thread_replication::ThreadReplica::open(
+                    repository.heddle_dir(),
+                    source_thread,
+                )?;
+                if source.genesis()?.spool != owner.genesis()?.spool {
+                    return Ok(None);
+                }
+                let Some((original, status)) = source.operation(&source_operation)? else {
+                    return Ok(None);
+                };
+                let source_original = original.verify()?;
+                if status != objects::object::thread_replication::Admission::Accepted
+                    || source_original.thread != source_thread
+                    || source_original
+                        .source_state()?
+                        .is_none_or(|state| state.id() != source_revision)
+                {
+                    return Ok(None);
+                }
+                pending_threads.push(source_thread);
+            }
             if let Some(visibility) = capture.visibility {
                 if let Some(tier) = &visibility.state {
                     let check = state.id() == revision || tier.is_embargo();
@@ -576,10 +625,13 @@ pub(super) fn source_content_visibility(
             }
         }
         let genesis = owner.genesis()?;
-        let Some(parent) = genesis.parent else { break };
-        owner = repo::thread_replication::ThreadReplica::open(repository.heddle_dir(), parent)?;
-        if owner.genesis()?.spool != genesis.spool {
-            return Ok(None);
+        if let Some(parent) = genesis.parent {
+            let parent_replica =
+                repo::thread_replication::ThreadReplica::open(repository.heddle_dir(), parent)?;
+            if parent_replica.genesis()?.spool != genesis.spool {
+                return Ok(None);
+            }
+            pending_threads.push(parent);
         }
     }
     for id in lineage {

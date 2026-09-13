@@ -1,11 +1,15 @@
 //! The browser authorizes one exact claim; the owned device supplies only the
 //! matching retained local-owner signature.
-use crypto::{Ed25519Signer, Signer, thread_ownership_claim::SignedOwnershipAcceptance};
+use crypto::{
+    Ed25519Signer, Signer, thread_ownership_claim::SignedOwnershipAcceptance,
+    thread_ownership_resolution::SignedOwnershipResolution,
+};
 use objects::{
     object::{
         CollaborationActor,
         thread_replication::{
             GenesisOwner, SourceAuthor, ThreadFacet, ownership_claim::ThreadOwnershipClaim,
+            ownership_resolution::ThreadOwnershipResolution,
         },
     },
     store::ObjectStore,
@@ -404,5 +408,45 @@ async fn conflict_status(
     assert_eq!(
         unavailable,
         ["captures".to_string(), "collaboration".to_string()].into()
+    );
+    let claims = replica
+        .ownership_claims()
+        .expect("retained conflicting claims");
+    let claim_ids = claims
+        .iter()
+        .map(|claim| claim.verify().expect("claim").id().expect("claim id"))
+        .collect();
+    let resolution = ThreadOwnershipResolution {
+        version: 1,
+        spool,
+        thread: replica.thread_id(),
+        winning_claim: previous.id().expect("winner id"),
+        conflicting_claims: claim_ids,
+        frontier: replica
+            .frontier_page(ThreadFacet::Source, None, 128)
+            .expect("current frontier")
+            .into_iter()
+            .collect(),
+        local_owner: local.public_key().try_into().expect("local public key"),
+        accepting_publisher: account.public_key().try_into().expect("account public key"),
+        acceptance: previous.acceptance.clone(),
+        occurred_at_ms: chrono::Utc::now().timestamp_millis(),
+    };
+    replica
+        .resolve_ownership(
+            &SignedOwnershipResolution::sign(&resolution, &local, account)
+                .expect("dual original resolution"),
+            authority,
+            &path,
+            chrono::Utc::now().timestamp(),
+        )
+        .expect("owner-chosen and current-recipient accepted resolution");
+    assert!(
+        super::auth::thread_visible(repository, &replica, uuid::Uuid::from_bytes([9; 16]), None)
+            .expect("resolved winner may read")
+    );
+    assert!(
+        !super::auth::thread_visible(repository, &replica, uuid::Uuid::from_bytes([99; 16]), None)
+            .expect("unrelated account remains denied")
     );
 }

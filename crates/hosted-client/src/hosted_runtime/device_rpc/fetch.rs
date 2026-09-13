@@ -9,7 +9,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use api::{
-    heddle::api::{v1alpha1::CallContext, v2alpha1::*},
+    heddle::api::{
+        v1alpha1::{CallContext, CallFailureCode},
+        v2alpha1::*,
+    },
     v2::client::{MessageReader, MessageWriter},
 };
 use iroh::endpoint::{RecvStream, SendStream};
@@ -30,6 +33,14 @@ use super::{DeviceRpc, auth, checkout};
 const FRAME: usize = 256 * 1024;
 const BYTES: u64 = 256 * 1024 * 1024;
 const RECORDS: usize = 10_000;
+#[derive(Debug)]
+struct SourceSelectionUnavailable;
+impl std::fmt::Display for SourceSelectionUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("selected source unavailable")
+    }
+}
+impl std::error::Error for SourceSelectionUnavailable {}
 pub(super) struct Prepared {
     pub(super) pack: VisibleSourcePack,
     pub(super) geneses: BTreeMap<ContentHash, ThreadGenesisRecord>,
@@ -49,6 +60,30 @@ impl DeviceRpc {
         let descriptor = api::v2::method_descriptor(method).context("Fetch descriptor missing")?;
         let (mut writer, mut reader) =
             transport::accepted_stream(send, recv, FRAME, Duration::from_secs(30), descriptor)?;
+        let outcome = self
+            .send_fetch_stream_inner(descriptor, context, &mut writer, &mut reader, budget)
+            .await;
+        if let Err(error) = outcome {
+            let (code, message) = if error.is::<SourceSelectionUnavailable>() {
+                (
+                    CallFailureCode::NotFound,
+                    "selected source unavailable".to_string(),
+                )
+            } else {
+                (CallFailureCode::FailedPrecondition, error.to_string())
+            };
+            writer.fail(&super::failure(code, message)).await?;
+        }
+        Ok(())
+    }
+    async fn send_fetch_stream_inner(
+        &self,
+        descriptor: &'static api::v2::MethodDescriptor,
+        context: &CallContext,
+        mut writer: &mut transport::Writer,
+        reader: &mut transport::Reader,
+        budget: &mut super::super::hosted::claim_protocol::CallBudget,
+    ) -> Result<()> {
         let body = reader.next().await?.context("Fetch opening required")?;
         let request = FetchClientFrame::decode(body.as_slice())?;
         let Some(fetch_client_frame::Body::Open(open)) = request.body else {
@@ -78,7 +113,17 @@ impl DeviceRpc {
         }
         let allow_partial = selection.allow_partial;
         let thread = checkout::thread(&session, Some(reference))?;
-        let revision = checkout::revision(&session, open.revision.as_ref())?;
+        let selected_revision = open.revision.as_ref().context("source revision required")?;
+        checkout::same_spool(&session, selected_revision.spool.as_ref())?;
+        let revision = match selected_revision.revision.as_ref() {
+            Some(revision_ref::Revision::State(id)) => StateId::from_bytes(
+                id.value
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| SourceSelectionUnavailable)?,
+            ),
+            _ => return Err(SourceSelectionUnavailable.into()),
+        };
         let feed = self.feed(&session)?;
         let mut changes = feed.changes.subscribe();
         let slot = self.content_work.clone().acquire_owned().await?;
@@ -87,7 +132,8 @@ impl DeviceRpc {
         let mut prepared = tokio::task::spawn_blocking(move || {
             let _slot = slot;
             admitted.check_current(&home)?;
-            let value = prepare(&admitted, thread, revision, allow_partial)?;
+            let value = prepare(&admitted, thread, revision, allow_partial)
+                .map_err(|_| SourceSelectionUnavailable)?;
             admitted.check_current(&home)?;
             Ok::<_, anyhow::Error>(value)
         })
@@ -287,7 +333,9 @@ pub(super) fn prepare(
     let selected = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
     session.authorize_thread(&repository, &selected)?;
     // Signed metadata is not possession of the named global CAS objects.
-    session.authorize_revision(&repository, revision)?;
+    // The exact selected Thread is already authorized. Its signed source
+    // lineage, including the canonical seed, is checked below. A reverse
+    // lookup cannot prove membership for a missing or withheld revision.
     let Some(redactions) = auth::source_content_visibility(
         &repository,
         &selected,

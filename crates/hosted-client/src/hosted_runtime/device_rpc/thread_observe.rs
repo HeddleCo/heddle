@@ -101,7 +101,19 @@ impl DeviceRpc {
         };
         let mut analysis = Vec::new();
         if sections.contains(&(ThreadSection::Analysis as i32)) {
+            let principal = uuid::Uuid::parse_str(&session.principal)?;
             for state in replica.current_source_revisions(128)? {
+                if super::auth::source_content_visibility(
+                    &repository,
+                    replica,
+                    principal,
+                    session.agent_id.as_deref(),
+                    state,
+                )?
+                .is_none()
+                {
+                    continue;
+                }
                 analysis.extend_from_slice(state.as_bytes());
                 let present = replica.has_source_possession(state)?;
                 analysis.push(u8::from(present));
@@ -222,6 +234,7 @@ impl DeviceRpc {
                     let size = page_size(&page, budget);
                     let principal = uuid::Uuid::parse_str(&session.principal)?;
                     let mut records = Vec::new();
+                    let mut unavailable = false;
                     let mut scanned = 0usize;
                     let mut exhausted = false;
                     while records.len() < size && scanned < 4096 {
@@ -249,6 +262,8 @@ impl DeviceRpc {
                                 if records.len() == size {
                                     break;
                                 }
+                            } else {
+                                unavailable = true;
                             }
                             if scanned == 4096 {
                                 break;
@@ -271,6 +286,7 @@ impl DeviceRpc {
                             b"captures",
                         )
                     };
+                    let visible_count = records.len();
                     for (id, signed) in records {
                         let operation = signed.verify()?;
                         let state = operation.source_state()?.context("source operation")?;
@@ -299,7 +315,9 @@ impl DeviceRpc {
                     }
                     (
                         "captures",
-                        if scanned == 4096 {
+                        if unavailable && visible_count == 0 {
+                            Coverage::Unavailable
+                        } else if unavailable || scanned == 4096 {
                             Coverage::Partial
                         } else {
                             Coverage::Complete
@@ -373,20 +391,26 @@ impl DeviceRpc {
                     )
                 }
                 ThreadSection::Review => {
-                    let source = compared_revision(session, replica, request.source.as_ref())?;
+                    let source =
+                        compared_revision(&repository, session, replica, request.source.as_ref())?;
                     let genesis = replica.genesis()?;
                     let target = if let Some(parent) = genesis.parent {
                         let parent = ThreadReplica::open(&session.spool.heddle_dir, parent)?;
-                        compared_revision(session, &parent, request.base.as_ref())?
+                        compared_revision(&repository, session, &parent, request.base.as_ref())?
                     } else if let Some(base) = request.base.as_ref() {
                         let state = checkout::revision(session, Some(base))?;
                         ensure!(
                             state == genesis.base,
                             "comparison base is outside the root Thread lineage"
                         );
-                        Some(base.clone())
+                        compared_revision(&repository, session, replica, Some(base))?
                     } else {
-                        Some(revision(&reference, genesis.base))
+                        compared_revision(
+                            &repository,
+                            session,
+                            replica,
+                            Some(&revision(&reference, genesis.base)),
+                        )?
                     };
                     if let (Some(source), Some(base)) = (source, target) {
                         events.push((
@@ -415,19 +439,59 @@ impl DeviceRpc {
                             format!("review:{}", uuid::Uuid::from_bytes(id))
                         });
                     let size = page_size(&page, budget);
-                    let properties = replica
-                        .metadata_property_page(after.as_deref().or(Some("review:")), size + 1)?;
-                    let properties = properties
-                        .into_iter()
-                        .take_while(|property| matches!(property, Property::Review(_)))
-                        .collect::<Vec<_>>();
-                    let exhausted = properties.len() <= size;
-                    let mut next = Vec::new();
-                    for property in properties.into_iter().take(size) {
+                    let mut cursor = after.unwrap_or_else(|| "review:".into());
+                    let mut properties = Vec::new();
+                    let mut exhausted = false;
+                    let mut scanned = 0usize;
+                    while properties.len() < size && scanned < 4096 {
+                        let batch = replica.metadata_property_page(Some(&cursor), 65)?;
+                        if batch.is_empty() {
+                            exhausted = true;
+                            break;
+                        }
+                        let batch_exhausted = batch.len() < 65;
+                        for property in batch {
+                            let Property::Review(id) = property else {
+                                exhausted = true;
+                                break;
+                            };
+                            cursor = format!("review:{id}");
+                            scanned += 1;
+                            let candidates = replica.metadata_frontier(&property)?;
+                            if super::thread::review_candidates_visible(
+                                &repository,
+                                replica,
+                                uuid::Uuid::parse_str(&session.principal)?,
+                                session.agent_id.as_deref(),
+                                &candidates,
+                            )? {
+                                properties.push((property, candidates));
+                            }
+                            if properties.len() == size || scanned == 4096 {
+                                break;
+                            }
+                        }
+                        if exhausted || properties.len() == size || scanned == 4096 {
+                            break;
+                        }
+                        if batch_exhausted {
+                            exhausted = true;
+                            break;
+                        }
+                    }
+                    let next = if exhausted {
+                        Vec::new()
+                    } else {
+                        let id = cursor.strip_prefix("review:").context("review cursor")?;
+                        let id = uuid::Uuid::parse_str(id)?;
+                        let mut bytes = [0; 32];
+                        bytes[..16].copy_from_slice(id.as_bytes());
+                        encode_cursor(&bytes, binding, b"reviews")
+                    };
+                    for (property, candidates) in properties {
                         let Property::Review(id) = property else {
                             bail!("review index property")
                         };
-                        let candidates = replica.metadata_frontier(&property)?;
                         let ids = candidates.iter().map(|(id, _)| *id).collect();
                         let version =
                             objects::object::thread_replication::metadata::property_version(
@@ -488,11 +552,6 @@ impl DeviceRpc {
                                 ));
                             }
                         }
-                        if !exhausted {
-                            let mut bytes = [0; 32];
-                            bytes[..16].copy_from_slice(id.as_bytes());
-                            next = encode_cursor(&bytes, binding, b"reviews");
-                        }
                     }
                     (
                         "review",
@@ -543,8 +602,21 @@ impl DeviceRpc {
                     ("collaboration", Coverage::Complete, page)
                 }
                 ThreadSection::Analysis => {
-                    let repository = repo::Repository::open(&session.spool.root)?;
+                    let principal = uuid::Uuid::parse_str(&session.principal)?;
+                    let mut withheld = false;
                     for state in replica.current_source_revisions(128)? {
+                        if super::auth::source_content_visibility(
+                            &repository,
+                            replica,
+                            principal,
+                            session.agent_id.as_deref(),
+                            state,
+                        )?
+                        .is_none()
+                        {
+                            withheld = true;
+                            continue;
+                        }
                         let root = if replica.has_source_possession(state)? {
                             session.authorize_revision(&repository, state)?;
                             repository.attached_semantic_index(&state)?
@@ -586,7 +658,11 @@ impl DeviceRpc {
                     }
                     (
                         "analysis",
-                        Coverage::Complete,
+                        if withheld {
+                            Coverage::Partial
+                        } else {
+                            Coverage::Complete
+                        },
                         PageInfo {
                             exhausted: true,
                             ..Default::default()
@@ -644,6 +720,7 @@ impl DeviceRpc {
     }
 }
 fn compared_revision(
+    repository: &repo::Repository,
     session: &Session,
     replica: &ThreadReplica,
     requested: Option<&RevisionRef>,
@@ -663,11 +740,36 @@ fn compared_revision(
             state == view.genesis.base || replica.accepted_source_revision(state)?.is_some(),
             "comparison revision is not admitted in the selected Thread"
         );
+        ensure!(
+            super::auth::source_content_visibility(
+                repository,
+                replica,
+                uuid::Uuid::parse_str(&session.principal)?,
+                session.agent_id.as_deref(),
+                state
+            )?
+            .is_some(),
+            "comparison source is unavailable to this audience"
+        );
         return Ok(Some(revision(&reference, state)));
     }
     match view.source_heads.as_slice() {
-        [] => Ok(Some(revision(&reference, view.genesis.base))),
-        [state] => Ok(Some(revision(&reference, *state))),
+        [] => Ok(super::auth::source_content_visibility(
+            repository,
+            replica,
+            uuid::Uuid::parse_str(&session.principal)?,
+            session.agent_id.as_deref(),
+            view.genesis.base,
+        )?
+        .map(|_| revision(&reference, view.genesis.base))),
+        [state] => Ok(super::auth::source_content_visibility(
+            repository,
+            replica,
+            uuid::Uuid::parse_str(&session.principal)?,
+            session.agent_id.as_deref(),
+            *state,
+        )?
+        .map(|_| revision(&reference, *state))),
         _ => Ok(None),
     }
 }
