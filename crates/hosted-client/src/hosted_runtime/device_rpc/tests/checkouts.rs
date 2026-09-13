@@ -302,6 +302,36 @@ pub(super) async fn roundtrip(
             .is_err(),
         "same operation ID cannot be rebound to a different comparison"
     );
+    let stack_targets = ["device-stack-first", "device-stack-second"]
+        .into_iter()
+        .map(|name| repository.create_native_thread(name, base, None, "Stack target")
+            .expect("stack target Thread"))
+        .collect::<Vec<_>>();
+    let stack = LandStackRequest {
+        client_operation_id: uuid::Uuid::new_v4().to_string(),
+        spool: Some(spool_ref.clone()),
+        landings: stack_targets.iter().map(|target| StackLanding {
+            thread: materialize.thread.clone(),
+            source: captured_overview.materialized.clone(),
+            target: Some(ThreadRef {
+                spool: Some(spool_ref.clone()),
+                id: Some(ThreadId { value: target.thread_id().as_bytes().to_vec() }),
+            }),
+            expected_target: materialize.revision.clone(),
+            expected_policy_version: logical.expected_policy_version.clone(),
+        }).collect(),
+    };
+    let stack_result = remote.api.call::<thread_api::rpc::ThreadServiceLandStack>(&stack)
+        .await.expect("native atomic Thread stack");
+    assert!(stack_result.receipt.is_some());
+    assert_eq!(stack_result,
+        remote.api.call::<thread_api::rpc::ThreadServiceLandStack>(&stack)
+            .await.expect("exact stack retry"));
+    assert!(stack_targets.iter().all(|target| target.view().expect("stack view").source_heads.len() == 1));
+    let mut changed_stack = stack.clone();
+    changed_stack.landings.pop();
+    assert!(remote.api.call::<thread_api::rpc::ThreadServiceLandStack>(&changed_stack).await.is_err(),
+        "stack command ID cannot be rebound to fewer members");
     let second = remote
         .api
         .call::<thread_api::rpc::CheckoutServiceMaterialize>(&MaterializeCheckoutRequest {

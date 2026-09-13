@@ -272,6 +272,24 @@ impl ThreadReplica {
         source_thread: ContentHash,
         source_operation: ContentHash,
     ) -> Result<Capture> {
+        self.prepare_integration_with_prepared(
+            repo,
+            state,
+            source_thread,
+            source_operation,
+            &[],
+        )
+    }
+    /// Ordered local stack members on one target carry the exact prior
+    /// prepared reference closure while their operations remain uncommitted.
+    pub fn prepare_integration_with_prepared(
+        &self,
+        repo: &Repository,
+        state: &State,
+        source_thread: ContentHash,
+        source_operation: ContentHash,
+        prepared_target: &[ThreadOperation],
+    ) -> Result<Capture> {
         let source = ThreadReplica::open(repo.heddle_dir(), source_thread)?;
         if source.genesis()?.spool != self.genesis()?.spool {
             return Err(err("integration references cross Spool"));
@@ -300,6 +318,19 @@ impl ThreadReplica {
                 .operation(&head)?
                 .ok_or_else(|| err("integration target head missing"))?;
             if let Some(proof) = signed.verify()?.reference_proof(&self.genesis()?)? {
+                roots.push(capture::closure(
+                    &Source(repo.store()),
+                    proof.descriptor,
+                    &proof.scope,
+                    proof.state,
+                )?);
+            }
+        }
+        for operation in prepared_target {
+            if operation.thread != self.thread || roots.len() >= 128 {
+                return Err(err("integration prepared target frontier budget exceeded"));
+            }
+            if let Some(proof) = operation.reference_proof(&self.genesis()?)? {
                 roots.push(capture::closure(
                     &Source(repo.store()),
                     proof.descriptor,

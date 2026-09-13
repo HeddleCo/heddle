@@ -20,7 +20,7 @@ use repo::thread_replication::ThreadReplica;
 
 use super::{
     DeviceRpc,
-    auth::{Session, source_content_visibility},
+    auth::{Session, source_visibility_floor},
     checkout::{decode_token, revision, thread, verified_lease},
     read_bounded,
 };
@@ -69,28 +69,22 @@ impl DeviceRpc {
         session.authorize_thread(&repository, &source_replica)?;
         session.authorize_thread(&repository, &target_replica)?;
         let principal = uuid::Uuid::parse_str(&session.principal)?;
-        if source_content_visibility(
+        let source_floor = source_visibility_floor(
             &repository,
             &source_replica,
             principal,
             session.agent_id.as_deref(),
             source,
         )?
-        .is_none()
-        {
-            bail!("source revision is unavailable to this caller");
-        }
-        if source_content_visibility(
+        .context("source revision is unavailable to this caller")?;
+        let target_floor = source_visibility_floor(
             &repository,
             &target_replica,
             principal,
             session.agent_id.as_deref(),
             expected,
         )?
-        .is_none()
-        {
-            bail!("target revision is unavailable to this caller");
-        }
+        .context("target revision is unavailable to this caller")?;
         let prepared = target_replica.prepared_local_landing(
             &namespace,
             &request.client_operation_id,
@@ -150,11 +144,11 @@ impl DeviceRpc {
                 }
             };
             let mut result_visibility = repository.resolve_capture_default_visibility();
-            for parent in [expected, source] {
+            for parent_floor in [&target_floor, &source_floor] {
                 result_visibility =
                     objects::object::thread_replication::local_integration::intersect_visibility(
                         &result_visibility,
-                        &repository.effective_visibility_tier(&parent)?,
+                        parent_floor,
                     )?;
             }
             let state = State::new_merge(

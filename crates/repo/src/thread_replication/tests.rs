@@ -1166,6 +1166,116 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
             .is_err(),
         "operation ID cannot be rebound after a lost response"
     );
+    let mut second_member = receipt.clone();
+    second_member.executed_at_ms += 9;
+    let stack_id = objects::object::OperationId::new();
+    let stack_command = crate::device_operations::Command {
+        namespace: "local-stack-test",
+        id: stack_id,
+        method: "/heddle.api.v2alpha1.ThreadService/LandStack",
+        request_hash: [6; 32],
+    };
+    assert!(
+        target
+            .prepare_local_stack(
+                stack_command.namespace,
+                &stack_id.to_string(),
+                &stack_command.request_hash,
+                &vec![0; 8 * 1024 * 1024 + 1],
+                b"too large",
+            )
+            .expect_err("aggregate preparation bound")
+            .to_string()
+            .contains("byte bound"),
+        "an oversized stack is rejected before SQLite insertion"
+    );
+    assert!(
+        target
+            .receive_local_stack_cas_command(
+                &[signed.clone(), make(second_member)],
+                repository.store(),
+                &stack_command,
+                b"must not commit",
+            )
+            .is_err(),
+        "later stack member with stale target frontier aborts every member"
+    );
+    assert!(
+        target
+            .accepted_source_revision(result.id())
+            .expect("target rollback")
+            .is_none(),
+        "earlier member cannot escape the failed stack transaction"
+    );
+    assert!(
+        crate::device_operations::replay_response(repository.heddle_dir(), &stack_command)
+            .expect("receipt rollback")
+            .is_none(),
+        "failed stack has no completed receipt"
+    );
+    let mut ordered_genesis = target_genesis.clone();
+    ordered_genesis.name = "ordered target".into();
+    ordered_genesis.nonce = vec![9];
+    let ordered_target = ThreadReplica::create(
+        repository.heddle_dir(),
+        &crypto::thread_operation::SignedGenesis::sign(&ordered_genesis, &signer)
+            .expect("ordered target proof"),
+    )
+    .expect("ordered target");
+    let mut first_ordered = receipt.clone();
+    first_ordered.target_thread = ordered_target.thread_id();
+    let first_ordered_operation = ThreadOperation {
+        version: 1,
+        thread: ordered_target.thread_id(),
+        parents: BTreeSet::new(),
+        publisher: first_ordered.device,
+        body: ThreadOperationBody::LocalIntegration(first_ordered.encode().expect("first receipt")),
+    };
+    let first_ordered_signed = SignedOperation::sign(&first_ordered_operation, &signer)
+        .expect("first ordered operation");
+    let mut second_result = State::new_merge(
+        Tree::new().hash(),
+        vec![result.id(), source_state],
+        author(),
+    );
+    second_result.intent = Some("second stack member".into());
+    let mut ordered = first_ordered.clone();
+    ordered.expected_target_frontier = BTreeSet::from([
+        first_ordered_operation.id().expect("first ID"),
+    ]);
+    ordered.result = second_result.encode_current_msgpack().expect("second state").into();
+    ordered.executed_at_ms += 10;
+    let second_ordered_operation = ThreadOperation {
+        version: 1,
+        thread: ordered_target.thread_id(),
+        parents: ordered.expected_target_frontier.clone(),
+        publisher: ordered.device,
+        body: ThreadOperationBody::LocalIntegration(ordered.encode().expect("second receipt")),
+    };
+    let ordered_id = objects::object::OperationId::new();
+    let ordered_command = crate::device_operations::Command {
+        namespace: "ordered-stack-test",
+        id: ordered_id,
+        method: "/heddle.api.v2alpha1.ThreadService/LandStack",
+        request_hash: [5; 32],
+    };
+    ordered_target
+        .receive_local_stack_cas_command(
+            &[first_ordered_signed, SignedOperation::sign(&second_ordered_operation, &signer).expect("second ordered operation")],
+            repository.store(),
+            &ordered_command,
+            b"ordered receipt",
+        )
+        .expect("ordered members commit together");
+    assert!(
+        ordered_target.accepted_source_revision(second_result.id()).expect("second result").is_some(),
+        "second stack member sees the first frontier inside one transaction"
+    );
+    assert_eq!(
+        crate::device_operations::replay_response(repository.heddle_dir(), &ordered_command)
+            .expect("ordered receipt"),
+        Some(b"ordered receipt".to_vec())
+    );
     assert_eq!(
         target
             .receive_local_integration_cas_command(&signed, repository.store(), |_| Ok(()), &command, response)

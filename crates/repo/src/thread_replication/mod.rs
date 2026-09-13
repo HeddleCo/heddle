@@ -120,6 +120,10 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
         namespace TEXT NOT NULL, operation_id TEXT NOT NULL, request_hash BLOB NOT NULL CHECK(length(request_hash)=32),
         canonical BLOB NOT NULL CHECK(length(canonical)<=262144), response BLOB NOT NULL CHECK(length(response)<=1048576),
         PRIMARY KEY(namespace,operation_id));")?;
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS thread_stack_prepared(
+        namespace TEXT NOT NULL, operation_id TEXT NOT NULL, request_hash BLOB NOT NULL CHECK(length(request_hash)=32),
+        canonical BLOB NOT NULL CHECK(length(canonical)<=8388608), response BLOB NOT NULL CHECK(length(response)<=1048576),
+        PRIMARY KEY(namespace,operation_id));")?;
     connection.execute_batch(ownership_claim::SCHEMA)?;
     connection.execute_batch(ownership_resolution::SCHEMA)?;
     connection.execute_batch(boundary_evidence::SCHEMA)?;
@@ -613,6 +617,49 @@ impl ThreadReplica {
         tx.commit()?;
         Ok((row.1,row.2))
     }
+    /// Stack preparation uses the same durable metadata database as single
+    /// landing, with an aggregate bound for at most 64 signed members.
+    pub fn prepared_local_stack(
+        &self,
+        namespace: &str,
+        operation_id: &str,
+        request_hash: &[u8; 32],
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let row: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = self.connect()?.query_row(
+            "SELECT request_hash,canonical,response FROM thread_stack_prepared WHERE namespace=?1 AND operation_id=?2",
+            params![namespace, operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        match row {
+            Some((hash, canonical, response)) if hash.as_slice() == request_hash.as_slice() => Ok(Some((canonical, response))),
+            Some(_) => Err(Error::Invalid("landing stack operation ID reused with different input".into())),
+            None => Ok(None),
+        }
+    }
+    pub fn prepare_local_stack(
+        &self,
+        namespace: &str,
+        operation_id: &str,
+        request_hash: &[u8; 32],
+        canonical: &[u8],
+        response: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        if canonical.len() > 8 * 1024 * 1024 || response.len() > 1024 * 1024 {
+            return Err(Error::Invalid("prepared landing stack exceeds byte bound".into()));
+        }
+        let mut connection = self.connect()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute("INSERT OR IGNORE INTO thread_stack_prepared(namespace,operation_id,request_hash,canonical,response) VALUES(?1,?2,?3,?4,?5)",
+            params![namespace,operation_id,request_hash.as_slice(),canonical,response])?;
+        let row: (Vec<u8>, Vec<u8>, Vec<u8>) = tx.query_row(
+            "SELECT request_hash,canonical,response FROM thread_stack_prepared WHERE namespace=?1 AND operation_id=?2",
+            params![namespace,operation_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+        if row.0.as_slice() != request_hash.as_slice() {
+            return Err(Error::Invalid("landing stack operation ID reused with different input".into()));
+        }
+        tx.commit()?;
+        Ok((row.1,row.2))
+    }
     pub fn receive_local_integration_cas_command(
         &self,
         signed: &SignedOperation,
@@ -625,6 +672,62 @@ impl ThreadReplica {
             return Err(Error::Invalid("local integration CAS requires a local receipt".into()));
         }
         self.receive_inner(signed, store, authorize, true, None, false, Some((command,response)))
+    }
+    /// Admit a bounded ordered stack on one Spool in one SQLite transaction.
+    /// Each later member sees earlier accepted source frontiers in this same
+    /// transaction; a failed member rolls every operation and receipt back.
+    pub fn receive_local_stack_cas_command(
+        &self,
+        signed: &[SignedOperation],
+        store: &impl ObjectStore,
+        command: &crate::device_operations::Command<'_>,
+        response: &[u8],
+    ) -> Result<()> {
+        if signed.is_empty() || signed.len() > 64 {
+            return Err(Error::Invalid("landing stack requires 1–64 members".into()));
+        }
+        let mut prepared = Vec::with_capacity(signed.len());
+        for original in signed {
+            let operation = original.verify()?;
+            let target = Self {
+                path: self.path.clone(),
+                thread: operation.thread,
+            };
+            if operation.local_integration()?.is_none() {
+                return Err(Error::Invalid("stack member must be a local integration".into()));
+            }
+            target.require_trusted_integration(&operation)?;
+            target.require_local_integration_source(&operation)?;
+            target.validate_reference_capture(&operation, store)?;
+            prepared.push((target, operation));
+        }
+        let mut connection = self.connect()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        for ((target, operation), original) in prepared.iter().zip(signed) {
+            if target.receive_in(&tx, original, operation, store, true, None, false)?
+                != Admission::Accepted
+            {
+                return Err(Error::Invalid("landing stack member is not accepted".into()));
+            }
+        }
+        if crate::device_operations::replay(&tx, command)
+            .map_err(|error| Error::Invalid(error.to_string()))?
+            .is_none()
+        {
+            crate::device_operations::receipt(&tx, command, response)
+                .map_err(|error| Error::Invalid(error.to_string()))?;
+        }
+        tx.commit()?;
+        let mut notified = std::collections::BTreeSet::new();
+        for (target, operation) in prepared {
+            if notified.insert(target.thread) {
+                target.notify_committed()?;
+            }
+            if target.reference_projection_pending(operation.id()?)? {
+                target.complete_reference_projection(operation.id()?, store)?;
+            }
+        }
+        Ok(())
     }
     /// Admit an original signed source whose referenced filename/anchor closure
     /// was deliberately withheld by a partial transfer. This preserves its

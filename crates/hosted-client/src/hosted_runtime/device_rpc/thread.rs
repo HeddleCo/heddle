@@ -669,7 +669,31 @@ impl DeviceRpc {
                         id: "device-thread-landing-policy".into(),
                     })),
                 }),
-                version: super::land::thread_policy_version(repository)?.as_bytes().to_vec(),
+                version: super::land::thread_policy_version(repository)?
+                    .as_bytes()
+                    .to_vec(),
+            }],
+            ..Default::default()
+        });
+        let stack_method = "/heddle.api.v2alpha1.ThreadService/LandStack";
+        overview.actions.push(ActionAvailability {
+            method: stack_method.into(),
+            endpoint: Some(self.endpoint()),
+            target: Some(EntityRef {
+                entity: reference.spool.clone().map(entity_ref::Entity::Spool),
+            }),
+            implemented: true,
+            authorized: permits(stack_method),
+            observed_versions: vec![ExpectedVersion {
+                resource: Some(EntityRef {
+                    entity: Some(entity_ref::Entity::Policy(RecordRef {
+                        spool: reference.spool.clone(),
+                        id: "device-thread-landing-policy".into(),
+                    })),
+                }),
+                version: super::land::thread_policy_version(repository)?
+                    .as_bytes()
+                    .to_vec(),
             }],
             ..Default::default()
         });

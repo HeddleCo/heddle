@@ -126,7 +126,7 @@ fn temporary_passkey_thread_landing_is_exact_method_and_spool_bound() {
     );
     let bytes = proof::encode(
         &OwnerHistory {
-            root: Some(root),
+            root: Some(root.clone()),
             accepted_transitions: vec![],
             state_hash: state.state_hash().to_vec(),
         },
@@ -150,6 +150,29 @@ fn temporary_passkey_thread_landing_is_exact_method_and_spool_bound() {
     }
     proof::verify(&bytes, context!("/heddle.api.v2alpha1.ThreadService/LandThread", "acme/project"), |_| false)
         .expect("exact passkey Thread landing");
+    let stack_token = Biscuit::builder()
+        .code(format!(
+            "user(\"11111111-1111-1111-1111-111111111111\"); session(\"passkey-stack\"); device_pop_key(\"{}\"); check if operation(\"LandStack\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};",
+            hex::encode(publisher), expiry.to_rfc3339(),
+        ))
+        .expect("stack authority facts")
+        .build(&pair)
+        .expect("temporary stack credential");
+    let stack_bytes = proof::encode(
+        &OwnerHistory {
+            root: Some(root),
+            accepted_transitions: vec![],
+            state_hash: state.state_hash().to_vec(),
+        },
+        &publisher,
+        Some(&attachment),
+        &stack_token,
+    )
+    .expect("portable stack authority");
+    proof::verify(&stack_bytes, context!("/heddle.api.v2alpha1.ThreadService/LandStack", "acme/project"), |_| false)
+        .expect("exact passkey Thread stack landing");
+    assert!(proof::verify(&stack_bytes, context!("/heddle.api.v2alpha1.ThreadService/LandThread", "acme/project"), |_| false).is_err());
+    assert!(proof::verify(&stack_bytes, context!("/heddle.api.v2alpha1.ThreadService/LandStack", "acme/other"), |_| false).is_err());
     assert!(proof::verify(&bytes, context!("/heddle.api.v2alpha1.ThreadService/RecordReview", "acme/project"), |_| false).is_err());
     assert!(proof::verify(&bytes, context!("/heddle.api.v2alpha1.ThreadService/LandThread", "acme/other"), |_| false).is_err());
 }

@@ -496,6 +496,30 @@ pub(super) fn source_content_visibility(
     agent: Option<&str>,
     revision: objects::object::StateId,
 ) -> Result<Option<objects::object::EntryRedactions>> {
+    Ok(source_content_projection(repository, replica, principal, agent, revision)?
+        .map(|(redactions, _)| redactions))
+}
+
+/// The signed floor is used when authoring an integration. It cannot be
+/// reconstructed from local sidecars alone after a metadata-only import.
+pub(super) fn source_visibility_floor(
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+    revision: objects::object::StateId,
+) -> Result<Option<objects::object::VisibilityTier>> {
+    Ok(source_content_projection(repository, replica, principal, agent, revision)?
+        .map(|(_, tier)| tier))
+}
+
+fn source_content_projection(
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+    revision: objects::object::StateId,
+) -> Result<Option<(objects::object::EntryRedactions, objects::object::VisibilityTier)>> {
     if !source_revision_visible(repository, replica, principal, agent, revision)? {
         return Ok(None);
     }
@@ -506,6 +530,7 @@ pub(super) fn source_content_visibility(
     else {
         return Ok(None);
     };
+    let mut floor = repository.effective_visibility_tier(&revision)?;
     let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
     let mut pending = vec![revision];
     let mut seen = BTreeSet::new();
@@ -609,6 +634,14 @@ pub(super) fn source_content_visibility(
                 }
                 pending_threads.push(source_thread);
             }
+            if state.id() == revision
+                && capture.visibility.as_ref().and_then(|visibility| visibility.state.as_ref()).is_none()
+            {
+                floor = objects::object::thread_replication::local_integration::intersect_visibility(
+                    &floor,
+                    &repository.resolve_capture_default_visibility(),
+                )?;
+            }
             if let Some(visibility) = capture.visibility {
                 if let Some(tier) = &visibility.state {
                     let check = state.id() == revision || tier.is_embargo();
@@ -617,6 +650,11 @@ pub(super) fn source_content_visibility(
                             || !objects::object::visible(tier, &audience))
                     {
                         return Ok(None);
+                    }
+                    if check {
+                        floor = objects::object::thread_replication::local_integration::intersect_visibility(
+                            &floor, tier,
+                        )?;
                     }
                 }
                 originals.entry(state.id()).or_default().push(visibility);
@@ -644,7 +682,52 @@ pub(super) fn source_content_visibility(
             });
         }
     }
-    Ok(Some(redactions))
+    Ok(Some((redactions, floor)))
+}
+
+/// An override from a historical State matters only if its exact salted leaf
+/// still occurs in the selected tree. This bounded walk is shared by native
+/// Read attestation; a stale hidden ancestor leaf does not taint new content.
+pub(super) fn selected_source_full_content_visible(
+    repository: &repo::Repository,
+    revision: objects::object::StateId,
+    redactions: &objects::object::EntryRedactions,
+) -> Result<bool> {
+    use objects::object::TreeEntryTarget;
+    let Some(state) = repository.store().get_state(&revision)? else {
+        return Ok(false);
+    };
+    if state.id() != revision {
+        return Ok(false);
+    }
+    let mut pending = vec![state.tree];
+    let mut seen = BTreeSet::new();
+    let mut bytes = 0usize;
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if seen.len() > 4096 {
+            return Ok(false);
+        }
+        let Some(tree) = repository.store().get_tree(&id)? else {
+            return Ok(false);
+        };
+        let canonical = tree.encode_canonical()?;
+        bytes = bytes.saturating_add(canonical.len());
+        if tree.hash() != id || bytes > 16 * 1024 * 1024 {
+            return Ok(false);
+        }
+        for (index, entry) in tree.entries().iter().enumerate() {
+            if !redactions.entry_visible(&tree, index) {
+                return Ok(false);
+            }
+            if let TreeEntryTarget::Tree { hash } = entry.target() {
+                pending.push(*hash);
+            }
+        }
+    }
+    Ok(true)
 }
 
 pub(super) fn discussion_visible(
