@@ -1,6 +1,6 @@
 //! Hosted authentication operations and typed outcomes.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{collections::BTreeSet, io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v2alpha1 as identity;
@@ -1357,7 +1357,8 @@ async fn create_service_token_connected(
     {
         bail!("issued service credential does not match the requested child, class or lifetime");
     }
-    let token = base64::engine::general_purpose::URL_SAFE.encode(&issued.biscuit);
+    let token =
+        verify_issued_service_biscuit(&parent_raw, &issued.biscuit, &root_key, &child_key, expiry)?;
     let subject = crate::hosted_runtime::device_flow::authenticated_subject(&token)
         .context("verifying issued service credential subject")?;
     if subject != issued.subject {
@@ -1490,15 +1491,25 @@ impl PreparedServiceToken {
     }
 
     fn load(path: &Path) -> Result<Option<Self>> {
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+        let file = match credential_file::open_credential_file_checked(path) {
+            Ok(file) => file,
+            Err(error)
+                if error
+                    .root_cause()
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
         };
+        let mut bytes = Vec::new();
+        file.take(256 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("reading {}", path.display()))?;
         if bytes.len() > 256 * 1024 {
             bail!("service-token preparation exceeds private storage bound");
         }
-        crypto::reject_group_or_world_readable_key(path)?;
         let prepared: Self =
             serde_json::from_slice(&bytes).context("decoding private service-token preparation")?;
         if prepared.format != Self::FORMAT {
@@ -1548,6 +1559,62 @@ impl PreparedServiceToken {
         }
         Ok(())
     }
+}
+
+fn verify_issued_service_biscuit(
+    parent_raw: &[u8],
+    issued_raw: &[u8],
+    root_key: &[u8],
+    child_key: &[u8],
+    expiry: i64,
+) -> Result<String> {
+    let root = biscuit_auth::PublicKey::from_bytes(root_key, biscuit_auth::Algorithm::Ed25519)
+        .context("invalid verified parent Biscuit root key")?;
+    let parent = biscuit_auth::Biscuit::from(parent_raw, root)
+        .context("active parent Biscuit signature failed local verification")?;
+    let root = biscuit_auth::PublicKey::from_bytes(root_key, biscuit_auth::Algorithm::Ed25519)
+        .context("invalid verified issued Biscuit root key")?;
+    let issued = biscuit_auth::Biscuit::from(issued_raw, root)
+        .context("issued service Biscuit signature failed local verification")?;
+    if issued.block_count() != parent.block_count() + 1 {
+        bail!("issued service credential must append exactly one block to its parent");
+    }
+    let parent_token = base64::engine::general_purpose::URL_SAFE.encode(parent_raw);
+    let token = base64::engine::general_purpose::URL_SAFE.encode(issued_raw);
+    biscuit_verifier::key_delegation::require_descendant(&parent_token, &token)
+        .context("issued service credential discarded parent restrictions")?;
+    let effective = biscuit_verifier::facts::verify_proof_key_lineage(&issued)
+        .context("issued service credential proof-key lineage failed")?;
+    if !effective.eq_ignore_ascii_case(&hex::encode(child_key)) {
+        bail!("issued service credential does not delegate possession to the requested child");
+    }
+    let now = chrono::Utc::now();
+    biscuit_verifier::authorize_at_with_extra_facts(
+        &issued,
+        "ObserveIdentity",
+        now,
+        None,
+        &[],
+        None,
+        &[],
+    )
+    .context("issued service credential is not currently usable")?;
+    let boundary = chrono::DateTime::from_timestamp(expiry, 0)
+        .context("issued service credential expiry outside supported range")?;
+    if biscuit_verifier::authorize_at_with_extra_facts(
+        &issued,
+        "ObserveIdentity",
+        boundary,
+        None,
+        &[],
+        None,
+        &[],
+    )
+    .is_ok()
+    {
+        bail!("issued service credential is not bounded by the requested expiry");
+    }
+    Ok(token)
 }
 
 fn sign_identity_record(
@@ -1982,6 +2049,138 @@ mod tests {
         assert!(done.put_hex.is_empty());
         assert!(done.issue_hex.is_none());
         assert_eq!(done.completed_digest.as_deref(), Some("credential-digest"));
+    }
+
+    #[test]
+    fn issued_service_token_requires_signed_exact_parent_child_and_expiry() {
+        use biscuit_auth::{Biscuit, KeyPair, builder::BlockBuilder};
+        let root = KeyPair::new();
+        let root_key = root.public().to_bytes();
+        let parent_signer =
+            Ed25519Signer::from_seed(&root.private().to_bytes()).expect("root proof key");
+        let child_signer = Ed25519Signer::generate().expect("child proof key");
+        let child_key = child_signer.public_key().to_vec();
+        let parent = Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("subject")
+            .fact(r#"session("parent-session")"#)
+            .expect("session")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(&root_key)).as_str())
+            .expect("parent proof key")
+            .build(&root)
+            .expect("parent Biscuit")
+            .to_base64()
+            .expect("parent token");
+        let child: &[u8; 32] = child_key.as_slice().try_into().expect("child key size");
+        let transfer = parent_signer
+            .sign(
+                &biscuit_verifier::key_delegation::statement(&parent, child)
+                    .expect("transfer statement"),
+            )
+            .expect("signed transfer");
+        let transfer: &[u8; 64] = transfer.as_slice().try_into().expect("transfer size");
+        let expiry = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp();
+        let restriction = BlockBuilder::new()
+            .check(
+                format!(
+                    "check if time($now), $now < {}",
+                    chrono::DateTime::from_timestamp(expiry, 0)
+                        .expect("expiry")
+                        .to_rfc3339()
+                )
+                .as_str(),
+            )
+            .expect("expiry restriction");
+        let valid = biscuit_verifier::key_delegation::append(&parent, child, transfer, restriction)
+            .expect("valid service child");
+        let parent_raw = base64::engine::general_purpose::URL_SAFE
+            .decode(&parent)
+            .expect("parent bytes");
+        let valid_raw = base64::engine::general_purpose::URL_SAFE
+            .decode(&valid)
+            .expect("child bytes");
+        verify_issued_service_biscuit(&parent_raw, &valid_raw, &root_key, &child_key, expiry)
+            .expect("signed exact child accepted");
+        let wrong_child = Ed25519Signer::generate().expect("different child");
+        let wrong_child_error = verify_issued_service_biscuit(
+            &parent_raw,
+            &valid_raw,
+            &root_key,
+            wrong_child.public_key(),
+            expiry,
+        )
+        .expect_err("wrong child must fail");
+        assert!(wrong_child_error.to_string().contains("requested child"));
+        let wrong_root = KeyPair::new();
+        let wrong_root_error = verify_issued_service_biscuit(
+            &parent_raw,
+            &valid_raw,
+            &wrong_root.public().to_bytes(),
+            &child_key,
+            expiry,
+        )
+        .expect_err("wrong root must fail");
+        assert!(wrong_root_error.to_string().contains("signature"));
+        let unbounded =
+            biscuit_verifier::key_delegation::append(&parent, child, transfer, BlockBuilder::new())
+                .expect("unbounded sibling child");
+        let unbounded_raw = base64::engine::general_purpose::URL_SAFE
+            .decode(&unbounded)
+            .expect("unbounded child bytes");
+        let unbounded_error = verify_issued_service_biscuit(
+            &parent_raw,
+            &unbounded_raw,
+            &root_key,
+            &child_key,
+            expiry,
+        )
+        .expect_err("missing child expiry must fail");
+        assert!(unbounded_error.to_string().contains("requested expiry"));
+        let sibling_parent = Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("sibling subject")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(&root_key)).as_str())
+            .expect("sibling proof key")
+            .fact(r#"session("another")"#)
+            .expect("sibling session")
+            .build(&root)
+            .expect("sibling parent")
+            .to_base64()
+            .expect("sibling token");
+        let sibling_transfer = parent_signer
+            .sign(
+                &biscuit_verifier::key_delegation::statement(&sibling_parent, child)
+                    .expect("sibling transfer statement"),
+            )
+            .expect("sibling transfer signature");
+        let sibling_transfer: &[u8; 64] = sibling_transfer
+            .as_slice()
+            .try_into()
+            .expect("sibling signature size");
+        let sibling = biscuit_verifier::key_delegation::append(
+            &sibling_parent,
+            child,
+            sibling_transfer,
+            BlockBuilder::new()
+                .check(
+                    format!(
+                        "check if time($now), $now < {}",
+                        chrono::DateTime::from_timestamp(expiry, 0)
+                            .expect("expiry")
+                            .to_rfc3339()
+                    )
+                    .as_str(),
+                )
+                .expect("sibling expiry restriction"),
+        )
+        .expect("sibling child");
+        let sibling_raw = base64::engine::general_purpose::URL_SAFE
+            .decode(&sibling)
+            .expect("sibling bytes");
+        let sibling_error =
+            verify_issued_service_biscuit(&parent_raw, &sibling_raw, &root_key, &child_key, expiry)
+                .expect_err("sibling root token must fail");
+        assert!(sibling_error.to_string().contains("discarded parent"));
     }
 
     #[test]

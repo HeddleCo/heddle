@@ -337,7 +337,7 @@ pub fn load_credential_file(path: &Path) -> Result<VerifiedCredential> {
 /// any file the group or others can access. The check runs against the opened
 /// handle's metadata so the permission verdict and the later read see the same
 /// inode.
-fn open_credential_file_checked(path: &Path) -> Result<File> {
+pub(crate) fn open_credential_file_checked(path: &Path) -> Result<File> {
     let file =
         File::open(path).with_context(|| format!("opening credential file {}", path.display()))?;
     let metadata = file
