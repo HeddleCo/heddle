@@ -158,7 +158,7 @@ pub enum AuthCommands {
 Signup-only. `heddle auth invite` creates an account-creation code.
 It does not grant spool access. Add a collaborator with:
 
-  heddle grant create --spool <path|url> --principal <handle> --role contributor
+  heddle grant create --spool <path|url> --principal <handle> --role writer
 ")]
     Invite {
         /// Bind the new invite to an email address.
@@ -247,37 +247,21 @@ pub enum AuthInviteCommands {
 
 /// Hosted role granted on a spool.
 ///
-/// `contributor` is the everyday name for the `developer` role.
+/// Native Spool grants use the three explicit resource roles.
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GrantRoleArg {
     Reader,
-    Contributor,
-    Developer,
-    Maintainer,
-    Admin,
-    Owner,
+    Writer,
+    Administrator,
 }
 
 impl GrantRoleArg {
-    /// Wire token `CreateGrant` / `UpdateGrant` accept.
-    pub fn as_hosted_role_name(self) -> &'static str {
+    /// Native v2 Spool role token.
+    pub fn as_resource_role_name(self) -> &'static str {
         match self {
             Self::Reader => "reader",
-            Self::Contributor | Self::Developer => "developer",
-            Self::Maintainer => "maintainer",
-            Self::Admin => "admin",
-            Self::Owner => "owner",
-        }
-    }
-
-    /// Hosted role ordinal used for the agent grant ceiling.
-    pub fn as_grant_role(self) -> repo::GrantRole {
-        match self {
-            Self::Reader => repo::GrantRole::Reader,
-            Self::Contributor | Self::Developer => repo::GrantRole::Developer,
-            Self::Maintainer => repo::GrantRole::Maintainer,
-            Self::Admin => repo::GrantRole::Admin,
-            Self::Owner => repo::GrantRole::Owner,
+            Self::Writer => "writer",
+            Self::Administrator => "administrator",
         }
     }
 }
@@ -292,14 +276,11 @@ pub enum GrantCommands {
 Adds a collaborator to an existing hosted spool. This is not a signup
 invite — `heddle auth invite` only creates an account-creation code.
 
-Roles: reader, contributor (developer), maintainer, admin, owner.
-
-Agent sessions may grant writer or below (reader, contributor)
-without human verification. Maintainer, admin, and owner stay
-human-verified and are refused for derive-agent / attenuated sessions.
+Roles: reader, writer, administrator. A delegate can grant only authority
+they currently hold; owner-only cryptographic powers are separate.
 
 Examples:
-  heddle grant create --spool spool/willow-ibis-8e7264/notes --principal alice --role contributor
+  heddle grant create --spool spool/willow-ibis-8e7264/notes --principal alice --role writer
   heddle grant create --spool https://api.preview.heddle.sh/notes --principal alice --role reader
 ")]
     Create(GrantCreateArgs),
@@ -316,13 +297,13 @@ Examples:
 ")]
     List(GrantListArgs),
 
-    /// Remove a grant. `ID` is the principal shown by `heddle grant list`.
+    /// Remove a grant by its stable record ID shown by `heddle grant list`.
     #[command(after_help = "\
-Agents may delete writer-or-below grants without human verification.
-Deleting a maintainer, admin, or owner grant still requires a human-verified session.
+The acting account or delegate must currently have grant administration on
+this Spool. A grant's role does not change the authority needed to remove it.
 
 Examples:
-  heddle grant delete alice --spool spool/willow-ibis-8e7264/notes
+  heddle grant delete <grant-id> --spool spool/willow-ibis-8e7264/notes
 ")]
     Delete(GrantDeleteArgs),
 }
@@ -743,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn grant_create_parses_spool_principal_and_contributor_role() {
+    fn grant_create_parses_spool_principal_and_writer_role() {
         let cli = Cli::try_parse_from([
             "heddle",
             "grant",
@@ -753,7 +734,7 @@ mod tests {
             "--principal",
             "alice",
             "--role",
-            "contributor",
+            "writer",
             "--server",
             "api.preview.heddle.sh",
         ])
@@ -766,8 +747,8 @@ mod tests {
         };
         assert_eq!(args.spool, "spool/willow-ibis-8e7264/notes");
         assert_eq!(args.principal, "alice");
-        assert_eq!(args.role, GrantRoleArg::Contributor);
-        assert_eq!(args.role.as_hosted_role_name(), "developer");
+        assert_eq!(args.role, GrantRoleArg::Writer);
+        assert_eq!(args.role.as_resource_role_name(), "writer");
         assert_eq!(args.server.as_deref(), Some("api.preview.heddle.sh"));
     }
 

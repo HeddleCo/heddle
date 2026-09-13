@@ -265,6 +265,7 @@ async fn start_inner(
         version: verified.state_hash().to_vec(),
         ..Default::default()
     };
+    let grants = Arc::new(Mutex::new(Vec::<v2::GrantRecord>::new()));
     let server_task = tokio::spawn(async move {
         let connection = server
             .accept()
@@ -285,6 +286,7 @@ async fn start_inner(
                 collaboration.clone(),
                 server_key.clone(),
                 owner.clone(),
+                Arc::clone(&grants),
             ));
         }
         server.close().await;
@@ -318,6 +320,7 @@ async fn serve_call(
     collaboration: Option<CollaborationFixture>,
     server_key: Vec<u8>,
     owner: v2::OwnerState,
+    grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -350,6 +353,8 @@ async fn serve_call(
                         "/heddle.api.v2alpha1.SpoolService/DeleteSpool".into(),
                         "/heddle.api.v2alpha1.SpoolService/ReviseSpool".into(),
                         "/heddle.api.v2alpha1.SpoolService/PromoteSpool".into(),
+                        "/heddle.api.v2alpha1.SpoolService/PutGrant".into(),
+                        "/heddle.api.v2alpha1.SpoolService/RevokeGrant".into(),
                         "/heddle.api.v2alpha1.IdentityService/ObserveIdentity".into(),
                         "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace".into(),
                         "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership".into(),
@@ -369,16 +374,40 @@ async fn serve_call(
                 .await
                 .unwrap();
             } else if method == "/heddle.api.v2alpha1.WorkspaceService/ResolveResources" {
-                let response = v2::ResolveResourcesResponse {
-                    results: vec![v2::ResourceResolution {
-                        resource: Some(v2::EntityRef {
-                            entity: Some(v2::entity_ref::Entity::Spool(v2::SpoolRef {
-                                id: uuid::Uuid::from_bytes([2; 16]).to_string(),
-                            })),
-                        }),
+                while let Ok(Some(chunk)) =
+                    recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await
+                {
+                    request.extend_from_slice(&chunk);
+                }
+                let body = decode_request_frame(&request)
+                    .ok()
+                    .and_then(|frame| v2::ResolveResourcesRequest::decode(frame.body).ok())
+                    .expect("native resource selectors");
+                let scoped_handle = body.selectors.len() == 2
+                    && matches!(
+                        body.selectors[1].selector,
+                        Some(v2::resource_selector::Selector::PrincipalHandle(_))
+                    );
+                let spool = v2::SpoolRef {
+                    id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+                };
+                let mut results = vec![v2::ResourceResolution {
+                    resource: Some(v2::EntityRef {
+                        entity: Some(v2::entity_ref::Entity::Spool(spool)),
+                    }),
+                    coverage: v2::Coverage::Complete as i32,
+                    ..Default::default()
+                }];
+                if scoped_handle {
+                    results.push(v2::ResourceResolution {
+                        selection_index: 1,
+                        principal_id: uuid::Uuid::from_bytes([4; 16]).to_string(),
                         coverage: v2::Coverage::Complete as i32,
                         ..Default::default()
-                    }],
+                    });
+                }
+                let response = v2::ResolveResourcesResponse {
+                    results,
                     ..Default::default()
                 };
                 send.write_chunk(Bytes::from(
@@ -406,6 +435,12 @@ async fn serve_call(
                 .await;
             } else if method == "/heddle.api.v2alpha1.SpoolService/PromoteSpool" {
                 serve_native_promote_spool(&mut send, &mut recv, &mut request, server_key).await;
+            } else if method == "/heddle.api.v2alpha1.SpoolService/PutGrant" {
+                serve_native_put_grant(&mut send, &mut recv, &mut request, server_key, grants)
+                    .await;
+            } else if method == "/heddle.api.v2alpha1.SpoolService/RevokeGrant" {
+                serve_native_revoke_grant(&mut send, &mut recv, &mut request, server_key, grants)
+                    .await;
             } else if method == "/heddle.api.v2alpha1.SpoolService/CreateSpool" {
                 serve_native_create_spool(&mut send, &mut recv, &mut request, server_key, owner)
                     .await;
@@ -431,7 +466,14 @@ async fn serve_call(
         }
         StreamingShape::ServerStreaming => {
             if method == "/heddle.api.v2alpha1.SpoolService/ObserveSpool" {
-                serve_native_spool_observation(&mut send, server_key).await;
+                serve_native_spool_observation(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    grants,
+                )
+                .await;
             } else if method == "/heddle.api.v2alpha1.IdentityService/ObserveIdentity" {
                 serve_native_identity_observation(&mut send, server_key).await;
             } else if method == "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace" {
@@ -763,8 +805,21 @@ async fn serve_native_identity_observation(
 
 async fn serve_native_spool_observation(
     send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
     server_key: Vec<u8>,
+    grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
 ) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let request_body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveSpoolRequest::decode(frame.body).ok())
+        .expect("native Spool observation request");
+    let grants_requested = request_body
+        .sections
+        .contains(&(v2::SpoolSection::Grants as i32));
     let source = v2::EndpointRef {
         kind: v2::EndpointKind::Weft as i32,
         public_key: server_key,
@@ -774,7 +829,7 @@ async fn serve_native_spool_observation(
         max_frame_bytes: 65536,
         max_snapshot_bytes: 1048576,
     };
-    let events = [
+    let mut events = vec![
         v2::SpoolEvent {
             frame: Some(v2::StreamFrame {
                 sequence: 1,
@@ -821,6 +876,58 @@ async fn serve_native_spool_observation(
             ..Default::default()
         },
     ];
+    if grants_requested {
+        events.truncate(1);
+        let records = grants
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        let mut sequence = 2;
+        for grant in records {
+            events.push(v2::SpoolEvent {
+                frame: Some(v2::StreamFrame {
+                    sequence,
+                    body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                        kind: v2::StreamDataKind::Snapshot as i32,
+                    })),
+                }),
+                payload: Some(v2::spool_event::Payload::Grant(grant)),
+            });
+            sequence += 1;
+        }
+        events.push(v2::SpoolEvent {
+            frame: Some(v2::StreamFrame {
+                sequence,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(v2::spool_event::Payload::Status(v2::SectionStatus {
+                section: "grants".into(),
+                coverage: v2::Coverage::Complete as i32,
+                page: Some(v2::PageInfo {
+                    exhausted: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+        });
+        events.push(v2::SpoolEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: sequence + 1,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        });
+    }
     for event in events {
         send.write_chunk(Bytes::from(
             encode_stream_message(&event.encode_to_vec()).unwrap(),
@@ -915,6 +1022,75 @@ async fn serve_native_promote_spool(
             ..Default::default()
         }),
         ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_native_put_grant(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::PutGrantRequest::decode(frame.body).ok())
+        .expect("native PutGrant request");
+    let mut grant = body.grant.expect("grant record");
+    grant.version = vec![1; 32];
+    grants
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .push(grant);
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+async fn serve_native_revoke_grant(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::RevokeGrantRequest::decode(frame.body).ok())
+        .expect("native RevokeGrant request");
+    grants
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .retain(|grant| grant.r#ref != body.grant);
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+async fn write_native_grant_receipt(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+    operation_id: String,
+) {
+    let response = v2::MutationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
     };
     send.write_chunk(Bytes::from(
         encode_success_response(&response.encode_to_vec()).unwrap(),

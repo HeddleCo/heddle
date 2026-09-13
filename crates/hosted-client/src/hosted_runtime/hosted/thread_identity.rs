@@ -6,6 +6,63 @@ use wire::ProtocolError;
 use super::HostedClient;
 
 impl HostedClient {
+    pub(super) async fn resolve_principal_id(
+        &self,
+        handle_or_id: &str,
+        spool: &contract::SpoolRef,
+    ) -> Result<String, ProtocolError> {
+        if let Ok(id) = uuid::Uuid::parse_str(handle_or_id) {
+            return Ok(id.to_string());
+        }
+        let remote = self.native().await.map_err(native_error)?;
+        let response = remote
+            .api
+            .call::<rpc::WorkspaceServiceResolveResources>(&contract::ResolveResourcesRequest {
+                selectors: vec![
+                    contract::ResourceSelector {
+                        selector: Some(contract::resource_selector::Selector::Resource(
+                            contract::EntityRef {
+                                entity: Some(contract::entity_ref::Entity::Spool(spool.clone())),
+                            },
+                        )),
+                    },
+                    contract::ResourceSelector {
+                        selector: Some(contract::resource_selector::Selector::PrincipalHandle(
+                            handle_or_id.to_owned(),
+                        )),
+                    },
+                ],
+                budget: None,
+            })
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        let mut results = response.results.into_iter();
+        let scope = results.next().ok_or_else(|| {
+            ProtocolError::InvalidState("principal resolution omitted Spool scope".into())
+        })?;
+        let result = results.next().ok_or_else(|| {
+            ProtocolError::ObjectNotFound("principal handle did not resolve".into())
+        })?;
+        if results.next().is_some()
+            || scope.selection_index != 0
+            || scope.coverage != contract::Coverage::Complete as i32
+            || scope
+                .resource
+                .as_ref()
+                .and_then(|value| value.entity.as_ref())
+                != Some(&contract::entity_ref::Entity::Spool(spool.clone()))
+            || result.selection_index != 1
+            || result.coverage != contract::Coverage::Complete as i32
+        {
+            return Err(ProtocolError::InvalidState(
+                "principal resolution was incomplete or ambiguous".into(),
+            ));
+        }
+        Ok(uuid::Uuid::parse_str(&result.principal_id)
+            .map_err(native_error)?
+            .to_string())
+    }
+
     pub(super) async fn native_spool_overview(
         &self,
         address: &str,

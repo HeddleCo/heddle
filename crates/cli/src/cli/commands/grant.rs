@@ -2,6 +2,7 @@
 //! `heddle grant` — create, list, and delete spool collaborator grants.
 
 use anyhow::{Context, Result, anyhow};
+use api::heddle::api::v2alpha1::{GrantRecord, ResourceRole};
 use heddle_cli_contract::cli::commands::wire::auth::{
     GrantCreateOutput, GrantDeleteOutput, GrantListOutput, GrantRowOutput,
 };
@@ -9,7 +10,7 @@ use hosted_client::hosted_runtime::{
     auth::resolve_server,
     hosted::{HostedAuthMode, HostedClient, HostedSession, canonicalize_spool_path},
 };
-use wire::{HostedGrantInfo, ProtocolError};
+use wire::ProtocolError;
 
 use super::{
     advice::RecoveryAdvice,
@@ -41,7 +42,7 @@ async fn cmd_grant_create(cli: &Cli, args: GrantCreateArgs) -> Result<()> {
         &server,
         &spool,
         &args.principal,
-        args.role.as_hosted_role_name(),
+        args.role.as_resource_role_name(),
     )
     .await;
     session.close().await;
@@ -94,7 +95,7 @@ async fn create_connected(
         .create_grant(principal, role, None, Some(spool), cli.operation_id_wire())
         .await
         .map_err(|err| map_grant_error(spool, &err))?;
-    let row = grant_row(&created, spool);
+    let row = grant_row(&created, spool)?;
     if should_output_json(cli, None) {
         write_full_command_json(
             &GrantCreateOutput {
@@ -128,7 +129,7 @@ async fn list_grant_rows(client: &mut HostedClient, spool: &str) -> Result<Vec<G
         .list_grants(Some(spool))
         .await
         .map_err(|err| map_grant_error(spool, &err))?;
-    Ok(grants.iter().map(|grant| grant_row(grant, spool)).collect())
+    grants.iter().map(|grant| grant_row(grant, spool)).collect()
 }
 
 async fn list_connected(
@@ -152,7 +153,7 @@ async fn list_connected(
     } else if rows.is_empty() {
         println!("No grants on {}.", style::bold(spool));
         super::action_line::print_next(&format!(
-            "heddle grant create --spool {spool} --principal <handle> --role contributor"
+            "heddle grant create --spool {spool} --principal <handle> --role writer"
         ));
     } else {
         println!("ID\tROLE\tSPOOL");
@@ -199,19 +200,29 @@ async fn delete_connected(
     Ok(())
 }
 
-fn grant_row(grant: &HostedGrantInfo, fallback_spool: &str) -> GrantRowOutput {
-    let spool = grant
-        .repo_path
-        .as_deref()
-        .or(grant.namespace_path.as_deref())
-        .unwrap_or(fallback_spool)
-        .to_string();
-    GrantRowOutput {
-        id: grant.subject.clone(),
-        principal: grant.subject.clone(),
-        role: grant.role.clone(),
-        spool,
-    }
+fn grant_row(grant: &GrantRecord, spool: &str) -> Result<GrantRowOutput> {
+    let reference = grant
+        .r#ref
+        .as_ref()
+        .ok_or_else(|| anyhow!("grant has no stable record ID"))?;
+    let role = match ResourceRole::try_from(grant.role) {
+        Ok(ResourceRole::Reader) => "reader",
+        Ok(ResourceRole::Writer) => "writer",
+        Ok(ResourceRole::Administrator) => "administrator",
+        _ => return Err(anyhow!("grant has an unknown resource role")),
+    };
+    let principal = match grant.principal.as_ref() {
+        Some(summary) if summary.id == grant.principal_id && !summary.handle.is_empty() => {
+            summary.handle.clone()
+        }
+        _ => grant.principal_id.clone(),
+    };
+    Ok(GrantRowOutput {
+        id: reference.id.clone(),
+        principal,
+        role: role.into(),
+        spool: spool.into(),
+    })
 }
 
 fn resolve_grant_spool(spool: &str, server: Option<&str>) -> Result<(String, String)> {
@@ -246,11 +257,7 @@ fn map_grant_error(spool: &str, err: &ProtocolError) -> anyhow::Error {
         _ => "",
     };
     let lower = message.to_ascii_lowercase();
-    let advice = if lower.contains("cannot grant maintainer, admin, or owner")
-        || lower.contains("cannot grant admin or owner")
-    {
-        RecoveryAdvice::grant_agent_ceiling(spool, "maintainer, admin, or owner")
-    } else if is_human_verification_required(&lower) {
+    let advice = if is_human_verification_required(&lower) {
         RecoveryAdvice::grant_needs_human(spool)
     } else if matches!(
         err,
@@ -283,12 +290,13 @@ fn is_human_verification_required(lowered_message: &str) -> bool {
 mod tests {
     use std::{ffi::OsString, sync::MutexGuard};
 
+    use api::heddle::api::v2alpha1::{GrantRecord, ResourceRole};
     use clap::Parser;
     use wire::ProtocolError;
 
     use super::{
-        create_connected, grant_row, is_human_verification_required, list_grant_rows,
-        map_grant_error, resolve_grant_spool,
+        create_connected, delete_connected, grant_row, is_human_verification_required,
+        list_grant_rows, map_grant_error, resolve_grant_spool,
     };
     use crate::cli::Cli;
 
@@ -339,19 +347,12 @@ mod tests {
             "--principal",
             "alice",
             "--role",
-            "contributor",
+            "writer",
         ]);
 
-        create_connected(
-            &cli,
-            &mut client,
-            "test.invalid",
-            spool,
-            "alice",
-            "contributor",
-        )
-        .await
-        .expect("create grant on the production path");
+        create_connected(&cli, &mut client, "test.invalid", spool, "alice", "writer")
+            .await
+            .expect("create grant on the production path");
 
         let rows = list_grant_rows(&mut client, spool)
             .await
@@ -361,10 +362,20 @@ mod tests {
             1,
             "owner list must return the created grant: {rows:?}"
         );
-        assert_eq!(rows[0].id, "alice");
+        assert!(uuid::Uuid::parse_str(&rows[0].id).is_ok());
         assert_eq!(rows[0].principal, "alice");
-        assert_eq!(rows[0].role, "developer");
+        assert_eq!(rows[0].role, "writer");
         assert_eq!(rows[0].spool, spool);
+
+        delete_connected(&cli, &mut client, "test.invalid", spool, &rows[0].id)
+            .await
+            .expect("revoke by stable grant ID");
+        assert!(
+            list_grant_rows(&mut client, spool)
+                .await
+                .expect("post-revoke list")
+                .is_empty()
+        );
 
         client.close().await;
         server.await.unwrap();
@@ -401,19 +412,25 @@ mod tests {
     }
 
     #[test]
-    fn grant_row_uses_subject_as_delete_id() {
+    fn grant_row_uses_stable_record_id_for_deletion() {
         let row = grant_row(
-            &wire::HostedGrantInfo {
-                subject: "alice".into(),
-                role: "developer".into(),
-                namespace_path: None,
-                repo_path: Some("spool/me/notes".into()),
+            &GrantRecord {
+                r#ref: Some(api::heddle::api::v2alpha1::RecordRef {
+                    spool: Some(api::heddle::api::v2alpha1::SpoolRef {
+                        id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+                    }),
+                    id: uuid::Uuid::from_bytes([3; 16]).to_string(),
+                }),
+                principal_id: uuid::Uuid::from_bytes([4; 16]).to_string(),
+                role: ResourceRole::Writer as i32,
+                ..Default::default()
             },
-            "fallback",
-        );
-        assert_eq!(row.id, "alice");
-        assert_eq!(row.principal, "alice");
-        assert_eq!(row.role, "developer");
+            "spool/me/notes",
+        )
+        .expect("native grant row");
+        assert_eq!(row.id, uuid::Uuid::from_bytes([3; 16]).to_string());
+        assert_eq!(row.principal, uuid::Uuid::from_bytes([4; 16]).to_string());
+        assert_eq!(row.role, "writer");
         assert_eq!(row.spool, "spool/me/notes");
     }
 

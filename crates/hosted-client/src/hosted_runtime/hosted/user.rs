@@ -1,12 +1,11 @@
 use api::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, BootstrapOwnerRootRequest,
     BootstrapOwnerRootResponse, CheckMergeEligibilityRequest, CheckMergeEligibilityResponse,
-    CreateAgentAccountRequest, CreateAgentAccountResponse, CreateGrantRequest,
-    CreateInvitationRequest, CreateServiceAccountRequest, CreateSignupInviteRequest,
-    CreateSignupInviteResponse, DeleteGrantRequest, GetCurrentOwnerKeyringRequest,
-    GetCurrentOwnerKeyringResponse, GrantSupportAccessRequest, GrantTargetRef,
-    Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest, IssuedCredentialResponse,
-    ListGrantsRequest, ListSignupInvitesRequest, ListSignupInvitesResponse,
+    CreateAgentAccountRequest, CreateAgentAccountResponse, CreateInvitationRequest,
+    CreateServiceAccountRequest, CreateSignupInviteRequest, CreateSignupInviteResponse,
+    GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse, GrantSupportAccessRequest,
+    GrantTargetRef, Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest,
+    IssuedCredentialResponse, ListSignupInvitesRequest, ListSignupInvitesResponse,
     ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
     ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
     ServiceAccountResponse, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
@@ -660,41 +659,140 @@ impl HostedClient {
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
         client_operation_id: String,
-    ) -> Result<wire::HostedGrantInfo, ProtocolError> {
-        let method = "heddle.api.v1alpha1.RegistryService/CreateGrant";
+    ) -> Result<api::heddle::api::v2alpha1::GrantRecord, ProtocolError> {
+        use api::heddle::api::v2alpha1 as contract;
+        let address = grant_spool_address(namespace_path, repo_path)?;
+        let spool = self.resolve_spool_ref(address).await?;
+        let principal_id = self.resolve_principal_id(subject, &spool).await?;
+        let method = "heddle.api.v2alpha1.SpoolService/PutGrant";
         let operation_id = if client_operation_id.is_empty() {
             ClientOperationId::fresh(method)
         } else {
             ClientOperationId::for_required_method(method, client_operation_id)?
         };
-        let target = build_target_ref(namespace_path, repo_path)?;
-        let grant = authed_call!(
-            self,
-            create_grant,
-            "CreateGrant",
-            CreateGrantRequest {
-                subject: subject.to_string(),
-                role: parse_hosted_role_arg(role)? as i32,
-                target,
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(to_protocol_grant(grant))
+        let grant = contract::GrantRecord {
+            r#ref: Some(contract::RecordRef {
+                spool: Some(spool),
+                id: uuid::Uuid::now_v7().to_string(),
+            }),
+            principal: Some(contract::PublicPrincipalSummary {
+                id: principal_id.clone(),
+                handle: subject.to_owned(),
+                ..Default::default()
+            }),
+            principal_id,
+            role: native_grant_role(role)? as i32,
+            ..Default::default()
+        };
+        let request = contract::PutGrantRequest {
+            client_operation_id: operation_id.to_wire(),
+            grant: Some(grant.clone()),
+            ..Default::default()
+        };
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServicePutGrant>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        require_applied_receipt(
+            response.receipt,
+            &request.client_operation_id,
+            &remote.description.endpoint,
+            "grant creation",
+        )?;
+        Ok(grant)
     }
 
     pub async fn list_grants(
         &mut self,
         resource: Option<&str>,
-    ) -> Result<Vec<wire::HostedGrantInfo>, ProtocolError> {
-        let response = authed_call!(
-            self,
-            list_grants,
-            "ListGrants",
-            ListGrantsRequest {
-                resource: resource.unwrap_or_default().to_string(),
+    ) -> Result<Vec<api::heddle::api::v2alpha1::GrantRecord>, ProtocolError> {
+        use api::heddle::api::v2alpha1 as contract;
+        let address = resource.ok_or_else(|| {
+            ProtocolError::InvalidState("grant list requires a Spool address".into())
+        })?;
+        let spool = self.resolve_spool_ref(address).await?;
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let mut rows = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut after_page = Vec::new();
+        loop {
+            let mut observation = remote
+                .observe::<thread_api::rpc::SpoolServiceObserveSpool>(
+                    contract::ObserveSpoolRequest {
+                        spool: Some(spool.clone()),
+                        sections: vec![contract::SpoolSection::Grants as i32],
+                        pages: Some(contract::SpoolPages {
+                            grants: Some(contract::PageRequest {
+                                after_page: after_page.clone(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        observe: Some(contract::ObserveOptions {
+                            mode: contract::ObservationMode::Once as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await
+                .map_err(native_protocol_error)?;
+            let batch = observation
+                .next_commit()
+                .await
+                .map_err(native_protocol_error)?
+                .ok_or_else(|| {
+                    ProtocolError::InvalidState("grant observation ended without checkpoint".into())
+                })?;
+            let mut status = None;
+            for change in batch.changes {
+                match change {
+                    contract::spool_event::Payload::Grant(grant) => {
+                        let reference = grant.r#ref.as_ref().ok_or_else(|| {
+                            ProtocolError::InvalidState("grant row has no stable identity".into())
+                        })?;
+                        if reference.spool.as_ref() != Some(&spool)
+                            || uuid::Uuid::parse_str(&reference.id).is_err()
+                            || !seen.insert(reference.id.clone())
+                            || rows.len() >= 4096
+                        {
+                            return Err(ProtocolError::InvalidState(
+                                "grant observation contains an invalid, duplicate or excess row"
+                                    .into(),
+                            ));
+                        }
+                        rows.push(grant);
+                    }
+                    contract::spool_event::Payload::Status(section)
+                        if section.section == "grants" =>
+                    {
+                        if section.coverage != contract::Coverage::Complete as i32
+                            || status.replace(section.page).is_some()
+                        {
+                            return Err(ProtocolError::InvalidState(
+                                "grant coverage is incomplete or duplicated".into(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
             }
-        );
-        Ok(response.grants.into_iter().map(to_protocol_grant).collect())
+            let page = status
+                .flatten()
+                .ok_or_else(|| ProtocolError::InvalidState("grant page status absent".into()))?;
+            if page.exhausted {
+                return Ok(rows);
+            }
+            if page.next_page.is_empty() || page.next_page == after_page {
+                return Err(ProtocolError::InvalidState(
+                    "grant cursor did not advance".into(),
+                ));
+            }
+            after_page = page.next_page;
+        }
     }
 
     pub async fn update_grant(
@@ -723,28 +821,56 @@ impl HostedClient {
 
     pub async fn delete_grant(
         &mut self,
-        subject: &str,
+        grant_id: &str,
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
         client_operation_id: String,
     ) -> Result<(), ProtocolError> {
-        let method = "heddle.api.v1alpha1.RegistryService/DeleteGrant";
+        use api::heddle::api::v2alpha1 as contract;
+        let address = grant_spool_address(namespace_path, repo_path)?;
+        let spool = self.resolve_spool_ref(address).await?;
+        let grant_id = uuid::Uuid::parse_str(grant_id)
+            .map_err(native_protocol_error)?
+            .to_string();
+        let record = self
+            .list_grants(Some(address))
+            .await?
+            .into_iter()
+            .find(|value| {
+                value
+                    .r#ref
+                    .as_ref()
+                    .is_some_and(|reference| reference.id == grant_id)
+            })
+            .ok_or_else(|| {
+                ProtocolError::ObjectNotFound("grant ID is not visible on this Spool".into())
+            })?;
+        let method = "heddle.api.v2alpha1.SpoolService/RevokeGrant";
         let operation_id = if client_operation_id.is_empty() {
             ClientOperationId::fresh(method)
         } else {
             ClientOperationId::for_required_method(method, client_operation_id)?
         };
-        let target = build_target_ref(namespace_path, repo_path)?;
-        authed_call!(
-            self,
-            delete_grant,
-            "DeleteGrant",
-            DeleteGrantRequest {
-                subject: subject.to_string(),
-                target,
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
+        let request = contract::RevokeGrantRequest {
+            client_operation_id: operation_id.to_wire(),
+            grant: Some(contract::RecordRef {
+                spool: Some(spool),
+                id: grant_id,
+            }),
+            expected_version: record.version,
+        };
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServiceRevokeGrant>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        require_applied_receipt(
+            response.receipt,
+            &request.client_operation_id,
+            &remote.description.endpoint,
+            "grant revocation",
+        )?;
         Ok(())
     }
 
@@ -1031,6 +1157,54 @@ fn native_spool_info(
     })
 }
 
+fn grant_spool_address<'a>(
+    namespace_path: Option<&'a str>,
+    repo_path: Option<&'a str>,
+) -> Result<&'a str, ProtocolError> {
+    match (namespace_path, repo_path) {
+        (Some(address), None) | (None, Some(address)) if !address.is_empty() => Ok(address),
+        _ => Err(ProtocolError::InvalidState(
+            "grant operation requires exactly one Spool address".into(),
+        )),
+    }
+}
+
+fn native_grant_role(
+    value: &str,
+) -> Result<api::heddle::api::v2alpha1::ResourceRole, ProtocolError> {
+    use api::heddle::api::v2alpha1::ResourceRole;
+    match value {
+        "reader" => Ok(ResourceRole::Reader),
+        "writer" => Ok(ResourceRole::Writer),
+        "administrator" => Ok(ResourceRole::Administrator),
+        _ => Err(ProtocolError::InvalidState(
+            "grant role must be reader, writer or administrator".into(),
+        )),
+    }
+}
+
+fn require_applied_receipt(
+    receipt: Option<api::heddle::api::v2alpha1::MutationReceipt>,
+    operation_id: &str,
+    endpoint: &Option<api::heddle::api::v2alpha1::EndpointRef>,
+    action: &str,
+) -> Result<(), ProtocolError> {
+    let receipt =
+        receipt.ok_or_else(|| ProtocolError::InvalidState(format!("{action} receipt absent")))?;
+    if receipt.client_operation_id != operation_id
+        || &receipt.endpoint != endpoint
+        || !matches!(
+            receipt.outcome,
+            Some(api::heddle::api::v2alpha1::mutation_receipt::Outcome::Applied(_))
+        )
+    {
+        return Err(ProtocolError::InvalidState(format!(
+            "{action} was not applied to the requested endpoint"
+        )));
+    }
+    Ok(())
+}
+
 fn native_protocol_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::InvalidState(error.to_string())
 }
@@ -1172,27 +1346,28 @@ mod tests {
             .update_repository("acme/widgets", "widgets-new")
             .await;
         client.delete_repository("acme/widgets-new").await.unwrap();
-        let _ = client
-            .create_grant(
-                "principal:alice",
-                "reader",
-                None,
-                Some("acme/widgets"),
-                String::new(),
-            )
-            .await;
-        assert!(
+        let created_grant = client
+            .create_grant("alice", "reader", None, Some("acme/widgets"), String::new())
+            .await
+            .expect("native grant creation");
+        assert_eq!(
             client
-                .list_grants(Some("repo:acme/widgets"))
+                .list_grants(Some("acme/widgets"))
                 .await
                 .unwrap()
-                .is_empty()
+                .len(),
+            1
         );
         let _ = client
             .update_grant("principal:alice", "maintainer", Some("acme"), None)
             .await;
         client
-            .delete_grant("principal:alice", Some("acme"), None, String::new())
+            .delete_grant(
+                &created_grant.r#ref.as_ref().expect("grant ref").id,
+                Some("acme"),
+                None,
+                String::new(),
+            )
             .await
             .unwrap();
         client
