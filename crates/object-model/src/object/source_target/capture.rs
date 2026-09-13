@@ -104,6 +104,68 @@ pub struct ReferenceClosure {
     pub files: BTreeMap<ContentHash, FileResolution>,
     pub targets: BTreeMap<ContentHash, TargetResolution>,
 }
+
+/// Read one target and its file binding from a signed descriptor. Unlike
+/// [`closure`], this walks only the two bounded trie routes and does not require
+/// unrelated targets to be retained locally. The caller supplies an admitted
+/// descriptor proof and independently authorizes any returned coordinates.
+pub fn resolve_target(
+    source: &impl ObjectSource,
+    descriptor: ContentHash,
+    scope: &CollaborationScope,
+    state: StateId,
+    target_id: ContentHash,
+) -> Result<Option<ResolvedSourceTarget>> {
+    let mut reader = Reader {
+        source,
+        blobs: BTreeMap::new(),
+        bytes: 0,
+    };
+    let snapshot: SourceTargetSnapshot =
+        decode(&reader.blob(descriptor, MAX_REFERENCE_OBJECT_BYTES)?)?;
+    snapshot.validate(scope, state)?;
+    // A 256-bit key uses at most 52 five-bit branches plus its leaf. Two
+    // independent maps bound work regardless of their total cardinality.
+    let mut budget = MapBudget::new(
+        106,
+        106 * crate::object::source_target_map::MAX_NODE_BYTES,
+        0,
+        0,
+    );
+    let Some(target_hash) =
+        SourceTargetMap::get(&mut reader, snapshot.targets, target_id, &mut budget)
+            .map_err(invalid)?
+    else {
+        return Ok(None);
+    };
+    let target: TargetResolution = decode(&reader.blob(target_hash, MAX_REFERENCE_OBJECT_BYTES)?)?;
+    if target.core.id().map_err(invalid)? != target_id {
+        return Err(invalid("source target core identity mismatch"));
+    }
+    let Some(file_hash) =
+        SourceTargetMap::get(&mut reader, snapshot.files, target.core.file, &mut budget)
+            .map_err(invalid)?
+    else {
+        return Err(invalid("source target file binding missing"));
+    };
+    let file: FileResolution = decode(&reader.blob(file_hash, MAX_REFERENCE_OBJECT_BYTES)?)?;
+    if file.core.id().map_err(invalid)? != target.core.file || file.core.scope.spool != scope.spool
+    {
+        return Err(invalid("source file core identity or Spool mismatch"));
+    }
+    let mut current_file = file.core.clone();
+    current_file.path = file.path.clone();
+    current_file.id().map_err(invalid)?;
+    let mut current_target = target.core.clone();
+    current_target.selector = target.selector.clone();
+    current_target.id().map_err(invalid)?;
+    Ok(Some(ResolvedSourceTarget {
+        scope: snapshot.scope,
+        state,
+        file,
+        target,
+    }))
+}
 struct Reader<'a, S> {
     source: &'a S,
     blobs: BTreeMap<ContentHash, Vec<u8>>,
