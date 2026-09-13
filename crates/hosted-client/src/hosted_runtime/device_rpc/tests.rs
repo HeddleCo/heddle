@@ -440,9 +440,9 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
         )
         .await
         .expect("release writer");
-    super::ownership_tests::claim(&remote, &repository, &replica).await;
     super::fetch_tests::claimed_roundtrip(&remote, &repository, &replica, &endpoint_signer, &owner)
         .await;
+    super::ownership_tests::claim(&remote, &repository, &replica).await;
     super::fetch_tests::roundtrip(
         &remote,
         &repository,

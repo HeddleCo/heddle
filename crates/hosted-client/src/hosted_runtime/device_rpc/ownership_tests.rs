@@ -304,8 +304,12 @@ async fn conflict_status(
         .api
         .observe::<thread_api::rpc::ContentServiceReadContent>(&ReadContentRequest {
             thread: Some(ThreadRef {
-                spool: Some(SpoolRef { id: spool.to_string() }),
-                id: Some(ThreadId { value: replica.thread_id().as_bytes().to_vec() }),
+                spool: Some(SpoolRef {
+                    id: spool.to_string(),
+                }),
+                id: Some(ThreadId {
+                    value: replica.thread_id().as_bytes().to_vec(),
+                }),
             }),
             revision: Some(RevisionRef {
                 spool: Some(SpoolRef {
@@ -324,16 +328,10 @@ async fn conflict_status(
             ..Default::default()
         })
         .await
-        .expect("immutable source remains reachable via independently authorized original Thread");
-    let mut source_seen = false;
-    while let Some(event) = content.next().await.expect("source frame") {
-        if matches!(event.payload, Some(content_event::Payload::State(_))) {
-            source_seen = true;
-        }
-    }
+        .expect("conflicted Thread read request");
     assert!(
-        source_seen,
-        "authorized shared State remains readable despite another conflicted origin"
+        content.next().await.is_err(),
+        "conflicted Thread cannot be used as content authority even if its base object is shared"
     );
     let reference = ThreadRef {
         spool: Some(SpoolRef {

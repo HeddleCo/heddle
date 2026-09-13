@@ -1,10 +1,13 @@
 //! Materialize shared references without changing the original signed records.
 use anyhow::{Result, ensure};
 use api::heddle::api::v2alpha1::Coverage;
-use objects::object::{
-    AnnotationTag, CollaborationAnchor, CollaborationRevision, CollaborationScope,
-    CollaborationSourceAnchor,
-    source_target::{SourceSelector, capture::ResolutionStatus},
+use objects::{
+    object::{
+        AnnotationTag, CollaborationAnchor, CollaborationRevision, CollaborationScope,
+        CollaborationSourceAnchor,
+        source_target::{SourceSelector, capture::ResolutionStatus},
+    },
+    store::ObjectStore,
 };
 use repo::thread_replication::ThreadReplica;
 
@@ -61,7 +64,34 @@ pub(super) fn project_for(
             let CollaborationRevision::State { state_id } = &source.revision else {
                 return Ok(false);
             };
-            super::auth::source_revision_visible(&repository, &target, principal, agent, *state_id)
+            let Some(redactions) = super::auth::source_content_visibility(
+                &repository,
+                &target,
+                principal,
+                agent,
+                *state_id,
+            )?
+            else {
+                return Ok(false);
+            };
+            if source.path.is_empty() {
+                return Ok(true);
+            }
+            let Some(state) = repository.store().get_state(state_id)? else {
+                return Ok(false);
+            };
+            if state.id() != *state_id {
+                return Ok(false);
+            }
+            let mut work = 0;
+            Ok(super::content::visible_path_entry(
+                repository.store(),
+                state.tree,
+                &source.path,
+                &redactions,
+                &mut work,
+            )
+            .is_ok())
         };
     let mut resolve = |scope: &mut CollaborationScope,
                        source: &mut CollaborationSourceAnchor|
@@ -143,15 +173,15 @@ pub(super) fn project_for(
     let mut selected = scope.clone();
     if let CollaborationAnchor::Source { source } = anchor {
         resolve(&mut selected, source)?;
-    } else if let CollaborationAnchor::State { state_id }
-    | CollaborationAnchor::Path { state_id, .. }
-    | CollaborationAnchor::Symbol { state_id, .. } = anchor
-    {
+    } else if let Some((state_id, path)) = match anchor {
+        CollaborationAnchor::State { state_id } => Some((*state_id, String::new())),
+        CollaborationAnchor::Path { state_id, path }
+        | CollaborationAnchor::Symbol { state_id, path, .. } => Some((*state_id, path.clone())),
+        _ => None,
+    } {
         let source = CollaborationSourceAnchor {
-            revision: CollaborationRevision::State {
-                state_id: *state_id,
-            },
-            path: String::new(),
+            revision: CollaborationRevision::State { state_id },
+            path,
             symbol_id: String::new(),
             start_line: None,
             end_line: None,

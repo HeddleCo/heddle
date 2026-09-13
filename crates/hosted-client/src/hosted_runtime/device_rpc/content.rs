@@ -15,7 +15,11 @@ use objects::{
 };
 use prost::Message;
 
-use super::{DeviceRpc, auth::{self, Session}, checkout, failure};
+use super::{
+    DeviceRpc,
+    auth::{self, Session},
+    checkout, failure,
+};
 
 const MAX_WORK: usize = 100_000;
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
@@ -130,15 +134,16 @@ impl DeviceRpc {
             let state_id = checkout::revision(&current, Some(&revision))?;
             let repository = repo::Repository::open(&current.spool.root)?;
             current.authorize_thread(&repository, &replica)?;
-            if !auth::source_revision_visible(
+            let Some(redactions) = auth::source_content_visibility(
                 &repository,
                 &replica,
                 uuid::Uuid::parse_str(&current.principal)?,
                 current.agent_id.as_deref(),
                 state_id,
-            )? {
-                bail!("selected source is unavailable to this Thread audience");
-            }
+            )?
+            else {
+                bail!("selected source is unavailable to this Thread audience")
+            };
             let state = repository
                 .store()
                 .get_state(&state_id)?
@@ -174,7 +179,8 @@ impl DeviceRpc {
                 };
                 match selection.selection.context("content selection required")? {
                     content_read::Selection::Blob(read) => {
-                        let hash = blob_hash(repository.store(), &state, &read, &mut work)?;
+                        let hash =
+                            blob_hash(repository.store(), &state, &redactions, &read, &mut work)?;
                         let size = objects::store::ObjectSource::decoded_blob_len(
                             repository.store(),
                             &hash,
@@ -217,6 +223,7 @@ impl DeviceRpc {
                             repository.store(),
                             &state,
                             &revision,
+                            &redactions,
                             &read,
                             limits,
                             &mut work,
@@ -232,6 +239,19 @@ impl DeviceRpc {
                         )))?;
                     }
                     content_read::Selection::State(_) => {
+                        for parent in &state.parents {
+                            if !auth::source_revision_visible(
+                                &repository,
+                                &replica,
+                                uuid::Uuid::parse_str(&current.principal)?,
+                                current.agent_id.as_deref(),
+                                *parent,
+                            )? {
+                                bail!(
+                                    "state summary parent is unavailable to this Thread audience"
+                                );
+                            }
+                        }
                         super::content_detail::state(&state, &revision, &mut emit)?
                     }
                     content_read::Selection::Diff(read) => super::content_detail::diff(
@@ -240,14 +260,18 @@ impl DeviceRpc {
                         &replica,
                         &state,
                         &revision,
+                        &redactions,
                         &read,
                         limits,
                         &mut emit,
                     )?,
                     content_read::Selection::Provenance(read) => super::content_detail::provenance(
                         &repository,
+                        &current,
+                        &replica,
                         &state,
                         &revision,
+                        &redactions,
                         &read,
                         limits,
                         &mut emit,
@@ -344,16 +368,53 @@ pub(super) fn path_entry(
     }
     bail!("source path unavailable")
 }
+pub(super) fn visible_path_entry(
+    store: &objects::store::FsStore,
+    root: ContentHash,
+    path: &str,
+    redactions: &objects::object::EntryRedactions,
+    work: &mut usize,
+) -> Result<TreeEntry> {
+    normalize(path, false)?;
+    let mut tree = root;
+    let mut components = path.split('/').peekable();
+    while let Some(component) = components.next() {
+        charge(work)?;
+        let value = store.get_tree(&tree)?.context("source tree unavailable")?;
+        if value.hash() != tree {
+            bail!("source tree identity mismatch");
+        }
+        let index = value
+            .entries()
+            .iter()
+            .position(|entry| entry.name() == component)
+            .context("source path unavailable")?;
+        if !redactions.entry_visible(&value, index) {
+            bail!("source path unavailable");
+        }
+        let entry = &value.entries()[index];
+        if components.peek().is_none() {
+            return Ok(entry.clone());
+        }
+        tree = entry
+            .tree_hash()
+            .context("path crosses a non-directory source entry")?;
+    }
+    bail!("source path unavailable")
+}
 pub(super) fn blob_hash(
     store: &objects::store::FsStore,
     state: &State,
+    redactions: &objects::object::EntryRedactions,
     read: &BlobRead,
     work: &mut usize,
 ) -> Result<ContentHash> {
     match read.source.as_ref().context("blob source required")? {
-        blob_read::Source::Path(path) => path_entry(store, state.tree, path, work)?
-            .leaf_content_hash()
-            .context("path is not a blob"),
+        blob_read::Source::Path(path) => {
+            visible_path_entry(store, state.tree, path, redactions, work)?
+                .leaf_content_hash()
+                .context("path is not a blob")
+        }
         blob_read::Source::ObjectHash(bytes) => {
             let hash = ContentHash::from_bytes(
                 bytes
@@ -368,8 +429,11 @@ pub(super) fn blob_hash(
                     continue;
                 }
                 let tree = store.get_tree(&tree)?.context("source tree unavailable")?;
-                for entry in tree.entries() {
+                for (index, entry) in tree.entries().iter().enumerate() {
                     charge(work)?;
+                    if !redactions.entry_visible(&tree, index) {
+                        continue;
+                    }
                     if entry.leaf_content_hash() == Some(hash) {
                         return Ok(hash);
                     }
@@ -386,6 +450,7 @@ fn tree_page(
     store: &objects::store::FsStore,
     state: &State,
     revision: &RevisionRef,
+    redactions: &objects::object::EntryRedactions,
     read: &TreeRead,
     limits: ReadBudget,
     work: &mut usize,
@@ -397,7 +462,7 @@ fn tree_page(
     let root = if read.path.is_empty() {
         state.tree
     } else {
-        path_entry(store, state.tree, &read.path, work)?
+        visible_path_entry(store, state.tree, &read.path, redactions, work)?
             .tree_hash()
             .context("tree path is not a directory")?
     };
@@ -428,8 +493,11 @@ fn tree_page(
         if tree.hash() != hash {
             bail!("source tree identity mismatch");
         }
-        for entry in tree.entries() {
+        for (index, entry) in tree.entries().iter().enumerate() {
             charge(work)?;
+            if !redactions.entry_visible(&tree, index) {
+                continue;
+            }
             let path = if prefix.is_empty() {
                 entry.name().to_owned()
             } else {

@@ -20,6 +20,124 @@ pub(super) async fn roundtrip(
         .store()
         .put_blob(&unrelated)
         .expect("unrelated object");
+    let hidden = Blob::from_slice(b"hidden signed entry\n");
+    repository.store().put_blob(&hidden).expect("hidden object");
+    let marked = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("visible.txt", selected.hash(), false).expect("visible entry"),
+            TreeEntry::file("hidden.txt", hidden.hash(), false).expect("hidden entry"),
+        ],
+        vec![[1; 32], [2; 32]],
+    )
+    .expect("salted source tree");
+    repository.store().put_tree(&marked).expect("salted tree");
+    let hidden_index = marked
+        .entries()
+        .iter()
+        .position(|entry| entry.name() == "hidden.txt")
+        .expect("hidden index");
+    let mut redactions = objects::object::EntryRedactions::default();
+    redactions.extend_overrides(
+        &[objects::object::EntryVisibilityEntry {
+            tree_id: marked.hash(),
+            leaf_hash: marked.v4_leaf_hash_at(hidden_index).expect("salted leaf"),
+            tier: objects::object::VisibilityTier::Private {
+                scope_label: "security".into(),
+            },
+        }],
+        |tier| objects::object::visible(tier, &objects::object::AudienceTier::Internal),
+    );
+    let mut work = 0;
+    assert!(
+        super::content::visible_path_entry(
+            repository.store(),
+            marked.hash(),
+            "hidden.txt",
+            &redactions,
+            &mut work
+        )
+        .is_err()
+    );
+    assert!(
+        super::content::blob_hash(
+            repository.store(),
+            &State::new_snapshot(
+                marked.hash(),
+                vec![],
+                Attribution::human(Principal::new("Owner", "owner@test"))
+            ),
+            &redactions,
+            &BlobRead {
+                source: Some(blob_read::Source::ObjectHash(
+                    hidden.hash().as_bytes().to_vec()
+                )),
+                ..Default::default()
+            },
+            &mut work
+        )
+        .is_err()
+    );
+    assert!(
+        super::content::visible_path_entry(
+            repository.store(),
+            marked.hash(),
+            "visible.txt",
+            &redactions,
+            &mut work
+        )
+        .is_ok()
+    );
+    let projected = super::content_detail::project_visible_tree(
+        repository,
+        marked.hash(),
+        &redactions,
+        &mut work,
+    )
+    .expect("visible source projection");
+    assert!(projected.get("hidden.txt").is_none());
+    assert!(projected.get("visible.txt").is_some());
+    let changed_visible = Blob::from_slice(b"visible change\n");
+    repository
+        .store()
+        .put_blob(&changed_visible)
+        .expect("changed visible blob");
+    let changed = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("visible.txt", changed_visible.hash(), false).expect("changed entry"),
+            TreeEntry::file("hidden.txt", hidden.hash(), false).expect("unchanged hidden entry"),
+        ],
+        vec![[3; 32], [2; 32]],
+    )
+    .expect("changed salted source tree");
+    repository.store().put_tree(&changed).expect("changed tree");
+    let projected_changed = super::content_detail::project_visible_tree(
+        repository,
+        changed.hash(),
+        &redactions,
+        &mut work,
+    )
+    .expect("changed visible projection");
+    let report = verbs::diff::compute_projected_tree_diff(
+        repository,
+        &projected,
+        &projected_changed,
+        "base",
+        "head",
+        3,
+    )
+    .expect("visible-only diff");
+    assert!(
+        report
+            .changes
+            .iter()
+            .any(|change| change.path == "visible.txt")
+    );
+    assert!(
+        !report
+            .changes
+            .iter()
+            .any(|change| change.path == "hidden.txt")
+    );
     let mut tree = Tree::new();
     tree.insert(TreeEntry::file("source.txt", selected.hash(), false).expect("entry"));
     repository.store().put_tree(&tree).expect("tree");
@@ -42,8 +160,12 @@ pub(super) async fn roundtrip(
     };
     let mut request = ReadContentRequest {
         thread: Some(ThreadRef {
-            spool: Some(SpoolRef { id: spool.to_string() }),
-            id: Some(ThreadId { value: vec![99; 32] }),
+            spool: Some(SpoolRef {
+                id: spool.to_string(),
+            }),
+            id: Some(ThreadId {
+                value: vec![99; 32],
+            }),
         }),
         revision: Some(revision.clone()),
         selections: vec![
@@ -92,8 +214,12 @@ pub(super) async fn roundtrip(
         .record_native_capture("content-source", state.id())
         .expect("original accepted source capture");
     let thread = ThreadRef {
-        spool: Some(SpoolRef { id: spool.to_string() }),
-        id: Some(ThreadId { value: replica.thread_id().as_bytes().to_vec() }),
+        spool: Some(SpoolRef {
+            id: spool.to_string(),
+        }),
+        id: Some(ThreadId {
+            value: replica.thread_id().as_bytes().to_vec(),
+        }),
     };
     request.thread = Some(thread.clone());
     let mut stream = remote

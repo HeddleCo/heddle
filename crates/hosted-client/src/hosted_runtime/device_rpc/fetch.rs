@@ -283,14 +283,18 @@ pub(super) fn prepare(
     session.authorize_thread(&repository, &selected)?;
     // Signed metadata is not possession of the named global CAS objects.
     session.authorize_revision(&repository, revision)?;
-    if !auth::source_revision_visible(
+    let Some(redactions) = auth::source_content_visibility(
         &repository,
         &selected,
         uuid::Uuid::parse_str(&session.principal)?,
         session.agent_id.as_deref(),
         revision,
-    )? {
+    )?
+    else {
         bail!("selected source is unavailable to this audience")
+    };
+    if !redactions.is_empty() {
+        bail!("selected source has hidden entries; use partial source projection");
     }
     let genesis = selected.genesis()?;
     let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;

@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use anyhow::{Context, Result, ensure};
 use api::heddle::api::{v1alpha1 as shared, v2alpha1::*};
 use objects::{
-    object::{ContentHash, State},
+    object::{ContentHash, State, Tree, TreeEntry},
     store::ObjectStore,
 };
 use prost::Message;
@@ -83,12 +83,45 @@ pub(super) fn state(
         None,
     )))
 }
+
+pub(super) fn project_visible_tree(
+    repository: &repo::Repository,
+    root: ContentHash,
+    redactions: &objects::object::EntryRedactions,
+    work: &mut usize,
+) -> Result<Tree> {
+    *work += 1;
+    ensure!(*work <= 4096, "visible diff projection exceeds tree budget");
+    let source = repository
+        .store()
+        .get_tree(&root)?
+        .context("diff tree unavailable")?;
+    ensure!(source.hash() == root, "diff tree identity mismatch");
+    let mut entries = Vec::new();
+    for (index, entry) in source.entries().iter().enumerate() {
+        if !redactions.entry_visible(&source, index) {
+            continue;
+        }
+        let visible = if let Some(child) = entry.tree_hash() {
+            let projected = project_visible_tree(repository, child, redactions, work)?;
+            let hash = repository.store().put_tree(&projected)?;
+            TreeEntry::directory(entry.name(), hash)?
+        } else {
+            entry.clone()
+        };
+        entries.push(visible);
+    }
+    let projection = Tree::from_entries(entries);
+    repository.store().put_tree(&projection)?;
+    Ok(projection)
+}
 pub(super) fn diff(
     repository: &repo::Repository,
     session: &Session,
     selected_thread: &repo::thread_replication::ThreadReplica,
     state: &State,
     revision: &RevisionRef,
+    redactions: &objects::object::EntryRedactions,
     read: &DiffRead,
     limits: ReadBudget,
     emit: &mut impl FnMut(Payload) -> Result<()>,
@@ -102,16 +135,18 @@ pub(super) fn diff(
         None => selected_thread.clone(),
     };
     session.authorize_thread(repository, &base_thread)?;
-    ensure!(
-        super::auth::source_revision_visible(
-            repository,
-            &base_thread,
-            uuid::Uuid::parse_str(&session.principal)?,
-            session.agent_id.as_deref(),
-            base,
-        )?,
-        "diff base is unavailable to its selected Thread audience"
-    );
+    let Some(base_redactions) = super::auth::source_content_visibility(
+        repository,
+        &base_thread,
+        uuid::Uuid::parse_str(&session.principal)?,
+        session.agent_id.as_deref(),
+        base,
+    )?
+    else {
+        anyhow::bail!("diff base is unavailable to its selected Thread audience")
+    };
+    let mut union = redactions.clone();
+    union.extend(&base_redactions);
     let previous = repository
         .store()
         .get_state(&base)?
@@ -123,7 +158,18 @@ pub(super) fn diff(
     }
     // Preflight both closures before invoking the existing rename-aware diff engine.
     let mut bytes = 0u64;
-    for root in [state.tree, previous.tree] {
+    let (from_tree, to_tree) = if union.is_empty() {
+        (None, None)
+    } else {
+        let mut projection_work = 0usize;
+        let from = project_visible_tree(repository, previous.tree, &union, &mut projection_work)?;
+        let to = project_visible_tree(repository, state.tree, &union, &mut projection_work)?;
+        (Some(from), Some(to))
+    };
+    for root in [
+        to_tree.as_ref().map(Tree::hash).unwrap_or(state.tree),
+        from_tree.as_ref().map(Tree::hash).unwrap_or(previous.tree),
+    ] {
         let mut pending = vec![root];
         let mut visited = BTreeSet::new();
         while let Some(hash) = pending.pop() {
@@ -158,7 +204,17 @@ pub(super) fn diff(
             }
         }
     }
-    let result = verbs::diff::compute_state_diff(repository, &base, &state.id(), false, 3)?;
+    let result = match (from_tree.as_ref(), to_tree.as_ref()) {
+        (Some(from), Some(to)) => verbs::diff::compute_projected_tree_diff(
+            repository,
+            from,
+            to,
+            base.short(),
+            state.id().short(),
+            3,
+        )?,
+        _ => verbs::diff::compute_state_diff(repository, &base, &state.id(), false, 3)?,
+    };
     let changes: Vec<_> = result
         .changes
         .into_iter()
@@ -244,8 +300,11 @@ pub(super) fn diff(
 }
 pub(super) fn provenance(
     repository: &repo::Repository,
+    session: &Session,
+    selected_thread: &repo::thread_replication::ThreadReplica,
     state: &State,
     revision: &RevisionRef,
+    redactions: &objects::object::EntryRedactions,
     read: &ProvenanceRead,
     limits: ReadBudget,
     emit: &mut impl FnMut(Payload) -> Result<()>,
@@ -255,6 +314,7 @@ pub(super) fn provenance(
     let hash = super::content::blob_hash(
         repository.store(),
         state,
+        redactions,
         &BlobRead {
             source: Some(blob_read::Source::Path(read.path.clone())),
             ..Default::default()
@@ -277,6 +337,18 @@ pub(super) fn provenance(
         let encoded = blob(repository.store(), &hash, limits.max_snapshot_bytes)?;
         let provenance: objects::object::FileProvenance = rmp_serde::from_slice(encoded.content())?;
         provenance.validate()?;
+        for origin in &provenance.origins {
+            ensure!(
+                super::auth::source_revision_visible(
+                    repository,
+                    selected_thread,
+                    uuid::Uuid::parse_str(&session.principal)?,
+                    session.agent_id.as_deref(),
+                    origin.state_id,
+                )?,
+                "provenance origin is unavailable to the selected Thread audience"
+            );
+        }
         ensure!(
             provenance.file_blob == source.hash(),
             "provenance differs from exact source blob"

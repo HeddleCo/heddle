@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, path::Path, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::Path,
+    sync::Mutex,
+};
 
 use anyhow::{Context, Result, bail};
 use api::{heddle::api::v1alpha1::CallContext, v2::MethodDescriptor};
@@ -479,6 +483,116 @@ pub(super) fn source_revision_visible(
             .is_none());
     }
     Ok(false)
+}
+
+/// Content projection for one exact accepted source, including original
+/// signed entry declarations that have not yet been installed as local
+/// sidecars. Every ancestor is traced through accepted originals in this
+/// Thread's parent lineage or the canonical system seed.
+pub(super) fn source_content_visibility(
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+    revision: objects::object::StateId,
+) -> Result<Option<objects::object::EntryRedactions>> {
+    if !source_revision_visible(repository, replica, principal, agent, revision)? {
+        return Ok(None);
+    }
+    let Some(audience) = reader_audience(repository, replica, principal, agent)? else {
+        return Ok(None);
+    };
+    let Some(mut redactions) = repository.content_visibility_for_audience(&revision, &audience)?
+    else {
+        return Ok(None);
+    };
+    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+    let mut pending = vec![revision];
+    let mut seen = BTreeSet::new();
+    let mut state_bytes = 0usize;
+    while let Some(id) = pending.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if seen.len() > 4096 {
+            return Ok(None);
+        }
+        let Some(state) = repository.store().get_state(&id)? else {
+            return Ok(None);
+        };
+        let canonical = state.encode_current_msgpack()?;
+        state_bytes = state_bytes.saturating_add(canonical.len());
+        if state.id() != id || state_bytes > 16 * 1024 * 1024 {
+            return Ok(None);
+        }
+        pending.extend(state.parents.iter().copied());
+    }
+    let lineage: Vec<_> = seen.iter().copied().collect();
+    let mut originals: BTreeMap<
+        objects::object::StateId,
+        Vec<objects::object::thread_replication::CaptureVisibility>,
+    > = BTreeMap::new();
+    let mut owner = replica.clone();
+    let mut owner_ids = BTreeSet::new();
+    let mut work = 0usize;
+    let mut bytes = 0usize;
+    for _ in 0..128 {
+        if !owner_ids.insert(owner.thread_id()) {
+            return Ok(None);
+        }
+        let Some(owner_audience) = reader_audience(repository, &owner, principal, agent)? else {
+            return Ok(None);
+        };
+        for (id, signed) in owner.accepted_source_originals_for_revisions(&lineage)? {
+            work += 1;
+            bytes = bytes.saturating_add(signed.canonical.len());
+            if work > 4096 || bytes > 16 * 1024 * 1024 {
+                return Ok(None);
+            }
+            let operation = signed.verify()?;
+            if operation.thread != owner.thread_id() {
+                return Ok(None);
+            }
+            let Some(capture) = operation.source_result()? else {
+                return Ok(None);
+            };
+            let state = capture.validated_state()?;
+            if state.id() != id {
+                return Ok(None);
+            }
+            if let Some(visibility) = capture.visibility {
+                if let Some(tier) = &visibility.state {
+                    let check = state.id() == revision || tier.is_embargo();
+                    if check
+                        && (!objects::object::visible(tier, &owner_audience)
+                            || !objects::object::visible(tier, &audience))
+                    {
+                        return Ok(None);
+                    }
+                }
+                originals.entry(state.id()).or_default().push(visibility);
+            } else {
+                originals.entry(state.id()).or_default();
+            }
+        }
+        let genesis = owner.genesis()?;
+        let Some(parent) = genesis.parent else { break };
+        owner = repo::thread_replication::ThreadReplica::open(repository.heddle_dir(), parent)?;
+        if owner.genesis()?.spool != genesis.spool {
+            return Ok(None);
+        }
+    }
+    for id in lineage {
+        if id != seed.id() && !originals.contains_key(&id) {
+            return Ok(None);
+        }
+        for visibility in originals.get(&id).into_iter().flatten() {
+            redactions.extend_overrides(&visibility.entries, |tier| {
+                objects::object::visible(tier, &audience)
+            });
+        }
+    }
+    Ok(Some(redactions))
 }
 
 pub(super) fn discussion_visible(

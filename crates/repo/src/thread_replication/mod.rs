@@ -476,6 +476,65 @@ impl ThreadReplica {
         rows.map(|row| hash(&row?)).collect()
     }
 
+    /// Read only accepted originals for a bounded set of exact lineage States.
+    /// The caller supplies the already-validated ancestry; unrelated Thread
+    /// lifetime history never consumes the content authorization budget.
+    pub fn accepted_source_originals_for_revisions(
+        &self,
+        revisions: &[StateId],
+    ) -> Result<Vec<(StateId, SignedOperation)>> {
+        if revisions.len() > 4096 {
+            return Err(Error::Invalid("source lineage exceeds read budget".into()));
+        }
+        let connection = self.connect()?;
+        let mut originals = Vec::new();
+        for chunk in revisions.chunks(128) {
+            if chunk.is_empty() {
+                continue;
+            }
+            let slots = std::iter::repeat_n("?", chunk.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let query = format!(
+                "SELECT source_revision,canonical,signature FROM operations WHERE thread=? AND status=1 AND facet=? AND source_revision IN ({slots}) ORDER BY source_revision,id"
+            );
+            let mut statement = connection.prepare(&query)?;
+            let mut values = vec![
+                rusqlite::types::Value::Blob(self.thread.as_bytes().to_vec()),
+                rusqlite::types::Value::Integer(i64::from(facet_number(ThreadFacet::Source))),
+            ];
+            values.extend(
+                chunk
+                    .iter()
+                    .map(|id| rusqlite::types::Value::Blob(id.as_bytes().to_vec())),
+            );
+            let rows = statement.query_map(rusqlite::params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, Vec<u8>>(0)?,
+                    SignedOperation {
+                        canonical: row.get(1)?,
+                        signature: row.get(2)?,
+                    },
+                ))
+            })?;
+            for row in rows {
+                let (id, signed) = row?;
+                originals.push((
+                    StateId::from_bytes(
+                        id.as_slice()
+                            .try_into()
+                            .map_err(|_| Error::Invalid("invalid source index State".into()))?,
+                    ),
+                    signed,
+                ));
+                if originals.len() > 4096 {
+                    return Err(Error::Invalid("source originals exceed read budget".into()));
+                }
+            }
+        }
+        Ok(originals)
+    }
+
     /// Persist a verified operation and admit newly complete causal descendants.
     /// The caller's authorization is evaluated before any private bytes persist.
     /// Native capture objects become durable before the acceptance transaction.
