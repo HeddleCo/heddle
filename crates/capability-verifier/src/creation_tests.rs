@@ -109,6 +109,30 @@ fn creation_fixture(
 }
 
 #[test]
+fn spool_creation_canonical_browser_fixture() {
+    let (signed, _) = creation_fixture(false, true);
+    let genesis = signed.genesis.as_ref().expect("genesis");
+    let statement = signed.delegated_creation.as_ref().expect("proof").statement.as_ref().expect("statement");
+    let actual = serde_json::json!({
+        "spool_uuid_hex": hex::encode(&genesis.spool_uuid),
+        "owner_public_key_hex": hex::encode(&genesis.owner_public_key.as_ref().expect("owner key").public_key),
+        "creator_public_key_hex": hex::encode(&statement.creator_key.as_ref().expect("creator key").public_key),
+        "account_uuid_hex": hex::encode(&statement.account_uuid),
+        "owner_state_hash_hex": hex::encode(&statement.owner_state_hash),
+        "owner_sequence": statement.owner_sequence,
+        "parent_spool_uuid_hex": hex::encode(&statement.parent_spool_uuid),
+        "parent_path_segments": statement.parent_path_segments,
+        "name": statement.name,
+        "created_at_unix_seconds": statement.created_at_unix_seconds,
+        "spool_genesis_digest_hex": hex::encode(spool_genesis_digest(genesis).expect("genesis digest")),
+        "canonical_spool_creation_hex": hex::encode(canonical_spool_creation(statement).expect("canonical statement")),
+        "spool_creation_signing_digest_hex": hex::encode(spool_creation_signing_digest(statement).expect("signing digest")),
+    });
+    let expected: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/spool_creation_v1.json")).expect("fixture JSON");
+    assert_eq!(actual, expected, "Rust canonical creation vector drifted");
+}
+
+#[test]
 fn delegated_creation_uses_exact_sealed_permission_and_actual_current_time() {
     let (signed, current) = creation_fixture(false, true);
     validate_spool_creation_structure(&signed, NOW).expect("structure and lineage");
