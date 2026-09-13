@@ -461,15 +461,23 @@ pub(super) async fn roundtrip(
     let mut hidden_search = remote
         .api
         .observe::<thread_api::rpc::SearchServiceSearch>(&SearchRequest {
-            page: None,
+            page: Some(PageRequest {
+                size: 1,
+                ..Default::default()
+            }),
             ..source_search.clone()
         })
         .await
         .expect("entry-restricted source search");
     let mut visible_paths = Vec::new();
+    let mut restricted_page = None;
     while let Some(event) = hidden_search.next().await.expect("restricted search frame") {
-        if let Some(search_event::Payload::Hit(hit)) = event.payload {
-            visible_paths.push(hit.location.expect("visible location").path);
+        match event.payload {
+            Some(search_event::Payload::Hit(hit)) => {
+                visible_paths.push(hit.location.expect("visible location").path);
+            }
+            Some(search_event::Payload::Complete(status)) => restricted_page = status.page,
+            _ => {}
         }
     }
     assert_eq!(
@@ -477,6 +485,9 @@ pub(super) async fn roundtrip(
         vec!["answer.rs"],
         "hidden indexed text cannot become a Search hit"
     );
+    let restricted_page = restricted_page.expect("restricted source page");
+    assert!(restricted_page.exhausted);
+    assert!(restricted_page.next_page.is_empty(), "hidden source path cannot create a cursor");
     let mut restricted = remote
         .api
         .observe::<thread_api::rpc::AnalysisServiceObserveAnalysis>(&ObserveAnalysisRequest {

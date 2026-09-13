@@ -303,6 +303,58 @@ impl DeviceRpc {
                     (uuid::Uuid, objects::object::ContentHash, objects::object::StateId, String),
                     bool,
                 >::new();
+                let mut admitted_sources = vec![Vec::new(); selected.len()];
+                let mut admitted_path_count = 0usize;
+                if selection.kinds.contains(&(SearchDomain::SourceContent as i32))
+                    || selection.kinds.contains(&(SearchDomain::SourceSymbol as i32))
+                {
+                    let principal = uuid::Uuid::parse_str(&worker_session.principal)?;
+                    for (index, spool) in selected.iter().enumerate() {
+                        let Some(source) = source_filters[index] else { continue; };
+                        let facts = worker_session.facts(Some(&spool.capability_path))?;
+                        let repository = repo::Repository::open(&spool.root)?;
+                        repo::thread_replication::source_search::visit_indexed_paths(
+                            &spool.heddle_dir,
+                            source,
+                            |candidate| {
+                                if selection.threads.get(&spool.id).is_some_and(|threads| !threads.contains(candidate.thread.as_bytes().as_slice())) {
+                                    return Ok(());
+                                }
+                                let key = (spool.id, candidate.thread, candidate.revision);
+                                if !source_projections.contains_key(&key) {
+                                    let proof = repo::thread_replication::ThreadReplica::open(
+                                        &spool.heddle_dir, candidate.thread,
+                                    ).ok().and_then(|replica| {
+                                        super::auth::source_content_visibility(
+                                            &repository, &replica, principal,
+                                            facts.delegation_agent_id.as_deref(), candidate.revision,
+                                        ).ok().flatten()
+                                    });
+                                    source_projections.insert(key, proof);
+                                }
+                                let Some(redactions) = source_projections.get(&key).and_then(Option::as_ref) else { return Ok(()); };
+                                let path_key = (spool.id, candidate.thread, candidate.revision, candidate.path.clone());
+                                if !source_paths.contains_key(&path_key) {
+                                    let mut path_work = 0;
+                                    let admitted = repository.store().get_state(&candidate.revision)
+                                        .ok().flatten()
+                                        .is_some_and(|state| state.id() == candidate.revision
+                                            && super::content::visible_path_entry(
+                                                repository.store(), state.tree, &candidate.path,
+                                                redactions, &mut path_work,
+                                            ).is_ok());
+                                    source_paths.insert(path_key.clone(), admitted);
+                                }
+                                if source_paths[&path_key] {
+                                    admitted_path_count += 1;
+                                    ensure!(admitted_path_count <= 100_000, "authorized source search scope exceeds path budget");
+                                    admitted_sources[index].push(candidate);
+                                }
+                                Ok(())
+                            },
+                        )?;
+                    }
+                }
                 let mut next_boundary = (position, None);
                 let mut has_more = false;
                 if matches!(mode, search_request::Mode::Unspecified | search_request::Mode::Lexical) {
@@ -336,7 +388,7 @@ impl DeviceRpc {
                         } else {
                             request.text.clone()
                         };
-                        let batch = repo::thread_replication::collaboration_search::search_native(
+                        let batch = repo::thread_replication::collaboration_search::search_native_admitted(
                             &spool.heddle_dir,
                             &query_text,
                             after_operation,
@@ -344,6 +396,7 @@ impl DeviceRpc {
                             &kinds,
                             selection.annotations.as_ref(),
                             source_filters[position].unwrap_or(repo::thread_replication::collaboration_search::SourceSelection::Current),
+                            &admitted_sources[position],
                         )?;
                         let exhausted = batch.scanned < remaining;
                         let facts = worker_session.facts(Some(&spool.capability_path))?;

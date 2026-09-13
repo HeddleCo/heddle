@@ -5,6 +5,78 @@ use rusqlite::{TransactionBehavior, params};
 
 use super::{Error, Result};
 
+/// One indexed source path. It is a search candidate, never read authority;
+/// callers must verify its exact Thread, source and selected salted entry.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct IndexedSourcePath {
+    pub thread: ContentHash,
+    pub revision: StateId,
+    pub path: String,
+}
+
+/// Visit indexed paths in bounded keyset batches without retaining a SQLite
+/// statement while the caller checks signed source and filesystem visibility.
+/// This enumerates the selected source scope independent of search text, so
+/// hidden matching rows cannot change a page's continuation or coverage.
+pub fn visit_indexed_paths(
+    directory: &std::path::Path,
+    source: super::collaboration_search::SourceSelection,
+    mut visit: impl FnMut(IndexedSourcePath) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let connection = crate::local_metadata::open_existing(directory)?
+        .ok_or_else(|| Error::Invalid("local metadata missing".into()))?;
+    let mut after: Option<IndexedSourcePath> = None;
+    loop {
+        let page = {
+            let mut statement = connection.prepare(
+                "SELECT DISTINCT c.thread,c.revision,c.path FROM source_search_candidates c
+                 JOIN operations o ON o.id=c.operation AND o.thread=c.thread
+                    AND o.source_revision=c.revision AND o.status=1 AND o.facet=1
+                 JOIN source_search_ready r ON r.operation=c.operation
+                    AND r.revision=c.revision AND r.extractor_version=1
+                 WHERE (?1 OR EXISTS(SELECT 1 FROM thread_source_head_revisions h
+                    WHERE h.thread=c.thread AND h.revision=c.revision))
+                   AND (?2 IS NULL OR c.revision=?2)
+                   AND (?3 IS NULL OR (c.thread,c.revision,c.path)>(?3,?4,?5))
+                 ORDER BY c.thread,c.revision,c.path LIMIT 256",
+            )?;
+            let exact = match source {
+                super::collaboration_search::SourceSelection::Exact(id) => Some(id),
+                _ => None,
+            };
+            let rows = statement.query_map(
+                params![
+                    matches!(source, super::collaboration_search::SourceSelection::Retained | super::collaboration_search::SourceSelection::Exact(_)),
+                    exact.as_ref().map(StateId::as_bytes),
+                    after.as_ref().map(|value| value.thread.as_bytes().as_slice()),
+                    after.as_ref().map(|value| value.revision.as_bytes().as_slice()),
+                    after.as_ref().map(|value| value.path.as_str()),
+                ],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?)),
+            )?;
+            rows.map(|row| {
+                let (thread, revision, path) = row?;
+                Ok(IndexedSourcePath {
+                    thread: super::hash(&thread)?,
+                    revision: StateId::from_bytes(*super::hash(&revision)?.as_bytes()),
+                    path,
+                })
+            }).collect::<Result<Vec<_>>>()?
+        };
+        if page.is_empty() {
+            return Ok(());
+        }
+        let more = page.len() == 256;
+        after = page.last().cloned();
+        for candidate in page {
+            visit(candidate)?;
+        }
+        if !more {
+            return Ok(());
+        }
+    }
+}
+
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS source_search_candidates(
  candidate BLOB NOT NULL UNIQUE CHECK(length(candidate)=32),
@@ -211,6 +283,50 @@ pub fn publish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn admitted_paths_filter_hidden_matches_before_page_limit() {
+        use super::super::collaboration_search::{SourceSelection, search_native_admitted};
+        let root = tempfile::tempdir().expect("temporary metadata");
+        let directory = root.path().join(".heddle");
+        std::fs::create_dir(&directory).expect("metadata directory");
+        let connection = crate::local_metadata::open(&directory).expect("metadata");
+        super::super::initialize_schema(&connection).expect("source schema");
+        let thread = ContentHash::from_bytes([1; 32]);
+        let revision = StateId::from_bytes([2; 32]);
+        let operation = ContentHash::from_bytes([3; 32]);
+        connection.execute("INSERT INTO operations(id,thread,facet,canonical,signature,status,source_revision) VALUES(?1,?2,1,x'00',zeroblob(64),1,?3)", params![operation.as_bytes(),thread.as_bytes(),revision.as_bytes()]).expect("accepted source");
+        let document = |path: &str| Document {
+            kind: 3,
+            path: path.into(),
+            symbol_id: String::new(),
+            symbol_name: String::new(),
+            start_line: None,
+            end_line: None,
+            text: "alpha".into(),
+        };
+        publish(&directory, thread, operation, revision,
+            &[document("hidden.rs"), document("visible.rs")], true, false)
+            .expect("indexed source");
+        let mut indexed = Vec::new();
+        visit_indexed_paths(&directory, SourceSelection::Retained, |path| {
+            indexed.push(path);
+            Ok(())
+        }).expect("indexed paths");
+        assert_eq!(indexed.len(), 2);
+        let admitted: Vec<_> = indexed.into_iter().filter(|path| path.path == "visible.rs").collect();
+        let page = search_native_admitted(&directory, "alpha", None, 1, &[3], None,
+            SourceSelection::Retained, &admitted).expect("first page");
+        assert_eq!(page.scanned, 1);
+        assert_eq!(page.hits[0].path, "visible.rs");
+        let next = search_native_admitted(&directory, "alpha", Some(page.hits[0].cursor), 1,
+            &[3], None, SourceSelection::Retained, &admitted).expect("next page");
+        assert!(next.hits.is_empty());
+        let hidden_only = search_native_admitted(&directory, "alpha", None, 1, &[3], None,
+            SourceSelection::Retained, &[]).expect("hidden-only page");
+        assert!(hidden_only.hits.is_empty());
+        assert_eq!(hidden_only.scanned, 0);
+    }
 
     #[test]
     fn accepted_originals_queue_once_and_publish_or_defer_with_bounded_progress() {

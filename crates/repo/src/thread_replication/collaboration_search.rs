@@ -87,7 +87,8 @@ pub enum SourceSelection {
 /// Bounded current-record candidates. Search text is literal. The caller
 /// projects and evaluates typed tags on each exact signed context revision
 /// after its authorization check.
-pub fn search_native(
+#[cfg(test)]
+pub(crate) fn search_native(
     directory: &std::path::Path,
     text: &str,
     after_operation: Option<objects::object::ContentHash>,
@@ -95,6 +96,35 @@ pub fn search_native(
     kinds: &[i32],
     annotations: Option<&objects::object::AnnotationQuery>,
     source: SourceSelection,
+) -> Result<NativeBatch> {
+    search_native_inner(directory, text, after_operation, limit, kinds, annotations, source, None)
+}
+
+/// Search with a query-local set of exact source paths admitted by the caller's
+/// signed Thread/source and selected-leaf gates. Source rows are joined to this
+/// set before ORDER BY/LIMIT, so hidden rows cannot consume page slots.
+pub fn search_native_admitted(
+    directory: &std::path::Path,
+    text: &str,
+    after_operation: Option<objects::object::ContentHash>,
+    limit: u32,
+    kinds: &[i32],
+    annotations: Option<&objects::object::AnnotationQuery>,
+    source: SourceSelection,
+    admitted: &[super::source_search::IndexedSourcePath],
+) -> Result<NativeBatch> {
+    search_native_inner(directory, text, after_operation, limit, kinds, annotations, source, Some(admitted))
+}
+
+fn search_native_inner(
+    directory: &std::path::Path,
+    text: &str,
+    after_operation: Option<objects::object::ContentHash>,
+    limit: u32,
+    kinds: &[i32],
+    annotations: Option<&objects::object::AnnotationQuery>,
+    source: SourceSelection,
+    admitted: Option<&[super::source_search::IndexedSourcePath]>,
 ) -> Result<NativeBatch> {
     if text.len() > 4096
         || limit == 0
@@ -112,6 +142,13 @@ pub fn search_native(
     let connection = crate::local_metadata::open_existing(directory)?
         .ok_or_else(|| Error::Invalid("local metadata missing".into()))?;
     bound_query_work(&connection)?;
+    connection.execute_batch("CREATE TEMP TABLE admitted_source_paths(thread BLOB NOT NULL,revision BLOB NOT NULL,path TEXT NOT NULL,PRIMARY KEY(thread,revision,path)) WITHOUT ROWID")?;
+    if let Some(admitted) = admitted {
+        let mut insert = connection.prepare("INSERT OR IGNORE INTO admitted_source_paths(thread,revision,path) VALUES(?1,?2,?3)")?;
+        for item in admitted {
+            insert.execute(rusqlite::params![item.thread.as_bytes(),item.revision.as_bytes(),item.path])?;
+        }
+    }
     let phrase = format!("\"{}\"", text.trim().replace('"', "\"\""));
     let exact_revision = text.trim().strip_prefix("heddle:").unwrap_or(text.trim());
     let exact_revision = objects::object::StateId::parse(exact_revision).ok();
@@ -152,6 +189,8 @@ pub fn search_native(
           AND ((c.kind=3 AND ?11) OR (c.kind=4 AND ?12))
           AND (?13 OR EXISTS(SELECT 1 FROM thread_source_head_revisions head WHERE head.thread=c.thread AND head.revision=c.revision))
           AND (?14 IS NULL OR c.revision=?14)
+          AND (?15=0 OR EXISTS(SELECT 1 FROM admitted_source_paths a
+            WHERE a.thread=c.thread AND a.revision=c.revision AND a.path=c.path))
       ), anchor AS (
         SELECT score,thread,cursor,kind,record FROM hits WHERE cursor=?6
       ) SELECT thread,operation,kind,record,summary,score,canonical,cursor,revision,path,symbol_id,symbol_name,start_line,end_line FROM hits
@@ -236,7 +275,8 @@ pub fn search_native(
                 match source {
                     SourceSelection::Exact(revision) => Some(revision.as_bytes().to_vec()),
                     _ => None,
-                }
+                },
+                admitted.is_some(),
             ],
             read,
         )?
