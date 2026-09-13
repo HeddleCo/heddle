@@ -1106,6 +1106,28 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
 }
 
 #[test]
+fn native_lookup_failure_cannot_publish_unsigned_snapshot() {
+    let (temp_dir, repo) = create_test_repo();
+    let before = repo.head().expect("head before capture");
+    let database = repo.heddle_dir().join(crate::local_metadata::DATABASE_NAME);
+    let connection = rusqlite::Connection::open(database).expect("metadata database");
+    connection
+        .execute("DROP TABLE local_thread_names", [])
+        .expect("simulate damaged native name mapping");
+    drop(connection);
+
+    fs::write(temp_dir.path().join("tracked.txt"), "new work").expect("write worktree");
+    let error = repo
+        .snapshot(Some("new work".to_string()), None)
+        .expect_err("native metadata failure must stop capture");
+    assert!(
+        error.to_string().contains("local_thread_names"),
+        "native lookup failure must be visible: {error}"
+    );
+    assert_eq!(repo.head().expect("head after refusal"), before);
+}
+
+#[test]
 fn native_admission_before_ref_publish_survives_a_crash_between_them() {
     let (temp_dir, repo) = create_test_repo();
     fs::write(temp_dir.path().join("tracked.txt"), "baseline").unwrap();
