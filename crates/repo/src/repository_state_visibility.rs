@@ -1016,7 +1016,7 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use crypto::{Ed25519Signer, Signer};
-    use objects::object::{Principal, VisibilityTier};
+    use objects::object::{Principal, State, VisibilityTier};
     use oplog::OpLogBackend;
     use tempfile::TempDir;
 
@@ -1312,6 +1312,101 @@ mod tests {
         assert_eq!(
             repo.local_operator_audience().unwrap(),
             crate::AudienceTier::Restricted("ax-secret".into())
+        );
+    }
+
+    #[test]
+    fn native_whole_tip_uses_own_tier_and_only_ancestor_embargoes() {
+        let (_directory, repo) = fresh_repo();
+        let base = repo.head().expect("head").expect("base");
+        let tree = repo
+            .store()
+            .get_state(&base)
+            .expect("read")
+            .expect("seed")
+            .tree;
+        for (tier, blocked) in [
+            (VisibilityTier::Public, false),
+            (VisibilityTier::Internal, false),
+            (
+                VisibilityTier::TeamScoped {
+                    team_id: "team".into(),
+                },
+                false,
+            ),
+            (
+                VisibilityTier::Private {
+                    scope_label: "security".into(),
+                },
+                true,
+            ),
+            (
+                VisibilityTier::Restricted {
+                    scope_label: "security".into(),
+                },
+                true,
+            ),
+        ] {
+            let parent = State::new_snapshot(
+                tree,
+                vec![base],
+                objects::object::Attribution::human(objects::object::Principal::new("owner", "")),
+            );
+            repo.store().put_state(&parent).expect("parent");
+            repo.put_state_visibility(sample_record(parent.id(), tier.clone()))
+                .expect("tier");
+            let child = State::new_snapshot(
+                tree,
+                vec![parent.id()],
+                objects::object::Attribution::human(objects::object::Principal::new("owner", "")),
+            );
+            repo.store().put_state(&child).expect("child");
+            let own = repo
+                .withholding_visibility_for_audience(&parent.id(), &crate::AudienceTier::Public)
+                .expect("own gate");
+            assert_eq!(
+                own.is_some(),
+                tier != VisibilityTier::Public,
+                "own tier {tier:?}"
+            );
+            let descendant = repo
+                .withholding_visibility_for_audience(&child.id(), &crate::AudienceTier::Public)
+                .expect("descendant gate");
+            assert_eq!(descendant.is_some(), blocked, "ancestor tier {tier:?}");
+        }
+    }
+
+    #[test]
+    fn native_whole_tip_shallow_marker_does_not_prove_unknown_ancestry() {
+        let (_directory, repo) = fresh_repo();
+        let base = repo.head().expect("head").expect("base");
+        let tree = repo
+            .store()
+            .get_state(&base)
+            .expect("read")
+            .expect("seed")
+            .tree;
+        let missing = StateId::from_bytes([93; 32]);
+        let child = State::new_snapshot(
+            tree,
+            vec![missing],
+            objects::object::Attribution::human(objects::object::Principal::new("owner", "")),
+        );
+        repo.store().put_state(&child).expect("child");
+        repo.set_shallow(&missing, &[])
+            .expect("local shallow marker");
+        repo.set_shallow(&child.id(), &[missing])
+            .expect("child shallow marker");
+        let (id, tier) = repo
+            .withholding_visibility_for_audience(&child.id(), &crate::AudienceTier::Public)
+            .expect("visibility")
+            .expect("missing ancestry remains withheld");
+        assert_eq!(id, missing);
+        assert_eq!(
+            tier,
+            VisibilityTier::Private {
+                scope_label: UNRESOLVED_ANCESTOR_SCOPE.into()
+            }
         );
     }
 
