@@ -700,6 +700,8 @@ impl DeviceRpc {
                 event(thread_event::Payload::Status(status)),
             ));
         }
+        // Reopen here: a policy or owner change during composition must reset
+        // this snapshot, even though its initial projections shared one handle.
         if self.thread_observation_version(session, replica, &request.sections)? != generation {
             return Err(super::stream::SnapshotChanged.into());
         }
