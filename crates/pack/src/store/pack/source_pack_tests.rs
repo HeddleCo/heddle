@@ -132,7 +132,7 @@ fn visible_source_pack_proves_hidden_leaves_without_reading_their_content() {
         temp.path().join("buckets"),
     )
     .expect("builder");
-    build_visible_source_pack(builder, &source, &state, &redactions, 16, 65536)
+    build_visible_source_pack(builder, &source, &state, &[], &redactions, 16, 65536)
         .expect("visible closure requires no hidden bytes");
     assert_eq!(source.blob_reads.get(), 1);
     let packed = PackReader::open(&path, &index).expect("pack reader");
@@ -207,6 +207,67 @@ fn visible_source_pack_proves_hidden_leaves_without_reading_their_content() {
             .is_err(),
         "a changed opaque commitment no longer proves the selected root"
     );
+
+    // Old ancestor commitments cannot turn a fresh fully visible capture into
+    // a partial result. The disclosure's coverage follows actual selected leaves.
+    let changed_tree = Tree::from_entries_salted_v4(
+        vec![TreeEntry::file("visible.txt", open.hash(), false).expect("changed entry")],
+        vec![[9; 32]],
+    )
+    .expect("fresh salted tree");
+    let changed = State::new_snapshot(
+        changed_tree.hash(),
+        vec![state.id()],
+        state.attribution.clone(),
+    );
+    let changed_source = SelectedSource {
+        entries: vec![
+            (
+                PackObjectId::Hash(changed_tree.hash()),
+                ObjectType::Tree,
+                changed_tree.encode_canonical().expect("changed tree"),
+            ),
+            (
+                PackObjectId::Hash(open.hash()),
+                ObjectType::Blob,
+                open.content().to_vec(),
+            ),
+        ],
+        blob_reads: std::cell::Cell::new(0),
+    };
+    let changed_path = temp.path().join("changed.pack");
+    let changed_index = temp.path().join("changed.idx");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&changed_path)
+        .expect("changed pack");
+    let builder = StreamingPackBuilder::new(
+        file,
+        changed_index.clone(),
+        Default::default(),
+        temp.path().join("changed-buckets"),
+    )
+    .expect("changed builder");
+    let (_, _, complete) = build_visible_source_pack(
+        builder,
+        &changed_source,
+        &changed,
+        &[],
+        &redactions,
+        16,
+        65536,
+    )
+    .expect("fresh visible closure");
+    assert!(
+        complete,
+        "ancestor overrides do not taint a different salted leaf"
+    );
+    PackReader::open(&changed_path, &changed_index)
+        .expect("changed reader")
+        .validate_source_closure(&changed, 16, 65536)
+        .expect("actually complete source");
 }
 #[test]
 fn publication_rejects_missing_source_and_unselected_objects() {

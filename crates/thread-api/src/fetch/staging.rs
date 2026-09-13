@@ -27,6 +27,7 @@ pub struct StagedSource {
     pub(super) operations: Vec<SignedOperation>,
     pub(super) dependencies: Vec<ThreadGenesisRecord>,
     pub(super) state: State,
+    pub(super) partial_trees: Vec<heddle_object_model::object::PartialTree>,
     pub(super) authority_admissions:
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
 }
@@ -48,6 +49,10 @@ impl StagedSource {
     }
     pub fn state(&self) -> &State {
         &self.state
+    }
+    /// Partial source remains read-only until a verified full closure arrives.
+    pub fn is_complete(&self) -> bool {
+        self.ready.full_closure_available
     }
 }
 impl<R: MessageReader<Error = transport::Error>> Download<R> {
@@ -152,7 +157,7 @@ fn validate_with_receipts(
     dependencies: Vec<ThreadGenesisRecord>,
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
 ) -> Result<StagedSource, Error> {
-    let value = validate_artifacts(
+    let value = validate_disclosure_artifacts(
         directory,
         ready
             .thread
@@ -169,6 +174,7 @@ fn validate_with_receipts(
         operations,
         dependencies,
         receipt_records,
+        !ready.full_closure_available,
     )?;
     Ok(StagedSource {
         directory: value.directory,
@@ -176,6 +182,7 @@ fn validate_with_receipts(
         operations: value.operations,
         dependencies: value.dependencies,
         state: value.state,
+        partial_trees: value.partial_trees,
         authority_admissions: value.authority_admissions,
     })
 }
@@ -187,6 +194,7 @@ pub struct ValidatedSourceArtifacts {
     genesis: ThreadGenesisRecord,
     dependencies: Vec<ThreadGenesisRecord>,
     state: State,
+    partial_trees: Vec<heddle_object_model::object::PartialTree>,
     authority_admissions:
         BTreeMap<ContentHash, crypto::thread_authority_admission::SignedAuthorityAdmission>,
 }
@@ -220,6 +228,28 @@ pub(crate) fn validate_artifacts(
     operations: Vec<SignedOperation>,
     dependency_records: Vec<ThreadGenesisRecord>,
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
+) -> Result<ValidatedSourceArtifacts, Error> {
+    validate_disclosure_artifacts(
+        directory,
+        thread,
+        revision,
+        original,
+        operations,
+        dependency_records,
+        receipt_records,
+        false,
+    )
+}
+
+fn validate_disclosure_artifacts(
+    directory: tempfile::TempDir,
+    thread: &ThreadRef,
+    revision: &RevisionRef,
+    original: &ThreadGenesisRecord,
+    operations: Vec<SignedOperation>,
+    dependency_records: Vec<ThreadGenesisRecord>,
+    receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
+    allow_partial: bool,
 ) -> Result<ValidatedSourceArtifacts, Error> {
     if operations.len() > 10_000
         || dependency_records.len() >= 128
@@ -310,6 +340,7 @@ pub(crate) fn validate_artifacts(
             genesis: original.clone(),
             dependencies: Vec::new(),
             state,
+            partial_trees: Vec::new(),
             authority_admissions: BTreeMap::new(),
         });
     }
@@ -585,19 +616,26 @@ pub(crate) fn validate_artifacts(
         .source_result()
         .map_err(preparation)?
         .ok_or(Error::Invalid("selected operation has no source result"))?;
-    PackReader::open(
+    let pack = PackReader::open(
         &directory.path().join("source.pack"),
         &directory.path().join("source.idx"),
     )
-    .map_err(preparation)?
-    .validate_source_closure_with_metadata(
-        &state,
-        &references,
-        capture.visibility.as_ref(),
-        SOURCE_OBJECTS,
-        SOURCE_BYTES,
-    )
     .map_err(preparation)?;
+    let partial_trees = if allow_partial {
+        pack.validate_visible_source_closure(&state, SOURCE_OBJECTS, SOURCE_BYTES)
+            .map_err(preparation)?
+            .partial_trees
+    } else {
+        pack.validate_source_closure_with_metadata(
+            &state,
+            &references,
+            capture.visibility.as_ref(),
+            SOURCE_OBJECTS,
+            SOURCE_BYTES,
+        )
+        .map_err(preparation)?;
+        Vec::new()
+    };
     // Dependency-first installation makes foreign source authority available
     // before admitting a local integration. Cycles cannot settle this graph.
     let mut ready_ids: BTreeSet<_> = edges
@@ -640,6 +678,7 @@ pub(crate) fn validate_artifacts(
         authority_admissions,
         dependencies,
         state,
+        partial_trees,
     })
 }
 fn preparation(error: impl std::fmt::Display) -> Error {

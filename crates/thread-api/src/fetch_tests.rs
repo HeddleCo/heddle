@@ -3,6 +3,46 @@ use objects::object::{StateId, thread_replication::ThreadGenesis};
 
 use super::*;
 
+#[test]
+fn partial_fetch_requires_explicit_selection_and_matching_completion() {
+    let (mut open, mut ready, endpoint, _) = fixture();
+    ready.full_closure_available = false;
+    assert!(
+        Validation::new(
+            open.clone(),
+            ready.clone(),
+            Some(&endpoint),
+            Limits::default()
+        )
+        .is_err(),
+        "an endpoint cannot silently weaken a complete request"
+    );
+    open.selection.as_mut().expect("selection").allow_partial = true;
+    let mut validation = Validation::new(open, ready.clone(), Some(&endpoint), Limits::default())
+        .expect("explicit partial request");
+    validation.artifact = ready.packs.len();
+    let complete = |coverage| FetchServerFrame {
+        body: Some(fetch_server_frame::Body::Complete(FetchComplete {
+            revision: ready.current.clone(),
+            checkpoint: ready.checkpoint.clone(),
+            closure: coverage,
+            ..Default::default()
+        })),
+    };
+    assert!(
+        validation
+            .accept(complete(Coverage::Complete as i32))
+            .is_err(),
+        "partial Ready cannot produce a full availability receipt"
+    );
+    assert!(matches!(
+        validation
+            .accept(complete(Coverage::Partial as i32))
+            .expect("matching partial completion"),
+        Item::Complete(_)
+    ));
+}
+
 pub(super) fn fixture() -> (FetchOpen, TransferReady, EndpointRef, [Vec<u8>; 2]) {
     let signer = Ed25519Signer::from_seed(&[61; 32]).expect("test creator");
     let spool_id = uuid::Uuid::from_u128(0x01980000000070008000000000000001);
@@ -143,7 +183,7 @@ fn native_fetch_commits_only_after_both_hashed_artifacts_and_exact_checkpoint() 
     assert!(matches!(
         download.accept(complete(&ready)),
         Err(Error::Invalid(
-            "download is not a complete exact source closure"
+            "download does not match its exact declared source coverage"
         ))
     ));
     assert!(!download.done);
@@ -201,7 +241,7 @@ fn native_fetch_rejects_different_endpoint_and_truncated_index() {
     assert!(matches!(
         download.accept(complete(&ready)),
         Err(Error::Invalid(
-            "download is not a complete exact source closure"
+            "download does not match its exact declared source coverage"
         ))
     ));
 }

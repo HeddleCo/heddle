@@ -19,7 +19,7 @@ mod source;
 #[cfg(feature = "source-transfer")]
 mod staging;
 #[cfg(feature = "source-transfer")]
-pub use source::{PublicationOptions, SourceBudget, SourcePack};
+pub use source::{PublicationOptions, SourceBudget, SourcePack, VisibleSourcePack};
 #[cfg(feature = "source-transfer")]
 pub use staging::{
     ProposedSourceArtifacts, validate_proposed_source_artifacts, validate_source_artifacts,

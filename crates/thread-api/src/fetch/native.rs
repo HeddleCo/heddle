@@ -329,13 +329,7 @@ impl StagedSource {
                     .map_err(preparation)?;
             }
         }
-        repository
-            .store()
-            .install_pack_streaming(
-                &self.directory.path().join("source.pack"),
-                &self.directory.path().join("source.idx"),
-            )
-            .map_err(preparation)?;
+        self.install_source_objects(repository)?;
         for (thread, pending) in &mut claims {
             install_ready_claims(
                 replicas
@@ -383,7 +377,14 @@ impl StagedSource {
                     }
                 }
             }
-            let admission = if let Some(receipt) = self
+            let admission = if !self.is_complete() {
+                replica.receive_source_metadata(
+                    signed,
+                    repository.store(),
+                    self.authority_admissions.get(&id),
+                    require_source_operation,
+                )
+            } else if let Some(receipt) = self
                 .authority_admissions
                 .get(&operation.id().map_err(preparation)?)
             {
@@ -494,16 +495,75 @@ impl StagedSource {
             if !proved {
                 return Err(Error::Invalid("selected source proof did not settle"));
             }
-            for replica in possession {
-                replica
-                    .record_source_possession(self.state.id())
-                    .map_err(preparation)?;
+            if self.is_complete() {
+                for replica in possession {
+                    replica
+                        .record_source_possession(self.state.id())
+                        .map_err(preparation)?;
+                }
             }
         }
-        selected
-            .record_source_possession(self.state.id())
-            .map_err(preparation)?;
+        if self.is_complete() {
+            selected
+                .record_source_possession(self.state.id())
+                .map_err(preparation)?;
+        }
         Ok(())
+    }
+
+    pub(super) fn install_source_objects(&self, repository: &Repository) -> Result<(), Error> {
+        let pack = self.directory.path().join("source.pack");
+        let index = self.directory.path().join("source.idx");
+        if self.is_complete() {
+            return repository
+                .store()
+                .install_pack_streaming(&pack, &index)
+                .map(|_| ())
+                .map_err(preparation);
+        }
+        // HRT1 is a disclosure proof, not a full tree object. Split it out before
+        // registering the visible immutable records in the shared object store.
+        let visible_pack = self.directory.path().join("visible.pack");
+        let visible_index = self.directory.path().join("visible.idx");
+        let output = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&visible_pack)?;
+        let mut builder = heddle_pack::store::pack::StreamingPackBuilder::new(
+            output,
+            visible_index.clone(),
+            Default::default(),
+            self.directory.path().join("visible-buckets"),
+        )
+        .map_err(preparation)?;
+        let reader =
+            heddle_pack::store::pack::PackReader::open(&pack, &index).map_err(preparation)?;
+        reader
+            .visit_objects(|id, kind, bytes| {
+                if kind != heddle_pack::store::pack::ObjectType::Tree
+                    || !objects::object::is_redacted_tree(bytes)
+                {
+                    builder.add_id(id, kind, bytes)?;
+                }
+                Ok(())
+            })
+            .map_err(preparation)?;
+        let (output, _) = builder.finalize().map_err(preparation)?;
+        drop(output);
+        for partial in &self.partial_trees {
+            let bytes =
+                objects::object::encode_redacted_projection(partial).map_err(preparation)?;
+            repository
+                .store()
+                .put_partial_tree(&partial.declared_root(), &bytes)
+                .map_err(preparation)?;
+        }
+        repository
+            .store()
+            .install_pack_streaming(&visible_pack, &visible_index)
+            .map(|_| ())
+            .map_err(preparation)
     }
 }
 struct PendingClaim {

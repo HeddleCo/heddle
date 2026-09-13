@@ -9,9 +9,11 @@ use std::{
 
 use api::v2::client::RpcTransport;
 use heddle_object_model::object::{
-    ObjectSource, State, StateId, source_target::capture::ReferenceProof,
+    EntryRedactions, ObjectSource, State, StateId, source_target::capture::ReferenceProof,
 };
-use heddle_pack::store::pack::{StreamingPackBuilder, build_source_pack_with_references};
+use heddle_pack::store::pack::{
+    StreamingPackBuilder, build_source_pack_with_references, build_visible_source_pack,
+};
 
 use super::{Error, PreparedPublication, PublicationOriginals};
 use crate::{Thread, contract::*, transport};
@@ -38,6 +40,52 @@ pub struct SourcePack {
     artifacts: [PackExtent; 2],
 }
 
+/// Read-side disclosure artifacts. A partial projection cannot be passed to
+/// `publish_source`, which requires a complete [`SourcePack`].
+pub struct VisibleSourcePack {
+    source: SourcePack,
+    complete: bool,
+}
+
+impl VisibleSourcePack {
+    /// Prepare an admitted source read, omitting hidden source entries and
+    /// reference descriptors when an entry restriction applies. Full reads
+    /// retain their independently verified reference closures.
+    pub fn prepare(
+        source: &impl ObjectSource,
+        selected: &State,
+        references: &[ReferenceProof],
+        redactions: &EntryRedactions,
+        scratch_root: &Path,
+        budget: SourceBudget,
+    ) -> Result<Self, Error> {
+        let (source, complete) = SourcePack::prepare_disclosure(
+            source,
+            selected,
+            references,
+            Some(redactions),
+            scratch_root,
+            budget,
+        )?;
+        Ok(Self { source, complete })
+    }
+
+    /// Whether the pack proves full source and selected descriptor availability.
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    /// Whole independently hashed pack/index artifacts in transmission order.
+    pub fn artifacts(&self) -> &[PackExtent; 2] {
+        self.source.artifacts()
+    }
+
+    /// Stream the retained read artifacts while this value owns their scratch.
+    pub async fn open_artifacts(&self) -> Result<[tokio::fs::File; 2], Error> {
+        self.source.open_artifacts().await
+    }
+}
+
 impl SourcePack {
     /// Performs disk I/O and compression. Async applications run preparation on
     /// their blocking-work executor. The output owns and removes its scratch.
@@ -59,6 +107,18 @@ impl SourcePack {
         scratch_root: &Path,
         budget: SourceBudget,
     ) -> Result<Self, Error> {
+        Self::prepare_disclosure(source, selected, references, None, scratch_root, budget)
+            .map(|(source, _)| source)
+    }
+
+    fn prepare_disclosure(
+        source: &impl ObjectSource,
+        selected: &State,
+        references: &[ReferenceProof],
+        redactions: Option<&EntryRedactions>,
+        scratch_root: &Path,
+        budget: SourceBudget,
+    ) -> Result<(Self, bool), Error> {
         let directory = tempfile::Builder::new()
             .prefix("thread-source-")
             .tempdir_in(scratch_root)?;
@@ -76,25 +136,40 @@ impl SourcePack {
             directory.path().join("buckets"),
         )
         .map_err(store_error)?;
-        let (pack, _) = build_source_pack_with_references(
-            builder,
-            source,
-            selected,
-            references,
-            budget.max_objects,
-            budget.max_decoded_bytes,
-        )
+        let (pack, _, complete) = match redactions {
+            Some(redactions) => build_visible_source_pack(
+                builder,
+                source,
+                selected,
+                references,
+                redactions,
+                budget.max_objects,
+                budget.max_decoded_bytes,
+            ),
+            None => build_source_pack_with_references(
+                builder,
+                source,
+                selected,
+                references,
+                budget.max_objects,
+                budget.max_decoded_bytes,
+            )
+            .map(|(output, stats)| (output, stats, true)),
+        }
         .map_err(store_error)?;
         drop(pack);
         let artifacts = [
             artifact(&pack_path, pack_extent::Kind::NativePack)?,
             artifact(&index_path, pack_extent::Kind::NativeIndex)?,
         ];
-        Ok(Self {
-            directory,
-            revision: selected.id(),
-            artifacts,
-        })
+        Ok((
+            Self {
+                directory,
+                revision: selected.id(),
+                artifacts,
+            },
+            complete,
+        ))
     }
 
     /// Whole, independently hashed artifacts in transmission order. Source

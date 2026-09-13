@@ -10,6 +10,82 @@ use super::*;
 use crate::replication;
 
 #[test]
+fn partial_source_staging_retains_proof_without_complete_availability() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (directory, mut ready, operations, state) = fixture(scratch.path(), false);
+    let pack = PackReader::open(
+        &directory.path().join("source.pack"),
+        &directory.path().join("source.idx"),
+    )
+    .expect("original pack");
+    let (_, bytes) = pack
+        .get_hashed_object(&state.tree)
+        .expect("tree read")
+        .expect("tree");
+    let tree = Tree::decode_canonical(&bytes).expect("salted tree");
+    let redacted = std::collections::HashSet::from([tree.v4_leaf_hash_at(0).expect("leaf")]);
+    let partial = objects::object::PartialTree::project(&tree, &redacted).expect("partial proof");
+    let mut builder = PackBuilder::for_repack(Default::default(), 0);
+    builder.add_id(
+        PackObjectId::StateId(state.id()),
+        ObjectType::State,
+        state.encode_current_msgpack().expect("canonical State"),
+    );
+    builder.add_id(
+        PackObjectId::Hash(state.tree),
+        ObjectType::Tree,
+        objects::object::encode_redacted_projection(&partial).expect("encode proof"),
+    );
+    let (bytes, index, _) = builder.build().expect("partial pack");
+    drop(pack);
+    std::fs::write(directory.path().join("source.pack"), &bytes).expect("write pack");
+    std::fs::write(directory.path().join("source.idx"), &index).expect("write index");
+    ready.full_closure_available = false;
+    let staged = validate(directory, ready.clone(), operations.clone(), vec![])
+        .expect("partial closure with unchanged original source signature");
+    assert!(!staged.is_complete());
+    assert_eq!(staged.partial_trees.len(), 1);
+    assert_eq!(staged.partial_trees[0].declared_root(), state.tree);
+    let destination = tempfile::tempdir().expect("destination");
+    let repository = repo::Repository::init_default(destination.path()).expect("repository");
+    staged
+        .install_source_objects(&repository)
+        .expect("install visible objects");
+    use objects::store::ObjectStore;
+    assert!(
+        repository
+            .store()
+            .get_tree(&state.tree)
+            .expect("full tree lookup")
+            .is_none(),
+        "a partial proof must never enter the full tree cache"
+    );
+    assert!(
+        repository
+            .store()
+            .has_partial_tree(&state.tree)
+            .expect("partial tree lookup")
+    );
+    let stored = repository
+        .store()
+        .get_state(&state.id())
+        .expect("state lookup")
+        .expect("state");
+    assert_eq!(
+        stored, state,
+        "source signature still binds the original State"
+    );
+    let directory = tempfile::tempdir_in(scratch.path()).expect("false full disclosure");
+    std::fs::write(directory.path().join("source.pack"), bytes).expect("write pack");
+    std::fs::write(directory.path().join("source.idx"), index).expect("write index");
+    ready.full_closure_available = true;
+    assert!(
+        validate(directory, ready, operations, vec![]).is_err(),
+        "partial proofs cannot be declared complete source"
+    );
+}
+
+#[test]
 fn only_exact_portable_empty_seed_stages_without_source_operation() {
     let scratch = tempfile::tempdir().expect("scratch");
     let (_, mut ready, _, _) = crate::fetch::tests::fixture();

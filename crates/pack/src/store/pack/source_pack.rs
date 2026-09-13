@@ -217,25 +217,28 @@ pub fn build_source_pack_with_references<W: Write + Read + Seek + SyncData>(
         max_objects,
         max_decoded_bytes,
     )
+    .map(|(output, stats, _)| (output, stats))
 }
 
 /// Build only source bytes visible under an already-admitted entry projection.
 /// Hidden directories are not traversed; their salted commitments prove the
 /// original tree root without names or targets. Reference descriptor closures
-/// are separate disclosure material and are omitted from this partial transfer.
+/// are included only when no selected entry is hidden. The final boolean is
+/// true when the selected source and reference closure is complete.
 pub fn build_visible_source_pack<W: Write + Read + Seek + SyncData>(
     builder: StreamingPackBuilder<W>,
     source: &impl ObjectSource,
     selected: &State,
+    references: &[crate::object::source_target::capture::ReferenceProof],
     redactions: &EntryRedactions,
     max_objects: usize,
     max_decoded_bytes: u64,
-) -> Result<(W, PackStats)> {
+) -> Result<(W, PackStats, bool)> {
     build_disclosure(
         builder,
         source,
         selected,
-        &[],
+        references,
         Some(redactions),
         max_objects,
         max_decoded_bytes,
@@ -250,7 +253,7 @@ fn build_disclosure<W: Write + Read + Seek + SyncData>(
     redactions: Option<&EntryRedactions>,
     max_objects: usize,
     max_decoded_bytes: u64,
-) -> Result<(W, PackStats)> {
+) -> Result<(W, PackStats, bool)> {
     if max_objects < 2 {
         return Err(invalid("source pack object budget exceeded"));
     }
@@ -263,20 +266,7 @@ fn build_disclosure<W: Write + Read + Seek + SyncData>(
         &canonical,
     )?;
     let mut discovered = BTreeMap::from([(selected.tree, ObjectType::Tree)]);
-    for reference in references {
-        let closure = crate::object::source_target::capture::closure(
-            source,
-            reference.descriptor,
-            &reference.scope,
-            reference.state,
-        )?;
-        for hash in closure.blobs.keys() {
-            discovered.entry(*hash).or_insert(ObjectType::Blob);
-        }
-        if discovered.len().saturating_add(1) > max_objects {
-            return Err(invalid("reference pack object budget exceeded"));
-        }
-    }
+    let mut partial = false;
     let mut pending = discovered.clone();
     while let Some((hash, kind)) = pending.pop_first() {
         match kind {
@@ -296,6 +286,7 @@ fn build_disclosure<W: Write + Read + Seek + SyncData>(
                         if (0..tree.entries().len())
                             .any(|index| !redactions.entry_visible(&tree, index)) =>
                     {
+                        partial = true;
                         let partial = PartialTree::project(&tree, redactions.leaves())?;
                         (
                             crate::object::encode_redacted_projection(&partial)?,
@@ -346,7 +337,32 @@ fn build_disclosure<W: Write + Read + Seek + SyncData>(
             _ => return Err(invalid("unexpected source object type")),
         }
     }
-    builder.finalize()
+    if !partial {
+        for reference in references {
+            let closure = crate::object::source_target::capture::closure(
+                source,
+                reference.descriptor,
+                &reference.scope,
+                reference.state,
+            )?;
+            for (hash, bytes) in closure.blobs {
+                if let Some(kind) = discovered.get(&hash) {
+                    if *kind != ObjectType::Blob {
+                        return Err(invalid("reference object type conflict"));
+                    }
+                    continue;
+                }
+                if discovered.len().saturating_add(1) >= max_objects {
+                    return Err(invalid("reference pack object budget exceeded"));
+                }
+                charge_bytes(&mut decoded, bytes.len() as u64, max_decoded_bytes)?;
+                discovered.insert(hash, ObjectType::Blob);
+                builder.add_id(PackObjectId::Hash(hash), ObjectType::Blob, bytes)?;
+            }
+        }
+    }
+    let (output, stats) = builder.finalize()?;
+    Ok((output, stats, !partial))
 }
 
 fn charge_bytes(decoded: &mut u64, length: u64, limit: u64) -> Result<()> {

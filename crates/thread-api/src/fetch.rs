@@ -237,6 +237,13 @@ impl Validation {
         {
             return Err(Error::Invalid("invalid fresh transfer checkpoint"));
         }
+        if !ready.full_closure_available
+            && !open.selection.as_ref().is_some_and(|s| s.allow_partial)
+        {
+            return Err(Error::Invalid(
+                "partial source disclosure was not requested",
+            ));
+        }
         let facets = open.selection.map(|s| s.facets).unwrap_or_default();
         if !facets.contains(&(SharedFacet::Source as i32))
             || facets.iter().any(|f| {
@@ -416,11 +423,16 @@ impl Validation {
                     || checkpoint.transfer_id != original.transfer_id
                     || checkpoint.plan_digest != original.plan_digest
                     || checkpoint.committed_bytes != self.received
-                    || complete.closure != Coverage::Complete as i32
+                    || complete.closure
+                        != if self.ready.full_closure_available {
+                            Coverage::Complete as i32
+                        } else {
+                            Coverage::Partial as i32
+                        }
                     || !complete.missing.is_empty()
                 {
                     return Err(Error::Invalid(
-                        "download is not a complete exact source closure",
+                        "download does not match its exact declared source coverage",
                     ));
                 }
                 self.done = true;
