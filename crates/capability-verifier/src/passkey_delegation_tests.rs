@@ -96,6 +96,77 @@ fn owner_authorized_passkey_admits_temporary_mint_without_server_or_existing_dev
     export_vector("ed25519", &value);
 }
 
+#[test]
+fn expired_revoked_passkey_work_keeps_provenance_without_current_authority() {
+    use crate::{boundary_authority, thread_control_authority as proof};
+
+    let (attachment, state) = fixture();
+    let publisher = TestKey::new(83).signing.verifying_key().to_bytes();
+    let pair = KeyPair::from(
+        &PrivateKey::from_bytes(&[83; 32], Algorithm::Ed25519).expect("temporary mint"),
+    );
+    let expiry = chrono::DateTime::from_timestamp(NOW + 100, 0).expect("expiry");
+    let token = Biscuit::builder()
+        .code(format!(
+            "user(\"11111111-1111-1111-1111-111111111111\"); session(\"passkey-session\"); device_pop_key(\"{}\"); check if operation(\"PublishContent\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};",
+            hex::encode(publisher), expiry.to_rfc3339(),
+        ))
+        .expect("credential facts")
+        .build(&pair)
+        .expect("temporary credential");
+    let root = signed_root(
+        OWNER_UUID,
+        &TestKey::new(81),
+        &[
+            (&TestKey::new(84), RecoveryGuardianKind::Paper),
+            (&TestKey::new(85), RecoveryGuardianKind::Social),
+        ],
+    );
+    let bytes = proof::encode(
+        &OwnerHistory {
+            root: Some(root),
+            accepted_transitions: vec![],
+            state_hash: state.state_hash().to_vec(),
+        },
+        &publisher,
+        Some(&attachment),
+        &token,
+    )
+    .expect("portable original authority");
+    let context = |now| proof::Context {
+        owner: &state,
+        account_uuid: &OWNER_UUID,
+        publisher: &publisher,
+        agent_id: None,
+        method: "/heddle.api.v2alpha1.SyncService/PublishContent",
+        spool_path: "acme/project",
+        now,
+    };
+    proof::verify(&bytes, context(NOW + 1), |_| false).expect("fresh authority control");
+    let original =
+        boundary_authority::inspect_original_identity(&bytes, context(NOW + 7200), |_| true)
+            .expect(
+                "owner may explicitly accept original work after credential expiry or revocation",
+            );
+    assert_eq!(original.publisher, publisher);
+    assert!(original.explicitly_revoked);
+    assert!(
+        original
+            .revocations
+            .identifiers()
+            .any(|id| id == "passkey-session"),
+        "original session attribution must be retained"
+    );
+    assert!(
+        proof::verify(&bytes, context(NOW + 7200), |_| false).is_err(),
+        "provenance cannot restore expired current authority"
+    );
+    assert!(
+        proof::verify(&bytes, context(NOW + 1), |_| true).is_err(),
+        "provenance cannot restore revoked current authority"
+    );
+}
+
 fn resign_assertion(value: &mut SignedMintRootAttachment, refresh_challenge: bool) {
     let proof = value.passkey_delegation.as_mut().expect("proof");
     if refresh_challenge {
@@ -149,7 +220,9 @@ fn owner_authorized_es256_passkey_accepts_der_assertion() {
     authority.cose_algorithm = -7;
     authority.public_key_spki = hex::decode("3059301306072a8648ce3d020106082a8648ce3d030107034200")
         .expect("P256 SPKI prefix");
-    authority.public_key_spki.extend_from_slice(passkey.verifying_key().to_sec1_point(false).as_bytes());
+    authority
+        .public_key_spki
+        .extend_from_slice(passkey.verifying_key().to_sec1_point(false).as_bytes());
     certificate.owner_signature = Some(
         TestKey::new(81)
             .sign_digest(&passkey_authority_signing_digest(authority).expect("certificate")),
