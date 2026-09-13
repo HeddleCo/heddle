@@ -331,8 +331,16 @@ impl DeviceRpc {
         session: &Session,
         replica: &ThreadReplica,
     ) -> Result<ThreadOverview> {
-        let mut overview = self
-            .thread_overview_for_spool(&session.spool, replica, |method| session.permits(method))?;
+        let repository = repo::Repository::open(&session.spool.root)?;
+        let principal = uuid::Uuid::parse_str(&session.principal)?;
+        let mut overview = self.thread_overview_for_spool(
+            &repository,
+            &session.spool,
+            replica,
+            principal,
+            session.agent_id.as_deref(),
+            |method| session.permits(method),
+        )?;
         if let Some(catalog) = repo::device_catalog::store::Catalog::read(&self.home)? {
             overview.current_bookmark = Some(catalog.bookmark(&BookmarkRef {
                 account: Some(PrincipalRef {
@@ -347,8 +355,11 @@ impl DeviceRpc {
     }
     pub(super) fn thread_overview_for_spool(
         &self,
+        repository: &repo::Repository,
         spool: &repo::device_catalog::DeviceSpool,
         replica: &ThreadReplica,
+        principal: uuid::Uuid,
+        agent: Option<&str>,
         permits: impl Fn(&str) -> bool,
     ) -> Result<ThreadOverview> {
         let view = replica.projection()?;
@@ -365,15 +376,60 @@ impl DeviceRpc {
             None,
             129,
         )?;
-        let complete = source_operations.len() <= 128;
+        let mut complete = source_operations.len() <= 128;
         source_operations.truncate(128);
+        let mut visible_operations = Vec::new();
+        for id in source_operations {
+            let Some((signed, _)) = replica.operation(&id)? else {
+                complete = false;
+                continue;
+            };
+            let operation = signed.verify()?;
+            let Some(state) = operation.source_state()? else {
+                complete = false;
+                continue;
+            };
+            if super::auth::source_content_visibility(
+                repository,
+                replica,
+                principal,
+                agent,
+                state.id(),
+            )?
+            .is_some()
+            {
+                visible_operations.push(id.as_bytes().to_vec());
+            } else {
+                complete = false;
+            }
+        }
+        let mut visible_heads = Vec::new();
+        for state in &view.source_heads {
+            if super::auth::source_content_visibility(
+                repository, replica, principal, agent, *state,
+            )?
+            .is_some()
+            {
+                visible_heads.push(revision(&reference, *state));
+            }
+        }
+        let visible_base = if super::auth::source_content_visibility(
+            repository,
+            replica,
+            principal,
+            agent,
+            view.genesis.base,
+        )?
+        .is_some()
+        {
+            Some(revision(&reference, view.genesis.base))
+        } else {
+            None
+        };
         let mut overview = ThreadOverview {
             ownership: Some(super::ownership::ownership_view(replica)?),
             source_frontier: Some(SourceOperationFrontier {
-                operation_ids: source_operations
-                    .into_iter()
-                    .map(|id| id.as_bytes().to_vec())
-                    .collect(),
+                operation_ids: visible_operations,
                 complete,
             }),
             r#ref: Some(reference.clone()),
@@ -385,15 +441,13 @@ impl DeviceRpc {
                 outcome: view.genesis.intent.clone(),
                 ..Default::default()
             }),
-            source_heads: view
-                .source_heads
-                .iter()
-                .map(|state| revision(&reference, *state))
-                .collect(),
-            base: Some(revision(&reference, view.genesis.base)),
+            source_heads: visible_heads,
+            base: visible_base,
             lifecycle: ThreadLifecycle::Draft as i32,
             readiness: ReviewReadiness::Unknown as i32,
-            capture_count: Some(view.capture_count),
+            // Historical accepted originals can include withheld revisions.
+            // Their total count is not an authorized projection.
+            capture_count: None,
             ..Default::default()
         };
         for (property, candidates) in &view.fields {

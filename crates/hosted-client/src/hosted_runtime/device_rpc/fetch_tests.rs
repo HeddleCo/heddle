@@ -10,7 +10,8 @@ use objects::{
     object::{
         Attribution, Blob, CollaborationActor, CollaborationAnchor, CollaborationMetadata,
         CollaborationRevision, CollaborationScope, CollaborationSourceAnchor, ContextRevision,
-        EntryVisibility, EntryVisibilityEntry, Principal, State, Tree, TreeEntry, VisibilityTier,
+        EntryVisibility, EntryVisibilityEntry, Principal, State, StateVisibility, Tree, TreeEntry,
+        VisibilityTier,
         source_target::{
             SourceAffinity, SourceFileCore, SourceLineRange, SourceSelector, SourceTargetBinding,
             SourceTargetCore, SourceTargetReference, capture,
@@ -194,7 +195,87 @@ pub(super) async fn partial_roundtrip(
         1
     );
 
+    let private = State::new_snapshot(
+        tree.hash(),
+        vec![replica.genesis().expect("genesis").base],
+        Attribution::human(Principal::new("Owner", "owner@test")),
+    )
+    .with_intent("whole-state private source");
+    repository
+        .store()
+        .put_state(&private)
+        .expect("private state");
+    repository
+        .put_state_visibility(StateVisibility {
+            state: private.id(),
+            tier: VisibilityTier::Private {
+                scope_label: "security".into(),
+            },
+            embargo_until: None,
+            declarer: repository.get_principal().expect("local declarer"),
+            declared_at: chrono::Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .expect("signed state visibility");
+    repository
+        .record_native_capture("device-test", private.id())
+        .expect("private original capture");
+
     let genesis = replica.genesis().expect("selected Thread");
+    let mut observed = remote
+        .observe::<thread_api::rpc::ThreadServiceObserveThread>(
+            ObserveThreadRequest {
+                thread: open(&genesis, state.id()).thread,
+                sections: vec![
+                    ThreadSection::Overview as i32,
+                    ThreadSection::Captures as i32,
+                ],
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("source-safe Thread observation");
+    let batch = observed
+        .next_commit()
+        .await
+        .expect("observation protocol")
+        .expect("snapshot");
+    let overview = batch
+        .changes
+        .iter()
+        .find_map(|change| match change {
+            thread_event::Payload::Overview(value) => Some(value),
+            _ => None,
+        })
+        .expect("Thread overview");
+    assert_eq!(
+        overview.source_heads.len(),
+        1,
+        "whole-state private source head must not appear in Thread overview"
+    );
+    assert_eq!(
+        overview.source_heads[0].revision.as_ref(),
+        Some(&revision_ref::Revision::State(
+            api::heddle::api::v1alpha1::StateId {
+                value: state.id().as_bytes().to_vec()
+            }
+        ))
+    );
+    assert!(
+        overview.capture_count.is_none(),
+        "unfiltered capture count must not leak"
+    );
+    assert_eq!(
+        batch
+            .changes
+            .iter()
+            .filter(|change| matches!(change, thread_event::Payload::Capture(_)))
+            .count(),
+        1,
+        "whole-state private capture must be filtered before page projection"
+    );
     let mut request = open(&genesis, state.id());
     request.selection.as_mut().expect("selection").allow_partial = true;
     let download = remote

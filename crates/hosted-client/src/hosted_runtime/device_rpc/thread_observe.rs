@@ -217,18 +217,56 @@ impl DeviceRpc {
                         .and_then(|p| p.captures.as_ref())
                         .cloned()
                         .unwrap_or_default();
-                    let after = decode_cursor(&page.after_page, binding, b"captures")?
+                    let mut after = decode_cursor(&page.after_page, binding, b"captures")?
                         .map(ContentHash::from_bytes);
                     let size = page_size(&page, budget);
-                    let mut records =
-                        replica.accepted_page(ThreadFacet::Source, after, size + 1)?;
-                    let exhausted = records.len() <= size;
-                    records.truncate(size);
+                    let principal = uuid::Uuid::parse_str(&session.principal)?;
+                    let mut records = Vec::new();
+                    let mut scanned = 0usize;
+                    let mut exhausted = false;
+                    while records.len() < size && scanned < 4096 {
+                        let batch = replica.accepted_page(ThreadFacet::Source, after, 65)?;
+                        if batch.is_empty() {
+                            exhausted = true;
+                            break;
+                        }
+                        let batch_exhausted = batch.len() < 65;
+                        for (id, signed) in batch {
+                            scanned += 1;
+                            after = Some(id);
+                            let operation = signed.verify()?;
+                            let state = operation.source_state()?.context("source operation")?;
+                            if super::auth::source_content_visibility(
+                                &repository,
+                                replica,
+                                principal,
+                                session.agent_id.as_deref(),
+                                state.id(),
+                            )?
+                            .is_some()
+                            {
+                                records.push((id, signed));
+                                if records.len() == size {
+                                    break;
+                                }
+                            }
+                            if scanned == 4096 {
+                                break;
+                            }
+                        }
+                        if records.len() == size || scanned == 4096 {
+                            break;
+                        }
+                        if batch_exhausted {
+                            exhausted = true;
+                            break;
+                        }
+                    }
                     let next = if exhausted {
                         Vec::new()
                     } else {
                         encode_cursor(
-                            records.last().context("capture page")?.0.as_bytes(),
+                            after.context("capture scan cursor")?.as_bytes(),
                             binding,
                             b"captures",
                         )
@@ -261,7 +299,11 @@ impl DeviceRpc {
                     }
                     (
                         "captures",
-                        Coverage::Complete,
+                        if scanned == 4096 {
+                            Coverage::Partial
+                        } else {
+                            Coverage::Complete
+                        },
                         PageInfo {
                             next_page: next,
                             exhausted,

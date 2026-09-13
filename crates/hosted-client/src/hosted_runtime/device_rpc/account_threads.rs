@@ -122,9 +122,14 @@ impl DeviceRpc {
                 )? {
                     continue;
                 }
-                let mut overview = self.thread_overview_for_spool(spool, &replica, |method| {
-                    session.permits_method(method, &spool.capability_path)
-                })?;
+                let mut overview = self.thread_overview_for_spool(
+                    &repository,
+                    spool,
+                    &replica,
+                    uuid::Uuid::parse_str(&session.principal)?,
+                    facts.delegation_agent_id.as_deref(),
+                    |method| session.permits_method(method, &spool.capability_path),
+                )?;
                 if overview.name != row.name || overview.lifecycle != row.lifecycle {
                     return Err(super::stream::SnapshotChanged.into());
                 }
