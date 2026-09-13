@@ -2835,6 +2835,7 @@ dependencies = [
  "heddle-perf-contract",
  "heddle-repo",
  "heddle-semantic",
+ "heddle-wire",
  "heddleco-iroh",
  "hex",
  "prost 0.14.1",

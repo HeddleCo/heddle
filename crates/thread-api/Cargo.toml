@@ -24,7 +24,7 @@ native = [
     "dep:tempfile",
 ]
 # Exact bounded source packs and download validation without a local repo or identity manager.
-source-transfer = ["replication", "dep:heddle-pack", "dep:tempfile"]
+source-transfer = ["replication", "dep:heddle-pack", "dep:tempfile", "dep:wire"]
 # An Iroh adapter for the transport-neutral client and replication driver.
 iroh = ["dep:iroh", "dep:tokio", "dep:heddle-perf-contract"]
 # Causal protocol and async stream driver, without a local repository or Iroh.
@@ -45,6 +45,7 @@ objects = { workspace = true, optional = true }
 crypto = { workspace = true, optional = true }
 heddle-object-model = { workspace = true, optional = true }
 heddle-pack = { workspace = true, optional = true }
+wire = { workspace = true, optional = true }
 biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.23.0", optional = true }
 chrono = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }

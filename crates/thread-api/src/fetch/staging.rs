@@ -150,7 +150,7 @@ fn validate(
 ) -> Result<StagedSource, Error> {
     validate_with_receipts(directory, ready, operations, dependencies, Vec::new())
 }
-fn validate_with_receipts(
+pub(super) fn validate_with_receipts(
     directory: tempfile::TempDir,
     ready: TransferReady,
     operations: Vec<SignedOperation>,
