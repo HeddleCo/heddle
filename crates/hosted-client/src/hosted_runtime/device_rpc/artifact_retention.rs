@@ -139,7 +139,10 @@ async fn expire_store(directory: PathBuf, spool: uuid::Uuid) -> Result<()> {
             #[cfg(feature = "semantic")]
             let next = {
                 super::source_search::index_due_source(&path, now)?;
-                let source_due = repo::thread_replication::source_search::next_due(&path)?;
+                // Pace catch-up to one original per second so a large imported
+                // backlog does not monopolize the owner's foreground device.
+                let source_due = repo::thread_replication::source_search::next_due(&path)?
+                    .map(|due| due.max(now.saturating_add(1)));
                 match (next, source_due) {
                     (Some(artifact), Some(source)) => Some(artifact.min(source)),
                     (None, source) => source,

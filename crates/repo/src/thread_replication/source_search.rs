@@ -98,7 +98,7 @@ pub fn defer(directory: &std::path::Path, operation: ContentHash, next_attempt: 
 pub fn next_due(directory: &std::path::Path) -> Result<Option<i64>> {
     let connection = crate::local_metadata::open(directory)?;
     let at = connection.query_row(
-        "SELECT MIN(next_attempt) FROM source_search_queue",
+        "SELECT MIN(q.next_attempt) FROM source_search_queue q JOIN operations o ON o.id=q.operation AND o.status=1 AND o.facet=1",
         [],
         |row| row.get(0),
     )?;
@@ -262,6 +262,13 @@ mod tests {
                 revision
             }]
         );
+        connection
+            .execute(
+                "UPDATE operations SET status=2 WHERE id=?1",
+                [operation.as_bytes().as_slice()],
+            )
+            .expect("retire operation");
+        assert_eq!(next_due(&directory).expect("retired work skipped"), None);
         connection
             .execute("DELETE FROM source_search_queue", [])
             .expect("drain");
