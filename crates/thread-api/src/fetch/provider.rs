@@ -764,8 +764,8 @@ mod tests {
 
     use api::{
         heddle::api::v2alpha1::{
-            Coverage, DescribeEndpointResponse, FetchComplete, ObjectAddress, PackChunk,
-            ProviderAssemblyRecord,
+            Coverage, DescribeEndpointResponse, EndpointKind, FetchComplete, ObjectAddress,
+            PackChunk, ProviderAssemblyRecord, ProviderDialRoute, provider_dial_route,
         },
         v2::{
             MethodDescriptor,
@@ -827,10 +827,21 @@ mod tests {
         ) -> Result<(Writer, Reader), Self::Error> {
             let frame = FetchClientFrame::decode(opening.as_slice())
                 .map_err(|_| transport::Error::Protocol("bad opening"))?;
-            assert!(
-                matches!(frame.body, Some(fetch_client_frame::Body::Open(FetchOpen {delivery, ..}))
-                if delivery == fetch_open::Delivery::ProviderPreferred as i32)
-            );
+            assert!(matches!(
+                frame.body,
+                Some(fetch_client_frame::Body::Open(FetchOpen {
+                    delivery,
+                    routes,
+                    ..
+                })) if delivery == fetch_open::Delivery::ProviderPreferred as i32
+                    && matches!(
+                        routes.as_slice(),
+                        [ProviderDialRoute {
+                            provider: Some(EndpointRef { kind, .. }),
+                            address: Some(provider_dial_route::Address::RelayUrl(_)),
+                        }] if *kind == EndpointKind::Provider as i32
+                    )
+            ));
             Ok((
                 Writer(Arc::clone(&self.finished)),
                 Reader(self.frames.clone().into()),
@@ -843,6 +854,15 @@ mod tests {
         for wrong_terminal in [false, true] {
             let (mut open, ready, endpoint, artifacts) = super::super::tests::fixture();
             open.delivery = fetch_open::Delivery::ProviderPreferred as i32;
+            open.routes = vec![ProviderDialRoute {
+                provider: Some(EndpointRef {
+                    public_key: vec![9; 32],
+                    kind: EndpointKind::Provider as i32,
+                }),
+                address: Some(provider_dial_route::Address::RelayUrl(
+                    "https://relay.example/".to_string(),
+                )),
+            }];
             let mut frames = vec![
                 FetchServerFrame {
                     body: Some(fetch_server_frame::Body::Ready(ready.clone())),
