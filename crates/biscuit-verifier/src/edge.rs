@@ -541,6 +541,8 @@ pub struct NativeAuthorizedExtent {
     pub range: heddle_api::heddle::api::v2alpha1::ProviderPhysicalRange,
     pub subject: String,
     pub audience: EdgeAudience,
+    /// Proof key resolved from the verified Biscuit, not from the Iroh peer.
+    pub cnf_public_key: [u8; 32],
 }
 
 /// The scope weft pins into its attenuation block.
@@ -830,10 +832,18 @@ pub fn authorize_native_provider_extent(
         &[request_fact],
         now,
     )?;
+    let cnf = facts.cnf.as_deref().ok_or_else(|| {
+        EdgeError::Unauthorized("capability has no request proof key".to_string())
+    })?;
+    let mut cnf_public_key = [0_u8; 32];
+    hex::decode_to_slice(cnf, &mut cnf_public_key).map_err(|_| {
+        EdgeError::Unauthorized("capability request proof key is invalid".to_string())
+    })?;
     Ok(NativeAuthorizedExtent {
         range: request_range.clone(),
         subject: facts.sub,
         audience,
+        cnf_public_key,
     })
 }
 

@@ -2,11 +2,10 @@
 //! verified Biscuit and separately enforce account attachment, scope, current
 //! revocation and durable nonce consumption. This check grants no authority.
 use api::{heddle::api::v1alpha1::CallContext, v2::MethodDescriptor};
-use crypto::Ed25519Signer;
 
 use crate::transport::Error;
 
-pub const PROOF_WINDOW_MILLIS: u64 = 60_000;
+pub const PROOF_WINDOW_MILLIS: u64 = api::request_proof::PROOF_WINDOW_MILLIS;
 
 pub struct VerifiedProof<'a> {
     identity: &'a str,
@@ -28,52 +27,40 @@ pub fn verify<'a>(
     effective_key: &[u8; 32],
     now_millis: i64,
 ) -> Result<VerifiedProof<'a>, Error> {
-    let operation_id = method.client_operation_id(body)?.unwrap_or_default();
-    if operation_id != context.client_operation_id
-        || (method.client_operation_id_required && operation_id.is_empty())
-    {
-        return Err(Error::Protocol(
-            "request and context operation IDs differ or are missing",
-        ));
-    }
-    let proof = context
-        .request_proof
-        .as_ref()
-        .ok_or(Error::Protocol("request PoP required"))?;
-    if proof.algorithm != "ed25519"
-        || proof.nonce.len() != 16
-        || now_millis.abs_diff(proof.timestamp_millis) > PROOF_WINDOW_MILLIS
-    {
-        return Err(Error::Protocol("invalid or expired request PoP"));
-    }
-    let identity = format!("principal:device-key:{}", hex::encode(effective_key));
-    if proof.signing_identity != identity {
-        return Err(Error::Protocol(
-            "request signing identity differs from Biscuit",
-        ));
-    }
-    Ed25519Signer::verify_with_public_key(
-        &api::signing::unary_bytes(
-            &identity,
-            method.path,
-            proof.timestamp_millis,
-            &proof.nonce,
-            body,
-        ),
+    let verified = api::request_proof::verify_native_request_proof(
+        context,
+        method,
+        body,
         effective_key,
-        &proof.signature,
+        now_millis,
     )
-    .map_err(|_| Error::Protocol("invalid request signature"))?;
+    .map_err(|error| match error {
+        api::request_proof::RequestProofError::OperationId => {
+            Error::Protocol("request and context operation IDs differ or are missing")
+        }
+        api::request_proof::RequestProofError::InvalidProof => {
+            Error::Protocol("invalid or expired request PoP")
+        }
+        api::request_proof::RequestProofError::Identity => {
+            Error::Protocol("request signing identity differs from Biscuit")
+        }
+        api::request_proof::RequestProofError::Signature => {
+            Error::Protocol("invalid request signature")
+        }
+        api::request_proof::RequestProofError::RequestMetadata => {
+            Error::Protocol("request operation ID could not be decoded")
+        }
+    })?;
     Ok(VerifiedProof {
-        identity: &proof.signing_identity,
-        nonce: &proof.nonce,
+        identity: verified.identity,
+        nonce: verified.nonce,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use api::{heddle::api::v1alpha1::RequestProof, v2::client::Rpc};
-    use crypto::Signer;
+    use crypto::{Ed25519Signer, Signer};
     use prost::Message;
 
     use super::*;
