@@ -57,14 +57,29 @@ impl Catalog {
     pub fn open(home: &Path) -> Result<Self> {
         let path = database_path(home);
         objects::fs_atomic::create_private_dir_all(path.parent().context("catalog parent")?)?;
-        let connection = Connection::open(path)?;
+        let mut connection = Connection::open(&path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let initialized:bool=connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_schema')",[],|row|row.get(0))?;
         if initialized {
             return Self::checked(connection);
         }
-        connection.pragma_update(None, "journal_mode", "WAL")?;
-        let tx = connection.unchecked_transaction()?;
+        // Like the shared metadata store, serialize only cold initialization:
+        // concurrent WAL activation can fail before SQLite's busy handler runs.
+        let _initialization = objects::lock::RepoLock::at(path.with_extension("initialize.lock"))
+            .write()
+            .context("lock device catalog initialization")?;
+        let initialized: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='catalog_schema')",
+            [], |row| row.get(0),
+        )?;
+        if initialized {
+            return Self::checked(connection);
+        }
+        let mode: String = connection.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+        if mode != "wal" {
+            bail!("device catalog requires WAL mode");
+        }
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         tx.execute_batch(SCHEMA)?;
         tx.commit()?;
         Self::checked(connection)
