@@ -8,7 +8,6 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_PENDING: i64 = 512;
-const MAX_COMPLETED: i64 = 65_536;
 
 pub(super) enum StoredReview {
     Pending(String, RecordReviewRequest),
@@ -86,26 +85,22 @@ impl ReviewOutbox {
         principal: &str,
         operation_id: uuid::Uuid,
     ) -> Result<Option<StoredReview>> {
-        let completed: Option<Vec<u8>> = self.connection.query_row(
-            "SELECT decision FROM completed_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
+        let stored: Option<(i64, String, Vec<u8>)> = self.connection.query_row(
+            "SELECT 1,thread_selector,decision FROM completed_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3
+             UNION ALL
+             SELECT 0,thread_selector,request FROM prepared_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3
+             LIMIT 1",
             params![endpoint, principal, operation_id.to_string()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).optional()?;
-        if let Some(bytes) = completed {
+        let Some((completed, selector, bytes)) = stored else { return Ok(None) };
+        if completed == 1 {
             ensure!(bytes.len() <= MAX_REQUEST_BYTES, "stored completed review exceeds bound");
             let decision = ReviewDecision::decode(bytes.as_slice())?;
             ensure!(decision.encode_to_vec() == bytes, "stored completed review is not canonical protobuf");
-            let selector: String = self.connection.query_row(
-                "SELECT thread_selector FROM completed_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
-                params![endpoint, principal, operation_id.to_string()], |row| row.get(0))?;
             return Ok(Some(StoredReview::Completed(selector, decision)));
         }
-        let bytes: Option<Vec<u8>> = self.connection.query_row(
-            "SELECT request FROM prepared_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
-            params![endpoint, principal, operation_id.to_string()],
-            |row| row.get(0),
-        ).optional()?;
-        bytes
+        Some(bytes)
             .map(|bytes| {
                 ensure!(
                     bytes.len() <= MAX_REQUEST_BYTES,
@@ -120,9 +115,6 @@ impl ReviewOutbox {
                     request.client_operation_id == operation_id.to_string(),
                     "stored review operation ID differs"
                 );
-                let selector: String = self.connection.query_row(
-                    "SELECT thread_selector FROM prepared_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
-                    params![endpoint, principal, operation_id.to_string()], |row| row.get(0))?;
                 Ok(StoredReview::Pending(selector, request))
             })
             .transpose()
@@ -192,6 +184,14 @@ impl ReviewOutbox {
         operation_id: uuid::Uuid,
     ) -> Result<()> {
         let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let already_completed: Option<i64> = transaction.query_row(
+            "SELECT 1 FROM completed_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
+            params![endpoint, principal, operation_id.to_string()], |row| row.get(0),
+        ).optional()?;
+        if already_completed.is_some() {
+            transaction.commit()?;
+            return Ok(());
+        }
         let (selector, bytes): (String, Vec<u8>) = transaction.query_row(
             "SELECT thread_selector,request FROM prepared_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
             params![endpoint, principal, operation_id.to_string()],
@@ -199,8 +199,6 @@ impl ReviewOutbox {
         ).context("completed review has no prepared request")?;
         let request = RecordReviewRequest::decode(bytes.as_slice())?;
         let decision = request.decision.context("prepared review has no decision")?;
-        let count: i64 = transaction.query_row("SELECT COUNT(*) FROM completed_review", [], |row| row.get(0))?;
-        ensure!(count < MAX_COMPLETED, "completed review history is full; retain operation IDs before preparing more reviews");
         transaction.execute(
             "INSERT INTO completed_review(endpoint,principal,operation_id,thread_selector,decision) VALUES(?1,?2,?3,?4,?5)",
             params![endpoint, principal, operation_id.to_string(), selector, decision.encode_to_vec()],
@@ -257,6 +255,9 @@ mod tests {
         assert!(reopened.save(&endpoint, &principal, id, "thread-a", &first).is_err(), "completed operation ID cannot be signed again");
         let restarted = ReviewOutbox::open_at(home.path().join("state")).expect("restart after receipt");
         assert!(matches!(restarted.load(&endpoint, &principal, id).expect("completed after restart"), Some(StoredReview::Completed(_, _))));
+        reopened.complete(&endpoint, &principal, id).expect("same caller repeats completion");
+        let mut another_process = restarted;
+        another_process.complete(&endpoint, &principal, id).expect("concurrent caller repeats completion");
     }
 
     #[test]
