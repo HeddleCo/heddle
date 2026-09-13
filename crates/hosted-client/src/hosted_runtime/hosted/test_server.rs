@@ -24,7 +24,7 @@ use api::{
             ListThreadsResponse, PackChunk, PackStreamKind, PullComplete, PullReady,
             PullServerFrame, PushClientFrame, PushComplete, PushReady, PushRequest,
             PushServerFrame, RepoEvent, SignedSpoolOwnerGenesis, StateContextEntry, StateId,
-            SubscribeRepoEventsRequest, TransferCheckpoint, TransportMode, UpdateSpoolRequest,
+            SubscribeRepoEventsRequest, TransferCheckpoint, TransportMode,
             get_context_history_response, list_context_response, list_discussions_response,
             list_refs_response, list_threads_response, pull_server_frame, push_client_frame,
             push_server_frame,
@@ -46,7 +46,6 @@ const OWNER_GENESIS_FIXTURE_HEX: &str = "0a380a102222222222222222222222222222222
 const GET_BLOB_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/GetBlob";
 const CREATE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/CreateSpool";
 const DELETE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/DeleteSpool";
-const UPDATE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/UpdateSpool";
 const GET_DISCUSSION_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/GetDiscussion";
 const LIST_BY_STATE_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/ListByState";
 const LIST_CONTEXT_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/ListContext";
@@ -56,7 +55,7 @@ const SUBSCRIBE_REPO_EVENTS_METHOD: &str =
 
 #[derive(Default)]
 pub(crate) struct SpoolMutationCapture {
-    pub updates: Vec<UpdateSpoolRequest>,
+    pub native_updates: Vec<v2::ReviseSpoolRequest>,
     pub deletes: Vec<DeleteSpoolRequest>,
     pub native_deletes: Vec<v2::DeleteSpoolRequest>,
 }
@@ -349,6 +348,7 @@ async fn serve_call(
                         "/heddle.api.v2alpha1.WorkspaceService/ResolveResources".into(),
                         "/heddle.api.v2alpha1.SpoolService/ObserveSpool".into(),
                         "/heddle.api.v2alpha1.SpoolService/DeleteSpool".into(),
+                        "/heddle.api.v2alpha1.SpoolService/ReviseSpool".into(),
                         "/heddle.api.v2alpha1.IdentityService/ObserveIdentity".into(),
                         "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace".into(),
                         "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership".into(),
@@ -394,13 +394,20 @@ async fn serve_call(
                     server_key,
                 )
                 .await;
+            } else if method == "/heddle.api.v2alpha1.SpoolService/ReviseSpool" {
+                serve_native_revise_spool(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    spool_mutations,
+                    server_key,
+                )
+                .await;
             } else if method == "/heddle.api.v2alpha1.SpoolService/CreateSpool" {
                 serve_native_create_spool(&mut send, &mut recv, &mut request, server_key, owner)
                     .await;
             } else if method == CREATE_SPOOL_METHOD {
                 serve_create_spool(&mut send, &mut recv, &mut request, create_spool).await;
-            } else if method == UPDATE_SPOOL_METHOD {
-                serve_update_spool(&mut send, &mut recv, &mut request, spool_mutations).await;
             } else if method == DELETE_SPOOL_METHOD {
                 serve_delete_spool(&mut send, &mut recv, &mut request, spool_mutations).await;
             } else if method == GET_BLOB_METHOD && !blobs.contents.is_empty() {
@@ -789,6 +796,9 @@ async fn serve_native_spool_observation(
                     id: uuid::Uuid::from_bytes([2; 16]).to_string(),
                 }),
                 version: vec![7; 32],
+                slug: "acme".into(),
+                path_segments: vec!["acme".into()],
+                settings: Some(v2::SpoolSettings::default()),
                 ..Default::default()
             })),
         },
@@ -815,6 +825,58 @@ async fn serve_native_spool_observation(
         .await
         .unwrap();
     }
+}
+
+async fn serve_native_revise_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    captured: Option<Arc<Mutex<SpoolMutationCapture>>>,
+    server_key: Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ReviseSpoolRequest::decode(frame.body).ok())
+        .expect("native Spool revision request");
+    if let Some(captured) = captured {
+        captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .native_updates
+            .push(body.clone());
+    }
+    let slug = body.slug.clone().unwrap_or_else(|| "acme".into());
+    let response = v2::SpoolMutationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
+        spool: Some(v2::SpoolOverview {
+            r#ref: body.spool,
+            version: vec![8; 32],
+            slug: slug.clone(),
+            path_segments: vec![slug],
+            name: body.name,
+            settings: body.settings,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
 }
 
 async fn serve_native_delete_spool(
@@ -1055,36 +1117,6 @@ async fn serve_create_spool(
             ..HostedSpool::default()
         },
         None => HostedSpool::default(),
-    };
-    send.write_chunk(Bytes::from(
-        encode_success_response(&response.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
-async fn serve_update_spool(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    captured: Option<Arc<Mutex<SpoolMutationCapture>>>,
-) {
-    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
-        request.extend_from_slice(&chunk);
-    }
-    let body = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| UpdateSpoolRequest::decode(frame.body).ok());
-    if let (Some(captured), Some(body)) = (captured.as_ref(), body.as_ref()) {
-        captured
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .updates
-            .push(body.clone());
-    }
-    let response = HostedSpool {
-        full_path: body.map_or_else(String::new, |request| request.full_path),
-        ..HostedSpool::default()
     };
     send.write_chunk(Bytes::from(
         encode_success_response(&response.encode_to_vec()).unwrap(),

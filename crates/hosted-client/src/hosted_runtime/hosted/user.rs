@@ -9,13 +9,13 @@ use api::heddle::api::v1alpha1::{
     ListSignupInvitesResponse, ListSupportAccessGrantsRequest, ListThreadApprovalsRequest,
     MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
     ServiceAccountResponse, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
-    UpdateSpoolRequest, grant_target_ref::Target as GrantTargetKind,
+    grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
 use super::{
     HostedClient,
-    helpers::{hosted_to_protocol_error, to_protocol_grant, to_protocol_spool},
+    helpers::{hosted_to_protocol_error, to_protocol_grant},
     operation_id::ClientOperationId,
 };
 
@@ -469,26 +469,63 @@ impl HostedClient {
         new_slug: Option<&str>,
         display_name: Option<Option<String>>,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateSpool");
-        let (display_name, clear_display_name) = match display_name {
-            Some(Some(value)) => (Some(value), false),
-            Some(None) => (None, true),
-            None => (None, false),
+        use api::heddle::api::v2alpha1 as contract;
+        let current = self.native_spool_overview(full_path).await?;
+        let operation_id = ClientOperationId::fresh("heddle.api.v2alpha1.SpoolService/ReviseSpool");
+        let request = contract::ReviseSpoolRequest {
+            client_operation_id: operation_id.to_wire(),
+            spool: current.r#ref.clone(),
+            expected_version: current.version.clone(),
+            name: display_name
+                .unwrap_or_else(|| Some(current.name.clone()))
+                .unwrap_or_default(),
+            settings: current.settings.clone(),
+            slug: new_slug.map(ToOwned::to_owned),
         };
-        let spool = authed_call!(
-            self,
-            update_spool,
-            "UpdateSpool",
-            UpdateSpoolRequest {
-                full_path: full_path.to_string(),
-                new_slug: new_slug.map(ToOwned::to_owned),
-                display_name,
-                clear_display_name,
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(to_protocol_spool(spool))
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServiceReviseSpool>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        let receipt = response
+            .receipt
+            .ok_or_else(|| ProtocolError::InvalidState("Spool revision receipt absent".into()))?;
+        if receipt.client_operation_id != request.client_operation_id
+            || receipt.endpoint != remote.description.endpoint
+            || !matches!(
+                receipt.outcome,
+                Some(contract::mutation_receipt::Outcome::Applied(_))
+            )
+        {
+            return Err(ProtocolError::InvalidState(
+                "Spool revision was not applied to the requested endpoint".into(),
+            ));
+        }
+        let revised = response
+            .spool
+            .ok_or_else(|| ProtocolError::InvalidState("revised Spool overview absent".into()))?;
+        if revised.r#ref != request.spool
+            || revised.name != request.name
+            || revised.settings != request.settings
+            || revised.slug != request.slug.as_deref().unwrap_or(&current.slug)
+            || revised.path_segments.is_empty()
+        {
+            return Err(ProtocolError::InvalidState(
+                "revised Spool differs from requested mutation".into(),
+            ));
+        }
+        Ok(wire::HostedSpoolInfo {
+            spool_id: revised
+                .r#ref
+                .as_ref()
+                .map(|value| value.id.clone())
+                .unwrap_or_default(),
+            full_path: revised.path_segments.join("/"),
+            kind: "spool".into(),
+            is_repo: false,
+            display_name: (!revised.name.is_empty()).then_some(revised.name),
+        })
     }
 
     pub async fn delete_spool(&mut self, full_path: &str) -> Result<(), ProtocolError> {
@@ -1117,21 +1154,22 @@ mod tests {
         server.await.unwrap();
 
         let captured = captured.lock().unwrap_or_else(|poison| poison.into_inner());
-        assert_eq!(captured.updates.len(), 2);
+        assert_eq!(captured.native_updates.len(), 2);
         assert_eq!(captured.native_deletes.len(), 2);
 
-        let namespace_update = &captured.updates[0];
-        assert_eq!(namespace_update.full_path, "acme");
-        assert_eq!(namespace_update.new_slug.as_deref(), Some("acme-new"));
-        assert_eq!(namespace_update.display_name, None);
-        assert!(namespace_update.clear_display_name);
+        let namespace_update = &captured.native_updates[0];
+        assert_eq!(
+            namespace_update.spool.as_ref().expect("Spool").id,
+            uuid::Uuid::from_bytes([2; 16]).to_string()
+        );
+        assert_eq!(namespace_update.expected_version, vec![7; 32]);
+        assert_eq!(namespace_update.slug.as_deref(), Some("acme-new"));
+        assert_eq!(namespace_update.name, "");
         assert!(!namespace_update.client_operation_id.is_empty());
 
-        let repository_update = &captured.updates[1];
-        assert_eq!(repository_update.full_path, "acme/widgets");
-        assert_eq!(repository_update.new_slug.as_deref(), Some("widgets-new"));
-        assert_eq!(repository_update.display_name, None);
-        assert!(!repository_update.clear_display_name);
+        let repository_update = &captured.native_updates[1];
+        assert_eq!(repository_update.expected_version, vec![7; 32]);
+        assert_eq!(repository_update.slug.as_deref(), Some("widgets-new"));
         assert!(!repository_update.client_operation_id.is_empty());
 
         for deletion in &captured.native_deletes {
