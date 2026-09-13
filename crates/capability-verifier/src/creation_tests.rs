@@ -77,6 +77,7 @@ fn creation_fixture(
                 nonce: vec![5; 32],
             };
             SignedMintRootAttachment {
+                passkey_delegation: None,
                 owner_signature: Some(owner.sign_digest(
                     &mint_root_signing_digest(&attachment).expect("certificate digest"),
                 )),

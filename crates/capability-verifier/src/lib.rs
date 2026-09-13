@@ -16,6 +16,7 @@ mod keyring;
 mod limits;
 mod operation;
 mod owner;
+pub mod passkey_delegation;
 pub mod thread_control_authority;
 mod transfer;
 
@@ -53,7 +54,7 @@ pub mod wire {
 }
 
 /// The exact API contract version used by this release line.
-pub const HEDDLE_API_REQUIREMENT: &str = "0.29";
+pub const HEDDLE_API_REQUIREMENT: &str = "0.31.0-alpha.1";
 
 #[cfg(test)]
 mod tests;

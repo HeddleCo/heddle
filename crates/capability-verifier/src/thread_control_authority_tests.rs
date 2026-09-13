@@ -58,6 +58,7 @@ fn fixture_mint_method_with_facts(
             nonce: vec![7; 32],
         };
         crate::wire::SignedMintRootAttachment {
+            passkey_delegation: None,
             owner_signature: Some(owner.sign_digest(
                 &crate::creation::mint_root_signing_digest(&body).expect("attachment digest"),
             )),
