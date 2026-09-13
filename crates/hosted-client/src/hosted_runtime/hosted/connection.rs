@@ -1,6 +1,9 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use api::heddle::api::v1alpha1::ProviderSource;
+use api::heddle::api::{
+    v1alpha1::ProviderSource,
+    v2alpha1::{EndpointKind, EndpointRef, ProviderDialRoute},
+};
 use config::ClientConfig;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode,
@@ -158,6 +161,56 @@ impl HostedConnection {
         let endpoint_id: EndpointId = source.endpoint_id.parse().map_err(|error| {
             HostedError::InvalidDescriptor(format!("provider endpoint id: {error}"))
         })?;
+        self.connect_provider(endpoint_id, || {
+            let transport = self.provider_transport.as_ref().ok_or_else(|| {
+                HostedError::InvalidDescriptor(
+                    "the active Iroh endpoint has no provider transport".to_string(),
+                )
+            })?;
+            transport.register_source(
+                &source.provider_id,
+                &source.endpoint_id,
+                &source.direct_url,
+                &source.opaque_ticket,
+            )
+        })
+        .await
+    }
+
+    pub(super) async fn native_provider_connection(
+        &self,
+        provider: &EndpointRef,
+        routes: &[ProviderDialRoute],
+    ) -> Result<iroh::endpoint::Connection> {
+        if provider.kind != EndpointKind::Provider as i32 {
+            return Err(HostedError::InvalidDescriptor(
+                "native provider endpoint kind is not provider".to_string(),
+            ));
+        }
+        let key: &[u8; 32] = provider.public_key.as_slice().try_into().map_err(|_| {
+            HostedError::InvalidDescriptor(
+                "native provider endpoint key must be 32 bytes".to_string(),
+            )
+        })?;
+        let endpoint_id = EndpointId::from_bytes(key).map_err(|error| {
+            HostedError::InvalidDescriptor(format!("native provider endpoint key: {error}"))
+        })?;
+        self.connect_provider(endpoint_id, || {
+            let transport = self.provider_transport.as_ref().ok_or_else(|| {
+                HostedError::InvalidDescriptor(
+                    "the active Iroh endpoint has no provider transport".to_string(),
+                )
+            })?;
+            transport.register_routes(provider, routes)
+        })
+        .await
+    }
+
+    async fn connect_provider(
+        &self,
+        endpoint_id: EndpointId,
+        address: impl FnOnce() -> Result<EndpointAddr>,
+    ) -> Result<iroh::endpoint::Connection> {
         let slot = {
             let mut connections = self.provider_connections.lock().await;
             Arc::clone(
@@ -173,20 +226,9 @@ impl HostedConnection {
             return Ok(connection.clone());
         }
 
-        let transport = self.provider_transport.as_ref().ok_or_else(|| {
-            HostedError::InvalidDescriptor(
-                "the active Iroh endpoint has no provider transport".to_string(),
-            )
-        })?;
-        let address = transport.register_source(
-            &source.provider_id,
-            &source.endpoint_id,
-            &source.direct_url,
-            &source.opaque_ticket,
-        )?;
         let connection = self
             .endpoint
-            .connect(address, api::PROVIDER_ALPN_V1)
+            .connect(address()?, api::PROVIDER_ALPN_V1)
             .await
             .map_err(HostedError::transport)?;
         *cached = Some(connection.clone());

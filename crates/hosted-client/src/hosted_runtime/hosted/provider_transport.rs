@@ -5,11 +5,14 @@ use std::{
     task::{Context, Poll},
 };
 
+use api::heddle::api::v2alpha1::{
+    EndpointKind, EndpointRef, ProviderDialRoute, provider_dial_route,
+};
 use bytes::Bytes;
 use config::ClientConfig;
 use futures::{SinkExt, StreamExt, task::AtomicWaker};
 use iroh::{
-    EndpointAddr, EndpointId, TransportAddr,
+    EndpointAddr, EndpointId, RelayUrl, TransportAddr,
     endpoint::transports::{CustomEndpoint, CustomSender, CustomTransport, RecvInfo, Transmit},
 };
 use iroh_base::CustomAddr;
@@ -77,6 +80,67 @@ impl ProviderWebSocketTransport {
         let endpoint_id: EndpointId = endpoint_id.parse().map_err(|error| {
             HostedError::InvalidDescriptor(format!("provider endpoint id: {error}"))
         })?;
+        let remote = self.register_websocket(direct_url)?;
+        Ok(EndpointAddr::from_parts(
+            endpoint_id,
+            [TransportAddr::Custom(remote)],
+        ))
+    }
+
+    /// Register only transport hints for one cryptographic v2 provider. The
+    /// subsequent Iroh handshake and DescribeEndpoint response still have to
+    /// prove this exact endpoint identity.
+    pub(super) fn register_routes(
+        &self,
+        provider: &EndpointRef,
+        routes: &[ProviderDialRoute],
+    ) -> Result<EndpointAddr> {
+        if provider.kind != EndpointKind::Provider as i32 {
+            return Err(HostedError::InvalidDescriptor(
+                "provider route endpoint kind is not provider".to_string(),
+            ));
+        }
+        let key: &[u8; 32] = provider.public_key.as_slice().try_into().map_err(|_| {
+            HostedError::InvalidDescriptor(
+                "provider route endpoint key must be 32 bytes".to_string(),
+            )
+        })?;
+        let endpoint_id = EndpointId::from_bytes(key).map_err(|error| {
+            HostedError::InvalidDescriptor(format!("provider route endpoint key: {error}"))
+        })?;
+        let mut address = EndpointAddr::new(endpoint_id);
+        for route in routes
+            .iter()
+            .filter(|route| route.provider.as_ref() == Some(provider))
+        {
+            match route.address.as_ref() {
+                Some(provider_dial_route::Address::RelayUrl(value)) => {
+                    let relay: RelayUrl = value.parse().map_err(|error| {
+                        HostedError::InvalidDescriptor(format!("provider relay URL: {error}"))
+                    })?;
+                    address = address.with_relay_url(relay);
+                }
+                Some(provider_dial_route::Address::WebsocketUrl(value)) => {
+                    validate_websocket_route(value)?;
+                    let remote = self.register_websocket(value)?;
+                    address = address.with_addrs([TransportAddr::Custom(remote)]);
+                }
+                None => {
+                    return Err(HostedError::InvalidDescriptor(
+                        "provider dial route has no address".to_string(),
+                    ));
+                }
+            }
+        }
+        if address.is_empty() {
+            return Err(HostedError::InvalidDescriptor(
+                "provider has no matching dial route".to_string(),
+            ));
+        }
+        Ok(address)
+    }
+
+    fn register_websocket(&self, direct_url: &str) -> Result<CustomAddr> {
         let incoming = self
             .inner
             .bound
@@ -110,11 +174,7 @@ impl ProviderWebSocketTransport {
             waker,
             self.inner.config.clone(),
         ));
-
-        Ok(EndpointAddr::from_parts(
-            endpoint_id,
-            [TransportAddr::Custom(remote)],
-        ))
+        Ok(remote)
     }
 }
 
@@ -387,14 +447,8 @@ fn validate_source(provider_id: &str, direct_url: &str, opaque_ticket: &str) -> 
             "provider source identity is empty".to_string(),
         ));
     }
-    let url = reqwest::Url::parse(direct_url)
-        .map_err(|error| HostedError::InvalidDescriptor(format!("provider direct URL: {error}")))?;
-    if url.scheme() != "wss"
-        || url.path() != "/direct"
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
+    let url = validate_websocket_route(direct_url)?;
+    if url.path() != "/direct" {
         return Err(HostedError::InvalidDescriptor(
             "provider direct URL is not a bare authenticated WSS route".to_string(),
         ));
@@ -420,6 +474,24 @@ fn validate_source(provider_id: &str, direct_url: &str, opaque_ticket: &str) -> 
     Ok(())
 }
 
+fn validate_websocket_route(value: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(value).map_err(|error| {
+        HostedError::InvalidDescriptor(format!("provider WebSocket URL: {error}"))
+    })?;
+    if value.len() > 4096
+        || url.scheme() != "wss"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(HostedError::InvalidDescriptor(
+            "provider WebSocket URL is not an authenticated WSS route".to_string(),
+        ));
+    }
+    Ok(url)
+}
+
 fn fresh_handle() -> [u8; 16] {
     let mut handle = [0; 16];
     rand::fill(&mut handle);
@@ -430,6 +502,9 @@ fn fresh_handle() -> [u8; 16] {
 mod tests {
     use std::{io, task::Poll};
 
+    use api::heddle::api::v2alpha1::{
+        EndpointKind, EndpointRef, ProviderDialRoute, provider_dial_route,
+    };
     use config::ClientConfig;
     use iroh::endpoint::transports::CustomTransport as _;
 
@@ -503,5 +578,54 @@ mod tests {
             )
             .unwrap();
         assert!(format!("{transport:?}").contains("registered_provider_lanes: 1"));
+    }
+
+    #[test]
+    fn native_provider_routes_use_v2_endpoint_identity_and_transport_hints() {
+        let transport = ProviderWebSocketTransport::new(ClientConfig::default());
+        let _bound = transport.bind().expect("bind provider transport");
+        let endpoint_id = iroh_base::SecretKey::generate().public();
+        let provider = EndpointRef {
+            public_key: endpoint_id.as_bytes().to_vec(),
+            kind: EndpointKind::Provider as i32,
+        };
+        let routes = [
+            ProviderDialRoute {
+                provider: Some(provider.clone()),
+                address: Some(provider_dial_route::Address::RelayUrl(
+                    "https://relay.example/".to_string(),
+                )),
+            },
+            ProviderDialRoute {
+                provider: Some(provider.clone()),
+                address: Some(provider_dial_route::Address::WebsocketUrl(
+                    "wss://provider.example/v2/direct?ticket=opaque".to_string(),
+                )),
+            },
+        ];
+
+        let address = transport
+            .register_routes(&provider, &routes)
+            .expect("register v2 provider routes");
+        assert_eq!(address.id, endpoint_id);
+        assert_eq!(address.relay_urls().count(), 1);
+        assert_eq!(
+            address
+                .addrs
+                .iter()
+                .filter(|route| route.is_custom())
+                .count(),
+            1
+        );
+        assert!(format!("{transport:?}").contains("registered_provider_lanes: 1"));
+
+        let unrelated = EndpointRef {
+            public_key: iroh_base::SecretKey::generate()
+                .public()
+                .as_bytes()
+                .to_vec(),
+            kind: EndpointKind::Provider as i32,
+        };
+        assert!(transport.register_routes(&unrelated, &routes).is_err());
     }
 }

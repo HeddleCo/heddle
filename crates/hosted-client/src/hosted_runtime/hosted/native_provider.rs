@@ -2,11 +2,23 @@
 //! key and this connection's actual Iroh client peer. CLI callers never supply
 //! a separate signer or asserted subject for one Fetch.
 
-use api::heddle::api::v2alpha1::{EndpointKind, EndpointRef};
+use std::{collections::BTreeMap, path::Path, time::Duration};
+
+use api::heddle::api::v2alpha1::{
+    EndpointKind, EndpointRef, FetchOpen, ProviderDialRoute, ProviderPlan, fetch_open,
+};
 use crypto::Signer as _;
-use thread_api::fetch::{Error as FetchError, ProviderConsentSigner};
+use thread_api::{
+    Remote,
+    credentials::Credentials,
+    fetch::{Error as FetchError, Limits, ProviderConsentSigner, ProviderFetch, StagedSource},
+    transport::IrohTransport,
+};
 
 use super::{CallContextFactory, HostedClient, HostedError, Result};
+
+const PROVIDER_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PROVIDER_ROUTES: usize = 128;
 
 pub(super) struct NativeProviderConsent<'a> {
     context: &'a CallContextFactory,
@@ -15,8 +27,48 @@ pub(super) struct NativeProviderConsent<'a> {
 }
 
 impl HostedClient {
+    /// Download one exact native source, using provider delivery only when the
+    /// authenticated Fetch admission selects it. Provider routes remain hints:
+    /// every selected endpoint is proved by Iroh and DescribeEndpoint before a
+    /// ticketed range is read.
+    pub async fn fetch_native_source(
+        &self,
+        open: FetchOpen,
+        limits: Limits,
+        scratch: &Path,
+    ) -> anyhow::Result<StagedSource> {
+        let delivery = fetch_open::Delivery::try_from(open.delivery)
+            .map_err(|_| FetchError::Invalid("unsupported Fetch delivery"))?;
+        let remote = self.native().await?;
+        if delivery != fetch_open::Delivery::ProviderPreferred {
+            return Ok(remote
+                .fetch_content(open, limits)
+                .await?
+                .stage(scratch)
+                .await?);
+        }
+
+        validate_routes(&open.routes)?;
+        let routes = open.routes.clone();
+        match remote.begin_provider_fetch(open, limits).await? {
+            ProviderFetch::Direct(download) => Ok(download.stage(scratch).await?),
+            ProviderFetch::Provider(download) => {
+                let signer = self.provider_consent()?;
+                let mut session = download.negotiate(&signer).await?;
+                session.receive_inline(scratch).await?;
+                let providers = self
+                    .native_provider_remotes(session.plan(), &routes)
+                    .await?;
+                session.receive_provider_ranges(&providers).await?;
+                Ok(session.complete(scratch).await?)
+            }
+        }
+    }
+
     pub(super) fn provider_consent(&self) -> Result<NativeProviderConsent<'_>> {
-        let signer = self.context.proof_signer()
+        let signer = self
+            .context
+            .proof_signer()
             .ok_or(HostedError::SigningIdentityRequired)?;
         let token = std::str::from_utf8(self.context.bearer_capability())
             .map_err(|error| HostedError::Framing(error.to_string()))?;
@@ -36,6 +88,42 @@ impl HostedClient {
             },
         })
     }
+
+    async fn native_provider_remotes(
+        &self,
+        plan: &ProviderPlan,
+        routes: &[ProviderDialRoute],
+    ) -> anyhow::Result<Vec<Remote<IrohTransport<Credentials>>>> {
+        let mut selected = BTreeMap::new();
+        for extent in &plan.extents {
+            let provider = extent
+                .provider
+                .as_ref()
+                .ok_or(FetchError::Invalid("provider endpoint absent"))?;
+            let key = provider_key(provider)?;
+            if let Some(previous) = selected.insert(key, provider.clone())
+                && previous != *provider
+            {
+                return Err(FetchError::Invalid("provider endpoint identity conflicts").into());
+            }
+        }
+        let credentials = self.context.native_credentials()?;
+        let mut providers = Vec::with_capacity(selected.len());
+        for (key, provider) in selected {
+            let connection = self
+                .connection
+                .native_provider_connection(&provider, routes)
+                .await?;
+            let transport = IrohTransport::new(
+                connection,
+                credentials.clone(),
+                thread_api::replication::opening::FRAME_LIMIT,
+                PROVIDER_PROGRESS_TIMEOUT,
+            )?;
+            providers.push(Remote::discover(transport, key, EndpointKind::Provider).await?);
+        }
+        Ok(providers)
+    }
 }
 
 impl ProviderConsentSigner for NativeProviderConsent<'_> {
@@ -48,13 +136,85 @@ impl ProviderConsentSigner for NativeProviderConsent<'_> {
     }
 
     fn public_key(&self) -> &[u8] {
-        self.context.proof_signer().map_or(&[], |signer| signer.public_key())
+        self.context
+            .proof_signer()
+            .map_or(&[], |signer| signer.public_key())
     }
 
     fn sign(&self, canonical: &[u8]) -> std::result::Result<Vec<u8>, FetchError> {
-        self.context.proof_signer()
+        self.context
+            .proof_signer()
             .ok_or(FetchError::Invalid("provider consent signer unavailable"))?
             .sign(canonical)
             .map_err(|error| FetchError::Preparation(error.to_string()))
+    }
+}
+
+fn validate_routes(routes: &[ProviderDialRoute]) -> std::result::Result<(), FetchError> {
+    if routes.is_empty() || routes.len() > MAX_PROVIDER_ROUTES {
+        return Err(FetchError::Invalid(
+            "preferred provider Fetch requires bounded dial routes",
+        ));
+    }
+    for route in routes {
+        provider_key(
+            route
+                .provider
+                .as_ref()
+                .ok_or(FetchError::Invalid("provider dial endpoint absent"))?,
+        )?;
+        if route.address.is_none() {
+            return Err(FetchError::Invalid("provider dial address absent"));
+        }
+    }
+    Ok(())
+}
+
+fn provider_key(provider: &EndpointRef) -> std::result::Result<[u8; 32], FetchError> {
+    if provider.kind != EndpointKind::Provider as i32 {
+        return Err(FetchError::Invalid(
+            "provider endpoint kind must be provider",
+        ));
+    }
+    provider
+        .public_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| FetchError::Invalid("provider endpoint key must be 32 bytes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use api::heddle::api::v2alpha1::{
+        EndpointKind, EndpointRef, ProviderDialRoute, provider_dial_route,
+    };
+
+    use super::{MAX_PROVIDER_ROUTES, validate_routes};
+
+    #[test]
+    fn provider_route_validation_reuses_the_fetch_contract() {
+        let provider = EndpointRef {
+            public_key: vec![7; 32],
+            kind: EndpointKind::Provider as i32,
+        };
+        let route = ProviderDialRoute {
+            provider: Some(provider.clone()),
+            address: Some(provider_dial_route::Address::RelayUrl(
+                "https://relay.example/".to_string(),
+            )),
+        };
+        validate_routes(std::slice::from_ref(&route)).expect("valid provider Fetch route");
+
+        let mut missing_address = route.clone();
+        missing_address.address = None;
+        assert!(validate_routes(&[missing_address]).is_err());
+
+        let mut wrong_kind = route.clone();
+        wrong_kind.provider = Some(EndpointRef {
+            kind: EndpointKind::Device as i32,
+            ..provider
+        });
+        assert!(validate_routes(&[wrong_kind]).is_err());
+        assert!(validate_routes(&vec![route; MAX_PROVIDER_ROUTES + 1]).is_err());
     }
 }
