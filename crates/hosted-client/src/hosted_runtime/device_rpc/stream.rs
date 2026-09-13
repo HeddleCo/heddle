@@ -78,6 +78,35 @@ pub(super) fn budget(requested: Option<ReadBudget>) -> ReadBudget {
 /// One observed page: keyed events, paging, and the version the page was cut at.
 pub(super) type ViewSnapshot<E> = (Vec<(String, E)>, PageInfo, Vec<u8>);
 
+// A completed source or authority mutation advances the retained feed before
+// the next frame. The version fence at snapshot start remains unconditional;
+// unchanged frames only need the retained session check.
+fn version_changed_since_snapshot(
+    changes: &tokio::sync::watch::Receiver<u64>,
+    validated_generation: &mut u64,
+    session: &impl ObservationAuthority,
+    home: &std::path::Path,
+    revision: &[u8],
+    current_version: &impl Fn() -> Result<Vec<u8>>,
+) -> Result<bool> {
+    session.check_clock()?;
+    let observed = *changes.borrow();
+    if observed == u64::MAX {
+        bail!("device change feed lost continuity");
+    }
+    if observed == *validated_generation {
+        return Ok(false);
+    }
+    session.check_current(home)?;
+    if current_version()? != revision {
+        return Ok(true);
+    }
+    // Keep the generation read before validation: a concurrent commit must
+    // still be seen at the next frame, even if it arrived during validation.
+    *validated_generation = observed;
+    Ok(false)
+}
+
 impl DeviceRpc {
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn observe_view<E: Event>(
@@ -212,6 +241,7 @@ impl DeviceRpc {
                 tokio::task::yield_now().await;
                 continue;
             }
+            let mut validated_generation = generation;
             retries = 0;
             let mut next = BTreeMap::new();
             for (id, event) in &events {
@@ -243,11 +273,10 @@ impl DeviceRpc {
                     if bytes > budget.max_snapshot_bytes as usize {
                         bail!("view exceeds accepted snapshot budget");
                     }
-                    if current_version()? != revision {
+                    if version_changed_since_snapshot(&changes, &mut validated_generation, session, &self.home, &revision, &current_version)? {
                         reset::<E>(&mut send, &mut sequence, StreamResetReason::WindowChanged, budget.max_frame_bytes).await?;
                         return Ok(());
                     }
-                    session.check_current(&self.home)?;
                     write(
                         &mut send,
                         &mut sequence,
@@ -263,7 +292,7 @@ impl DeviceRpc {
                     )
                     .await?;
                 }
-                if current_version()? != revision {
+                if version_changed_since_snapshot(&changes, &mut validated_generation, session, &self.home, &revision, &current_version)? {
                     reset::<E>(
                         &mut send,
                         &mut sequence,
@@ -273,7 +302,6 @@ impl DeviceRpc {
                     .await?;
                     return Ok(());
                 }
-                session.check_current(&self.home)?;
                 let next_cursor = blake3::hash(
                     &[
                         binding.as_slice(),
@@ -413,5 +441,109 @@ impl Event for IdentityEvent {
 impl Event for OwnershipEvent {
     fn frame(&mut self, frame: StreamFrame) {
         self.frame = Some(frame);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        path::Path,
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    use super::*;
+
+    #[derive(Default)]
+    struct CountingAuthority {
+        full: AtomicUsize,
+        clocks: AtomicUsize,
+        expired: AtomicBool,
+    }
+    impl ObservationAuthority for CountingAuthority {
+        fn binding(&self) -> Vec<u8> {
+            Vec::new()
+        }
+        fn expires(&self) -> i64 {
+            0
+        }
+        fn check_clock(&self) -> Result<()> {
+            self.clocks.fetch_add(1, Ordering::Relaxed);
+            if self.expired.load(Ordering::Relaxed) {
+                bail!("clock authority expired")
+            }
+            Ok(())
+        }
+        fn check_current(&self, _home: &Path) -> Result<()> {
+            self.full.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn unchanged_frames_skip_projection_and_committed_change_rechecks() {
+        let (sender, mut changes) = tokio::sync::watch::channel(1u64);
+        changes.borrow_and_update();
+        let authority = CountingAuthority::default();
+        let mut validated = 1;
+        let calls = AtomicUsize::new(0);
+        let current = || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            Ok(vec![2])
+        };
+        for _ in 0..32 {
+            assert!(
+                !version_changed_since_snapshot(
+                    &changes,
+                    &mut validated,
+                    &authority,
+                    Path::new("."),
+                    &[1],
+                    &current
+                )
+                .expect("unchanged frame")
+            );
+        }
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            0,
+            "unchanged analysis frames must not rescan sources"
+        );
+        assert_eq!(
+            authority.full.load(Ordering::Relaxed),
+            0,
+            "unchanged frames must not reload authority"
+        );
+        assert_eq!(
+            authority.clocks.load(Ordering::Relaxed),
+            32,
+            "each frame still enforces clock caveats"
+        );
+        sender.send(2).expect("committed generation");
+        assert!(
+            version_changed_since_snapshot(
+                &changes,
+                &mut validated,
+                &authority,
+                Path::new("."),
+                &[1],
+                &current
+            )
+            .expect("changed frame")
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(authority.full.load(Ordering::Relaxed), 1);
+        authority.expired.store(true, Ordering::Relaxed);
+        assert!(
+            version_changed_since_snapshot(
+                &changes,
+                &mut validated,
+                &authority,
+                Path::new("."),
+                &[1],
+                &current
+            )
+            .is_err(),
+            "clock-only expiry stops unchanged frames"
+        );
     }
 }
