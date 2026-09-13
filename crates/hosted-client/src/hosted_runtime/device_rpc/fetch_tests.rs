@@ -270,6 +270,30 @@ pub(super) async fn partial_roundtrip(
         .record_native_capture("device-test", private.id())
         .expect("private original capture");
 
+    let mut current_target_view = remote
+        .observe::<thread_api::rpc::CollaborationServiceObserveCollaboration>(
+            ObserveCollaborationRequest {
+                spool: Some(SpoolRef {
+                    id: observed_spool.clone(),
+                }),
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("current device target observation");
+    let current_batch = current_target_view
+        .next_commit()
+        .await
+        .expect("current target stream")
+        .expect("current target snapshot");
+    assert!(current_batch.changes.iter().any(|change| matches!(change,
+        collaboration_event::Payload::SourceTarget(value)
+            if matches!(&value.change, Some(source_target_resolution_event::Change::Upsert(resolution))
+                if resolution.status == source_target_resolution::Status::Unavailable as i32
+                    && resolution.computed_for.is_none() && resolution.location.is_none())
+    )), "concurrent or inaccessible current source must not disclose a target location");
+
     let genesis = replica.genesis().expect("selected Thread");
     let withheld = remote
         .fetch_content(open(&genesis, private.id()), Default::default())
