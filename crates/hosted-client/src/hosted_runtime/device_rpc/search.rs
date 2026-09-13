@@ -349,6 +349,11 @@ impl DeviceRpc {
                                             facts.delegation_agent_id.as_deref(), candidate.revision,
                                         ).ok()
                                     });
+                                    if matches!(admission, Some(super::auth::SourceContentAdmission::Visible(_)
+                                        | super::auth::SourceContentAdmission::Unavailable)) {
+                                        admitted_target_count += 1;
+                                        ensure!(admitted_target_count <= 4096, "authorized source search scope exceeds target budget");
+                                    }
                                     match admission {
                                         Some(super::auth::SourceContentAdmission::Visible(proof)) => {
                                             source_projections.insert(key, Some(proof));
@@ -362,8 +367,6 @@ impl DeviceRpc {
                                     }
                                 }
                                 let Some(redactions) = source_projections.get(&key).and_then(Option::as_ref) else { return Ok(()); };
-                                admitted_target_count += 1;
-                                ensure!(admitted_target_count <= 4096, "authorized source search scope exceeds target budget");
                                 let readiness = search_index.readiness_for_authorized_target(
                                     candidate.thread, candidate.revision,
                                 )?;
