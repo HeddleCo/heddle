@@ -154,6 +154,7 @@ fn sign_decision(
             explanation,
             revokes,
             expires_at_unix_seconds: None,
+            coverage: None,
         }),
         Author {
             account: actor.principal_id,

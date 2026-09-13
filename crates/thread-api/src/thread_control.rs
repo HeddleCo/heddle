@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use crypto::{Signer, thread_operation::SignedOperation};
 pub use heddle_object_model::object::thread_replication::metadata::{
-    Control, Destination, EndpointKind, Intent, Lifecycle, Review, ReviewKind, SharedFacet,
-    SharingPolicy,
+    Control, Destination, EndpointKind, Intent, Lifecycle, Review, ReviewCoverage, ReviewKind,
+    SharedFacet, SharingPolicy,
     audience::{Audience, Invitee},
     retention::{MaterialRetention, RetentionPolicy},
 };
@@ -246,6 +246,9 @@ impl PreparedControl {
                 ReviewKind::Approval => wire::review_decision::Kind::Approval,
                 ReviewKind::Rejection => wire::review_decision::Kind::Rejection,
                 ReviewKind::Revocation => wire::review_decision::Kind::Revocation,
+                ReviewKind::Read => wire::review_decision::Kind::Read,
+                ReviewKind::AgentPreview => wire::review_decision::Kind::AgentPreview,
+                ReviewKind::AgentCoReview => wire::review_decision::Kind::AgentCoReview,
             } as i32,
             explanation: value.explanation.clone(),
             revokes: value.revokes.map(|id| wire::RecordRef {
@@ -253,6 +256,27 @@ impl PreparedControl {
                 id: id.to_string(),
             }),
             expires_at: None,
+            coverage: value
+                .coverage
+                .as_ref()
+                .map(|coverage| wire::ReviewCoverage {
+                    selection: Some(match coverage {
+                        ReviewCoverage::WholeSource => {
+                            wire::review_coverage::Selection::WholeSource(true)
+                        }
+                        ReviewCoverage::Symbols(anchors) => {
+                            wire::review_coverage::Selection::Symbols(wire::ReviewSymbols {
+                                anchors: anchors
+                                    .iter()
+                                    .map(|anchor| wire::ReviewSymbolAnchor {
+                                        path: anchor.file.clone(),
+                                        symbol: anchor.symbol.clone(),
+                                    })
+                                    .collect(),
+                            })
+                        }
+                    }),
+                }),
         };
         if let Some(seconds) = value.expires_at_unix_seconds {
             decision.expires_at = Some(Default::default());

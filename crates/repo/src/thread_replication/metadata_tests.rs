@@ -218,6 +218,7 @@ fn thread_control_cross_language_golden_vectors() {
             explanation: "Reviewed exact source and target".into(),
             revokes: None,
             expires_at_unix_seconds: Some(1900000100),
+            coverage: None,
         }),
     ];
     let vectors: Vec<_> = controls.into_iter().map(|control| {

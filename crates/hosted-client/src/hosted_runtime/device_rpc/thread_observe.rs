@@ -540,7 +540,15 @@ impl DeviceRpc {
                                 events.push((
                                     format!("review:{id}"),
                                     event(thread_event::Payload::Review(
-                                        prepared.record_review()?.decision.context("review")?,
+                                        api::heddle::api::v2alpha1::ReviewRecord {
+                                            decision: Some(
+                                                prepared
+                                                    .record_review()?
+                                                    .decision
+                                                    .context("review")?,
+                                            ),
+                                            original: Some(prepared.record.clone()),
+                                        },
                                     )),
                                 ));
                             }

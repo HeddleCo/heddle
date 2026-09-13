@@ -1393,6 +1393,7 @@ mod tests {
                 explanation: "looks ready".into(),
                 revokes: None,
                 expires_at_unix_seconds: None,
+                coverage: None,
             }),
             Author {
                 account: uuid::Uuid::from_bytes([9; 16]),

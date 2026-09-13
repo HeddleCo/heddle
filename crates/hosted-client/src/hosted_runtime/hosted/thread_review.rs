@@ -101,13 +101,21 @@ impl HostedClient {
                         }
                     }
                     contract::thread_event::Payload::Review(value) => {
-                        let id = value
+                        let decision = value
+                            .decision
+                            .ok_or_else(|| invalid("review decision absent"))?;
+                        if value.original.as_ref().is_none_or(|original| {
+                            original.canonical_record.is_empty() || original.signatures.is_empty()
+                        }) {
+                            return Err(invalid("review original proof absent"));
+                        }
+                        let id = decision
                             .r#ref
                             .as_ref()
                             .ok_or_else(|| invalid("review has no ID"))?;
                         if id.spool != reference.spool
                             || uuid::Uuid::parse_str(&id.id).is_err()
-                            || value.thread.as_ref() != Some(&reference)
+                            || decision.thread.as_ref() != Some(&reference)
                             || !seen.insert(id.id.clone())
                             || decisions.len() >= 4096
                         {
@@ -115,7 +123,7 @@ impl HostedClient {
                                 "review page has invalid, duplicate or excess row",
                             ));
                         }
-                        decisions.push(value);
+                        decisions.push(decision);
                     }
                     contract::thread_event::Payload::Status(value) if value.section == "review" => {
                         if page_status.replace(value).is_some() {
@@ -146,7 +154,9 @@ impl HostedClient {
                         .is_none_or(|head| head.spool != target.spool)
                     || assessment.policy_version.is_empty()
                 {
-                    return Err(invalid("landing assessment is incomplete or names another target"));
+                    return Err(invalid(
+                        "landing assessment is incomplete or names another target",
+                    ));
                 }
             } else if page_overview.landing_assessment.is_some() {
                 return Err(invalid("unrequested landing assessment supplied"));

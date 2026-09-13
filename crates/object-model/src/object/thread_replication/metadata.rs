@@ -84,6 +84,21 @@ pub enum ReviewKind {
     Approval,
     Rejection,
     Revocation,
+    Read,
+    AgentPreview,
+    AgentCoReview,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewCoverage {
+    WholeSource,
+    Symbols(Vec<ReviewSymbolAnchor>),
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReviewSymbolAnchor {
+    pub file: String,
+    pub symbol: String,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,6 +111,8 @@ pub struct Review {
     pub explanation: String,
     pub revokes: Option<Uuid>,
     pub expires_at_unix_seconds: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<ReviewCoverage>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
@@ -202,6 +219,32 @@ impl ThreadControl {
             }
             Control::Review(review) => {
                 text(&review.explanation, 32768, true)?;
+                let attestation = matches!(
+                    review.kind,
+                    ReviewKind::Read | ReviewKind::AgentPreview | ReviewKind::AgentCoReview
+                );
+                if attestation != review.coverage.is_some() {
+                    return Err(invalid("review coverage must match attestation kind"));
+                }
+                if let Some(ReviewCoverage::Symbols(anchors)) = &review.coverage {
+                    if anchors.is_empty() || anchors.len() > 128 {
+                        return Err(invalid("review symbol coverage exceeds bounds"));
+                    }
+                    for anchor in anchors {
+                        text(&anchor.file, 4096, false)?;
+                        text(&anchor.symbol, 1024, false)?;
+                        if anchor.file.starts_with('/')
+                            || anchor
+                                .file
+                                .split('/')
+                                .any(|part| part.is_empty() || part == "." || part == "..")
+                        {
+                            return Err(invalid(
+                                "review symbol path must be relative and canonical",
+                            ));
+                        }
+                    }
+                }
                 if review.id.is_nil()
                     || review
                         .revokes
@@ -459,6 +502,7 @@ mod tests {
             explanation: "original decision".into(),
             revokes: None,
             expires_at_unix_seconds: None,
+            coverage: None,
         });
         let original = operation(&genesis, &value, BTreeSet::new());
         let parent = BTreeSet::from([original.id().expect("review ID")]);
@@ -474,5 +518,50 @@ mod tests {
         operation(&genesis, &value, parent)
             .validate_parents(&genesis, &[original])
             .expect("same accountable reviewer");
+    }
+    #[test]
+    fn read_coverage_cannot_be_relabelled_as_approval_or_name_hidden_paths() {
+        let (_, mut value) = fixture();
+        value.control = Control::Review(Review {
+            id: Uuid::from_u128(6),
+            source: StateId::from_bytes([7; 32]),
+            target: StateId::from_bytes([8; 32]),
+            policy_version: ContentHash::from_bytes([9; 32]),
+            kind: ReviewKind::Read,
+            explanation: String::new(),
+            revokes: None,
+            expires_at_unix_seconds: None,
+            coverage: Some(ReviewCoverage::Symbols(vec![ReviewSymbolAnchor {
+                file: "src/main.rs".into(),
+                symbol: "run".into(),
+            }])),
+        });
+        value.encode().expect("bounded read attestation");
+        let Control::Review(review) = &mut value.control else {
+            panic!("review fixture")
+        };
+        review.kind = ReviewKind::Approval;
+        assert!(
+            value
+                .encode()
+                .expect_err("approval cannot carry read coverage")
+                .to_string()
+                .contains("coverage")
+        );
+        let Control::Review(review) = &mut value.control else {
+            panic!("review fixture")
+        };
+        review.kind = ReviewKind::AgentPreview;
+        review.coverage = Some(ReviewCoverage::Symbols(vec![ReviewSymbolAnchor {
+            file: "../private.rs".into(),
+            symbol: "run".into(),
+        }]));
+        assert!(
+            value
+                .encode()
+                .expect_err("coverage path must be canonical")
+                .to_string()
+                .contains("path")
+        );
     }
 }
