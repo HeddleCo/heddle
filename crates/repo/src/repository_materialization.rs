@@ -1338,12 +1338,10 @@ mod tests {
         );
     }
 
-    /// A visible subtree edge whose subtree body is held NEITHER as a full tree
-    /// NOR as a partial projection must surface as a "withheld" (`RedactedTree`)
-    /// error, NOT `NotFound` (C2) — a partial clone distinguishes "withheld"
-    /// from "gone".
+    /// Only an explicit redacted leaf proves withholding. A visible subtree
+    /// with no received body is missing, including inside a partial checkout.
     #[test]
-    fn nested_absent_subtree_reports_withheld_not_not_found() {
+    fn nested_absent_subtree_does_not_invent_redaction() {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         let store = repo.store();
@@ -1364,25 +1362,22 @@ mod tests {
 
         let dest = temp.path().join("absent-subtree-checkout");
         match repo.materialize_partial_tree(&root_partial, &dest) {
-            Err(HeddleError::RedactedTree(msg)) => {
-                assert!(
-                    msg.contains("withheld"),
-                    "expected a withheld message, got: {msg}"
-                );
+            Err(HeddleError::MissingObject { object_type, id }) => {
+                assert_eq!(object_type, "tree");
+                assert_eq!(id, phantom_subtree.to_string());
             }
-            Err(HeddleError::NotFound(_)) => {
-                panic!("a withheld subtree must NOT surface as NotFound (C2)")
-            }
-            other => panic!("expected RedactedTree(withheld), got: {other:?}"),
+            other => panic!("expected missing visible subtree, got: {other:?}"),
         }
+        assert!(
+            !dest.exists(),
+            "missing visible data is rejected before filesystem writes"
+        );
     }
 
-    /// P4: capture/commit on a PARTIAL clone must REFUSE (fail-loud). Storing a
-    /// redacted projection makes the clone DERIVED-partial; a capture would
-    /// re-author a tip over withheld leaves and silently drop them. A later
-    /// full backfill (`put_tree`) drops the partial slot and clears the marker.
+    /// Capture depends on what was materialized at this checkout, not what
+    /// happens to be cached in the shared object store.
     #[test]
-    fn capture_refuses_on_partial_clone_and_backfill_clears_marker() {
+    fn capture_refuses_until_full_checkout_materialization() {
         use objects::object::encode_redacted_projection;
 
         let temp = TempDir::new().unwrap();
@@ -1395,9 +1390,11 @@ mod tests {
         repo.store()
             .put_tree_serialized(&hrt1, tree.hash())
             .unwrap();
+        repo.materialize_partial_tree(&partial, repo.root())
+            .expect("partial checkout");
         assert!(
             repo.is_partial_clone().unwrap(),
-            "a stored redacted projection makes this a partial clone"
+            "this checkout omitted withheld leaves"
         );
 
         std::fs::write(temp.path().join("newfile.txt"), b"new work").unwrap();
@@ -1409,13 +1406,54 @@ mod tests {
             other => panic!("capture must REFUSE on a partial clone, got: {other:?}"),
         }
 
-        // No auto-backfill: an explicit full-tree write drops the partial slot,
-        // clearing the DERIVED marker so capture is allowed again.
+        // Receiving a full tree does not write previously withheld files.
+        // It must not make those missing files look like authored deletions.
         repo.store().put_tree(&tree).unwrap();
+        assert!(repo.is_partial_clone().expect("still partial checkout"));
+        repo.materialize_tree(&tree, repo.root())
+            .expect("explicit full checkout");
         assert!(
             !repo.is_partial_clone().unwrap(),
-            "a full backfill must drop the partial slot and clear the marker"
+            "only materializing the complete tree clears the capture guard"
         );
+    }
+
+    #[test]
+    fn unrelated_partial_tree_does_not_block_current_checkout_capture() {
+        let temp = TempDir::new().expect("checkout");
+        let repo = Repository::init_default(temp.path()).expect("repo");
+        let (tree, secret_leaf) = partial_fixture(&repo);
+        let partial = PartialTree::project(&tree, &std::collections::HashSet::from([secret_leaf]))
+            .expect("another checkout projection");
+        repo.store()
+            .put_partial_tree(
+                &tree.hash(),
+                &objects::object::encode_redacted_projection(&partial).expect("projection bytes"),
+            )
+            .expect("cache shared source");
+        let sibling = TempDir::new().expect("another checkout");
+        repo.materialize_partial_tree(&partial, sibling.path())
+            .expect("partial sibling");
+        assert!(
+            !repo.is_partial_clone().expect("own checkout scope"),
+            "a sibling checkout must not make this checkout incomplete"
+        );
+        std::fs::write(repo.root().join("new.txt"), b"independent agent work").expect("edit");
+        repo.snapshot(Some("independent edit".into()), None)
+            .expect("capture own complete checkout");
+    }
+
+    #[test]
+    fn partial_checkout_removes_previously_materialized_withheld_files() {
+        let temp = TempDir::new().expect("checkout");
+        let repo = Repository::init_default(temp.path()).expect("repo");
+        let (tree, secret_leaf) = partial_fixture(&repo);
+        repo.materialize_tree(&tree, repo.root()).expect("full checkout");
+        let partial = PartialTree::project(&tree, &std::collections::HashSet::from([secret_leaf]))
+            .expect("limited projection");
+        repo.materialize_partial_tree(&partial, repo.root()).expect("limited checkout");
+        assert!(!repo.root().join("secret.md").exists(), "previously tracked withheld file must be removed");
+        assert!(repo.root().join("readme.md").exists(), "visible file survives");
     }
 
     /// P5: `heddle status` on a partial checkout must resolve the tip's tree via
