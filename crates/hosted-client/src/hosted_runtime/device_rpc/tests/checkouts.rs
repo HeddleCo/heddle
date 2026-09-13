@@ -223,6 +223,56 @@ pub(super) async fn roundtrip(
             .await
             .expect("landing retry")
     );
+    let logical_target = repository
+        .create_native_thread("device-logical-target", base, None, "Thread landing")
+        .expect("logical target Thread");
+    let logical = LandThreadRequest {
+        client_operation_id: uuid::Uuid::new_v4().to_string(),
+        thread: Some(ThreadRef {
+            spool: Some(spool_ref.clone()),
+            id: Some(ThreadId {
+                value: replica.thread_id().as_bytes().to_vec(),
+            }),
+        }),
+        source: captured_overview.materialized.clone(),
+        target: Some(ThreadRef {
+            spool: Some(spool_ref.clone()),
+            id: Some(ThreadId {
+                value: logical_target.thread_id().as_bytes().to_vec(),
+            }),
+        }),
+        expected_target: materialize.revision.clone(),
+        expected_policy_version: super::super::land::thread_policy_version(&repository)
+            .expect("observed local policy")
+            .as_bytes()
+            .to_vec(),
+    };
+    let first_logical = remote
+        .api
+        .call::<thread_api::rpc::ThreadServiceLandThread>(&logical)
+        .await
+        .expect("native Thread landing");
+    assert!(first_logical.receipt.is_some(), "landing has a durable receipt");
+    assert_eq!(logical_target.view().expect("logical target view").source_heads.len(), 1);
+    assert_eq!(
+        first_logical,
+        remote
+            .api
+            .call::<thread_api::rpc::ThreadServiceLandThread>(&logical)
+            .await
+            .expect("native Thread landing exact retry"),
+        "retry returns the original receipt after the target advances"
+    );
+    let mut changed_logical = logical.clone();
+    changed_logical.expected_target = captured_overview.materialized.clone();
+    assert!(
+        remote
+            .api
+            .call::<thread_api::rpc::ThreadServiceLandThread>(&changed_logical)
+            .await
+            .is_err(),
+        "same operation ID cannot be rebound to a different comparison"
+    );
     let second = remote
         .api
         .call::<thread_api::rpc::CheckoutServiceMaterialize>(&MaterializeCheckoutRequest {

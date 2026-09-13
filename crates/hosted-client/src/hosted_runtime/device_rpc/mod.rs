@@ -124,6 +124,7 @@ pub(crate) const METHODS: &[&str] = &[
     "/heddle.api.v2alpha1.ThreadService/SetAudiencePolicy",
     "/heddle.api.v2alpha1.ThreadService/SetRetentionPolicy",
     "/heddle.api.v2alpha1.ThreadService/RecordReview",
+    "/heddle.api.v2alpha1.ThreadService/LandThread",
     "/heddle.api.v2alpha1.SyncService/ReplicateThread",
     "/heddle.api.v2alpha1.SyncService/Fetch",
     "/heddle.api.v2alpha1.SyncService/PublishContent",
@@ -262,6 +263,9 @@ impl DeviceRpc {
         if method.ends_with("/ResolveOwnershipConflict") {
             return self.resolve_ownership_conflict(session, body);
         }
+        if method.ends_with("/LandThread") {
+            return self.land_thread(session, LandThreadRequest::decode(body)?);
+        }
         if method.ends_with("/CancelOperation") {
             return self.cancel_operation(session, body);
         }
@@ -398,6 +402,9 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
         "RecordReview" => scope!(RecordReviewRequest, |r: RecordReviewRequest| r
             .decision
             .and_then(|p| p.thread)
+            .and_then(|t| t.spool)),
+        "LandThread" => scope!(LandThreadRequest, |r: LandThreadRequest| r
+            .thread
             .and_then(|t| t.spool)),
         "ReadContent" => scope!(ReadContentRequest, |r: ReadContentRequest| r
             .revision

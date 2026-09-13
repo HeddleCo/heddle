@@ -67,7 +67,7 @@ impl DeviceRpc {
             request.observe.clone().unwrap_or_default(),
             send,
             |budget, binding| self.thread_snapshot(session, &replica, &request, budget, binding),
-            || self.thread_observation_version(session, &replica, &request.sections),
+            || self.thread_observation_version(session, &replica, &request.sections, request.landing_target.as_ref()),
         )
         .await
     }
@@ -76,9 +76,10 @@ impl DeviceRpc {
         session: &Session,
         replica: &ThreadReplica,
         sections: &[i32],
+        landing_target: Option<&ThreadRef>,
     ) -> Result<Vec<u8>> {
         let repository = repo::Repository::open(&session.spool.root)?;
-        self.thread_observation_version_with_repository(&repository, session, replica, sections)
+        self.thread_observation_version_with_repository(&repository, session, replica, sections, landing_target)
     }
     fn thread_observation_version_with_repository(
         &self,
@@ -86,6 +87,7 @@ impl DeviceRpc {
         session: &Session,
         replica: &ThreadReplica,
         sections: &[i32],
+        landing_target: Option<&ThreadRef>,
     ) -> Result<Vec<u8>> {
         if self.thread_conflict_status(session, replica)?.is_some() {
             return Ok(repo::thread_replication::projection::version(
@@ -100,6 +102,16 @@ impl DeviceRpc {
             replica.thread_id(),
             replica.generation()?,
         );
+        let target_version = if let Some(reference) = landing_target {
+            let target_id = checkout::thread(session, Some(reference))?;
+            let target = ThreadReplica::open(&session.spool.heddle_dir, target_id)?;
+            session.authorize_thread(repository, &target)?;
+            repo::thread_replication::projection::version(target_id, target.generation()?)
+                .as_bytes()
+                .to_vec()
+        } else {
+            Vec::new()
+        };
         let evidence = if sections.contains(&(ThreadSection::Evidence as i32)) {
             repo::device_evidence::thread_generation(
                 &session.spool.heddle_dir,
@@ -141,6 +153,7 @@ impl DeviceRpc {
                 analysis.as_slice(),
                 &evidence.to_be_bytes(),
                 version.as_bytes().as_slice(),
+                target_version.as_slice(),
                 super::land::policy_version(repository)?
                     .as_bytes()
                     .as_slice(),
@@ -162,7 +175,7 @@ impl DeviceRpc {
         self.thread_snapshots
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Some(ownership) = self.thread_conflict_status(session, replica)? {
-            let generation = self.thread_observation_version(session, replica, &[])?;
+            let generation = self.thread_observation_version(session, replica, &[], None)?;
             let mut overview = ThreadOverview {
                 r#ref: request.thread.clone(),
                 ownership: Some(ownership),
@@ -218,11 +231,50 @@ impl DeviceRpc {
         let repository = repo::Repository::open(&session.spool.root)?;
         session.authorize_thread(&repository, replica)?;
         let mut overview = self.thread_overview_with_repository(&repository, session, replica)?;
+        if let Some(target_ref) = request.landing_target.as_ref() {
+            let target_id = checkout::thread(session, Some(target_ref))?;
+            ensure!(target_id != replica.thread_id(), "landing needs a distinct target Thread");
+            let target = ThreadReplica::open(&session.spool.heddle_dir, target_id)?;
+            session.authorize_thread(&repository, &target)?;
+            let selected_source =
+                compared_revision(&repository, session, replica, request.source.as_ref())?;
+            let selected_target = compared_revision(&repository, session, &target, None)?;
+            if let (Some(source), Some(expected_target)) = (selected_source, selected_target) {
+                let source_id = checkout::revision(session, Some(&source))?;
+                let target_revision = checkout::revision(session, Some(&expected_target))?;
+                use verbs::merge::{
+                    ConflictLabels, ThreeWayMergeOutcome, try_three_way_merge_between_tips,
+                };
+                let readiness = match try_three_way_merge_between_tips(
+                    &repository,
+                    &target_revision,
+                    &source_id,
+                    ConflictLabels::DEFAULT,
+                )? {
+                    ThreeWayMergeOutcome::Conflicted { .. } => ReviewReadiness::Blocked,
+                    _ if session.permits("/heddle.api.v2alpha1.ThreadService/LandThread") => {
+                        ReviewReadiness::Eligible
+                    }
+                    _ => ReviewReadiness::Blocked,
+                };
+                overview.landing_assessment = Some(LandingAssessment {
+                    target: Some(target_ref.clone()),
+                    source: Some(source),
+                    expected_target: Some(expected_target),
+                    policy_version: super::land::thread_policy_version(&repository)?
+                        .as_bytes()
+                        .to_vec(),
+                    readiness: readiness as i32,
+                    requirements: Vec::new(),
+                });
+            }
+        }
         let generation = self.thread_observation_version_with_repository(
             &repository,
             session,
             replica,
             &request.sections,
+            request.landing_target.as_ref(),
         )?;
         let reference = overview.r#ref.clone().context("Thread scope")?;
         let mut events = Vec::new();
@@ -722,7 +774,7 @@ impl DeviceRpc {
         }
         // Reopen here: a policy or owner change during composition must reset
         // this snapshot, even though its initial projections shared one handle.
-        if self.thread_observation_version(session, replica, &request.sections)? != generation {
+        if self.thread_observation_version(session, replica, &request.sections, request.landing_target.as_ref())? != generation {
             return Err(super::stream::SnapshotChanged.into());
         }
         events.insert(

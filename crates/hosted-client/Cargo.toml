@@ -81,6 +81,7 @@ semantic = ["repo/tree-sitter-symbols"]
 # hosted sync glue. Off by default so local-only CLI builds never compile the
 # hosted stack; the `heddle-cli` `client` marker feature forwards here.
 client = [
+    "dep:heddleco-capability-verifier",
     "dep:thread-api",
     "dep:biscuit-verifier",
     "api",

@@ -1072,11 +1072,101 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
             .contains("weakens source audience")
     );
     let signed = make(receipt.clone());
+    let command_id = objects::object::OperationId::new();
+    let request_hash = [7; 32];
+    let command = crate::device_operations::Command {
+        namespace: "local-landing-test",
+        id: command_id,
+        method: "/heddle.api.v2alpha1.ThreadService/LandThread",
+        request_hash,
+    };
+    assert!(
+        target
+            .prepared_local_landing(command.namespace, &command_id.to_string(), &request_hash)
+            .expect("fresh command")
+            .is_none()
+    );
+    let canonical = signed.verify().expect("original operation").encode().expect("canonical");
+    let response = b"stable landing receipt";
     assert_eq!(
         target
-            .receive_local_integration_cas(&signed, repository.store(), |_| Ok(()))
+            .prepare_local_landing(command.namespace, &command_id.to_string(), &request_hash, &canonical, response)
+            .expect("prepared before admission"),
+        (canonical.clone(), response.to_vec())
+    );
+    let mut later_receipt = receipt.clone();
+    later_receipt.executed_at_ms += 1;
+    let later_candidate = make(later_receipt)
+        .verify()
+        .expect("later candidate")
+        .encode()
+        .expect("later bytes");
+    assert_ne!(later_candidate, canonical, "retry can construct new local bytes");
+    assert_eq!(
+        target
+            .prepare_local_landing(
+                command.namespace,
+                &command_id.to_string(),
+                &request_hash,
+                &later_candidate,
+                b"later response",
+            )
+            .expect("same request reuses first prepared operation"),
+        (canonical.clone(), response.to_vec())
+    );
+    let race_id = objects::object::OperationId::new().to_string();
+    let barrier = std::sync::Barrier::new(2);
+    std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            barrier.wait();
+            target.prepare_local_landing(
+                command.namespace,
+                &race_id,
+                &request_hash,
+                &canonical,
+                response,
+            )
+        });
+        let second = scope.spawn(|| {
+            barrier.wait();
+            target.prepare_local_landing(
+                command.namespace,
+                &race_id,
+                &request_hash,
+                &later_candidate,
+                b"later response",
+            )
+        });
+        assert_eq!(
+            first.join().expect("first preparer thread").expect("first preparation"),
+            second.join().expect("second preparer thread").expect("second preparation"),
+            "concurrent retries select the same immutable signed operation"
+        );
+    });
+    let reopened = ThreadReplica::open(repository.heddle_dir(), target.thread_id())
+        .expect("reopen after preparation");
+    assert_eq!(
+        reopened
+            .prepared_local_landing(command.namespace, &command_id.to_string(), &request_hash)
+            .expect("durable preparation"),
+        Some((canonical.clone(), response.to_vec()))
+    );
+    assert!(
+        reopened
+            .prepared_local_landing(command.namespace, &command_id.to_string(), &[8; 32])
+            .is_err(),
+        "operation ID cannot be rebound after a lost response"
+    );
+    assert_eq!(
+        target
+            .receive_local_integration_cas_command(&signed, repository.store(), |_| Ok(()), &command, response)
             .expect("landing"),
         Admission::Accepted
+    );
+    assert_eq!(
+        crate::device_operations::replay_response(repository.heddle_dir(), &command)
+            .expect("same-transaction receipt"),
+        Some(response.to_vec())
     );
     assert_eq!(
         repository
@@ -1086,7 +1176,7 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
     );
     assert_eq!(
         target
-            .receive_local_integration_cas(&signed, repository.store(), |_| Ok(()))
+            .receive_local_integration_cas_command(&signed, repository.store(), |_| Ok(()), &command, response)
             .expect("exact retry"),
         Admission::Accepted
     );

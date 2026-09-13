@@ -116,6 +116,10 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
             CREATE TABLE IF NOT EXISTS sharing(thread BLOB NOT NULL, destination BLOB NOT NULL, facets INTEGER NOT NULL, version BLOB NOT NULL, PRIMARY KEY(thread,destination));
             CREATE TABLE IF NOT EXISTS thread_control_heads(thread BLOB NOT NULL,property TEXT NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,property,operation));
             CREATE TABLE IF NOT EXISTS thread_control_commands(thread BLOB NOT NULL,publisher BLOB NOT NULL,command BLOB NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,publisher,command));")?;
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS thread_landing_prepared(
+        namespace TEXT NOT NULL, operation_id TEXT NOT NULL, request_hash BLOB NOT NULL CHECK(length(request_hash)=32),
+        canonical BLOB NOT NULL CHECK(length(canonical)<=262144), response BLOB NOT NULL CHECK(length(response)<=1048576),
+        PRIMARY KEY(namespace,operation_id));")?;
     connection.execute_batch(ownership_claim::SCHEMA)?;
     connection.execute_batch(ownership_resolution::SCHEMA)?;
     connection.execute_batch(boundary_evidence::SCHEMA)?;
@@ -548,7 +552,7 @@ impl ThreadReplica {
         store: &impl ObjectStore,
         authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
     ) -> Result<Admission> {
-        self.receive_inner(signed, store, authorize, false, None, false)
+        self.receive_inner(signed, store, authorize, false, None, false, None)
     }
     /// Execute local landing only against the exact currently observed target
     /// frontier. Historical replication uses `receive` and preserves branches.
@@ -563,7 +567,64 @@ impl ThreadReplica {
                 "local integration CAS requires a local receipt".into(),
             ));
         }
-        self.receive_inner(signed, store, authorize, true, None, false)
+        self.receive_inner(signed, store, authorize, true, None, false, None)
+    }
+    /// Load immutable prepared bytes before consulting a moving target frontier.
+    pub fn prepared_local_landing(
+        &self,
+        namespace: &str,
+        operation_id: &str,
+        request_hash: &[u8; 32],
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let row: Option<(Vec<u8>, Vec<u8>, Vec<u8>)> = self.connect()?.query_row(
+            "SELECT request_hash,canonical,response FROM thread_landing_prepared WHERE namespace=?1 AND operation_id=?2",
+            params![namespace, operation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
+        match row {
+            Some((hash, canonical, response)) if hash.as_slice() == request_hash.as_slice() => Ok(Some((canonical, response))),
+            Some(_) => Err(Error::Invalid("landing operation ID reused with different input".into())),
+            None => Ok(None),
+        }
+    }
+    /// Persist the exact operation and response before CAS. A crash before
+    /// admission resumes these bytes; no retry remerges against newer heads.
+    pub fn prepare_local_landing(
+        &self,
+        namespace: &str,
+        operation_id: &str,
+        request_hash: &[u8; 32],
+        canonical: &[u8],
+        response: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        if canonical.len() > 256 * 1024 || response.len() > 1024 * 1024 {
+            return Err(Error::Invalid("prepared landing exceeds byte bound".into()));
+        }
+        let mut connection = self.connect()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute("INSERT OR IGNORE INTO thread_landing_prepared(namespace,operation_id,request_hash,canonical,response) VALUES(?1,?2,?3,?4,?5)",
+            params![namespace,operation_id,request_hash.as_slice(),canonical,response])?;
+        let row: (Vec<u8>, Vec<u8>, Vec<u8>) = tx.query_row(
+            "SELECT request_hash,canonical,response FROM thread_landing_prepared WHERE namespace=?1 AND operation_id=?2",
+            params![namespace,operation_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+        if row.0.as_slice() != request_hash.as_slice() {
+            return Err(Error::Invalid("landing operation ID reused with different input".into()));
+        }
+        tx.commit()?;
+        Ok((row.1,row.2))
+    }
+    pub fn receive_local_integration_cas_command(
+        &self,
+        signed: &SignedOperation,
+        store: &impl ObjectStore,
+        authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
+        command: &crate::device_operations::Command<'_>,
+        response: &[u8],
+    ) -> Result<Admission> {
+        if signed.verify()?.local_integration()?.is_none() {
+            return Err(Error::Invalid("local integration CAS requires a local receipt".into()));
+        }
+        self.receive_inner(signed, store, authorize, true, None, false, Some((command,response)))
     }
     /// Admit an original signed source whose referenced filename/anchor closure
     /// was deliberately withheld by a partial transfer. This preserves its
@@ -577,7 +638,7 @@ impl ThreadReplica {
         authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
         authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
     ) -> Result<Admission> {
-        self.receive_inner(signed, store, authorize, false, authority_receipt, true)
+        self.receive_inner(signed, store, authorize, false, authority_receipt, true, None)
     }
     fn receive_inner(
         &self,
@@ -587,6 +648,7 @@ impl ThreadReplica {
         compare_frontier: bool,
         authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
         defer_references: bool,
+        command: Option<(&crate::device_operations::Command<'_>, &[u8])>,
     ) -> Result<Admission> {
         let operation = signed.verify()?;
         if operation.thread != self.thread {
@@ -618,6 +680,17 @@ impl ThreadReplica {
             authority_receipt,
             defer_this,
         )?;
+        if admission == Admission::Accepted {
+            if let Some((command, response)) = command {
+                if crate::device_operations::replay(&tx, command)
+                    .map_err(|error| Error::Invalid(error.to_string()))?
+                    .is_none()
+                {
+                    crate::device_operations::receipt(&tx, command, response)
+                        .map_err(|error| Error::Invalid(error.to_string()))?;
+                }
+            }
+        }
         tx.commit()?;
         self.notify_committed()?;
         if !defer_this
