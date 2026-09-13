@@ -57,10 +57,17 @@ pub(super) fn index(
 pub struct Hit {
     pub thread: objects::object::ContentHash,
     pub operation: objects::object::ContentHash,
+    pub cursor: objects::object::ContentHash,
     pub kind: i32,
     pub record: String,
     pub snippet: String,
     pub score: f64,
+    pub revision: Option<objects::object::StateId>,
+    pub path: String,
+    pub symbol_id: String,
+    pub symbol_name: String,
+    pub start_line: Option<u32>,
+    pub end_line: Option<u32>,
 }
 
 pub struct NativeBatch {
@@ -84,8 +91,8 @@ pub fn search_native(
         || limit == 0
         || limit > 257
         || kinds.is_empty()
-        || kinds.len() > 4
-        || kinds.iter().any(|kind| !matches!(kind, 0..=2 | 5))
+        || kinds.len() > 6
+        || kinds.iter().any(|kind| !matches!(kind, 0..=5))
         || (text.trim().is_empty() && annotations.is_none())
         || (annotations.is_some() && kinds != [2])
     {
@@ -102,7 +109,8 @@ pub fn search_native(
     let lexical = "WITH hits AS (
         SELECT s.thread,s.operation,s.kind,s.record,
                snippet(collaboration_search,4,'','',' … ',32) summary,
-               bm25(collaboration_search) score,o.canonical
+               bm25(collaboration_search) score,o.canonical,s.operation cursor,
+               NULL revision,'' path,'' symbol_id,'' symbol_name,NULL start_line,NULL end_line
         FROM collaboration_search s JOIN operations o ON o.id=s.operation
         WHERE collaboration_search MATCH ?1 AND o.status=1
           AND ((s.kind=1 AND ?2) OR (s.kind=2 AND ?3))
@@ -113,19 +121,32 @@ pub fn search_native(
               AND c.record_kind=2 AND c.record_id=s.record))
         UNION ALL
         SELECT l.thread,l.thread,0,lower(hex(l.thread)),
-               substr(l.name||char(10)||l.intent,1,512),-1.0,x''
+               substr(l.name||char(10)||l.intent,1,512),-1.0,x'',l.thread,
+               NULL,'','','',NULL,NULL
         FROM thread_list l WHERE ?4 AND instr(lower(l.name||' '||l.intent),lower(?5))>0
         UNION ALL
-        SELECT o.thread,o.id,5,?9,?9,-2.0,o.canonical
+        SELECT o.thread,o.id,5,?9,?9,-2.0,o.canonical,o.id,
+               o.source_revision,'','','',NULL,NULL
         FROM operations o WHERE ?8 AND o.status=1 AND o.facet=1 AND o.source_revision=?10
+        UNION ALL
+        SELECT c.thread,c.operation,c.kind,lower(hex(c.candidate)),
+               snippet(source_search_fts,0,'','',' … ',32),bm25(source_search_fts),o.canonical,c.candidate,
+               c.revision,c.path,c.symbol_id,c.symbol_name,c.start_line,c.end_line
+        FROM source_search_fts JOIN source_search_candidates c ON c.rowid=source_search_fts.rowid
+        JOIN operations o ON o.id=c.operation
+        JOIN source_search_ready ready ON ready.operation=c.operation AND ready.revision=c.revision
+        WHERE source_search_fts MATCH ?1 AND o.status=1 AND o.facet=1
+          AND o.thread=c.thread AND o.source_revision=c.revision
+          AND ((c.kind=3 AND ?11) OR (c.kind=4 AND ?12))
       ), anchor AS (
-        SELECT score,thread,operation,kind,record FROM hits WHERE operation=?6
-      ) SELECT thread,operation,kind,record,summary,score,canonical FROM hits
+        SELECT score,thread,cursor,kind,record FROM hits WHERE cursor=?6
+      ) SELECT thread,operation,kind,record,summary,score,canonical,cursor,revision,path,symbol_id,symbol_name,start_line,end_line FROM hits
         WHERE ?6 IS NULL OR ((SELECT count(*) FROM anchor)=1 AND
-          (score,thread,operation,kind,record)>(SELECT score,thread,operation,kind,record FROM anchor))
-        ORDER BY score,thread,operation,kind,record LIMIT ?7";
+          (score,thread,cursor,kind,record)>(SELECT score,thread,cursor,kind,record FROM anchor))
+        ORDER BY score,thread,cursor,kind,record LIMIT ?7";
     let filters_only = "WITH hits AS (SELECT s.thread,s.operation,s.kind,s.record,
-               substr(s.text,1,512) summary,0.0 score,o.canonical
+               substr(s.text,1,512) summary,0.0 score,o.canonical,s.operation cursor,
+               NULL revision,'' path,'' symbol_id,'' symbol_name,NULL start_line,NULL end_line
         FROM collaboration_search s JOIN operations o ON o.id=s.operation
         WHERE o.status=1 AND s.kind=2 AND NOT EXISTS(
             SELECT 1 FROM parents p JOIN operations child ON child.id=p.child
@@ -133,17 +154,32 @@ pub fn search_native(
             WHERE p.parent=o.id AND child.status=1 AND c.thread=s.thread
               AND c.record_kind=2 AND c.record_id=s.record)
       ), anchor AS (
-        SELECT score,thread,operation,kind,record FROM hits WHERE operation=?1
-      ) SELECT thread,operation,kind,record,summary,score,canonical FROM hits
+        SELECT score,thread,cursor,kind,record FROM hits WHERE cursor=?1
+      ) SELECT thread,operation,kind,record,summary,score,canonical,cursor,revision,path,symbol_id,symbol_name,start_line,end_line FROM hits
         WHERE ?1 IS NULL OR ((SELECT count(*) FROM anchor)=1 AND
-          (score,thread,operation,kind,record)>(SELECT score,thread,operation,kind,record FROM anchor))
-        ORDER BY score,thread,operation,kind,record LIMIT ?2";
+          (score,thread,cursor,kind,record)>(SELECT score,thread,cursor,kind,record FROM anchor))
+        ORDER BY score,thread,cursor,kind,record LIMIT ?2";
     let mut statement = connection.prepare(if text.trim().is_empty() {
         filters_only
     } else {
         lexical
     })?;
-    type Row = (Vec<u8>, Vec<u8>, i32, String, String, f64, Vec<u8>);
+    type Row = (
+        Vec<u8>,
+        Vec<u8>,
+        i32,
+        String,
+        String,
+        f64,
+        Vec<u8>,
+        Vec<u8>,
+        Option<Vec<u8>>,
+        String,
+        String,
+        String,
+        Option<u32>,
+        Option<u32>,
+    );
     let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Row> {
         Ok((
             row.get(0)?,
@@ -153,6 +189,13 @@ pub fn search_native(
             row.get(4)?,
             row.get(5)?,
             row.get(6)?,
+            row.get(7)?,
+            row.get(8)?,
+            row.get(9)?,
+            row.get(10)?,
+            row.get(11)?,
+            row.get(12)?,
+            row.get(13)?,
         ))
     };
     let rows = if text.trim().is_empty() {
@@ -172,7 +215,9 @@ pub fn search_native(
                 limit,
                 kinds.contains(&5),
                 text.trim(),
-                exact_revision.map(|id| id.as_bytes().to_vec())
+                exact_revision.map(|id| id.as_bytes().to_vec()),
+                kinds.contains(&3),
+                kinds.contains(&4)
             ],
             read,
         )?
@@ -180,15 +225,42 @@ pub fn search_native(
     let mut hits = Vec::new();
     let mut scanned = 0;
     for row in rows {
-        let (thread, operation, kind, record, summary, score, _canonical) = row?;
+        let (
+            thread,
+            operation,
+            kind,
+            record,
+            summary,
+            score,
+            _canonical,
+            cursor,
+            revision,
+            path,
+            symbol_id,
+            symbol_name,
+            start_line,
+            end_line,
+        ) = row?;
         scanned += 1;
         hits.push(Hit {
             thread: super::hash(&thread)?,
             operation: super::hash(&operation)?,
+            cursor: super::hash(&cursor)?,
             kind,
             record,
             snippet: summary,
             score,
+            revision: revision
+                .map(|value| {
+                    super::hash(&value)
+                        .map(|hash| objects::object::StateId::from_content_hash(hash))
+                })
+                .transpose()?,
+            path,
+            symbol_id,
+            symbol_name,
+            start_line,
+            end_line,
         });
     }
     Ok(NativeBatch { hits, scanned })
@@ -227,10 +299,17 @@ pub fn search(
         Ok(Hit {
             thread: super::hash(&thread)?,
             operation: super::hash(&operation)?,
+            cursor: super::hash(&operation)?,
             kind,
             record,
             snippet,
             score,
+            revision: None,
+            path: String::new(),
+            symbol_id: String::new(),
+            symbol_name: String::new(),
+            start_line: None,
+            end_line: None,
         })
     })
     .collect()

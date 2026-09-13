@@ -273,6 +273,80 @@ pub(super) async fn roundtrip(
     }
     assert!(record);
     assert_eq!(symbols, 1, "actual indexed symbol crosses Iroh projection");
+    let source_search = SearchRequest {
+        threads: vec![request.thread.clone().expect("analysis Thread")],
+        domains: vec![SearchDomain::SourceContent as i32],
+        text: "pub fn".into(),
+        page: Some(PageRequest {
+            size: 1,
+            ..Default::default()
+        }),
+        mode: search_request::Mode::Lexical as i32,
+        ..Default::default()
+    };
+    let mut first = remote
+        .api
+        .observe::<thread_api::rpc::SearchServiceSearch>(&source_search)
+        .await
+        .expect("indexed source content search");
+    let mut first_path = None;
+    let mut next = Vec::new();
+    while let Some(event) = first.next().await.expect("source first page") {
+        match event.payload {
+            Some(search_event::Payload::Hit(hit)) => {
+                assert_eq!(hit.domain, SearchDomain::SourceContent as i32);
+                first_path = Some(hit.location.expect("source location").path);
+            }
+            Some(search_event::Payload::Complete(status)) => {
+                assert_eq!(status.coverage, Coverage::Partial as i32);
+                next = status.page.expect("source page").next_page;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        first_path.is_some() && !next.is_empty(),
+        "indexed source candidates paginate privately"
+    );
+    let mut second_request = source_search.clone();
+    second_request.page.as_mut().expect("page").after_page = next.clone();
+    for _ in 0..2 {
+        let mut second = remote
+            .api
+            .observe::<thread_api::rpc::SearchServiceSearch>(&second_request)
+            .await
+            .expect("retry source page");
+        let mut path = None;
+        while let Some(event) = second.next().await.expect("source second page") {
+            if let Some(search_event::Payload::Hit(hit)) = event.payload {
+                path = Some(hit.location.expect("source location").path);
+            }
+        }
+        assert!(
+            path.is_some() && path != first_path,
+            "candidate cursor resumes to the other source file without duplication"
+        );
+    }
+    let mut symbols_search = remote
+        .api
+        .observe::<thread_api::rpc::SearchServiceSearch>(&SearchRequest {
+            threads: source_search.threads.clone(),
+            domains: vec![SearchDomain::SourceSymbol as i32],
+            text: "answer".into(),
+            mode: search_request::Mode::Lexical as i32,
+            ..Default::default()
+        })
+        .await
+        .expect("indexed source symbol search");
+    let mut symbol_hits = 0;
+    while let Some(event) = symbols_search.next().await.expect("symbol search frame") {
+        if let Some(search_event::Payload::Hit(hit)) = event.payload {
+            assert_eq!(hit.symbol_name.as_deref(), Some("answer"));
+            assert_eq!(hit.location.expect("symbol location").path, "answer.rs");
+            symbol_hits += 1;
+        }
+    }
+    assert_eq!(symbol_hits, 1);
     let hidden_index = tree
         .entries()
         .iter()
@@ -298,6 +372,25 @@ pub(super) async fn roundtrip(
             Some(sidecar.encode().expect("sidecar bytes")),
         )
         .expect("restrict source entry");
+    let mut hidden_search = remote
+        .api
+        .observe::<thread_api::rpc::SearchServiceSearch>(&SearchRequest {
+            page: None,
+            ..source_search.clone()
+        })
+        .await
+        .expect("entry-restricted source search");
+    let mut visible_paths = Vec::new();
+    while let Some(event) = hidden_search.next().await.expect("restricted search frame") {
+        if let Some(search_event::Payload::Hit(hit)) = event.payload {
+            visible_paths.push(hit.location.expect("visible location").path);
+        }
+    }
+    assert_eq!(
+        visible_paths,
+        vec!["answer.rs"],
+        "hidden indexed text cannot become a Search hit"
+    );
     let mut restricted = remote
         .api
         .observe::<thread_api::rpc::AnalysisServiceObserveAnalysis>(&ObserveAnalysisRequest {

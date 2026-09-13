@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use api::heddle::api::{v1alpha1::CallFailureCode, v2alpha1::*};
 use iroh::endpoint::SendStream;
+use objects::store::ObjectStore;
 use prost::Message;
 
 struct SearchSelection {
@@ -20,7 +21,7 @@ struct SearchSelection {
 impl SearchSelection {
     fn parse(request: &SearchRequest) -> Result<Self> {
         ensure!(
-            request.spools.len() <= 32 && request.threads.len() <= 64 && request.domains.len() <= 4,
+            request.spools.len() <= 32 && request.threads.len() <= 64 && request.domains.len() <= 6,
             "search selector bound exceeded"
         );
         let mut spools = BTreeSet::new();
@@ -80,6 +81,8 @@ impl SearchSelection {
                         SearchDomain::Thread
                             | SearchDomain::Discussion
                             | SearchDomain::Context
+                            | SearchDomain::SourceContent
+                            | SearchDomain::SourceSymbol
                             | SearchDomain::Revision
                     ),
                     "unsupported search domain"
@@ -182,7 +185,9 @@ impl DeviceRpc {
                     let generation =
                         repo::thread_replication::collaboration::generation(&spool.heddle_dir)?;
                     digest.update(&generation);
-                    generations.push(generation);
+                    let metadata = repo::operation_dedup::observation::generation(&spool.heddle_dir)?;
+                    digest.update(&metadata);
+                    generations.push((generation, metadata));
                 }
                 let binding = digest.finalize();
                 let cursor_directory = selected.first().map(|spool| &spool.heddle_dir);
@@ -210,7 +215,7 @@ impl DeviceRpc {
                         source: Some(this.endpoint()),
                         payload: Some(search_event::Payload::DomainStatus(SearchDomainStatus {
                             domain: *domain,
-                            coverage: Coverage::Complete as i32,
+                            coverage: if matches!(*domain, 4 | 5) { Coverage::Partial } else { Coverage::Complete } as i32,
                             supported_modes: vec![search_request::Mode::Lexical as i32],
                         })),
                     });
@@ -245,7 +250,7 @@ impl DeviceRpc {
                         let principal = uuid::Uuid::parse_str(&worker_session.principal)?;
                         for hit in batch.hits {
                             examined += 1;
-                            after_operation = Some(hit.operation);
+                            after_operation = Some(hit.cursor);
                             if selection.threads.get(&spool.id).is_some_and(|threads| !threads.contains(hit.thread.as_bytes().as_slice())) { continue; }
                             let replica = repo::thread_replication::ThreadReplica::open(
                                 &spool.heddle_dir,
@@ -293,13 +298,20 @@ impl DeviceRpc {
                                 let (coverage, _) = super::collaboration_targets::project_for(spool, principal, facts.delegation_agent_id.as_deref(), &replica, &scope, &mut context.anchor, &mut context.tags)?;
                                 if coverage == Coverage::Unavailable { continue; }
                             }
-                            let revision_hit = if hit.kind == 5 {
-                                let text = hit.record.strip_prefix("heddle:").unwrap_or(&hit.record);
-                                let revision = objects::object::StateId::parse(text)?;
-                                if super::auth::source_content_visibility(
+                            let revision_hit = if let Some(revision) = hit.revision {
+                                let Some(redactions) = super::auth::source_content_visibility(
                                     &repository, &replica, principal,
                                     facts.delegation_agent_id.as_deref(), revision,
-                                )?.is_none() { continue; }
+                                )? else { continue; };
+                                if matches!(hit.kind, 3 | 4) {
+                                    let state = repository.store().get_state(&revision)?.context("indexed source state absent")?;
+                                    let mut path_work = 0;
+                                    if super::content::visible_path_entry(
+                                        repository.store(), state.tree, &hit.path,
+                                        &redactions,
+                                        &mut path_work,
+                                    ).is_err() { continue; }
+                                }
                                 Some(RevisionRef {
                                     spool: Some(SpoolRef { id: spool.id.to_string() }),
                                     revision: Some(revision_ref::Revision::State(
@@ -345,6 +357,10 @@ impl DeviceRpc {
                                     causal_id: if hit.kind == 2 { hit.operation.as_bytes().to_vec() } else { Vec::new() },
                                     location: revision_hit.map(|revision| SourceLocation {
                                         revision: Some(revision),
+                                        path: hit.path,
+                                        symbol_id: hit.symbol_id,
+                                        start_line: hit.start_line,
+                                        end_line: hit.end_line,
                                         thread: Some(ThreadRef {
                                             spool: Some(SpoolRef { id: spool.id.to_string() }),
                                             id: Some(ThreadId { value: hit.thread.as_bytes().to_vec() }),
@@ -352,11 +368,12 @@ impl DeviceRpc {
                                         ..Default::default()
                                     }),
                                     match_kind: if hit.kind == 5 { SearchMatchKind::HashExact as i32 } else if request.text.trim().is_empty() { SearchMatchKind::Structured as i32 } else { SearchMatchKind::Fulltext as i32 },
+                                    symbol_name: (hit.kind == 4).then_some(hit.symbol_name),
                                     ..Default::default()
                                 })),
                             });
                             visible += 1;
-                            next_boundary = (position, Some(hit.operation));
+                            next_boundary = (position, Some(hit.cursor));
                         }
                         if exhausted {
                             position += 1;
@@ -375,7 +392,10 @@ impl DeviceRpc {
                     source: Some(this.endpoint()),
                     payload: Some(search_event::Payload::Complete(SectionStatus {
                         section: "search".into(),
-                        coverage: Coverage::Complete as i32,
+                        coverage: if selection.kinds.contains(&(SearchDomain::SourceContent as i32))
+                            || selection.kinds.contains(&(SearchDomain::SourceSymbol as i32)) {
+                            Coverage::Partial
+                        } else { Coverage::Complete } as i32,
                         page: Some(PageInfo {
                             exhausted: !has_more,
                             next_page,
@@ -384,12 +404,14 @@ impl DeviceRpc {
                         ..Default::default()
                     })),
                 });
-                for (spool, observed) in selected.iter().zip(&generations) {
+                for (spool, (observed, metadata)) in selected.iter().zip(&generations) {
                     ensure!(
                         repo::thread_replication::collaboration::generation(&spool.heddle_dir)?
                             == *observed,
                         "search data changed during query; refresh the first page"
                     );
+                    ensure!(repo::operation_dedup::observation::generation(&spool.heddle_dir)? == *metadata,
+                        "search index changed during query; refresh the first page");
                 }
                 Ok(events)
             });

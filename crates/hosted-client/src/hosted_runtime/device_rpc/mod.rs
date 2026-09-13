@@ -54,6 +54,8 @@ mod publication_tests;
 mod receipt_tests;
 mod replication;
 mod search;
+#[cfg(feature = "semantic")]
+mod source_search;
 #[cfg(test)]
 mod sibling_tests;
 mod stream;

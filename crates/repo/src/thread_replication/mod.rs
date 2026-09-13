@@ -26,6 +26,7 @@ mod policy_sync;
 pub mod projection;
 pub mod source_authority;
 mod source_index;
+pub mod source_search;
 mod source_possession;
 pub mod source_publication;
 mod source_transfer;
@@ -129,6 +130,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
     connection.execute_batch(boundary_evidence::SCHEMA)?;
     connection.execute_batch(collaboration::SCHEMA)?;
     connection.execute_batch(collaboration_search::SCHEMA)?;
+    connection.execute_batch(source_search::SCHEMA)?;
     connection.execute_batch(source_index::SCHEMA)?;
     connection.execute_batch(listing::SCHEMA)
 }

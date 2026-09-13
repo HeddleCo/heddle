@@ -332,6 +332,12 @@ impl DeviceRpc {
                         .check_current(&home)
                         .map_err(|error| repo::HeddleError::InvalidObject(error.to_string()))
                 })?;
+                let thread_id = super::checkout::thread(&source, Some(&thread))?;
+                let replica = repo::thread_replication::ThreadReplica::open(
+                    &source.spool.heddle_dir,
+                    thread_id,
+                )?;
+                super::source_search::index_analyzed_source(&repository, &replica, state)?;
             }
 
             Ok(())
@@ -729,7 +735,7 @@ fn analysis_version(session: &Session, request: &ObserveAnalysisRequest) -> Resu
     )?);
     Ok(hash.finalize().as_bytes().to_vec())
 }
-fn semantic_symbols(
+pub(super) fn semantic_symbols(
     repository: &repo::Repository,
     state: objects::object::StateId,
     redactions: &objects::object::EntryRedactions,
