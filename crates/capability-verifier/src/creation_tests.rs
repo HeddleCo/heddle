@@ -112,7 +112,13 @@ fn creation_fixture(
 fn spool_creation_canonical_browser_fixture() {
     let (signed, _) = creation_fixture(false, true);
     let genesis = signed.genesis.as_ref().expect("genesis");
-    let statement = signed.delegated_creation.as_ref().expect("proof").statement.as_ref().expect("statement");
+    let statement = signed
+        .delegated_creation
+        .as_ref()
+        .expect("proof")
+        .statement
+        .as_ref()
+        .expect("statement");
     let actual = serde_json::json!({
         "spool_uuid_hex": hex::encode(&genesis.spool_uuid),
         "owner_public_key_hex": hex::encode(&genesis.owner_public_key.as_ref().expect("owner key").public_key),
@@ -128,8 +134,68 @@ fn spool_creation_canonical_browser_fixture() {
         "canonical_spool_creation_hex": hex::encode(canonical_spool_creation(statement).expect("canonical statement")),
         "spool_creation_signing_digest_hex": hex::encode(spool_creation_signing_digest(statement).expect("signing digest")),
     });
-    let expected: serde_json::Value = serde_json::from_str(include_str!("../tests/fixtures/spool_creation_v1.json")).expect("fixture JSON");
+    let expected: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/spool_creation_v1.json"))
+            .expect("fixture JSON");
     assert_eq!(actual, expected, "Rust canonical creation vector drifted");
+}
+
+#[test]
+fn browser_produced_delegated_creation_passes_rust_admission() {
+    use prost::Message as _;
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/browser_spool_creation_interop.json"
+    ))
+    .expect("browser interop fixture");
+    let record_hex = fixture["signed_spool_owner_genesis_hex"]
+        .as_str()
+        .expect("browser record hex");
+    let bytes = hex::decode(record_hex).expect("browser record bytes");
+    let record =
+        SignedSpoolOwnerGenesis::decode(bytes.as_slice()).expect("browser record protobuf");
+    let proof = record.delegated_creation.as_ref().expect("delegated proof");
+    let history = proof.owner_history.as_ref().expect("signed owner history");
+    let root = history.root.as_ref().expect("signed owner root");
+    let owner = verify_owner_root(root).expect("independent owner root");
+    assert_eq!(history.state_hash, owner.state_hash());
+    let now = fixture["now_unix_seconds"]
+        .as_i64()
+        .expect("fixed verifier time");
+    let facts = admit_fresh_spool_creation(&record, &owner, now)
+        .expect("browser artifact admitted by Rust");
+    assert_eq!(
+        facts.cnf.as_deref(),
+        Some(
+            hex::encode(
+                proof
+                    .statement
+                    .as_ref()
+                    .expect("statement")
+                    .creator_key
+                    .as_ref()
+                    .expect("creator key")
+                    .public_key
+                    .as_slice()
+            )
+            .as_str()
+        )
+    );
+    let without_check = hex::decode(
+        fixture["missing_restriction_signed_spool_owner_genesis_hex"]
+            .as_str()
+            .expect("browser artifact without final restriction"),
+    )
+    .expect("negative browser bytes");
+    let without_check = SignedSpoolOwnerGenesis::decode(without_check.as_slice())
+        .expect("well-formed and signed negative browser record");
+    let refusal = admit_fresh_spool_creation(&without_check, &owner, now)
+        .expect_err("a delegated chain without the exact final check must fail");
+    assert!(
+        refusal
+            .to_string()
+            .contains("final block differs from exact intent"),
+        "the missing check must reach the exact-intent guard: {refusal}"
+    );
 }
 
 #[test]
