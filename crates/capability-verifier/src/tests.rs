@@ -828,6 +828,43 @@ fn recovery_window_is_signed_preserved_and_statefully_checkable() {
     assert!(apply_transition(&state, &changed_window, NOW + 100, limits()).is_err());
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn browser_paper_recovery_transition_matches_rust_owner_verifier() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../tests/fixtures/browser_paper_recovery_interop.json"
+    ))
+    .expect("browser fixture JSON");
+    let field = |name: &str| -> Vec<u8> {
+        hex::decode(fixture[name].as_str().expect("hex fixture field"))
+            .expect("hex fixture bytes")
+    };
+    let root = SignedOwnerRoot::decode(field("owner_root_hex").as_slice()).expect("owner root wire");
+    let transition = SignedOwnerKeyTransition::decode(field("signed_transition_hex").as_slice())
+        .expect("transition wire");
+    let state = verify_owner_root(&root).expect("browser owner root is valid");
+    assert_eq!(state.state_hash().as_slice(), field("owner_state_hash_hex"));
+    let eligible_at: i64 = fixture["eligible_at_seconds"]
+        .as_str()
+        .expect("eligible timestamp")
+        .parse()
+        .expect("numeric eligible timestamp");
+    let pending_since = eligible_at - i64::try_from(effective_recovery_window(state.recovery_policy()))
+        .expect("bounded recovery window");
+    verify_transition_timelock(&state, &transition, pending_since)
+        .expect("browser paper recovery meets signed window");
+    apply_transition_with_timelock(&state, &transition, eligible_at, pending_since, limits())
+        .expect("browser paper recovery is admitted by Rust");
+    assert!(apply_transition_with_timelock(
+        &state, &transition, eligible_at - 1, pending_since, limits()
+    ).is_err(), "recovery must not activate before the signed time");
+    let mut changed = transition.clone();
+    changed.authorizations[0].signature[0] ^= 1;
+    assert!(apply_transition_with_timelock(
+        &state, &changed, eligible_at, pending_since, limits()
+    ).is_err(), "changed paper signature must not authorize recovery");
+}
+
 fn recovery_policy_transition(
     state: &VerifiedOwnerState,
     authority: &TestKey,
