@@ -325,14 +325,15 @@ struct PullFixture {
 
 /// In-memory weft stand-in: a staged pack is unpublished until Push
 /// finishes draining the client stream, then it becomes cloneable.
+#[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct DurableSyncStore {
     staged: Arc<Mutex<Option<PullFixture>>>,
     published: Arc<Mutex<Option<PullFixture>>>,
 }
 
+#[cfg(test)]
 impl DurableSyncStore {
-    #[cfg(test)]
     fn pull_fixture(&self) -> Option<PullFixture> {
         self.published
             .lock()
@@ -340,7 +341,6 @@ impl DurableSyncStore {
             .clone()
     }
 
-    #[cfg(test)]
     pub(crate) fn stage(&self, remote_state: StateId, pack_data: Vec<u8>, index_data: Vec<u8>) {
         *self
             .staged
@@ -420,6 +420,7 @@ async fn start_inner(
                 collaboration.clone(),
                 registry.clone(),
                 grants.clone(),
+                #[cfg(test)]
                 None,
             ));
         }
@@ -542,7 +543,7 @@ async fn serve_call(
     collaboration: Option<CollaborationFixture>,
     registry: Option<RegistryFixture>,
     grants: GrantStore,
-    durable: Option<DurableSyncStore>,
+    #[cfg(test)] durable: Option<DurableSyncStore>,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -645,6 +646,7 @@ async fn serve_call(
                     recv,
                     request.split_off(prelude_len),
                     push_requests,
+                    #[cfg(test)]
                     durable,
                 )
                 .await;
@@ -672,7 +674,7 @@ async fn serve_push(
     mut recv: iroh::endpoint::RecvStream,
     mut buffered: Vec<u8>,
     captured: Option<Arc<Mutex<Vec<PushRequest>>>>,
-    durable: Option<DurableSyncStore>,
+    #[cfg(test)] durable: Option<DurableSyncStore>,
 ) {
     let request = loop {
         if let Some((frame, consumed)) = decode_stream_frame(&buffered).unwrap() {
@@ -718,8 +720,16 @@ async fn serve_push(
         .await
         .is_ok_and(|chunk| chunk.is_some())
     {}
-    let accept =
-        durable.as_ref().is_some_and(|store| store.publish_staged()) && local_state.is_some();
+    let accept = {
+        #[cfg(test)]
+        {
+            durable.as_ref().is_some_and(|store| store.publish_staged()) && local_state.is_some()
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    };
     let complete = PushServerFrame {
         frame: Some(push_server_frame::Frame::Complete(PushComplete {
             success: accept,
