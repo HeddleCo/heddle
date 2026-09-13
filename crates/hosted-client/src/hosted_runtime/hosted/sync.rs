@@ -4901,6 +4901,88 @@ mod native_exchange_tests {
         client.close().await;
         server.await.unwrap();
     }
+
+    #[tokio::test]
+    async fn push_content_survives_bounded_close_and_clones_byte_for_byte() {
+        const PAYLOAD: &[u8] = b"durable-across-bounded-close-e0c3\n";
+        let (mut client, server_addr, server, store) =
+            crate::hosted_runtime::hosted::test_server::start_durable_push_clone().await;
+        let source = TempDir::new().unwrap();
+        let repo = Repository::init_default(source.path()).unwrap();
+        std::fs::write(source.path().join("payload.bin"), PAYLOAD).unwrap();
+        let state = repo
+            .snapshot_with_attribution(
+                Some("durable close fixture".to_string()),
+                None,
+                Attribution::human(Principal::new("Test", "test@example.com")),
+            )
+            .unwrap()
+            .id();
+        save_thread_record(&repo, state, "thread-stable-main", "main");
+        let expected = objects::object::Blob::from(PAYLOAD);
+        let objects = wire::enumerate_state_closure(repo.store(), state).unwrap();
+        let pack = wire::build_native_pack(repo.store(), &objects).unwrap();
+        store.stage(
+            super::super::helpers::proto_state_id(state).expect("state id"),
+            pack.pack_data,
+            pack.index_data,
+        );
+
+        let pushed = client
+            .push_with_expected_head_profiled(
+                &repo,
+                "acme/widgets",
+                state,
+                "main",
+                false,
+                ExpectedRemoteHead::Missing,
+                "durable-close-push-op".to_string(),
+            )
+            .await
+            .unwrap()
+            .0;
+        assert!(pushed.success, "durable fixture must accept the push");
+        assert_eq!(pushed.new_state, Some(state));
+
+        HostedClient::hold_next_close_for_test(Duration::from_millis(80));
+        let started = Instant::now();
+        client.close().await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "close must detach an 80ms drain, took {elapsed:?}"
+        );
+
+        let mut clone_client =
+            crate::hosted_runtime::hosted::test_server::connect_test_client(server_addr).await;
+        let clone = TempDir::new().unwrap();
+        let (pulled, cloned_repo) = clone_client
+            .clone_pull_with_depth_and_materialization(
+                "acme/widgets",
+                Some("main"),
+                None,
+                PullMaterialization::Full,
+                |_, _| Repository::init_default(clone.path()).map_err(ProtocolError::from),
+            )
+            .await
+            .unwrap();
+        assert!(pulled.success, "clone after bounded close must succeed");
+        assert_eq!(pulled.final_state, Some(state));
+        let got = cloned_repo
+            .store()
+            .get_blob(&expected.hash())
+            .unwrap()
+            .expect("pushed blob must be durable after bounded close");
+        assert_eq!(
+            got.content(),
+            PAYLOAD,
+            "clone from a fresh endpoint must match the pushed bytes"
+        );
+
+        clone_client.close().await;
+        server.abort();
+        let _ = server.await;
+    }
 }
 
 #[cfg(test)]

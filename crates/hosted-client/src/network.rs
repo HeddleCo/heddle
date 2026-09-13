@@ -41,6 +41,8 @@ pub use iroh::{Endpoint, EndpointId, RelayMode};
 pub use crate::hosted_runtime::claim_bridge::{
     DaemonClaimRouter, claim_bridge_socket_path, mount_claim_router,
 };
+#[cfg(feature = "client")]
+pub use crate::hosted_runtime::hosted::hosted_bridge::{HostedBridge, hosted_bridge_socket_path};
 
 /// Home relay for this build flavor. Trailing slash matches the
 /// signed endpoint-descriptor encoding.
@@ -91,6 +93,23 @@ pub fn default_relay_mode() -> RelayMode {
 #[cfg(feature = "client")]
 pub async fn bind_persistent_endpoint(relay_mode: RelayMode) -> anyhow::Result<Endpoint> {
     crate::hosted_runtime::net_endpoint::bind(relay_mode).await
+}
+
+/// Bind the persistent device endpoint together with the hosted-session
+/// bridge that reuses it for CLI weft calls.
+#[cfg(feature = "client")]
+pub async fn bind_persistent_hosted(
+    relay_mode: RelayMode,
+) -> anyhow::Result<(
+    Endpoint,
+    crate::hosted_runtime::hosted::hosted_bridge::HostedBridge,
+)> {
+    let persistent = crate::hosted_runtime::net_endpoint::bind_with_provider(relay_mode).await?;
+    let bridge = crate::hosted_runtime::hosted::hosted_bridge::HostedBridge::new(
+        persistent.endpoint.clone(),
+        Some(persistent.provider_transport),
+    );
+    Ok((persistent.endpoint, bridge))
 }
 
 /// The persisted device node id, or `None` when the identity has
@@ -147,6 +166,29 @@ mod tests {
                 "default/release build must not embed the preview relay"
             );
             assert_eq!(host, "relay.heddle.sh");
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn bind_persistent_hosted_uses_the_device_endpoint() {
+        let _env_guard = config::credentials::lock_test_env();
+        let home = tempfile::TempDir::new().expect("temp Heddle home");
+        let previous = std::env::var_os("HEDDLE_HOME");
+        unsafe {
+            std::env::set_var("HEDDLE_HOME", home.path());
+        }
+        let (endpoint, _bridge) = bind_persistent_hosted(RelayMode::Disabled)
+            .await
+            .expect("persistent hosted bind");
+        let node_id = persisted_node_id()
+            .expect("read persisted node id")
+            .expect("bind must mint a device identity");
+        assert_eq!(endpoint.id(), node_id);
+        endpoint.close().await;
+        match previous {
+            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
         }
     }
 }

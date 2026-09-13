@@ -131,6 +131,21 @@ impl HostedSession {
     }
 
     pub async fn connect(&self, server: &str) -> Result<HostedClient, ProtocolError> {
+        #[cfg(unix)]
+        match HostedClient::connect_via_netd(server, &self.config).await {
+            Ok(mut client) => {
+                client
+                    .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
+                    .await;
+                return Ok(client);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "netd hosted bridge unavailable; discovering the endpoint locally"
+                );
+            }
+        }
         let descriptor = self
             .discover_endpoint(server)
             .await
@@ -150,6 +165,21 @@ impl HostedSession {
     /// the device node id the box network daemon serves the claim router
     /// on (heddle#1620).
     pub async fn connect_outbound(&self, server: &str) -> Result<HostedClient, ProtocolError> {
+        #[cfg(unix)]
+        match HostedClient::connect_via_netd(server, &self.config).await {
+            Ok(mut client) => {
+                client
+                    .auto_rotate_if_needed(self.renewable_authority_credential.as_ref())
+                    .await;
+                return Ok(client);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "netd hosted bridge unavailable; discovering the endpoint locally"
+                );
+            }
+        }
         let descriptor = self
             .discover_endpoint(server)
             .await

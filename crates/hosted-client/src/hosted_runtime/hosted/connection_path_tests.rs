@@ -58,7 +58,7 @@ fn require_release_build() {
     panic!("hosted endpoint close contract must run with --release");
 }
 
-fn verified_descriptor(
+pub(crate) fn verified_descriptor(
     endpoint_id: iroh::EndpointId,
     relay_urls: Vec<String>,
     direct_addresses: Vec<String>,
@@ -157,7 +157,7 @@ async fn hosted_endpoint_close_release_contract() {
             HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
                 .await
                 .unwrap();
-        let endpoint_observer = connection.endpoint.clone();
+        let endpoint_observer = connection.local_endpoint().expect("local fixture").clone();
         let close_started = Instant::now();
         if negative_control {
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -240,11 +240,19 @@ async fn reachable_direct_address_keeps_the_claim_relay_online() {
         HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
             .await
             .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), connection.endpoint.online())
-        .await
-        .expect("claim listener should register with the signed relay");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        connection.local_endpoint().expect("local fixture").online(),
+    )
+    .await
+    .expect("claim listener should register with the signed relay");
     assert!(
-        !connection.endpoint.home_relay_status().get().is_empty(),
+        !connection
+            .local_endpoint()
+            .expect("local fixture")
+            .home_relay_status()
+            .get()
+            .is_empty(),
         "a direct hosted path must keep the inbound claim relay initialized"
     );
     connection.close().await;
@@ -336,11 +344,19 @@ async fn unreachable_direct_address_falls_back_to_signed_relay() {
     .await
     .expect("relay fallback should connect")
     .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), connection.endpoint.online())
-        .await
-        .expect("client should register with the signed relay");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        connection.local_endpoint().expect("local fixture").online(),
+    )
+    .await
+    .expect("client should register with the signed relay");
     assert!(
-        !connection.endpoint.home_relay_status().get().is_empty(),
+        !connection
+            .local_endpoint()
+            .expect("local fixture")
+            .home_relay_status()
+            .get()
+            .is_empty(),
         "relay fallback must initialize the signed relay transport"
     );
     connection.close().await;
@@ -393,7 +409,10 @@ async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
         .await
         .unwrap();
     let claim_connection = claim_client
-        .connect(connection.endpoint.addr(), CLAIM_ALPN_V1)
+        .connect(
+            connection.local_endpoint().expect("local fixture").addr(),
+            CLAIM_ALPN_V1,
+        )
         .await
         .expect("claim ALPN connection");
     let (mut send, mut recv) = claim_connection.open_bi().await.unwrap();
@@ -409,5 +428,84 @@ async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
 
     claim_client.close().await;
     connection.close().await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn connect_with_config_falls_back_to_local_when_netd_is_down() {
+    let _env_guard = config::credentials::lock_test_env();
+    let _home = HeddleHomeEnvGuard::isolated();
+    let server = Endpoint::builder(presets::Minimal)
+        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let descriptor = verified_descriptor(
+        server.id(),
+        Vec::new(),
+        server.addr().ip_addrs().map(ToString::to_string).collect(),
+    );
+    let server_task = tokio::spawn(async move {
+        let connection = server
+            .accept()
+            .await
+            .expect("incoming hosted connection")
+            .await
+            .unwrap();
+        connection.closed().await;
+        server.close().await;
+    });
+
+    let config = config::ClientConfig::default().with_server_key("https://api.test.heddle.sh");
+    let client = super::HostedClient::connect_with_config(&descriptor, &config)
+        .await
+        .expect("local connect must succeed after netd fallback");
+    assert!(
+        !client.reused_warm_connection(),
+        "a missing hosted bridge must not report warm reuse"
+    );
+    client.close().await;
+    server_task.await.unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn connect_outbound_falls_back_to_local_when_netd_is_down() {
+    let _env_guard = config::credentials::lock_test_env();
+    let _home = HeddleHomeEnvGuard::isolated();
+    let server = Endpoint::builder(presets::Minimal)
+        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    let descriptor = verified_descriptor(
+        server.id(),
+        Vec::new(),
+        server.addr().ip_addrs().map(ToString::to_string).collect(),
+    );
+    let server_task = tokio::spawn(async move {
+        let connection = server
+            .accept()
+            .await
+            .expect("incoming outbound connection")
+            .await
+            .unwrap();
+        connection.closed().await;
+        server.close().await;
+    });
+
+    let config = config::ClientConfig::default().with_server_key("https://api.test.heddle.sh");
+    let client = super::HostedClient::connect_outbound_with_config(&descriptor, &config)
+        .await
+        .expect("outbound local connect must succeed after netd fallback");
+    assert!(!client.reused_warm_connection());
+    client.close().await;
     server_task.await.unwrap();
 }

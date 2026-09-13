@@ -23,7 +23,7 @@ const WEBSOCKET_TRANSPORT_ID: u64 = 0x6864_646c_6577_7301;
 const LANE_QUEUE_DEPTH: usize = 64;
 
 #[derive(Clone)]
-pub(super) struct ProviderWebSocketTransport {
+pub(crate) struct ProviderWebSocketTransport {
     inner: Arc<TransportState>,
 }
 
@@ -56,7 +56,7 @@ impl std::fmt::Debug for ProviderWebSocketTransport {
 }
 
 impl ProviderWebSocketTransport {
-    pub(super) fn new(config: ClientConfig) -> Self {
+    pub(crate) fn new(config: ClientConfig) -> Self {
         Self {
             inner: Arc::new(TransportState {
                 config,

@@ -509,10 +509,12 @@ Examples:
     /// `heddle netd serve` runs a long-lived async daemon that binds
     /// the machine's single persistent Iroh endpoint on the persisted
     /// device node id and keeps it relay-reachable, so outstanding
-    /// claim links keep resolving across restarts. Unlike `daemon`, it
-    /// is not gated on Linux/FUSE and never idle-exits. `status`
-    /// reports liveness and the advertised node id; `stop` asks a
-    /// running daemon to close its endpoint and exit.
+    /// claim links keep resolving across restarts. Hosted verbs
+    /// (`whoami`, `push`, `pull`, `clone`) reuse that endpoint's warm
+    /// weft session when netd is running. Unlike `daemon`, it is not
+    /// gated on Linux/FUSE and never idle-exits. `status` reports
+    /// liveness and the advertised node id; `stop` asks a running
+    /// daemon to close its endpoint and exit.
     Netd {
         #[command(subcommand)]
         command: NetdCommands,
@@ -610,8 +612,8 @@ pub enum DaemonCommands {
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum NetdCommands {
     /// Run the foreground network daemon: bind the persistent device
-    /// endpoint, keep relays online, and serve same-uid control RPCs.
-    /// Never idle-exits.
+    /// endpoint, keep relays online, hold warm weft sessions for hosted
+    /// CLI verbs, and serve same-uid control RPCs. Never idle-exits.
     Serve,
 
     /// Report network-daemon liveness and the advertised device node
