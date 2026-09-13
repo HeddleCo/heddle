@@ -93,6 +93,7 @@ pub use commands_semantic::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};
 pub use commands_shell::{CompletionSubject, ShellCommands, ShellKind};
 pub use commands_thread::{
     ThreadCleanupArgs, ThreadCommands, ThreadListArgs, ThreadMarkerCommands,
+    ThreadOwnershipCommands,
 };
 pub use commands_visibility::{
     VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs,

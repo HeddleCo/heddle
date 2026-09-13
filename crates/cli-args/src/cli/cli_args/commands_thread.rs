@@ -91,6 +91,12 @@ Advanced split form:
     /// Guide a blocked or stale thread toward its next clean state.
     Resolve(ThreadResolveArgs),
 
+    /// Inspect or explicitly transfer a Thread's native ownership.
+    Ownership {
+        #[command(subcommand)]
+        command: ThreadOwnershipCommands,
+    },
+
     /// Materialize an existing thread ref at a chosen path.
     #[command(after_help = "\
 Advanced split form:
@@ -150,6 +156,61 @@ Examples:
         #[command(subcommand)]
         command: ThreadMarkerCommands,
     },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum ThreadOwnershipCommands {
+    /// Show the local owner or the complete signed conflict.
+    Status { thread: Option<String> },
+    /// Explicitly transfer a local-key Thread to the currently authorized account.
+    Claim { thread: Option<String> },
+    /// Original local owner chooses one accepted claim; the current account accepts.
+    Resolve {
+        thread: Option<String>,
+        /// Full claim ID shown by `heddle thread ownership status`.
+        #[arg(long)]
+        claim: String,
+    },
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use clap::Parser;
+
+    use super::*;
+    use crate::cli::cli_args::{Cli, Commands};
+
+    #[test]
+    fn ownership_commands_select_named_or_current_thread_and_require_explicit_winner() {
+        let status = Cli::try_parse_from(["heddle", "thread", "ownership", "status"])
+            .expect("current Thread status");
+        assert!(matches!(
+            status.command,
+            Commands::Thread {
+                command: ThreadCommands::Ownership {
+                    command: ThreadOwnershipCommands::Status { thread: None }
+                }
+            }
+        ));
+        let resolve = Cli::try_parse_from([
+            "heddle",
+            "thread",
+            "ownership",
+            "resolve",
+            "feature",
+            "--claim",
+            "ab12",
+        ])
+        .expect("named Thread and explicit claim");
+        assert!(
+            matches!(resolve.command, Commands::Thread { command: ThreadCommands::Ownership {
+            command: ThreadOwnershipCommands::Resolve { thread: Some(_), claim }
+        } } if claim == "ab12")
+        );
+        assert!(
+            Cli::try_parse_from(["heddle", "thread", "ownership", "resolve", "feature"]).is_err()
+        );
+    }
 }
 
 #[derive(Subcommand, Clone)]

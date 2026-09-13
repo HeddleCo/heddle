@@ -77,6 +77,7 @@ mod thread;
 mod thread_approval;
 mod thread_cmd;
 mod thread_landing;
+mod thread_ownership_cmd;
 mod thread_shaping;
 mod timeline_cmd;
 mod undo;

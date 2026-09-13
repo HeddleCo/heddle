@@ -391,6 +391,9 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
             cmd_thread_absorb(cli, args.thread, args.into, args.message, args.preview)
         }
         ThreadCommands::Resolve(args) => cmd_thread_resolve(cli, args.thread),
+        ThreadCommands::Ownership { command } => {
+            super::thread_ownership_cmd::cmd_thread_ownership(cli, &repo, command)
+        }
         ThreadCommands::Promote(args) => {
             cmd_thread_promote(cli, &repo, &args.thread, args.path, args.force)
         }

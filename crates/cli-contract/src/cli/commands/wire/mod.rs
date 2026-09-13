@@ -74,5 +74,6 @@ pub use thread::{
     ApprovalOutput, ApprovalRevokeOutput, DroppedThread, EligibilityOutput, FskitReadinessReport,
     SkippedThread, ThreadAbsorbOutput, ThreadCaptureOutput, ThreadCaptureSummary,
     ThreadCleanupOutput, ThreadCurrentOutput, ThreadListImportGuidanceOutput, ThreadListOutput,
-    ThreadOpOutput, ThreadRecordOutput, ThreadResolveOutput, ThreadShowOutput, UnmetOutput,
+    ThreadOpOutput, ThreadOwnershipOutput, ThreadRecordOutput, ThreadResolveOutput,
+    ThreadShowOutput, UnmetOutput,
 };

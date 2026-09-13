@@ -22,7 +22,7 @@ use crate::cli::{
     AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands, EnvCommands,
     HookCommands, INIT_VERB, IntegrationCommands, MaintenanceCommands, NetdCommands, OplogCommands,
     PurgeCommands, RedactCommands, RemoteCommands, ShellCommands, ThreadCommands,
-    ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
+    ThreadMarkerCommands, ThreadOwnershipCommands, TimelineCommands, VisibilityCommands,
     cli_args::{
         AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands, DiscussCommands,
         PresenceCommands, ReviewCommands,
@@ -2725,6 +2725,40 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    entry(&["thread", "ownership"], GROUP),
+    entry(
+        &["thread", "ownership", "status"],
+        json_discriminators(
+            documented_schemas(READ_JSON, &["thread ownership status"]),
+            &[json_discriminator(
+                Some("thread ownership status"),
+                "output_kind",
+                "thread_ownership",
+            )],
+        ),
+    ),
+    entry(
+        &["thread", "ownership", "claim"],
+        json_discriminators(
+            documented_schemas(REF_MUTATION, &["thread ownership claim"]),
+            &[json_discriminator(
+                Some("thread ownership claim"),
+                "output_kind",
+                "thread_ownership",
+            )],
+        ),
+    ),
+    entry(
+        &["thread", "ownership", "resolve"],
+        json_discriminators(
+            documented_schemas(REF_MUTATION, &["thread ownership resolve"]),
+            &[json_discriminator(
+                Some("thread ownership resolve"),
+                "output_kind",
+                "thread_ownership",
+            )],
+        ),
+    ),
     entry(
         &["thread", "promote"],
         json_discriminators(
@@ -4549,6 +4583,11 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ThreadCommands::Move(_) => vec!["thread", "move"],
             ThreadCommands::Absorb(_) => vec!["thread", "absorb"],
             ThreadCommands::Resolve(_) => vec!["thread", "resolve"],
+            ThreadCommands::Ownership { command } => match command {
+                ThreadOwnershipCommands::Status { .. } => vec!["thread", "ownership", "status"],
+                ThreadOwnershipCommands::Claim { .. } => vec!["thread", "ownership", "claim"],
+                ThreadOwnershipCommands::Resolve { .. } => vec!["thread", "ownership", "resolve"],
+            },
             ThreadCommands::Promote(_) => vec!["thread", "promote"],
             ThreadCommands::Drop(_) => vec!["thread", "drop"],
             ThreadCommands::Approve(_) => vec!["thread", "approve"],

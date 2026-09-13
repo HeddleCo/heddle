@@ -89,6 +89,36 @@ impl Repository {
     pub fn native_thread_signer(&self, replica: &ThreadReplica) -> Result<Ed25519Signer> {
         self.native_thread_signer_at(replica, &crate::identity::heddle_home_dir())
     }
+    /// Recover the immutable local owner's retained signer for an explicit
+    /// conflict resolution, even while effective ownership is unavailable.
+    pub fn native_original_owner_signer(&self, replica: &ThreadReplica) -> Result<Ed25519Signer> {
+        let objects::object::thread_replication::GenesisOwner::LocalKey(owner) =
+            replica.genesis()?.owner
+        else {
+            return Err(Error::Invalid(
+                "Thread genesis has no local owner key".into(),
+            ));
+        };
+        if let Some(local) = crate::identity::load_local(
+            &self.heddle_dir().join(crate::identity::LOCAL_IDENTITY_FILE),
+        )? {
+            let signer = Ed25519Signer::from_pem(&local.private_key_pem)?;
+            if signer.public_key() == owner {
+                return Ok(signer);
+            }
+        }
+        if let Some(device) =
+            crate::identity::load_device(&crate::identity::device_identity_path())?
+        {
+            let signer = Ed25519Signer::from_pem(&device.private_key_pem)?;
+            if signer.public_key() == owner {
+                return Ok(signer);
+            }
+        }
+        Err(Error::Invalid(
+            "original local owner key is unavailable on this device".into(),
+        ))
+    }
     pub(crate) fn native_thread_signer_at(
         &self,
         replica: &ThreadReplica,

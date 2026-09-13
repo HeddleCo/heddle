@@ -54,6 +54,7 @@ fn facts_with(rights: Vec<Right>, is_staff: bool) -> BiscuitFacts {
         bounded_identity_scope: String::new(),
         request_signed_session: false,
         root_established: false,
+        verified_temporary_passkey: false,
     }
 }
 
@@ -295,6 +296,9 @@ pub struct BiscuitFacts {
     /// Independent-root RPCs require this fact in addition to a single
     /// Biscuit block. Agent-rooted mints never emit it.
     pub root_established: bool,
+    /// Set only after hosted registry verification of a temporary passkey
+    /// session. Never inferred from caller-supplied Biscuit authority facts.
+    pub verified_temporary_passkey: bool,
 }
 
 // ---- Fact extraction -----------------------------------------------
@@ -587,6 +591,7 @@ impl BiscuitFacts {
             bounded_identity_scope: identity_observation_bounds.scope,
             request_signed_session,
             root_established,
+            verified_temporary_passkey: false,
         })
     }
 

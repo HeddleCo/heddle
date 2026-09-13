@@ -80,6 +80,19 @@ pub struct ThreadShowOutput {
     pub recovery_commands: Vec<String>,
 }
 
+/// Explicit native Thread ownership status and transitions.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "ThreadOwnershipSchema")]
+pub struct ThreadOwnershipOutput {
+    pub output_kind: &'static str,
+    pub thread: String,
+    pub status: &'static str,
+    pub owner: Option<String>,
+    pub claim_ids: Vec<String>,
+    pub winning_claim: Option<String>,
+    pub resolution_id: Option<String>,
+}
+
 fn serialize_empty_action_as_null<S>(
     action: &String,
     serializer: S,
