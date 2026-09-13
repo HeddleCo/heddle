@@ -42,19 +42,39 @@ pub use crate::hosted_runtime::claim_bridge::{
     DaemonClaimRouter, claim_bridge_socket_path, mount_claim_router,
 };
 
-/// Relay mode that keeps the endpoint reachable through the default
-/// (number-0) relay servers.
+/// Production and preview Heddle relays. Trailing slashes match the
+/// signed endpoint-descriptor encoding.
+///
+/// `heddle netd serve` binds this pair so a claim link can reach the
+/// machine from either environment. Hosted CLI connections still take
+/// their relay list from the signed descriptor (`RelayMode::custom`);
+/// this is only the daemon's home-relay map when no descriptor is in
+/// hand. Never fall through to iroh's [`RelayMode::Default`]: that
+/// map is n0's `*.relay.n0.iroh.link` and is not a Heddle relay.
+#[cfg(feature = "client")]
+const HEDDLE_RELAY_URLS: [&str; 2] = [
+    "https://relay.heddle.sh/",
+    "https://relay.preview.heddle.sh/",
+];
+
+/// Relay mode that keeps the endpoint reachable through Heddle's
+/// relays only.
 ///
 /// The persistent endpoint must stay relay-reachable: a browser
 /// holding only a claim link has no direct path to the machine, so it
 /// dials the advertised node id through a relay. Binding with
-/// [`RelayMode::Disabled`] would strand exactly that caller. Piece 2
-/// (weft subscription) will be able to pass a signed
-/// [`RelayMode::Custom`] set instead; the daemon keeps whatever relay
-/// mode it was bound with online for its whole lifetime.
+/// [`RelayMode::Disabled`] would strand exactly that caller. The
+/// daemon keeps this custom map online for its whole lifetime.
 #[cfg(feature = "client")]
 pub fn default_relay_mode() -> RelayMode {
-    RelayMode::Default
+    RelayMode::custom(HEDDLE_RELAY_URLS.iter().map(|url| {
+        url.parse().unwrap_or_else(|error| {
+            // Crate constants. A parse failure is a programming error,
+            // not a runtime condition; falling through to Default
+            // would put netd on n0's map.
+            panic!("HEDDLE_RELAY_URLS entry {url:?} must parse as RelayUrl: {error}")
+        })
+    }))
 }
 
 /// Bind the machine's single persistent Iroh endpoint on the device
