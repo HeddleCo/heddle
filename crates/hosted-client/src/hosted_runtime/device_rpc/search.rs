@@ -191,19 +191,16 @@ impl DeviceRpc {
                     cursor_scope.update(facts.delegation_agent_id.as_deref().unwrap_or("").as_bytes());
                 }
                 let cursor_scope = *cursor_scope.finalize().as_bytes();
-                let (mut position, mut offset) = if page.after_page.is_empty() {
-                    (0usize, 0u32)
+                let (mut position, mut after_operation) = if page.after_page.is_empty() {
+                    (0usize, None)
                 } else {
                     let directory = cursor_directory.context("search cursor has no selected Spool")?;
-                    let stored = repo::device_page_cursors::resume(
-                        directory, cursor_scope, binding.as_bytes(), "search", &page.after_page,
+                    let (ordinal, operation) = repo::device_page_cursors::resume_search(
+                        directory, cursor_scope, binding.as_bytes(), &page.after_page,
                     )?;
-                    (
-                        u32::from_be_bytes(stored[..4].try_into()?) as usize,
-                        u32::from_be_bytes(stored[4..8].try_into()?),
-                    )
+                    (ordinal, Some(objects::object::ContentHash::from_bytes(operation)))
                 };
-                ensure!(position <= selected.len(), "search cursor outside Spools");
+                ensure!(position < selected.len() || selected.is_empty(), "search cursor outside Spools");
                 let mut events = Vec::new();
                 for domain in &selection.kinds {
                     events.push(SearchEvent {
@@ -217,7 +214,7 @@ impl DeviceRpc {
                 }
                 let mut examined = 0usize;
                 let mut visible = 0usize;
-                let mut next_boundary = (position, offset);
+                let mut next_boundary = (position, None);
                 let mut has_more = false;
                 if matches!(mode, search_request::Mode::Unspecified | search_request::Mode::Lexical) {
                     'scan: while position < selected.len() {
@@ -234,7 +231,7 @@ impl DeviceRpc {
                         let batch = repo::thread_replication::collaboration_search::search_native(
                             &spool.heddle_dir,
                             &request.text,
-                            offset,
+                            after_operation,
                             remaining as u32,
                             &kinds,
                             selection.annotations.as_ref(),
@@ -244,8 +241,8 @@ impl DeviceRpc {
                         let facts = worker_session.facts(Some(&spool.capability_path))?;
                         let principal = uuid::Uuid::parse_str(&worker_session.principal)?;
                         for hit in batch.hits {
-                            offset = offset.checked_add(1).context("search offset overflow")?;
                             examined += 1;
+                            after_operation = Some(hit.operation);
                             if selection.threads.get(&spool.id).is_some_and(|threads| !threads.contains(hit.thread.as_bytes().as_slice())) { continue; }
                             let replica = repo::thread_replication::ThreadReplica::open(
                                 &spool.heddle_dir,
@@ -288,9 +285,10 @@ impl DeviceRpc {
                                 if let Some(discussion) = context.extracted_from {
                                     if !super::auth::discussion_visible(&repository, &replica, principal, facts.delegation_agent_id.as_deref(), discussion)? { continue; }
                                 }
+                                if selection.annotations.as_ref().is_some_and(|query| !query.matches(&context.tags)) { continue; }
                                 let scope = objects::object::CollaborationScope { spool: spool.id, thread: Some(hit.thread) };
                                 let (coverage, _) = super::collaboration_targets::project_for(spool, principal, facts.delegation_agent_id.as_deref(), &replica, &scope, &mut context.anchor, &mut context.tags)?;
-                                if coverage == Coverage::Unavailable || selection.annotations.as_ref().is_some_and(|query| !query.matches(&context.tags)) { continue; }
+                                if coverage == Coverage::Unavailable { continue; }
                             }
                             if visible == limit as usize {
                                 has_more = true;
@@ -331,11 +329,11 @@ impl DeviceRpc {
                                 })),
                             });
                             visible += 1;
-                            next_boundary = (position, offset);
+                            next_boundary = (position, Some(hit.operation));
                         }
                         if exhausted {
                             position += 1;
-                            offset = 0;
+                            after_operation = None;
                         }
                     }
                 }
@@ -343,10 +341,8 @@ impl DeviceRpc {
                     vec![]
                 } else {
                     let directory = cursor_directory.context("search cursor has no selected Spool")?;
-                    let mut stored = [0u8; 32];
-                    stored[..4].copy_from_slice(&(next_boundary.0 as u32).to_be_bytes());
-                    stored[4..8].copy_from_slice(&next_boundary.1.to_be_bytes());
-                    repo::device_page_cursors::issue(directory, cursor_scope, binding.as_bytes(), "search", stored)?.to_vec()
+                    let operation = next_boundary.1.context("search continuation has no served operation")?;
+                    repo::device_page_cursors::issue(directory, cursor_scope, binding.as_bytes(), &format!("search:{}", next_boundary.0), *operation.as_bytes())?.to_vec()
                 };
                 events.push(SearchEvent {
                     source: Some(this.endpoint()),

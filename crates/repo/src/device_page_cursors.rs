@@ -115,6 +115,36 @@ pub fn resume(
     resume_at(heddle_dir, scope, binding, section, token, now()?)
 }
 
+/// Resolve a Search cursor whose private section carries the selected Spool
+/// ordinal. The public token remains random and reveals neither ordinal nor
+/// the last served operation identity.
+pub fn resume_search(
+    heddle_dir: &Path,
+    scope: [u8; 32],
+    binding: &[u8],
+    token: &[u8],
+) -> Result<(usize, [u8; 32]), Error> {
+    if token.len() != 32 || binding.len() > 128 {
+        return Err(Error::Invalid);
+    }
+    let connection = local_metadata::open(heddle_dir)?;
+    let stored: Option<(String, Vec<u8>)> = connection
+        .query_row(
+            "SELECT section,last_scanned FROM device_page_cursors WHERE token=?1 AND scope=?2 AND binding=?3 AND section LIKE 'search:%' AND expires_at>?4",
+            params![token, scope.as_slice(), binding, now()?],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let (section, operation) = stored.ok_or(Error::Expired)?;
+    let ordinal = section
+        .strip_prefix("search:")
+        .ok_or(Error::Invalid)?
+        .parse::<usize>()
+        .map_err(|_| Error::Invalid)?;
+    let operation = operation.try_into().map_err(|_| Error::Invalid)?;
+    Ok((ordinal, operation))
+}
+
 fn resume_at(
     heddle_dir: &Path,
     scope: [u8; 32],
@@ -141,6 +171,32 @@ fn resume_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_cursor_keeps_spool_and_operation_private_and_retries() {
+        let home = tempfile::tempdir().expect("local search cursor store");
+        let scope = [19; 32];
+        let operation = [29; 32];
+        let token = issue(home.path(), scope, b"search-query", "search:3", operation)
+            .expect("issue private search position");
+        assert_ne!(token, operation);
+        assert_eq!(
+            resume_search(home.path(), scope, b"search-query", &token).expect("first page"),
+            (3, operation)
+        );
+        assert_eq!(
+            resume_search(home.path(), scope, b"search-query", &token).expect("retry"),
+            (3, operation)
+        );
+        assert!(matches!(
+            resume_search(home.path(), [20; 32], b"search-query", &token),
+            Err(Error::Expired)
+        ));
+        assert!(matches!(
+            resume_search(home.path(), scope, b"other-query", &token),
+            Err(Error::Expired)
+        ));
+    }
 
     #[test]
     fn opaque_cursor_retries_and_rejects_other_reader_or_query() {

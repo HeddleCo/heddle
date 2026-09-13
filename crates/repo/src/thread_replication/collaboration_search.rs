@@ -75,7 +75,7 @@ pub struct NativeBatch {
 pub fn search_native(
     directory: &std::path::Path,
     text: &str,
-    offset: u32,
+    after_operation: Option<objects::object::ContentHash>,
     limit: u32,
     kinds: &[i32],
     annotations: Option<&objects::object::AnnotationQuery>,
@@ -83,7 +83,6 @@ pub fn search_native(
     if text.len() > 4096
         || limit == 0
         || limit > 257
-        || offset > 10_000
         || kinds.is_empty()
         || kinds.len() > 3
         || kinds.iter().any(|kind| !(0..=2).contains(kind))
@@ -114,9 +113,13 @@ pub fn search_native(
         SELECT l.thread,l.thread,0,lower(hex(l.thread)),
                substr(l.name||char(10)||l.intent,1,512),-1.0,x''
         FROM thread_list l WHERE ?4 AND instr(lower(l.name||' '||l.intent),lower(?5))>0
+      ), anchor AS (
+        SELECT score,thread,operation,kind,record FROM hits WHERE operation=?6
       ) SELECT thread,operation,kind,record,summary,score,canonical FROM hits
-        ORDER BY score,thread,operation,kind,record LIMIT ?6 OFFSET ?7";
-    let filters_only = "SELECT s.thread,s.operation,s.kind,s.record,
+        WHERE ?6 IS NULL OR ((SELECT count(*) FROM anchor)=1 AND
+          (score,thread,operation,kind,record)>(SELECT score,thread,operation,kind,record FROM anchor))
+        ORDER BY score,thread,operation,kind,record LIMIT ?7";
+    let filters_only = "WITH hits AS (SELECT s.thread,s.operation,s.kind,s.record,
                substr(s.text,1,512) summary,0.0 score,o.canonical
         FROM collaboration_search s JOIN operations o ON o.id=s.operation
         WHERE o.status=1 AND s.kind=2 AND NOT EXISTS(
@@ -124,7 +127,12 @@ pub fn search_native(
             JOIN collaboration_operations c ON c.operation=child.id
             WHERE p.parent=o.id AND child.status=1 AND c.thread=s.thread
               AND c.record_kind=2 AND c.record_id=s.record)
-        ORDER BY score,s.thread,s.operation,s.kind,s.record LIMIT ?1 OFFSET ?2";
+      ), anchor AS (
+        SELECT score,thread,operation,kind,record FROM hits WHERE operation=?1
+      ) SELECT thread,operation,kind,record,summary,score,canonical FROM hits
+        WHERE ?1 IS NULL OR ((SELECT count(*) FROM anchor)=1 AND
+          (score,thread,operation,kind,record)>(SELECT score,thread,operation,kind,record FROM anchor))
+        ORDER BY score,thread,operation,kind,record LIMIT ?2";
     let mut statement = connection.prepare(if text.trim().is_empty() {
         filters_only
     } else {
@@ -143,7 +151,10 @@ pub fn search_native(
         ))
     };
     let rows = if text.trim().is_empty() {
-        statement.query_map(params![limit, offset], read)?
+        statement.query_map(
+            params![after_operation.map(|id| id.as_bytes().to_vec()), limit],
+            read,
+        )?
     } else {
         statement.query_map(
             params![
@@ -152,8 +163,8 @@ pub fn search_native(
                 kinds.contains(&2),
                 kinds.contains(&0),
                 text.trim(),
-                limit,
-                offset
+                after_operation.map(|id| id.as_bytes().to_vec()),
+                limit
             ],
             read,
         )?
