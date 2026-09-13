@@ -334,6 +334,7 @@ async fn serve_call(
                         "/heddle.api.v2alpha1.WorkspaceService/ResolveResources".into(),
                         "/heddle.api.v2alpha1.SpoolService/ObserveSpool".into(),
                         "/heddle.api.v2alpha1.SpoolService/DeleteSpool".into(),
+                        "/heddle.api.v2alpha1.IdentityService/ObserveIdentity".into(),
                     ],
                     default_read_budget: Some(v2::ReadBudget {
                         max_items: 64,
@@ -400,6 +401,8 @@ async fn serve_call(
         StreamingShape::ServerStreaming => {
             if method == "/heddle.api.v2alpha1.SpoolService/ObserveSpool" {
                 serve_native_spool_observation(&mut send, server_key).await;
+            } else if method == "/heddle.api.v2alpha1.IdentityService/ObserveIdentity" {
+                serve_native_identity_observation(&mut send, server_key).await;
             } else if method == LIST_CONTEXT_METHOD {
                 if let Some(context) = context {
                     serve_list_context(&mut send, &mut recv, &mut request, context).await;
@@ -462,6 +465,76 @@ async fn serve_call(
         }
     }
     send.finish().unwrap();
+}
+
+async fn serve_native_identity_observation(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+) {
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let events = [
+        v2::IdentityEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 1,
+                body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                    source: Some(source),
+                    binding_digest: vec![8; 32],
+                    accepted_budget: Some(budget),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+        v2::IdentityEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 2,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(v2::identity_event::Payload::Identity(v2::PrincipalRecord {
+                id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+                account_id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+                personal_spool: Some(v2::SpoolAddress {
+                    r#ref: Some(v2::SpoolRef {
+                        id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+                    }),
+                    path_segments: vec!["acme".into()],
+                }),
+                ..Default::default()
+            })),
+        },
+        v2::IdentityEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 3,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+    ];
+    for event in events {
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
 }
 
 async fn serve_native_spool_observation(

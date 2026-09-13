@@ -3,7 +3,7 @@ use api::heddle::api::v1alpha1::{
     BootstrapOwnerRootResponse, CheckMergeEligibilityRequest, CheckMergeEligibilityResponse,
     CreateGrantRequest, CreateInvitationRequest, CreateServiceAccountRequest,
     CreateSignupInviteRequest, CreateSignupInviteResponse, DeleteGrantRequest,
-    GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse, GetCurrentUserSpoolRequest,
+    GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse,
     GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
     IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
     ListSignupInvitesRequest, ListSignupInvitesResponse, ListSpoolsRequest,
@@ -144,13 +144,66 @@ impl HostedClient {
     }
 
     pub async fn get_current_user_spool(&mut self) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        let spool = authed_call!(
-            self,
-            get_current_user_spool,
-            "GetCurrentUserSpool",
-            GetCurrentUserSpoolRequest {}
-        );
-        Ok(to_protocol_spool(spool))
+        use api::heddle::api::v2alpha1 as contract;
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let mut observation = remote
+            .observe::<thread_api::rpc::IdentityServiceObserveIdentity>(
+                contract::ObserveIdentityRequest {
+                    observe: Some(contract::ObserveOptions {
+                        mode: contract::ObservationMode::Once as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(native_protocol_error)?;
+        let batch = observation
+            .next_commit()
+            .await
+            .map_err(native_protocol_error)?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState(
+                    "identity observation ended without a checkpoint".into(),
+                )
+            })?;
+        let mut principals = batch.changes.into_iter().filter_map(|change| match change {
+            contract::identity_event::Payload::Identity(principal) => Some(principal),
+            _ => None,
+        });
+        let principal = principals.next().ok_or_else(|| {
+            ProtocolError::InvalidState("personal Spool identity unavailable".into())
+        })?;
+        if principals.next().is_some() {
+            return Err(ProtocolError::InvalidState(
+                "identity observation returned multiple principals".into(),
+            ));
+        }
+        let address = principal.personal_spool.ok_or_else(|| {
+            ProtocolError::ObjectNotFound("personal Spool has not been created".into())
+        })?;
+        let reference = address.r#ref.ok_or_else(|| {
+            ProtocolError::InvalidState("personal Spool has no stable identity".into())
+        })?;
+        uuid::Uuid::parse_str(&reference.id).map_err(native_protocol_error)?;
+        if address.path_segments.is_empty()
+            || address
+                .path_segments
+                .iter()
+                .any(|segment| segment.is_empty() || segment.contains('/'))
+        {
+            return Err(ProtocolError::InvalidState(
+                "personal Spool address is invalid".into(),
+            ));
+        }
+        Ok(wire::HostedSpoolInfo {
+            spool_id: reference.id,
+            full_path: address.path_segments.join("/"),
+            kind: "spool".into(),
+            is_repo: false,
+            display_name: address.path_segments.last().cloned(),
+        })
     }
 
     pub async fn list_spools(
@@ -812,6 +865,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn personal_spool_comes_from_native_identity_observation() {
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        let personal = client
+            .get_current_user_spool()
+            .await
+            .expect("v2 personal Spool");
+        assert_eq!(personal.full_path, "acme");
+        assert_eq!(
+            personal.spool_id,
+            uuid::Uuid::from_bytes([2; 16]).to_string()
+        );
+        client.close().await;
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
     async fn administration_facade_builds_and_dispatches_every_native_request() {
         let _home = IsolatedHeddleHome::new();
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
@@ -836,7 +905,15 @@ mod tests {
             })
             .await;
         client.begin_login("alice@example.com").await.unwrap();
-        let _ = client.get_current_user_spool().await;
+        let personal = client
+            .get_current_user_spool()
+            .await
+            .expect("v2 personal Spool");
+        assert_eq!(personal.full_path, "acme");
+        assert_eq!(
+            personal.spool_id,
+            uuid::Uuid::from_bytes([2; 16]).to_string()
+        );
         assert!(client.list_spools(true).await.unwrap().is_empty());
         client
             .create_spool("acme", "widgets", true, Some("Widgets".to_string()))
