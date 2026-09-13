@@ -231,7 +231,7 @@ const UNSWEPT_TODO: &[&str] = &[
     "thread approvals",
     "thread approve",
     "thread captures",
-    "thread check-merge",
+    "thread readiness",
     "thread current",
     "thread move",
     "watch",

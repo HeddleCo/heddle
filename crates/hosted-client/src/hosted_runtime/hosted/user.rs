@@ -1202,7 +1202,7 @@ fn native_grant_role(
     }
 }
 
-fn require_applied_receipt(
+pub(super) fn require_applied_receipt(
     receipt: Option<api::heddle::api::v2alpha1::MutationReceipt>,
     operation_id: &str,
     endpoint: &Option<api::heddle::api::v2alpha1::EndpointRef>,
@@ -1310,6 +1310,50 @@ mod tests {
             .expect("native versioned promotion");
         assert_eq!(promoted.spool_id, original.spool_id);
         assert_eq!(promoted.full_path, "acme");
+        client.close().await;
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn native_review_observation_feeds_original_signed_record() {
+        use objects::object::{ContentHash, StateId};
+        use thread_api::thread_control::{Author, Control, PreparedControl, Review, ReviewKind};
+
+        let (client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        let snapshot = client.observe_review("acme", "feature").await.expect("review snapshot");
+        assert_eq!(snapshot.overview.name, "feature");
+        assert_eq!(snapshot.comparison.as_ref().expect("comparison").policy_version, vec![6; 32]);
+        let landing = client.observe_landing_assessment("acme", "feature", "main")
+            .await
+            .expect("target-bound assessment");
+        let assessment = landing.overview.landing_assessment.expect("exact landing target");
+        assert_eq!(assessment.target.expect("target").id.expect("ID").value, vec![4; 32]);
+        let signer = crypto::Ed25519Signer::from_seed(&[13; 32]).expect("test author");
+        let prepared = PreparedControl::sign(
+            &snapshot.overview,
+            Control::Review(Review {
+                id: uuid::Uuid::now_v7(),
+                source: StateId::from_bytes([5; 32]),
+                target: StateId::from_bytes([5; 32]),
+                policy_version: ContentHash::from_bytes([6; 32]),
+                kind: ReviewKind::Approval,
+                explanation: "looks ready".into(),
+                revokes: None,
+                expires_at_unix_seconds: None,
+            }),
+            Author {
+                account: uuid::Uuid::from_bytes([9; 16]),
+                agent_id: None,
+                authority_envelope: b"test original authority",
+            },
+            uuid::Uuid::now_v7(),
+            1_800_000_000_000,
+            &signer,
+        )
+        .expect("sign exact review comparison");
+        client.record_review(&prepared.record_review().expect("wire request"))
+            .await
+            .expect("native typed review RPC");
         client.close().await;
         server.await.expect("server");
     }

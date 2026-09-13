@@ -111,17 +111,17 @@ Advanced split form:
     #[command(visible_alias = "delete")]
     Drop(ThreadDropArgs),
 
-    /// Record a merge approval for `<source> -> <target>`.
+    /// Record a signed approval for the Thread's current comparison.
     Approve(ThreadApproveArgs),
 
-    /// List approvals recorded for `<source> -> <target>`.
+    /// List review decisions recorded for a Thread.
     Approvals(ThreadApprovalsArgs),
 
-    /// Revoke a previously recorded approval by id.
+    /// Revoke your previously recorded approval by its ID.
     RevokeApproval(ThreadRevokeApprovalArgs),
 
-    /// Check whether `<source> -> <target>` would merge under
-    /// the repo's branch-protection policies. Read-only.
+    /// Inspect current Thread readiness and requirements. Read-only.
+    #[command(name = "readiness")]
     CheckMerge(ThreadCheckMergeArgs),
 
     /// Sweep merged, stale auto-created, or abandoned threads.

@@ -125,7 +125,7 @@ schema_registry! {
     (&["thread approve"], ApprovalOutput),
     (&["thread approvals"], Vec<ApprovalOutput>),
     (&["thread revoke-approval"], ApprovalRevokeOutput),
-    (&["thread check-merge"], EligibilityOutput),
+    (&["thread readiness"], EligibilityOutput),
     (&["thread cleanup"], ThreadCleanupOutput),
     (&["thread marker list"], MarkerListOutput),
     (&["thread marker create", "thread marker show"], MarkerOpOutput),

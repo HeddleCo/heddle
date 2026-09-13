@@ -39,6 +39,8 @@ mod test_https;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_server;
 mod thread_identity;
+mod thread_review;
+pub use thread_review::ReviewSnapshot;
 mod thread_metadata;
 mod user;
 

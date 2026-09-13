@@ -1010,16 +1010,11 @@ pub struct ThreadDropArgs {
     pub force: bool,
 }
 
-/// Arguments for `thread approve` — record an approval for a
-/// `<source> -> <target>` merge against the source thread's
-/// current state.
+/// Arguments for `thread approve` — sign the current exact Thread comparison.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ThreadApproveArgs {
-    /// Source thread identifier (the change set being merged).
-    pub source: String,
-
-    /// Target thread identifier (where the merge would land).
-    pub target: String,
+    /// Thread name or ID to review.
+    pub thread: String,
 
     /// Optional human note attached to the approval.
     #[arg(long)]
@@ -1030,12 +1025,10 @@ pub struct ThreadApproveArgs {
     pub remote: String,
 }
 
-/// Arguments for `thread approvals` — list every approval recorded
-/// for `<source> -> <target>`.
+/// Arguments for `thread approvals` — list decisions for one Thread.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ThreadApprovalsArgs {
-    pub source: String,
-    pub target: String,
+    pub thread: String,
     #[arg(long, default_value = "origin")]
     pub remote: String,
 }
@@ -1044,27 +1037,23 @@ pub struct ThreadApprovalsArgs {
 /// approval by id.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ThreadRevokeApprovalArgs {
+    /// Thread containing the decision.
+    pub thread: String,
+
     /// UUID of the approval row to revoke.
     pub id: String,
     #[arg(long, default_value = "origin")]
     pub remote: String,
 }
 
-/// Arguments for `thread check-merge` — query the merge gate
-/// without recording anything. Returns the unmet requirements.
+/// Arguments for `thread readiness` — inspect the Thread's current review state.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ThreadCheckMergeArgs {
-    pub source: String,
+    /// Source Thread whose accepted head would land.
+    pub thread: String,
+
+    /// Target Thread receiving the landing.
     pub target: String,
-
-    /// 'merge' (default), 'force_push', or 'complete'.
-    #[arg(long, default_value = "merge")]
-    pub gated_action: String,
-
-    /// File paths the diff touches, repeat or comma-separate. Empty =
-    /// "we don't know" (every path-conditional policy fires).
-    #[arg(long = "path", value_delimiter = ',')]
-    pub changed_paths: Vec<String>,
 
     #[arg(long, default_value = "origin")]
     pub remote: String,

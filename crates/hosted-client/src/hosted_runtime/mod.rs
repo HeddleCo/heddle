@@ -39,7 +39,7 @@ pub mod whoami;
 
 pub use device_flow::AgentTemplate;
 pub use hosted::{
-    HostedAuthMode, HostedClient, HostedSession, ServerStream, resolve_active_bearer,
+    HostedAuthMode, HostedClient, HostedSession, ReviewSnapshot, ServerStream, resolve_active_bearer,
     resolve_hosted_credential,
 };
 pub use websocket::connect_websocket;

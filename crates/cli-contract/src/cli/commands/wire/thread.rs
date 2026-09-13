@@ -250,41 +250,42 @@ pub struct ThreadAbsorbOutput {
     pub message: String,
 }
 
-/// One approval row (`thread approve`, `thread approvals`,
-/// `thread check-merge`).
+/// One native signed review decision (`thread approve`, `thread approvals`).
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadApprovalSchema")]
 pub struct ApprovalOutput {
     pub id: String,
-    pub repo_path: String,
-    pub source_thread: String,
-    pub target_thread: String,
-    pub source_state: String,
-    pub approver_user_id: String,
-    pub note: String,
-    pub approved_at: u64,
+    pub thread: String,
+    pub source_revision: String,
+    pub base_revision: String,
+    pub policy_version: String,
+    pub principal_id: String,
+    pub kind: String,
+    pub explanation: String,
     pub expires_at: u64,
 }
 
-/// One unmet merge-eligibility requirement.
+/// One native readiness requirement.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadMergeRequirementSchema")]
 pub struct UnmetOutput {
-    pub policy_id: String,
+    pub policy_id: Option<String>,
     pub kind: String,
-    pub group_id: String,
-    pub reason: String,
-    pub needed: u32,
-    pub have: u32,
+    pub explanation: String,
+    pub recovery_method: String,
 }
 
-/// JSON payload for `thread check-merge`.
+/// JSON payload for `thread readiness`.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadMergeEligibilitySchema")]
 pub struct EligibilityOutput {
-    pub allowed: bool,
-    pub unmet: Vec<UnmetOutput>,
-    pub valid_approvals: Vec<ApprovalOutput>,
+    pub thread: String,
+    pub target: String,
+    pub source_revision: String,
+    pub target_revision: String,
+    pub policy_version: String,
+    pub readiness: String,
+    pub requirements: Vec<UnmetOutput>,
 }
 
 /// JSON payload for `thread revoke-approval`.
@@ -293,5 +294,5 @@ pub struct EligibilityOutput {
 pub struct ApprovalRevokeOutput {
     pub output_kind: &'static str,
     pub id: String,
-    pub deleted: bool,
+    pub revoked: bool,
 }

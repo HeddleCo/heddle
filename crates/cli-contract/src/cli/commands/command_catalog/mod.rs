@@ -2927,8 +2927,8 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["thread", "check-merge"],
-        documented_schemas(READ_JSON, &["thread check-merge"]),
+        &["thread", "readiness"],
+        documented_schemas(READ_JSON, &["thread readiness"]),
     ),
     entry(
         &["thread", "cleanup"],
@@ -4718,7 +4718,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ThreadCommands::Approve(_) => vec!["thread", "approve"],
             ThreadCommands::Approvals(_) => vec!["thread", "approvals"],
             ThreadCommands::RevokeApproval(_) => vec!["thread", "revoke-approval"],
-            ThreadCommands::CheckMerge(_) => vec!["thread", "check-merge"],
+            ThreadCommands::CheckMerge(_) => vec!["thread", "readiness"],
             ThreadCommands::Cleanup(_) => vec!["thread", "cleanup"],
             ThreadCommands::Collapse(_) => vec!["thread", "collapse"],
             ThreadCommands::Expand(_) => vec!["thread", "expand"],
