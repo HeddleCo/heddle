@@ -206,10 +206,10 @@ pub struct WhoamiOutput {
     pub source: String,
     /// Locally verified subject, present even when the server is unreachable.
     pub subject: Option<String>,
-    /// The server answered `WhoAmI` — the hosted identity below is authoritative.
+    /// The server answered native `ObserveIdentity` with the current credential.
     pub reachable: bool,
-    /// `root` (full-authority device/human token), `agent` (an offline-derived,
-    /// attenuated delegation), or `service-account`. `None` when unauthenticated.
+    /// Locally inferred credential class, replaced by the observed v2 class
+    /// when the server is reachable. `None` when unauthenticated.
     pub token_kind: Option<String>,
     /// Resource scopes the delegation chain restricts this token to. Empty ⇒
     /// full resource authority.
@@ -231,28 +231,18 @@ pub struct WhoamiOutput {
 #[derive(Debug, Serialize, JsonSchema)]
 #[schemars(rename = "WhoamiIdentitySchema")]
 pub struct WhoamiIdentity {
-    pub subject: String,
-    pub actor_subject: String,
-    pub is_staff: bool,
-    pub is_service_account: bool,
-    pub is_biscuit: bool,
-    pub session_id: String,
-    pub amr: Vec<String>,
-    /// The scope string the server records for this credential.
-    pub server_scope: String,
-    pub credential_id: String,
-    pub device_id: Option<String>,
+    pub principal_id: String,
+    pub account_id: String,
+    pub handle: Option<String>,
+    pub acting_agent_id: Option<String>,
+    pub rooting_tier: String,
+    pub credential_id: Option<String>,
+    pub credential_subject: String,
+    pub credential_kind: String,
+    pub session_id: Option<String>,
+    pub authentication_methods: Vec<String>,
     pub agent_provider: Option<String>,
     pub agent_model: Option<String>,
-    /// Resource roles the caller holds directly (UI gating only; the server
-    /// enforces effective, inherited roles on each RPC).
-    pub roles: Vec<WhoamiRole>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[schemars(rename = "WhoamiRoleSchema")]
-pub struct WhoamiRole {
-    pub resource_path: String,
-    pub resource_kind: String,
-    pub role: String,
+    /// Verified method hints from the current credential observation.
+    pub available_actions: Vec<String>,
 }

@@ -8,7 +8,7 @@ use heddle_cli_contract::cli::commands::wire::auth::{
     AgentAccountCreatedOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, CaptureActor,
     DescriptorTrustSource as WireDescriptorTrustSource, HumanPromotionDirective,
     ServiceTokenOutput, SignupInviteCreatedOutput, SignupInviteListOutput, SignupInviteOutput,
-    WhoamiIdentity, WhoamiOutput, WhoamiRole,
+    WhoamiIdentity, WhoamiOutput,
 };
 use hosted_client::hosted_runtime::{
     AgentTemplate,
@@ -573,27 +573,19 @@ fn whoami_output(report: WhoamiReport) -> WhoamiOutput {
 
 fn whoami_identity(identity: HostedIdentity) -> WhoamiIdentity {
     WhoamiIdentity {
-        subject: identity.subject,
-        actor_subject: identity.actor_subject,
-        is_staff: identity.is_staff,
-        is_service_account: identity.is_service_account,
-        is_biscuit: identity.is_biscuit,
-        session_id: identity.session_id,
-        amr: identity.amr,
-        server_scope: identity.server_scope,
+        principal_id: identity.principal_id,
+        account_id: identity.account_id,
+        handle: identity.handle,
+        acting_agent_id: identity.acting_agent_id,
+        rooting_tier: identity.rooting_tier,
         credential_id: identity.credential_id,
-        device_id: identity.device_id,
+        credential_subject: identity.credential_subject,
+        credential_kind: identity.credential_kind,
+        session_id: identity.session_id,
+        authentication_methods: identity.authentication_methods,
         agent_provider: identity.agent_provider,
         agent_model: identity.agent_model,
-        roles: identity
-            .roles
-            .into_iter()
-            .map(|role| WhoamiRole {
-                resource_path: role.resource_path,
-                resource_kind: role.resource_kind,
-                role: role.role,
-            })
-            .collect(),
+        available_actions: identity.available_actions,
     }
 }
 
@@ -628,34 +620,38 @@ fn write_whoami_human(
         writeln!(writer, "Subject:       {subject}")?;
     }
     if let Some(identity) = &output.identity {
-        if identity.actor_subject != identity.subject && !identity.actor_subject.is_empty() {
-            writeln!(writer, "Acting as:     {}", identity.actor_subject)?;
+        writeln!(writer, "Account:       {}", identity.account_id)?;
+        if let Some(handle) = &identity.handle {
+            writeln!(writer, "Handle:        {handle}")?;
         }
-        if !identity.credential_id.is_empty() {
-            writeln!(writer, "Credential:    {}", identity.credential_id)?;
+        if let Some(agent_id) = &identity.acting_agent_id {
+            writeln!(writer, "Acting agent:  {agent_id}")?;
         }
-        if !identity.session_id.is_empty() {
-            writeln!(writer, "Session:       {}", identity.session_id)?;
+        writeln!(writer, "Account root:  {}", identity.rooting_tier)?;
+        writeln!(
+            writer,
+            "Credential:    {} ({})",
+            identity.credential_subject, identity.credential_kind
+        )?;
+        if let Some(credential_id) = &identity.credential_id {
+            writeln!(writer, "Credential ID: {credential_id}")?;
         }
-        if identity.is_staff {
-            writeln!(writer, "Staff:         yes")?;
+        if let Some(session_id) = &identity.session_id {
+            writeln!(writer, "Session:       {session_id}")?;
         }
-        if !identity.server_scope.is_empty() {
-            writeln!(writer, "Server scope:  {}", identity.server_scope)?;
+        if !identity.authentication_methods.is_empty() {
+            writeln!(
+                writer,
+                "Auth methods:  {}",
+                identity.authentication_methods.join(", ")
+            )?;
         }
-        if !identity.roles.is_empty() {
-            let roles = identity
-                .roles
-                .iter()
-                .map(|role| {
-                    format!(
-                        "{}:{}={}",
-                        role.resource_kind, role.resource_path, role.role
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(writer, "Roles:         {roles}")?;
+        if !identity.available_actions.is_empty() {
+            writeln!(
+                writer,
+                "Method hints:  {}",
+                identity.available_actions.join(", ")
+            )?;
         }
     } else {
         writeln!(
@@ -792,7 +788,7 @@ mod tests {
 
     use hosted_client::hosted_runtime::{
         auth::{AuthLogout, HumanPromotionDirective as HostedHumanPromotionDirective},
-        whoami::{CaptureActor as HostedCaptureActor, WhoamiRole as HostedWhoamiRole},
+        whoami::CaptureActor as HostedCaptureActor,
     };
 
     use super::*;
@@ -1101,23 +1097,19 @@ mod tests {
 
     fn identity() -> HostedIdentity {
         HostedIdentity {
-            subject: "human:1".into(),
-            actor_subject: "agent:reviewer-1".into(),
-            is_staff: true,
-            is_service_account: false,
-            is_biscuit: true,
-            session_id: "session-1".into(),
-            amr: vec!["passkey".into()],
-            server_scope: "api.heddle.test".into(),
-            credential_id: "credential-1".into(),
-            device_id: Some("device-1".into()),
+            principal_id: "principal-1".into(),
+            account_id: "account-1".into(),
+            handle: Some("heddle-human".into()),
+            acting_agent_id: Some("reviewer-1".into()),
+            rooting_tier: "self-rooted".into(),
+            credential_id: Some("credential-1".into()),
+            credential_subject: "agent:reviewer-1".into(),
+            credential_kind: "agent".into(),
+            session_id: Some("session-1".into()),
+            authentication_methods: vec!["passkey".into()],
             agent_provider: Some("codex".into()),
             agent_model: Some("gpt".into()),
-            roles: vec![HostedWhoamiRole {
-                resource_path: "heddle/heddle".into(),
-                resource_kind: "repo".into(),
-                role: "owner".into(),
-            }],
+            available_actions: vec!["/heddle.api.v2alpha1.ThreadService/RecordReview".into()],
         }
     }
 
@@ -1151,8 +1143,8 @@ mod tests {
         assert_eq!(machine.output_kind, "whoami");
         assert_eq!(machine.capture_actor.email, "human@example.com");
         let mapped = machine.identity.expect("mapped hosted identity");
-        assert_eq!(mapped.actor_subject, "agent:reviewer-1");
-        assert_eq!(mapped.roles[0].role, "owner");
+        assert_eq!(mapped.credential_subject, "agent:reviewer-1");
+        assert_eq!(mapped.available_actions.len(), 1);
 
         let mut bytes = Vec::new();
         write_whoami_human(&mut bytes, &report).expect("render reachable whoami");
@@ -1160,12 +1152,11 @@ mod tests {
         for expected in [
             "Capture actor: Heddle Human <human@example.com>",
             "Source:        environment",
-            "Acting as:     agent:reviewer-1",
-            "Credential:    credential-1",
+            "Acting agent:  reviewer-1",
+            "Credential:    agent:reviewer-1 (agent)",
             "Session:       session-1",
-            "Staff:         yes",
-            "Server scope:  api.heddle.test",
-            "repo:heddle/heddle=owner",
+            "Account root:  self-rooted",
+            "Method hints:  /heddle.api.v2alpha1.ThreadService/RecordReview",
             "Scopes:        repo:heddle/heddle",
             "Op ceiling:    Pull, Push",
             "(in 60s)",

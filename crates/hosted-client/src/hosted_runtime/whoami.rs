@@ -7,7 +7,7 @@
 //! only reads; it never attaches a credential.
 
 use anyhow::{Context, Result};
-use api::heddle::api::v1alpha1::HostedRole;
+use api::heddle::api::v2alpha1::{CredentialKind, RootingTier};
 use biscuit_auth::builder::{BlockBuilder, Term};
 use config::UserConfig;
 use crypto::Ed25519Signer;
@@ -46,26 +46,21 @@ pub struct WhoamiReport {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WhoamiIdentity {
-    pub subject: String,
-    pub actor_subject: String,
-    pub is_staff: bool,
-    pub is_service_account: bool,
-    pub is_biscuit: bool,
-    pub session_id: String,
-    pub amr: Vec<String>,
-    pub server_scope: String,
-    pub credential_id: String,
-    pub device_id: Option<String>,
+    pub principal_id: String,
+    pub account_id: String,
+    pub handle: Option<String>,
+    pub acting_agent_id: Option<String>,
+    pub rooting_tier: String,
+    pub credential_id: Option<String>,
+    pub credential_subject: String,
+    pub credential_kind: String,
+    pub session_id: Option<String>,
+    pub authentication_methods: Vec<String>,
     pub agent_provider: Option<String>,
     pub agent_model: Option<String>,
-    pub roles: Vec<WhoamiRole>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WhoamiRole {
-    pub resource_path: String,
-    pub resource_kind: String,
-    pub role: String,
+    /// Effective method hints from the current credential observation, not
+    /// guessed resource roles or authority granted by this read.
+    pub available_actions: Vec<String>,
 }
 
 fn capture_actor_from_resolved(resolved: &ResolvedPrincipal) -> CaptureActor {
@@ -95,18 +90,14 @@ async fn resolve_whoami(start_path: &std::path::Path, server: &str) -> Result<Wh
     // than erroring — `reachable` records which case this is.
     output.identity = fetch_identity(server).await.ok();
     output.reachable = output.identity.is_some();
-    if output
-        .identity
-        .as_ref()
-        .is_some_and(|identity| identity.is_service_account)
-    {
-        output.token_kind = Some("service-account".to_string());
+    if let Some(identity) = &output.identity {
+        output.token_kind = Some(identity.credential_kind.clone());
     }
     output.recommended_action = if !output.proof_key_available {
         Some(format!("heddle auth login --server {server}"))
     } else if !output.reachable {
         Some(format!(
-            "server did not answer WhoAmI; check connectivity to {server} or re-run `heddle auth login --server {server}`"
+            "server did not answer ObserveIdentity; check connectivity to {server} or re-run `heddle auth login --server {server}`"
         ))
     } else {
         None
@@ -183,7 +174,7 @@ fn resolve_local_whoami(
         Some(format!("heddle auth login --server {server}"))
     } else {
         Some(format!(
-            "server did not answer WhoAmI; check connectivity to {server} or re-run `heddle auth login --server {server}`"
+            "server did not answer ObserveIdentity; check connectivity to {server} or re-run `heddle auth login --server {server}`"
         ))
     };
 
@@ -218,33 +209,63 @@ async fn fetch_identity(server: &str) -> Result<WhoamiIdentity> {
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
     let response = client
-        .who_am_i()
+        .observe_current_identity()
         .await
         .map_err(|error| anyhow::anyhow!(error));
     client.close().await;
-    let response = response?;
+    let (principal, credential) = response?;
+    project_current_identity(principal, credential)
+}
+
+fn project_current_identity(
+    principal: api::heddle::api::v2alpha1::PrincipalRecord,
+    credential: api::heddle::api::v2alpha1::CurrentCredentialRecord,
+) -> Result<WhoamiIdentity> {
+    let kind = match CredentialKind::try_from(credential.kind).ok() {
+        Some(CredentialKind::Device) => "device",
+        Some(CredentialKind::Agent) => "agent",
+        Some(CredentialKind::Service) => "service",
+        Some(CredentialKind::Anonymous) => "anonymous",
+        _ => anyhow::bail!("identity view has unknown credential kind"),
+    };
+    let rooting_tier = match RootingTier::try_from(principal.rooting_tier).ok() {
+        Some(RootingTier::SelfRooted) => "self-rooted",
+        Some(RootingTier::ServerRooted) => "server-rooted",
+        Some(RootingTier::AgentRooted) => "agent-rooted",
+        _ => anyhow::bail!("identity view has unknown account rooting tier"),
+    };
+    let mut actions = credential
+        .actions
+        .into_iter()
+        .filter(|action| action.implemented && action.authorized)
+        .map(|action| {
+            if action.target.is_some() {
+                format!("{} [target-scoped]", action.method)
+            } else {
+                action.method
+            }
+        })
+        .collect::<Vec<_>>();
+    actions.sort();
+    actions.dedup();
     Ok(WhoamiIdentity {
-        subject: response.subject,
-        actor_subject: response.actor_subject,
-        is_staff: response.is_staff,
-        is_service_account: response.is_service_account,
-        is_biscuit: response.is_biscuit,
-        session_id: response.session_id,
-        amr: response.amr,
-        server_scope: response.scope,
-        credential_id: response.credential_id,
-        device_id: response.device_id,
-        agent_provider: response.agent_provider,
-        agent_model: response.agent_model,
-        roles: response
-            .roles
-            .into_iter()
-            .map(|role| WhoamiRole {
-                resource_path: role.resource_path,
-                resource_kind: role.resource_kind,
-                role: hosted_role_name(role.role).to_string(),
-            })
-            .collect(),
+        principal_id: principal.id,
+        account_id: principal.account_id,
+        handle: (!principal.handle.is_empty()).then_some(principal.handle),
+        acting_agent_id: (!principal.acting_agent_id.is_empty())
+            .then_some(principal.acting_agent_id),
+        rooting_tier: rooting_tier.into(),
+        credential_id: credential.r#ref.map(|value| value.id),
+        credential_subject: credential.subject,
+        credential_kind: kind.into(),
+        session_id: credential
+            .session
+            .and_then(|session| session.r#ref.map(|value| value.id)),
+        authentication_methods: credential.authentication_methods,
+        agent_provider: (!credential.agent_provider.is_empty())
+            .then_some(credential.agent_provider),
+        agent_model: (!credential.agent_model.is_empty()).then_some(credential.agent_model),
+        available_actions: actions,
     })
 }
 
@@ -323,23 +344,71 @@ fn biscuit_string_literals(fragment: &str) -> Vec<String> {
     literals
 }
 
-fn hosted_role_name(role: i32) -> &'static str {
-    match HostedRole::try_from(role) {
-        Ok(HostedRole::Reader) => "reader",
-        Ok(HostedRole::Developer) => "developer",
-        Ok(HostedRole::Maintainer) => "maintainer",
-        Ok(HostedRole::Admin) => "admin",
-        Ok(HostedRole::Owner) => "owner",
-        Ok(HostedRole::Unspecified) | Err(_) => "unspecified",
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use api::heddle::api::v2alpha1::{
+        ActionAvailability, CurrentCredentialRecord, EntityRef, PrincipalRecord, RecordRef,
+    };
     use objects::object::Principal;
 
     use super::*;
     use crate::hosted_runtime::hosted::CredentialSource;
+
+    #[test]
+    fn native_whoami_keeps_account_actor_and_effective_methods_distinct() {
+        let principal = PrincipalRecord {
+            id: "principal-1".into(),
+            account_id: "account-1".into(),
+            rooting_tier: RootingTier::SelfRooted as i32,
+            ..Default::default()
+        };
+        let credential = CurrentCredentialRecord {
+            r#ref: Some(RecordRef {
+                id: "credential-1".into(),
+                ..Default::default()
+            }),
+            kind: CredentialKind::Agent as i32,
+            subject: "agent:reviewer".into(),
+            acting_agent_id: "reviewer".into(),
+            actions: vec![
+                ActionAvailability {
+                    method: "RecordReview".into(),
+                    implemented: true,
+                    authorized: true,
+                    ..Default::default()
+                },
+                ActionAvailability {
+                    method: "PutGrant".into(),
+                    implemented: true,
+                    authorized: false,
+                    ..Default::default()
+                },
+                ActionAvailability {
+                    method: "RevokeSession".into(),
+                    implemented: true,
+                    authorized: true,
+                    target: Some(EntityRef::default()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let viewed = project_current_identity(principal.clone(), credential.clone())
+            .expect("native projection");
+        assert_eq!(viewed.account_id, "account-1");
+        assert_eq!(viewed.credential_subject, "agent:reviewer");
+        assert_eq!(viewed.credential_kind, "agent");
+        assert_eq!(
+            viewed.available_actions,
+            ["RecordReview", "RevokeSession [target-scoped]"]
+        );
+        let mut invalid = credential;
+        invalid.kind = CredentialKind::Unspecified as i32;
+        assert!(
+            project_current_identity(principal, invalid).is_err(),
+            "unknown credential classes cannot masquerade as a root"
+        );
+    }
 
     fn luke_actor() -> CaptureActor {
         capture_actor_from_resolved(&ResolvedPrincipal {
@@ -396,17 +465,11 @@ mod tests {
     }
 
     #[test]
-    fn biscuit_literal_and_role_helpers_cover_escaped_and_unknown_values() {
+    fn biscuit_literal_helper_covers_escaped_values() {
         assert_eq!(
             biscuit_string_literals(r#"check if operation($op), $op == "repo.read""#),
             vec!["repo.read".to_string()]
         );
-        assert_eq!(hosted_role_name(1), "reader");
-        assert_eq!(hosted_role_name(2), "developer");
-        assert_eq!(hosted_role_name(3), "maintainer");
-        assert_eq!(hosted_role_name(4), "admin");
-        assert_eq!(hosted_role_name(5), "owner");
-        assert_eq!(hosted_role_name(i32::MAX), "unspecified");
     }
 
     struct PrincipalEnvGuard {

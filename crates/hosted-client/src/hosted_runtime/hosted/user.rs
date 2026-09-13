@@ -51,16 +51,75 @@ impl HostedClient {
     /// Resolve the acting identity for the bound bearer (subject, staff/service
     /// markers, session, server-side scope, and directly-held resource roles).
     /// Read-only; drives `heddle whoami`.
-    pub async fn who_am_i(
+    pub async fn observe_current_identity(
         &mut self,
-    ) -> Result<api::heddle::api::v1alpha1::WhoAmIResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            who_am_i,
-            "/heddle.api.v1alpha1.IdentityService/WhoAmI",
-            api::heddle::api::v1alpha1::WhoAmIRequest {}
-        ))
+    ) -> Result<
+        (
+            api::heddle::api::v2alpha1::PrincipalRecord,
+            api::heddle::api::v2alpha1::CurrentCredentialRecord,
+        ),
+        ProtocolError,
+    > {
+        use api::heddle::api::v2alpha1 as contract;
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let mut observation = remote
+            .observe::<thread_api::rpc::IdentityServiceObserveIdentity>(
+                contract::ObserveIdentityRequest {
+                    include_current_credential: true,
+                    observe: Some(contract::ObserveOptions {
+                        mode: contract::ObservationMode::Once as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(native_protocol_error)?;
+        let batch = observation
+            .next_commit()
+            .await
+            .map_err(native_protocol_error)?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState("identity view ended without a checkpoint".into())
+            })?;
+        let mut principal = None;
+        let mut credential = None;
+        for change in batch.changes {
+            match change {
+                contract::identity_event::Payload::Identity(value) => {
+                    if principal.replace(value).is_some() {
+                        return Err(ProtocolError::InvalidState(
+                            "identity view duplicated principal".into(),
+                        ));
+                    }
+                }
+                contract::identity_event::Payload::CurrentCredential(value) => {
+                    if credential.replace(value).is_some() {
+                        return Err(ProtocolError::InvalidState(
+                            "identity view duplicated current credential".into(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let principal = principal
+            .ok_or_else(|| ProtocolError::InvalidState("identity view omitted principal".into()))?;
+        let credential = credential.ok_or_else(|| {
+            ProtocolError::InvalidState("identity view omitted current credential".into())
+        })?;
+        if principal.account_id.is_empty()
+            || principal.id.is_empty()
+            || credential.subject.is_empty()
+            || contract::CredentialKind::try_from(credential.kind).is_err()
+            || credential.kind == contract::CredentialKind::Unspecified as i32
+        {
+            return Err(ProtocolError::InvalidState(
+                "identity view has incomplete current authority".into(),
+            ));
+        }
+        Ok((principal, credential))
     }
 
     pub async fn create_service_account(
@@ -1358,7 +1417,12 @@ mod tests {
         let _home = IsolatedHeddleHome::new();
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
 
-        client.who_am_i().await.unwrap();
+        let (principal, credential) = client.observe_current_identity().await.unwrap();
+        assert_eq!(
+            principal.account_id,
+            uuid::Uuid::from_bytes([9; 16]).to_string()
+        );
+        assert_eq!(credential.subject, "agent:reviewer-1");
         let _ = client
             .create_service_account(CreateServiceAccountRequest::default())
             .await;

@@ -826,6 +826,7 @@ async fn serve_native_identity_observation(
         .and_then(|frame| v2::ObserveIdentityRequest::decode(frame.body).ok())
         .expect("native identity observation request");
     let signup_requested = body.signup_invitations.is_some();
+    let credential_requested = body.include_current_credential;
     let source = v2::EndpointRef {
         kind: v2::EndpointKind::Weft as i32,
         public_key: server_key,
@@ -858,6 +859,8 @@ async fn serve_native_identity_observation(
             payload: Some(v2::identity_event::Payload::Identity(v2::PrincipalRecord {
                 id: uuid::Uuid::from_bytes([9; 16]).to_string(),
                 account_id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+                acting_agent_id: "reviewer-1".into(),
+                rooting_tier: v2::RootingTier::SelfRooted as i32,
                 personal_spool: Some(v2::SpoolAddress {
                     r#ref: Some(v2::SpoolRef {
                         id: uuid::Uuid::from_bytes([2; 16]).to_string(),
@@ -921,7 +924,43 @@ async fn serve_native_identity_observation(
                 })),
             },
         );
-        events[4].frame.as_mut().expect("checkpoint frame").sequence = 5;
+    }
+    if credential_requested {
+        events.insert(
+            2,
+            v2::IdentityEvent {
+                frame: Some(v2::StreamFrame {
+                    sequence: 0,
+                    body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                        kind: v2::StreamDataKind::Snapshot as i32,
+                    })),
+                }),
+                payload: Some(v2::identity_event::Payload::CurrentCredential(
+                    v2::CurrentCredentialRecord {
+                        r#ref: Some(v2::RecordRef {
+                            id: uuid::Uuid::from_bytes([12; 16]).to_string(),
+                            ..Default::default()
+                        }),
+                        kind: v2::CredentialKind::Agent as i32,
+                        subject: "agent:reviewer-1".into(),
+                        acting_agent_id: "reviewer-1".into(),
+                        agent_provider: "codex".into(),
+                        agent_model: "gpt".into(),
+                        session: Some(v2::SessionRecord {
+                            r#ref: Some(v2::RecordRef {
+                                id: uuid::Uuid::from_bytes([13; 16]).to_string(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            },
+        );
+    }
+    for (index, event) in events.iter_mut().enumerate() {
+        event.frame.as_mut().expect("identity event frame").sequence = (index + 1) as u64;
     }
     for event in events {
         send.write_chunk(Bytes::from(

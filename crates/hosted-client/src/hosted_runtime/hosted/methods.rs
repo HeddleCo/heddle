@@ -85,13 +85,6 @@ impl HostedRoutes<'_> {
         CreateAgentAccountResponse
     );
     unary_method!(
-        who_am_i,
-        "IdentityService",
-        "WhoAmI",
-        WhoAmIRequest,
-        WhoAmIResponse
-    );
-    unary_method!(
         bootstrap_owner_root,
         "OwnerAuthorizationService",
         "BootstrapOwnerRoot",
