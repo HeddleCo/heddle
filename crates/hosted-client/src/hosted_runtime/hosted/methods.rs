@@ -313,20 +313,6 @@ impl HostedRoutes<'_> {
     );
 
     unary_method!(
-        approve_thread,
-        "WorkflowService",
-        "ApproveThread",
-        ApproveThreadRequest,
-        ThreadApproval
-    );
-    unary_method!(
-        check_merge_eligibility,
-        "WorkflowService",
-        "CheckMergeEligibility",
-        CheckMergeEligibilityRequest,
-        CheckMergeEligibilityResponse
-    );
-    unary_method!(
         get_thread,
         "WorkflowService",
         "GetThread",
@@ -339,20 +325,6 @@ impl HostedRoutes<'_> {
         "ListThreads",
         ListThreadsRequest,
         ListThreadsResponse
-    );
-    unary_method!(
-        list_thread_approvals,
-        "WorkflowService",
-        "ListThreadApprovals",
-        ListThreadApprovalsRequest,
-        ListThreadApprovalsResponse
-    );
-    unary_method!(
-        revoke_approval,
-        "WorkflowService",
-        "RevokeApproval",
-        RevokeApprovalRequest,
-        DeleteResponse
     );
 
     unary_method!(
@@ -468,7 +440,7 @@ mod tests {
     };
 
     #[test]
-    fn shipped_native_inventory_is_38_unary_seven_server_streams_and_two_bidi() {
+    fn shipped_native_inventory_is_34_unary_seven_server_streams_and_two_bidi() {
         const ROUTES: &[MethodRoute] = &[
             MethodRoute::CollaborationServiceAppendTurn,
             MethodRoute::CollaborationServiceListByState,
@@ -511,12 +483,8 @@ mod tests {
             MethodRoute::RepositoryServiceSubscribeRepoEvents,
             MethodRoute::RepositoryServiceSupersedeContext,
             MethodRoute::StateReviewServiceSignState,
-            MethodRoute::WorkflowServiceApproveThread,
-            MethodRoute::WorkflowServiceCheckMergeEligibility,
             MethodRoute::WorkflowServiceGetThread,
-            MethodRoute::WorkflowServiceListThreadApprovals,
             MethodRoute::WorkflowServiceListThreads,
-            MethodRoute::WorkflowServiceRevokeApproval,
         ];
         let shipped = ALL_METHODS
             .iter()
@@ -527,13 +495,13 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(shipped.len(), 47);
+        assert_eq!(shipped.len(), 43);
         assert_eq!(
             shipped
                 .iter()
                 .filter(|method| method.streaming == StreamingShape::Unary)
                 .count(),
-            38
+            34
         );
         assert_eq!(
             shipped

@@ -1,15 +1,14 @@
 use api::heddle::api::v1alpha1::{
-    ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, BootstrapOwnerRootRequest,
-    BootstrapOwnerRootResponse, CheckMergeEligibilityRequest, CheckMergeEligibilityResponse,
-    CreateAgentAccountRequest, CreateAgentAccountResponse, CreateInvitationRequest,
+    BeginWebAuthnAuthenticationRequest, BootstrapOwnerRootRequest,
+    BootstrapOwnerRootResponse, CreateAgentAccountRequest, CreateAgentAccountResponse,
+    CreateInvitationRequest,
     CreateServiceAccountRequest, CreateSignupInviteRequest, CreateSignupInviteResponse,
     GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse, GrantSupportAccessRequest,
     GrantTargetRef, Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest,
     IssuedCredentialResponse, ListSignupInvitesRequest, ListSignupInvitesResponse,
-    ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
-    ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
-    ServiceAccountResponse, SupportAccessGrant, ThreadApproval,
-    grant_target_ref::Target as GrantTargetKind,
+    ListSupportAccessGrantsRequest, MonorepoNode,
+    ResolveMonorepoRequest, RevokeSupportAccessRequest,
+    ServiceAccountResponse, SupportAccessGrant, grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
@@ -36,18 +35,6 @@ macro_rules! authed_call {
             user,
             $rpc,
             concat!("/heddle.api.v1alpha1.RegistryService/", $method),
-            $msg
-        )
-    }};
-}
-
-macro_rules! workflow_call {
-    ($self:ident, $rpc:ident, $method:literal, $msg:expr) => {{
-        signed_call!(
-            $self,
-            workflow,
-            $rpc,
-            concat!("/heddle.api.v1alpha1.WorkflowService/", $method),
             $msg
         )
     }};
@@ -893,125 +880,6 @@ impl HostedClient {
         Ok(())
     }
 
-    /// Record an approval for `(source_thread → target_thread)` at
-    /// the source's current `source_state`. The server's gate decides
-    /// later whether this approval *counts* against any matching
-    /// policy's requirements.
-    pub async fn approve_thread(
-        &mut self,
-        repo_path: &str,
-        source_thread: &str,
-        target_thread: &str,
-        source_state: &str,
-        note: Option<&str>,
-        client_operation_id: String,
-    ) -> Result<ThreadApproval, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v1alpha1.WorkflowService/ApproveThread",
-            client_operation_id,
-        );
-        let source_thread_id = self.require_thread_id(repo_path, source_thread).await?;
-        let target_thread_id = self.require_thread_id(repo_path, target_thread).await?;
-        Ok(workflow_call!(
-            self,
-            approve_thread,
-            "ApproveThread",
-            ApproveThreadRequest {
-                repo_path: super::helpers::repository_ref(repo_path),
-                source_thread: source_thread.to_string(),
-                target_thread: target_thread.to_string(),
-                source_state: objects::object::StateId::parse(source_state)
-                    .ok()
-                    .and_then(super::helpers::proto_state_id),
-                note: note.unwrap_or_default().to_string(),
-                client_operation_id: operation_id.to_wire(),
-                source_thread_id,
-                target_thread_id,
-            }
-        ))
-    }
-
-    pub async fn revoke_approval(
-        &mut self,
-        id: &str,
-        client_operation_id: String,
-    ) -> Result<(), ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v1alpha1.WorkflowService/RevokeApproval",
-            client_operation_id,
-        );
-        workflow_call!(
-            self,
-            revoke_approval,
-            "RevokeApproval",
-            RevokeApprovalRequest {
-                id: id.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(())
-    }
-
-    pub async fn list_thread_approvals(
-        &mut self,
-        repo_path: &str,
-        source_thread: &str,
-        target_thread: &str,
-    ) -> Result<Vec<ThreadApproval>, ProtocolError> {
-        let source_thread_id = self.require_thread_id(repo_path, source_thread).await?;
-        let target_thread_id = self.require_thread_id(repo_path, target_thread).await?;
-        Ok(workflow_call!(
-            self,
-            list_thread_approvals,
-            "ListThreadApprovals",
-            ListThreadApprovalsRequest {
-                repo_path: super::helpers::repository_ref(repo_path),
-                source_thread: source_thread.to_string(),
-                target_thread: target_thread.to_string(),
-                source_thread_id,
-                target_thread_id,
-            }
-        )
-        .approvals)
-    }
-
-    /// Ask the server "can <source> merge into <target> at
-    /// <source_state>, given the diff touches `changed_paths`?" The
-    /// reply lists every unmet requirement and the approvals that
-    /// counted as valid.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn check_merge_eligibility(
-        &mut self,
-        repo_path: &str,
-        source_thread: &str,
-        target_thread: &str,
-        source_state: &str,
-        gated_action: &str,
-        changed_paths: Vec<String>,
-        author_user_id: Option<&str>,
-    ) -> Result<CheckMergeEligibilityResponse, ProtocolError> {
-        let source_thread_id = self.require_thread_id(repo_path, source_thread).await?;
-        let target_thread_id = self.require_thread_id(repo_path, target_thread).await?;
-        Ok(workflow_call!(
-            self,
-            check_merge_eligibility,
-            "CheckMergeEligibility",
-            CheckMergeEligibilityRequest {
-                repo_path: super::helpers::repository_ref(repo_path),
-                source_thread: source_thread.to_string(),
-                target_thread: target_thread.to_string(),
-                source_state: objects::object::StateId::parse(source_state)
-                    .ok()
-                    .and_then(super::helpers::proto_state_id),
-                gated_action: gated_action.to_string(),
-                changed_paths,
-                author_user_id: author_user_id.unwrap_or_default().to_string(),
-                source_thread_id,
-                target_thread_id,
-            }
-        ))
-    }
-
     /// Phase C: grant a Heddle staff member temporary admin on a
     /// namespace or repo. Exactly one of `namespace_path` or
     /// `repo_path` should be set.
@@ -1447,10 +1315,6 @@ mod tests {
             .await
             .unwrap();
         client
-            .revoke_approval("approval-1", "revoke-approval-op".to_string())
-            .await
-            .unwrap();
-        client
             .grant_support_access(
                 "operator@example.com",
                 None,
@@ -1473,41 +1337,6 @@ mod tests {
             .await
             .unwrap();
         client.resolve_monorepo("acme", Some(4)).await.unwrap();
-
-        let invalid_state = objects::object::StateId::from_bytes([3; 32]).to_string_full();
-        assert!(
-            client
-                .approve_thread(
-                    "acme/widgets",
-                    "feature",
-                    "main",
-                    &invalid_state,
-                    Some("looks good"),
-                    "approval-op".to_string(),
-                )
-                .await
-                .is_err()
-        );
-        assert!(
-            client
-                .list_thread_approvals("acme/widgets", "feature", "main")
-                .await
-                .is_err()
-        );
-        assert!(
-            client
-                .check_merge_eligibility(
-                    "acme/widgets",
-                    "feature",
-                    "main",
-                    &invalid_state,
-                    "land",
-                    vec!["src/lib.rs".to_string()],
-                    Some("principal:alice"),
-                )
-                .await
-                .is_err()
-        );
 
         client.close().await;
         server.await.unwrap();
