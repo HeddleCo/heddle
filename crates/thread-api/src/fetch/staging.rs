@@ -150,6 +150,15 @@ fn validate(
 ) -> Result<StagedSource, Error> {
     validate_with_receipts(directory, ready, operations, dependencies, Vec::new())
 }
+
+struct DisclosureInput {
+    directory: tempfile::TempDir,
+    operations: Vec<SignedOperation>,
+    dependency_records: Vec<ThreadGenesisRecord>,
+    receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
+    allow_partial: bool,
+}
+
 pub(super) fn validate_with_receipts(
     directory: tempfile::TempDir,
     ready: TransferReady,
@@ -158,7 +167,6 @@ pub(super) fn validate_with_receipts(
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
 ) -> Result<StagedSource, Error> {
     let value = validate_disclosure_artifacts(
-        directory,
         ready
             .thread
             .as_ref()
@@ -171,10 +179,13 @@ pub(super) fn validate_with_receipts(
             .thread_genesis
             .as_ref()
             .ok_or(Error::Invalid("original genesis absent"))?,
-        operations,
-        dependencies,
-        receipt_records,
-        !ready.full_closure_available,
+        DisclosureInput {
+            directory,
+            operations,
+            dependency_records: dependencies,
+            receipt_records,
+            allow_partial: !ready.full_closure_available,
+        },
     )?;
     Ok(StagedSource {
         directory: value.directory,
@@ -230,27 +241,32 @@ pub(crate) fn validate_artifacts(
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
 ) -> Result<ValidatedSourceArtifacts, Error> {
     validate_disclosure_artifacts(
-        directory,
         thread,
         revision,
         original,
-        operations,
-        dependency_records,
-        receipt_records,
-        false,
+        DisclosureInput {
+            directory,
+            operations,
+            dependency_records,
+            receipt_records,
+            allow_partial: false,
+        },
     )
 }
 
 fn validate_disclosure_artifacts(
-    directory: tempfile::TempDir,
     thread: &ThreadRef,
     revision: &RevisionRef,
     original: &ThreadGenesisRecord,
-    operations: Vec<SignedOperation>,
-    dependency_records: Vec<ThreadGenesisRecord>,
-    receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
-    allow_partial: bool,
+    input: DisclosureInput,
 ) -> Result<ValidatedSourceArtifacts, Error> {
+    let DisclosureInput {
+        directory,
+        operations,
+        dependency_records,
+        receipt_records,
+        allow_partial,
+    } = input;
     if operations.len() > 10_000
         || dependency_records.len() >= 128
         || receipt_records.len() > operations.len()
