@@ -38,7 +38,9 @@ pub fn initialize_schema(connection: &rusqlite::Connection) -> Result<(), Error>
         expires_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS device_page_cursors_scope_age
-      ON device_page_cursors(scope, issued_at, token);",
+      ON device_page_cursors(scope, issued_at, token);
+    CREATE INDEX IF NOT EXISTS device_page_cursors_expiry
+      ON device_page_cursors(expires_at);",
     )?;
     Ok(())
 }
@@ -51,7 +53,8 @@ fn now() -> Result<i64, Error> {
 }
 
 /// Issue a stable private lookup for a scan boundary. Old tokens remain valid
-/// until their TTL, so retries and multiple tabs can repeat the same page.
+/// until their TTL or the per-actor retention cap, so retries and multiple
+/// tabs can repeat the same page while its token remains retained.
 pub fn issue(
     heddle_dir: &Path,
     scope: [u8; 32],
@@ -59,13 +62,30 @@ pub fn issue(
     section: &str,
     last_scanned: [u8; 32],
 ) -> Result<[u8; 32], Error> {
+    issue_with_limit(
+        heddle_dir,
+        scope,
+        binding,
+        section,
+        last_scanned,
+        MAX_PER_SCOPE,
+    )
+}
+
+fn issue_with_limit(
+    heddle_dir: &Path,
+    scope: [u8; 32],
+    binding: &[u8],
+    section: &str,
+    last_scanned: [u8; 32],
+    max_per_scope: i64,
+) -> Result<[u8; 32], Error> {
     if binding.len() > 128 || section.len() > 32 || section.is_empty() {
         return Err(Error::Invalid);
     }
     let time = now()?;
     let token: [u8; 32] = rand::random();
     let mut connection = local_metadata::open(heddle_dir)?;
-    initialize_schema(&connection)?;
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
         "DELETE FROM device_page_cursors WHERE expires_at<=?1",
@@ -75,9 +95,9 @@ pub fn issue(
     transaction.execute(
         "DELETE FROM device_page_cursors WHERE token IN (
         SELECT token FROM device_page_cursors WHERE scope=?1
-        ORDER BY issued_at DESC, token DESC LIMIT -1 OFFSET ?2
+        ORDER BY rowid DESC LIMIT -1 OFFSET ?2
     )",
-        params![scope.as_slice(), MAX_PER_SCOPE],
+        params![scope.as_slice(), max_per_scope],
     )?;
     transaction.commit()?;
     Ok(token)
@@ -92,14 +112,24 @@ pub fn resume(
     section: &str,
     token: &[u8],
 ) -> Result<[u8; 32], Error> {
+    resume_at(heddle_dir, scope, binding, section, token, now()?)
+}
+
+fn resume_at(
+    heddle_dir: &Path,
+    scope: [u8; 32],
+    binding: &[u8],
+    section: &str,
+    token: &[u8],
+    time: i64,
+) -> Result<[u8; 32], Error> {
     if token.len() != 32 || binding.len() > 128 || section.len() > 32 {
         return Err(Error::Invalid);
     }
     let connection = local_metadata::open(heddle_dir)?;
-    initialize_schema(&connection)?;
     let stored: Option<Vec<u8>> = connection.query_row(
         "SELECT last_scanned FROM device_page_cursors WHERE token=?1 AND scope=?2 AND binding=?3 AND section=?4 AND expires_at>?5",
-        params![token, scope.as_slice(), binding, section, now()?],
+        params![token, scope.as_slice(), binding, section, time],
         |row| row.get(0),
     ).optional()?;
     stored
@@ -138,5 +168,40 @@ mod tests {
                 Err(Error::Expired)
             ));
         }
+    }
+
+    #[test]
+    fn retention_keeps_newest_reusable_token_and_expiry_refuses_it() {
+        let home = tempfile::tempdir().expect("private local metadata");
+        let scope = [11; 32];
+        let first = issue_with_limit(home.path(), scope, b"first", "captures", [1; 32], 2)
+            .expect("first token");
+        let middle = issue_with_limit(home.path(), scope, b"middle", "captures", [2; 32], 2)
+            .expect("middle token");
+        let latest = issue_with_limit(home.path(), scope, b"latest", "captures", [3; 32], 2)
+            .expect("latest token");
+        assert!(matches!(
+            resume(home.path(), scope, b"first", "captures", &first),
+            Err(Error::Expired)
+        ));
+        assert_eq!(
+            resume(home.path(), scope, b"middle", "captures", &middle).expect("middle retained"),
+            [2; 32]
+        );
+        assert_eq!(
+            resume(home.path(), scope, b"latest", "captures", &latest).expect("newest retained"),
+            [3; 32]
+        );
+        assert!(matches!(
+            resume_at(
+                home.path(),
+                scope,
+                b"latest",
+                "captures",
+                &latest,
+                now().expect("clock") + TTL_SECONDS
+            ),
+            Err(Error::Expired)
+        ));
     }
 }
