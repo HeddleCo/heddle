@@ -316,22 +316,6 @@ impl RecoveryAdvice {
         }
     }
 
-    pub(crate) fn machine_contract_drift(
-        error: impl Into<String>,
-        unsafe_condition: impl Into<String>,
-    ) -> Self {
-        Self::safety_refusal(
-            "machine_contract_drift",
-            error,
-            "Inspect the schema contract with `heddle doctor schemas --output json`, then update the schema registry or documented samples.",
-            unsafe_condition,
-            "continuing to rely on this machine contract could make JSON callers parse stale or undocumented fields",
-            "repository state, refs, metadata, and worktree files were left unchanged",
-            "heddle doctor schemas --output json",
-            vec!["heddle doctor schemas --output json".to_string()],
-        )
-    }
-
     pub fn stale_daemon_protocol(their_version: u32, our_version: u32) -> Self {
         Self::safety_refusal(
             "daemon_protocol_version_mismatch",
@@ -555,6 +539,53 @@ impl RecoveryAdvice {
             raw,
             "'file:symbol'",
             "heddle review sign <state> --kind read --symbols <file>:<symbol> --public-key <hex> --signature <hex> --signed-at-unix <secs>",
+        )
+    }
+
+    pub fn semantic_anchor_malformed(raw: &str) -> Self {
+        Self::malformed_option_value(
+            "semantic_anchor_malformed",
+            "<anchor>",
+            raw,
+            "'path:symbol' (for example src/api.rs:greet)",
+            "heddle semantic refs <path>:<symbol>",
+        )
+    }
+
+    pub fn discussion_not_found(discussion_id: &str) -> Self {
+        Self::safety_refusal(
+            "discussion_not_found",
+            format!("Discussion not found: {discussion_id}"),
+            "List discussions with `heddle discuss list`, then retry with an id from that output.",
+            format!("no discussion matched `{discussion_id}` in the collaboration store"),
+            "guessing a discussion id could inspect or mutate the wrong collaboration thread",
+            "no repository objects, refs, metadata, or worktree files were changed",
+            "heddle discuss list",
+            vec!["heddle discuss list".to_string()],
+        )
+    }
+
+    pub fn discuss_into_annotation_body_required() -> Self {
+        Self::missing_option(
+            "discuss_into_annotation_body_required",
+            "--body",
+            "--into-annotation",
+            "heddle discuss resolve <id> --into-annotation --body \"...\"",
+        )
+    }
+
+    pub fn integration_config_expected_table(tool: &'static str, location: &'static str) -> Self {
+        Self::safety_refusal(
+            "integration_config_expected_table",
+            format!("{tool} config is malformed: `{location}` must be a table"),
+            format!(
+                "Edit your {tool} config so `{location}` is a table (or remove the key), then re-run `heddle integration install {tool}`."
+            ),
+            format!("`{location}` in the existing {tool} config is not a table"),
+            format!("continuing would overwrite or misparse the existing {tool} config"),
+            "your existing agent config file and repository state were left unchanged",
+            format!("heddle integration install {tool}"),
+            vec![format!("heddle integration install {tool}")],
         )
     }
 
@@ -1167,6 +1198,172 @@ impl RecoveryAdvice {
             "local Heddle state, Git refs, and worktree files were left unchanged by the failed pull result",
             primary_command.clone(),
             vec![primary_command, "heddle verify".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn promote_slug_taken(full_path: &str, slug: &str) -> Self {
+        Self::safety_refusal(
+            "promote_slug_taken",
+            format!("Cannot promote '{full_path}': root slug '{slug}' is already taken"),
+            "Pick a free root name, or rename the personal spool first. Inspect with `heddle whoami`."
+                .to_string(),
+            format!("a root-level spool named '{slug}' already exists or is reserved"),
+            "the personal spool stays under your handle until the root slug is free",
+            "hosted spool path, grants, and local checkouts were left unchanged",
+            "heddle whoami".to_string(),
+            vec!["heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn promote_account_standing(full_path: &str) -> Self {
+        Self::safety_refusal(
+            "promote_account_standing",
+            format!("Cannot promote '{full_path}': the account is not claimed and verified"),
+            "Promotion requires a claimed, verified account. Run `heddle claim`, then retry.",
+            "the server refused promotion because this account is anonymous or unverified",
+            "the personal spool stays under your handle until the account is claimed",
+            "hosted spool path, grants, and local checkouts were left unchanged",
+            "heddle claim".to_string(),
+            vec!["heddle claim".to_string(), "heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn promote_not_owner(full_path: &str) -> Self {
+        Self::safety_refusal(
+            "promote_not_owner",
+            format!("Cannot promote '{full_path}': only an owner of this spool can promote it"),
+            "Ask an owner to promote it, or check the roles on `heddle whoami`.",
+            "the caller does not hold an owner grant on the personal spool",
+            "the personal spool was not moved",
+            "hosted spool path, grants, and local checkouts were left unchanged",
+            "heddle whoami".to_string(),
+            vec!["heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn promote_already_root(full_path: &str) -> Self {
+        Self::safety_refusal(
+            "promote_already_root",
+            format!("'{full_path}' is already a root-level spool"),
+            format!("Clone it with `heddle clone https://<host>/{full_path} <dir>`."),
+            "promotion only moves a personal child spool to the shared root",
+            "no hosted path would change",
+            "hosted spool path, grants, and local checkouts were left unchanged",
+            format!("heddle clone https://<host>/{full_path} <dir>"),
+            vec![format!("heddle clone https://<host>/{full_path} <dir>")],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn grant_spool_required() -> Self {
+        Self::invalid_usage(
+            "grant_spool_required",
+            "hosted grant URL must include a spool path, e.g. https://api.heddle.sh/spool/<handle>/<name>",
+            "Pass `--spool spool/<handle>/<name>` or a hosted URL that includes the spool path.",
+            "heddle grant list --spool spool/<handle>/<name>",
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn grant_denied(spool: &str) -> Self {
+        Self::safety_refusal(
+            "grant_denied",
+            format!("Cannot manage grants on '{spool}': permission denied"),
+            "Only an owner or admin of this spool can create or delete grants. Check roles with `heddle whoami`.",
+            "the caller does not hold GrantWrite on the spool",
+            "no collaborator grant was created or removed",
+            "hosted grants and local checkouts were left unchanged",
+            "heddle whoami".to_string(),
+            vec!["heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn grant_agent_ceiling(spool: &str, role: &str) -> Self {
+        Self::safety_refusal(
+            "grant_agent_ceiling",
+            format!(
+                "Cannot grant '{role}' on '{spool}': agent sessions cannot grant maintainer, admin, or owner"
+            ),
+            "Grant reader or contributor from this session. Maintainer, admin, and owner require a human-verified session (Tapestry or an unattenuated owner credential).",
+            "the active credential is an attenuated agent session and the requested role is above writer",
+            "no collaborator grant was created",
+            "hosted grants and local checkouts were left unchanged",
+            format!("heddle grant create --spool {spool} --principal <handle> --role contributor"),
+            vec![
+                format!(
+                    "heddle grant create --spool {spool} --principal <handle> --role contributor"
+                ),
+                "heddle whoami".to_string(),
+            ],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn grant_needs_human(spool: &str) -> Self {
+        Self::safety_refusal(
+            "grant_needs_human",
+            format!("Cannot manage grants on '{spool}': human verification required"),
+            "Maintainer, admin, and owner grants require a human-verified session. Agent sessions may grant writer or below (reader, contributor) without WebAuthn.",
+            "the server demanded human verification for this grant write",
+            "no collaborator grant was created or removed",
+            "hosted grants and local checkouts were left unchanged",
+            "heddle whoami".to_string(),
+            vec!["heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn grant_not_found(spool: &str) -> Self {
+        Self::safety_refusal(
+            "grant_not_found",
+            format!("Cannot manage grants: spool '{spool}' was not found"),
+            format!("Check the path with `heddle whoami`, then retry with `--spool {spool}`."),
+            format!("the server has no spool at '{spool}'"),
+            "no collaborator grant was created or removed",
+            "hosted grants and local checkouts were left unchanged",
+            "heddle whoami".to_string(),
+            vec!["heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn grant_failed(spool: &str, error: &str) -> Self {
+        let primary = if spool.is_empty() {
+            "heddle whoami".to_string()
+        } else {
+            format!("heddle grant list --spool {spool}")
+        };
+        Self::safety_refusal(
+            "grant_failed",
+            format!("Cannot manage grants on '{spool}': {error}"),
+            "Fix the reported condition, then retry `heddle grant`. Check identity with `heddle whoami`.",
+            format!("the server refused a grant RPC for '{spool}': {error}"),
+            "no collaborator grant was created or removed",
+            "hosted grants and local checkouts were left unchanged",
+            primary.clone(),
+            vec![primary, "heddle whoami".to_string()],
+        )
+    }
+
+    #[cfg(feature = "client")]
+    pub fn promote_failed(full_path: &str, error: &str) -> Self {
+        Self::safety_refusal(
+            "promote_failed",
+            format!("Cannot promote '{full_path}': {error}"),
+            "Fix the reported condition, then retry `heddle promote` with the same path.",
+            format!("the server refused PromoteSpool for '{full_path}': {error}"),
+            "the personal spool was not moved",
+            "hosted spool path, grants, and local checkouts were left unchanged",
+            format!("heddle promote {full_path}"),
+            vec![
+                format!("heddle promote {full_path}"),
+                "heddle whoami".to_string(),
+            ],
         )
     }
 

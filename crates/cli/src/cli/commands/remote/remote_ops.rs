@@ -1105,7 +1105,11 @@ async fn pull_network(repo: &Repository, options: PullNetworkOptions<'_>) -> Res
     .with_warning_sink(std::sync::Arc::new(
         crate::cli::warning_render::StderrWarningSink,
     ));
-    let result = pull_network_connected(repo, &mut client, repo_path, options).await;
+    let repo_path =
+        hosted_client::hosted_runtime::hosted::resolve_personal_first_read(&mut client, repo_path)
+            .await
+            .map_err(anyhow::Error::new)?;
+    let result = pull_network_connected(repo, &mut client, &repo_path, options).await;
     client.close().await;
     result
 }

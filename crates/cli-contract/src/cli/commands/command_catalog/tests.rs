@@ -183,6 +183,38 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["whoami"], &["whoami"]),
     #[cfg(feature = "client")]
     sample(&["claim"], &["claim"]),
+    #[cfg(feature = "client")]
+    sample(&["promote"], &["promote", "spool/willow-ibis-8e7264/notes"]),
+    #[cfg(feature = "client")]
+    sample(
+        &["grant", "create"],
+        &[
+            "grant",
+            "create",
+            "--spool",
+            "spool/willow-ibis-8e7264/notes",
+            "--principal",
+            "alice",
+            "--role",
+            "contributor",
+        ],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["grant", "list"],
+        &["grant", "list", "--spool", "spool/willow-ibis-8e7264/notes"],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["grant", "delete"],
+        &[
+            "grant",
+            "delete",
+            "alice",
+            "--spool",
+            "spool/willow-ibis-8e7264/notes",
+        ],
+    ),
     #[cfg(feature = "git-overlay")]
     sample(&["bridge", "git", "import"], &["bridge", "git", "import"]),
     #[cfg(feature = "git-overlay")]
@@ -260,7 +292,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["discuss", "wait"], &["discuss", "wait"]),
     sample(&["doctor"], &["doctor"]),
     sample(&["doctor", "docs"], &["doctor", "docs"]),
-    sample(&["doctor", "schemas"], &["doctor", "schemas"]),
     sample(&["maintenance", "fsck"], &["maintenance", "fsck"]),
     sample(
         &["maintenance", "fsck", "repair", "git"],
@@ -1521,6 +1552,9 @@ fn auth_commands_are_user_scoped() {
         &["auth", "derive-agent"],
         &["auth", "create-service-token"],
         &["claim"],
+        &["grant", "create"],
+        &["grant", "list"],
+        &["grant", "delete"],
     ] {
         let contract = raw_command_contract_for_path(path.iter().copied())
             .unwrap_or_else(|| panic!("missing command contract for `{}`", path.join(" ")));
@@ -1782,6 +1816,10 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // advertises its discriminator here alongside the other
             // client-gated hosted verbs.
             "whoami",
+            "promote",
+            "grant create",
+            "grant list",
+            "grant delete",
             "bridge git import",
             "bridge git export",
             "sync git",
@@ -1818,7 +1856,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "discuss wait",
             "doctor",
             "doctor docs",
-            "doctor schemas",
             "maintenance oplog recover",
             "help",
             "init",
@@ -2487,6 +2524,6 @@ fn feature_gated_command_roots_are_catalog_owned() {
     // listed here.
     assert_eq!(
         feature_gated_command_roots(),
-        &["auth", "ci", "claim", "whoami"]
+        &["auth", "ci", "claim", "grant", "promote", "whoami"]
     );
 }

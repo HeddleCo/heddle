@@ -34,6 +34,7 @@ impl TestResponse {
         }
     }
 
+    #[allow(dead_code)]
     pub(super) fn protobuf(body: impl Into<Vec<u8>>) -> Self {
         Self {
             status: 200,

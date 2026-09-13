@@ -107,17 +107,6 @@ pub enum DoctorCommands {
     /// CI. Pair with `--output json` for structured output. Run on every PR
     /// to prevent the docs from drifting from the CLI again.
     Docs(DoctorDocsArgs),
-
-    /// Drift-check `docs/json-schemas.md` against the registered
-    /// schemas.
-    ///
-    /// Generates the canonical schema for every verb in the schemas
-    /// registry, parses every `## heddle <verb> --output json` sample in
-    /// `docs/json-schemas.md`, and verifies that every key in the
-    /// sample is declared in the schema. Exits non-zero on drift.
-    /// Pair with `--output json` for CI. Run alongside `heddle doctor docs`
-    /// on every PR.
-    Schemas(DoctorSchemasArgs),
 }
 
 /// Arguments for `heddle doctor docs`.
@@ -133,15 +122,6 @@ pub struct DoctorDocsArgs {
     /// Scan every tracked `.md` file in the repository.
     #[arg(long)]
     pub all: bool,
-}
-
-/// Arguments for `heddle doctor schemas`.
-#[derive(Clone, Debug, clap::Args)]
-pub struct DoctorSchemasArgs {
-    /// Refresh the generated command-contract coverage sample in
-    /// `docs/json-schemas.md`, then run the normal schema drift check.
-    #[arg(long)]
-    pub update_docs: bool,
 }
 
 fn parse_confidence(s: &str) -> Result<f32, String> {

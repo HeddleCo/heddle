@@ -9,11 +9,11 @@ use refs::{Head, RefExpectation, RefUpdate};
 use tracing::debug;
 
 use super::{
-    HeddleError, Repository, Result,
     repository_worktree_apply::{
         WorktreeApplyDirtyBehavior, WorktreeApplyPlan, WorktreeApplyReport, WorktreeApplyStats,
         WorktreeApplyStrategy,
     },
+    HeddleError, Repository, Result,
 };
 use crate::{thread_model::ThreadFreshness, thread_storage::ThreadManager};
 
@@ -434,7 +434,15 @@ impl Repository {
                 .as_ref()
                 .is_some_and(|current_state| current_state.id() == *target);
 
-        let tree = if same_state_verified_clean {
+        let audience = self
+            .local_operator_audience()
+            .map_err(|e| HeddleError::Config(format!("resolve operator audience: {e:#}")))?;
+        let withheld = self
+            .withholding_visibility_for_audience(target, &audience)
+            .map_err(|e| HeddleError::Config(format!("resolve visibility for {target}: {e:#}")))?
+            .is_some();
+
+        let tree = if withheld || same_state_verified_clean {
             None
         } else {
             Some(
@@ -449,6 +457,10 @@ impl Repository {
             Some(current_state) => self.store.get_tree(&current_state.tree)?,
             None => None,
         };
+
+        if withheld {
+            self.checkout_state_gated(target, &state, &self.root, &audience)?;
+        }
 
         let (apply_plan, apply_report) = if let Some(tree) = tree.as_ref() {
             let apply_plan = self.plan_worktree_apply(

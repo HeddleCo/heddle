@@ -537,6 +537,69 @@ fn owner_clone_of_private_spool_after_visibility_discuss_and_context() {
     );
 }
 
+/// heddle#1733: private ancestor + later public tip. Local clone must keep
+/// the Private sidecar so list/show match the owner audience. Use a
+/// non-reserved secret path (`secrets.env`); literal `.env` stays exit 65.
+#[test]
+fn clone_keeps_private_ancestor_visibility_beside_public_tip() {
+    let (temp, _) = init_and_capture("public");
+    fs::write(temp.path().join("public.env"), b"PUBLIC=1\n").unwrap();
+    heddle(&["capture", "-m", "public env"], Some(temp.path())).expect("capture public");
+
+    fs::write(temp.path().join("secrets.env"), b"AX_SECRET=do-not-leak\n").unwrap();
+    let private = capture_state(temp.path(), "private secret path");
+    heddle(
+        &[
+            "visibility",
+            "set",
+            &private,
+            "--tier",
+            "private",
+            "--label",
+            "ax-secret",
+        ],
+        Some(temp.path()),
+    )
+    .expect("visibility set private");
+
+    fs::write(temp.path().join("tip.txt"), b"later public work\n").unwrap();
+    heddle(&["capture", "-m", "public tip"], Some(temp.path())).expect("capture public tip");
+
+    let clone = TempDir::new().unwrap();
+    let dest = clone.path().join("owner-clone");
+    heddle(
+        &[
+            "clone",
+            &temp.path().to_string_lossy(),
+            &dest.to_string_lossy(),
+        ],
+        None,
+    )
+    .unwrap_or_else(|err| panic!("clone of public tip with private ancestor must succeed: {err}"));
+
+    let show = show_json(&dest, &private);
+    assert_eq!(
+        show["tier"], "private",
+        "cloned checkout must keep the private ancestor sidecar: {show}"
+    );
+    assert_eq!(show["label"], "ax-secret");
+
+    let raw = heddle(&["--output", "json", "visibility", "list"], Some(&dest)).expect("list");
+    let listing: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(listing["output_kind"], "visibility_list");
+    assert_eq!(
+        listing["count"], 1,
+        "clone list must include the private ancestor: {listing}"
+    );
+    assert_eq!(listing["states"][0]["tier"], "private");
+
+    let owner_secret = fs::read(dest.join("secrets.env")).expect("owner clone sees secret");
+    assert_eq!(
+        owner_secret, b"AX_SECRET=do-not-leak\n",
+        "Restricted(ax-secret) owner clone may still see the secret path"
+    );
+}
+
 #[test]
 fn visibility_list_enumerates_tiered_states() {
     let (temp, _) = init_and_capture("ordinary");

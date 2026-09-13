@@ -4,7 +4,6 @@
 pub mod advice;
 pub mod command_catalog;
 pub mod doctor_docs;
-pub mod doctor_schemas;
 pub mod init_output;
 pub mod schemas;
 pub mod surface_conformance;
@@ -21,7 +20,6 @@ pub use command_catalog::{
     operator_envelope_verbs, ranked_visible_roots, root_commands_for_help_visibility,
 };
 pub use doctor_docs::cmd_doctor_docs;
-pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
 pub use init_output::{InitOutput, InitPrincipalOutput};
 pub use schemas::{documented_schema_verbs, schema_for_verb, schema_verbs};
 pub use surface_conformance::{

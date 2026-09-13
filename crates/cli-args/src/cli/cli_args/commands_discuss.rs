@@ -106,7 +106,7 @@ pub struct DiscussResolveArgs {
     /// Resolution kind: `by-edit` or `dismiss`.
     #[arg(long, value_enum)]
     pub mode: Option<ResolveModeArg>,
-    /// Resolve by creating a context annotation from this discussion.
+    /// Resolve by creating a real context annotation (`context set`) and linking it.
     #[arg(long, requires = "body")]
     pub into_annotation: bool,
     /// For `by-edit`: state containing the edit (defaults to HEAD).

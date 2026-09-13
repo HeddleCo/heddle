@@ -6,10 +6,11 @@
 //! `init` registers the real [`InitOutput`] type so the published
 //! schema cannot drift from the serializer. Remaining verbs still use
 //! schemars-derived mirror structs to avoid threading `JsonSchema`
-//! through every workspace output type. `heddle doctor schemas`
-//! validates documented samples against the registered schemas.
+//! through every workspace output type.
 //!
-//! See [`super::doctor_schemas`] for the drift checker.
+//! This registry is the runtime source for `heddle <command> --schema`,
+//! which prints the JSON Schema for that command's `--output json`
+//! payload and exits without running the command.
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
@@ -26,7 +27,6 @@ use verbs::{
 use super::{
     command_catalog,
     doctor_docs::DocsReport,
-    doctor_schemas::SchemaReport,
     init_output::InitOutput,
     wire::{
         AdoptOutput, BlameOutput, CloneOutput, DiscussWaitLineOutput, DiscussionListOutput,
@@ -47,6 +47,7 @@ use super::{
         },
         auth::{
             AgentAccountCreatedOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput,
+            GrantCreateOutput, GrantDeleteOutput, GrantListOutput, PromoteOutput,
             ServiceTokenOutput, SignupInviteCreatedOutput, SignupInviteListOutput, WhoamiOutput,
         },
         thread::{
@@ -161,7 +162,6 @@ schema_registry! {
     (&["revert"], RevertOutput),
     (&["doctor"], DoctorSchema),
     (&["doctor docs"], DocsReport),
-    (&["doctor schemas"], SchemaReport),
     (&["agent presence show"], ActorSingleOutput),
     (&["agent presence list"], ActorListOutput),
     (&["agent presence complete"], ActorDoneOutput),
@@ -178,6 +178,10 @@ schema_registry! {
     (&["auth status"], AuthStatusOutput),
     (&["auth trust show", "auth trust replace"], AuthTrustOutput),
     (&["whoami"], WhoamiOutput),
+    (&["promote"], PromoteOutput),
+    (&["grant create"], GrantCreateOutput),
+    (&["grant list"], GrantListOutput),
+    (&["grant delete"], GrantDeleteOutput),
     (&["auth create-service-token"], ServiceTokenOutput),
     (&["auth invite"], SignupInviteCreatedOutput),
     (&["auth invite list"], SignupInviteListOutput),
@@ -200,8 +204,10 @@ pub fn schema_verbs() -> &'static [&'static str] {
         .as_slice()
 }
 
-/// Schema verbs that `heddle doctor schemas` must check against
-/// `docs/json-schemas.md`, derived from the active command catalog.
+/// Schema verbs the command catalog marks as documented (the stable,
+/// agent-facing subset), derived from the active command catalog. Used by
+/// the machine-contract coverage report to separate documented verbs from
+/// the full runtime registry.
 pub fn documented_schema_verbs() -> &'static [&'static str] {
     DOCUMENTED_SCHEMA_VERBS
         .get_or_init(command_catalog::documented_schema_verbs)
@@ -519,7 +525,7 @@ fn schema_verb_supports_op_id(verb: &str) -> bool {
 // the real serializer, and `schemars` emits the JSON Schema. `init`
 // registers the real output type instead — do not add a mirror for it.
 // When a remaining mirror's real output struct changes, update the
-// mirror here and `docs/json-schemas.md`.
+// mirror here so `heddle <cmd> --schema` keeps matching the serializer.
 
 // ---- shared sub-types ------------------------------------------------------
 //
@@ -852,9 +858,8 @@ mod tests {
     }
 
     /// Every schema verb advertised by the command contract table must
-    /// produce a schema.
-    /// Otherwise `heddle doctor schemas` would silently miss drift on
-    /// that verb.
+    /// produce a schema. Otherwise `heddle <cmd> --schema` would come up
+    /// empty for that verb.
     #[test]
     fn registry_covers_every_listed_verb() {
         for verb in schema_verbs() {
@@ -863,6 +868,53 @@ mod tests {
                 "verb '{verb}' is advertised by command contracts but schema_for_verb returned None"
             );
         }
+    }
+
+    /// Coverage guard for `heddle <command> --schema`: every shipping
+    /// command that can emit `--output json` must register a schema that
+    /// `schema_for_verb` resolves, so `--schema` can never come up empty
+    /// for a command a user can actually run. This is the in-Rust quality
+    /// signal that replaces the removed schemas-drift coverage gate.
+    #[test]
+    fn every_json_capable_command_has_a_resolvable_schema() {
+        // Roots gated off the default surface (behind non-default cargo
+        // features) are not built into the default schema registry.
+        const GATED_ROOTS: &[&str] = &["ci"];
+        let catalog = command_catalog::build_command_catalog();
+        let mut missing = Vec::new();
+        for command in &catalog.commands {
+            if !command.supports_json {
+                continue;
+            }
+            if command
+                .path
+                .first()
+                .is_some_and(|root| GATED_ROOTS.contains(&root.as_str()))
+            {
+                continue;
+            }
+            if command.schema_verbs.is_empty() {
+                missing.push(format!(
+                    "{}: advertises `--output json` but registers no schema verb",
+                    command.display
+                ));
+                continue;
+            }
+            for verb in &command.schema_verbs {
+                if schema_for_verb(verb).is_none() {
+                    missing.push(format!(
+                        "{} (verb `{verb}`): schema_for_verb returned None",
+                        command.display
+                    ));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "JSON-capable commands without a resolvable `--output json` schema \
+             (so `heddle <cmd> --schema` would fail for a shipping command):\n  - {}",
+            missing.join("\n  - ")
+        );
     }
 
     #[test]

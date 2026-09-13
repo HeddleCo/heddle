@@ -19,7 +19,6 @@ pub mod operation_id;
 pub mod perf;
 #[cfg(feature = "semantic")]
 pub mod semantic;
-pub mod ts_codegen;
 pub mod util;
 
 // User-config schema, credentials, transport knobs, and tracing init live in

@@ -31,25 +31,28 @@ mod resolver;
 mod session;
 #[cfg(test)]
 mod session_tests;
+mod spool_path;
 mod state_review;
 mod sync;
 #[cfg(test)]
 mod test_https;
-#[cfg(test)]
-pub(crate) mod test_server;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_server;
 mod thread_identity;
 mod thread_metadata;
 mod user;
 
 #[cfg(test)]
 mod descriptor_trust_acceptance;
+#[cfg(test)]
+mod descriptor_trust_conformance;
 
 use std::sync::Arc;
 
 use api::heddle::api::v1alpha1::CallContext;
 pub use bootstrap::{
     DescriptorKeyring, VerifiedEndpointDescriptor, fetch_descriptor_key_document,
-    fetch_signed_endpoint_descriptor,
+    fetch_ephemeral_descriptor_set,
 };
 pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, ServerStreamItem};
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn, HostedResolution};
@@ -74,6 +77,10 @@ pub use methods::HostedRoutes;
 use objects::{NoopWarnings, Warning, WarningSink};
 use prost::Message;
 pub use session::{HostedAuthMode, HostedSession};
+pub use spool_path::{
+    HostedReadPath, canonicalize_spool_path, is_root_level_spool_path, plan_personal_first_read,
+    resolve_personal_first_read, strip_spool_prefix,
+};
 #[cfg(test)]
 pub(crate) use sync::PullBootstrapMetadata;
 pub use sync::{

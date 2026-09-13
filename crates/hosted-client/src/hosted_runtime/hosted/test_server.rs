@@ -90,7 +90,7 @@ pub(crate) struct ContextFixture {
     pub history_requests: Arc<Mutex<Vec<String>>>,
 }
 
-pub(crate) async fn start() -> (HostedClient, JoinHandle<()>) {
+pub async fn start() -> (HostedClient, JoinHandle<()>) {
     start_inner(None, BlobFixture::default(), None, None, None, None, None).await
 }
 
@@ -349,6 +349,7 @@ async fn serve_call(
                         "/heddle.api.v2alpha1.SpoolService/ObserveSpool".into(),
                         "/heddle.api.v2alpha1.SpoolService/DeleteSpool".into(),
                         "/heddle.api.v2alpha1.SpoolService/ReviseSpool".into(),
+                        "/heddle.api.v2alpha1.SpoolService/PromoteSpool".into(),
                         "/heddle.api.v2alpha1.IdentityService/ObserveIdentity".into(),
                         "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace".into(),
                         "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership".into(),
@@ -403,6 +404,8 @@ async fn serve_call(
                     server_key,
                 )
                 .await;
+            } else if method == "/heddle.api.v2alpha1.SpoolService/PromoteSpool" {
+                serve_native_promote_spool(&mut send, &mut recv, &mut request, server_key).await;
             } else if method == "/heddle.api.v2alpha1.SpoolService/CreateSpool" {
                 serve_native_create_spool(&mut send, &mut recv, &mut request, server_key, owner)
                     .await;
@@ -868,6 +871,47 @@ async fn serve_native_revise_spool(
             path_segments: vec![slug],
             name: body.name,
             settings: body.settings,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_native_promote_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::PromoteSpoolRequest::decode(frame.body).ok())
+        .expect("native Spool promotion request");
+    let response = v2::SpoolMutationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
+        spool: Some(v2::SpoolOverview {
+            r#ref: body.spool,
+            version: vec![8; 32],
+            slug: "acme".into(),
+            path_segments: vec!["acme".into()],
             ..Default::default()
         }),
         ..Default::default()

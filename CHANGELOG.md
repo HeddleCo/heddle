@@ -15,6 +15,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Added
 
+- **`heddle promote` and personal-first hosted reads.** `heddle promote`
+  calls `RegistryService/PromoteSpool` to lift `spool/<handle>/<name>` to
+  `spool/<name>`. Clone and pull resolve a bare first path segment to the
+  caller's personal child first, then the shared root. Promotion denials
+  (taken slug, unverified account, missing owner grant) print recovery
+  instead of a generic remote error (heddle#1728, weft#2107).
+
 - **Harness identity cursor on each capture.** `integration install` writes
   per-harness hooks that stamp a workspace `.heddle/identity` sidecar
   (`provider`, `model`, `thought_level`, `session`, `parent`). Each
@@ -41,6 +48,21 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
   hash-shaped path (heddle#1457).
 
 ### Changed
+
+- **Agent-driven `heddle grant` at writer or below.** Attenuated / derive-agent
+  sessions may create and delete `reader` and `contributor` (developer) grants
+  without WebAuthn. Maintainer, admin, and owner still require human
+  verification; the CLI refuses those roles locally when the bearer is a
+  detectable agent session (heddle#1738 / weft#2119). Help states the ceiling.
+  Derive-agent children now include `ListGrants` / `CreateGrant` / `DeleteGrant`
+  in the safe operation set.
+
+- **heddle 0.23.0 on heddle-api 0.30.0 and capability-verifier 0.19.0.**
+  Native bootstrap consumes the canonical `heddle_api::descriptor_trust`
+  contract (set version 1, two-layer root attestation + signed
+  `EndpointDescriptor`) instead of a local copy of that logic. Dial
+  addresses come from the attested ephemeral key's signed descriptor.
+  Workspace crates inherit 0.23.0.
 
 - **Git projection uses Sley 0.9's reader-backed push seam.** Smart-HTTP ref
   reconciliation and exact-action execution now share one receive-pack

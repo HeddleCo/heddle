@@ -50,6 +50,13 @@ impl HostedRoutes<'_> {
         AuthChallengeResponse
     );
     unary_method!(
+        create_device_authorization,
+        "IdentityService",
+        "CreateDeviceAuthorization",
+        CreateDeviceAuthorizationRequest,
+        DeviceAuthorizationResponse
+    );
+    unary_method!(
         create_service_account,
         "IdentityService",
         "CreateServiceAccount",
@@ -64,6 +71,13 @@ impl HostedRoutes<'_> {
         CreateSignupInviteResponse
     );
     unary_method!(
+        exchange_device_authorization,
+        "IdentityService",
+        "ExchangeDeviceAuthorization",
+        ExchangeDeviceAuthorizationRequest,
+        AccessTokenResponse
+    );
+    unary_method!(
         issue_service_account_credential,
         "IdentityService",
         "IssueServiceAccountCredential",
@@ -76,6 +90,13 @@ impl HostedRoutes<'_> {
         "ListSignupInvites",
         ListSignupInvitesRequest,
         ListSignupInvitesResponse
+    );
+    unary_method!(
+        create_agent_account,
+        "IdentityService",
+        "CreateAgentAccount",
+        CreateAgentAccountRequest,
+        CreateAgentAccountResponse
     );
     unary_method!(
         who_am_i,
@@ -140,6 +161,20 @@ impl HostedRoutes<'_> {
         "GetCurrentUserSpool",
         GetCurrentUserSpoolRequest,
         HostedSpool
+    );
+    unary_method!(
+        get_spool,
+        "RegistryService",
+        "GetSpool",
+        GetSpoolRequest,
+        HostedSpool
+    );
+    unary_method!(
+        promote_spool,
+        "RegistryService",
+        "PromoteSpool",
+        PromoteSpoolRequest,
+        PromoteSpoolResponse
     );
     unary_method!(
         grant_support_access,
@@ -363,6 +398,18 @@ impl HostedRoutes<'_> {
         SignStateRequest,
         SignStateResponse
     );
+    pub async fn wait_for_device_authorization(
+        &self,
+        request: &WaitForDeviceAuthorizationRequest,
+    ) -> Result<ServerStream<DeviceAuthorizationEvent>> {
+        self.client
+            .call_long_lived_server_stream(
+                "/heddle.api.v1alpha1.IdentityService/WaitForDeviceAuthorization",
+                request,
+            )
+            .await
+    }
+
     pub async fn subscribe_repo_events(
         &self,
         request: &SubscribeRepoEventsRequest,
@@ -421,14 +468,17 @@ mod tests {
     };
 
     #[test]
-    fn remaining_route_inventory_is_34_unary_six_server_streams_and_two_bidi() {
+    fn shipped_native_inventory_is_38_unary_seven_server_streams_and_two_bidi() {
         const ROUTES: &[MethodRoute] = &[
             MethodRoute::CollaborationServiceAppendTurn,
             MethodRoute::CollaborationServiceListByState,
             MethodRoute::CollaborationServiceOpenDiscussion,
             MethodRoute::IdentityServiceBeginWebAuthnAuthentication,
+            MethodRoute::IdentityServiceCreateDeviceAuthorization,
             MethodRoute::IdentityServiceCreateServiceAccount,
+            MethodRoute::IdentityServiceExchangeDeviceAuthorization,
             MethodRoute::IdentityServiceIssueServiceAccountCredential,
+            MethodRoute::IdentityServiceWaitForDeviceAuthorization,
             MethodRoute::IdentityServiceWhoAmI,
             MethodRoute::RegistryServiceCreateGrant,
             MethodRoute::RegistryServiceCreateInvitation,
@@ -436,6 +486,8 @@ mod tests {
             MethodRoute::RegistryServiceDeleteGrant,
             MethodRoute::RegistryServiceDeleteSpool,
             MethodRoute::RegistryServiceGetCurrentUserSpool,
+            MethodRoute::RegistryServiceGetSpool,
+            MethodRoute::RegistryServicePromoteSpool,
             MethodRoute::RegistryServiceGrantSupportAccess,
             MethodRoute::RegistryServiceListGrants,
             MethodRoute::RegistryServiceListSpools,
@@ -475,20 +527,20 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(shipped.len(), 42);
+        assert_eq!(shipped.len(), 47);
         assert_eq!(
             shipped
                 .iter()
                 .filter(|method| method.streaming == StreamingShape::Unary)
                 .count(),
-            34
+            38
         );
         assert_eq!(
             shipped
                 .iter()
                 .filter(|method| method.streaming == StreamingShape::ServerStreaming)
                 .count(),
-            6
+            7
         );
         assert_eq!(
             shipped

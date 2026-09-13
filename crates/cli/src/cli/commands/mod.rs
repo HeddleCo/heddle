@@ -32,6 +32,8 @@ mod gc;
 mod git_overlay_txn;
 #[cfg(feature = "git-overlay")]
 mod git_projection_io;
+#[cfg(feature = "client")]
+mod grant;
 pub(crate) mod heddleignore_defaults;
 mod history_target;
 mod hook;
@@ -52,6 +54,8 @@ mod next_action;
 mod operator_core;
 mod operator_loop;
 mod oplog;
+#[cfg(feature = "client")]
+mod promote;
 mod purge;
 mod query;
 mod ready_cmd;
@@ -125,7 +129,6 @@ pub use diff::cmd_diff;
 pub use discuss::run as cmd_discuss;
 pub use doctor::cmd_doctor;
 pub use doctor_docs::cmd_doctor_docs;
-pub use doctor_schemas::{cmd_doctor_schemas, documented_samples_with_bound_verbs};
 pub use env_cmd::cmd_env;
 pub use error_envelope::{
     print_error_with_hint, print_error_with_hint_with_config, print_or_suggest_parse_error,
@@ -138,9 +141,10 @@ pub use gc::cmd_gc;
 pub use git_projection_io::cmd_context_reason_git;
 #[cfg(feature = "git-overlay")]
 pub use git_projection_io::{cmd_export_git, cmd_import_git, cmd_sync_git};
+#[cfg(feature = "client")]
+pub use grant::cmd_grant;
 pub use heddle_cli_contract::cli::commands::{
-    advice, command_catalog, doctor_docs, doctor_schemas, schemas, surface_conformance,
-    verification_health,
+    advice, command_catalog, doctor_docs, schemas, surface_conformance, verification_health,
 };
 pub use hook::cmd_hook;
 #[cfg(feature = "client")]
@@ -155,6 +159,8 @@ pub use netdaemon::{cmd_netd_serve, cmd_netd_status, cmd_netd_stop};
 pub use operator_core::operator_emission_output_kinds;
 pub use operator_loop::{cmd_abort, cmd_continue, cmd_sync_smart};
 pub use oplog::cmd_oplog;
+#[cfg(feature = "client")]
+pub use promote::cmd_promote;
 pub use purge::cmd_purge;
 pub use query::run as cmd_query;
 pub use ready_cmd::cmd_ready;

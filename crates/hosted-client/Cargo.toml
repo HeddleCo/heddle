@@ -15,8 +15,9 @@ name = "hosted_client"
 
 [dependencies]
 anyhow.workspace = true
-thread-api = { package = "heddle-thread-api", path = "../thread-api", version = "0.22.0", default-features = false, features = ["native", "iroh", "signing", "root-attachment"], optional = true }
-biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.22.0", optional = true }
+heddleco-capability-verifier = { path = "../capability-verifier", version = "0.17.0", optional = true }
+thread-api = { package = "heddle-thread-api", path = "../thread-api", version = "0.23.0", default-features = false, features = ["native", "iroh", "signing", "root-attachment"], optional = true }
+biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.23.0", optional = true }
 api = { workspace = true, optional = true }
 base64.workspace = true
 biscuit-auth = { workspace = true, optional = true }
@@ -103,6 +104,16 @@ client = [
     "dep:tokio-tungstenite",
     "dep:webpki-roots",
 ]
+# Preview AX home relay for `heddle netd serve`
+# (`https://relay.preview.heddle.sh/`). Off by default so stock and
+# `--release` installs home on production (`https://relay.heddle.sh/`).
+# Does not change hosted CLI connections, which still take relays
+# from the signed descriptor. Enable via `heddle-cli`'s `preview`
+# forward: `cargo build --release -p heddle-cli --features client,preview`.
+preview = []
+# In-process hosted fixture for crate tests and CLI grant integration.
+# Production client builds do not enable this.
+test-utils = ["dep:heddleco-capability-verifier"]
 # Forwarded from the CLI's `telemetry` feature: trace-context propagation on
 # hosted calls.
 telemetry = [

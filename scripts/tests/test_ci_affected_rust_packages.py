@@ -87,7 +87,7 @@ class AffectedRustPackagesTests(unittest.TestCase):
         )
 
     def test_docs_select_cli_doctor_and_docsgen_freshness_tests(self):
-        result = self.select(["docs/json-schemas.md"])
+        result = self.select(["docs/STABILITY.md"])
         self.assertFalse(result["all"])
         self.assertEqual(result["selected"], ["heddle-cli", "heddle-docsgen"])
 

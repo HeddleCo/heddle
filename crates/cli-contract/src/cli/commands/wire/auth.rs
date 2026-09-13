@@ -8,6 +8,67 @@
 use schemars::JsonSchema;
 use serde::Serialize;
 
+/// JSON payload for `heddle promote`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "PromoteSchema")]
+pub struct PromoteOutput {
+    pub output_kind: &'static str,
+    pub status: &'static str,
+    pub from: String,
+    pub full_path: String,
+    pub spool_id: String,
+    pub is_repo: bool,
+    pub server: String,
+    pub recommended_action: Option<String>,
+}
+
+/// JSON payload for `heddle grant create`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "GrantCreateSchema")]
+pub struct GrantCreateOutput {
+    pub output_kind: &'static str,
+    pub id: String,
+    pub principal: String,
+    pub role: String,
+    pub spool: String,
+    pub server: String,
+    pub recommended_action: Option<String>,
+}
+
+/// One row from `heddle grant list`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "GrantRowSchema")]
+pub struct GrantRowOutput {
+    pub id: String,
+    pub principal: String,
+    pub role: String,
+    pub spool: String,
+}
+
+/// JSON payload for `heddle grant list`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "GrantListSchema")]
+pub struct GrantListOutput {
+    pub output_kind: &'static str,
+    pub spool: String,
+    pub server: String,
+    pub grants: Vec<GrantRowOutput>,
+    pub recommended_action: Option<String>,
+}
+
+/// JSON payload for `heddle grant delete`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "GrantDeleteSchema")]
+pub struct GrantDeleteOutput {
+    pub output_kind: &'static str,
+    pub id: String,
+    pub principal: String,
+    pub spool: String,
+    pub server: String,
+    pub deleted: bool,
+    pub recommended_action: Option<String>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 #[schemars(rename = "AgentAccountCreatedSchema")]
 pub struct AgentAccountCreatedOutput {

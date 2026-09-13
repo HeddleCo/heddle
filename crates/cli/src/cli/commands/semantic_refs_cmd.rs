@@ -9,6 +9,7 @@ use repo::Repository;
 use serde::Serialize;
 
 use super::{
+    advice::RecoveryAdvice,
     history_target::resolve_state_id,
     next_action::{NextActionValidationContext, write_full_command_json},
     snapshot::ensure_current_state,
@@ -113,13 +114,11 @@ fn query_refs(
 }
 
 fn parse_anchor(spec: &str) -> Result<SymbolAnchor> {
-    let (file, symbol) = spec.split_once(':').ok_or_else(|| {
-        anyhow!("symbol anchor must be path:symbol (for example src/api.rs:greet), got {spec:?}")
-    })?;
+    let (file, symbol) = spec
+        .split_once(':')
+        .ok_or_else(|| anyhow!(RecoveryAdvice::semantic_anchor_malformed(spec)))?;
     if file.is_empty() || symbol.is_empty() {
-        return Err(anyhow!(
-            "symbol anchor must be path:symbol (for example src/api.rs:greet), got {spec:?}"
-        ));
+        return Err(anyhow!(RecoveryAdvice::semantic_anchor_malformed(spec)));
     }
     Ok(SymbolAnchor::new(file, symbol))
 }

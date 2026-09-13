@@ -36,8 +36,9 @@ pub use agent::{
 };
 pub use auth::{
     AgentAccountCreatedOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, CaptureActor,
-    HumanPromotionDirective, ServiceTokenOutput, SignupInviteCreatedOutput, SignupInviteListOutput,
-    SignupInviteOutput, WhoamiIdentity, WhoamiOutput, WhoamiRole,
+    GrantCreateOutput, GrantDeleteOutput, GrantListOutput, GrantRowOutput, HumanPromotionDirective,
+    PromoteOutput, ServiceTokenOutput, SignupInviteCreatedOutput,
+    SignupInviteListOutput, SignupInviteOutput, WhoamiIdentity, WhoamiOutput, WhoamiRole,
 };
 pub use bridge::{
     ExportGitOutput, ExportedRefOutput, ImportGitOutput, IntegrationStatusOutput,

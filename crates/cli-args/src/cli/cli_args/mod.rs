@@ -42,22 +42,22 @@ pub use commands_args::{
     AgentProvenanceListArgs, AgentProvenanceSegmentArgs, AgentProvenanceShowArgs, AgentReadyArgs,
     AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs, AgentTaskCreateArgs,
     AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg, AgentTaskUpdateArgs, CloneArgs,
-    CollapseArgs, DiffArgs, DiffBaseArg, DoctorArgs, DoctorCommands, DoctorDocsArgs,
-    DoctorSchemasArgs, ExpandArgs, INIT_VERB, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs,
-    ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadAbsorbArgs,
-    ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs,
-    ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs,
-    ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TimelineCommands,
-    TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs, TimelineRecordToolArgs,
-    TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, UndoArgs,
-    WatchArgs, WorkspaceModeArg,
+    CollapseArgs, DiffArgs, DiffBaseArg, DoctorArgs, DoctorCommands, DoctorDocsArgs, ExpandArgs,
+    INIT_VERB, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs,
+    SnapshotArgs, SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs,
+    ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs,
+    ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs,
+    ThreadShowArgs, ThreadStartArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
+    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
+    TimelineStatusArgs, TimelineTargetArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
 };
 #[cfg(feature = "ci")]
 pub use commands_ci::{CiCommands, CiRunArgs};
 #[cfg(feature = "client")]
 pub use commands_client::{
     AgentTemplateArg, AuthCommands, AuthInviteCommands, AuthTrustCommands, AuthTrustReplaceArgs,
-    AuthTrustShowArgs, ClaimArgs, DEFAULT_CLAIM_WEB_ORIGIN,
+    AuthTrustShowArgs, ClaimArgs, DEFAULT_CLAIM_WEB_ORIGIN, GrantCommands, GrantCreateArgs,
+    GrantDeleteArgs, GrantListArgs, GrantRoleArg, PromoteArgs,
 };
 pub use commands_context::ContextCommands;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]

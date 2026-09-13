@@ -132,7 +132,8 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
          or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
          `git-overlay`, \
          `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
-         `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`)."
+         `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`, \
+         `visibility`)."
     );
 }
 
@@ -385,12 +386,35 @@ fn find_subcommand_or_alias<'a>(
 }
 
 fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Option<Vec<String>> {
-    if !raw.iter().any(|arg| arg == "--help" || arg == "-h") {
+    command_path_from_raw_trigger(cmd, raw, &|token| token == "--help" || token == "-h")
+}
+
+/// Resolve the deepest selected subcommand path from raw argv for a global
+/// short-circuit flag like `--schema` — the pre-parse equivalent of
+/// [`command_path_from_raw_help_request`], so the flag can print without
+/// tripping clap's required-argument validation (as `--help` does).
+///
+/// Returns `None` when `flag` is absent or only global flags were supplied
+/// (no subcommand selected), so the caller can fall through to clap.
+pub fn command_path_from_raw_flag(
+    cmd: &clap::Command,
+    raw: &[String],
+    flag: &str,
+) -> Option<Vec<String>> {
+    command_path_from_raw_trigger(cmd, raw, &|token| token == flag)
+}
+
+fn command_path_from_raw_trigger(
+    cmd: &clap::Command,
+    raw: &[String],
+    is_trigger: &dyn Fn(&str) -> bool,
+) -> Option<Vec<String>> {
+    if !raw.iter().any(|arg| is_trigger(arg)) {
         return None;
     }
     if raw
         .iter()
-        .all(|arg| arg == "--help" || arg == "-h" || arg.starts_with('-'))
+        .all(|arg| is_trigger(arg) || arg.starts_with('-'))
     {
         return None;
     }
@@ -403,7 +427,7 @@ fn command_path_from_raw_help_request(cmd: &clap::Command, raw: &[String]) -> Op
             skip_next = false;
             continue;
         }
-        if token == "--help" || token == "-h" {
+        if is_trigger(token) {
             continue;
         }
         if let Some(takes_value) = global_option_takes_value(current, token) {
@@ -503,6 +527,7 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
         "discuss" | "discussions" => DISCUSS_TOPIC,
         "git-projection" | "git-projections" | "footer" | "notes" => GIT_PROJECTION_TOPIC,
         "signals" | "risk-signals" => SIGNALS_TOPIC,
+        "visibility" | "audience" => VISIBILITY_TOPIC,
         _ => return None,
     })
 }
@@ -582,6 +607,10 @@ never governs. Git Overlay clones ingest full history and reject partial-history
 options. Advanced/planned flags `--lazy` and `--filter blob:none`
 skip blob content and hydrate it on demand for hosted/network Heddle
 remotes; local clone paths reject them today.
+
+A bare hosted name (`https://host/notes`) clones your personal copy
+`spool/<handle>/notes` when it exists, otherwise the root `spool/notes`.
+`heddle promote` moves a personal spool to that root.
 
 See `heddle help threads` for the thread model and `heddle help remotes`
 for remote management.
@@ -840,7 +869,9 @@ Common loop:
     heddle verify
 
 Remote values may be Git URLs, hosted endpoints, or local paths. `push` and
-`pull` use the default remote unless a positional remote is supplied. In Git
+`pull` use the default remote unless a positional remote is supplied. A bare
+hosted name on clone/pull resolves to your personal spool first, then the
+shared root; `heddle promote` lifts a personal spool to that root. In Git
 Overlay, Sley reads and edits the repository's Git configuration and streams
 objects directly between the remote and `.git`. In Native Heddle, the same
 verbs use Heddle transport and storage. The Git executable is not involved.
@@ -1008,6 +1039,34 @@ that client into showing notes, but Heddle itself does not require a Git
 executable on the system.
 "#;
 
+const VISIBILITY_TOPIC: &str = "State visibility — who may see a captured state.\n\
+\n\
+`heddle visibility set <state> --tier <public|internal|team-scoped|restricted|private>`\n\
+                  — declare an audience. `team-scoped`, `restricted`, and\n\
+                    `private` need `--label`. Public stays record-free.\n\
+`promote`         — open to a less-restrictive tier (never a narrowing).\n\
+`show` / `list`   — inspect declared sidecar records on this store.\n\
+                    Checkout, clone, and pull withhold separately.\n\
+\n\
+Private is per-state and downward-closed. A later public tip that still\n\
+names blobs introduced by a private ancestor is withheld from public\n\
+and internal audiences. Owner / matching `--label` still sees the bytes.\n\
+Clone and pull fail closed: they do not materialize secret path bytes\n\
+for a lesser audience, including when a private ancestor object is missing.\n\
+\n\
+This is not a way to keep one secret file beside a public tip:\n\
+  - Literal `.env` / `.env.local` / `config/.env` are reserved. Capture\n\
+    exits 65. Do not work around that with another env-shaped path.\n\
+  - Runtime secrets that must never enter Source History: `heddle env`.\n\
+  - Path-level hide of a blob already in history: `heddle redact`.\n\
+    Redaction is cooperative render-hide; visibility is serve-withhold.\n\
+\n\
+Visibility sidecars travel with local clone/push/pull. Hosted clones\n\
+need Weft to send the records the audience may know (owner key pinned\n\
+from PullReady). If list/show on a hosted clone is empty while the\n\
+owner still has records, that is a Weft disclosure gap, not a missing\n\
+`.env` capture.\n";
+
 const SIGNALS_TOPIC: &str = "Risk signals — five modules behind a pure trait.\n\
 \n\
 - `invariant_adjacency`        — fires when a changed symbol carries an\n\
@@ -1085,8 +1144,28 @@ mod tests {
             "output-format",
             "output",
             "clone",
+            "visibility",
+            "audience",
         ] {
             assert!(topic_text(topic).is_some(), "{topic}");
+        }
+    }
+
+    #[test]
+    fn visibility_topic_names_env_redact_and_downward_closure() {
+        let text = topic_text("visibility").expect("visibility topic exists");
+        for needle in [
+            "downward-closed",
+            "heddle env",
+            "heddle redact",
+            ".env",
+            "exits 65",
+            "Private",
+        ] {
+            assert!(
+                text.contains(needle),
+                "visibility topic missing `{needle}`: {text}"
+            );
         }
     }
 

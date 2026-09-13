@@ -32,7 +32,8 @@ The audit standard is grounded in these sources:
   non-interactive safety, verb-oriented command design, and flag clarity.
 - Heddle's own principles: [docs/PRINCIPLES.md](PRINCIPLES.md), especially
   verification, disposability, composability, restraint, and honesty.
-- Heddle's JSON contract: [docs/json-schemas.md](json-schemas.md).
+- Heddle's JSON contract: the runtime schema registry, retrievable per
+  command with `heddle <command> --schema`.
 
 ## Scoring model
 
@@ -316,8 +317,8 @@ Heddle is ready to present as a best-of-class OSS CLI only when:
 1. All hard gates pass globally.
 2. All everyday commands score A or better.
 3. No advanced public command scores below B.
-4. `docs/json-schemas.md`, the runtime schema registry, and runtime JSON agree.
-5. `heddle doctor docs --all --output json` and schema drift checks are clean.
+4. The runtime schema registry (`heddle <command> --schema`) and runtime JSON agree.
+5. `heddle doctor docs --all --output json` is clean.
 6. The Git-overlay matrix passes with no `git` executable on `PATH`.
 7. Every C-or-lower audit finding has an owner, issue, and release-blocking
    decision.

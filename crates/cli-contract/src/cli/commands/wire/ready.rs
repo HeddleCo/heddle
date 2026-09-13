@@ -236,7 +236,8 @@ impl JsonSchema for ReadyOutput {
 
 #[cfg(test)]
 mod tests {
-    use verbs::doctor_schemas_plan::schema_property_keys;
+    use verbs::schema_keys::schema_property_keys;
+
 
     use super::*;
 

@@ -12,8 +12,6 @@ use verbs::{
     ResolveReport, StatusReport, VerifyReport,
 };
 
-#[cfg(feature = "client")]
-use crate::cli::AuthCommands;
 #[cfg(feature = "semantic")]
 use crate::cli::SemanticCommands;
 #[cfg(feature = "git-overlay")]
@@ -29,6 +27,8 @@ use crate::cli::{
     },
     render::shell_quote,
 };
+#[cfg(feature = "client")]
+use crate::cli::{AuthCommands, GrantCommands};
 #[cfg(feature = "git-overlay")]
 use crate::cli::{BridgeCommands, BridgeGitCommands};
 
@@ -1569,6 +1569,143 @@ const CONTRACTS: &[CommandContractEntry] = &[
             191,
         ),
     ),
+    entry(
+        &["promote"],
+        feature_gated(
+            exits(
+                json_discriminators(
+                    documented_schemas(
+                        CommandContract {
+                            help_rank: 192,
+                            ..user_scoped(NETWORK_METADATA_MUTATION)
+                        },
+                        &["promote"],
+                    ),
+                    &[json_discriminator(
+                        Some("promote"),
+                        "output_kind",
+                        "promote",
+                    )],
+                ),
+                &[
+                    (0, "ok"),
+                    (75, "server unreachable; safe to retry"),
+                    (
+                        76,
+                        "target slug taken or request rejected; do not retry without changing inputs",
+                    ),
+                    (77, "not the owner, or account is not claimed/verified"),
+                    (78, "not authenticated or spool path missing"),
+                ],
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &["grant"],
+        feature_gated(
+            CommandContract {
+                help_rank: 193,
+                ..user_scoped(GROUP)
+            },
+            "client",
+        ),
+    ),
+    entry(
+        &["grant", "create"],
+        feature_gated(
+            exits(
+                json_discriminators(
+                    documented_schemas(
+                        CommandContract {
+                            help_rank: 193,
+                            ..user_scoped(NETWORK_METADATA_MUTATION)
+                        },
+                        &["grant create"],
+                    ),
+                    &[json_discriminator(
+                        Some("grant create"),
+                        "output_kind",
+                        "grant_create",
+                    )],
+                ),
+                &[
+                    (0, "ok"),
+                    (75, "server unreachable; safe to retry"),
+                    (
+                        76,
+                        "server rejected the grant; do not retry without changing inputs",
+                    ),
+                    (
+                        77,
+                        "not permitted to grant on this spool, or agent cannot grant maintainer/admin/owner",
+                    ),
+                    (78, "not authenticated or spool path missing"),
+                ],
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &["grant", "list"],
+        feature_gated(
+            exits(
+                json_discriminators(
+                    documented_schemas(
+                        CommandContract {
+                            help_rank: 194,
+                            ..user_scoped(READ_JSON)
+                        },
+                        &["grant list"],
+                    ),
+                    &[json_discriminator(
+                        Some("grant list"),
+                        "output_kind",
+                        "grant_list",
+                    )],
+                ),
+                &[
+                    (0, "ok"),
+                    (75, "server unreachable; safe to retry"),
+                    (77, "not permitted to list grants on this spool"),
+                    (78, "not authenticated or spool path missing"),
+                ],
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &["grant", "delete"],
+        feature_gated(
+            exits(
+                json_discriminators(
+                    documented_schemas(
+                        CommandContract {
+                            help_rank: 195,
+                            ..user_scoped(NETWORK_METADATA_MUTATION)
+                        },
+                        &["grant delete"],
+                    ),
+                    &[json_discriminator(
+                        Some("grant delete"),
+                        "output_kind",
+                        "grant_delete",
+                    )],
+                ),
+                &[
+                    (0, "ok"),
+                    (75, "server unreachable; safe to retry"),
+                    (
+                        76,
+                        "server rejected the delete; do not retry without changing inputs",
+                    ),
+                    (77, "not permitted to delete grants on this spool"),
+                    (78, "not authenticated or spool path missing"),
+                ],
+            ),
+            "client",
+        ),
+    ),
     entry(&["bridge"], surface(GROUP, "git_projection")),
     entry(&["bridge", "git"], surface(GROUP, "git_projection")),
     entry(
@@ -1999,17 +2136,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 Some("doctor docs"),
                 "output_kind",
                 "doctor_docs",
-            )],
-        ),
-    ),
-    entry(
-        &["doctor", "schemas"],
-        json_discriminators(
-            documented_schemas(READ_JSON, &["doctor schemas"]),
-            &[json_discriminator(
-                Some("doctor schemas"),
-                "output_kind",
-                "doctor_schemas",
             )],
         ),
     ),
@@ -4506,7 +4632,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Doctor(args) => match &args.command {
             None => vec!["doctor"],
             Some(DoctorCommands::Docs(_)) => vec!["doctor", "docs"],
-            Some(DoctorCommands::Schemas(_)) => vec!["doctor", "schemas"],
         },
         Commands::Start(_) => vec!["start"],
         #[cfg(feature = "ci")]
@@ -4654,6 +4779,14 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Whoami { .. } => vec!["whoami"],
         #[cfg(feature = "client")]
         Commands::Claim(_) => vec!["claim"],
+        #[cfg(feature = "client")]
+        Commands::Grant { command } => match command {
+            GrantCommands::Create(_) => vec!["grant", "create"],
+            GrantCommands::List(_) => vec!["grant", "list"],
+            GrantCommands::Delete(_) => vec!["grant", "delete"],
+        },
+        #[cfg(feature = "client")]
+        Commands::Promote(_) => vec!["promote"],
         Commands::Context { command } => match command {
             ContextCommands::Set(_) => vec!["context", "set"],
             ContextCommands::Get(_) => vec!["context", "get"],

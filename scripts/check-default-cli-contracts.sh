@@ -48,4 +48,3 @@ fi
 
 HEDDLE_BIN="$heddle_bin" bash scripts/verify-cold-flow-human.sh
 HEDDLE_BIN="$heddle_bin" bash scripts/verify-cold-flow-agent.sh
-"$heddle_bin" --repo "$repo_root" doctor schemas

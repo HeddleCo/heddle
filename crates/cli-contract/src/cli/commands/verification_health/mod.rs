@@ -796,8 +796,8 @@ fn build_machine_contract_coverage() -> MachineContractCoverage {
 
     // Commands behind non-default feature gates (`ci` until its
     // constitutional promotion) stay out of the machine-contract
-    // coverage snapshot: docs/json-schemas.md bakes ONE published set of
-    // numbers, and a ci-enabled build must not drift it.
+    // coverage snapshot so the reported numbers stay stable regardless of
+    // which optional features a given build enables.
     const NON_DEFAULT_GATED_ROOTS: &[&str] = &["ci"];
 
     let mut catalog_commands_total = 0usize;

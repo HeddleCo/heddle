@@ -37,7 +37,7 @@ Every gate is executable from the repo root with checked-in tooling.
 |------|-----------|---------|
 | `heddle-core` docs build | `cargo doc -p heddle-core --no-deps` exit 0 | |
 | Default CLI executable contracts | existing CI script | `bash scripts/check-default-cli-contracts.sh` |
-| JSON schema drift | doctor schemas gate | CI `rust-tests.yml` |
+| JSON schema coverage | `every_json_capable_command_has_a_resolvable_schema` unit test | CI `rust-tests.yml` |
 
 ## G5 — Performance (equal work only)
 

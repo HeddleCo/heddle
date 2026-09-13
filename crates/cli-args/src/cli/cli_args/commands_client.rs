@@ -6,6 +6,31 @@ use clap::{Args, Subcommand, ValueEnum};
 const DEFAULT_CLAIM_TIMEOUT: &str = "15m";
 pub const DEFAULT_CLAIM_WEB_ORIGIN: &str = "https://app.heddle.sh";
 
+/// Arguments for `heddle promote`.
+#[derive(Args, Clone, Debug)]
+#[command(after_help = "\
+Promote moves a personal hosted spool to the shared root namespace:
+
+  spool/<your-handle>/<name>  →  spool/<name>
+
+The server requires the root slug to be free, a claimed/verified account, and
+an owner grant on the personal spool. Denials print the recovery step.
+
+Examples:
+  heddle promote spool/willow-ibis-8e7264/notes
+  heddle promote willow-ibis-8e7264/notes --server api.preview.heddle.sh
+  heddle promote https://api.preview.heddle.sh/willow-ibis-8e7264/notes
+")]
+pub struct PromoteArgs {
+    /// Personal spool to lift to root (`spool/<handle>/<name>`, `<handle>/<name>`, or a hosted URL).
+    #[arg(value_name = "PATH")]
+    pub path: String,
+
+    /// Hosted Heddle server. Omit when `PATH` is a URL, or to use the configured default.
+    #[arg(long)]
+    pub server: Option<String>,
+}
+
 /// Offer the current agent-rooted account for a human to claim.
 #[derive(Args, Clone, Debug)]
 pub struct ClaimArgs {
@@ -124,7 +149,17 @@ pub enum AuthCommands {
     },
 
     /// Create or list signup invites owned by the signed-in account.
+    ///
+    /// Signup-only: this mints an account-creation code. It does not grant
+    /// another principal access to a spool. Use `heddle grant` to add a
+    /// collaborator.
     #[command(args_conflicts_with_subcommands = true)]
+    #[command(after_help = "\
+Signup-only. `heddle auth invite` creates an account-creation code.
+It does not grant spool access. Add a collaborator with:
+
+  heddle grant create --spool <path|url> --principal <handle> --role contributor
+")]
     Invite {
         /// Bind the new invite to an email address.
         #[arg(long)]
@@ -139,7 +174,7 @@ pub enum AuthCommands {
         command: Option<AuthInviteCommands>,
     },
 
-    /// Inspect or explicitly replace descriptor-signing trust
+    /// Inspect or explicitly replace the deployment descriptor root pin
     Trust {
         #[command(subcommand)]
         command: AuthTrustCommands,
@@ -160,7 +195,7 @@ pub enum AuthCommands {
         #[arg(long = "ttl", default_value_t = 3600)]
         ttl_secs: u64,
 
-        /// Resource scope (`repo:org/name`, `namespace:org`, `spool:org/name`, or a bare repo path).
+        /// Resource scope (`spool:name`, `spool:handle/name`, or a bare spool path).
         #[arg(long = "scope")]
         scopes: Vec<String>,
 
@@ -210,11 +245,141 @@ pub enum AuthInviteCommands {
     List,
 }
 
+/// Hosted role granted on a spool.
+///
+/// `contributor` is the everyday name for the `developer` role.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrantRoleArg {
+    Reader,
+    Contributor,
+    Developer,
+    Maintainer,
+    Admin,
+    Owner,
+}
+
+impl GrantRoleArg {
+    /// Wire token `CreateGrant` / `UpdateGrant` accept.
+    pub fn as_hosted_role_name(self) -> &'static str {
+        match self {
+            Self::Reader => "reader",
+            Self::Contributor | Self::Developer => "developer",
+            Self::Maintainer => "maintainer",
+            Self::Admin => "admin",
+            Self::Owner => "owner",
+        }
+    }
+
+    /// Hosted role ordinal used for the agent grant ceiling.
+    pub fn as_grant_role(self) -> repo::GrantRole {
+        match self {
+            Self::Reader => repo::GrantRole::Reader,
+            Self::Contributor | Self::Developer => repo::GrantRole::Developer,
+            Self::Maintainer => repo::GrantRole::Maintainer,
+            Self::Admin => repo::GrantRole::Admin,
+            Self::Owner => repo::GrantRole::Owner,
+        }
+    }
+}
+
+/// Grant another principal access to a hosted spool.
+///
+/// Separate from `heddle auth invite`, which is signup-only.
+#[derive(Subcommand, Clone, Debug)]
+pub enum GrantCommands {
+    /// Grant a principal a role on a hosted spool.
+    #[command(after_help = "\
+Adds a collaborator to an existing hosted spool. This is not a signup
+invite — `heddle auth invite` only creates an account-creation code.
+
+Roles: reader, contributor (developer), maintainer, admin, owner.
+
+Agent sessions may grant writer or below (reader, contributor)
+without human verification. Maintainer, admin, and owner stay
+human-verified and are refused for derive-agent / attenuated sessions.
+
+Examples:
+  heddle grant create --spool spool/willow-ibis-8e7264/notes --principal alice --role contributor
+  heddle grant create --spool https://api.preview.heddle.sh/notes --principal alice --role reader
+")]
+    Create(GrantCreateArgs),
+
+    /// List grants on a hosted spool.
+    #[command(after_help = "\
+`--spool` is the same bare path create and delete use
+(`spool/<handle>/<name>`, `<handle>/<name>`, or a hosted URL).
+Do not prefix `repo:`.
+
+Examples:
+  heddle grant list --spool spool/willow-ibis-8e7264/notes
+  heddle grant list --spool notes --server api.preview.heddle.sh
+")]
+    List(GrantListArgs),
+
+    /// Remove a grant. `ID` is the principal shown by `heddle grant list`.
+    #[command(after_help = "\
+Agents may delete writer-or-below grants without human verification.
+Deleting a maintainer, admin, or owner grant still requires a human-verified session.
+
+Examples:
+  heddle grant delete alice --spool spool/willow-ibis-8e7264/notes
+")]
+    Delete(GrantDeleteArgs),
+}
+
+/// Arguments for `heddle grant create`.
+#[derive(Args, Clone, Debug)]
+pub struct GrantCreateArgs {
+    /// Spool to grant on (`spool/<handle>/<name>`, `<handle>/<name>`, or a hosted URL).
+    #[arg(long, value_name = "PATH|URL")]
+    pub spool: String,
+
+    /// Principal to grant (handle or account).
+    #[arg(long, value_name = "HANDLE|ACCOUNT")]
+    pub principal: String,
+
+    /// Role to grant.
+    #[arg(long, value_enum)]
+    pub role: GrantRoleArg,
+
+    /// Hosted Heddle server. Omit when `--spool` is a URL, or to use the configured default.
+    #[arg(long)]
+    pub server: Option<String>,
+}
+
+/// Arguments for `heddle grant list`.
+#[derive(Args, Clone, Debug)]
+pub struct GrantListArgs {
+    /// Spool whose grants to list (`spool/<handle>/<name>`, `<handle>/<name>`, or a hosted URL).
+    #[arg(long, value_name = "PATH|URL")]
+    pub spool: String,
+
+    /// Hosted Heddle server. Omit when `--spool` is a URL, or to use the configured default.
+    #[arg(long)]
+    pub server: Option<String>,
+}
+
+/// Arguments for `heddle grant delete`.
+#[derive(Args, Clone, Debug)]
+pub struct GrantDeleteArgs {
+    /// Principal shown as `ID` by `heddle grant list`.
+    #[arg(value_name = "ID")]
+    pub id: String,
+
+    /// Spool the grant is on (`spool/<handle>/<name>`, `<handle>/<name>`, or a hosted URL).
+    #[arg(long, value_name = "PATH|URL")]
+    pub spool: String,
+
+    /// Hosted Heddle server. Omit when `--spool` is a URL, or to use the configured default.
+    #[arg(long)]
+    pub server: Option<String>,
+}
+
 #[derive(Subcommand, Clone, Debug)]
 pub enum AuthTrustCommands {
-    /// Show the descriptor trust controlling a server connection
+    /// Show the descriptor root pin controlling a server connection
     Show(AuthTrustShowArgs),
-    /// Atomically replace an automatic descriptor trust pin
+    /// Atomically replace an automatic descriptor root pin
     Replace(AuthTrustReplaceArgs),
 }
 
@@ -230,13 +395,13 @@ pub struct AuthTrustReplaceArgs {
     /// Heddle server authority
     #[arg(long)]
     pub server: String,
-    /// Current descriptor public key required for compare-and-swap
+    /// Current descriptor root public key required for compare-and-swap
     #[arg(long, value_name = "64_HEX")]
     pub expect_current_public_key: String,
-    /// New descriptor key id confirmed out of band
+    /// New descriptor root key id confirmed out of band
     #[arg(long)]
     pub key_id: String,
-    /// New descriptor public key confirmed out of band
+    /// New descriptor root public key confirmed out of band
     #[arg(long, value_name = "64_HEX")]
     pub public_key: String,
 }
@@ -245,7 +410,10 @@ pub struct AuthTrustReplaceArgs {
 mod tests {
     use clap::Parser;
 
-    use crate::cli::{AuthCommands, AuthInviteCommands, AuthTrustCommands, Cli, Commands};
+    use crate::cli::{
+        AuthCommands, AuthInviteCommands, AuthTrustCommands, Cli, Commands, GrantCommands,
+        GrantRoleArg,
+    };
 
     #[test]
     fn trust_replace_parses_compare_and_swap_inputs() {
@@ -366,6 +534,24 @@ mod tests {
         assert_eq!(args.web_origin.as_deref(), Some("https://heddle.example"));
         assert_eq!(args.timeout, std::time::Duration::from_secs(30 * 60));
         assert!(Cli::try_parse_from(["heddle", "claim", "--timeout", "0s"]).is_err());
+    }
+
+    #[test]
+    fn promote_parses_path_and_optional_server() {
+        let cli = Cli::try_parse_from([
+            "heddle",
+            "promote",
+            "spool/willow-ibis-8e7264/notes",
+            "--server",
+            "api.preview.heddle.sh",
+        ])
+        .expect("promote flags parse");
+        let Commands::Promote(args) = cli.command else {
+            panic!("expected top-level promote");
+        };
+        assert_eq!(args.path, "spool/willow-ibis-8e7264/notes");
+        assert_eq!(args.server.as_deref(), Some("api.preview.heddle.sh"));
+        assert!(Cli::try_parse_from(["heddle", "promote"]).is_err());
     }
 
     #[test]
@@ -554,5 +740,75 @@ mod tests {
                 "runner persona must reject authority-changing overrides"
             );
         }
+    }
+
+    #[test]
+    fn grant_create_parses_spool_principal_and_contributor_role() {
+        let cli = Cli::try_parse_from([
+            "heddle",
+            "grant",
+            "create",
+            "--spool",
+            "spool/willow-ibis-8e7264/notes",
+            "--principal",
+            "alice",
+            "--role",
+            "contributor",
+            "--server",
+            "api.preview.heddle.sh",
+        ])
+        .expect("grant create flags parse");
+        let Commands::Grant {
+            command: GrantCommands::Create(args),
+        } = cli.command
+        else {
+            panic!("expected grant create");
+        };
+        assert_eq!(args.spool, "spool/willow-ibis-8e7264/notes");
+        assert_eq!(args.principal, "alice");
+        assert_eq!(args.role, GrantRoleArg::Contributor);
+        assert_eq!(args.role.as_hosted_role_name(), "developer");
+        assert_eq!(args.server.as_deref(), Some("api.preview.heddle.sh"));
+    }
+
+    #[test]
+    fn grant_list_and_delete_parse() {
+        let list = Cli::try_parse_from([
+            "heddle",
+            "grant",
+            "list",
+            "--spool",
+            "notes",
+            "--server",
+            "api.preview.heddle.sh",
+        ])
+        .expect("grant list flags parse");
+        let Commands::Grant {
+            command: GrantCommands::List(args),
+        } = list.command
+        else {
+            panic!("expected grant list");
+        };
+        assert_eq!(args.spool, "notes");
+        assert_eq!(args.server.as_deref(), Some("api.preview.heddle.sh"));
+
+        let delete = Cli::try_parse_from([
+            "heddle",
+            "grant",
+            "delete",
+            "alice",
+            "--spool",
+            "spool/willow-ibis-8e7264/notes",
+        ])
+        .expect("grant delete flags parse");
+        let Commands::Grant {
+            command: GrantCommands::Delete(args),
+        } = delete.command
+        else {
+            panic!("expected grant delete");
+        };
+        assert_eq!(args.id, "alice");
+        assert_eq!(args.spool, "spool/willow-ibis-8e7264/notes");
+        assert!(Cli::try_parse_from(["heddle", "grant", "delete", "alice"]).is_err());
     }
 }

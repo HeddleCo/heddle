@@ -36,6 +36,19 @@ impl GrantRole {
             _ => GrantRole::Unspecified,
         }
     }
+
+    /// Parse a CLI or wire role name. `contributor` is the everyday name
+    /// for [`GrantRole::Developer`].
+    pub fn from_hosted_role_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "reader" => Some(Self::Reader),
+            "contributor" | "developer" => Some(Self::Developer),
+            "maintainer" => Some(Self::Maintainer),
+            "admin" => Some(Self::Admin),
+            "owner" => Some(Self::Owner),
+            _ => None,
+        }
+    }
 }
 
 /// Map a caller's grant to the audience the visibility gate must use.
