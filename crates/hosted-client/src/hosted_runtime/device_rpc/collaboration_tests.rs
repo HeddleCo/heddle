@@ -28,27 +28,42 @@ pub(super) async fn roundtrip(
         mentions: vec![],
     };
     let base = replica.genesis().expect("genesis").base;
-    let mut unadmitted_anchor = Anchor::State { state_id: base };
+    let local_spool = repo::device_catalog::DeviceSpool {
+        id: spool,
+        root: repository.root().to_owned(),
+        heddle_dir: repository.heddle_dir().to_owned(),
+        capability_path: spool.to_string(),
+    };
+    let mut initial_anchor = Anchor::State { state_id: base };
     let (coverage, _) = super::collaboration_targets::project_for(
-        &repo::device_catalog::DeviceSpool {
-            id: spool,
-            root: repository.root().to_owned(),
-            heddle_dir: repository.heddle_dir().to_owned(),
-            capability_path: spool.to_string(),
-        },
+        &local_spool,
         metadata.actor.principal_id,
         None,
         replica,
         &metadata.scope,
-        &mut unadmitted_anchor,
+        &mut initial_anchor,
         &mut [],
     )
     .expect("project source reference");
     assert_eq!(
         coverage,
-        Coverage::Unavailable,
-        "a genesis base without an accepted source operation cannot authorize a reference"
+        Coverage::Complete,
+        "the exact canonical empty root is a readable system base"
     );
+    let mut unknown_anchor = Anchor::State {
+        state_id: objects::object::StateId::from_bytes([97; 32]),
+    };
+    let (coverage, _) = super::collaboration_targets::project_for(
+        &local_spool,
+        metadata.actor.principal_id,
+        None,
+        replica,
+        &metadata.scope,
+        &mut unknown_anchor,
+        &mut [],
+    )
+    .expect("project unknown source reference");
+    assert_eq!(coverage, Coverage::Unavailable, "arbitrary State hash is not an admitted source");
     let command = |id: uuid::Uuid, body| thread_api::collaboration::Command {
         discussion,
         operation_id: CollaborationIdempotencyKey::new(id.to_string()).expect("command ID"),

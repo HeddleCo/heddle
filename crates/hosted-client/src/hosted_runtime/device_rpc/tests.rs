@@ -121,6 +121,7 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
     let spool_ref = SpoolRef {
         id: spool.to_string(),
     };
+    super::fetch_tests::initial_base_roundtrip(&remote, &replica).await;
     super::artifact_tests::roundtrip(&remote, &repository, spool).await;
     super::content_tests::roundtrip(&remote, &repository, spool).await;
     super::publication_tests::roundtrip(&remote, &repository, *browser.id().as_bytes()).await;

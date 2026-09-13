@@ -221,8 +221,7 @@ pub(crate) fn validate_artifacts(
     dependency_records: Vec<ThreadGenesisRecord>,
     receipt_records: Vec<crypto::thread_authority_admission::SignedAuthorityAdmission>,
 ) -> Result<ValidatedSourceArtifacts, Error> {
-    if operations.is_empty()
-        || operations.len() > 10_000
+    if operations.len() > 10_000
         || dependency_records.len() >= 128
         || receipt_records.len() > operations.len()
     {
@@ -278,6 +277,42 @@ pub(crate) fn validate_artifacts(
         return Err(Error::Invalid("exact native State required"));
     };
     let selected_thread = genesis.id().map_err(preparation)?;
+    if operations.is_empty() {
+        if !dependency_records.is_empty() || !receipt_records.is_empty() {
+            return Err(Error::Invalid(
+                "initial source cannot carry dependency originals",
+            ));
+        }
+        let state =
+            heddle_object_model::object::thread_replication::hosted_import::synthetic_initial_base(
+            )
+            .map_err(preparation)?;
+        let canonical = state.encode_current_msgpack().map_err(preparation)?;
+        heddle_object_model::object::thread_replication::hosted_import::initial_base_state(
+            &genesis, &canonical,
+        )
+        .map_err(preparation)?;
+        if selected.value.as_slice() != state.id().as_bytes() {
+            return Err(Error::Invalid(
+                "selected initial source differs from canonical seed",
+            ));
+        }
+        PackReader::open(
+            &directory.path().join("source.pack"),
+            &directory.path().join("source.idx"),
+        )
+        .map_err(preparation)?
+        .validate_source_closure_with_metadata(&state, &[], None, SOURCE_OBJECTS, SOURCE_BYTES)
+        .map_err(preparation)?;
+        return Ok(ValidatedSourceArtifacts {
+            directory,
+            operations,
+            genesis: original.clone(),
+            dependencies: Vec::new(),
+            state,
+            authority_admissions: BTreeMap::new(),
+        });
+    }
     let mut geneses = BTreeMap::from([(selected_thread, genesis)]);
     let mut dependencies = Vec::new();
     for wrapper in dependency_records {
@@ -340,6 +375,38 @@ pub(crate) fn validate_artifacts(
     let mut originals = BTreeMap::new();
     let mut decoded = BTreeMap::<ContentHash, ThreadOperation>::new();
     let mut selected_operation = None;
+    let mut source_thread = selected_thread;
+    let mut inherited_bases = BTreeSet::new();
+    for _ in 0..128 {
+        let current = geneses
+            .get(&source_thread)
+            .ok_or(Error::Invalid("fork base source genesis absent"))?;
+        if selected.value.as_slice() != current.base.as_bytes() {
+            break;
+        }
+        let parent = current.parent.ok_or(Error::Invalid(
+            "non-system base has no original parent source",
+        ))?;
+        if !inherited_bases.insert(source_thread) {
+            return Err(Error::Invalid("fork base parent cycle"));
+        }
+        let ancestor = geneses
+            .get(&parent)
+            .ok_or(Error::Invalid("fork base parent original absent"))?;
+        if ancestor.spool != current.spool {
+            return Err(Error::Invalid("fork base crosses Spool"));
+        }
+        source_thread = parent;
+    }
+    if selected.value.as_slice()
+        == geneses
+            .get(&source_thread)
+            .ok_or(Error::Invalid("fork base source genesis absent"))?
+            .base
+            .as_bytes()
+    {
+        return Err(Error::Invalid("fork base source chain exceeds bound"));
+    }
     for signed in &operations {
         let operation = signed.verify().map_err(preparation)?;
         let id = operation.id().map_err(preparation)?;
@@ -347,7 +414,7 @@ pub(crate) fn validate_artifacts(
             .source_state()
             .map_err(preparation)?
             .ok_or(Error::Invalid("non-source operation in source ancestry"))?;
-        if operation.thread == selected_thread
+        if operation.thread == source_thread
             && state.id().as_bytes().as_slice() == selected.value
             && selected_operation.replace((id, state)).is_some()
         {
@@ -450,7 +517,13 @@ pub(crate) fn validate_artifacts(
                 .copied(),
         );
     }
-    if seen.len() != decoded.len() || used_threads.len() != geneses.len() {
+    if seen.len() != decoded.len()
+        || used_threads
+            .union(&inherited_bases)
+            .copied()
+            .collect::<BTreeSet<_>>()
+            != geneses.keys().copied().collect()
+    {
         return Err(Error::Invalid("unselected source proofs"));
     }
     // A claim cutoff is an additional signed causal barrier. Ancestors retain

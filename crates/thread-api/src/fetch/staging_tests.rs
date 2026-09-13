@@ -9,6 +9,138 @@ use objects::{
 use super::*;
 use crate::replication;
 
+#[test]
+fn only_exact_portable_empty_seed_stages_without_source_operation() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (_, mut ready, _, _) = crate::fetch::tests::fixture();
+    let signer = Ed25519Signer::from_seed(&[61; 32]).expect("creator");
+    let mut genesis = replication::opening::verify_genesis(
+        ready
+            .thread_genesis
+            .as_ref()
+            .expect("record")
+            .genesis
+            .as_ref()
+            .expect("signed"),
+        ready.thread.as_ref().expect("Thread"),
+    )
+    .expect("genesis");
+    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+        .expect("canonical seed");
+    genesis.base = seed.id();
+    let signed =
+        replication::opening::sign_genesis(&genesis, &signer).expect("signed seed genesis");
+    ready.thread_genesis.as_mut().expect("record").genesis = Some(signed);
+    ready.thread.as_mut().expect("Thread").id = Some(ThreadId {
+        value: genesis.id().expect("Thread ID").as_bytes().to_vec(),
+    });
+    ready.current.as_mut().expect("revision").revision = Some(revision_ref::Revision::State(
+        api::heddle::api::v1alpha1::StateId {
+            value: seed.id().as_bytes().to_vec(),
+        },
+    ));
+    let mut builder = PackBuilder::for_repack(Default::default(), 0);
+    builder.add_id(
+        PackObjectId::StateId(seed.id()),
+        ObjectType::State,
+        seed.encode_current_msgpack().expect("State"),
+    );
+    let tree = Tree::new();
+    builder.add_id(
+        PackObjectId::Hash(tree.hash()),
+        ObjectType::Tree,
+        tree.encode_canonical().expect("tree"),
+    );
+    let (pack, index, _) = builder.build().expect("source pack");
+    let directory = tempfile::Builder::new()
+        .prefix("seed-download-")
+        .tempdir_in(scratch.path())
+        .expect("staging");
+    std::fs::write(directory.path().join("source.pack"), pack).expect("pack");
+    std::fs::write(directory.path().join("source.idx"), index).expect("index");
+    let staged = validate(directory, ready.clone(), vec![], vec![]).expect("known seed");
+    assert_eq!(staged.state().id(), seed.id());
+    assert!(staged.operations().is_empty());
+    let mut wrong = ready;
+    let random = State::new_snapshot(
+        Tree::new().hash(),
+        vec![],
+        Attribution::human(Principal::new("Heddle", "init@heddle")),
+    );
+    wrong.current.as_mut().expect("revision").revision = Some(revision_ref::Revision::State(
+        api::heddle::api::v1alpha1::StateId {
+            value: random.id().as_bytes().to_vec(),
+        },
+    ));
+    let directory = tempfile::Builder::new()
+        .prefix("seed-download-negative-")
+        .tempdir_in(scratch.path())
+        .expect("staging");
+    std::fs::copy(
+        staged.artifact_paths()[0].clone(),
+        directory.path().join("source.pack"),
+    )
+    .expect("copy pack");
+    std::fs::copy(
+        staged.artifact_paths()[1].clone(),
+        directory.path().join("source.idx"),
+    )
+    .expect("copy index");
+    assert!(
+        validate(directory, wrong, vec![], vec![]).is_err(),
+        "random empty State is not an implicit source"
+    );
+}
+
+#[test]
+fn fork_base_stages_only_with_parent_original_source() {
+    let scratch = tempfile::tempdir().expect("scratch");
+    let (directory, mut ready, operations, state) = fixture(scratch.path(), false);
+    let parent = ready.thread_genesis.clone().expect("parent original");
+    let parent_genesis = replication::opening::verify_genesis(
+        parent.genesis.as_ref().expect("signed parent"),
+        ready.thread.as_ref().expect("parent Thread"),
+    )
+    .expect("parent genesis");
+    let mut child = parent_genesis.clone();
+    child.parent = Some(parent_genesis.id().expect("parent ID"));
+    child.base = state.id();
+    child.name = "fork".into();
+    let signer = Ed25519Signer::from_seed(&[61; 32]).expect("creator");
+    let signed = replication::opening::sign_genesis(&child, &signer).expect("signed fork");
+    ready.thread_genesis.as_mut().expect("child record").genesis = Some(signed);
+    ready.thread.as_mut().expect("Thread").id = Some(ThreadId {
+        value: child.id().expect("child ID").as_bytes().to_vec(),
+    });
+    let staged = validate(
+        directory,
+        ready.clone(),
+        operations.clone(),
+        vec![parent.clone()],
+    )
+    .expect("parent original proves fork base");
+    assert_eq!(staged.state().id(), state.id());
+    assert_eq!(staged.dependency_geneses().len(), 1);
+    let directory = tempfile::Builder::new()
+        .prefix("fork-missing-parent-")
+        .tempdir_in(scratch.path())
+        .expect("staging");
+    std::fs::copy(
+        staged.artifact_paths()[0].clone(),
+        directory.path().join("source.pack"),
+    )
+    .expect("copy pack");
+    std::fs::copy(
+        staged.artifact_paths()[1].clone(),
+        directory.path().join("source.idx"),
+    )
+    .expect("copy index");
+    assert!(
+        validate(directory, ready, operations, vec![]).is_err(),
+        "fork base cannot discard the parent original and rely on its hash"
+    );
+}
+
 fn fixture(
     scratch: &Path,
     extra_blob: bool,

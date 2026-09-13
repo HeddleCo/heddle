@@ -453,18 +453,54 @@ impl StagedSource {
         )?
         .id()
         .map_err(preparation)?;
-        if replicas
+        let selected = replicas
             .get(&main_id)
-            .ok_or(Error::Invalid("selected replica absent"))?
-            .accepted_source_revision(self.state.id())
-            .map_err(preparation)?
-            .is_none()
-        {
-            return Err(Error::Invalid("selected source proof did not settle"));
+            .ok_or(Error::Invalid("selected replica absent"))?;
+        if self.operations.is_empty() {
+            let genesis = selected.genesis().map_err(preparation)?;
+            let canonical = self.state.encode_current_msgpack().map_err(preparation)?;
+            objects::object::thread_replication::hosted_import::initial_base_state(
+                &genesis, &canonical,
+            )
+            .map_err(preparation)?;
+        } else {
+            let mut source = selected;
+            let mut proved = false;
+            let mut possession = Vec::new();
+            for _ in 0..128 {
+                if source
+                    .accepted_source_revision(self.state.id())
+                    .map_err(preparation)?
+                    .is_some()
+                {
+                    possession.push(source);
+                    proved = true;
+                    break;
+                }
+                let genesis = source.genesis().map_err(preparation)?;
+                if genesis.base != self.state.id() {
+                    break;
+                }
+                possession.push(source);
+                let Some(parent) = genesis.parent else { break };
+                let Some(next) = replicas.get(&parent) else {
+                    break;
+                };
+                if next.genesis().map_err(preparation)?.spool != genesis.spool {
+                    break;
+                }
+                source = next;
+            }
+            if !proved {
+                return Err(Error::Invalid("selected source proof did not settle"));
+            }
+            for replica in possession {
+                replica
+                    .record_source_possession(self.state.id())
+                    .map_err(preparation)?;
+            }
         }
-        replicas
-            .get(&main_id)
-            .ok_or(Error::Invalid("selected replica absent"))?
+        selected
             .record_source_possession(self.state.id())
             .map_err(preparation)?;
         Ok(())

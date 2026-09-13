@@ -14,9 +14,8 @@ use crate::{
 
 pub const HOSTED_IMPORT_FORMAT: &str = "heddle-hosted-import-v1";
 
-/// Stable synthetic pre-history for browser imports into a new Spool. This is
-/// system initialization, never an assertion of human capture authorship.
-/// Local repositories may retain their own random initial seed instead.
+/// Stable synthetic pre-history for every new Spool. This is system
+/// initialization, never an assertion of human capture authorship.
 pub fn synthetic_initial_base() -> Result<State> {
     use crate::object::{Attribution, ChangeId, Principal, Tree};
     let mut state = State::new_refresh_of(
@@ -30,23 +29,15 @@ pub fn synthetic_initial_base() -> Result<State> {
     State::decode_current_msgpack(&state.encode_current_msgpack()?)
 }
 
-/// Validate a portable initial base supplied with the creator-signed genesis.
-/// Its random logical identity and creation time are retained exactly; only the
-/// existing synthetic Heddle seed shape is accepted, so no hidden object closure
-/// can be smuggled into the empty-Spool bootstrap.
+/// Only the exact deterministic empty seed can bootstrap without an original
+/// source operation. A random empty State, even with Heddle attribution, is
+/// authored content and requires ordinary source provenance.
 pub fn initial_base_state(genesis: &ThreadGenesis, bytes: &[u8]) -> Result<State> {
-    use crate::object::{Attribution, Principal, Tree};
     if bytes.is_empty() || bytes.len() > 4096 {
         return Err(invalid("initial Thread base exceeds bootstrap bound"));
     }
     let state = State::decode_current_msgpack(bytes)?;
-    let mut expected = State::new_refresh_of(
-        Tree::new().hash(),
-        Vec::new(),
-        Attribution::human(Principal::new("Heddle", "init@heddle")),
-        state.change_id,
-    );
-    expected.created_at = state.created_at;
+    let expected = synthetic_initial_base()?;
     if state.id() != genesis.base || expected.encode_current_msgpack()? != bytes {
         return Err(invalid(
             "initial Thread base differs from signed empty seed",
@@ -306,11 +297,7 @@ mod tests {
     #[test]
     fn import_initial_base_is_exact_bounded_empty_seed() {
         let (mut genesis, _, _) = fixture();
-        let seed = State::new_snapshot(
-            Tree::new().hash(),
-            vec![],
-            Attribution::human(Principal::new("Heddle", "init@heddle")),
-        );
+        let seed = synthetic_initial_base().expect("known system seed");
         let bytes = seed.encode_current_msgpack().expect("seed");
         genesis.base = seed.id();
         assert_eq!(
@@ -319,6 +306,21 @@ mod tests {
                 .id(),
             seed.id()
         );
+        let random_seed = State::new_snapshot(
+            Tree::new().hash(),
+            vec![],
+            Attribution::human(Principal::new("Heddle", "init@heddle")),
+        );
+        genesis.base = random_seed.id();
+        assert!(
+            initial_base_state(
+                &genesis,
+                &random_seed.encode_current_msgpack().expect("random seed")
+            )
+            .is_err(),
+            "the old random empty seed shape is not a bootstrap exception"
+        );
+        genesis.base = seed.id();
         let mut changed = seed.clone();
         changed.tree = ContentHash::from_bytes([88; 32]);
         genesis.base = changed.id();

@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use api::{heddle::api::v1alpha1::CallContext, v2::MethodDescriptor};
 use biscuit_verifier::{BiscuitFacts, PublicKey};
 use chrono::Utc;
+use objects::store::ObjectStore;
 use repo::device_catalog::DeviceSpool;
 
 #[derive(Default)]
@@ -401,43 +402,83 @@ pub(super) fn source_revision_visible(
     agent: Option<&str>,
     revision: objects::object::StateId,
 ) -> Result<bool> {
-    let Some(audience) = reader_audience(repository, replica, principal, agent)? else {
-        return Ok(false);
-    };
-    if replica.accepted_source_revision(revision)?.is_none() {
-        return Ok(false);
-    }
-    // A metadata-only courier can supply the accepted signed source before
-    // this checkout has a local visibility sidecar. The original declaration
-    // still binds the reader, including when the same State has several
-    // accepted source operations.
-    let operations = replica.source_operation_page(revision, None, 65)?;
-    if operations.len() > 64 {
-        return Ok(false);
-    }
-    for id in operations {
-        let Some((signed, _)) = replica.operation(&id)? else {
+    let mut owner = replica.clone();
+    // A fork's base is carried by its parent Thread, not by an operation
+    // invented under the child identity. Every hop needs its own audience.
+    for _ in 0..128 {
+        let Some(audience) = reader_audience(repository, &owner, principal, agent)? else {
             return Ok(false);
         };
-        let operation = signed.verify()?;
-        let Some(capture) = operation.source_result()? else {
-            return Ok(false);
-        };
-        match capture.visibility.and_then(|visibility| visibility.state) {
-            Some(tier) if !objects::object::visible(&tier, &audience) => return Ok(false),
-            None if !objects::object::visible(
-                &repository.resolve_capture_default_visibility(),
-                &audience,
-            ) =>
-            {
+        let genesis = owner.genesis()?;
+        if revision == genesis.base {
+            let seed =
+                objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+            if revision != seed.id() {
+                let Some(parent) = genesis.parent else {
+                    return Ok(false);
+                };
+                owner =
+                    repo::thread_replication::ThreadReplica::open(repository.heddle_dir(), parent)?;
+                if owner.genesis()?.spool != genesis.spool {
+                    return Ok(false);
+                }
+                continue;
+            }
+            if !owner.has_source_possession(revision)? {
                 return Ok(false);
             }
-            _ => {}
+            let Some(stored) = repository.store().get_state(&revision)? else {
+                return Ok(false);
+            };
+            if stored.encode_current_msgpack()? != seed.encode_current_msgpack()? {
+                return Ok(false);
+            }
+            return Ok(repository
+                .withholding_visibility_for_audience(&revision, &audience)?
+                .is_none()
+                && objects::object::visible(
+                    &repository.resolve_capture_default_visibility(),
+                    &audience,
+                ));
         }
+        if owner.accepted_source_revision(revision)?.is_none()
+            || !owner.has_source_possession(revision)?
+        {
+            return Ok(false);
+        }
+        // A metadata-only courier can supply the accepted signed source before
+        // this checkout has a local visibility sidecar. The original declaration
+        // still binds the reader, including when the same State has several
+        // accepted source operations.
+        let operations = owner.source_operation_page(revision, None, 65)?;
+        if operations.len() > 64 {
+            return Ok(false);
+        }
+        for id in operations {
+            let Some((signed, _)) = owner.operation(&id)? else {
+                return Ok(false);
+            };
+            let operation = signed.verify()?;
+            let Some(capture) = operation.source_result()? else {
+                return Ok(false);
+            };
+            match capture.visibility.and_then(|visibility| visibility.state) {
+                Some(tier) if !objects::object::visible(&tier, &audience) => return Ok(false),
+                None if !objects::object::visible(
+                    &repository.resolve_capture_default_visibility(),
+                    &audience,
+                ) =>
+                {
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
+        return Ok(repository
+            .withholding_visibility_for_audience(&revision, &audience)?
+            .is_none());
     }
-    Ok(repository
-        .withholding_visibility_for_audience(&revision, &audience)?
-        .is_none())
+    Ok(false)
 }
 
 pub(super) fn discussion_visible(

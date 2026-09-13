@@ -41,6 +41,13 @@ fn init_default_persists_and_reuses_stable_main_thread_record() {
         .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("init_default must seed the main ref");
+    assert_eq!(
+        main_state,
+        objects::object::thread_replication::hosted_import::synthetic_initial_base()
+            .expect("canonical system seed")
+            .id(),
+        "native init and hosted import share the exact system base"
+    );
     let manager = ThreadManager::new(repo.heddle_dir());
 
     let first = manager

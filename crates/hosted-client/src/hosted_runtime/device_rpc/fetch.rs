@@ -13,7 +13,10 @@ use api::{
     v2::client::{MessageReader, MessageWriter},
 };
 use iroh::endpoint::{RecvStream, SendStream};
-use objects::object::{ContentHash, StateId, thread_replication::OPERATION_FORMAT};
+use objects::{
+    object::{ContentHash, StateId, thread_replication::OPERATION_FORMAT},
+    store::ObjectStore,
+};
 use prost::Message;
 use repo::thread_replication::ThreadReplica;
 use thread_api::{
@@ -280,19 +283,86 @@ pub(super) fn prepare(
     session.authorize_thread(&repository, &selected)?;
     // Signed metadata is not possession of the named global CAS objects.
     session.authorize_revision(&repository, revision)?;
-    let state = selected
+    if !auth::source_revision_visible(
+        &repository,
+        &selected,
+        uuid::Uuid::parse_str(&session.principal)?,
+        session.agent_id.as_deref(),
+        revision,
+    )? {
+        bail!("selected source is unavailable to this audience")
+    }
+    let genesis = selected.genesis()?;
+    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+    if revision == genesis.base && revision == seed.id() {
+        let state = repository
+            .store()
+            .get_state(&revision)?
+            .context("canonical initial source is unavailable")?;
+        if state.encode_current_msgpack()? != seed.encode_current_msgpack()? {
+            bail!("initial source differs from canonical empty seed")
+        }
+        let generation = selected.generation()?;
+        let scratch = repository.heddle_dir().join("source-transfers");
+        objects::fs_atomic::create_private_dir_all(&scratch)?;
+        let pack = SourcePack::prepare_with_references(
+            repository.store(),
+            &state,
+            &[],
+            &scratch,
+            SourceBudget {
+                max_objects: 100_000,
+                max_decoded_bytes: BYTES,
+            },
+        )?;
+        if selected.generation()? != generation {
+            bail!("source Thread changed during preparation")
+        }
+        return Ok(Prepared {
+            pack,
+            geneses: BTreeMap::from([(thread, selected.genesis_record()?)]),
+            operations: Vec::new(),
+            guards: vec![(selected, generation)],
+        });
+    }
+    let mut source_owner = selected.clone();
+    let mut lineage = BTreeMap::new();
+    for _ in 0..128 {
+        let current = source_owner.genesis()?;
+        if revision != current.base {
+            break;
+        }
+        let parent = current
+            .parent
+            .context("fork base has no parent source proof")?;
+        lineage.insert(source_owner.thread_id(), source_owner.clone());
+        source_owner = ThreadReplica::open(&session.spool.heddle_dir, parent)?;
+        session.authorize_thread(&repository, &source_owner)?;
+        if source_owner.genesis()?.spool != current.spool {
+            bail!("fork source parent crosses Spool")
+        }
+    }
+    if revision == source_owner.genesis()?.base {
+        bail!("source parent chain exceeds bound")
+    }
+    let state = source_owner
         .accepted_source_revision(revision)?
         .context("selected revision is not admitted by Thread")?;
-    let ids = selected.source_operation_page(revision, None, 2)?;
+    let ids = source_owner.source_operation_page(revision, None, 2)?;
     let [selected_operation] = ids.as_slice() else {
         bail!("select a uniquely admitted source operation")
     };
-    let mut pending = BTreeSet::from([(thread, *selected_operation)]);
+    let mut pending = BTreeSet::from([(source_owner.thread_id(), *selected_operation)]);
     let mut seen = BTreeSet::new();
     let mut emitted = BTreeSet::new();
     let mut geneses = BTreeMap::new();
     let mut proofs = Vec::new();
     let mut guards = Vec::new();
+    for (id, child) in lineage {
+        let generation = child.generation()?;
+        geneses.insert(id, child.genesis_record()?);
+        guards.push((child, generation));
+    }
     let mut operations = Vec::new();
     let mut bytes = 0usize;
     while let Some((owner, id)) = pending.pop_first() {

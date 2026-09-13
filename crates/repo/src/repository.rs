@@ -61,7 +61,7 @@ use objects::{
     Progress,
     error::{HeddleError, Result},
     lock::{RepoLock, RepositoryLockExt},
-    object::{Attribution, ContentHash, State, StateId, ThreadName, Tree},
+    object::{ContentHash, State, StateId, ThreadName, Tree},
     store::{FsStore, ObjectStore, ShallowInfo},
     sync::RwLockExt,
 };
@@ -147,7 +147,6 @@ pub use overlay::{
     GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus, GitOverlayTagTip,
 };
 pub use repository_identity::is_synthetic_root;
-use repository_identity::seed_principal;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryCapability {
@@ -844,10 +843,8 @@ impl Repository {
     pub fn seed_default_thread(&self) -> Result<()> {
         let main_thread = ThreadName::from("main");
         if self.refs.get_thread(&main_thread)?.is_none() {
-            let empty_tree = Tree::new();
-            let tree_hash = self.store.put_tree(&empty_tree)?;
-            let state =
-                State::new_snapshot(tree_hash, vec![], Attribution::human(seed_principal()));
+            let state = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+            self.store.put_tree(&Tree::new())?;
             self.store.put_state(&state)?;
             self.refs.set_thread(&main_thread, &state.id())?;
         }
