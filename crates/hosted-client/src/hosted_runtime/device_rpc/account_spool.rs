@@ -290,7 +290,13 @@ impl DeviceRpc {
                 .and_then(|a| a.attachment.as_ref())
                 .and_then(|a| a.mint_root_key.as_ref())
                 .unwrap_or(owner.authority_key());
-            authority.verify_mint_root(&issuer.public_key, now)?;
+            if issuer.public_key == session.root.to_bytes() {
+                // The request already proved this exact mint root against the
+                // locally enrolled owner, including a fresh passkey delegation.
+                session.owner(&self.home)?;
+            } else {
+                authority.verify_mint_root(&issuer.public_key, now)?;
+            }
             ensure!(
                 statement.account_uuid == uuid::Uuid::parse_str(&session.principal)?.as_bytes()
                     && statement.parent_spool_uuid
