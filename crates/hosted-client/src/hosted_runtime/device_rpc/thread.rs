@@ -332,9 +332,17 @@ impl DeviceRpc {
         replica: &ThreadReplica,
     ) -> Result<ThreadOverview> {
         let repository = repo::Repository::open(&session.spool.root)?;
+        self.thread_overview_with_repository(&repository, session, replica)
+    }
+    pub(super) fn thread_overview_with_repository(
+        &self,
+        repository: &repo::Repository,
+        session: &Session,
+        replica: &ThreadReplica,
+    ) -> Result<ThreadOverview> {
         let principal = uuid::Uuid::parse_str(&session.principal)?;
         let mut overview = self.thread_overview_for_spool(
-            &repository,
+            repository,
             &session.spool,
             replica,
             principal,
@@ -562,10 +570,8 @@ impl DeviceRpc {
                 }
             }
         }
-        let repository = repo::Repository::open(&spool.root)?;
-        overview.review_policy_version = super::land::policy_version(&repository)?
-            .as_bytes()
-            .to_vec();
+        overview.review_policy_version =
+            super::land::policy_version(repository)?.as_bytes().to_vec();
         for (property, suffix) in [
             (Property::Name, "RenameThread"),
             (Property::Intent, "ReviseIntent"),

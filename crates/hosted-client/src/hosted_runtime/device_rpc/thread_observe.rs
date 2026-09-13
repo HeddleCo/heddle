@@ -78,6 +78,15 @@ impl DeviceRpc {
         sections: &[i32],
     ) -> Result<Vec<u8>> {
         let repository = repo::Repository::open(&session.spool.root)?;
+        self.thread_observation_version_with_repository(&repository, session, replica, sections)
+    }
+    fn thread_observation_version_with_repository(
+        &self,
+        repository: &repo::Repository,
+        session: &Session,
+        replica: &ThreadReplica,
+        sections: &[i32],
+    ) -> Result<Vec<u8>> {
         if self.thread_conflict_status(session, replica)?.is_some() {
             return Ok(repo::thread_replication::projection::version(
                 replica.thread_id(),
@@ -86,7 +95,7 @@ impl DeviceRpc {
             .as_bytes()
             .to_vec());
         }
-        session.authorize_thread(&repository, replica)?;
+        session.authorize_thread(repository, replica)?;
         let version = repo::thread_replication::projection::version(
             replica.thread_id(),
             replica.generation()?,
@@ -104,7 +113,7 @@ impl DeviceRpc {
             let principal = uuid::Uuid::parse_str(&session.principal)?;
             for state in replica.current_source_revisions(128)? {
                 if super::auth::source_content_visibility(
-                    &repository,
+                    repository,
                     replica,
                     principal,
                     session.agent_id.as_deref(),
@@ -118,7 +127,7 @@ impl DeviceRpc {
                 let present = replica.has_source_possession(state)?;
                 analysis.push(u8::from(present));
                 if present {
-                    session.authorize_revision(&repository, state)?;
+                    session.authorize_revision(repository, state)?;
                     if let Some(attachment) = repository
                         .latest_state_attachment(&state, repo::StateAttachmentKind::SemanticIndex)?
                     {
@@ -132,7 +141,7 @@ impl DeviceRpc {
                 analysis.as_slice(),
                 &evidence.to_be_bytes(),
                 version.as_bytes().as_slice(),
-                super::land::policy_version(&repository)?
+                super::land::policy_version(repository)?
                     .as_bytes()
                     .as_slice(),
             ]
@@ -208,8 +217,13 @@ impl DeviceRpc {
         }
         let repository = repo::Repository::open(&session.spool.root)?;
         session.authorize_thread(&repository, replica)?;
-        let mut overview = self.thread_overview(session, replica)?;
-        let generation = self.thread_observation_version(session, replica, &request.sections)?;
+        let mut overview = self.thread_overview_with_repository(&repository, session, replica)?;
+        let generation = self.thread_observation_version_with_repository(
+            &repository,
+            session,
+            replica,
+            &request.sections,
+        )?;
         let reference = overview.r#ref.clone().context("Thread scope")?;
         let mut events = Vec::new();
         let mut all_exhausted = true;
