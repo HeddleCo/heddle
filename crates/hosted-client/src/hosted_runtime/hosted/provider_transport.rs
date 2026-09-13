@@ -580,8 +580,8 @@ mod tests {
         assert!(format!("{transport:?}").contains("registered_provider_lanes: 1"));
     }
 
-    #[test]
-    fn native_provider_routes_use_v2_endpoint_identity_and_transport_hints() {
+    #[tokio::test]
+    async fn native_provider_routes_use_v2_endpoint_identity_and_transport_hints() {
         let transport = ProviderWebSocketTransport::new(ClientConfig::default());
         let _bound = transport.bind().expect("bind provider transport");
         let endpoint_id = iroh_base::SecretKey::generate().public();
