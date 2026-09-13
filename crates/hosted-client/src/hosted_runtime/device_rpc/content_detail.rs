@@ -86,6 +86,7 @@ pub(super) fn state(
 pub(super) fn diff(
     repository: &repo::Repository,
     session: &Session,
+    selected_thread: &repo::thread_replication::ThreadReplica,
     state: &State,
     revision: &RevisionRef,
     read: &DiffRead,
@@ -93,6 +94,24 @@ pub(super) fn diff(
     emit: &mut impl FnMut(Payload) -> Result<()>,
 ) -> Result<()> {
     let base = checkout::revision(session, read.base.as_ref())?;
+    let base_thread = match read.base_thread.as_ref() {
+        Some(reference) => repo::thread_replication::ThreadReplica::open(
+            &session.spool.heddle_dir,
+            checkout::thread(session, Some(reference))?,
+        )?,
+        None => selected_thread.clone(),
+    };
+    session.authorize_thread(repository, &base_thread)?;
+    ensure!(
+        super::auth::source_revision_visible(
+            repository,
+            &base_thread,
+            uuid::Uuid::parse_str(&session.principal)?,
+            session.agent_id.as_deref(),
+            base,
+        )?,
+        "diff base is unavailable to its selected Thread audience"
+    );
     let previous = repository
         .store()
         .get_state(&base)?

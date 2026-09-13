@@ -19,12 +19,19 @@ pub struct Blob {
 
 impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
     /// One request for any mixture of paths and missing object hashes. The
-    /// revision pins both content and authorization; no mutable Thread-tip lookup.
+    /// The selected Thread and revision pin content and authorization without a
+    /// mutable Thread-tip lookup.
     pub async fn read_blobs(
         &self,
+        thread: ThreadRef,
         revision: RevisionRef,
         sources: Vec<BlobSource>,
     ) -> Result<Vec<Blob>, Error> {
+        if thread.spool != revision.spool
+            || thread.id.as_ref().is_none_or(|id| id.value.len() != 32)
+        {
+            return Err(Error::Invalid("content Thread differs from exact revision scope"));
+        }
         let budget = observation::budget(&self.description)?;
         if sources.is_empty() || sources.len() > budget.max_items as usize {
             return Err(Error::Invalid("invalid selection count"));
@@ -51,6 +58,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         let mut messages = self
             .api
             .observe::<rpc::ContentServiceReadContent>(&ReadContentRequest {
+                thread: Some(thread),
                 revision: Some(revision.clone()),
                 selections,
                 budget: Some(budget),

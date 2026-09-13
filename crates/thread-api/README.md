@@ -205,7 +205,7 @@ maintaining a handwritten route list in Heddle.
 Content has its own demand-driven read, pinned to the observed revision:
 
 ```rust,ignore
-let blobs = remote.read_blobs(observed_tip, vec![
+let blobs = remote.read_blobs(selected_thread, observed_tip, vec![
     BlobSource::Path("README.md".into()),
     BlobSource::ObjectHash(missing_blob_hash),
 ]).await?;

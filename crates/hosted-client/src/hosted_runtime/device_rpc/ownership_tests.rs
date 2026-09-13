@@ -303,6 +303,10 @@ async fn conflict_status(
     let mut content = remote
         .api
         .observe::<thread_api::rpc::ContentServiceReadContent>(&ReadContentRequest {
+            thread: Some(ThreadRef {
+                spool: Some(SpoolRef { id: spool.to_string() }),
+                id: Some(ThreadId { value: replica.thread_id().as_bytes().to_vec() }),
+            }),
             revision: Some(RevisionRef {
                 spool: Some(SpoolRef {
                     id: spool.to_string(),

@@ -122,6 +122,7 @@ async fn paths_and_hashes_share_one_exact_revision_read() {
     let remote = peer.connect().await.expect("discovery");
     let blobs = remote
         .read_blobs(
+            support::thread_ref(),
             support::revision(),
             vec![
                 BlobSource::Path("README.md".into()),
@@ -157,6 +158,7 @@ async fn blob_range_without_selection_completion_is_interrupted() {
     assert!(matches!(
         remote
             .read_blobs(
+                support::thread_ref(),
                 support::revision(),
                 vec![BlobSource::Path("README.md".into())]
             )
@@ -173,6 +175,7 @@ async fn a_blob_from_another_revision_is_rejected() {
     assert!(matches!(
         remote
             .read_blobs(
+                support::thread_ref(),
                 support::revision(),
                 vec![BlobSource::Path("README.md".into())]
             )

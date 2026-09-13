@@ -59,6 +59,7 @@ async fn main() -> Result<()> {
     };
     let blobs = remote
         .read_blobs(
+            thread.reference.clone(),
             revision.clone(),
             vec![
                 BlobSource::Path("README.md".into()),

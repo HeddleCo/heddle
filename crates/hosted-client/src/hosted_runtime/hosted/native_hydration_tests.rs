@@ -45,6 +45,11 @@ async fn exercise(corrupt: bool, truncated: bool) {
             },
         )),
     };
+    let thread = v2::ThreadRef {
+        spool: Some(v2::SpoolRef { id: spool.clone() }),
+        id: Some(v2::ThreadId { value: vec![7; 32] }),
+    };
+    let served_thread = thread.clone();
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
         .relay_mode(RelayMode::Disabled)
@@ -103,6 +108,7 @@ async fn exercise(corrupt: bool, truncated: bool) {
             "/heddle.api.v2alpha1.ContentService/ReadContent"
         );
         let read = v2::ReadContentRequest::decode(frame.body).expect("native selection");
+        assert_eq!(read.thread, Some(served_thread));
         assert_eq!(read.revision, Some(revision.clone()));
         assert_eq!(read.selections.len(), 1, "no sibling or whole-tip request");
         assert_eq!(
@@ -161,7 +167,7 @@ async fn exercise(corrupt: bool, truncated: bool) {
             .await
             .expect("assembled client");
     let result = client
-        .hydrate_blob(&repo, &spool, state, wanted.hash())
+        .hydrate_blob(&repo, &spool, thread, state, wanted.hash())
         .await;
     client.close().await;
     task.await.expect("native server finished");

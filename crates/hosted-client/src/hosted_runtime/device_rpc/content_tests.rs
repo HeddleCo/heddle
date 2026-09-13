@@ -40,7 +40,11 @@ pub(super) async fn roundtrip(
             },
         )),
     };
-    let request = ReadContentRequest {
+    let mut request = ReadContentRequest {
+        thread: Some(ThreadRef {
+            spool: Some(SpoolRef { id: spool.to_string() }),
+            id: Some(ThreadId { value: vec![99; 32] }),
+        }),
         revision: Some(revision.clone()),
         selections: vec![
             ContentRead {
@@ -76,7 +80,7 @@ pub(super) async fn roundtrip(
         ),
         "an object hash without an audience-authorized Thread cannot disclose source"
     );
-    repository
+    let replica = repository
         .create_native_thread(
             "content-source",
             repository.head().expect("head").expect("source base"),
@@ -87,6 +91,11 @@ pub(super) async fn roundtrip(
     repository
         .record_native_capture("content-source", state.id())
         .expect("original accepted source capture");
+    let thread = ThreadRef {
+        spool: Some(SpoolRef { id: spool.to_string() }),
+        id: Some(ThreadId { value: replica.thread_id().as_bytes().to_vec() }),
+    };
+    request.thread = Some(thread.clone());
     let mut stream = remote
         .api
         .observe::<thread_api::rpc::ContentServiceReadContent>(&request)
@@ -127,6 +136,7 @@ pub(super) async fn roundtrip(
         blob_read::Source::Path("../source.txt".into()),
     ] {
         let denied = ReadContentRequest {
+            thread: Some(thread.clone()),
             revision: Some(revision.clone()),
             selections: vec![ContentRead {
                 selection_id: "denied".into(),
@@ -149,6 +159,7 @@ pub(super) async fn roundtrip(
     }
     let blobs = remote
         .read_blobs(
+            thread,
             revision,
             vec![thread_api::content::BlobSource::ObjectHash(
                 selected.hash().as_bytes().to_vec(),

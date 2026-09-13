@@ -15,7 +15,7 @@ use objects::{
 };
 use prost::Message;
 
-use super::{DeviceRpc, auth::Session, checkout, failure};
+use super::{DeviceRpc, auth::{self, Session}, checkout, failure};
 
 const MAX_WORK: usize = 100_000;
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
@@ -121,9 +121,24 @@ impl DeviceRpc {
             let _slot = slot;
             current.check_current(&home)?;
             let mut budget = Budget::new(request.budget)?;
+            let thread_id = checkout::thread(&current, request.thread.as_ref())?;
+            let replica = repo::thread_replication::ThreadReplica::open(
+                &current.spool.heddle_dir,
+                thread_id,
+            )?;
             let revision = request.revision.context("exact revision required")?;
             let state_id = checkout::revision(&current, Some(&revision))?;
             let repository = repo::Repository::open(&current.spool.root)?;
+            current.authorize_thread(&repository, &replica)?;
+            if !auth::source_revision_visible(
+                &repository,
+                &replica,
+                uuid::Uuid::parse_str(&current.principal)?,
+                current.agent_id.as_deref(),
+                state_id,
+            )? {
+                bail!("selected source is unavailable to this Thread audience");
+            }
             let state = repository
                 .store()
                 .get_state(&state_id)?
@@ -222,6 +237,7 @@ impl DeviceRpc {
                     content_read::Selection::Diff(read) => super::content_detail::diff(
                         &repository,
                         &current,
+                        &replica,
                         &state,
                         &revision,
                         &read,

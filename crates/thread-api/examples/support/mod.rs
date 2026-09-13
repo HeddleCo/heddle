@@ -407,6 +407,7 @@ async fn serve(mut send: SendStream, mut recv: RecvStream, state: Arc<State>) ->
         }
         api::v2::MethodRoute::ContentServiceReadContent => {
             let request = ReadContentRequest::decode(request.body)?;
+            ensure!(request.thread == Some(thread_ref()), "exact owning Thread");
             ensure!(request.revision == Some(revision()), "exact revision");
             for selection in request.selections {
                 let mut revision = revision();

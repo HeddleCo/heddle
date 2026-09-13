@@ -16,11 +16,12 @@ impl HostedClient {
         &self,
         repo: &Repository,
         spool_address: &str,
+        thread: contract::ThreadRef,
         revision: StateId,
         path: &str,
     ) -> Result<Blob, ProtocolError> {
         let blob = self
-            .read_native_blob(spool_address, revision, BlobSource::Path(path.into()))
+            .read_native_blob(spool_address, thread, revision, BlobSource::Path(path.into()))
             .await?;
         repo.store().put_blob(&blob)?;
         repo.clear_missing_blob(&blob.hash())?;
@@ -34,6 +35,7 @@ impl HostedClient {
         &self,
         repo: &Repository,
         spool_address: &str,
+        thread: contract::ThreadRef,
         revision: StateId,
         hash: ContentHash,
     ) -> Result<usize, ProtocolError> {
@@ -44,6 +46,7 @@ impl HostedClient {
         let blob = self
             .read_native_blob(
                 spool_address,
+                thread,
                 revision,
                 BlobSource::ObjectHash(hash.as_bytes().to_vec()),
             )
@@ -56,13 +59,20 @@ impl HostedClient {
     async fn read_native_blob(
         &self,
         spool_address: &str,
+        thread: contract::ThreadRef,
         revision: StateId,
         source: BlobSource,
     ) -> Result<Blob, ProtocolError> {
         let spool = self.resolve_spool_ref(spool_address).await?;
+        if thread.spool.as_ref() != Some(&spool)
+            || thread.id.as_ref().is_none_or(|id| id.value.len() != 32)
+        {
+            return Err(invalid("hydration Thread differs from selected Spool"));
+        }
         let remote = self.native().await.map_err(invalid)?;
         let mut blobs = remote
             .read_blobs(
+                thread,
                 contract::RevisionRef {
                     spool: Some(spool),
                     revision: Some(contract::revision_ref::Revision::State(ProtoStateId {
