@@ -84,8 +84,8 @@ pub fn search_native(
         || limit == 0
         || limit > 257
         || kinds.is_empty()
-        || kinds.len() > 3
-        || kinds.iter().any(|kind| !(0..=2).contains(kind))
+        || kinds.len() > 4
+        || kinds.iter().any(|kind| !matches!(kind, 0..=2 | 5))
         || (text.trim().is_empty() && annotations.is_none())
         || (annotations.is_some() && kinds != [2])
     {
@@ -97,6 +97,8 @@ pub fn search_native(
         .ok_or_else(|| Error::Invalid("local metadata missing".into()))?;
     bound_query_work(&connection)?;
     let phrase = format!("\"{}\"", text.trim().replace('"', "\"\""));
+    let exact_revision = text.trim().strip_prefix("heddle:").unwrap_or(text.trim());
+    let exact_revision = objects::object::StateId::parse(exact_revision).ok();
     let lexical = "WITH hits AS (
         SELECT s.thread,s.operation,s.kind,s.record,
                snippet(collaboration_search,4,'','',' … ',32) summary,
@@ -113,6 +115,9 @@ pub fn search_native(
         SELECT l.thread,l.thread,0,lower(hex(l.thread)),
                substr(l.name||char(10)||l.intent,1,512),-1.0,x''
         FROM thread_list l WHERE ?4 AND instr(lower(l.name||' '||l.intent),lower(?5))>0
+        UNION ALL
+        SELECT o.thread,o.id,5,?9,?9,-2.0,o.canonical
+        FROM operations o WHERE ?8 AND o.status=1 AND o.facet=1 AND o.source_revision=?10
       ), anchor AS (
         SELECT score,thread,operation,kind,record FROM hits WHERE operation=?6
       ) SELECT thread,operation,kind,record,summary,score,canonical FROM hits
@@ -164,7 +169,10 @@ pub fn search_native(
                 kinds.contains(&0),
                 text.trim(),
                 after_operation.map(|id| id.as_bytes().to_vec()),
-                limit
+                limit,
+                kinds.contains(&5),
+                text.trim(),
+                exact_revision.map(|id| id.as_bytes().to_vec())
             ],
             read,
         )?

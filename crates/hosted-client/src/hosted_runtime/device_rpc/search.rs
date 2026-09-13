@@ -20,7 +20,7 @@ struct SearchSelection {
 impl SearchSelection {
     fn parse(request: &SearchRequest) -> Result<Self> {
         ensure!(
-            request.spools.len() <= 32 && request.threads.len() <= 64 && request.domains.len() <= 3,
+            request.spools.len() <= 32 && request.threads.len() <= 64 && request.domains.len() <= 4,
             "search selector bound exceeded"
         );
         let mut spools = BTreeSet::new();
@@ -77,7 +77,10 @@ impl SearchSelection {
                 ensure!(
                     matches!(
                         kind,
-                        SearchDomain::Thread | SearchDomain::Discussion | SearchDomain::Context
+                        SearchDomain::Thread
+                            | SearchDomain::Discussion
+                            | SearchDomain::Context
+                            | SearchDomain::Revision
                     ),
                     "unsupported search domain"
                 );
@@ -290,6 +293,20 @@ impl DeviceRpc {
                                 let (coverage, _) = super::collaboration_targets::project_for(spool, principal, facts.delegation_agent_id.as_deref(), &replica, &scope, &mut context.anchor, &mut context.tags)?;
                                 if coverage == Coverage::Unavailable { continue; }
                             }
+                            let revision_hit = if hit.kind == 5 {
+                                let text = hit.record.strip_prefix("heddle:").unwrap_or(&hit.record);
+                                let revision = objects::object::StateId::parse(text)?;
+                                if super::auth::source_content_visibility(
+                                    &repository, &replica, principal,
+                                    facts.delegation_agent_id.as_deref(), revision,
+                                )?.is_none() { continue; }
+                                Some(RevisionRef {
+                                    spool: Some(SpoolRef { id: spool.id.to_string() }),
+                                    revision: Some(revision_ref::Revision::State(
+                                        api::heddle::api::v1alpha1::StateId { value: revision.as_bytes().to_vec() }
+                                    )),
+                                })
+                            } else { None };
                             if visible == limit as usize {
                                 has_more = true;
                                 break 'scan;
@@ -300,7 +317,9 @@ impl DeviceRpc {
                                 }),
                                 id: hit.record,
                             };
-                            let entity = if hit.kind == 0 {
+                            let entity = if let Some(revision) = revision_hit.as_ref() {
+                                entity_ref::Entity::Revision(revision.clone())
+                            } else if hit.kind == 0 {
                                 entity_ref::Entity::Thread(ThreadRef {
                                     spool: Some(SpoolRef { id: spool.id.to_string() }),
                                     id: Some(ThreadId { value: hit.thread.as_bytes().to_vec() }),
@@ -319,12 +338,20 @@ impl DeviceRpc {
                                     summary: hit.snippet,
                                     score: -hit.score,
                                     domain: i32::from(hit.kind) + 1,
-                                    match_kind: if request.text.trim().is_empty() { SearchMatchKind::Structured } else { SearchMatchKind::Fulltext } as i32,
                                     thread: Some(ThreadRef {
                                         spool: Some(SpoolRef { id: spool.id.to_string() }),
                                         id: Some(ThreadId { value: hit.thread.as_bytes().to_vec() }),
                                     }),
                                     causal_id: if hit.kind == 2 { hit.operation.as_bytes().to_vec() } else { Vec::new() },
+                                    location: revision_hit.map(|revision| SourceLocation {
+                                        revision: Some(revision),
+                                        thread: Some(ThreadRef {
+                                            spool: Some(SpoolRef { id: spool.id.to_string() }),
+                                            id: Some(ThreadId { value: hit.thread.as_bytes().to_vec() }),
+                                        }),
+                                        ..Default::default()
+                                    }),
+                                    match_kind: if hit.kind == 5 { SearchMatchKind::HashExact as i32 } else if request.text.trim().is_empty() { SearchMatchKind::Structured as i32 } else { SearchMatchKind::Fulltext as i32 },
                                     ..Default::default()
                                 })),
                             });

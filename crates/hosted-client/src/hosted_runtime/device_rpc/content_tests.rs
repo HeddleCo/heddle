@@ -226,6 +226,51 @@ pub(super) async fn roundtrip(
         }),
     };
     request.thread = Some(thread.clone());
+    let exact_search = SearchRequest {
+        threads: vec![thread.clone()],
+        domains: vec![SearchDomain::Revision as i32],
+        text: format!("heddle:{}", state.id().to_string_full()),
+        mode: search_request::Mode::Lexical as i32,
+        ..Default::default()
+    };
+    let mut found = remote
+        .api
+        .observe::<thread_api::rpc::SearchServiceSearch>(&exact_search)
+        .await
+        .expect("indexed exact revision search");
+    let mut hits = 0;
+    while let Some(event) = found.next().await.expect("revision search frame") {
+        if let Some(search_event::Payload::Hit(hit)) = event.payload {
+            assert_eq!(hit.domain, SearchDomain::Revision as i32);
+            assert_eq!(hit.match_kind, SearchMatchKind::HashExact as i32);
+            assert_eq!(hit.thread.as_ref(), Some(&thread));
+            assert!(matches!(hit.subject.and_then(|subject| subject.entity),
+                Some(entity_ref::Entity::Revision(reference)) if reference == revision));
+            assert!(
+                matches!(hit.location.and_then(|location| location.revision), Some(reference) if reference == revision)
+            );
+            hits += 1;
+        }
+    }
+    assert_eq!(
+        hits, 1,
+        "one accepted source operation in exact selected Thread"
+    );
+    let mut wrong_search = exact_search.clone();
+    wrong_search.threads[0].id = Some(ThreadId {
+        value: vec![75; 32],
+    });
+    let mut wrong = remote
+        .api
+        .observe::<thread_api::rpc::SearchServiceSearch>(&wrong_search)
+        .await
+        .expect("unrelated Thread search");
+    while let Some(event) = wrong.next().await.expect("unrelated search frame") {
+        assert!(
+            !matches!(event.payload, Some(search_event::Payload::Hit(_))),
+            "same source hash cannot escape through another Thread selector"
+        );
+    }
     let mut stream = remote
         .api
         .observe::<thread_api::rpc::ContentServiceReadContent>(&request)
@@ -393,4 +438,42 @@ pub(super) async fn roundtrip(
     *device.content_send_gate.lock().expect("test gate") = None;
     assert!(failed, "late override must fail the buffered read");
     assert!(!disclosed, "late override must withhold queued blob bytes");
+
+    repository
+        .put_state_visibility(objects::object::StateVisibility {
+            state: state.id(),
+            tier: objects::object::VisibilityTier::Private {
+                scope_label: "search-hidden".into(),
+            },
+            embargo_until: None,
+            declarer: Principal::new("Owner", "owner@test"),
+            declared_at: chrono::Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .expect("local private State declaration");
+    let mut withheld = remote
+        .api
+        .observe::<thread_api::rpc::SearchServiceSearch>(&exact_search)
+        .await
+        .expect("withheld exact revision search");
+    let mut complete = false;
+    while let Some(event) = withheld.next().await.expect("withheld search frame") {
+        match event.payload {
+            Some(search_event::Payload::Hit(_)) => {
+                panic!("withheld source revision leaked through exact hash search")
+            }
+            Some(search_event::Payload::Complete(status)) => {
+                assert_eq!(status.coverage, Coverage::Complete as i32);
+                let page = status.page.expect("withheld page");
+                assert!(
+                    page.exhausted && page.next_page.is_empty(),
+                    "hidden-only page must not expose a continuation"
+                );
+                complete = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(complete);
 }
