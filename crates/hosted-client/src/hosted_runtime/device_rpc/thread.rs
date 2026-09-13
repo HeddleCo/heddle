@@ -271,6 +271,16 @@ impl DeviceRpc {
                             review.policy_version == super::land::policy_version(&repository)?,
                             "native review policy changed"
                         );
+                        ensure!(
+                            review_candidates_visible(
+                                &repository,
+                                &replica,
+                                uuid::Uuid::parse_str(&session.principal)?,
+                                session.agent_id.as_deref(),
+                                &[(operation.id()?, signed.clone())],
+                            )?,
+                            "review source or coverage is unavailable to this actor"
+                        );
                     }
                 }
             }
@@ -690,15 +700,14 @@ pub(super) fn review_candidates_visible(
         let Control::Review(review) = control.control else {
             bail!("review property names another control")
         };
-        if super::auth::source_content_visibility(
+        let Some(redactions) = super::auth::source_content_visibility(
             repository,
             replica,
             principal,
             agent,
             review.source,
-        )?
-        .is_none()
-            || super::auth::source_content_visibility(
+        )? else { return Ok(false) };
+        if super::auth::source_content_visibility(
                 repository,
                 &target,
                 principal,
@@ -708,6 +717,19 @@ pub(super) fn review_candidates_visible(
             .is_none()
         {
             return Ok(false);
+        }
+        match review.coverage {
+            Some(objects::object::thread_replication::metadata::ReviewCoverage::WholeSource) if !redactions.is_empty() => return Ok(false),
+            Some(objects::object::thread_replication::metadata::ReviewCoverage::Symbols(ref anchors)) => {
+                let Some(state) = repository.store().get_state(&review.source)? else { return Ok(false) };
+                let mut work = 0;
+                for anchor in anchors {
+                    if super::content::visible_path_entry(repository.store(), state.tree, &anchor.file, &redactions, &mut work).is_err() {
+                        return Ok(false);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     Ok(true)
