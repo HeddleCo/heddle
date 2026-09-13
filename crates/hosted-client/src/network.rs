@@ -42,19 +42,42 @@ pub use crate::hosted_runtime::claim_bridge::{
     DaemonClaimRouter, claim_bridge_socket_path, mount_claim_router,
 };
 
-/// Relay mode that keeps the endpoint reachable through the default
-/// (number-0) relay servers.
+/// Home relay for this build flavor. Trailing slash matches the
+/// signed endpoint-descriptor encoding.
+///
+/// Split on the `preview` cargo feature (forwarded from `heddle-cli`):
+/// stock / `--release` without the feature hardcodes production only;
+/// `--features preview` hardcodes preview only. The unused URL is
+/// cfg'd out, so a production binary cannot embed preview and a
+/// preview binary cannot embed prod.
+///
+/// Hosted CLI connections still take their relay list from the signed
+/// descriptor (`RelayMode::custom`). This constant is only the netd
+/// home-relay map when no descriptor is in hand. Never
+/// [`RelayMode::Default`]: that map is n0's `*.relay.n0.iroh.link`.
+#[cfg(all(feature = "client", feature = "preview"))]
+const HEDDLE_HOME_RELAY_URL: &str = "https://relay.preview.heddle.sh/";
+
+#[cfg(all(feature = "client", not(feature = "preview")))]
+const HEDDLE_HOME_RELAY_URL: &str = "https://relay.heddle.sh/";
+
+/// Relay mode that keeps the endpoint reachable through this build's
+/// Heddle home relay.
 ///
 /// The persistent endpoint must stay relay-reachable: a browser
 /// holding only a claim link has no direct path to the machine, so it
 /// dials the advertised node id through a relay. Binding with
-/// [`RelayMode::Disabled`] would strand exactly that caller. Piece 2
-/// (weft subscription) will be able to pass a signed
-/// [`RelayMode::Custom`] set instead; the daemon keeps whatever relay
-/// mode it was bound with online for its whole lifetime.
+/// [`RelayMode::Disabled`] would strand exactly that caller. The
+/// daemon keeps this custom map online for its whole lifetime.
 #[cfg(feature = "client")]
 pub fn default_relay_mode() -> RelayMode {
-    RelayMode::Default
+    let url = HEDDLE_HOME_RELAY_URL.parse().unwrap_or_else(|error| {
+        // Crate constant. A parse failure is a programming error, not
+        // a runtime condition; falling through to Default would put
+        // netd on n0's map.
+        panic!("HEDDLE_HOME_RELAY_URL {HEDDLE_HOME_RELAY_URL:?} must parse as RelayUrl: {error}")
+    });
+    RelayMode::custom([url])
 }
 
 /// Bind the machine's single persistent Iroh endpoint on the device
@@ -76,4 +99,54 @@ pub async fn bind_persistent_endpoint(relay_mode: RelayMode) -> anyhow::Result<E
 #[cfg(feature = "client")]
 pub fn persisted_node_id() -> anyhow::Result<Option<EndpointId>> {
     crate::hosted_runtime::net_endpoint::persisted_node_id()
+}
+
+#[cfg(all(test, feature = "client"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_relay_mode_is_heddle_custom_for_this_build_flavor() {
+        let mode = default_relay_mode();
+        assert!(
+            matches!(mode, RelayMode::Custom(_)),
+            "netd must bind RelayMode::Custom, got {mode:?}"
+        );
+
+        let urls: Vec<iroh::RelayUrl> = mode.relay_map().urls();
+        assert_eq!(
+            urls.len(),
+            1,
+            "this build flavor must hardcode exactly one home relay, got {urls:?}"
+        );
+
+        let host = urls[0]
+            .host_str()
+            .unwrap_or("")
+            .trim_end_matches('.')
+            .to_string();
+        assert!(
+            !host.ends_with("n0.iroh.link") && host != "n0.iroh.link",
+            "n0 default relay leaked into netd bind: {host}"
+        );
+
+        #[cfg(feature = "preview")]
+        {
+            assert_eq!(HEDDLE_HOME_RELAY_URL, "https://relay.preview.heddle.sh/");
+            assert!(
+                !HEDDLE_HOME_RELAY_URL.contains("://relay.heddle.sh"),
+                "preview feature must not embed the production relay"
+            );
+            assert_eq!(host, "relay.preview.heddle.sh");
+        }
+        #[cfg(not(feature = "preview"))]
+        {
+            assert_eq!(HEDDLE_HOME_RELAY_URL, "https://relay.heddle.sh/");
+            assert!(
+                !HEDDLE_HOME_RELAY_URL.contains("preview"),
+                "default/release build must not embed the preview relay"
+            );
+            assert_eq!(host, "relay.heddle.sh");
+        }
+    }
 }

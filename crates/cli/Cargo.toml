@@ -185,6 +185,11 @@ client = [
     "heddle-cli-contract/client",
     "heddle-cli-render/client",
 ]
+# Preview AX / preview.heddle.sh home relay for `heddle netd serve`.
+# Off by default: stock and crates.io installs home on production
+# (`https://relay.heddle.sh/`). Enable for preview-environment
+# binaries: `cargo build --release -p heddle-cli --features client,preview`.
+preview = ["hosted-client/preview"]
 # Deep git import + AI-session reasoning extraction now backs every Git
 # overlay import path. Kept as a feature name for existing feature sets,
 # but the dependency is always present so no legacy bridge importer is
