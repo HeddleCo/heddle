@@ -386,6 +386,100 @@ pub(super) async fn roundtrip(
     }
     assert_eq!(search_hits, 1);
     assert!(search_complete);
+    let selected_thread = ThreadRef {
+        spool: Some(SpoolRef { id: metadata.scope.spool.to_string() }),
+        id: Some(ThreadId { value: replica.thread_id().as_bytes().to_vec() }),
+    };
+    let exact_review = AnnotationQuery {
+        all: vec![AnnotationTagPredicate {
+            predicate: Some(annotation_tag_predicate::Predicate::Exact(
+                thread_api::collaboration::annotation_tag_ref(&context.tags[0]),
+            )),
+        }],
+        ..Default::default()
+    };
+    let mut filtered = remote.api.observe::<thread_api::rpc::SearchServiceSearch>(&SearchRequest {
+        threads: vec![selected_thread.clone()],
+        domains: vec![SearchDomain::Context as i32],
+        annotations: Some(exact_review),
+        mode: search_request::Mode::Lexical as i32,
+        ..Default::default()
+    }).await.expect("typed local Search without text");
+    let mut filtered_hits = 0;
+    while let Some(event) = filtered.next().await.expect("filtered Search frame") {
+        if let Some(search_event::Payload::Hit(hit)) = event.payload {
+            assert_eq!(hit.thread.as_ref(), Some(&selected_thread));
+            assert_eq!(hit.causal_id.len(), 32);
+            filtered_hits += 1;
+        }
+    }
+    assert_eq!(filtered_hits, 1, "exact tags select the current signed revision");
+    let mut wrong_thread = selected_thread.clone();
+    wrong_thread.id = Some(ThreadId { value: vec![99; 32] });
+    let mut unrelated = remote.api.observe::<thread_api::rpc::SearchServiceSearch>(&SearchRequest {
+        threads: vec![wrong_thread],
+        domains: vec![SearchDomain::Context as i32],
+        text: "Decision rationale".into(),
+        mode: search_request::Mode::Lexical as i32,
+        ..Default::default()
+    }).await.expect("unrelated Thread Search");
+    while let Some(event) = unrelated.next().await.expect("unrelated Search frame") {
+        assert!(!matches!(event.payload, Some(search_event::Payload::Hit(_))), "Thread selector cannot search a sibling Thread");
+    }
+    let name = replica.genesis().expect("Thread genesis").name;
+    let mut threads = remote.api.observe::<thread_api::rpc::SearchServiceSearch>(&SearchRequest {
+        threads: vec![selected_thread.clone()],
+        domains: vec![SearchDomain::Thread as i32],
+        text: name,
+        mode: search_request::Mode::Lexical as i32,
+        ..Default::default()
+    }).await.expect("local Thread domain Search");
+    let mut thread_hits = 0;
+    while let Some(event) = threads.next().await.expect("Thread Search frame") {
+        if let Some(search_event::Payload::Hit(hit)) = event.payload {
+            assert!(matches!(hit.subject.and_then(|subject| subject.entity), Some(entity_ref::Entity::Thread(reference)) if reference == selected_thread));
+            thread_hits += 1;
+        }
+    }
+    assert_eq!(thread_hits, 1);
+    let embargoed = DiscussionRecordId::generate();
+    let embargo_operation = uuid::Uuid::new_v4();
+    let embargo_open = thread_api::collaboration::Command {
+        discussion: embargoed,
+        operation_id: CollaborationIdempotencyKey::new(embargo_operation.to_string()).expect("embargo operation"),
+        metadata: metadata.clone(),
+        author: Attribution::human(Principal::new("Owner", "")),
+        occurred_at_ms: chrono::Utc::now().timestamp_millis(),
+        body: Body::Open {
+            blocking: false,
+            title: "Embargoed search needle".into(),
+            anchor: Anchor::Repository,
+            visibility: VisibilityTier::Private { scope_label: "legal-hold".into() },
+            turn: DiscussionTurnV1::new("Private discussion text").expect("embargo turn"),
+            thread_ref: None,
+        },
+    }.sign(&[], &signer).expect("embargo signature");
+    remote.api.call::<thread_api::rpc::CollaborationServiceOpenDiscussion>(&OpenDiscussionRequest {
+        client_operation_id: embargo_operation.to_string(),
+        spool: Some(SpoolRef { id: metadata.scope.spool.to_string() }),
+        anchor: Some(thread_api::collaboration::anchor_ref(&Anchor::Repository, &metadata.scope).expect("embargo anchor")),
+        title: "Embargoed search needle".into(),
+        initial_body: "Private discussion text".into(),
+        signed_operation: Some(embargo_open),
+        audience: Audience::Private as i32,
+        audience_label: "legal-hold".into(),
+        ..Default::default()
+    }).await.expect("author may store embargoed original");
+    let mut embargo_search = remote.api.observe::<thread_api::rpc::SearchServiceSearch>(&SearchRequest {
+        threads: vec![selected_thread.clone()],
+        domains: vec![SearchDomain::Discussion as i32],
+        text: "Embargoed search needle".into(),
+        mode: search_request::Mode::Lexical as i32,
+        ..Default::default()
+    }).await.expect("embargo Search observation");
+    while let Some(event) = embargo_search.next().await.expect("embargo Search frame") {
+        assert!(!matches!(event.payload, Some(search_event::Payload::Hit(_))), "without an explicit label grant even owner Internal must not see Private");
+    }
     let hits = repo::thread_replication::collaboration_search::search(
         repository.heddle_dir(),
         "Decision rationale",
@@ -456,6 +550,7 @@ pub(super) async fn roundtrip(
                         .is_some_and(|reference| reference.id == context.id.to_string());
                 }
                 Some(thread_event::Payload::Discussion(value)) => {
+                    assert!(value.r#ref.as_ref().is_none_or(|reference| reference.id != embargoed.to_string()), "Thread aggregate must hide embargoed discussion");
                     assert!(
                         expected,
                         "other Thread discussion must not enter selected aggregate"

@@ -171,6 +171,10 @@ impl DeviceRpc {
                         budget.max_snapshot_bytes as usize,
                     )?;
                     let discussion = &summary.discussion;
+                    if !super::auth::record_visible(
+                        &repository, &replica, uuid::Uuid::parse_str(&session.principal)?,
+                        session.agent_id.as_deref(), &discussion.visibility,
+                    )? { continue; }
                     let status = if discussion.anchor_status == CollaborationAnchorStatus::Orphaned
                     {
                         discussion_record::Status::Orphaned
@@ -260,6 +264,12 @@ impl DeviceRpc {
                     let mut record = operation
                         .context_revision()?
                         .context("context candidate missing context")?;
+                    if let Some(discussion) = record.extracted_from {
+                        if !super::auth::discussion_visible(
+                            &repository, &replica, uuid::Uuid::parse_str(&session.principal)?,
+                            session.agent_id.as_deref(), discussion,
+                        )? { continue; }
+                    }
                     if !selected(&record.id.to_string(), true) {
                         continue;
                     }

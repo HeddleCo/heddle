@@ -347,3 +347,43 @@ pub(super) fn thread_visible(
     };
     Ok(replica.audience_allows(principal, agent, true, local.as_ref())?)
 }
+
+/// A verified explicit Thread participant receives the ordinary Internal
+/// floor. Other authorized Spool readers receive Public until a current
+/// local audience grant supplies a stronger tier. Neither floor implies an
+/// embargo label; Private remains withheld without one.
+pub(super) fn record_visible(
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+    tier: &objects::object::VisibilityTier,
+) -> Result<bool> {
+    if !thread_visible(repository, replica, principal, agent)? {
+        return Ok(false);
+    }
+    let genesis = replica.genesis()?;
+    let local = match genesis.owner {
+        objects::object::thread_replication::GenesisOwner::LocalKey(key)
+            if repository.holds_native_owner_key(&key)? => Some(key),
+        _ => None,
+    };
+    let explicit = replica.audience_allows(principal, agent, false, local.as_ref())?;
+    let audience = if explicit {
+        objects::object::AudienceTier::Internal
+    } else {
+        objects::object::AudienceTier::Public
+    };
+    Ok(objects::object::visible(tier, &audience))
+}
+
+pub(super) fn discussion_visible(
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+    id: objects::object::DiscussionRecordId,
+) -> Result<bool> {
+    let summary = replica.discussion_summary(id, 1024 * 1024)?;
+    record_visible(repository, replica, principal, agent, &summary.discussion.visibility)
+}

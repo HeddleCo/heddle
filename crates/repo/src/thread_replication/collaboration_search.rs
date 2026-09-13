@@ -63,6 +63,89 @@ pub struct Hit {
     pub score: f64,
 }
 
+pub struct NativeBatch {
+    pub hits: Vec<Hit>,
+    /// Rows consumed before caller visibility filtering; this drives the cursor.
+    pub scanned: usize,
+}
+
+/// Bounded current-record candidates. Search text is literal. Annotation
+/// predicates are evaluated on each signed context revision, never on a union
+/// of tags belonging to concurrent operations.
+pub fn search_native(
+    directory: &std::path::Path,
+    text: &str,
+    offset: u32,
+    limit: u32,
+    kinds: &[i32],
+    annotations: Option<&objects::object::AnnotationQuery>,
+) -> Result<NativeBatch> {
+    if text.len() > 4096 || limit == 0 || limit > 257 || offset > 10_000
+        || kinds.is_empty() || kinds.len() > 3 || kinds.iter().any(|kind| !(0..=2).contains(kind))
+        || (text.trim().is_empty() && annotations.is_none())
+        || (annotations.is_some() && kinds != [2])
+    {
+        return Err(Error::Invalid("invalid native search query or page bound".into()));
+    }
+    let connection = crate::local_metadata::open_existing(directory)?
+        .ok_or_else(|| Error::Invalid("local metadata missing".into()))?;
+    bound_query_work(&connection)?;
+    let phrase = format!("\"{}\"", text.trim().replace('"', "\"\""));
+    let lexical = "WITH hits AS (
+        SELECT s.thread,s.operation,s.kind,s.record,
+               snippet(collaboration_search,4,'','',' … ',32) summary,
+               bm25(collaboration_search) score,o.canonical
+        FROM collaboration_search s JOIN operations o ON o.id=s.operation
+        WHERE collaboration_search MATCH ?1 AND o.status=1
+          AND ((s.kind=1 AND ?2) OR (s.kind=2 AND ?3))
+          AND (s.kind<>2 OR NOT EXISTS(
+            SELECT 1 FROM parents p JOIN operations child ON child.id=p.child
+            JOIN collaboration_operations c ON c.operation=child.id
+            WHERE p.parent=o.id AND child.status=1 AND c.thread=s.thread
+              AND c.record_kind=2 AND c.record_id=s.record))
+        UNION ALL
+        SELECT l.thread,l.thread,0,lower(hex(l.thread)),
+               substr(l.name||char(10)||l.intent,1,512),-1.0,x''
+        FROM thread_list l WHERE ?4 AND instr(lower(l.name||' '||l.intent),lower(?5))>0
+      ) SELECT thread,operation,kind,record,summary,score,canonical FROM hits
+        ORDER BY score,thread,operation,kind,record LIMIT ?6 OFFSET ?7";
+    let filters_only = "SELECT s.thread,s.operation,s.kind,s.record,
+               substr(s.text,1,512) summary,0.0 score,o.canonical
+        FROM collaboration_search s JOIN operations o ON o.id=s.operation
+        WHERE o.status=1 AND s.kind=2 AND NOT EXISTS(
+            SELECT 1 FROM parents p JOIN operations child ON child.id=p.child
+            JOIN collaboration_operations c ON c.operation=child.id
+            WHERE p.parent=o.id AND child.status=1 AND c.thread=s.thread
+              AND c.record_kind=2 AND c.record_id=s.record)
+        ORDER BY score,s.thread,s.operation,s.kind,s.record LIMIT ?1 OFFSET ?2";
+    let mut statement = connection.prepare(if text.trim().is_empty() { filters_only } else { lexical })?;
+    type Row = (Vec<u8>, Vec<u8>, i32, String, String, f64, Vec<u8>);
+    let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Row> {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
+    };
+    let rows = if text.trim().is_empty() {
+        statement.query_map(params![limit, offset], read)?
+    } else {
+        statement.query_map(params![phrase, kinds.contains(&1), kinds.contains(&2), kinds.contains(&0), text.trim(), limit, offset], read)?
+    };
+    let mut hits = Vec::new();
+    let mut scanned = 0;
+    for row in rows {
+        let (thread, operation, kind, record, summary, score, canonical) = row?;
+        scanned += 1;
+        if let Some(query) = annotations {
+            let operation = objects::object::thread_replication::ThreadOperation::decode(&canonical)?;
+            let context = operation.context_revision()?.ok_or_else(|| Error::Invalid("context search index mismatch".into()))?;
+            if !query.matches(&context.tags) { continue; }
+        }
+        hits.push(Hit {
+            thread: super::hash(&thread)?, operation: super::hash(&operation)?, kind,
+            record, snippet: summary, score,
+        });
+    }
+    Ok(NativeBatch { hits, scanned })
+}
+
 /// Literal phrase search does not accept FTS syntax from the wire. Canonical
 /// pending/rejected operations and superseded context revisions are excluded.
 pub fn search(

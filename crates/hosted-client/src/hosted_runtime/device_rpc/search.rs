@@ -1,10 +1,53 @@
 //! Finite indexed local search; result frames never retain a SQLite transaction.
-use std::{collections::BTreeSet, sync::Arc, time::Duration};
+use std::{collections::{BTreeMap, BTreeSet}, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use api::heddle::api::{v1alpha1::CallFailureCode, v2alpha1::*};
 use iroh::endpoint::SendStream;
 use prost::Message;
+
+struct SearchSelection {
+    spools: BTreeSet<uuid::Uuid>,
+    threads: BTreeMap<uuid::Uuid, BTreeSet<Vec<u8>>>,
+    kinds: BTreeSet<i32>,
+    annotations: Option<objects::object::AnnotationQuery>,
+}
+
+impl SearchSelection {
+    fn parse(request: &SearchRequest) -> Result<Self> {
+        ensure!(request.spools.len() <= 32 && request.threads.len() <= 64 && request.domains.len() <= 3, "search selector bound exceeded");
+        let mut spools = BTreeSet::new();
+        for spool in &request.spools {
+            ensure!(spools.insert(uuid::Uuid::parse_str(&spool.id)?), "duplicate search Spool");
+        }
+        let mut threads = BTreeMap::<uuid::Uuid, BTreeSet<Vec<u8>>>::new();
+        for thread in &request.threads {
+            let spool = thread.spool.as_ref().context("search Thread requires Spool")?;
+            let spool = uuid::Uuid::parse_str(&spool.id)?;
+            let id = thread.id.as_ref().context("search Thread requires identity")?;
+            ensure!(id.value.len() == 32, "search Thread identity must be 32 bytes");
+            ensure!(threads.entry(spool).or_default().insert(id.value.clone()), "duplicate search Thread");
+        }
+        if spools.is_empty() { spools.extend(threads.keys().copied()); }
+        else if !threads.is_empty() { spools.retain(|spool| threads.contains_key(spool)); }
+        let annotations = request.annotations.as_ref().map(thread_api::collaboration::annotation_query).transpose()?;
+        let mut kinds = BTreeSet::new();
+        if request.domains.is_empty() {
+            if annotations.is_some() { kinds.insert(SearchDomain::Context as i32); }
+            else { kinds.extend([SearchDomain::Thread as i32, SearchDomain::Discussion as i32, SearchDomain::Context as i32]); }
+        } else {
+            for domain in &request.domains {
+                let kind = SearchDomain::try_from(*domain).context("invalid search domain")?;
+                ensure!(matches!(kind, SearchDomain::Thread | SearchDomain::Discussion | SearchDomain::Context), "unsupported search domain");
+                ensure!(kinds.insert(kind as i32), "duplicate search domain");
+            }
+        }
+        ensure!(annotations.is_none() || kinds == BTreeSet::from([SearchDomain::Context as i32]), "annotation filters select context revisions only");
+        ensure!(!request.text.trim().is_empty() || annotations.is_some(), "search requires text or annotation filters");
+        ensure!(request.text.len() <= 4096, "search text exceeds bound");
+        Ok(Self { spools, threads, kinds, annotations })
+    }
+}
 
 use super::{DeviceRpc, account_auth::AccountSession, failure, stream::ObservationAuthority};
 
@@ -18,19 +61,21 @@ impl DeviceRpc {
         let session = Arc::new(session);
         let result = tokio::time::timeout(Duration::from_secs(30), async {
             let request = SearchRequest::decode(body)?;
-            let mode =
-                search_request::Mode::try_from(request.mode).context("unknown search mode")?;
-            let mut spools = BTreeSet::new();
-            for spool in &request.spools {
-                ensure!(
-                    spools.insert(uuid::Uuid::parse_str(&spool.id)?),
-                    "duplicate search Spool"
-                );
+            let mode = search_request::Mode::try_from(request.mode).context("unknown search mode")?;
+            ensure!(matches!(mode, search_request::Mode::Unspecified | search_request::Mode::Lexical), "device supports lexical Search only");
+            let selection = SearchSelection::parse(&request)?;
+            let mut spools = selection.spools.clone();
+            if spools.is_empty() {
+                if let Some(catalog) = repo::device_catalog::store::Catalog::read(&self.home)? {
+                    for registered in catalog.registrations()? {
+                        if session.facts(Some(&registered.capability_path)).is_ok() {
+                            ensure!(spools.len() < 64, "authorized local Search discovery exceeds 64 Spools; select explicit Spools");
+                            spools.insert(registered.id);
+                        }
+                    }
+                }
             }
-            ensure!(
-                !spools.is_empty() && spools.len() <= 32,
-                "search requires one to thirty-two explicit Spools"
-            );
+            ensure!(spools.len() <= 64, "search Spool selection exceeds bound");
             let requested = request.budget.unwrap_or_default();
             let frame = if requested.max_frame_bytes == 0 {
                 65536
@@ -99,7 +144,7 @@ impl DeviceRpc {
                 ensure!(position <= selected.len(), "search cursor outside Spools");
                 let mut events = Vec::new();
                 let mut examined = 0usize;
-                if mode != search_request::Mode::Semantic {
+                if matches!(mode, search_request::Mode::Unspecified | search_request::Mode::Lexical) {
                     while position < selected.len()
                         && events.len() < limit as usize
                         && examined < 1024
@@ -112,21 +157,25 @@ impl DeviceRpc {
                         let spool = &selected[position];
                         worker_session.facts(Some(&spool.capability_path))?;
                         let remaining = limit as usize - events.len();
-                        let mut hits = repo::thread_replication::collaboration_search::search(
+                        let kinds: Vec<_> = selection.kinds.iter().copied().map(|kind| kind - 1).collect();
+                        let batch = repo::thread_replication::collaboration_search::search_native(
                             &spool.heddle_dir,
                             &request.text,
                             offset,
-                            remaining as u32 + 1,
+                            remaining as u32,
+                            &kinds,
+                            selection.annotations.as_ref(),
                         )?;
-                        let exhausted = hits.len() <= remaining;
-                        hits.truncate(remaining);
-                        examined = examined.saturating_add(hits.len());
+                        let exhausted = batch.scanned < remaining;
+                        examined = examined.saturating_add(batch.scanned);
                         offset = offset
-                            .checked_add(hits.len() as u32)
+                            .checked_add(batch.scanned as u32)
                             .context("search offset overflow")?;
                         let repository = repo::Repository::open(&spool.root)?;
                         let facts = worker_session.facts(Some(&spool.capability_path))?;
-                        for hit in hits {
+                        let principal = uuid::Uuid::parse_str(&worker_session.principal)?;
+                        for hit in batch.hits {
+                            if selection.threads.get(&spool.id).is_some_and(|threads| !threads.contains(hit.thread.as_bytes().as_slice())) { continue; }
                             let replica = repo::thread_replication::ThreadReplica::open(
                                 &spool.heddle_dir,
                                 hit.thread,
@@ -134,10 +183,21 @@ impl DeviceRpc {
                             if !super::auth::thread_visible(
                                 &repository,
                                 &replica,
-                                uuid::Uuid::parse_str(&worker_session.principal)?,
+                                principal,
                                 facts.delegation_agent_id.as_deref(),
                             )? {
                                 continue;
+                            }
+                            if hit.kind == 1 {
+                                let id = uuid::Uuid::parse_str(&hit.record)?;
+                                if !super::auth::discussion_visible(&repository, &replica, principal, facts.delegation_agent_id.as_deref(), objects::object::DiscussionRecordId::from_uuid(id)?)? { continue; }
+                            }
+                            if hit.kind == 2 {
+                                let (signed, _) = replica.operation(&hit.operation)?.context("indexed context operation absent")?;
+                                let context = signed.verify()?.context_revision()?.context("indexed context revision absent")?;
+                                if let Some(discussion) = context.extracted_from {
+                                    if !super::auth::discussion_visible(&repository, &replica, principal, facts.delegation_agent_id.as_deref(), discussion)? { continue; }
+                                }
                             }
                             let reference = RecordRef {
                                 spool: Some(SpoolRef {
@@ -145,7 +205,12 @@ impl DeviceRpc {
                                 }),
                                 id: hit.record,
                             };
-                            let entity = if hit.kind == 2 {
+                            let entity = if hit.kind == 0 {
+                                entity_ref::Entity::Thread(ThreadRef {
+                                    spool: Some(SpoolRef { id: spool.id.to_string() }),
+                                    id: Some(ThreadId { value: hit.thread.as_bytes().to_vec() }),
+                                })
+                            } else if hit.kind == 2 {
                                 entity_ref::Entity::Context(reference)
                             } else {
                                 entity_ref::Entity::Discussion(reference)
@@ -170,7 +235,7 @@ impl DeviceRpc {
                         if exhausted {
                             position += 1;
                             offset = 0;
-                        } else {
+                        } else if events.len() >= limit as usize {
                             break;
                         }
                     }
@@ -192,11 +257,7 @@ impl DeviceRpc {
                     source: Some(this.endpoint()),
                     payload: Some(search_event::Payload::Complete(SectionStatus {
                         section: "search".into(),
-                        coverage: if mode == search_request::Mode::Semantic {
-                            Coverage::Unavailable
-                        } else {
-                            Coverage::Partial
-                        } as i32,
+                        coverage: if exhausted { Coverage::Complete } else { Coverage::Partial } as i32,
                         page: Some(PageInfo {
                             exhausted,
                             next_page,
