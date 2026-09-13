@@ -1,0 +1,142 @@
+//! Private, retryable continuation state for device read projections.
+//! A public page token is random; it never serializes an unserved record ID.
+use std::{
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
+
+use crate::local_metadata;
+
+const TTL_SECONDS: i64 = 24 * 60 * 60;
+const MAX_PER_SCOPE: i64 = 1024;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("local page cursor store: {0}")]
+    Store(#[from] local_metadata::Error),
+    #[error("local page cursor SQL: {0}")]
+    Sql(#[from] rusqlite::Error),
+    #[error("page cursor expired or belongs to another view; restart the observation")]
+    Expired,
+    #[error("page cursor clock is before the Unix epoch")]
+    Clock,
+    #[error("invalid page cursor scope or record ID")]
+    Invalid,
+}
+
+pub fn initialize_schema(connection: &rusqlite::Connection) -> Result<(), Error> {
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS device_page_cursors(
+        token BLOB PRIMARY KEY CHECK(length(token)=32),
+        scope BLOB NOT NULL CHECK(length(scope)=32),
+        binding BLOB NOT NULL CHECK(length(binding)<=128),
+        section TEXT NOT NULL CHECK(length(section)<=32),
+        last_scanned BLOB NOT NULL CHECK(length(last_scanned)=32),
+        issued_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS device_page_cursors_scope_age
+      ON device_page_cursors(scope, issued_at, token);",
+    )?;
+    Ok(())
+}
+
+fn now() -> Result<i64, Error> {
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| Error::Clock)?
+        .as_secs() as i64)
+}
+
+/// Issue a stable private lookup for a scan boundary. Old tokens remain valid
+/// until their TTL, so retries and multiple tabs can repeat the same page.
+pub fn issue(
+    heddle_dir: &Path,
+    scope: [u8; 32],
+    binding: &[u8],
+    section: &str,
+    last_scanned: [u8; 32],
+) -> Result<[u8; 32], Error> {
+    if binding.len() > 128 || section.len() > 32 || section.is_empty() {
+        return Err(Error::Invalid);
+    }
+    let time = now()?;
+    let token: [u8; 32] = rand::random();
+    let mut connection = local_metadata::open(heddle_dir)?;
+    initialize_schema(&connection)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute(
+        "DELETE FROM device_page_cursors WHERE expires_at<=?1",
+        [time],
+    )?;
+    transaction.execute("INSERT INTO device_page_cursors(token,scope,binding,section,last_scanned,issued_at,expires_at) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![token.as_slice(), scope.as_slice(), binding, section, last_scanned.as_slice(), time, time + TTL_SECONDS])?;
+    transaction.execute(
+        "DELETE FROM device_page_cursors WHERE token IN (
+        SELECT token FROM device_page_cursors WHERE scope=?1
+        ORDER BY issued_at DESC, token DESC LIMIT -1 OFFSET ?2
+    )",
+        params![scope.as_slice(), MAX_PER_SCOPE],
+    )?;
+    transaction.commit()?;
+    Ok(token)
+}
+
+/// Resolve a random token after the caller has authenticated. Authorization of
+/// the Thread and every resumed row remains the read handler's responsibility.
+pub fn resume(
+    heddle_dir: &Path,
+    scope: [u8; 32],
+    binding: &[u8],
+    section: &str,
+    token: &[u8],
+) -> Result<[u8; 32], Error> {
+    if token.len() != 32 || binding.len() > 128 || section.len() > 32 {
+        return Err(Error::Invalid);
+    }
+    let connection = local_metadata::open(heddle_dir)?;
+    initialize_schema(&connection)?;
+    let stored: Option<Vec<u8>> = connection.query_row(
+        "SELECT last_scanned FROM device_page_cursors WHERE token=?1 AND scope=?2 AND binding=?3 AND section=?4 AND expires_at>?5",
+        params![token, scope.as_slice(), binding, section, now()?],
+        |row| row.get(0),
+    ).optional()?;
+    stored
+        .ok_or(Error::Expired)?
+        .try_into()
+        .map_err(|_| Error::Invalid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opaque_cursor_retries_and_rejects_other_reader_or_query() {
+        let home = tempfile::tempdir().expect("private local metadata");
+        let scope = [7; 32];
+        let hidden = [8; 32];
+        let token = issue(home.path(), scope, b"query-one", "captures", hidden)
+            .expect("issued continuation");
+        assert_ne!(token, hidden, "public token does not disclose hidden ID");
+        assert_eq!(
+            resume(home.path(), scope, b"query-one", "captures", &token).expect("first resume"),
+            hidden
+        );
+        assert_eq!(
+            resume(home.path(), scope, b"query-one", "captures", &token).expect("retry"),
+            hidden
+        );
+        for (reader, binding, section) in [
+            ([9; 32], b"query-one".as_slice(), "captures"),
+            (scope, b"query-two".as_slice(), "captures"),
+            (scope, b"query-one".as_slice(), "reviews"),
+        ] {
+            assert!(matches!(
+                resume(home.path(), reader, binding, section, &token),
+                Err(Error::Expired)
+            ));
+        }
+    }
+}

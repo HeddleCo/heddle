@@ -76,6 +76,8 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
             crate::device_artifacts::initialize_schema(&tx)?;
             crate::device_evidence::initialize_schema(&tx)?;
             crate::device_operations::initialize_schema(&tx)?;
+            crate::device_page_cursors::initialize_schema(&tx)
+                .map_err(|error| Error::Initialization(error.to_string()))?;
             crate::reference_projection::initialize_schema(&tx)?;
             crate::operation_dedup::initialize_schema(&tx)?;
             crate::actor_presence::initialize_schema(&tx)?;

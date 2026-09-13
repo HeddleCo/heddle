@@ -229,62 +229,48 @@ impl DeviceRpc {
                         .and_then(|p| p.captures.as_ref())
                         .cloned()
                         .unwrap_or_default();
-                    let mut after = decode_cursor(&page.after_page, binding, b"captures")?
+                    let after = decode_cursor(session, &page.after_page, binding, "captures")?
                         .map(ContentHash::from_bytes);
                     let size = page_size(&page, budget);
                     let principal = uuid::Uuid::parse_str(&session.principal)?;
-                    let mut records = Vec::new();
-                    let mut unavailable = false;
-                    let mut scanned = 0usize;
-                    let mut exhausted = false;
-                    while records.len() < size && scanned < 4096 {
-                        let batch = replica.accepted_page(ThreadFacet::Source, after, 65)?;
-                        if batch.is_empty() {
-                            exhausted = true;
-                            break;
-                        }
-                        let batch_exhausted = batch.len() < 65;
-                        for (id, signed) in batch {
-                            scanned += 1;
-                            after = Some(id);
+                    let scanned_page = scan_visible_page(
+                        after,
+                        size,
+                        4096,
+                        |after| {
+                            replica
+                                .accepted_page(ThreadFacet::Source, after.copied(), 65)
+                                .map_err(anyhow::Error::from)
+                        },
+                        |_, signed| {
                             let operation = signed.verify()?;
                             let state = operation.source_state()?.context("source operation")?;
-                            if super::auth::source_content_visibility(
+                            Ok(super::auth::source_content_visibility(
                                 &repository,
                                 replica,
                                 principal,
                                 session.agent_id.as_deref(),
                                 state.id(),
                             )?
-                            .is_some()
-                            {
-                                records.push((id, signed));
-                                if records.len() == size {
-                                    break;
-                                }
-                            } else {
-                                unavailable = true;
-                            }
-                            if scanned == 4096 {
-                                break;
-                            }
-                        }
-                        if records.len() == size || scanned == 4096 {
-                            break;
-                        }
-                        if batch_exhausted {
-                            exhausted = true;
-                            break;
-                        }
-                    }
+                            .is_some())
+                        },
+                    )?;
+                    let PageScan {
+                        records,
+                        after,
+                        unavailable,
+                        scanned,
+                        exhausted,
+                    } = scanned_page;
                     let next = if exhausted {
                         Vec::new()
                     } else {
                         encode_cursor(
+                            session,
                             after.context("capture scan cursor")?.as_bytes(),
                             binding,
-                            b"captures",
-                        )
+                            "captures",
+                        )?
                     };
                     let visible_count = records.len();
                     for (id, signed) in records {
@@ -432,12 +418,13 @@ impl DeviceRpc {
                         .and_then(|p| p.reviews.as_ref())
                         .cloned()
                         .unwrap_or_default();
-                    let after =
-                        decode_cursor(&page.after_page, binding, b"reviews")?.map(|bytes| {
+                    let after = decode_cursor(session, &page.after_page, binding, "reviews")?.map(
+                        |bytes| {
                             let mut id = [0; 16];
                             id.copy_from_slice(&bytes[..16]);
                             format!("review:{}", uuid::Uuid::from_bytes(id))
-                        });
+                        },
+                    );
                     let size = page_size(&page, budget);
                     let mut cursor = after.unwrap_or_else(|| "review:".into());
                     let mut properties = Vec::new();
@@ -486,7 +473,7 @@ impl DeviceRpc {
                         let id = uuid::Uuid::parse_str(id)?;
                         let mut bytes = [0; 32];
                         bytes[..16].copy_from_slice(id.as_bytes());
-                        encode_cursor(&bytes, binding, b"reviews")
+                        encode_cursor(session, &bytes, binding, "reviews")?
                     };
                     for (property, candidates) in properties {
                         let Property::Review(id) = property else {
@@ -792,18 +779,138 @@ fn page_size(page: &PageRequest, budget: &ReadBudget) -> usize {
         .min(budget.max_items.saturating_sub(3).max(1))
         .min(128) as usize
 }
-fn encode_cursor(id: &[u8; 32], binding: &[u8], section: &[u8]) -> Vec<u8> {
-    let digest = blake3::hash(&[binding, section].concat());
-    [digest.as_bytes().as_slice(), id.as_slice()].concat()
+struct PageScan<K, T> {
+    records: Vec<(K, T)>,
+    after: Option<K>,
+    unavailable: bool,
+    scanned: usize,
+    exhausted: bool,
 }
-fn decode_cursor(cursor: &[u8], binding: &[u8], section: &[u8]) -> Result<Option<[u8; 32]>> {
+
+/// A hidden-only scan still advances internally. Its public continuation is
+/// an opaque lookup for `after`, never a serialized record identifier.
+fn scan_visible_page<K, T>(
+    mut after: Option<K>,
+    size: usize,
+    scan_limit: usize,
+    mut fetch: impl FnMut(Option<&K>) -> Result<Vec<(K, T)>>,
+    mut visible: impl FnMut(&K, &T) -> Result<bool>,
+) -> Result<PageScan<K, T>>
+where
+    K: Clone,
+{
+    ensure!(
+        size > 0 && scan_limit > 0,
+        "page and scan budget must be positive"
+    );
+    let mut records = Vec::new();
+    let mut unavailable = false;
+    let mut scanned = 0;
+    let mut exhausted = false;
+    while records.len() < size && scanned < scan_limit {
+        let batch = fetch(after.as_ref())?;
+        if batch.is_empty() {
+            exhausted = true;
+            break;
+        }
+        let batch_exhausted = batch.len() < 65;
+        for (id, item) in batch {
+            scanned += 1;
+            after = Some(id.clone());
+            if visible(&id, &item)? {
+                records.push((id, item));
+            } else {
+                unavailable = true;
+            }
+            if records.len() == size || scanned == scan_limit {
+                break;
+            }
+        }
+        if records.len() == size || scanned == scan_limit {
+            break;
+        }
+        if batch_exhausted {
+            exhausted = true;
+            break;
+        }
+    }
+    Ok(PageScan {
+        records,
+        after,
+        unavailable,
+        scanned,
+        exhausted,
+    })
+}
+
+fn cursor_scope(session: &Session) -> [u8; 32] {
+    *blake3::hash(
+        &[
+            session.principal.as_bytes(),
+            session.publisher.as_slice(),
+            session.agent_id.as_deref().unwrap_or("").as_bytes(),
+        ]
+        .concat(),
+    )
+    .as_bytes()
+}
+fn encode_cursor(
+    session: &Session,
+    id: &[u8; 32],
+    binding: &[u8],
+    section: &str,
+) -> Result<Vec<u8>> {
+    Ok(repo::device_page_cursors::issue(
+        &session.spool.heddle_dir,
+        cursor_scope(session),
+        binding,
+        section,
+        *id,
+    )?
+    .to_vec())
+}
+fn decode_cursor(
+    session: &Session,
+    cursor: &[u8],
+    binding: &[u8],
+    section: &str,
+) -> Result<Option<[u8; 32]>> {
     if cursor.is_empty() {
         return Ok(None);
     }
-    ensure!(
-        cursor.len() == 64
-            && cursor[..32] == *blake3::hash(&[binding, section].concat()).as_bytes(),
-        "page cursor belongs to another query"
-    );
-    Ok(Some(cursor[32..].try_into()?))
+    Ok(Some(repo::device_page_cursors::resume(
+        &session.spool.heddle_dir,
+        cursor_scope(session),
+        binding,
+        section,
+        cursor,
+    )?))
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    #[test]
+    fn hidden_only_scan_budget_resumes_to_later_visible_record() {
+        let rows = [(1u32, false), (2, false), (3, true)];
+        let fetch = |after: Option<&u32>| -> Result<Vec<(u32, bool)>> {
+            Ok(rows
+                .iter()
+                .copied()
+                .filter(|(id, _)| after.is_none_or(|prior| id > prior))
+                .collect())
+        };
+        let first = scan_visible_page(None, 1, 2, fetch, |_, visible| Ok(*visible))
+            .expect("bounded first page");
+        assert!(
+            first.records.is_empty(),
+            "the initial page contains only withheld rows"
+        );
+        assert_eq!(first.after, Some(2));
+        assert!(first.unavailable && !first.exhausted);
+        let second = scan_visible_page(first.after, 1, 2, fetch, |_, visible| Ok(*visible))
+            .expect("resume after hidden-only page");
+        assert_eq!(second.records, vec![(3, true)]);
+    }
 }
