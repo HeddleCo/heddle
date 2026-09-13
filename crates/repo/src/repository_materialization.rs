@@ -382,12 +382,17 @@ impl Repository {
         let requested_threads = requested_materialization_threads();
         fs::create_dir_all(dir)
             .map_err(|e| HeddleError::Io(enrich_fs_error(dir, "creating", e)))?;
+        let canonical = fs::canonicalize(dir)?;
+        if !plan.withheld.is_empty() {
+            crate::thread_manifest::mark_withheld_checkout(self.heddle_dir(), &canonical)?;
+        }
         for directory in &plan.directories {
             fs::create_dir_all(directory)
                 .map_err(|e| HeddleError::Io(enrich_fs_error(directory, "creating", e)))?;
         }
 
         let (worker_count, file_entries) = self.materialize_write_ops_seeded(&plan.leaves)?;
+        self.finish_materialization(dir, &canonical, &plan)?;
 
         debug!(
             directories = plan.directories.len(),
@@ -450,11 +455,16 @@ impl Repository {
 
         fs::create_dir_all(dir)
             .map_err(|e| HeddleError::Io(enrich_fs_error(dir, "creating", e)))?;
+        let canonical = fs::canonicalize(dir)?;
+        if !plan.withheld.is_empty() {
+            crate::thread_manifest::mark_withheld_checkout(self.heddle_dir(), &canonical)?;
+        }
         for directory in &plan.directories {
             fs::create_dir_all(directory)
                 .map_err(|e| HeddleError::Io(enrich_fs_error(directory, "creating", e)))?;
         }
         self.materialize_write_ops_seeded(&plan.leaves)?;
+        self.finish_materialization(dir, &canonical, &plan)?;
 
         debug!(
             visible_at_root,
@@ -468,6 +478,40 @@ impl Repository {
             withheld: plan.withheld,
             visible_at_root,
         })
+    }
+
+    /// Share the existing per-root leaf inventory and capture guard with
+    /// whole-state withholding. A partial projection cannot leave previously
+    /// tracked hidden files behind, or change another checkout's guard.
+    fn finish_materialization(
+        &self,
+        dir: &Path,
+        canonical: &Path,
+        plan: &MaterializationPlan,
+    ) -> Result<()> {
+        let served: std::collections::BTreeSet<String> = plan
+            .leaves
+            .iter()
+            .map(|leaf| {
+                leaf.path()
+                    .strip_prefix(dir)
+                    .map(cache_key)
+                    .map_err(|error| {
+                        HeddleError::Config(format!("materialized leaf outside checkout: {error}"))
+                    })
+            })
+            .collect::<Result<_>>()?;
+        self.reconcile_materialized_root(
+            dir,
+            canonical,
+            &served,
+            &std::collections::BTreeSet::new(),
+        )?;
+        crate::thread_manifest::write_materialized_leaves(self.heddle_dir(), canonical, &served)?;
+        if plan.withheld.is_empty() {
+            crate::thread_manifest::clear_withheld_checkout(self.heddle_dir(), canonical)?;
+        }
+        Ok(())
     }
 
     /// Plan the materialization of a redacted partial projection (HRT1) rooted
@@ -587,8 +631,7 @@ impl Repository {
                 // Partial-aware subtree resolution: a nested subtree may be a
                 // full canonical tree OR a redacted partial projection (HRT1)
                 // when this checkout descends from a partial clone. `read_tree`
-                // distinguishes Full / Partial / Absent so a withheld subtree
-                // surfaces as "withheld", never as `NotFound` (C2).
+                // distinguishes proven redaction from missing visible data.
                 plan.directories.push(path.clone());
                 match self.store.read_tree(hash)? {
                     objects::store::TreeRead::Full(subtree) => {
@@ -598,15 +641,10 @@ impl Repository {
                         self.plan_partial_materialization(&subtree, &rel_path, &path, plan)?;
                     }
                     objects::store::TreeRead::Absent => {
-                        // Neither a full tree nor a partial projection is held.
-                        // In a partial clone this is a withheld subtree, not a
-                        // corrupt/missing store: report it fail-loud as redacted
-                        // (withheld) rather than `NotFound` so the caller can
-                        // present "withheld" instead of "gone" (C2).
-                        return Err(HeddleError::RedactedTree(format!(
-                            "subtree {hash} at {} is withheld (neither a full tree nor a partial projection is held)",
-                            rel_path.display()
-                        )));
+                        return Err(HeddleError::MissingObject {
+                            object_type: "tree".into(),
+                            id: hash.to_string(),
+                        });
                     }
                 }
             }
@@ -1393,7 +1431,7 @@ mod tests {
         repo.materialize_partial_tree(&partial, repo.root())
             .expect("partial checkout");
         assert!(
-            repo.is_partial_clone().unwrap(),
+            repo.is_incomplete_checkout().unwrap(),
             "this checkout omitted withheld leaves"
         );
 
@@ -1409,11 +1447,14 @@ mod tests {
         // Receiving a full tree does not write previously withheld files.
         // It must not make those missing files look like authored deletions.
         repo.store().put_tree(&tree).unwrap();
-        assert!(repo.is_partial_clone().expect("still partial checkout"));
+        assert!(
+            repo.is_incomplete_checkout()
+                .expect("still partial checkout")
+        );
         repo.materialize_tree(&tree, repo.root())
             .expect("explicit full checkout");
         assert!(
-            !repo.is_partial_clone().unwrap(),
+            !repo.is_incomplete_checkout().unwrap(),
             "only materializing the complete tree clears the capture guard"
         );
     }
@@ -1435,7 +1476,7 @@ mod tests {
         repo.materialize_partial_tree(&partial, sibling.path())
             .expect("partial sibling");
         assert!(
-            !repo.is_partial_clone().expect("own checkout scope"),
+            !repo.is_incomplete_checkout().expect("own checkout scope"),
             "a sibling checkout must not make this checkout incomplete"
         );
         std::fs::write(repo.root().join("new.txt"), b"independent agent work").expect("edit");
@@ -1448,12 +1489,20 @@ mod tests {
         let temp = TempDir::new().expect("checkout");
         let repo = Repository::init_default(temp.path()).expect("repo");
         let (tree, secret_leaf) = partial_fixture(&repo);
-        repo.materialize_tree(&tree, repo.root()).expect("full checkout");
+        repo.materialize_tree(&tree, repo.root())
+            .expect("full checkout");
         let partial = PartialTree::project(&tree, &std::collections::HashSet::from([secret_leaf]))
             .expect("limited projection");
-        repo.materialize_partial_tree(&partial, repo.root()).expect("limited checkout");
-        assert!(!repo.root().join("secret.md").exists(), "previously tracked withheld file must be removed");
-        assert!(repo.root().join("readme.md").exists(), "visible file survives");
+        repo.materialize_partial_tree(&partial, repo.root())
+            .expect("limited checkout");
+        assert!(
+            !repo.root().join("secret.md").exists(),
+            "previously tracked withheld file must be removed"
+        );
+        assert!(
+            repo.root().join("readme.md").exists(),
+            "visible file survives"
+        );
     }
 
     /// P5: `heddle status` on a partial checkout must resolve the tip's tree via

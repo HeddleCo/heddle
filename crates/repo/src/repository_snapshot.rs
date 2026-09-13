@@ -1421,22 +1421,25 @@ impl Repository {
         )
     }
 
-    /// Whether this clone holds any redacted partial projection (HRT1) — the
-    /// DERIVED partial-clone marker (v1). Cheap: it inspects only the partial
-    /// slot, never walks a tree.
-    pub fn is_partial_clone(&self) -> Result<bool> {
-        Ok(!self.store.list_partial_trees()?.is_empty())
+    /// Whether this checkout's materialization withheld content. This is an
+    /// indexed-by-root marker lookup, independent of cached trees and sibling
+    /// checkouts. Only completing a full materialization clears the guard.
+    pub fn is_incomplete_checkout(&self) -> Result<bool> {
+        Ok(crate::thread_manifest::is_withheld_checkout(
+            self.heddle_dir(),
+            &std::fs::canonicalize(self.root())?,
+        )?)
     }
 
     /// Fail loud if this is a partial clone (P4). Capture cannot re-author a
     /// tip whose closure withholds leaves the operator never received; doing so
     /// would drop the withheld entries.
-    fn refuse_capture_on_partial_clone(&self) -> Result<()> {
-        if self.is_partial_clone()? {
+    fn require_complete_checkout(&self) -> Result<()> {
+        if self.is_incomplete_checkout()? {
             return Err(HeddleError::RedactedTree(
-                "cannot capture on a partial (redacted) clone: this checkout withholds \
-                 entries that were never transferred, so a capture would silently drop \
-                 them. Fetch the full history before capturing."
+                "cannot capture an incomplete checkout: it withholds \
+                 entries that are not materialized, so a capture would silently drop \
+                 them. Materialize a complete checkout before capturing."
                     .to_string(),
             ));
         }
@@ -1471,16 +1474,9 @@ impl Repository {
         mut known_worktree_changes: Option<WorktreeStatus>,
         require_worktree_change: bool,
     ) -> Result<SnapshotExecution> {
-        // P4: capture/commit on a PARTIAL clone REFUSES (fail-loud). A partial
-        // checkout withholds leaves this client never received; walking the
-        // worktree and re-authoring a tip over a partial tree would silently
-        // drop every withheld entry (data loss shaped exactly like a leak in
-        // reverse). The partial marker is DERIVED — the presence of any stored
-        // redacted projection means this clone is partial. A later explicit
-        // full fetch backfills the full trees and drops the partial slots
-        // (`remove_partial_tree`), clearing the marker; there is no
-        // auto-backfill.
-        self.refuse_capture_on_partial_clone()?;
+        // Receiving full bytes alone cannot turn withheld files into authored
+        // deletions. Capture resumes only after a complete materialization.
+        self.require_complete_checkout()?;
 
         const MAX_WORKTREE_CHANGE_ATTEMPTS: usize = 4;
         let mut worktree_change_attempts = 0;
@@ -1497,6 +1493,7 @@ impl Repository {
                     .write()
                     .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
                 self.require_attached_native_source_signer()?;
+                self.require_complete_checkout()?;
 
                 if let Some(merge_state) = self.merge_state_manager().load()? {
                     // A merge capture builds its own tree and never runs the
@@ -1880,6 +1877,7 @@ impl Repository {
         transaction_id: Option<&str>,
     ) -> Result<State> {
         self.require_attached_native_source_signer()?;
+        self.require_complete_checkout()?;
         // A merge capture builds its own tree and never runs the v4
         // salt/sidecar path; queued entry-visibility marks would silently
         // attach to nothing. Fail loud so they are never dropped (the worktree
