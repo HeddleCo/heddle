@@ -15,7 +15,7 @@ use repo::Repository;
 use thread_api::thread_control::{Author, Control, PreparedControl, Review, ReviewKind};
 #[path = "review_outbox.rs"]
 mod review_outbox;
-use review_outbox::ReviewOutbox;
+use review_outbox::{ReviewOutbox, StoredReview};
 
 use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::{
@@ -274,7 +274,20 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
     let (reference, endpoint, principal) = review_scope(&client, &address, &args.thread).await?;
     let mut outbox = ReviewOutbox::open()?;
     let request = match outbox.load(&endpoint, &principal, id)? {
-        Some(stored) => {
+        Some(StoredReview::Completed(decision)) => {
+            let previous = wire::RecordReviewRequest { client_operation_id: id.to_string(), decision: Some(decision.clone()), ..Default::default() };
+            replay_matches(&previous, &reference, &principal, wire::review_decision::Kind::Approval, None, args.note.as_deref())?;
+            client.close().await;
+            let output = decision_output(&decision, &args.thread)?;
+            if should_output_json(cli, Some(repo.config())) {
+                write_full_command_json(&output, NextActionValidationContext::without_repo(&["thread", "approve"]))?;
+            } else {
+                println!("Already approved Thread '{}' at {}", args.thread, output.source_revision);
+                println!("  review id: {}", output.id);
+            }
+            return Ok(());
+        }
+        Some(StoredReview::Pending(stored)) => {
             replay_matches(
                 &stored,
                 &reference,
@@ -315,7 +328,7 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
     result.with_context(|| {
         format!("review request may be pending; retry the exact original with --op-id {id}")
     })?;
-    outbox.remove(&endpoint, &principal, id)?;
+    outbox.complete(&endpoint, &principal, id)?;
     let output = decision_output(&decision, &args.thread)?;
     if should_output_json(cli, Some(repo.config())) {
         write_full_command_json(
@@ -377,7 +390,18 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
     let (reference, endpoint, principal) = review_scope(&client, &address, &args.thread).await?;
     let mut outbox = ReviewOutbox::open()?;
     let request = match outbox.load(&endpoint, &principal, operation)? {
-        Some(stored) => {
+        Some(StoredReview::Completed(decision)) => {
+            let previous = wire::RecordReviewRequest { client_operation_id: operation.to_string(), decision: Some(decision), ..Default::default() };
+            replay_matches(&previous, &reference, &principal, wire::review_decision::Kind::Revocation, Some(id), None)?;
+            client.close().await;
+            if should_output_json(cli, Some(repo.config())) {
+                write_full_command_json(&ApprovalRevokeOutput { output_kind: "thread_revoke_approval", id: args.id, revoked: true }, NextActionValidationContext::without_repo(&["thread", "revoke-approval"]))?;
+            } else {
+                println!("Approval {} was already revoked for Thread '{}'", args.id, args.thread);
+            }
+            return Ok(());
+        }
+        Some(StoredReview::Pending(stored)) => {
             replay_matches(
                 &stored,
                 &reference,
@@ -433,7 +457,7 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
     result.with_context(|| {
         format!("revocation may be pending; retry the exact original with --op-id {operation}")
     })?;
-    outbox.remove(&endpoint, &principal, operation)?;
+    outbox.complete(&endpoint, &principal, operation)?;
     if should_output_json(cli, Some(repo.config())) {
         write_full_command_json(
             &ApprovalRevokeOutput {

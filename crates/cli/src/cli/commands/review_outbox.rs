@@ -2,12 +2,18 @@
 use std::{fs::OpenOptions, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
-use api::heddle::api::v2alpha1::RecordReviewRequest;
+use api::heddle::api::v2alpha1::{RecordReviewRequest, ReviewDecision};
 use prost::Message;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 const MAX_REQUEST_BYTES: usize = 256 * 1024;
 const MAX_PENDING: i64 = 512;
+const MAX_COMPLETED: i64 = 65_536;
+
+pub(super) enum StoredReview {
+    Pending(RecordReviewRequest),
+    Completed(ReviewDecision),
+}
 
 pub(super) struct ReviewOutbox {
     connection: Connection,
@@ -60,6 +66,13 @@ impl ReviewOutbox {
                operation_id TEXT NOT NULL,
                request BLOB NOT NULL CHECK(length(request)<=262144),
                PRIMARY KEY(endpoint,principal,operation_id)
+             );
+             CREATE TABLE IF NOT EXISTS completed_review (
+               endpoint BLOB NOT NULL CHECK(length(endpoint)=32),
+               principal TEXT NOT NULL,
+               operation_id TEXT NOT NULL,
+               decision BLOB NOT NULL CHECK(length(decision)<=262144),
+               PRIMARY KEY(endpoint,principal,operation_id)
              );",
         )?;
         Ok(Self { connection })
@@ -70,7 +83,18 @@ impl ReviewOutbox {
         endpoint: &[u8],
         principal: &str,
         operation_id: uuid::Uuid,
-    ) -> Result<Option<RecordReviewRequest>> {
+    ) -> Result<Option<StoredReview>> {
+        let completed: Option<Vec<u8>> = self.connection.query_row(
+            "SELECT decision FROM completed_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
+            params![endpoint, principal, operation_id.to_string()],
+            |row| row.get(0),
+        ).optional()?;
+        if let Some(bytes) = completed {
+            ensure!(bytes.len() <= MAX_REQUEST_BYTES, "stored completed review exceeds bound");
+            let decision = ReviewDecision::decode(bytes.as_slice())?;
+            ensure!(decision.encode_to_vec() == bytes, "stored completed review is not canonical protobuf");
+            return Ok(Some(StoredReview::Completed(decision)));
+        }
         let bytes: Option<Vec<u8>> = self.connection.query_row(
             "SELECT request FROM prepared_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
             params![endpoint, principal, operation_id.to_string()],
@@ -91,7 +115,7 @@ impl ReviewOutbox {
                     request.client_operation_id == operation_id.to_string(),
                     "stored review operation ID differs"
                 );
-                Ok(request)
+                Ok(StoredReview::Pending(request))
             })
             .transpose()
     }
@@ -117,6 +141,12 @@ impl ReviewOutbox {
             "prepared review exceeds bound"
         );
         let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let completed: Option<i64> = transaction.query_row(
+            "SELECT 1 FROM completed_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
+            params![endpoint, principal, operation_id.to_string()],
+            |row| row.get(0),
+        ).optional()?;
+        ensure!(completed.is_none(), "operation ID already completed; reuse its recorded result");
         let existing: Option<i64> = transaction.query_row(
             "SELECT 1 FROM prepared_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
             params![endpoint, principal, operation_id.to_string()],
@@ -142,16 +172,31 @@ impl ReviewOutbox {
         Ok(())
     }
 
-    pub(super) fn remove(
-        &self,
+    pub(super) fn complete(
+        &mut self,
         endpoint: &[u8],
         principal: &str,
         operation_id: uuid::Uuid,
     ) -> Result<()> {
-        self.connection.execute(
+        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let bytes: Vec<u8> = transaction.query_row(
+            "SELECT request FROM prepared_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
+            params![endpoint, principal, operation_id.to_string()],
+            |row| row.get(0),
+        ).context("completed review has no prepared request")?;
+        let request = RecordReviewRequest::decode(bytes.as_slice())?;
+        let decision = request.decision.context("prepared review has no decision")?;
+        let count: i64 = transaction.query_row("SELECT COUNT(*) FROM completed_review", [], |row| row.get(0))?;
+        ensure!(count < MAX_COMPLETED, "completed review history is full; retain operation IDs before preparing more reviews");
+        transaction.execute(
+            "INSERT INTO completed_review(endpoint,principal,operation_id,decision) VALUES(?1,?2,?3,?4)",
+            params![endpoint, principal, operation_id.to_string(), decision.encode_to_vec()],
+        )?;
+        transaction.execute(
             "DELETE FROM prepared_review WHERE endpoint=?1 AND principal=?2 AND operation_id=?3",
             params![endpoint, principal, operation_id.to_string()],
         )?;
+        transaction.commit()?;
         Ok(())
     }
 }
@@ -190,29 +235,15 @@ mod tests {
             "same operation cannot acquire newly observed comparison"
         );
         let reopened = ReviewOutbox::open_at(home.path().join("state")).expect("restart");
-        assert_eq!(
-            reopened.load(&endpoint, &principal, id).expect("load"),
-            Some(first)
-        );
-        assert_eq!(
-            reopened
-                .load(&[6; 32], &principal, id)
-                .expect("other endpoint"),
-            None
-        );
-        assert_eq!(
-            reopened
-                .load(&endpoint, "another-principal", id)
-                .expect("other actor"),
-            None
-        );
-        reopened
-            .remove(&endpoint, &principal, id)
-            .expect("receipt cleanup");
-        assert_eq!(
-            reopened.load(&endpoint, &principal, id).expect("clean"),
-            None
-        );
+        assert!(matches!(reopened.load(&endpoint, &principal, id).expect("load"), Some(StoredReview::Pending(request)) if request == first));
+        assert!(reopened.load(&[6; 32], &principal, id).expect("other endpoint").is_none());
+        assert!(reopened.load(&endpoint, "another-principal", id).expect("other actor").is_none());
+        let mut reopened = reopened;
+        reopened.complete(&endpoint, &principal, id).expect("receipt recorded");
+        assert!(matches!(reopened.load(&endpoint, &principal, id).expect("completed"), Some(StoredReview::Completed(decision)) if Some(decision.clone()) == first.decision));
+        assert!(reopened.save(&endpoint, &principal, id, &first).is_err(), "completed operation ID cannot be signed again");
+        let restarted = ReviewOutbox::open_at(home.path().join("state")).expect("restart after receipt");
+        assert!(matches!(restarted.load(&endpoint, &principal, id).expect("completed after restart"), Some(StoredReview::Completed(_))));
     }
 
     #[test]
