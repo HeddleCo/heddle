@@ -8,16 +8,12 @@ use api::heddle::api::v1alpha1::{
     IssuedCredentialResponse, ListSignupInvitesRequest, ListSignupInvitesResponse,
     ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
     ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
-    ServiceAccountResponse, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
+    ServiceAccountResponse, SupportAccessGrant, ThreadApproval,
     grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
-use super::{
-    HostedClient,
-    helpers::{hosted_to_protocol_error, to_protocol_grant},
-    operation_id::ClientOperationId,
-};
+use super::{HostedClient, helpers::hosted_to_protocol_error, operation_id::ClientOperationId};
 
 macro_rules! signed_call {
     ($self:ident, $client:ident, $rpc:ident, $path:expr, $msg:expr) => {{
@@ -801,22 +797,45 @@ impl HostedClient {
         role: &str,
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
-    ) -> Result<wire::HostedGrantInfo, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateGrant");
-        let target = build_target_ref(namespace_path, repo_path)?;
-        let grant = authed_call!(
-            self,
-            update_grant,
-            "UpdateGrant",
-            UpdateGrantRequest {
-                subject: subject.to_string(),
-                role: parse_hosted_role_arg(role)? as i32,
-                target,
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(to_protocol_grant(grant))
+    ) -> Result<api::heddle::api::v2alpha1::GrantRecord, ProtocolError> {
+        use api::heddle::api::v2alpha1 as contract;
+        let address = grant_spool_address(namespace_path, repo_path)?;
+        let spool = self.resolve_spool_ref(address).await?;
+        let principal_id = self.resolve_principal_id(subject, &spool).await?;
+        let mut matching = self
+            .list_grants(Some(address))
+            .await?
+            .into_iter()
+            .filter(|grant| grant.principal_id == principal_id);
+        let mut grant = matching.next().ok_or_else(|| {
+            ProtocolError::ObjectNotFound("principal has no grant on this Spool".into())
+        })?;
+        if matching.next().is_some() {
+            return Err(ProtocolError::InvalidState(
+                "principal has multiple grants; select a stable grant ID".into(),
+            ));
+        }
+        let expected_version = grant.version.clone();
+        grant.role = native_grant_role(role)? as i32;
+        let method = "heddle.api.v2alpha1.SpoolService/PutGrant";
+        let request = contract::PutGrantRequest {
+            client_operation_id: ClientOperationId::fresh(method).to_wire(),
+            grant: Some(grant.clone()),
+            expected_version,
+        };
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServicePutGrant>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        require_applied_receipt(
+            response.receipt,
+            &request.client_operation_id,
+            &remote.description.endpoint,
+            "grant update",
+        )?;
+        Ok(grant)
     }
 
     pub async fn delete_grant(
@@ -1358,14 +1377,27 @@ mod tests {
                 .len(),
             1
         );
-        let _ = client
-            .update_grant("principal:alice", "maintainer", Some("acme"), None)
-            .await;
+        let updated_grant = client
+            .update_grant("alice", "writer", None, Some("acme/widgets"))
+            .await
+            .expect("native grant update uses observed version");
+        assert_eq!(
+            updated_grant.role,
+            api::heddle::api::v2alpha1::ResourceRole::Writer as i32
+        );
+        assert_eq!(
+            client
+                .list_grants(Some("acme/widgets"))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         client
             .delete_grant(
                 &created_grant.r#ref.as_ref().expect("grant ref").id,
-                Some("acme"),
                 None,
+                Some("acme/widgets"),
                 String::new(),
             )
             .await

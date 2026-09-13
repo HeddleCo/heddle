@@ -1045,11 +1045,17 @@ async fn serve_native_put_grant(
         .and_then(|frame| v2::PutGrantRequest::decode(frame.body).ok())
         .expect("native PutGrant request");
     let mut grant = body.grant.expect("grant record");
-    grant.version = vec![1; 32];
-    grants
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(grant);
+    let mut records = grants.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(existing) = records.iter_mut().find(|row| row.r#ref == grant.r#ref) {
+        assert_eq!(body.expected_version, existing.version);
+        grant.version = vec![2; 32];
+        *existing = grant;
+    } else {
+        assert!(body.expected_version.is_empty());
+        grant.version = vec![1; 32];
+        records.push(grant);
+    }
+    drop(records);
     write_native_grant_receipt(send, server_key, body.client_operation_id).await;
 }
 
