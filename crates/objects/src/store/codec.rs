@@ -8,9 +8,10 @@ use heddle_format::compression::{
 
 use crate::{
     object::{
-        Action, ActionId, ContentHash, State, TREE_DELTA_ANCHOR_INTERVAL, TREE_DELTA_MAX_OPS, Tree,
-        decode_tree_delta, decode_tree_delta_header, encode_tree_delta, is_canonical_tree,
-        is_delta_tree, is_lean_tree, tree_delta,
+        Action, ActionId, ContentHash, PartialTree, State, TREE_DELTA_ANCHOR_INTERVAL,
+        TREE_DELTA_MAX_OPS, Tree, TreeScheme, decode_redacted_projection, decode_tree_delta,
+        decode_tree_delta_header, encode_tree_delta, is_canonical_tree, is_delta_tree,
+        is_lean_tree, is_redacted_tree, is_salted_tree, tree_delta,
     },
     store::{HeddleError, Result},
 };
@@ -69,6 +70,17 @@ pub fn encode_tree(tree: &Tree, _config: &CompressionConfig) -> Result<(ContentH
 /// eligible descendants are cumulative HDC1 deltas against the epoch anchor.
 pub fn encode_tree_hot(tree: &Tree, base: Option<TreeDeltaBase<'_>>) -> Result<EncodedTree> {
     let hash = tree.hash();
+    // A V4 salted tree is stored as a full self-keyed HSR1 canonical body. It
+    // is always an anchor (never an HLR1 lean or HDC1 delta — both drop the
+    // per-entry salt), so `base` is irrelevant and it carries the `Lean`
+    // (anchor, nothing to remember) lineage kind.
+    if tree.scheme() == TreeScheme::V4Salted {
+        return Ok(EncodedTree {
+            hash,
+            data: tree.encode_canonical()?,
+            kind: TreeEncodingKind::Lean,
+        });
+    }
     let lean = tree.encode_lean()?;
     let Some(base) = base else {
         return Ok(EncodedTree {
@@ -77,6 +89,16 @@ pub fn encode_tree_hot(tree: &Tree, base: Option<TreeDeltaBase<'_>>) -> Result<E
             kind: TreeEncodingKind::Lean,
         });
     };
+    if base.anchor.scheme() == TreeScheme::V4Salted {
+        // A V3 child cannot delta against a V4 salted anchor (different hash
+        // scheme, no shared preimage). Store the child as its own lean anchor
+        // rather than hard-failing the write.
+        return Ok(EncodedTree {
+            hash,
+            data: lean,
+            kind: TreeEncodingKind::Lean,
+        });
+    }
     if hash == base.anchor_id {
         return Ok(EncodedTree {
             hash,
@@ -142,7 +164,20 @@ pub fn decode_tree(data: &[u8]) -> Result<Tree> {
 }
 
 pub fn decode_tree_serialized(data: &[u8]) -> Result<Tree> {
-    if !is_canonical_tree(data) {
+    if is_redacted_tree(data) {
+        // A full-tree decoder cannot represent a projection with withheld
+        // entries. The partial-store/partial-read path is
+        // [`decode_partial_tree`] + `ObjectStore::{put,read}_partial_tree`;
+        // this typed error is the backstop for callers that route an HRT1 body
+        // into the full-tree path by mistake.
+        return Err(HeddleError::RedactedTree(
+            "HRT1 redacted projection must be read via decode_partial_tree, not as a full tree"
+                .to_string(),
+        ));
+    }
+    // HSR1 carries its declared root inline, so it self-keys and can decode
+    // without an external key (its root is verified inside `decode_canonical`).
+    if !is_canonical_tree(data) && !is_salted_tree(data) {
         return Err(HeddleError::InvalidObject(
             "HLR1/HDC1 tree decoding requires the external object key".to_string(),
         ));
@@ -167,6 +202,15 @@ pub fn decode_tree_serialized_with_key(
     expected: ContentHash,
     anchor: Option<&Tree>,
 ) -> Result<Tree> {
+    if is_redacted_tree(data) {
+        // See [`decode_tree_serialized`]: an HRT1 body carries withheld entries
+        // and is read through [`decode_partial_tree`] /
+        // `ObjectStore::read_tree`, never as a full [`Tree`].
+        return Err(HeddleError::RedactedTree(
+            "HRT1 redacted projection must be read via decode_partial_tree, not as a full tree"
+                .to_string(),
+        ));
+    }
     let tree = if is_lean_tree(data) {
         Tree::decode_lean(data, expected)?
     } else if is_delta_tree(data) {
@@ -180,7 +224,9 @@ pub fn decode_tree_serialized_with_key(
             HeddleError::InvalidObject("HDC1 tree is missing its materialized anchor".to_string())
         })?;
         decode_tree_delta(data, anchor, expected)?
-    } else if is_canonical_tree(data) {
+    } else if is_canonical_tree(data) || is_salted_tree(data) {
+        // HTR4 (flat V3) and HSR1 (salted V4) both decode through
+        // `decode_canonical`, which dispatches on the body magic.
         Tree::decode_canonical(data)?
     } else {
         return Err(HeddleError::InvalidObject(
@@ -192,6 +238,30 @@ pub fn decode_tree_serialized_with_key(
         return Err(HeddleError::Corruption { expected, found });
     }
     Ok(tree)
+}
+
+/// Decode an HRT1 redacted projection body and verify it reconstructs the
+/// externally-declared tree hash `expected`.
+///
+/// This is the partial-tree counterpart to [`decode_tree_serialized_with_key`]:
+/// where that returns a full [`Tree`] and refuses an HRT1 body, this returns a
+/// verified [`PartialTree`] whose visible preimages + withheld leaf hashes
+/// reproduce `expected` (Leg 1's `reconstruct_root` contract). A partial clone
+/// verifies against the tip's declared `State.tree` through this path WITHOUT
+/// holding the withheld content.
+///
+/// [`decode_redacted_projection`] already checks that the projection's leaves
+/// reconstruct its self-declared root; the extra equality below binds that
+/// self-declared root to the externally-expected key, so a projection cannot
+/// masquerade as a different tree (mirroring the `found != expected` corruption
+/// check every full-tree decode performs).
+pub fn decode_partial_tree(data: &[u8], expected: ContentHash) -> Result<PartialTree> {
+    let partial = decode_redacted_projection(data)?;
+    let found = partial.declared_root();
+    if found != expected {
+        return Err(HeddleError::Corruption { expected, found });
+    }
+    Ok(partial)
 }
 
 /// Return the serialized tree body stored in a loose object, decompressing
@@ -265,6 +335,40 @@ mod tests {
             assert!(crate::object::is_lean_tree(&encoded));
             assert_eq!(decode_tree_with_key(&encoded, hash, None).unwrap(), tree);
         }
+    }
+
+    #[test]
+    fn v3_child_over_a_v4_anchor_falls_back_to_lean_not_error() {
+        // A V4 salted anchor cannot be a delta base for a V3 child (different
+        // hash scheme). Pre-fix this hit `encode_tree_delta` and Err'd, failing
+        // the write; it must now fall back to a lean anchor.
+        let v4_anchor = Tree::from_entries_salted_v4(
+            vec![
+                TreeEntry::file("a", ContentHash::compute(b"a"), false).unwrap(),
+                TreeEntry::file("b", ContentHash::compute(b"b"), false).unwrap(),
+            ],
+            vec![[0x11; 32], [0x22; 32]],
+        )
+        .unwrap();
+        let v3_child = Tree::from_entries(vec![
+            TreeEntry::file("a", ContentHash::compute(b"a"), false).unwrap(),
+        ]);
+        let encoded = encode_tree_hot(
+            &v3_child,
+            Some(TreeDeltaBase {
+                anchor_id: v4_anchor.hash(),
+                anchor: &v4_anchor,
+                parent_depth: 0,
+            }),
+        )
+        .expect("v3-over-v4 must not error");
+        assert_eq!(encoded.kind, TreeEncodingKind::Lean);
+        assert!(crate::object::is_lean_tree(&encoded.data));
+        assert_eq!(encoded.hash, v3_child.hash());
+        assert_eq!(
+            decode_tree_with_key(&encoded.data, v3_child.hash(), None).unwrap(),
+            v3_child
+        );
     }
 
     #[test]

@@ -10,8 +10,9 @@ use super::{
     tree_canonical::{
         TREE_BLOCK_ENCODING_VERSION, TREE_BLOCK_INDEX_LEN, TREE_BLOCK_PREAMBLE_LEN,
         TREE_ENCODING_VERSION, TREE_HEADER_LEN, TREE_LEAN_ENCODING_VERSION, TREE_LEAN_MAGIC,
-        TreeBlockHeader, TreeBlockIndex, TreeHeader, decode_block_header, decode_block_index,
-        decode_block_payload, decode_entry_frame, decode_header,
+        TREE_REDACTED_MAGIC, TREE_SALTED_MAGIC, TreeBlockHeader, TreeBlockIndex, TreeHeader,
+        decode_block_header, decode_block_index, decode_block_payload, decode_entry_frame,
+        decode_header,
     },
     tree_source::{TreeBodyIntegrity, TreeByteSource},
 };
@@ -180,6 +181,22 @@ impl<S: TreeByteSource> TreeEntryReader<S> {
     ) -> Result<Self, TreeStreamError> {
         let mut magic = [0u8; 4];
         source.read_exact_at(0, &mut magic)?;
+        if &magic == TREE_REDACTED_MAGIC {
+            // A redacted projection is serve-only and carries opaque leaves; it
+            // must never enter the streaming/pack read path.
+            return Err(TreeStreamError::Malformed(
+                "HRT1 redacted projection must not enter the tree stream".into(),
+            ));
+        }
+        if &magic == TREE_SALTED_MAGIC {
+            // A V4 salted body's id is a Merkle root over leaf-hash-ordered
+            // leaves, which cannot be verified by the streaming reader's
+            // incremental single-pass hasher. HSR1 bodies are decoded eagerly
+            // via `Tree::decode_canonical` / `decode_salted_v4`.
+            return Err(TreeStreamError::Malformed(
+                "HSR1 salted trees are decoded eagerly, not streamed".into(),
+            ));
+        }
         let (header, layout) = if &magic == TREE_LEAN_MAGIC {
             let (entry_count, body_start) = read_source_varint(&mut source, 4)?;
             let entry_count = u64::try_from(entry_count)

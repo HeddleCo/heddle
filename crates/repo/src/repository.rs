@@ -70,7 +70,7 @@ pub use refs::SpoolFacet;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use repo_config::{
     HostedConfig, KeyBindingRegistryAnchor, OutputFormat, ProvenanceConfig, RepoConfig,
-    RepoRemoteConfig, RepositorySourceAuthority, TrustedKey,
+    RepoRemoteConfig, RepositorySourceAuthority, TreeSchemePolicy, TrustedKey,
 };
 // Review-epic config types — re-exported here so the new
 // `signals.rs` (and external crates wanting to construct a
@@ -90,7 +90,7 @@ pub use repository_maintenance::{
     PullPlannerCacheInspection, RefCountsInspection, RepositoryMaintenanceRunReport,
     RepositoryPerformanceInspectionReport, WorktreeIndexInspection,
 };
-pub use repository_materialization::WarmCanonicalStoreStats;
+pub use repository_materialization::{PartialMaterialization, WarmCanonicalStoreStats};
 pub use repository_partial_fetch::MissingBlob;
 pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
 pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOutcome};
@@ -98,8 +98,13 @@ pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile, WorktreeStat
 pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeStatusDetailed};
 use sley::Repository as SleyRepository;
 
+#[path = "repository_capture_v4.rs"]
+mod repository_capture_v4;
+#[path = "repository_entry_visibility.rs"]
+mod repository_entry_visibility;
 #[path = "repository_snapshot.rs"]
 mod repository_snapshot;
+pub use repository_entry_visibility::{EntryVisibilityBinding, EntryVisibilityMark};
 #[cfg(test)]
 #[path = "repository_tests.rs"]
 mod repository_tests;
@@ -210,6 +215,13 @@ where
     /// real, TTY-rendering handle via [`Repository::set_progress`] before
     /// driving an operation. Set-after-construction like `blob_hydrator`.
     progress: RwLock<Progress>,
+    /// Pending per-entry visibility marks (v4 redactable trees) queued by
+    /// [`Repository::mark_entry_visibility`] /
+    /// [`Repository::mark_subtree_visibility`] and drained by the next capture,
+    /// which resolves each path to its leaf hash (after salts are minted) and
+    /// stages an `EntryVisibility` sidecar in the snapshot's own oplog batch.
+    /// Set-after-construction like `progress`.
+    pending_entry_visibility: RwLock<Vec<crate::EntryVisibilityMark>>,
 }
 
 impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> RepositoryLockExt for Repository<R, O, S> {
@@ -257,6 +269,7 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
             signal_computer: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
             progress: RwLock::new(Progress::null()),
+            pending_entry_visibility: RwLock::new(Vec::new()),
         }
     }
 
@@ -697,6 +710,14 @@ impl Repository {
 
     pub fn config(&self) -> &RepoConfig {
         self.repo_config()
+    }
+
+    /// The tree-hashing scheme a fresh capture on this spool produces, read
+    /// from the `[policies] tree_scheme` flag (default `v3`). Advisory on read:
+    /// the store dispatches on body magic, so this only gates *write* scheme at
+    /// the capture chokepoint (v4 redactable trees).
+    pub fn capture_tree_scheme(&self) -> objects::object::TreeScheme {
+        self.config().policies.tree_scheme.tree_scheme()
     }
 
     pub fn get_tree_for_state(&self, state_id: &StateId) -> Result<Option<Tree>> {

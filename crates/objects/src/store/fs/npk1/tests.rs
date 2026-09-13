@@ -524,3 +524,52 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn repack_with_a_loose_v4_tree_succeeds_and_keeps_it_retrievable() {
+    let (_temp, store) = store();
+    // A V3 tree (NPK1 candidate) and a V4 salted tree, both loose.
+    let v3 = related_tree(1, 20);
+    let v3_hash = store.put_tree(&v3).expect("put v3 tree");
+    let v4 = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("secret.md", ContentHash::compute(b"secret"), false).unwrap(),
+            TreeEntry::file("readme.md", ContentHash::compute(b"readme"), false).unwrap(),
+        ],
+        vec![[0x33; 32], [0x44; 32]],
+    )
+    .expect("build v4 tree");
+    let v4_hash = store.put_tree(&v4).expect("put v4 tree");
+
+    // Pre-fix: the loose V4 tree was fed into NPK1, `encode_lean` Err'd, and the
+    // whole repack aborted. This must now complete.
+    repack(&store);
+
+    // Both trees remain retrievable after repack.
+    assert_eq!(
+        store
+            .get_tree(&v4_hash)
+            .expect("get v4")
+            .expect("v4 present"),
+        v4
+    );
+    assert_eq!(
+        store
+            .get_tree(&v3_hash)
+            .expect("get v3")
+            .expect("v3 present"),
+        v3
+    );
+    // The V4 tree is excluded from the NPK1 pack (it rode the native pack).
+    let npk1_has_v4 = store
+        .npk1_manager()
+        .read()
+        .expect("NPK1 manager")
+        .get_tree(&v4_hash)
+        .expect("npk1 lookup")
+        .is_some();
+    assert!(
+        !npk1_has_v4,
+        "a v4 salted tree must never enter the NPK1 pack"
+    );
+}

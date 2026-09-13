@@ -322,6 +322,7 @@ impl Repository {
             signal_computer: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
             progress: RwLock::new(Progress::null()),
+            pending_entry_visibility: RwLock::new(Vec::new()),
         };
         Ok(repo)
     }
@@ -404,6 +405,7 @@ impl Repository {
             signal_computer: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
             progress: RwLock::new(Progress::null()),
+            pending_entry_visibility: RwLock::new(Vec::new()),
         };
 
         Ok(repo)
