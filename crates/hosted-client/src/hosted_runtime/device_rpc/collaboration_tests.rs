@@ -601,6 +601,110 @@ pub(super) async fn roundtrip(
             _ => {}
         }
     }
+    let mut public_matches = Vec::new();
+    for _ in 0..2 {
+        let discussion = DiscussionRecordId::generate();
+        let operation_id = uuid::Uuid::new_v4();
+        let signed = thread_api::collaboration::Command {
+            discussion,
+            operation_id: CollaborationIdempotencyKey::new(operation_id.to_string())
+                .expect("public search operation"),
+            metadata: metadata.clone(),
+            author: Attribution::human(Principal::new("Owner", "")),
+            occurred_at_ms: chrono::Utc::now().timestamp_millis(),
+            body: Body::Open {
+                blocking: false,
+                title: "Embargoed search needle".into(),
+                anchor: Anchor::Repository,
+                visibility: VisibilityTier::Public,
+                turn: DiscussionTurnV1::new("Visible search text").expect("public turn"),
+                thread_ref: None,
+            },
+        }
+        .sign(&[], &signer)
+        .expect("public search signature");
+        remote
+            .api
+            .call::<thread_api::rpc::CollaborationServiceOpenDiscussion>(&OpenDiscussionRequest {
+                client_operation_id: operation_id.to_string(),
+                spool: Some(SpoolRef {
+                    id: metadata.scope.spool.to_string(),
+                }),
+                anchor: Some(
+                    thread_api::collaboration::anchor_ref(&Anchor::Repository, &metadata.scope)
+                        .expect("public search anchor"),
+                ),
+                title: "Embargoed search needle".into(),
+                initial_body: "Visible search text".into(),
+                signed_operation: Some(signed),
+                audience: Audience::Public as i32,
+                ..Default::default()
+            })
+            .await
+            .expect("public search discussion");
+        public_matches.push(discussion.to_string());
+    }
+    let page_request = SearchRequest {
+        threads: vec![selected_thread.clone()],
+        domains: vec![SearchDomain::Discussion as i32],
+        text: "Embargoed search needle".into(),
+        mode: search_request::Mode::Lexical as i32,
+        page: Some(PageRequest {
+            size: 1,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let read_page = |request: SearchRequest| async move {
+        let mut stream = remote
+            .api
+            .observe::<thread_api::rpc::SearchServiceSearch>(&request)
+            .await
+            .expect("paged device Search");
+        let mut ids = Vec::new();
+        let mut next = Vec::new();
+        while let Some(event) = stream.next().await.expect("paged Search frame") {
+            match event.payload {
+                Some(search_event::Payload::Hit(hit)) => {
+                    if let Some(entity_ref::Entity::Discussion(record)) =
+                        hit.subject.and_then(|subject| subject.entity)
+                    {
+                        ids.push(record.id);
+                    }
+                }
+                Some(search_event::Payload::Complete(status)) => {
+                    assert_eq!(status.coverage, Coverage::Complete as i32);
+                    next = status.page.expect("paged Search status").next_page;
+                }
+                _ => {}
+            }
+        }
+        (ids, next)
+    };
+    let (first, cursor) = read_page(page_request.clone()).await;
+    assert_eq!(
+        first.len(),
+        1,
+        "hidden candidates do not fill a visible page"
+    );
+    assert_eq!(cursor.len(), 32, "continuation is an opaque random token");
+    assert_ne!(cursor, embargoed.to_string().into_bytes());
+    let mut second_request = page_request;
+    second_request.page.as_mut().expect("page").after_page = cursor;
+    let (second, exhausted) = read_page(second_request.clone()).await;
+    let (retry, retry_exhausted) = read_page(second_request).await;
+    assert_eq!(second, retry, "a resumed page is retryable");
+    assert_eq!(exhausted, retry_exhausted);
+    assert!(exhausted.is_empty(), "two visible matches exhaust the view");
+    assert_ne!(first, second, "lookahead does not duplicate the served row");
+    assert_eq!(
+        first
+            .into_iter()
+            .chain(second)
+            .collect::<std::collections::BTreeSet<_>>(),
+        public_matches.into_iter().collect(),
+        "hidden match cannot skip either visible discussion"
+    );
     let hits = repo::thread_replication::collaboration_search::search(
         repository.heddle_dir(),
         "Decision rationale",
