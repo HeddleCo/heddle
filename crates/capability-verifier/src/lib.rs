@@ -17,6 +17,7 @@ mod limits;
 mod operation;
 mod owner;
 pub mod passkey_delegation;
+pub mod service_scope;
 pub mod thread_control_authority;
 mod transfer;
 
