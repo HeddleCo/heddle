@@ -76,6 +76,14 @@ pub struct NativeBatch {
     pub scanned: usize,
 }
 
+/// Source-domain selection only. Revision identifier hits remain historical.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceSelection {
+    Current,
+    Retained,
+    Exact(objects::object::StateId),
+}
+
 /// Bounded current-record candidates. Search text is literal. The caller
 /// projects and evaluates typed tags on each exact signed context revision
 /// after its authorization check.
@@ -86,6 +94,7 @@ pub fn search_native(
     limit: u32,
     kinds: &[i32],
     annotations: Option<&objects::object::AnnotationQuery>,
+    source: SourceSelection,
 ) -> Result<NativeBatch> {
     if text.len() > 4096
         || limit == 0
@@ -141,6 +150,8 @@ pub fn search_native(
         WHERE source_search_fts MATCH ?1 AND o.status=1 AND o.facet=1
           AND o.thread=c.thread AND o.source_revision=c.revision
           AND ((c.kind=3 AND ?11) OR (c.kind=4 AND ?12))
+          AND (?13 OR EXISTS(SELECT 1 FROM thread_source_head_revisions head WHERE head.thread=c.thread AND head.revision=c.revision))
+          AND (?14 IS NULL OR c.revision=?14)
       ), anchor AS (
         SELECT score,thread,cursor,kind,record FROM hits WHERE cursor=?6
       ) SELECT thread,operation,kind,record,summary,score,canonical,cursor,revision,path,symbol_id,symbol_name,start_line,end_line FROM hits
@@ -220,7 +231,12 @@ pub fn search_native(
                 text.trim(),
                 exact_revision.map(|id| id.as_bytes().to_vec()),
                 kinds.contains(&3),
-                kinds.contains(&4)
+                kinds.contains(&4),
+                !matches!(source, SourceSelection::Current),
+                match source {
+                    SourceSelection::Exact(revision) => Some(revision.as_bytes().to_vec()),
+                    _ => None,
+                }
             ],
             read,
         )?

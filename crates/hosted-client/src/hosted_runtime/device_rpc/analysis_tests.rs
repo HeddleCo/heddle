@@ -511,6 +511,83 @@ pub(super) async fn roundtrip(
         vec!["answer.rs"],
         "a semantic index attachment cannot reveal a withheld source entry"
     );
+    let newer_blob = Blob::from(b"pub fn newer() -> i32 { 99 }\n".to_vec());
+    repository
+        .store()
+        .put_blob(&newer_blob)
+        .expect("new source blob");
+    let newer_tree = Tree::from_entries_salted_v4(
+        vec![TreeEntry::file("newer.rs", newer_blob.hash(), false).expect("new path")],
+        vec![[33; 32]],
+    )
+    .expect("new source tree");
+    repository.store().put_tree(&newer_tree).expect("new tree");
+    let newer_state = State::new_snapshot(
+        newer_tree.hash(),
+        vec![state.id()],
+        Attribution::human(Principal::new("owner", "")),
+    );
+    repository
+        .store()
+        .put_state(&newer_state)
+        .expect("new state");
+    repository
+        .record_native_capture("analysis-source", newer_state.id())
+        .expect("new accepted head");
+    super::source_search::index_analyzed_source(repository, &thread, newer_state.id())
+        .expect("index new head");
+    let count_hits = |request: SearchRequest| async move {
+        let mut stream = remote
+            .api
+            .observe::<thread_api::rpc::SearchServiceSearch>(&request)
+            .await
+            .expect("scoped source Search");
+        let mut paths = Vec::new();
+        while let Some(event) = stream.next().await.expect("scoped Search frame") {
+            if let Some(search_event::Payload::Hit(hit)) = event.payload {
+                paths.push(hit.location.expect("source location").path);
+            }
+        }
+        paths
+    };
+    let exact_answer = SearchRequest {
+        text: "answer".into(),
+        page: None,
+        ..source_search.clone()
+    };
+    assert!(
+        count_hits(exact_answer.clone()).await.is_empty(),
+        "CURRENT must not fall back to an older matching source"
+    );
+    let retained = SearchRequest {
+        source_scope: Some(search_request::SourceScope::SourceHistory(
+            SearchSourceHistory::Retained as i32,
+        )),
+        ..exact_answer.clone()
+    };
+    assert_eq!(
+        count_hits(retained).await,
+        vec!["answer.rs"],
+        "explicit history includes retained source"
+    );
+    let exact = SearchRequest {
+        source_scope: Some(search_request::SourceScope::SourceRevision(RevisionRef {
+            spool: Some(SpoolRef {
+                id: spool.to_string(),
+            }),
+            revision: Some(revision_ref::Revision::State(
+                api::heddle::api::v1alpha1::StateId {
+                    value: state.id().as_bytes().to_vec(),
+                },
+            )),
+        })),
+        ..exact_answer
+    };
+    assert_eq!(
+        count_hits(exact).await,
+        vec!["answer.rs"],
+        "exact revision selects historical accepted source"
+    );
     let released = tokio::time::timeout(
         std::time::Duration::from_secs(2),
         device.analysis.workers.clone().acquire_many_owned(2),

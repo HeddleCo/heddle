@@ -16,6 +16,14 @@ struct SearchSelection {
     threads: BTreeMap<uuid::Uuid, BTreeSet<Vec<u8>>>,
     kinds: BTreeSet<i32>,
     annotations: Option<objects::object::AnnotationQuery>,
+    source_scope: LocalSourceScope,
+}
+
+#[derive(Clone)]
+enum LocalSourceScope {
+    Current,
+    Retained,
+    Exact(RevisionRef),
 }
 
 impl SearchSelection {
@@ -99,11 +107,42 @@ impl SearchSelection {
             "search requires text or annotation filters"
         );
         ensure!(request.text.len() <= 4096, "search text exceeds bound");
+        let source_requested = kinds.contains(&(SearchDomain::SourceContent as i32))
+            || kinds.contains(&(SearchDomain::SourceSymbol as i32));
+        ensure!(
+            request.source_scope.is_none() || source_requested,
+            "source scope requires source content or symbol domain"
+        );
+        let source_scope = match request.source_scope.as_ref() {
+            None | Some(search_request::SourceScope::SourceHistory(0 | 1)) => {
+                LocalSourceScope::Current
+            }
+            Some(search_request::SourceScope::SourceHistory(2)) => LocalSourceScope::Retained,
+            Some(search_request::SourceScope::SourceHistory(_)) => {
+                anyhow::bail!("unknown source history scope")
+            }
+            Some(search_request::SourceScope::SourceRevision(revision)) => {
+                let spool = revision
+                    .spool
+                    .as_ref()
+                    .context("source revision Spool required")?;
+                let id = uuid::Uuid::parse_str(&spool.id)?;
+                ensure!(
+                    !threads.is_empty()
+                        && threads.keys().all(|selected| *selected == id)
+                        && spools.len() == 1
+                        && spools.contains(&id),
+                    "exact source revision requires selected Threads in its Spool"
+                );
+                LocalSourceScope::Exact(revision.clone())
+            }
+        };
         Ok(Self {
             spools,
             threads,
             kinds,
             annotations,
+            source_scope,
         })
     }
 }
@@ -189,6 +228,35 @@ impl DeviceRpc {
                     digest.update(&metadata);
                     generations.push((generation, metadata));
                 }
+                let mut source_filters = Vec::with_capacity(selected.len());
+                for spool in &selected {
+                    let filter = match &selection.source_scope {
+                        LocalSourceScope::Current => Some(repo::thread_replication::collaboration_search::SourceSelection::Current),
+                        LocalSourceScope::Retained => Some(repo::thread_replication::collaboration_search::SourceSelection::Retained),
+                        LocalSourceScope::Exact(revision) => {
+                            match revision.revision.as_ref().context("source revision identity required")? {
+                                revision_ref::Revision::State(state) => {
+                                    ensure!(state.value.len()==32,"source State identity must be 32 bytes");
+                                    let mut bytes=[0;32]; bytes.copy_from_slice(&state.value);
+                                    Some(repo::thread_replication::collaboration_search::SourceSelection::Exact(objects::object::StateId::from_bytes(bytes)))
+                                }
+                                revision_ref::Revision::GitCommitOid(oid) => {
+                                    ensure!((oid.len()==40 || oid.len()==64) && oid.bytes().all(|byte|byte.is_ascii_hexdigit()),"invalid Git source revision selector");
+                                    let repository=repo::Repository::open(&spool.root)?;
+                                    repository.git_overlay_mapped_state_for_git_commit(&oid.to_ascii_lowercase())?
+                                        .map(repo::thread_replication::collaboration_search::SourceSelection::Exact)
+                                }
+                            }
+                        }
+                    };
+                    match filter {
+                        Some(repo::thread_replication::collaboration_search::SourceSelection::Current) => digest.update(b"current"),
+                        Some(repo::thread_replication::collaboration_search::SourceSelection::Retained) => digest.update(b"retained"),
+                        Some(repo::thread_replication::collaboration_search::SourceSelection::Exact(state)) => digest.update(state.as_bytes()),
+                        None => digest.update(b"unmapped"),
+                    };
+                    source_filters.push(filter);
+                }
                 let binding = digest.finalize();
                 let cursor_directory = selected.first().map(|spool| &spool.heddle_dir);
                 let mut cursor_scope = blake3::Hasher::new_derive_key("heddle-device-search-cursor-actor-v1");
@@ -235,7 +303,10 @@ impl DeviceRpc {
                         worker_session.facts(Some(&spool.capability_path))?;
                         ensure!(examined < 10_000, "device search candidate work bound exceeded");
                         let remaining = (10_000 - examined).min(256);
-                        let kinds: Vec<_> = selection.kinds.iter().copied().map(|kind| kind - 1).collect();
+                        let kinds: Vec<_> = selection.kinds.iter().copied().map(|kind| kind - 1)
+                            .filter(|kind|source_filters[position].is_some() || !matches!(kind,3|4))
+                            .collect();
+                        if kinds.is_empty() {position+=1;after_operation=None;continue;}
                         let repository = repo::Repository::open(&spool.root)?;
                         let query_text = if selection.kinds.len() == 1
                             && selection.kinds.contains(&(SearchDomain::Revision as i32))
@@ -259,6 +330,7 @@ impl DeviceRpc {
                             remaining as u32,
                             &kinds,
                             selection.annotations.as_ref(),
+                            source_filters[position].unwrap_or(repo::thread_replication::collaboration_search::SourceSelection::Current),
                         )?;
                         let exhausted = batch.scanned < remaining;
                         let facts = worker_session.facts(Some(&spool.capability_path))?;

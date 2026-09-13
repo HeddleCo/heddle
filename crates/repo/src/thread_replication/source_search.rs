@@ -291,11 +291,10 @@ mod tests {
         super::super::initialize_schema(&connection).expect("source schema");
         let thread = ContentHash::from_bytes([1; 32]);
         let revision = StateId::from_bytes([2; 32]);
+        let hidden_revision = StateId::from_bytes([5; 32]);
         let visible_operation = ContentHash::from_bytes([3; 32]);
         let hidden_operation = ContentHash::from_bytes([4; 32]);
-        for operation in [visible_operation, hidden_operation] {
-            connection.execute("INSERT INTO operations(id,thread,facet,canonical,signature,status,source_revision) VALUES(?1,?2,1,x'00',zeroblob(64),1,?3)",params![operation.as_bytes(),thread.as_bytes(),revision.as_bytes()]).expect("accepted original");
-        }
+        connection.execute("INSERT INTO operations(id,thread,facet,canonical,signature,status,source_revision) VALUES(?1,?2,1,x'00',zeroblob(64),1,?3)",params![visible_operation.as_bytes(),thread.as_bytes(),revision.as_bytes()]).expect("visible original");
         let document = |path: &str, text: &str| Document {
             kind: 3,
             path: path.into(),
@@ -322,15 +321,23 @@ mod tests {
             4,
             &[3],
             None,
+            super::super::collaboration_search::SourceSelection::Retained,
         )
         .expect("visible query");
         assert_eq!(first.hits.len(), 1);
         let visible_score = first.hits[0].score;
+        connection
+            .execute(
+                "INSERT INTO parents(child,parent) VALUES(?1,?2)",
+                params![hidden_operation.as_bytes(), visible_operation.as_bytes()],
+            )
+            .expect("source causal edge");
+        connection.execute("INSERT INTO operations(id,thread,facet,canonical,signature,status,source_revision) VALUES(?1,?2,1,x'00',zeroblob(64),1,?3)",params![hidden_operation.as_bytes(),thread.as_bytes(),hidden_revision.as_bytes()]).expect("newer original");
         publish(
             &directory,
             thread,
             hidden_operation,
-            revision,
+            hidden_revision,
             &[document("hidden.rs", "alpha hidden alpha alpha")],
             true,
             false,
@@ -343,6 +350,7 @@ mod tests {
             4,
             &[3],
             None,
+            super::super::collaboration_search::SourceSelection::Retained,
         )
         .expect("combined query");
         let visible = second
@@ -354,5 +362,33 @@ mod tests {
             visible.score, visible_score,
             "unserved corpus must not change a visible hit's score"
         );
+        let current = super::super::collaboration_search::search_native(
+            &directory,
+            "alpha",
+            None,
+            4,
+            &[3],
+            None,
+            super::super::collaboration_search::SourceSelection::Current,
+        )
+        .expect("current source");
+        assert_eq!(current.hits.len(), 1);
+        assert_eq!(
+            current.hits[0].revision,
+            Some(hidden_revision),
+            "older accepted source does not fall back into current scope"
+        );
+        let exact = super::super::collaboration_search::search_native(
+            &directory,
+            "alpha",
+            None,
+            4,
+            &[3],
+            None,
+            super::super::collaboration_search::SourceSelection::Exact(revision),
+        )
+        .expect("historical exact source");
+        assert_eq!(exact.hits.len(), 1);
+        assert_eq!(exact.hits[0].revision, Some(revision));
     }
 }
