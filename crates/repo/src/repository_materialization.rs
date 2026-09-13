@@ -1438,8 +1438,8 @@ mod tests {
         std::fs::write(temp.path().join("newfile.txt"), b"new work").unwrap();
         match repo.snapshot(Some("attempt".to_string()), None) {
             Err(HeddleError::RedactedTree(msg)) => assert!(
-                msg.contains("partial"),
-                "expected partial-clone refusal, got: {msg}"
+                msg.contains("incomplete checkout"),
+                "expected incomplete-checkout refusal, got: {msg}"
             ),
             other => panic!("capture must REFUSE on a partial clone, got: {other:?}"),
         }

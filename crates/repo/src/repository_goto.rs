@@ -27,6 +27,9 @@ impl Repository {
     /// Return whether the checkout exactly materializes `target` without
     /// changing refs or recording an operation.
     pub fn worktree_matches_state(&self, target: &StateId) -> Result<bool> {
+        if self.is_incomplete_checkout()? {
+            return Ok(false);
+        }
         let target_state = self
             .store
             .get_state(target)?
@@ -35,7 +38,16 @@ impl Repository {
             .store
             .get_tree(&target_state.tree)?
             .ok_or_else(|| HeddleError::NotFound(format!("tree {}", target_state.tree)))?;
-        Ok(self.build_tree(&self.root)? == target_tree)
+        // Compare materialized paths/content against the exact target. Salted
+        // commitments are storage identity, not a difference in checkout files.
+        self.worktree_is_clean_cached_with_options(
+            &target_tree,
+            &crate::WorktreeStatusOptions {
+                fsmonitor: crate::FsMonitorSettings {
+                    mode: crate::FsMonitorMode::Off,
+                },
+            },
+        )
     }
 
     /// Restore checkout files to a state without moving refs or recording an

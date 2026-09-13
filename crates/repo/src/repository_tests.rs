@@ -5,7 +5,7 @@ use std::{
 };
 
 use objects::{
-    object::{Blob, ThreadName, Tree, TreeEntry, is_delta_tree},
+    object::{Blob, ThreadName, Tree, TreeEntry},
     store::{ObjectStore, ShallowInfo},
     util::{gitlink_placeholder_bytes, symlink_target_bytes},
 };
@@ -149,52 +149,61 @@ fn capture_refresh_does_not_rewrite_identity_only_default_main() {
 }
 
 #[test]
-fn snapshot_modify_then_revert_keeps_epoch_anchor_readable_after_reopen() {
+fn snapshot_modify_then_revert_preserves_salted_history_after_reopen() {
     let (temp_dir, repo) = create_test_repo();
-    for index in 0..128 {
-        fs::write(
-            temp_dir.path().join(format!("fixture-{index:03}.txt")),
-            format!("unchanged-{index}\n"),
-        )
-        .unwrap();
-    }
+    fs::write(temp_dir.path().join("unchanged.txt"), "stable\n").expect("sibling source");
     let root = temp_dir.path().join("root.txt");
-
-    fs::write(&root, "v1\n").unwrap();
-    let anchor_state = repo.snapshot(Some("anchor".to_string()), None).unwrap();
-    let anchor_tree = repo.store().get_tree(&anchor_state.tree).unwrap().unwrap();
-    fs::write(&root, "v2\n").unwrap();
-    let descendant_state = repo.snapshot(Some("descendant".to_string()), None).unwrap();
-    let descendant_tree = repo
-        .store()
-        .get_tree(&descendant_state.tree)
-        .unwrap()
-        .unwrap();
-    assert!(
-        is_delta_tree(
+    fs::write(&root, "v1\n").expect("initial source");
+    let first = repo
+        .snapshot(Some("first".into()), None)
+        .expect("first capture");
+    fs::write(&root, "v2\n").expect("changed source");
+    let changed = repo
+        .snapshot(Some("changed".into()), None)
+        .expect("changed capture");
+    fs::write(&root, "v1\n").expect("reverted source");
+    let reverted = repo
+        .snapshot(Some("revert".into()), None)
+        .expect("reverted capture");
+    let trees = [&first, &changed, &reverted].map(|state| {
+        assert!(objects::object::is_salted_tree(
             &repo
                 .store()
-                .get_tree_serialized(&descendant_state.tree)
-                .unwrap()
-                .unwrap()
-        ),
-        "fixture must store the modified tree as HDC1",
+                .get_tree_serialized(&state.tree)
+                .expect("source bytes")
+                .expect("tree")
+        ));
+        repo.store()
+            .get_tree(&state.tree)
+            .expect("source tree")
+            .expect("tree")
+    });
+    assert_eq!(
+        trees[0].entries(),
+        trees[2].entries(),
+        "revert restores source content"
     );
-
-    fs::write(&root, "v1\n").unwrap();
-    let reverted_state = repo.snapshot(Some("revert".to_string()), None).unwrap();
-    assert_eq!(reverted_state.tree, anchor_state.tree);
+    assert_ne!(
+        first.tree, reverted.tree,
+        "edited leaves receive fresh privacy commitments"
+    );
+    for tree in &trees[1..] {
+        assert_eq!(
+            tree.v4_leaf_hash_for("unchanged.txt"),
+            trees[0].v4_leaf_hash_for("unchanged.txt")
+        );
+    }
     drop(repo);
-
-    let reopened = Repository::open(temp_dir.path()).unwrap();
-    assert_eq!(
-        reopened.store().get_tree(&anchor_state.tree).unwrap(),
-        Some(anchor_tree),
-    );
-    assert_eq!(
-        reopened.store().get_tree(&descendant_state.tree).unwrap(),
-        Some(descendant_tree),
-    );
+    let reopened = Repository::open(temp_dir.path()).expect("reopen captures");
+    for (state, tree) in [&first, &changed, &reverted].into_iter().zip(trees) {
+        assert_eq!(
+            reopened
+                .store()
+                .get_tree(&state.tree)
+                .expect("durable source"),
+            Some(tree)
+        );
+    }
 }
 
 #[cfg(unix)]
