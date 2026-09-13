@@ -104,6 +104,11 @@ pub fn mention(value: &EntityRef) -> Result<Mention, Error> {
                     "bookmarks are account-private; mention their Spool or Thread instead",
                 ));
             }
+            Entity::Passkey(_) => {
+                return Err(Error::Protocol(
+                    "passkeys are account-private credentials and cannot be mentioned",
+                ));
+            }
         },
     )
 }
