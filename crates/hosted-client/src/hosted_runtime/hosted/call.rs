@@ -12,7 +12,10 @@ use api::{
 use bytes::{Bytes, BytesMut};
 use prost::Message;
 
-use super::{HostedConnection, HostedError, Result};
+use super::{
+    HostedConnection, HostedError, Result,
+    connection::{HostedRecvStream, HostedSendStream},
+};
 
 pub(super) async fn unary<Request, Response>(
     connection: &HostedConnection,
@@ -41,21 +44,12 @@ where
     let frame =
         encode_request_frame(method, context, encoded_request).map_err(HostedError::framing)?;
     let frame_len = frame.len();
-    let (mut send, mut recv) = connection
-        .connection
-        .open_bi()
-        .await
-        .map_err(HostedError::transport)?;
+    let (mut send, mut recv) = connection.open_bi().await?;
     heddle_perf_contract::record_network_stream_opened();
-    send.write_chunk(Bytes::from(frame))
-        .await
-        .map_err(HostedError::transport)?;
+    send.write_chunk(Bytes::from(frame)).await?;
     heddle_perf_contract::record_network_bytes_sent(frame_len);
-    send.finish().map_err(HostedError::transport)?;
-    let response = recv
-        .read_to_end(MAX_CONTROL_BODY + 1)
-        .await
-        .map_err(HostedError::transport)?;
+    send.finish()?;
+    let response = recv.read_to_end(MAX_CONTROL_BODY + 1).await?;
     heddle_perf_contract::record_network_bytes_received(response.len());
     match decode_response_frame(&response).map_err(HostedError::framing)? {
         ResponseFrame::Success(body) => Response::decode(body).map_err(HostedError::from),
@@ -77,17 +71,11 @@ where
     let mut frame = encode_request_prelude(method, context).map_err(HostedError::framing)?;
     frame.extend_from_slice(&request.encode_to_vec());
     let frame_len = frame.len();
-    let (mut send, recv) = connection
-        .connection
-        .open_bi()
-        .await
-        .map_err(HostedError::transport)?;
+    let (mut send, recv) = connection.open_bi().await?;
     heddle_perf_contract::record_network_stream_opened();
-    send.write_chunk(Bytes::from(frame))
-        .await
-        .map_err(HostedError::transport)?;
+    send.write_chunk(Bytes::from(frame)).await?;
     heddle_perf_contract::record_network_bytes_sent(frame_len);
-    send.finish().map_err(HostedError::transport)?;
+    send.finish()?;
     Ok(ServerStream::new(connection, recv))
 }
 
@@ -103,15 +91,9 @@ where
     require_shape(method, StreamingShape::Bidirectional)?;
     let prelude = encode_request_prelude(method, context).map_err(HostedError::framing)?;
     let prelude_len = prelude.len();
-    let (mut send, recv) = connection
-        .connection
-        .open_bi()
-        .await
-        .map_err(HostedError::transport)?;
+    let (mut send, recv) = connection.open_bi().await?;
     heddle_perf_contract::record_network_stream_opened();
-    send.write_chunk(Bytes::from(prelude))
-        .await
-        .map_err(HostedError::transport)?;
+    send.write_chunk(Bytes::from(prelude)).await?;
     heddle_perf_contract::record_network_bytes_sent(prelude_len);
     Ok(BidirectionalStream {
         send: Some(send),
@@ -125,7 +107,7 @@ where
 /// Decoded server-streaming response over one operation stream.
 pub struct ServerStream<Response> {
     _connection: Arc<HostedConnection>,
-    recv: iroh::endpoint::RecvStream,
+    recv: HostedRecvStream,
     buffered: Vec<u8>,
     response: PhantomData<Response>,
     raw_remaining: u64,
@@ -142,7 +124,7 @@ impl<Response> ServerStream<Response>
 where
     Response: Message + Default,
 {
-    fn new(connection: Arc<HostedConnection>, recv: iroh::endpoint::RecvStream) -> Self {
+    fn new(connection: Arc<HostedConnection>, recv: HostedRecvStream) -> Self {
         Self {
             _connection: connection,
             recv,
@@ -186,12 +168,7 @@ where
                 self.buffered.drain(..consumed);
                 return Ok(Some(response));
             }
-            match self
-                .recv
-                .read_chunk(MAX_CONTROL_BODY + 5)
-                .await
-                .map_err(HostedError::transport)?
-            {
+            match self.recv.read_chunk(MAX_CONTROL_BODY + 5).await? {
                 Some(chunk) => {
                     heddle_perf_contract::record_network_bytes_received(chunk.len());
                     self.buffered.extend_from_slice(&chunk);
@@ -225,12 +202,7 @@ where
             self.raw_remaining -= length as u64;
             return Ok(Some(chunk));
         }
-        let Some(chunk) = self
-            .recv
-            .read_chunk(maximum)
-            .await
-            .map_err(HostedError::transport)?
-        else {
+        let Some(chunk) = self.recv.read_chunk(maximum).await? else {
             return Err(HostedError::Framing(
                 "stream ended within a declared raw body".to_string(),
             ));
@@ -248,9 +220,7 @@ where
 
     pub fn cancel(&mut self) -> Result<()> {
         if !self.finished {
-            self.recv
-                .stop(1u32.into())
-                .map_err(HostedError::transport)?;
+            self.recv.stop(1)?;
             self.finished = true;
         }
         Ok(())
@@ -260,14 +230,14 @@ where
 impl<Response> Drop for ServerStream<Response> {
     fn drop(&mut self) {
         if !self.finished {
-            let _ = self.recv.stop(1u32.into());
+            let _ = self.recv.stop(1);
         }
     }
 }
 
 /// Bidirectional operation stream with typed protobuf messages in both directions.
 pub struct BidirectionalStream<Request, Response> {
-    send: Option<iroh::endpoint::SendStream>,
+    send: Option<HostedSendStream>,
     responses: ServerStream<Response>,
     request: PhantomData<Request>,
     raw_remaining: u64,
@@ -276,7 +246,7 @@ pub struct BidirectionalStream<Request, Response> {
 
 /// Request half of a bidirectional operation stream.
 pub struct BidirectionalRequestStream<Request> {
-    send: Option<iroh::endpoint::SendStream>,
+    send: Option<HostedSendStream>,
     request: PhantomData<Request>,
     raw_remaining: u64,
     control: BytesMut,
@@ -312,8 +282,7 @@ where
             .as_mut()
             .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
             .write_all(&self.control)
-            .await
-            .map_err(HostedError::transport)?;
+            .await?;
         heddle_perf_contract::record_network_bytes_sent(frame_len);
         Ok(())
     }
@@ -325,7 +294,7 @@ where
             ));
         }
         if let Some(mut send) = self.send.take() {
-            send.finish().map_err(HostedError::transport)?;
+            send.finish()?;
         }
         Ok(())
     }
@@ -344,7 +313,7 @@ where
 
     pub fn cancel(&mut self) -> Result<()> {
         if let Some(mut send) = self.send.take() {
-            send.reset(1u32.into()).map_err(HostedError::transport)?;
+            send.reset(1)?;
         }
         self.responses.cancel()
     }
@@ -367,8 +336,7 @@ where
             .as_mut()
             .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
             .write_all(&self.control)
-            .await
-            .map_err(HostedError::transport)?;
+            .await?;
         heddle_perf_contract::record_network_bytes_sent(frame_len);
         Ok(())
     }
@@ -386,8 +354,7 @@ where
             .as_mut()
             .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
             .write_all(&self.control)
-            .await
-            .map_err(HostedError::transport)?;
+            .await?;
         heddle_perf_contract::record_network_bytes_sent(frame_len);
         self.raw_remaining = length;
         Ok(())
@@ -404,8 +371,7 @@ where
             .as_mut()
             .ok_or_else(|| HostedError::Framing("request stream is finished".to_string()))?
             .write_chunk(chunk)
-            .await
-            .map_err(HostedError::transport)?;
+            .await?;
         heddle_perf_contract::record_network_bytes_sent(length as usize);
         self.raw_remaining -= length;
         Ok(())
@@ -418,14 +384,14 @@ where
             ));
         }
         if let Some(mut send) = self.send.take() {
-            send.finish().map_err(HostedError::transport)?;
+            send.finish()?;
         }
         Ok(())
     }
 
     pub fn cancel(&mut self) -> Result<()> {
         if let Some(mut send) = self.send.take() {
-            send.reset(1u32.into()).map_err(HostedError::transport)?;
+            send.reset(1)?;
         }
         Ok(())
     }
@@ -494,7 +460,7 @@ mod tests {
         let connection = HostedConnection::connect(client, server_addr)
             .await
             .unwrap();
-        let (mut send, recv) = connection.connection.open_bi().await.unwrap();
+        let (mut send, recv) = connection.open_bi().await.unwrap();
         send.write_all(b"x").await.unwrap();
         send.finish().unwrap();
         response_started_rx.await.unwrap();

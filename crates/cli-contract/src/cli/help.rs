@@ -650,6 +650,10 @@ const DAEMON_TOPIC: &str = "The mount daemon owns virtualized workspace sessions
 \n\
 `heddle daemon`        — FUSE mount-daemon control plane. Owns FUSE sessions for\n\
                          `--workspace virtualized --daemon` threads. Linux only.\n\
+                         Subcommands: serve | status | stop.\n\
+`heddle netd`          — Box network daemon. Binds the persistent Iroh endpoint\n\
+                         and holds warm weft connections so hosted whoami/push/\n\
+                         pull/clone reuse descriptor+relay+QUIC across commands.\n\
                          Subcommands: serve | status | stop.\n";
 
 const MODEL_TOPIC: &str = r#"Heddle mental model — the everyday loop in one screen.

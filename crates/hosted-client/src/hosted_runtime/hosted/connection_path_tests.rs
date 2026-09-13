@@ -157,7 +157,7 @@ async fn hosted_endpoint_close_release_contract() {
             HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
                 .await
                 .unwrap();
-        let endpoint_observer = connection.endpoint.clone();
+        let endpoint_observer = connection.local_endpoint().expect("local fixture").clone();
         let close_started = Instant::now();
         if negative_control {
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -240,11 +240,19 @@ async fn reachable_direct_address_keeps_the_claim_relay_online() {
         HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
             .await
             .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), connection.endpoint.online())
-        .await
-        .expect("claim listener should register with the signed relay");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        connection.local_endpoint().expect("local fixture").online(),
+    )
+    .await
+    .expect("claim listener should register with the signed relay");
     assert!(
-        !connection.endpoint.home_relay_status().get().is_empty(),
+        !connection
+            .local_endpoint()
+            .expect("local fixture")
+            .home_relay_status()
+            .get()
+            .is_empty(),
         "a direct hosted path must keep the inbound claim relay initialized"
     );
     connection.close().await;
@@ -336,11 +344,19 @@ async fn unreachable_direct_address_falls_back_to_signed_relay() {
     .await
     .expect("relay fallback should connect")
     .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), connection.endpoint.online())
-        .await
-        .expect("client should register with the signed relay");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        connection.local_endpoint().expect("local fixture").online(),
+    )
+    .await
+    .expect("client should register with the signed relay");
     assert!(
-        !connection.endpoint.home_relay_status().get().is_empty(),
+        !connection
+            .local_endpoint()
+            .expect("local fixture")
+            .home_relay_status()
+            .get()
+            .is_empty(),
         "relay fallback must initialize the signed relay transport"
     );
     connection.close().await;
@@ -393,7 +409,10 @@ async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
         .await
         .unwrap();
     let claim_connection = claim_client
-        .connect(connection.endpoint.addr(), CLAIM_ALPN_V1)
+        .connect(
+            connection.local_endpoint().expect("local fixture").addr(),
+            CLAIM_ALPN_V1,
+        )
         .await
         .expect("claim ALPN connection");
     let (mut send, mut recv) = claim_connection.open_bi().await.unwrap();

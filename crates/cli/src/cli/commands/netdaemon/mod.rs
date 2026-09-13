@@ -10,7 +10,8 @@
 //! Three verbs hang off this module, mirroring the mount daemon's
 //! control surface but box scoped:
 //!
-//! * `heddle netd serve` — foreground async daemon.
+//! * `heddle netd serve` — foreground async daemon (persistent
+//!   endpoint + warm weft sessions for hosted CLI verbs).
 //! * `heddle netd status` — liveness + advertised node id.
 //! * `heddle netd stop` — drain and exit.
 //!

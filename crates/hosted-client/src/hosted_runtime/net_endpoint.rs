@@ -12,24 +12,40 @@
 //! invalidate every outstanding claim URL.
 
 use anyhow::{Context, Result};
+use config::ClientConfig;
 use iroh::{Endpoint, EndpointId, RelayMode, endpoint::presets};
 
-use super::agent_node_identity;
+use super::{agent_node_identity, hosted::ProviderWebSocketTransport};
 
 /// Bind an endpoint on the persisted device node id, reachable
 /// through `relay_mode`. The identity is loaded-or-minted exactly
 /// once (serialized by the identity write lock); every subsequent
 /// bind — including after a restart — reuses the same secret key and
 /// therefore the same node id.
+pub(crate) struct PersistentEndpoint {
+    pub endpoint: Endpoint,
+    pub provider_transport: ProviderWebSocketTransport,
+}
+
 pub(crate) async fn bind(relay_mode: RelayMode) -> Result<Endpoint> {
+    Ok(bind_with_provider(relay_mode).await?.endpoint)
+}
+
+pub(crate) async fn bind_with_provider(relay_mode: RelayMode) -> Result<PersistentEndpoint> {
     let identity =
         agent_node_identity::load_or_create().context("loading persisted device node identity")?;
-    Endpoint::builder(presets::Minimal)
+    let provider_transport = ProviderWebSocketTransport::new(ClientConfig::default());
+    let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(relay_mode)
         .secret_key(identity.secret_key())
+        .add_custom_transport(std::sync::Arc::new(provider_transport.clone()))
         .bind()
         .await
-        .context("binding persistent device iroh endpoint")
+        .context("binding persistent device iroh endpoint")?;
+    Ok(PersistentEndpoint {
+        endpoint,
+        provider_transport,
+    })
 }
 
 /// The persisted device node id, or `None` when the identity has

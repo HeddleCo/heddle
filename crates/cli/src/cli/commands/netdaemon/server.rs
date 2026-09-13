@@ -10,19 +10,21 @@
 //! lifecycles (this one never idle-exits) and different platforms
 //! (this one runs on any Unix).
 //!
-//! What it owns (heddle#1533, piece 1):
+//! What it owns (heddle#1533, piece 1, plus the hosted warm-session
+//! bridge):
 //!
 //! * one Iroh endpoint on the persisted device node id, bound with
 //!   relays online (browsers holding only a claim link dial through a
 //!   relay),
 //! * a box-scoped endpoint-discovery file advertising that node id,
 //! * a same-uid control socket for `netd status` / `netd stop`,
+//! * a same-uid hosted bridge that caches weft QUIC sessions so
+//!   one-shot CLI verbs reuse descriptor+relay+QUIC,
 //! * a single-writer guard so two processes never both bind the
 //!   device node id.
 //!
-//! What it does NOT own yet: the claim-ALPN router (piece 3 /
-//! heddle#1620) mounts on the endpoint at the seam marked below, and
-//! the weft subscription/doorbell (piece 2) is separate.
+//! The weft subscription/doorbell (piece 2) is separate. Preview vs
+//! prod home-relay remains the `preview` cargo feature.
 
 use std::{
     os::unix::net::UnixStream,
@@ -74,7 +76,7 @@ pub async fn run_network_daemon() -> Result<()> {
     // device node id, relays online. The node id therefore survives a
     // restart — the acceptance clause the browser claim link relies on
     // (heddle#1620).
-    let endpoint = hosted_client::network::bind_persistent_endpoint(
+    let (endpoint, hosted_sessions) = hosted_client::network::bind_persistent_hosted(
         hosted_client::network::default_relay_mode(),
     )
     .await
@@ -98,6 +100,14 @@ pub async fn run_network_daemon() -> Result<()> {
     let claim_socket = hosted_client::network::claim_bridge_socket_path(&heddle_home);
     let claim_router = hosted_client::network::mount_claim_router(endpoint.clone());
     let claim_bridge = tokio::spawn(claim_router.serve_owner_root_bridge(claim_socket.clone()));
+
+    // Warm weft sessions for one-shot CLI verbs. The persistent endpoint
+    // is already relay-homed; the hosted bridge caches the weft QUIC
+    // connection so whoami/push/pull/clone do not pay bind+WSS+handshake
+    // on every process. Relays for those sessions still come from the
+    // signed descriptor, not from stuffing preview+prod into one Custom set.
+    let hosted_socket = hosted_client::network::hosted_bridge_socket_path(&heddle_home);
+    let hosted_bridge = tokio::spawn(hosted_sessions.serve(hosted_socket.clone()));
 
     let advertised = EndpointState {
         version: NETWORK_DAEMON_PROTOCOL_VERSION,
@@ -140,9 +150,11 @@ pub async fn run_network_daemon() -> Result<()> {
     // makes the unlink single-writer safe — a successor that raced in
     // keeps its file.
     claim_bridge.abort();
+    hosted_bridge.abort();
     endpoint.close().await;
     remove_endpoint_if_owned(&endpoint_path, &advertised);
     let _ = std::fs::remove_file(&claim_socket);
+    let _ = std::fs::remove_file(&hosted_socket);
     let _ = std::fs::remove_file(&socket_path);
     info!("heddle network daemon exiting");
 

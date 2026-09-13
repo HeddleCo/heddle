@@ -16,12 +16,14 @@ mod credential;
 mod descriptor_trust;
 mod error;
 pub(crate) mod helpers;
+pub(crate) mod hosted_bridge;
 mod human;
 mod hydration;
 mod methods;
 pub(crate) mod operation_id;
 mod provider_pull;
 mod provider_transport;
+pub(crate) use provider_transport::ProviderWebSocketTransport;
 mod resolver;
 mod session;
 #[cfg(test)]
@@ -216,7 +218,7 @@ impl HostedClient {
     ) -> Result<Self> {
         let context = CallContextFactory::from_client_config(config)?;
         Ok(Self {
-            connection: HostedConnection::connect_verified(descriptor, config).await?,
+            connection: connect_preferred(descriptor, config, false).await?,
             context,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
@@ -236,13 +238,33 @@ impl HostedClient {
     ) -> Result<Self> {
         let context = CallContextFactory::from_client_config(config)?;
         Ok(Self {
-            connection: HostedConnection::connect_verified_outbound(descriptor, config).await?,
+            connection: connect_preferred(descriptor, config, true).await?,
             context,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
         })
+    }
+
+    /// Connect through a running `heddle netd` warm weft session when the
+    /// hosted bridge socket is present. Falls back to the caller if netd
+    /// is not serving.
+    #[cfg(unix)]
+    pub(crate) async fn connect_via_netd(server: &str, config: &ClientConfig) -> Result<Self> {
+        let context = CallContextFactory::from_client_config(config)?;
+        Ok(Self {
+            connection: HostedConnection::connect_via_netd(server, config).await?,
+            context,
+            transport: helpers::HostedTransportPolicy::from_client_config(config),
+            on_human_signature: None,
+            warnings: Arc::new(NoopWarnings),
+            server_key: config.server_key.clone(),
+        })
+    }
+
+    pub fn reused_warm_connection(&self) -> bool {
+        self.connection.reused_warm()
     }
 
     /// Direct-address constructor for conformance tests and explicit local endpoints.
@@ -529,5 +551,29 @@ impl HostedClient {
         Response: Message + Default,
     {
         call::bidirectional(self.connection.clone(), method, context).await
+    }
+}
+
+async fn connect_preferred(
+    descriptor: &VerifiedEndpointDescriptor,
+    config: &ClientConfig,
+    outbound: bool,
+) -> Result<Arc<HostedConnection>> {
+    #[cfg(unix)]
+    if let Some(server) = config.server_key.as_deref() {
+        match HostedConnection::connect_via_netd(server, config).await {
+            Ok(connection) => return Ok(connection),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "netd hosted bridge unavailable; connecting locally"
+                );
+            }
+        }
+    }
+    if outbound {
+        HostedConnection::connect_verified_outbound(descriptor, config).await
+    } else {
+        HostedConnection::connect_verified(descriptor, config).await
     }
 }
