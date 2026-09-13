@@ -77,3 +77,48 @@ pub async fn bind_persistent_endpoint(relay_mode: RelayMode) -> anyhow::Result<E
 pub fn persisted_node_id() -> anyhow::Result<Option<EndpointId>> {
     crate::hosted_runtime::net_endpoint::persisted_node_id()
 }
+
+#[cfg(all(test, feature = "client"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_relay_mode_is_heddle_custom_not_n0_default() {
+        let mode = default_relay_mode();
+        assert!(
+            matches!(mode, RelayMode::Custom(_)),
+            "netd must bind RelayMode::Custom, got {mode:?}"
+        );
+
+        let urls: Vec<iroh::RelayUrl> = mode.relay_map().urls();
+        assert!(
+            !urls.is_empty(),
+            "netd must stay relay-reachable for claim links"
+        );
+
+        let mut hosts: Vec<String> = urls
+            .iter()
+            .map(|url| {
+                url.host_str()
+                    .unwrap_or("")
+                    .trim_end_matches('.')
+                    .to_string()
+            })
+            .collect();
+        hosts.sort();
+        hosts.dedup();
+
+        for host in &hosts {
+            assert!(
+                !host.ends_with("n0.iroh.link") && host != "n0.iroh.link",
+                "n0 default relay leaked into netd bind: {host}"
+            );
+        }
+
+        assert_eq!(
+            hosts,
+            ["relay.heddle.sh", "relay.preview.heddle.sh"],
+            "netd home relays must be Heddle's only"
+        );
+    }
+}
