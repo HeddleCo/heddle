@@ -51,6 +51,19 @@ impl DeviceRpc {
         let prepared = anchor_replica.prepared_local_stack(&namespace, &request.client_operation_id, &request_hash)?;
         let principal = uuid::Uuid::parse_str(&session.principal)?;
         let (operations, response) = if let Some((canonical, response)) = prepared {
+            for landing in &request.landings {
+                if landing.expected_policy_version != super::land::thread_policy_version(&repository)?.as_bytes() {
+                    bail!("landing policy changed; observe landing again");
+                }
+                let source = ThreadReplica::open(&session.spool.heddle_dir, thread(session, landing.thread.as_ref())?)?;
+                let target = ThreadReplica::open(&session.spool.heddle_dir, thread(session, landing.target.as_ref())?)?;
+                session.authorize_thread(&repository, &source)?;
+                session.authorize_thread(&repository, &target)?;
+                source_visibility_floor(&repository, &source, principal, session.agent_id.as_deref(), revision(session, landing.source.as_ref())?)?
+                    .context("source revision is unavailable to this caller")?;
+                source_visibility_floor(&repository, &target, principal, session.agent_id.as_deref(), revision(session, landing.expected_target.as_ref())?)?
+                    .context("target revision is unavailable to this caller")?;
+            }
             let items: Vec<Vec<u8>> = rmp_serde::from_slice(&canonical)?;
             if items.len() != request.landings.len() { bail!("prepared stack length does not match request") }
             let mut operations = Vec::with_capacity(items.len());
