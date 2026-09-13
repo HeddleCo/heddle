@@ -317,6 +317,79 @@ mod tests {
     }
 
     #[test]
+    fn content_projection_carries_explicit_ancestor_overrides_and_rejects_corrupt_metadata() {
+        let (temp, repo) = v4_repo();
+        fs::write(temp.path().join("secret.md"), b"private content").expect("write secret");
+        repo.mark_entry_visibility(
+            "secret.md",
+            VisibilityTier::Private {
+                scope_label: "security".into(),
+            },
+        )
+        .expect("mark secret");
+        let parent = repo
+            .snapshot(Some("marked".into()), None)
+            .expect("capture marked state");
+        let child = repo
+            .snapshot(Some("unchanged".into()), None)
+            .expect("capture descendant");
+        assert!(
+            repo.get_entry_visibility_bytes(&child.change_id)
+                .expect("child sidecar")
+                .is_none()
+        );
+        let tree = repo
+            .store()
+            .get_tree(&child.tree)
+            .expect("load tree")
+            .expect("tree exists");
+        let projection = repo
+            .content_visibility_for_audience(&child.id(), &crate::AudienceTier::Internal)
+            .expect("project source")
+            .expect("whole state visible");
+        assert!(
+            !projection.entry_visible(&tree, 0),
+            "ancestor override protects unchanged entry"
+        );
+
+        fs::write(temp.path().join("secret.md"), b"new authored content").expect("change secret");
+        let changed = repo
+            .snapshot(Some("changed".into()), None)
+            .expect("capture fresh leaf");
+        let tree = repo
+            .store()
+            .get_tree(&changed.tree)
+            .expect("load tree")
+            .expect("tree exists");
+        let projection = repo
+            .content_visibility_for_audience(&changed.id(), &crate::AudienceTier::Internal)
+            .expect("project changed source")
+            .expect("whole state visible");
+        assert!(
+            projection.entry_visible(&tree, 0),
+            "fresh salt does not inherit content taint"
+        );
+
+        let path = repo.entry_visibility_path_for_change(&parent.change_id);
+        fs::write(&path, b"invalid sidecar").expect("simulate corrupt metadata");
+        assert!(
+            repo.content_visibility_for_audience(&changed.id(), &crate::AudienceTier::Internal)
+                .is_err(),
+            "an unreadable ancestor override cannot become visible by absence"
+        );
+        assert!(
+            repo.content_visibility_for_audience(
+                &objects::object::StateId::from_content_hash(
+                    objects::object::ContentHash::compute(b"unknown ancestor")
+                ),
+                &crate::AudienceTier::Internal
+            )
+            .expect("unknown state check")
+            .is_none()
+        );
+    }
+
+    #[test]
     fn mark_entry_visibility_stages_sidecar_keyed_by_change_with_leaf_hash() {
         let (temp, repo) = v4_repo();
         fs::write(temp.path().join("readme.md"), b"public\n").unwrap();

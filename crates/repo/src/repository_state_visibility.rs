@@ -625,6 +625,43 @@ impl Repository {
         state_id: &StateId,
         audience: &AudienceTier,
     ) -> Result<Option<(StateId, VisibilityTier)>> {
+        self.walk_content_visibility(state_id, audience, |_| Ok(0))
+    }
+
+    /// Local sidecar projection for a whole-tip-admitted state. `None` means
+    /// withheld or unresolved ancestry; malformed metadata returns an error.
+    /// This does not grant Thread access or replace signed original admission.
+    /// Native readers also intersect the original captured privacy metadata.
+    ///
+    /// Explicit ancestor overrides follow unchanged salted leaf commitments.
+    /// Ancestor baselines never create per-entry taint. The walk shares the
+    /// same state/byte bounds and own-tier gate as other visibility surfaces.
+    pub fn content_visibility_for_audience(
+        &self,
+        state_id: &StateId,
+        audience: &AudienceTier,
+    ) -> Result<Option<objects::object::EntryRedactions>> {
+        let mut redactions = objects::object::EntryRedactions::default();
+        let withheld = self.walk_content_visibility(state_id, audience, |state| {
+            let Some(bytes) = self.get_entry_visibility_bytes(&state.change_id)? else {
+                return Ok(0);
+            };
+            let sidecar = objects::object::EntryVisibility::decode(&bytes)?;
+            if sidecar.change_id != state.change_id || sidecar.tree_root != state.tree {
+                anyhow::bail!("entry visibility does not belong to the source state");
+            }
+            redactions.extend_overrides(&sidecar.entries, |tier| visible(tier, audience));
+            Ok(bytes.len())
+        })?;
+        Ok(withheld.is_none().then_some(redactions))
+    }
+
+    fn walk_content_visibility(
+        &self,
+        state_id: &StateId,
+        audience: &AudienceTier,
+        mut visit: impl FnMut(&objects::object::State) -> Result<usize>,
+    ) -> Result<Option<(StateId, VisibilityTier)>> {
         let mut seen = HashSet::new();
         let mut stack = vec![*state_id];
         let mut decoded_bytes = 0usize;
@@ -652,6 +689,10 @@ impl Repository {
             };
             decoded_bytes = decoded_bytes.saturating_add(state.encode_current_msgpack()?.len());
             if state.id() != id || decoded_bytes > 16 * 1024 * 1024 {
+                return Ok(unresolved(id));
+            }
+            decoded_bytes = decoded_bytes.saturating_add(visit(&state)?);
+            if decoded_bytes > 16 * 1024 * 1024 {
                 return Ok(unresolved(id));
             }
             stack.extend(state.parents.iter().copied());
