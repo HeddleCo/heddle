@@ -1085,7 +1085,7 @@ async fn create_service_token_connected(
     };
     let statement = api::v2::identity_management::DelegationStatement {
         account_id: principal.account_id.clone(),
-        delegation_id,
+        delegation_id: delegation_id.clone(),
         label: name.clone(),
         kind: identity::delegation_record::Kind::Service as i32,
         root_public_key: root_key.clone(),
@@ -1182,7 +1182,10 @@ async fn create_service_token_connected(
         .api
         .call::<thread_api::rpc::IdentityServiceIssueDelegationCredential>(&issue)
         .await
-        .context("issuing native service credential")?;
+        .with_context(|| format!(
+            "issuing native service credential for delegation {}; no credential file was written",
+            delegation_id,
+        ))?;
     let receipt = response
         .receipt
         .context("service credential issuance receipt absent")?;
