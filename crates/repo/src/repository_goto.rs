@@ -9,11 +9,11 @@ use refs::{Head, RefExpectation, RefUpdate};
 use tracing::debug;
 
 use super::{
+    HeddleError, Repository, Result,
     repository_worktree_apply::{
         WorktreeApplyDirtyBehavior, WorktreeApplyPlan, WorktreeApplyReport, WorktreeApplyStats,
         WorktreeApplyStrategy,
     },
-    HeddleError, Repository, Result,
 };
 use crate::{thread_model::ThreadFreshness, thread_storage::ThreadManager};
 
@@ -549,6 +549,61 @@ mod tests {
     ) -> StateId {
         fs::write(root.join(path), content).unwrap();
         repo.snapshot(Some(path.to_string()), None).unwrap().id()
+    }
+
+    #[test]
+    fn clean_checkout_compares_source_content_and_requires_full_materialization() {
+        use std::collections::HashSet;
+
+        use objects::object::PartialTree;
+
+        let (temp, repo) = create_repo();
+        fs::create_dir(temp.path().join("src")).expect("source directory");
+        fs::write(temp.path().join("src/lib.rs"), b"source").expect("nested source");
+        fs::write(temp.path().join("private.txt"), b"private").expect("private source");
+        let state = repo.snapshot(Some("source".into()), None).expect("capture");
+        assert!(
+            repo.worktree_matches_state(&state.id())
+                .expect("clean salted source")
+        );
+        fs::write(temp.path().join("src/lib.rs"), b"edited").expect("edit source");
+        assert!(
+            !repo
+                .worktree_matches_state(&state.id())
+                .expect("dirty source")
+        );
+        fs::write(temp.path().join("src/lib.rs"), b"source").expect("restore source");
+        assert!(
+            repo.worktree_matches_state(&state.id())
+                .expect("restored source")
+        );
+        fs::write(temp.path().join("new.txt"), b"untracked").expect("new source");
+        assert!(
+            !repo
+                .worktree_matches_state(&state.id())
+                .expect("untracked source")
+        );
+        fs::remove_file(temp.path().join("new.txt")).expect("remove untracked source");
+        let tree = repo
+            .store()
+            .get_tree(&state.tree)
+            .expect("full tree")
+            .expect("source tree");
+        let hidden = tree.v4_leaf_hash_for("private.txt").expect("salted leaf");
+        let partial = PartialTree::project(&tree, &HashSet::from([hidden])).expect("projection");
+        repo.materialize_partial_tree(&partial, repo.root())
+            .expect("partial checkout");
+        assert!(
+            !repo
+                .worktree_matches_state(&state.id())
+                .expect("partial is never complete")
+        );
+        repo.materialize_tree(&tree, repo.root())
+            .expect("full materialization");
+        assert!(
+            repo.worktree_matches_state(&state.id())
+                .expect("complete restored checkout")
+        );
     }
 
     #[test]
