@@ -68,6 +68,7 @@ impl DeviceRpc {
         }
         for (section, requested) in [
             ("sessions", query.sessions.is_some()),
+            ("passkeys", query.passkeys.is_some()),
             ("signup_invitations", query.signup_invitations.is_some()),
             ("delegations", query.delegations.is_some()),
             ("recovery", query.recovery.is_some()),
