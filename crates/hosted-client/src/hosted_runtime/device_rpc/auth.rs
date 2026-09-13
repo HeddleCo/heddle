@@ -496,8 +496,231 @@ pub(super) fn source_content_visibility(
     agent: Option<&str>,
     revision: objects::object::StateId,
 ) -> Result<Option<objects::object::EntryRedactions>> {
-    Ok(source_content_projection(repository, replica, principal, agent, revision)?
-        .map(|(redactions, _)| redactions))
+    Ok(
+        match source_content_admission(repository, replica, principal, agent, revision)? {
+            SourceContentAdmission::Visible(redactions) => Some(redactions),
+            SourceContentAdmission::Unavailable | SourceContentAdmission::Withheld => None,
+        },
+    )
+}
+
+/// A missing local State can be called unavailable only after its complete
+/// signed lineage independently proves the same whole-tip audience rule.
+pub(super) enum SourceContentAdmission {
+    Visible(objects::object::EntryRedactions),
+    Unavailable,
+    Withheld,
+}
+
+pub(super) fn source_content_admission(
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+    revision: objects::object::StateId,
+) -> Result<SourceContentAdmission> {
+    if let Some((redactions, _)) =
+        source_content_projection(repository, replica, principal, agent, revision)?
+    {
+        return Ok(SourceContentAdmission::Visible(redactions));
+    }
+    if (!replica.has_source_possession(revision)?
+        || repository.store().get_state(&revision)?.is_none())
+        && signed_unmaterialized_source_visible(repository, replica, principal, agent, revision)?
+    {
+        return Ok(SourceContentAdmission::Unavailable);
+    }
+    Ok(SourceContentAdmission::Withheld)
+}
+
+fn signed_unmaterialized_source_visible(
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+    revision: objects::object::StateId,
+) -> Result<bool> {
+    use objects::object::{ContentHash, StateId, visible};
+    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+    let Some(target_audience) = reader_audience(repository, replica, principal, agent)? else {
+        return Ok(false);
+    };
+    let mut pending = vec![(replica.thread_id(), revision, None::<ContentHash>)];
+    let mut seen = BTreeSet::<(ContentHash, StateId)>::new();
+    let mut original_bytes = 0usize;
+    let mut edges = 0usize;
+    while let Some((owner_id, id, exact_operation)) = pending.pop() {
+        edges += 1;
+        if edges > 4096 || pending.len() > 4096 {
+            return Ok(false);
+        }
+        // An integration names one exact accepted operation. Check that edge
+        // even when another path already visited the same State. Its policy
+        // floor is then intersected with every accepted original for that
+        // State, not just the integration's selected operation.
+        if let Some(exact) = exact_operation {
+            let owner =
+                repo::thread_replication::ThreadReplica::open(repository.heddle_dir(), owner_id)?;
+            let Some((signed, status)) = owner.operation(&exact)? else {
+                return Ok(false);
+            };
+            original_bytes =
+                original_bytes.saturating_add(signed.canonical.len() + signed.signature.len());
+            if original_bytes > 16 * 1024 * 1024 {
+                return Ok(false);
+            }
+            let operation = signed.verify()?;
+            if status != objects::object::thread_replication::Admission::Accepted
+                || operation.id()? != exact
+                || operation.thread != owner_id
+                || operation
+                    .source_state()?
+                    .is_none_or(|state| state.id() != id)
+            {
+                return Ok(false);
+            }
+        }
+        if !seen.insert((owner_id, id)) {
+            continue;
+        }
+        if seen.len() > 4096 || pending.len() > 4096 {
+            return Ok(false);
+        }
+        let owner =
+            repo::thread_replication::ThreadReplica::open(repository.heddle_dir(), owner_id)?;
+        if owner.genesis()?.spool != replica.genesis()?.spool {
+            return Ok(false);
+        }
+        let Some(owner_audience) = reader_audience(repository, &owner, principal, agent)? else {
+            return Ok(false);
+        };
+        let genesis = owner.genesis()?;
+        if id == seed.id() && id == genesis.base && genesis.parent.is_none() {
+            for tier in [
+                repository.effective_visibility_tier(&id)?,
+                repository.resolve_capture_default_visibility(),
+            ] {
+                if (id == revision || tier.is_embargo())
+                    && (!visible(&tier, &owner_audience) || !visible(&tier, &target_audience))
+                {
+                    return Ok(false);
+                }
+            }
+            continue;
+        }
+        if id == genesis.base {
+            let Some(parent) = genesis.parent else {
+                return Ok(false);
+            };
+            pending.push((parent, id, None));
+            continue;
+        }
+        let operations = owner.source_operation_page(id, None, 65)?;
+        if operations.is_empty() || operations.len() > 64 {
+            return Ok(false);
+        }
+        if exact_operation.is_some_and(|exact| !operations.contains(&exact)) {
+            return Ok(false);
+        }
+        let mut state = None;
+        let mut edge_parents = BTreeSet::new();
+        for operation_id in operations {
+            let Some((signed, status)) = owner.operation(&operation_id)? else {
+                return Ok(false);
+            };
+            if status != objects::object::thread_replication::Admission::Accepted {
+                return Ok(false);
+            }
+            original_bytes =
+                original_bytes.saturating_add(signed.canonical.len() + signed.signature.len());
+            if original_bytes > 16 * 1024 * 1024 {
+                return Ok(false);
+            }
+            let operation = signed.verify()?;
+            if operation.thread != owner_id || operation.id()? != operation_id {
+                return Ok(false);
+            }
+            let Some(capture) = operation.source_result()? else {
+                return Ok(false);
+            };
+            let original_state = capture.validated_state()?;
+            if original_state.id() != id {
+                return Ok(false);
+            }
+            if state
+                .as_ref()
+                .is_some_and(|prior: &objects::object::State| prior != &original_state)
+            {
+                return Ok(false);
+            }
+            let tier = capture
+                .visibility
+                .and_then(|visibility| visibility.state)
+                .unwrap_or_else(|| repository.resolve_capture_default_visibility());
+            if (id == revision || tier.is_embargo())
+                && (!visible(&tier, &owner_audience) || !visible(&tier, &target_audience))
+            {
+                return Ok(false);
+            }
+            let edge = if let Some(integration) = operation.local_integration()? {
+                Some((
+                    integration.source_thread,
+                    integration.source_operation,
+                    integration.source_revision,
+                ))
+            } else {
+                operation.integration()?.map(|integration| {
+                    (
+                        integration.source_thread,
+                        integration.source_operation,
+                        integration.source_revision,
+                    )
+                })
+            };
+            if let Some((source_thread, source_operation, source_revision)) = edge {
+                if source_thread == owner_id
+                    || (source_revision != id && !original_state.parents.contains(&source_revision))
+                {
+                    return Ok(false);
+                }
+                let source = repo::thread_replication::ThreadReplica::open(
+                    repository.heddle_dir(),
+                    source_thread,
+                )?;
+                let Some((original, status)) = source.operation(&source_operation)? else {
+                    return Ok(false);
+                };
+                let source_original = original.verify()?;
+                if status != objects::object::thread_replication::Admission::Accepted
+                    || source_original.thread != source_thread
+                    || source_original.id()? != source_operation
+                    || source_original
+                        .source_state()?
+                        .is_none_or(|state| state.id() != source_revision)
+                {
+                    return Ok(false);
+                }
+                edge_parents.insert(source_revision);
+                pending.push((source_thread, source_revision, Some(source_operation)));
+            }
+            state = Some(original_state);
+        }
+        let Some(state) = state else {
+            return Ok(false);
+        };
+        let local_tier = repository.effective_visibility_tier(&id)?;
+        if (id == revision || local_tier.is_embargo())
+            && (!visible(&local_tier, &owner_audience) || !visible(&local_tier, &target_audience))
+        {
+            return Ok(false);
+        }
+        for parent in state.parents {
+            if !edge_parents.contains(&parent) {
+                pending.push((owner_id, parent, None));
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// The signed floor is used when authoring an integration. It cannot be
@@ -509,8 +732,10 @@ pub(super) fn source_visibility_floor(
     agent: Option<&str>,
     revision: objects::object::StateId,
 ) -> Result<Option<objects::object::VisibilityTier>> {
-    Ok(source_content_projection(repository, replica, principal, agent, revision)?
-        .map(|(_, tier)| tier))
+    Ok(
+        source_content_projection(repository, replica, principal, agent, revision)?
+            .map(|(_, tier)| tier),
+    )
 }
 
 fn source_content_projection(
@@ -519,7 +744,12 @@ fn source_content_projection(
     principal: uuid::Uuid,
     agent: Option<&str>,
     revision: objects::object::StateId,
-) -> Result<Option<(objects::object::EntryRedactions, objects::object::VisibilityTier)>> {
+) -> Result<
+    Option<(
+        objects::object::EntryRedactions,
+        objects::object::VisibilityTier,
+    )>,
+> {
     if !source_revision_visible(repository, replica, principal, agent, revision)? {
         return Ok(None);
     }
@@ -618,12 +848,17 @@ fn source_content_projection(
                 pending_threads.push(source_thread);
             }
             if state.id() == revision
-                && capture.visibility.as_ref().and_then(|visibility| visibility.state.as_ref()).is_none()
+                && capture
+                    .visibility
+                    .as_ref()
+                    .and_then(|visibility| visibility.state.as_ref())
+                    .is_none()
             {
-                floor = objects::object::thread_replication::local_integration::intersect_visibility(
-                    &floor,
-                    &repository.resolve_capture_default_visibility(),
-                )?;
+                floor =
+                    objects::object::thread_replication::local_integration::intersect_visibility(
+                        &floor,
+                        &repository.resolve_capture_default_visibility(),
+                    )?;
             }
             if let Some(visibility) = capture.visibility {
                 if let Some(tier) = &visibility.state {
@@ -728,4 +963,111 @@ pub(super) fn discussion_visible(
         agent,
         &summary.discussion.visibility,
     )
+}
+
+#[cfg(test)]
+mod metadata_source_tests {
+    use crypto::{Signer, thread_operation::SignedOperation};
+    use objects::object::{
+        Attribution, Principal, State, VisibilityTier,
+        thread_replication::{
+            Admission, AuthoredCapture, Capture, CaptureVisibility, ThreadOperation,
+            ThreadOperationBody,
+        },
+    };
+
+    use super::*;
+
+    #[test]
+    fn missing_source_state_needs_all_signed_original_and_ancestor_floors() {
+        let directory = tempfile::tempdir().expect("source fixture directory");
+        let repository = repo::Repository::init_default(directory.path()).expect("repository");
+        let seed_id = repository.head().expect("head").expect("canonical seed");
+        let thread = repository
+            .create_native_thread("metadata-source", seed_id, None, "metadata source")
+            .expect("local Thread");
+        let signer = repository
+            .native_original_owner_signer(&thread)
+            .expect("owner signer");
+        let principal = uuid::Uuid::from_bytes([7; 16]);
+        let publish = |state: &State, tier: Option<VisibilityTier>, parents: BTreeSet<_>| {
+            let visibility = tier.map(|state| CaptureVisibility {
+                state: Some(state),
+                embargo_until: None,
+                entries: vec![],
+            });
+            let operation = ThreadOperation {
+                version: 1,
+                thread: thread.thread_id(),
+                parents,
+                publisher: signer.public_key().try_into().expect("publisher key"),
+                body: ThreadOperationBody::Capture(AuthoredCapture::local(Capture {
+                    state: state.encode_current_msgpack().expect("signed State bytes"),
+                    source_targets: None,
+                    visibility,
+                })),
+            };
+            let id = operation.id().expect("operation ID");
+            let signed = SignedOperation::sign(&operation, &signer).expect("source signature");
+            assert_eq!(
+                thread
+                    .receive_source_metadata(&signed, repository.store(), None, |_| Ok(()))
+                    .expect("metadata-only source admission"),
+                Admission::Accepted
+            );
+            id
+        };
+        let state = State::new_snapshot(
+            repository
+                .store()
+                .get_state(&seed_id)
+                .expect("seed read")
+                .expect("seed")
+                .tree,
+            vec![seed_id],
+            Attribution::human(Principal::new("owner", "")),
+        );
+        assert!(
+            repository
+                .store()
+                .get_state(&state.id())
+                .expect("source read")
+                .is_none()
+        );
+        let first = publish(&state, None, BTreeSet::new());
+        assert!(matches!(
+            source_content_admission(&repository, &thread, principal, None, state.id())
+                .expect("signed public source"),
+            SourceContentAdmission::Unavailable
+        ));
+        publish(
+            &state,
+            Some(VisibilityTier::Private {
+                scope_label: "held".into(),
+            }),
+            BTreeSet::new(),
+        );
+        assert!(
+            matches!(
+                source_content_admission(&repository, &thread, principal, None, state.id())
+                    .expect("second original floor"),
+                SourceContentAdmission::Withheld
+            ),
+            "a second accepted original for the same State must not be skipped"
+        );
+        let child = State::new_snapshot(
+            state.tree,
+            vec![state.id()],
+            Attribution::human(Principal::new("owner", "")),
+        );
+        publish(&child, None, BTreeSet::from([first]));
+        assert!(
+            matches!(
+                source_content_admission(&repository, &thread, principal, None, child.id())
+                    .expect("signed hidden ancestor"),
+                SourceContentAdmission::Withheld
+            ),
+            "an embargoed signed ancestor must not make missing child bytes observable"
+        );
+    }
 }

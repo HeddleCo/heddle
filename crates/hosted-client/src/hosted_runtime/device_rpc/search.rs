@@ -1,7 +1,10 @@
 //! Finite indexed local search; result frames never retain a SQLite transaction.
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -338,15 +341,25 @@ impl DeviceRpc {
                                 }
                                 let key = (spool.id, candidate.thread, candidate.revision);
                                 if !source_projections.contains_key(&key) {
-                                    let proof = repo::thread_replication::ThreadReplica::open(
+                                    let admission = repo::thread_replication::ThreadReplica::open(
                                         &spool.heddle_dir, candidate.thread,
                                     ).ok().and_then(|replica| {
-                                        super::auth::source_content_visibility(
+                                        super::auth::source_content_admission(
                                             &repository, &replica, principal,
                                             facts.delegation_agent_id.as_deref(), candidate.revision,
-                                        ).ok().flatten()
+                                        ).ok()
                                     });
-                                    source_projections.insert(key, proof);
+                                    match admission {
+                                        Some(super::auth::SourceContentAdmission::Visible(proof)) => {
+                                            source_projections.insert(key, Some(proof));
+                                        }
+                                        Some(super::auth::SourceContentAdmission::Unavailable) => {
+                                            content_ready = false;
+                                            symbols_ready = false;
+                                            source_projections.insert(key, None);
+                                        }
+                                        _ => { source_projections.insert(key, None); }
+                                    }
                                 }
                                 let Some(redactions) = source_projections.get(&key).and_then(Option::as_ref) else { return Ok(()); };
                                 admitted_target_count += 1;

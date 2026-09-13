@@ -384,8 +384,11 @@ pub(super) async fn roundtrip(
                 first_path = Some(hit.location.expect("source location").path);
             }
             Some(search_event::Payload::Complete(status)) => {
-                assert_eq!(status.coverage, Coverage::Complete as i32,
-                    "indexed authorized source has complete content coverage");
+                assert_eq!(
+                    status.coverage,
+                    Coverage::Complete as i32,
+                    "indexed authorized source has complete content coverage"
+                );
                 next = status.page.expect("source page").next_page;
             }
             _ => {}
@@ -478,8 +481,11 @@ pub(super) async fn roundtrip(
                 visible_paths.push(hit.location.expect("visible location").path);
             }
             Some(search_event::Payload::Complete(status)) => {
-                assert_eq!(status.coverage, Coverage::Complete as i32,
-                    "hidden indexed entry does not make authorized coverage partial");
+                assert_eq!(
+                    status.coverage,
+                    Coverage::Complete as i32,
+                    "hidden indexed entry does not make authorized coverage partial"
+                );
                 restricted_page = status.page;
             }
             _ => {}
@@ -492,7 +498,10 @@ pub(super) async fn roundtrip(
     );
     let restricted_page = restricted_page.expect("restricted source page");
     assert!(restricted_page.exhausted);
-    assert!(restricted_page.next_page.is_empty(), "hidden source path cannot create a cursor");
+    assert!(
+        restricted_page.next_page.is_empty(),
+        "hidden source path cannot create a cursor"
+    );
     let mut restricted = remote
         .api
         .observe::<thread_api::rpc::AnalysisServiceObserveAnalysis>(&ObserveAnalysisRequest {
@@ -603,6 +612,106 @@ pub(super) async fn roundtrip(
         count_hits(exact).await,
         vec!["answer.rs"],
         "exact revision selects historical accepted source"
+    );
+    // A signed current source can arrive before its State bytes. Its own and
+    // ancestor visibility are provable from signed originals, but the local
+    // source index is unavailable: this is Partial rather than a false empty
+    // Complete result. A second private original for the same State then
+    // withholds the target without changing the public coverage response.
+    let metadata_state = State::new_snapshot(
+        newer_tree.hash(),
+        vec![newer_state.id()],
+        Attribution::human(Principal::new("owner", "")),
+    );
+    assert!(
+        repository
+            .store()
+            .get_state(&metadata_state.id())
+            .expect("metadata State lookup")
+            .is_none()
+    );
+    let signer = repository
+        .native_original_owner_signer(&thread)
+        .expect("source signer");
+    let parent = thread
+        .source_operation_page(newer_state.id(), None, 1)
+        .expect("parent source")[0];
+    let publish_metadata = |tier: Option<VisibilityTier>| {
+        use crypto::{Signer, thread_operation::SignedOperation};
+        use objects::object::thread_replication::{
+            AuthoredCapture, Capture, CaptureVisibility, ThreadOperation, ThreadOperationBody,
+        };
+        let operation = ThreadOperation {
+            version: 1,
+            thread: thread.thread_id(),
+            parents: [parent].into(),
+            publisher: signer.public_key().try_into().expect("publisher key"),
+            body: ThreadOperationBody::Capture(AuthoredCapture::local(Capture {
+                state: metadata_state
+                    .encode_current_msgpack()
+                    .expect("metadata State bytes"),
+                source_targets: None,
+                visibility: tier.map(|state| CaptureVisibility {
+                    state: Some(state),
+                    embargo_until: None,
+                    entries: vec![],
+                }),
+            })),
+        };
+        let signed = SignedOperation::sign(&operation, &signer).expect("signed metadata source");
+        assert_eq!(
+            thread
+                .receive_source_metadata(&signed, repository.store(), None, |_| Ok(()))
+                .expect("accepted metadata-only original"),
+            objects::object::thread_replication::Admission::Accepted
+        );
+    };
+    let coverage = |request: SearchRequest| async move {
+        let mut stream = remote
+            .api
+            .observe::<thread_api::rpc::SearchServiceSearch>(&request)
+            .await
+            .expect("metadata-only source Search");
+        let mut status = None;
+        let mut hits = 0;
+        while let Some(event) = stream.next().await.expect("metadata Search frame") {
+            match event.payload {
+                Some(search_event::Payload::DomainStatus(value))
+                    if value.domain == SearchDomain::SourceContent as i32 =>
+                {
+                    status = Some(value.coverage)
+                }
+                Some(search_event::Payload::Hit(_)) => hits += 1,
+                _ => {}
+            }
+        }
+        (status, hits)
+    };
+    publish_metadata(None);
+    let missing = coverage(SearchRequest {
+        text: "newer".into(),
+        page: None,
+        ..source_search.clone()
+    })
+    .await;
+    assert_eq!(
+        missing,
+        (Some(Coverage::Partial as i32), 0),
+        "authorized missing State must be Partial"
+    );
+    publish_metadata(Some(VisibilityTier::Private {
+        scope_label: "held".into(),
+    }));
+    let hidden = coverage(SearchRequest {
+        text: "newer".into(),
+        page: None,
+        ..source_search.clone()
+    })
+    .await;
+    assert_eq!(
+        hidden,
+        (Some(Coverage::Complete as i32), 0),
+        "hidden same-State original must not change coverage"
     );
     let released = tokio::time::timeout(
         std::time::Duration::from_secs(2),
