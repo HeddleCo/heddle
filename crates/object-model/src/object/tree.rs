@@ -509,6 +509,19 @@ impl TreeEntry {
 
 // ── Tree ────────────────────────────────────────────────────────────
 
+/// A complete tree with its encoding scheme and per-entry salts kept together.
+/// Use [`Self::from_entries_salted_v4`] to supply explicit salts for a new tree;
+/// mutations through [`Self::insert`] maintain the selected scheme.
+///
+/// Explicit salt mutation is internal, so it cannot corrupt a flat tree:
+///
+/// ```compile_fail,E0624
+/// use heddle_object_model::object::{ContentHash, Tree, TreeEntry};
+/// let mut tree = Tree::new();
+/// if let Ok(entry) = TreeEntry::file("readme", ContentHash::compute(b"text"), false) {
+///     tree.insert_salted(entry, [7; 32]);
+/// }
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tree {
     // Trees are immutable on every read path and only change while a caller is
