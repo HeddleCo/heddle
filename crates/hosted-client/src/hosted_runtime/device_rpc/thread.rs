@@ -598,6 +598,25 @@ impl DeviceRpc {
                 ..Default::default()
             });
         }
+        for suffix in [
+            "OpenDiscussion",
+            "AppendTurn",
+            "ResolveDiscussion",
+            "ReopenDiscussion",
+            "PutContext",
+        ] {
+            let method = format!("/heddle.api.v2alpha1.CollaborationService/{suffix}");
+            overview.actions.push(ActionAvailability {
+                authorized: permits(&method),
+                method,
+                endpoint: Some(self.endpoint()),
+                target: Some(EntityRef {
+                    entity: Some(entity_ref::Entity::Thread(reference.clone())),
+                }),
+                implemented: true,
+                ..Default::default()
+            });
+        }
         let method = "/heddle.api.v2alpha1.ThreadService/RecordReview";
         overview.actions.push(ActionAvailability {
             method: method.into(),
