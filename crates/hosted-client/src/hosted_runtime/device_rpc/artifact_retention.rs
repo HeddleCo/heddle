@@ -136,6 +136,16 @@ async fn expire_store(directory: PathBuf, spool: uuid::Uuid) -> Result<()> {
                     at
                 }
             });
+            #[cfg(feature = "semantic")]
+            let next = {
+                super::source_search::index_due_source(&path, now)?;
+                let source_due = repo::thread_replication::source_search::next_due(&path)?;
+                match (next, source_due) {
+                    (Some(artifact), Some(source)) => Some(artifact.min(source)),
+                    (None, source) => source,
+                    (artifact, None) => artifact,
+                }
+            };
             Ok((held, next))
         })
         .await??;

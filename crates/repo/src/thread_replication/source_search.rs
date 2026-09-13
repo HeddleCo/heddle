@@ -23,7 +23,87 @@ CREATE TABLE IF NOT EXISTS source_search_ready(
  revision BLOB NOT NULL CHECK(length(revision)=32),
  content_ready INTEGER NOT NULL CHECK(content_ready IN(0,1)),
  symbols_ready INTEGER NOT NULL CHECK(symbols_ready IN(0,1))
-);";
+);
+CREATE TABLE IF NOT EXISTS source_search_queue(
+ operation BLOB PRIMARY KEY CHECK(length(operation)=32),
+ thread BLOB NOT NULL CHECK(length(thread)=32),
+ revision BLOB NOT NULL CHECK(length(revision)=32),
+ next_attempt INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS source_search_queue_due ON source_search_queue(next_attempt,operation);
+CREATE TABLE IF NOT EXISTS source_search_bootstrap(version INTEGER PRIMARY KEY CHECK(version=1));
+INSERT OR IGNORE INTO source_search_queue(operation,thread,revision)
+SELECT o.id,o.thread,o.source_revision FROM operations o
+WHERE o.status=1 AND o.facet=1
+  AND NOT EXISTS(SELECT 1 FROM source_search_ready r WHERE r.operation=o.id AND r.revision=o.source_revision)
+  AND NOT EXISTS(SELECT 1 FROM source_search_bootstrap WHERE version=1);
+INSERT OR IGNORE INTO source_search_bootstrap(version) VALUES(1);
+CREATE TRIGGER IF NOT EXISTS source_search_admitted_update AFTER UPDATE OF status ON operations
+WHEN OLD.status<>1 AND NEW.status=1 AND NEW.facet=1
+BEGIN
+ INSERT OR IGNORE INTO source_search_queue(operation,thread,revision) VALUES(NEW.id,NEW.thread,NEW.source_revision);
+END;
+CREATE TRIGGER IF NOT EXISTS source_search_admitted_insert AFTER INSERT ON operations
+WHEN NEW.status=1 AND NEW.facet=1
+BEGIN
+ INSERT OR IGNORE INTO source_search_queue(operation,thread,revision) VALUES(NEW.id,NEW.thread,NEW.source_revision);
+END;";
+
+/// One accepted original awaiting extraction. This is work scheduling, never read authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QueuedOriginal {
+    pub operation: ContentHash,
+    pub thread: ContentHash,
+    pub revision: StateId,
+}
+
+/// Return a bounded due batch without holding a transaction across parsing.
+pub fn due(directory: &std::path::Path, now: i64, limit: usize) -> Result<Vec<QueuedOriginal>> {
+    if !(1..=32).contains(&limit) {
+        return Err(Error::Invalid(
+            "source search queue batch must be 1..32".into(),
+        ));
+    }
+    let connection = crate::local_metadata::open(directory)?;
+    let mut statement = connection.prepare("SELECT q.operation,q.thread,q.revision FROM source_search_queue q JOIN operations o ON o.id=q.operation AND o.status=1 AND o.facet=1 WHERE q.next_attempt<=?1 ORDER BY q.next_attempt,q.operation LIMIT ?2")?;
+    let rows = statement.query_map(params![now, limit as i64], |row| {
+        Ok((
+            row.get::<_, Vec<u8>>(0)?,
+            row.get::<_, Vec<u8>>(1)?,
+            row.get::<_, Vec<u8>>(2)?,
+        ))
+    })?;
+    rows.map(|row| {
+        let (operation, thread, revision) = row?;
+        Ok(QueuedOriginal {
+            operation: super::hash(&operation)?,
+            thread: super::hash(&thread)?,
+            revision: StateId::from_bytes(*super::hash(&revision)?.as_bytes()),
+        })
+    })
+    .collect()
+}
+
+/// Defer an unavailable source without pinning progress behind that queue row.
+pub fn defer(directory: &std::path::Path, operation: ContentHash, next_attempt: i64) -> Result<()> {
+    let connection = crate::local_metadata::open(directory)?;
+    connection.execute(
+        "UPDATE source_search_queue SET next_attempt=?2 WHERE operation=?1",
+        params![operation.as_bytes(), next_attempt],
+    )?;
+    Ok(())
+}
+
+/// Earliest retry time for a daemon-owned maintenance wake.
+pub fn next_due(directory: &std::path::Path) -> Result<Option<i64>> {
+    let connection = crate::local_metadata::open(directory)?;
+    let at = connection.query_row(
+        "SELECT MIN(next_attempt) FROM source_search_queue",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(at)
+}
 
 /// One location and bounded text prepared outside the metadata transaction.
 #[derive(Clone, Debug)]
@@ -106,10 +186,92 @@ pub fn publish(
         "INSERT INTO metadata_changes(topic,entity) VALUES('source_search',?1)",
         [operation.to_string()],
     )?;
+    if content_ready {
+        transaction.execute(
+            "DELETE FROM source_search_queue WHERE operation=?1",
+            [operation.as_bytes().as_slice()],
+        )?;
+    } else {
+        transaction.execute("UPDATE source_search_queue SET next_attempt=strftime('%s','now')+60 WHERE operation=?1",[operation.as_bytes().as_slice()])?;
+    }
     transaction.commit()?;
     objects::fs_atomic::write_file_atomic(
         &directory.join(crate::local_metadata::CHANGE_MARKER_NAME),
         uuid::Uuid::new_v4().as_bytes(),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepted_originals_queue_once_and_publish_or_defer_with_bounded_progress() {
+        let root = tempfile::tempdir().expect("temporary metadata");
+        let directory = root.path().join(".heddle");
+        std::fs::create_dir(&directory).expect("metadata directory");
+        let connection = crate::local_metadata::open(&directory).expect("metadata");
+        super::super::initialize_schema(&connection).expect("source schema");
+        let thread = ContentHash::from_bytes([1; 32]);
+        let revision = StateId::from_bytes([2; 32]);
+        let operation = ContentHash::from_bytes([3; 32]);
+        connection.execute("INSERT INTO operations(id,thread,facet,canonical,signature,status,source_revision) VALUES(?1,?2,1,x'00',zeroblob(64),0,?3)",params![operation.as_bytes(),thread.as_bytes(),revision.as_bytes()]).expect("pending");
+        assert!(due(&directory, 10, 1).expect("due").is_empty());
+        connection
+            .execute(
+                "UPDATE operations SET status=1 WHERE id=?1",
+                [operation.as_bytes().as_slice()],
+            )
+            .expect("admit");
+        assert_eq!(
+            due(&directory, 10, 1).expect("due"),
+            vec![QueuedOriginal {
+                operation,
+                thread,
+                revision
+            }]
+        );
+        defer(&directory, operation, 20).expect("defer");
+        assert!(due(&directory, 19, 1).expect("not due").is_empty());
+        assert_eq!(
+            due(&directory, 20, 1).expect("due"),
+            vec![QueuedOriginal {
+                operation,
+                thread,
+                revision
+            }]
+        );
+        publish(&directory, thread, operation, revision, &[], true, false)
+            .expect("content indexed");
+        assert!(due(&directory, 21, 1).expect("queue drained").is_empty());
+        assert_eq!(next_due(&directory).expect("next"), None);
+        assert!(due(&directory, 21, 33).is_err());
+        connection
+            .execute("DELETE FROM source_search_ready", [])
+            .expect("legacy projection absent");
+        connection
+            .execute("DELETE FROM source_search_bootstrap", [])
+            .expect("legacy install");
+        connection.execute_batch(SCHEMA).expect("one-time backfill");
+        assert_eq!(
+            due(&directory, 21, 1).expect("backfilled"),
+            vec![QueuedOriginal {
+                operation,
+                thread,
+                revision
+            }]
+        );
+        connection
+            .execute("DELETE FROM source_search_queue", [])
+            .expect("drain");
+        connection
+            .execute_batch(SCHEMA)
+            .expect("repeat initialization");
+        assert!(
+            due(&directory, 21, 1)
+                .expect("no repeated full scan")
+                .is_empty()
+        );
+    }
 }

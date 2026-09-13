@@ -3,7 +3,10 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
-use objects::{object::StateId, store::ObjectStore};
+use objects::{
+    object::{ContentHash, StateId},
+    store::ObjectStore,
+};
 
 use super::analysis;
 
@@ -11,6 +14,15 @@ pub(super) fn index_analyzed_source(
     repository: &repo::Repository,
     replica: &repo::thread_replication::ThreadReplica,
     state: StateId,
+) -> Result<()> {
+    index_source(repository, replica, state, None)
+}
+
+fn index_source(
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    state: StateId,
+    selected: Option<ContentHash>,
 ) -> Result<()> {
     let source = repository
         .store()
@@ -101,7 +113,11 @@ pub(super) fn index_analyzed_source(
             "source Search document bound exceeded"
         );
     }
-    let originals = replica.source_operation_page(state, None, 1024)?;
+    let originals = if let Some(operation) = selected {
+        vec![operation]
+    } else {
+        replica.source_operation_page(state, None, 1024)?
+    };
     ensure!(!originals.is_empty(), "source Search original absent");
     for operation in originals {
         repo::thread_replication::source_search::publish(
@@ -115,4 +131,32 @@ pub(super) fn index_analyzed_source(
         )?;
     }
     Ok(())
+}
+
+/// Process one durable accepted-source queue row outside the metadata transaction.
+/// Failed or incomplete materialization is deferred, allowing later rows to progress.
+pub(super) fn index_due_source(directory: &std::path::Path, now: i64) -> Result<Option<i64>> {
+    let Some(item) = repo::thread_replication::source_search::due(directory, now, 1)?
+        .into_iter()
+        .next()
+    else {
+        return Ok(None);
+    };
+    let outcome = (|| {
+        let root = directory
+            .parent()
+            .context("source Search repository root absent")?;
+        let repository = repo::Repository::open(root)?;
+        let replica = repo::thread_replication::ThreadReplica::open(directory, item.thread)?;
+        index_source(&repository, &replica, item.revision, Some(item.operation))
+    })();
+    if let Err(error) = outcome {
+        tracing::warn!(operation=%item.operation, %error, "native source Search indexing deferred");
+        repo::thread_replication::source_search::defer(
+            directory,
+            item.operation,
+            now.saturating_add(60),
+        )?;
+    }
+    Ok(Some(now))
 }
