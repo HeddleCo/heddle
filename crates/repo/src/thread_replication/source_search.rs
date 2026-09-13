@@ -274,4 +274,78 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[test]
+    fn hidden_source_corpus_cannot_change_visible_hit_score() {
+        let root = tempfile::tempdir().expect("temporary metadata");
+        let directory = root.path().join(".heddle");
+        std::fs::create_dir(&directory).expect("metadata directory");
+        let connection = crate::local_metadata::open(&directory).expect("metadata");
+        super::super::initialize_schema(&connection).expect("source schema");
+        let thread = ContentHash::from_bytes([1; 32]);
+        let revision = StateId::from_bytes([2; 32]);
+        let visible_operation = ContentHash::from_bytes([3; 32]);
+        let hidden_operation = ContentHash::from_bytes([4; 32]);
+        for operation in [visible_operation, hidden_operation] {
+            connection.execute("INSERT INTO operations(id,thread,facet,canonical,signature,status,source_revision) VALUES(?1,?2,1,x'00',zeroblob(64),1,?3)",params![operation.as_bytes(),thread.as_bytes(),revision.as_bytes()]).expect("accepted original");
+        }
+        let document = |path: &str, text: &str| Document {
+            kind: 3,
+            path: path.into(),
+            symbol_id: String::new(),
+            symbol_name: String::new(),
+            start_line: None,
+            end_line: None,
+            text: text.into(),
+        };
+        publish(
+            &directory,
+            thread,
+            visible_operation,
+            revision,
+            &[document("visible.rs", "alpha visible")],
+            true,
+            false,
+        )
+        .expect("visible projection");
+        let first = super::super::collaboration_search::search_native(
+            &directory,
+            "alpha",
+            None,
+            4,
+            &[3],
+            None,
+        )
+        .expect("visible query");
+        assert_eq!(first.hits.len(), 1);
+        let visible_score = first.hits[0].score;
+        publish(
+            &directory,
+            thread,
+            hidden_operation,
+            revision,
+            &[document("hidden.rs", "alpha hidden alpha alpha")],
+            true,
+            false,
+        )
+        .expect("other projection");
+        let second = super::super::collaboration_search::search_native(
+            &directory,
+            "alpha",
+            None,
+            4,
+            &[3],
+            None,
+        )
+        .expect("combined query");
+        let visible = second
+            .hits
+            .iter()
+            .find(|hit| hit.operation == visible_operation)
+            .expect("visible hit retained");
+        assert_eq!(
+            visible.score, visible_score,
+            "unserved corpus must not change a visible hit's score"
+        );
+    }
 }

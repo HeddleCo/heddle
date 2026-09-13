@@ -106,6 +106,9 @@ pub fn search_native(
     let phrase = format!("\"{}\"", text.trim().replace('"', "\"\""));
     let exact_revision = text.trim().strip_prefix("heddle:").unwrap_or(text.trim());
     let exact_revision = objects::object::StateId::parse(exact_revision).ok();
+    // Source scores stay corpus-independent: FTS bm25 includes hidden documents
+    // in its collection statistics and would expose their presence through an
+    // otherwise visible hit's score/order before the device visibility gate.
     let lexical = "WITH hits AS (
         SELECT s.thread,s.operation,s.kind,s.record,
                snippet(collaboration_search,4,'','',' … ',32) summary,
@@ -130,7 +133,7 @@ pub fn search_native(
         FROM operations o WHERE ?8 AND o.status=1 AND o.facet=1 AND o.source_revision=?10
         UNION ALL
         SELECT c.thread,c.operation,c.kind,lower(hex(c.candidate)),
-               snippet(source_search_fts,0,'','',' … ',32),bm25(source_search_fts),o.canonical,c.candidate,
+               snippet(source_search_fts,0,'','',' … ',32),-3.0,o.canonical,c.candidate,
                c.revision,c.path,c.symbol_id,c.symbol_name,c.start_line,c.end_line
         FROM source_search_fts JOIN source_search_candidates c ON c.rowid=source_search_fts.rowid
         JOIN operations o ON o.id=c.operation
