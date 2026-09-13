@@ -699,7 +699,7 @@ impl Tree {
 
     /// V4 insert with an explicit salt, maintaining the parallel salt vector.
     /// Replacing an existing entry of the same name drops its old salt.
-    pub fn insert_salted(&mut self, entry: TreeEntry, salt: [u8; 32]) {
+    fn insert_salted(&mut self, entry: TreeEntry, salt: [u8; 32]) {
         debug_assert_eq!(self.scheme, TreeScheme::V4Salted);
         let entries = Arc::make_mut(&mut self.entries);
         let salts = Arc::make_mut(&mut self.salts);
