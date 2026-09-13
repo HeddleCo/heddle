@@ -109,6 +109,11 @@ pub fn mention(value: &EntityRef) -> Result<Mention, Error> {
                     "passkeys are account-private credentials and cannot be mentioned",
                 ));
             }
+            Entity::Principal(_) | Entity::Agent(_) => {
+                return Err(Error::Protocol(
+                    "principal and agent references require an explicit mention contract",
+                ));
+            }
         },
     )
 }
