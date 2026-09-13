@@ -17,7 +17,10 @@ use iroh::{
     endpoint::{AckFrequencyConfig, QuicTransportConfig, presets},
     protocol::Router,
 };
-use tokio::{io::AsyncReadExt, io::AsyncWriteExt, sync::Mutex};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    sync::Mutex,
+};
 
 use super::{
     HostedError, Result, VerifiedEndpointDescriptor,
@@ -71,6 +74,19 @@ struct ProxiedTransport {
     socket_path: PathBuf,
     node_id: EndpointId,
     reused: AtomicBool,
+    /// Ephemeral local endpoint for provider (CAS) dials.
+    ///
+    /// Weft stays in netd. `ProviderBackend` needs a real Iroh
+    /// `Connection`, which cannot cross the UDS splice, so the CLI
+    /// binds this once per process the first time a provider is used.
+    provider_local: Mutex<Option<LocalProviderEndpoint>>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct LocalProviderEndpoint {
+    endpoint: Endpoint,
+    transport: ProviderWebSocketTransport,
 }
 
 impl HostedConnection {
@@ -202,6 +218,7 @@ impl HostedConnection {
                 socket_path: socket,
                 node_id: ensured.node_id,
                 reused: AtomicBool::new(ensured.reused),
+                provider_local: Mutex::new(None),
             }),
             provider_connections: Mutex::new(HashMap::new()),
         }))
@@ -276,23 +293,17 @@ impl HostedConnection {
                         "the active Iroh endpoint has no provider transport".to_string(),
                     )
                 })?;
-                let address = transport.register_source(
-                    &source.provider_id,
-                    &source.endpoint_id,
-                    &source.direct_url,
-                    &source.opaque_ticket,
-                )?;
-                let connection = endpoint
-                    .connect(address, api::PROVIDER_ALPN_V1)
-                    .await
-                    .map_err(HostedError::transport)?;
+                let connection = dial_provider(endpoint, transport, source).await?;
                 *cached = Some(connection.clone());
                 Ok(connection)
             }
             #[cfg(unix)]
-            HostedTransport::Proxied(_) => Err(HostedError::transport(
-                "provider connections on a netd-proxied session are opened as streams",
-            )),
+            HostedTransport::Proxied(proxied) => {
+                let (endpoint, transport) = proxied.ensure_local_provider().await?;
+                let connection = dial_provider(&endpoint, &transport, source).await?;
+                *cached = Some(connection.clone());
+                Ok(connection)
+            }
         }
     }
 
@@ -306,9 +317,22 @@ impl HostedConnection {
                 bounded_foreground_shutdown(async move { router.shutdown().await }).await;
             }
             #[cfg(unix)]
-            HostedTransport::Proxied(_) => {
+            HostedTransport::Proxied(proxied) => {
                 // The weft QUIC session lives in netd; dropping this handle
-                // must not drain it.
+                // must not drain it. A lazy local provider endpoint is
+                // this process's, so start a bounded close if we bound one.
+                let local = {
+                    let mut guard = proxied.provider_local.lock().await;
+                    guard.take()
+                };
+                if let Some(local) = local {
+                    let endpoint = local.endpoint;
+                    bounded_foreground_shutdown(async move {
+                        endpoint.close().await;
+                        Ok::<(), &'static str>(())
+                    })
+                    .await;
+                }
             }
         }
     }
@@ -318,6 +342,28 @@ impl HostedConnection {
             HostedTransport::Local { .. } => false,
             #[cfg(unix)]
             HostedTransport::Proxied(proxied) => proxied.reused.load(Ordering::Relaxed),
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    fn local_provider_endpoint_id_for_test(&self) -> Option<EndpointId> {
+        match &self.inner {
+            HostedTransport::Local { .. } => None,
+            HostedTransport::Proxied(proxied) => proxied
+                .provider_local
+                .try_lock()
+                .ok()
+                .and_then(|guard| guard.as_ref().map(|local| local.endpoint.id())),
+        }
+    }
+
+    #[cfg(all(test, unix))]
+    async fn ensure_local_provider_for_test(&self) -> Result<EndpointId> {
+        match &self.inner {
+            HostedTransport::Local { .. } => Err(HostedError::transport(
+                "local sessions already have an endpoint",
+            )),
+            HostedTransport::Proxied(proxied) => Ok(proxied.ensure_local_provider().await?.0.id()),
         }
     }
 
@@ -348,6 +394,53 @@ impl HostedConnection {
             }
         }
     }
+}
+
+#[cfg(unix)]
+impl ProxiedTransport {
+    async fn ensure_local_provider(&self) -> Result<(Endpoint, ProviderWebSocketTransport)> {
+        let mut guard = self.provider_local.lock().await;
+        if let Some(local) = guard.as_ref() {
+            return Ok((local.endpoint.clone(), local.transport.clone()));
+        }
+        let config = ClientConfig {
+            allow_insecure: self.allow_insecure,
+            ..ClientConfig::default()
+        };
+        let transport = ProviderWebSocketTransport::new(config);
+        let endpoint = bind_endpoint(
+            RelayMode::Disabled,
+            Some(transport.clone()),
+            EndpointIdentity::Ephemeral,
+        )
+        .await?;
+        tracing::debug!(
+            node_id = %endpoint.id(),
+            "bound local ephemeral endpoint for provider dials on a netd-proxied session"
+        );
+        *guard = Some(LocalProviderEndpoint {
+            endpoint: endpoint.clone(),
+            transport: transport.clone(),
+        });
+        Ok((endpoint, transport))
+    }
+}
+
+async fn dial_provider(
+    endpoint: &Endpoint,
+    transport: &ProviderWebSocketTransport,
+    source: &ProviderSource,
+) -> Result<iroh::endpoint::Connection> {
+    let address = transport.register_source(
+        &source.provider_id,
+        &source.endpoint_id,
+        &source.direct_url,
+        &source.opaque_ticket,
+    )?;
+    endpoint
+        .connect(address, api::PROVIDER_ALPN_V1)
+        .await
+        .map_err(HostedError::transport)
 }
 
 pub(super) enum HostedSendStream {
@@ -561,8 +654,10 @@ fn transport_config() -> QuicTransportConfig {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         net::Ipv4Addr,
-        sync::Arc,
+        path::PathBuf,
+        sync::{Arc, atomic::AtomicBool},
         time::{Duration, Instant},
     };
 
@@ -736,5 +831,134 @@ mod tests {
         );
         server_task.abort();
         let _ = server_task.await;
+    }
+
+    #[cfg(unix)]
+    fn test_proxied() -> std::sync::Arc<HostedConnection> {
+        let node_id = iroh_base::SecretKey::generate().public();
+        std::sync::Arc::new(HostedConnection {
+            inner: super::HostedTransport::Proxied(super::ProxiedTransport {
+                server: "https://api.test.heddle.sh".to_string(),
+                allow_insecure: true,
+                socket_path: PathBuf::from("/tmp/heddle-hosted-unused.sock"),
+                node_id,
+                reused: AtomicBool::new(true),
+                provider_local: Mutex::new(None),
+            }),
+            provider_connections: Mutex::new(HashMap::new()),
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn proxied_provider_connection_binds_local_endpoint_instead_of_failing_closed() {
+        let connection = test_proxied();
+        let endpoint_id = iroh_base::SecretKey::generate().public();
+        let source = ProviderSource {
+            provider_id: "provider-a".to_string(),
+            endpoint_id: endpoint_id.to_string(),
+            direct_url: "wss://127.0.0.1:1/direct?provider=provider-a&ticket=opaque".to_string(),
+            opaque_ticket: "opaque".to_string(),
+            expires_at_unix_millis: u64::MAX,
+        };
+        let dial = {
+            let connection = Arc::clone(&connection);
+            tokio::spawn(async move { connection.provider_connection(&source).await })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let first = loop {
+            if let Some(id) = connection.local_provider_endpoint_id_for_test() {
+                break id;
+            }
+            if Instant::now() >= deadline {
+                panic!(
+                    "netd-proxied provider_connection must bind a local endpoint (failing closed with 'opened as streams' would never bind)"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        dial.abort();
+        let _ = dial.await;
+
+        let second = connection
+            .ensure_local_provider_for_test()
+            .await
+            .expect("local provider endpoint must stay bound");
+        assert_eq!(
+            first, second,
+            "a proxied session must reuse one local provider endpoint"
+        );
+
+        let started = Instant::now();
+        connection.close().await;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "closing a proxied session with a local provider endpoint must not drain, took {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn proxied_provider_connection_reuses_a_live_cached_connection() {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let server_id = server.id();
+        let server_addr = server.addr();
+        let server_task = tokio::spawn(async move {
+            let connection = server
+                .accept()
+                .await
+                .expect("incoming connection")
+                .await
+                .unwrap();
+            connection.closed().await;
+            server.close().await;
+        });
+        let client = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let live = HostedConnection::connect(client, server_addr)
+            .await
+            .unwrap();
+        let connection = test_proxied();
+        connection.provider_connections.lock().await.insert(
+            server_id,
+            Arc::new(Mutex::new(Some(
+                live.quic_connection().expect("local fixture").clone(),
+            ))),
+        );
+
+        let reused = connection
+            .provider_connection(&ProviderSource {
+                provider_id: "provider-a".to_string(),
+                endpoint_id: server_id.to_string(),
+                direct_url: "wss://unused.invalid/direct?provider=provider-a&ticket=unused"
+                    .to_string(),
+                opaque_ticket: "unused".to_string(),
+                expires_at_unix_millis: u64::MAX,
+            })
+            .await
+            .unwrap();
+
+        assert!(reused.close_reason().is_none());
+        assert!(
+            connection.local_provider_endpoint_id_for_test().is_none(),
+            "a live cached provider connection must not bind a local endpoint"
+        );
+        connection.close().await;
+        live.close().await;
+        server_task.await.unwrap();
     }
 }

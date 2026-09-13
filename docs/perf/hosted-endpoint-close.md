@@ -26,7 +26,9 @@ Process exit is no longer gated on `wait_all_draining`.
 
 When `heddle netd serve` is running, hosted verbs reuse the daemon's
 persistent endpoint and a cached weft QUIC connection. Close of a
-proxied handle is a no-op: the session stays warm in netd.
+proxied handle does not drain weft. If that process opened a provider
+(CAS) connection, it bound a local ephemeral endpoint; close starts a
+bounded drain of that endpoint only.
 
 Preview vs prod relays stay the `preview` cargo feature. Hosted
 connections still take their relay list from the signed descriptor.
