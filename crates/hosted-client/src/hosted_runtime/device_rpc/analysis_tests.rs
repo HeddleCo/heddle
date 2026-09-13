@@ -75,6 +75,40 @@ pub(super) async fn roundtrip(
         execution_endpoint: Some(device.endpoint()),
         ..Default::default()
     };
+    // Accepted captures queue source Search without a browser StartAnalysis call.
+    let _source_maintenance = super::artifact_retention::Retention::start(device.home.clone());
+    let automatic = SearchRequest {
+        threads: vec![request.thread.clone().expect("selected Thread")],
+        domains: vec![SearchDomain::SourceContent as i32],
+        text: "pub fn answer".into(),
+        mode: search_request::Mode::Lexical as i32,
+        ..Default::default()
+    };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let mut stream = remote
+            .api
+            .observe::<thread_api::rpc::SearchServiceSearch>(&automatic)
+            .await
+            .expect("automatic source Search");
+        let mut found = false;
+        while let Some(event) = stream.next().await.expect("automatic Search frame") {
+            if let Some(search_event::Payload::Hit(hit)) = event.payload {
+                found |= hit
+                    .location
+                    .as_ref()
+                    .is_some_and(|location| location.path == "answer.rs");
+            }
+        }
+        if found {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "daemon must index accepted source without StartAnalysis"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     let unrelated = repository
         .create_native_thread("analysis-unrelated", base, None, "other Thread")
         .expect("unrelated Thread");
