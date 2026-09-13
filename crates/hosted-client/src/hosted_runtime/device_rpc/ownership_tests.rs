@@ -420,7 +420,11 @@ async fn conflict_status(
         version: 1,
         spool,
         thread: replica.thread_id(),
-        winning_claim: previous.id().expect("winner id"),
+        winning_claim: first
+            .verify()
+            .expect("first claim")
+            .id()
+            .expect("winner id"),
         conflicting_claims: claim_ids,
         frontier: replica
             .frontier_page(ThreadFacet::Source, None, 128)
