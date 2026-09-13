@@ -13,11 +13,34 @@ use crate::hosted_runtime::{
 };
 
 #[tokio::test]
+async fn real_device_content_obeys_exact_thread_and_entry_visibility() {
+    real_device_roundtrip(true).await;
+}
+
+#[tokio::test]
+async fn real_device_partial_fetch_preserves_signed_source_until_reference_hydration() {
+    real_device_roundtrip_partial().await;
+}
+
+async fn real_device_roundtrip_partial() {
+    real_device_roundtrip_with_partial(false, true).await;
+}
+
+#[tokio::test]
+async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
+    real_device_roundtrip(false).await;
+}
+
 // reason: `lock_test_env` serializes process-global HEDDLE_HOME/credential
 // mutation, so the guard is deliberately held across the whole async scenario
 // (payload `()`, single per-test runtime — no other task contends, no deadlock).
 #[allow(clippy::await_holding_lock)]
-async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
+async fn real_device_roundtrip(content_only: bool) {
+    real_device_roundtrip_with_partial(content_only, false).await;
+}
+
+#[allow(clippy::await_holding_lock)]
+async fn real_device_roundtrip_with_partial(content_only: bool, partial_only: bool) {
     let _guard = config::credentials::lock_test_env();
     struct Restore(Option<std::ffi::OsString>);
     impl Drop for Restore {
@@ -122,8 +145,28 @@ async fn real_device_rpc_captures_without_weft_and_rejects_unowned_authority() {
         id: spool.to_string(),
     };
     super::fetch_tests::initial_base_roundtrip(&remote, &replica).await;
+    if partial_only {
+        super::fetch_tests::partial_roundtrip(
+            &remote,
+            &repository,
+            &replica,
+            &endpoint_signer,
+            &owner,
+        )
+        .await;
+        drop(remote);
+        browser.close().await;
+        router.shutdown().await.expect("router shutdown");
+        return;
+    }
     super::artifact_tests::roundtrip(&remote, &repository, spool).await;
     super::content_tests::roundtrip(&remote, &repository, spool).await;
+    if content_only {
+        drop(remote);
+        browser.close().await;
+        router.shutdown().await.expect("router shutdown");
+        return;
+    }
     super::publication_tests::roundtrip(&remote, &repository, *browser.id().as_bytes()).await;
     super::collaboration_tests::roundtrip(&remote, &repository, &replica, spool).await;
     super::evidence_tests::roundtrip(&remote, &device, &repository, &replica, spool).await;

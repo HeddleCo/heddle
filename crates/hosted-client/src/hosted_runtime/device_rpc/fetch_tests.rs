@@ -8,11 +8,18 @@ use crypto::{
 };
 use objects::{
     object::{
-        Attribution, Principal, State,
+        Attribution, Blob, CollaborationActor, CollaborationAnchor, CollaborationMetadata,
+        CollaborationRevision, CollaborationScope, CollaborationSourceAnchor, ContextRevision,
+        EntryVisibility, EntryVisibilityEntry, Principal, State, Tree, TreeEntry, VisibilityTier,
+        source_target::{
+            SourceAffinity, SourceFileCore, SourceLineRange, SourceSelector, SourceTargetBinding,
+            SourceTargetCore, SourceTargetReference, capture,
+        },
         thread_replication::{
             Admission, GenesisOwner, ThreadGenesis, ThreadOperation, ThreadOperationBody,
         },
     },
+    reference_store::Source,
     store::ObjectStore,
 };
 
@@ -28,6 +35,301 @@ pub(super) async fn roundtrip(
     owner: &OwnerState,
 ) {
     transfer(remote, repository, replica, endpoint_signer, owner, true).await;
+}
+
+pub(super) async fn partial_roundtrip(
+    remote: &thread_api::Remote<
+        thread_api::transport::IrohTransport<thread_api::credentials::Credentials>,
+    >,
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    endpoint_signer: &Ed25519Signer,
+    owner: &OwnerState,
+) {
+    let visible = Blob::from_slice(b"visible source\nsecond line\n");
+    let hidden = Blob::from_slice(b"hidden source\n");
+    repository.store().put_blob(&visible).expect("visible blob");
+    repository.store().put_blob(&hidden).expect("hidden blob");
+    let tree = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("visible.txt", visible.hash(), false).expect("visible entry"),
+            TreeEntry::file("hidden.txt", hidden.hash(), false).expect("hidden entry"),
+        ],
+        vec![[11; 32], [12; 32]],
+    )
+    .expect("salted tree");
+    repository.store().put_tree(&tree).expect("source tree");
+    let state = State::new_snapshot(
+        tree.hash(),
+        vec![replica.genesis().expect("genesis").base],
+        Attribution::human(Principal::new("Owner", "owner@test")),
+    );
+    repository.store().put_state(&state).expect("source state");
+    let hidden_index = tree
+        .entries()
+        .iter()
+        .position(|entry| entry.name() == "hidden.txt")
+        .expect("hidden leaf");
+    let sidecar = EntryVisibility::new(
+        state.change_id,
+        tree.hash(),
+        vec![EntryVisibilityEntry {
+            tree_id: tree.hash(),
+            leaf_hash: tree
+                .v4_leaf_hash_at(hidden_index)
+                .expect("hidden commitment"),
+            tier: VisibilityTier::Private {
+                scope_label: "security".into(),
+            },
+        }],
+    )
+    .expect("visibility sidecar");
+    repository
+        .restore_entry_visibility_sidecar(
+            &state.change_id,
+            Some(sidecar.encode().expect("sidecar bytes")),
+        )
+        .expect("source visibility");
+    let scope = CollaborationScope {
+        spool: replica
+            .genesis()
+            .expect("genesis")
+            .spool
+            .parse()
+            .expect("Spool UUID"),
+        thread: Some(replica.thread_id()),
+    };
+    let file = SourceFileCore {
+        scope: scope.clone(),
+        revision: CollaborationRevision::State {
+            state_id: state.id(),
+        },
+        path: "visible.txt".into(),
+    };
+    let core = SourceTargetCore {
+        file: file.id().expect("file identity"),
+        revision: file.revision.clone(),
+        selector: SourceSelector::Lines {
+            range: SourceLineRange {
+                start: 1,
+                end: 2,
+                start_affinity: SourceAffinity::After,
+                end_affinity: SourceAffinity::Before,
+            },
+        },
+    };
+    let signer = Ed25519Signer::from_seed(&[61; 32]).expect("context signer");
+    let context = ContextRevision {
+        version: 2,
+        id: uuid::Uuid::from_u128(811),
+        parents: vec![],
+        metadata: CollaborationMetadata {
+            scope,
+            actor: CollaborationActor {
+                principal_id: uuid::Uuid::from_u128(1),
+                agent_id: None,
+            },
+            mentions: vec![],
+        },
+        anchor: CollaborationAnchor::Source {
+            source: CollaborationSourceAnchor {
+                revision: file.revision.clone(),
+                path: file.path.clone(),
+                symbol_id: String::new(),
+                start_line: Some(2),
+                end_line: Some(2),
+                target: Some(SourceTargetReference {
+                    target: core.id().expect("target identity"),
+                    binding: SourceTargetBinding::ViewedThread,
+                }),
+            },
+        },
+        content: "Visible source annotation".into(),
+        tags: vec![],
+        supersedes: None,
+        extracted_from: None,
+        occurred_at_ms: 100,
+    };
+    let context_operation = ThreadOperation {
+        version: 1,
+        thread: replica.thread_id(),
+        parents: BTreeSet::new(),
+        publisher: signer.public_key().try_into().expect("publisher key"),
+        body: ThreadOperationBody::Context(context.encode().expect("context bytes")),
+    };
+    assert_eq!(
+        replica
+            .receive(
+                &SignedOperation::sign(&context_operation, &signer).expect("signed context"),
+                repository.store(),
+                |_| Ok(())
+            )
+            .expect("context admission"),
+        Admission::Accepted
+    );
+    let id = repository
+        .record_native_capture("device-test", state.id())
+        .expect("signed source capture");
+    let (signed, _) = replica
+        .operation(&id)
+        .expect("original lookup")
+        .expect("original operation");
+    let capture = signed
+        .verify()
+        .expect("original signature")
+        .source_result()
+        .expect("source body")
+        .expect("capture");
+    assert!(
+        capture.source_targets.is_some(),
+        "original source commits its reference descriptor"
+    );
+    assert_eq!(
+        capture
+            .visibility
+            .as_ref()
+            .expect("signed privacy")
+            .entries
+            .len(),
+        1
+    );
+
+    let genesis = replica.genesis().expect("selected Thread");
+    let mut request = open(&genesis, state.id());
+    request.selection.as_mut().expect("selection").allow_partial = true;
+    let download = remote
+        .fetch_content(request, Default::default())
+        .await
+        .expect("partial source Fetch");
+    assert!(
+        !download.ready().full_closure_available,
+        "hidden leaf requires partial closure"
+    );
+    let scratch = tempfile::tempdir().expect("stage scratch");
+    let staged = download
+        .stage(scratch.path())
+        .await
+        .expect("verified HRT1 source");
+    assert!(!staged.is_complete());
+    assert_eq!(staged.state().id(), state.id());
+    assert!(
+        staged.operations().iter().any(|operation| operation
+            .verify()
+            .expect("original")
+            .id()
+            .expect("id")
+            == id)
+    );
+
+    use base64::Engine as _;
+    let root = Ed25519Signer::from_seed(&[71; 32]).expect("account authority");
+    let seed_credential = mint_agent_root(&[71; 32]).expect("binding authority");
+    let minted = crate::hosted_runtime::root_mint::remint_stored_root(
+        &seed_credential.private_key_pem,
+        &seed_credential.subject,
+        None,
+        Some("partial-source-transfer-binding"),
+    )
+    .expect("binding session");
+    let credential = base64::engine::general_purpose::URL_SAFE
+        .decode(minted.token)
+        .expect("binding bytes");
+    let now = chrono::Utc::now().timestamp();
+    let binding = thread_api::root_attachment::sign_binding(
+        &root,
+        endpoint_signer,
+        RootAttachmentBinding {
+            format_version: 2,
+            account_id: owner.owner.as_ref().expect("account").id.clone(),
+            root_public_key: root.public_key().to_vec(),
+            subject_public_key: root.public_key().to_vec(),
+            device: Some(EndpointRef {
+                kind: EndpointKind::Device as i32,
+                public_key: endpoint_signer.public_key().to_vec(),
+            }),
+            credential_digest: blake3::hash(&credential).as_bytes().to_vec(),
+            not_before_unix_seconds: now - 1,
+            expires_at_unix_seconds: now + 300,
+            pairing_challenge: vec![92; 32],
+        },
+    )
+    .expect("signed endpoint binding");
+    let authority = repo::device_authority::DeviceAuthority {
+        owner: owner.clone(),
+        mint_roots: vec![],
+        revoked_ids: vec![],
+        revoked_mint_roots: vec![],
+        revoked_publishers: vec![],
+    };
+    let receiver = tempfile::tempdir().expect("partial receiver");
+    let receiving_repository = repo::Repository::init(receiver.path()).expect("unseeded receiver");
+    assert_eq!(
+        staged
+            .install_owned_device(
+                &receiving_repository,
+                &authority,
+                thread_api::fetch::OwnedDeviceBinding {
+                    attachment: &binding,
+                    credential: &credential
+                },
+                &format!("spool/{}", genesis.spool),
+                now,
+            )
+            .expect("install metadata and visible HRT1 closure"),
+        state.id()
+    );
+    let installed = repo::thread_replication::ThreadReplica::open(
+        receiving_repository.heddle_dir(),
+        genesis.id().expect("Thread"),
+    )
+    .expect("installed Thread");
+    assert!(
+        installed
+            .reference_projection_pending(id)
+            .expect("pending reference projection")
+    );
+    assert!(
+        !installed
+            .has_source_possession(state.id())
+            .expect("full possession")
+    );
+
+    let proof = signed
+        .verify()
+        .expect("original signature")
+        .reference_proof(&genesis)
+        .expect("typed source proof")
+        .expect("signed descriptor");
+    let closure = capture::closure(
+        &Source(repository.store()),
+        proof.descriptor,
+        &proof.scope,
+        proof.state,
+    )
+    .expect("exact original reference closure");
+    assert!(closure.blobs.contains_key(&proof.descriptor));
+    for (hash, bytes) in closure.blobs {
+        assert_eq!(
+            receiving_repository
+                .store()
+                .put_blob(&Blob::new(bytes))
+                .expect("hydrate exact reference blob"),
+            hash
+        );
+    }
+    installed
+        .complete_reference_projection(id, receiving_repository.store())
+        .expect("hydrate verified reference projection");
+    assert!(
+        !installed
+            .reference_projection_pending(id)
+            .expect("projection complete")
+    );
+    assert!(
+        !installed
+            .has_source_possession(state.id())
+            .expect("partial remains partial")
+    );
 }
 pub(super) async fn initial_base_roundtrip(
     remote: &thread_api::Remote<

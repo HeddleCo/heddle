@@ -20,7 +20,7 @@ use objects::{
 use prost::Message;
 use repo::thread_replication::ThreadReplica;
 use thread_api::{
-    publication::{SourceBudget, SourcePack},
+    publication::{SourceBudget, VisibleSourcePack},
     transport,
 };
 use tokio::io::AsyncReadExt;
@@ -31,7 +31,7 @@ const FRAME: usize = 256 * 1024;
 const BYTES: u64 = 256 * 1024 * 1024;
 const RECORDS: usize = 10_000;
 pub(super) struct Prepared {
-    pub(super) pack: SourcePack,
+    pub(super) pack: VisibleSourcePack,
     pub(super) geneses: BTreeMap<ContentHash, ThreadGenesisRecord>,
     pub(super) operations: Vec<repo::thread_replication::admission::StoredOperation>,
     guards: Vec<(ThreadReplica, i64)>,
@@ -73,10 +73,10 @@ impl DeviceRpc {
             || selection.facets != [SharedFacet::Source as i32]
             || !selection.exclude_revisions.is_empty()
             || selection.depth != 0
-            || selection.allow_partial
         {
-            bail!("Fetch requires a fresh complete exact source selection")
+            bail!("Fetch requires a fresh exact source selection")
         }
+        let allow_partial = selection.allow_partial;
         let thread = checkout::thread(&session, Some(reference))?;
         let revision = checkout::revision(&session, open.revision.as_ref())?;
         let feed = self.feed(&session)?;
@@ -87,7 +87,7 @@ impl DeviceRpc {
         let mut prepared = tokio::task::spawn_blocking(move || {
             let _slot = slot;
             admitted.check_current(&home)?;
-            let value = prepare(&admitted, thread, revision)?;
+            let value = prepare(&admitted, thread, revision, allow_partial)?;
             admitted.check_current(&home)?;
             Ok::<_, anyhow::Error>(value)
         })
@@ -103,7 +103,7 @@ impl DeviceRpc {
                     .context("selected original genesis missing")?,
             ),
             packs: prepared.pack.artifacts().to_vec(),
-            full_closure_available: true,
+            full_closure_available: prepared.pack.is_complete(),
             budget: Some(ReadBudget {
                 max_items: RECORDS as u32 + 2048,
                 max_frame_bytes: FRAME as u32,
@@ -233,7 +233,11 @@ impl DeviceRpc {
                     committed_bytes: committed,
                     ..checkpoint
                 }),
-                closure: Coverage::Complete as i32,
+                closure: if prepared.pack.is_complete() {
+                    Coverage::Complete as i32
+                } else {
+                    Coverage::Partial as i32
+                },
                 missing: vec![],
             }),
             &mut charged,
@@ -277,6 +281,7 @@ pub(super) fn prepare(
     session: &auth::Session,
     thread: ContentHash,
     revision: StateId,
+    allow_partial: bool,
 ) -> Result<Prepared> {
     let repository = repo::Repository::open(&session.spool.root)?;
     let selected = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
@@ -293,9 +298,6 @@ pub(super) fn prepare(
     else {
         bail!("selected source is unavailable to this audience")
     };
-    if !redactions.is_empty() {
-        bail!("selected source has hidden entries; use partial source projection");
-    }
     let genesis = selected.genesis()?;
     let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
     if revision == genesis.base && revision == seed.id() {
@@ -309,16 +311,20 @@ pub(super) fn prepare(
         let generation = selected.generation()?;
         let scratch = repository.heddle_dir().join("source-transfers");
         objects::fs_atomic::create_private_dir_all(&scratch)?;
-        let pack = SourcePack::prepare_with_references(
+        let pack = VisibleSourcePack::prepare(
             repository.store(),
             &state,
             &[],
+            &redactions,
             &scratch,
             SourceBudget {
                 max_objects: 100_000,
                 max_decoded_bytes: BYTES,
             },
         )?;
+        if !allow_partial && !pack.is_complete() {
+            bail!("selected source has hidden entries; request partial source projection");
+        }
         if selected.generation()? != generation {
             bail!("source Thread changed during preparation")
         }
@@ -435,16 +441,20 @@ pub(super) fn prepare(
 
     let scratch = repository.heddle_dir().join("source-transfers");
     objects::fs_atomic::create_private_dir_all(&scratch)?;
-    let pack = SourcePack::prepare_with_references(
+    let pack = VisibleSourcePack::prepare(
         repository.store(),
         &state,
         &proofs,
+        &redactions,
         &scratch,
         SourceBudget {
             max_objects: 100_000,
             max_decoded_bytes: BYTES,
         },
     )?;
+    if !allow_partial && !pack.is_complete() {
+        bail!("selected source has hidden entries; request partial source projection");
+    }
     for (replica, generation) in &guards {
         if replica.generation()? != *generation {
             bail!("source Thread changed during preparation")
