@@ -444,6 +444,9 @@ impl Validation {
             fetch_server_frame::Body::ProviderPlan(_) => Err(Error::Invalid(
                 "provider transfer requires explicit client consent",
             )),
+            fetch_server_frame::Body::ProviderInline(_) => Err(Error::Invalid(
+                "provider inline record requires an admitted provider plan",
+            )),
             fetch_server_frame::Body::Ready(_) => {
                 Err(Error::Invalid("duplicate download admission"))
             }
