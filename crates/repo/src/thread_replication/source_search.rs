@@ -20,15 +20,28 @@ pub struct IndexedSourceTarget {
 pub fn visit_indexed_targets(
     directory: &std::path::Path,
     source: super::collaboration_search::SourceSelection,
+    selected_threads: Option<&[ContentHash]>,
     mut visit: impl FnMut(IndexedSourceTarget) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let connection = crate::local_metadata::open_existing(directory)?
         .ok_or_else(|| Error::Invalid("local metadata missing".into()))?;
+    connection.execute_batch("CREATE TEMP TABLE selected_source_threads(thread BLOB PRIMARY KEY) WITHOUT ROWID")?;
+    if let Some(threads) = selected_threads {
+        let mut insert = connection.prepare("INSERT OR IGNORE INTO selected_source_threads(thread) VALUES(?1)")?;
+        for thread in threads {
+            insert.execute([thread.as_bytes().as_slice()])?;
+        }
+    }
     let mut after: Option<IndexedSourceTarget> = None;
     loop {
         let page = {
-            let mut statement = connection.prepare(
-                "SELECT DISTINCT c.thread,c.revision FROM source_search_candidates c
+            let selected_join = if selected_threads.is_some() {
+                "JOIN selected_source_threads selected ON selected.thread=c.thread"
+            } else {
+                ""
+            };
+            let query = format!(
+                "SELECT DISTINCT c.thread,c.revision FROM source_search_candidates c {selected_join}
                  JOIN operations o ON o.id=c.operation AND o.thread=c.thread
                     AND o.source_revision=c.revision AND o.status=1 AND o.facet=1
                  JOIN source_search_ready r ON r.operation=c.operation
@@ -38,7 +51,8 @@ pub fn visit_indexed_targets(
                    AND (?2 IS NULL OR c.revision=?2)
                    AND (?3 IS NULL OR (c.thread,c.revision)>(?3,?4))
                  ORDER BY c.thread,c.revision LIMIT 256",
-            )?;
+            );
+            let mut statement = connection.prepare(&query)?;
             let exact = match source {
                 super::collaboration_search::SourceSelection::Exact(id) => Some(id),
                 _ => None,
@@ -86,6 +100,7 @@ CREATE TABLE IF NOT EXISTS source_search_candidates(
  CHECK(length(path)<=4096 AND length(symbol_id)<=4096 AND length(symbol_name)<=4096)
 );
 CREATE INDEX IF NOT EXISTS source_search_candidates_operation ON source_search_candidates(operation);
+CREATE INDEX IF NOT EXISTS source_search_candidates_target ON source_search_candidates(thread,revision);
 CREATE TABLE IF NOT EXISTS source_search_candidate_leaves(
  candidate BLOB NOT NULL CHECK(length(candidate)=32),
  leaf BLOB NOT NULL CHECK(length(leaf)=32),
@@ -338,11 +353,18 @@ mod tests {
             &[document("hidden.rs"), document("visible.rs")], true, false)
             .expect("indexed source");
         let mut indexed = Vec::new();
-        visit_indexed_targets(&directory, SourceSelection::Retained, |target| {
+        visit_indexed_targets(&directory, SourceSelection::Retained, Some(&[thread]), |target| {
             indexed.push(target);
             Ok(())
         }).expect("indexed targets");
         assert_eq!(indexed.len(), 1);
+        let mut unrelated = Vec::new();
+        visit_indexed_targets(&directory, SourceSelection::Retained,
+            Some(&[ContentHash::from_bytes([7;32])]), |target| {
+                unrelated.push(target);
+                Ok(())
+            }).expect("selected unrelated Thread");
+        assert!(unrelated.is_empty(), "Thread selector constrains target discovery in SQL");
         let admitted = vec![super::super::collaboration_search::AdmittedSourceTarget {
             thread, revision, denied_leaves: vec![ContentHash::from_bytes([9;32])],
         }];

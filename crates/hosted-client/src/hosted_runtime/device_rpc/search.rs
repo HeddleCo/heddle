@@ -1,7 +1,7 @@
 //! Finite indexed local search; result frames never retain a SQLite transaction.
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
     time::Duration,
 };
 
@@ -10,6 +10,17 @@ use api::heddle::api::{v1alpha1::CallFailureCode, v2alpha1::*};
 use iroh::endpoint::SendStream;
 use objects::store::ObjectStore;
 use prost::Message;
+
+/// An abandoned stream must stop its blocking search worker and release the
+/// content-work permit. `spawn_blocking` cannot be aborted once it starts, so
+/// each bounded preparation batch checks this latch before more work.
+struct CancelSearchOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelSearchOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
 struct SearchSelection {
     spools: BTreeSet<uuid::Uuid>,
@@ -208,6 +219,8 @@ impl DeviceRpc {
                 .context("device query capacity exhausted")?;
             let this = self.clone();
             let worker_session = session.clone();
+            let cancellation = Arc::new(AtomicBool::new(false));
+            let _cancel_on_drop = CancelSearchOnDrop(cancellation.clone());
             let worker = tokio::task::spawn_blocking(move || -> Result<Vec<SearchEvent>> {
                 let _permit = permit;
                 worker_session.check_current(&this.home)?;
@@ -312,10 +325,20 @@ impl DeviceRpc {
                         let Some(source) = source_filters[index] else { continue; };
                         let facts = worker_session.facts(Some(&spool.capability_path))?;
                         let repository = repo::Repository::open(&spool.root)?;
+                        let selected_threads = selection.threads.get(&spool.id)
+                            .map(|threads| threads.iter().map(|id| {
+                                let bytes: [u8;32] = id.as_slice().try_into()
+                                    .context("selected Search Thread identity must be 32 bytes")?;
+                                Ok(objects::object::ContentHash::from_bytes(bytes))
+                            }).collect::<Result<Vec<_>>>())
+                            .transpose()?;
                         repo::thread_replication::source_search::visit_indexed_targets(
                             &spool.heddle_dir,
                             source,
+                            selected_threads.as_deref(),
                             |candidate| {
+                                ensure!(!cancellation.load(Ordering::Acquire), "search query canceled");
+                                worker_session.check_clock()?;
                                 if selection.threads.get(&spool.id).is_some_and(|threads| !threads.contains(candidate.thread.as_bytes().as_slice())) {
                                     return Ok(());
                                 }
