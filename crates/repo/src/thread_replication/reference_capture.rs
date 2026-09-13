@@ -245,9 +245,7 @@ impl ThreadReplica {
                     .as_ref()
                     .is_some_and(|previous| previous != &resolved)
                 {
-                    return Err(err(
-                        "reference has concurrent resolutions at this source revision",
-                    ));
+                    return Err(Error::ReferenceProjectionAmbiguous);
                 }
                 result = Some(resolved);
             }

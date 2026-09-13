@@ -1,4 +1,6 @@
 //! Shared push views over indexed collaboration records and original causal proofs.
+use std::collections::{BTreeMap, HashMap};
+
 use anyhow::{Context, Result, bail, ensure};
 use api::heddle::api::v2alpha1::*;
 use objects::object::{
@@ -31,12 +33,14 @@ impl DeviceRpc {
         ensure!(
             request.anchors.len() <= 128
                 && request.contexts.len() <= 128
-                && request.discussions.len() <= 128,
+                && request.discussions.len() <= 128
+                && request.source_views.len() <= 64,
             "collaboration selector count exceeds budget"
         );
         for reference in request.contexts.iter().chain(&request.discussions) {
             super::checkout::same_spool(session, reference.spool.as_ref())?;
         }
+        self.source_view_selections(session, &request.source_views)?;
         let mut query = request.clone();
         query.observe = None;
         if let Some(page) = query.page.as_mut() {
@@ -97,7 +101,9 @@ impl DeviceRpc {
             .as_ref()
             .map(thread_api::collaboration::annotation_query)
             .transpose()?;
+        let source_views = self.source_view_selections(session, &request.source_views)?;
         let mut events = Vec::new();
+        let mut resolutions = BTreeMap::new();
         let mut exhausted = false;
         let mut work = 0;
         let mut candidates = std::collections::VecDeque::new();
@@ -154,6 +160,7 @@ impl DeviceRpc {
                 };
                 filters.is_empty() || filters.iter().any(|record| record.id == id)
             };
+            let mut targets = Vec::new();
             let payload = match row.position.kind {
                 0 | 1 => {
                     if query.is_some() {
@@ -207,6 +214,9 @@ impl DeviceRpc {
                         thread_api::collaboration::anchor_ref(&resolved_anchor, &anchor_scope)?;
                     if !anchor_matches(request, &anchor) {
                         continue;
+                    }
+                    if row.position.kind == 0 {
+                        collect_targets(&resolved_anchor, &[], &mut targets);
                     }
                     if row.position.kind == 0 {
                         let (audience, label) =
@@ -307,6 +317,7 @@ impl DeviceRpc {
                     if !anchor_matches(request, &anchor) {
                         continue;
                     }
+                    collect_targets(&record.anchor, &record.tags, &mut targets);
                     let heads = replica.collaboration_heads(&Record {
                         kind: 2,
                         id: record.id.to_string(),
@@ -454,6 +465,38 @@ impl DeviceRpc {
                 ),
                 event,
             ));
+            for target in targets {
+                let resolution = super::collaboration_targets::resolution_for(
+                    &repository,
+                    session,
+                    &replica,
+                    &target,
+                    source_views.get(&replica.thread_id()).copied(),
+                )?;
+                let key = resolution
+                    .key
+                    .as_ref()
+                    .context("source target key required")?;
+                let encoded = key.encode_to_vec();
+                resolutions.insert(encoded, resolution);
+            }
+        }
+        for (key, resolution) in resolutions {
+            ensure!(
+                events.len() < budget.max_items.saturating_sub(1) as usize,
+                "source target events exceed collaboration response budget; reduce page size"
+            );
+            let event = CollaborationEvent {
+                frame: None,
+                payload: Some(Payload::SourceTarget(SourceTargetResolutionEvent {
+                    change: Some(source_target_resolution_event::Change::Upsert(resolution)),
+                })),
+            };
+            ensure!(
+                event.encoded_len() <= budget.max_frame_bytes as usize / 2,
+                "source target event exceeds frame budget"
+            );
+            events.push((format!("target:{}", hex::encode(key)), event));
         }
         if collaboration::generation(&session.spool.heddle_dir)? != generation {
             return Err(super::stream::SnapshotChanged.into());
@@ -471,6 +514,111 @@ impl DeviceRpc {
             ..Default::default()
         };
         Ok((events, page, generation))
+    }
+}
+impl DeviceRpc {
+    fn source_view_selections(
+        &self,
+        session: &Session,
+        views: &[SourceTargetView],
+    ) -> Result<HashMap<ContentHash, objects::object::StateId>> {
+        ensure!(
+            views.len() <= 64,
+            "source view selector count exceeds budget"
+        );
+        let mut selected = HashMap::new();
+        for view in views {
+            super::checkout::same_spool(
+                session,
+                view.thread.as_ref().and_then(|t| t.spool.as_ref()),
+            )?;
+            let thread = view
+                .thread
+                .as_ref()
+                .context("source view Thread required")?;
+            let id = thread
+                .id
+                .as_ref()
+                .context("source view Thread ID required")?;
+            let thread_id = ContentHash::from_bytes(id.value.as_slice().try_into()?);
+            let state = super::checkout::revision(session, view.revision.as_ref())?;
+            let replica = ThreadReplica::open(&session.spool.heddle_dir, thread_id)?;
+            let genesis = replica.genesis()?;
+            ensure!(
+                genesis.spool == session.spool.id.to_string(),
+                "source view belongs to another Spool"
+            );
+            ensure!(
+                state == genesis.base || replica.accepted_source_revision(state)?.is_some(),
+                "source view revision is not admitted in selected Thread"
+            );
+            ensure!(
+                selected.insert(thread_id, state).is_none(),
+                "source view Thread selected more than once"
+            );
+        }
+        Ok(selected)
+    }
+}
+fn collect_targets(
+    anchor: &objects::object::CollaborationAnchor,
+    tags: &[objects::object::AnnotationTag],
+    out: &mut Vec<objects::object::source_target::SourceTargetReference>,
+) {
+    use objects::object::{AnnotationTag, CollaborationAnchor};
+    if let CollaborationAnchor::Source { source } = anchor {
+        if let Some(target) = &source.target {
+            out.push(target.clone());
+        }
+    }
+    for tag in tags {
+        match tag {
+            AnnotationTag::Source { target }
+            | AnnotationTag::Symbol {
+                target: Some(target),
+                ..
+            } => {
+                if let Some(reference) = &target.source.target {
+                    out.push(reference.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+#[cfg(test)]
+mod source_target_tests {
+    use objects::object::{
+        CollaborationAnchor as NativeAnchor, CollaborationRevision, CollaborationSourceAnchor,
+        StateId,
+        source_target::{SourceTargetBinding, SourceTargetReference},
+    };
+
+    use super::*;
+
+    #[test]
+    fn original_anchor_collects_target_without_changing_coordinates() {
+        let reference = SourceTargetReference {
+            target: ContentHash::from_bytes([9; 32]),
+            binding: SourceTargetBinding::ViewedThread,
+        };
+        let anchor = NativeAnchor::Source {
+            source: CollaborationSourceAnchor {
+                revision: CollaborationRevision::State {
+                    state_id: StateId::from_bytes([3; 32]),
+                },
+                path: "original/name.rs".into(),
+                symbol_id: String::new(),
+                start_line: Some(4),
+                end_line: Some(5),
+                target: Some(reference.clone()),
+            },
+        };
+        let original = anchor.clone();
+        let mut targets = Vec::new();
+        collect_targets(&anchor, &[], &mut targets);
+        assert_eq!(targets, vec![reference]);
+        assert_eq!(anchor, original);
     }
 }
 fn anchor_matches(request: &ObserveCollaborationRequest, anchor: &CollaborationAnchor) -> bool {

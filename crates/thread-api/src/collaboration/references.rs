@@ -279,7 +279,7 @@ pub(super) fn source_target(
         .map_err(|_| Error::Protocol("invalid source target binding"))?;
     Ok(target)
 }
-pub(super) fn source_target_ref(
+pub fn source_target_ref(
     value: &heddle_object_model::object::source_target::SourceTargetReference,
 ) -> SourceTargetReference {
     use heddle_object_model::object::{

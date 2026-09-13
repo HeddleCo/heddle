@@ -74,6 +74,8 @@ pub enum Error {
     SignedOperation(#[from] crypto::thread_operation::Error),
     #[error("reference projection unavailable until descriptor hydration")]
     ReferenceProjectionPending,
+    #[error("reference has concurrent resolutions at this source revision")]
+    ReferenceProjectionAmbiguous,
     #[error("{0}")]
     Invalid(String),
 }

@@ -10,7 +10,7 @@ use heddle_object_model::object::{
     CollaborationOperationEnvelope, ContentHash, ContextRevision, DiscussionRecordId,
     thread_replication::{OPERATION_FORMAT, ThreadOperation, ThreadOperationBody},
 };
-pub use references::{anchor, anchor_ref, audience, mention, mention_ref, visibility};
+pub use references::{anchor, anchor_ref, audience, mention, mention_ref, source_target_ref, visibility};
 pub use tags::{
     annotation_query, annotation_source, annotation_source_ref, annotation_tag, annotation_tag_ref,
     annotation_tags, annotation_value, annotation_value_ref,

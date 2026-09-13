@@ -573,6 +573,15 @@ impl DeviceRpc {
                             .and_then(|pages| pages.collaboration.clone()),
                         include_history: true,
                         include_operations: request.include_operations,
+                        source_views: request
+                            .source
+                            .as_ref()
+                            .map(|source| SourceTargetView {
+                                thread: Some(reference.clone()),
+                                revision: Some(source.clone()),
+                            })
+                            .into_iter()
+                            .collect(),
                         ..Default::default()
                     };
                     let (rows, page, _) = self.collaboration_snapshot_for_thread(
@@ -595,6 +604,9 @@ impl DeviceRpc {
                             }
                             collaboration_event::Payload::Operation(value) => {
                                 thread_event::Payload::SignedOperation(value)
+                            }
+                            collaboration_event::Payload::SourceTarget(value) => {
+                                thread_event::Payload::SourceTarget(value)
                             }
                             _ => bail!("unexpected collaboration snapshot control"),
                         };
