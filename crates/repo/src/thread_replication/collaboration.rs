@@ -186,7 +186,7 @@ impl ThreadReplica {
                 return Err(invalid("extracted context already exists"));
             }
         }
-        let admission = self.receive_in(&tx, signed, &operation, store, false, None)?;
+        let admission = self.receive_in(&tx, signed, &operation, store, false, None, false)?;
         if admission != Admission::Accepted {
             return Err(invalid("collaboration requires admitted causal parents"));
         }

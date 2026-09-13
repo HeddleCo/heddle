@@ -129,7 +129,14 @@ pub(super) fn project_for(
             coverage = Coverage::Unavailable;
             return Ok(());
         }
-        match replica.resolve_source_target(&repository, reference, viewed)? {
+        let resolution = match replica.resolve_source_target(&repository, reference, viewed) {
+            Err(repo::thread_replication::Error::ReferenceProjectionPending) => {
+                coverage = Coverage::Unavailable;
+                return Ok(());
+            }
+            other => other?,
+        };
+        match resolution {
             Some(value)
                 if value.file.status == ResolutionStatus::Resolved
                     && value.target.status == ResolutionStatus::Resolved =>

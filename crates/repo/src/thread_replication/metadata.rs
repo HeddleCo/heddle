@@ -217,7 +217,7 @@ impl ThreadReplica {
         if !matches!(signed.verify()?.body, ThreadOperationBody::Metadata(_)) {
             return Err(Error::Invalid("control CAS requires metadata".into()));
         }
-        self.receive_inner(signed, store, authorize, true, None)
+        self.receive_inner(signed, store, authorize, true, None, false)
     }
     pub fn metadata_frontier(
         &self,

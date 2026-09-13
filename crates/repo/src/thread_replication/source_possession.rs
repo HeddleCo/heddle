@@ -48,6 +48,12 @@ impl ThreadReplica {
                 "source possession requires an admitted source or exact genesis base".into(),
             ));
         }
+        let references_pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reference_projection_pending WHERE thread=?1 AND revision=?2)",
+            params![self.thread.as_bytes(), revision.as_bytes()], |row| row.get(0))?;
+        if references_pending {
+            return Err(Error::ReferenceProjectionPending);
+        }
         let inserted = tx.execute(
             "INSERT OR IGNORE INTO thread_source_availability(thread,revision) VALUES(?1,?2)",
             params![self.thread.as_bytes(), revision.as_bytes()],
@@ -90,6 +96,7 @@ impl ThreadReplica {
             store,
             operation.local_integration()?.is_some(),
             None,
+            false,
         )?;
         if admission != Admission::Accepted {
             return Err(Error::Invalid("prepared source did not settle".into()));

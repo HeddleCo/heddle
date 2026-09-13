@@ -14,6 +14,11 @@ CREATE INDEX IF NOT EXISTS thread_source_revisions_revision ON thread_source_rev
 CREATE TABLE IF NOT EXISTS thread_source_availability(
  thread BLOB NOT NULL REFERENCES threads(id) ON DELETE CASCADE,revision BLOB NOT NULL,
  PRIMARY KEY(thread,revision));
+CREATE TABLE IF NOT EXISTS reference_projection_pending(
+ thread BLOB NOT NULL, operation BLOB NOT NULL, revision BLOB NOT NULL,
+ PRIMARY KEY(thread,operation));
+CREATE INDEX IF NOT EXISTS reference_projection_pending_revision
+ ON reference_projection_pending(thread,revision);
 CREATE INDEX IF NOT EXISTS thread_source_availability_revision ON thread_source_availability(revision,thread);
 CREATE TABLE IF NOT EXISTS thread_source_counts(
  thread BLOB PRIMARY KEY, count INTEGER NOT NULL CHECK(count>=0));

@@ -86,12 +86,97 @@ fn files(store: &impl ObjectStore, root: ContentHash) -> Result<BTreeMap<String,
     Ok(result)
 }
 impl ThreadReplica {
+    /// Pending signed source metadata has no trustworthy local reference
+    /// projection. A reader reports unavailable until the exact descriptor
+    /// closure has been validated and attached.
+    pub fn reference_projection_pending(&self, operation: ContentHash) -> Result<bool> {
+        Ok(self.connect()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reference_projection_pending WHERE thread=?1 AND operation=?2)",
+            params![self.thread.as_bytes(), operation.as_bytes()],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn reference_projection_pending_for_revision(&self, revision: StateId) -> Result<bool> {
+        Ok(self.connect()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reference_projection_pending WHERE thread=?1 AND revision=?2)",
+            params![self.thread.as_bytes(), revision.as_bytes()],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Hydrate an admitted source's original descriptor without changing its
+    /// signed operation, attribution, or acceptance. Replays are idempotent.
+    pub fn complete_reference_projection(
+        &self,
+        id: ContentHash,
+        store: &impl ObjectStore,
+    ) -> Result<()> {
+        let Some((signed, status)) = self.operation(&id)? else {
+            return Err(err("source operation is absent"));
+        };
+        if status != super::Admission::Accepted {
+            return Err(err("reference projection requires accepted source"));
+        }
+        if !self.reference_projection_pending(id)? {
+            return Ok(());
+        }
+        let operation = signed.verify()?;
+        if operation.source_result()?.is_none() || operation.thread != self.thread {
+            return Err(err("reference projection requires exact signed source"));
+        }
+        self.validate_reference_capture(&operation, store)?;
+        let mut connection = self.connect()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM reference_projection_pending p JOIN operations o ON o.id=p.operation AND o.thread=p.thread AND o.status=1 WHERE p.thread=?1 AND p.operation=?2)",
+            params![self.thread.as_bytes(), id.as_bytes()],
+            |row| row.get(0),
+        )?;
+        if pending {
+            self.publish_capture_references(&tx, &operation, id, store)?;
+            tx.execute(
+                "DELETE FROM reference_projection_pending WHERE thread=?1 AND operation=?2",
+                params![self.thread.as_bytes(), id.as_bytes()],
+            )?;
+            tx.execute(
+                "UPDATE threads SET generation=generation+1 WHERE id=?1",
+                [self.thread.as_bytes()],
+            )?;
+        }
+        tx.commit()?;
+        if pending {
+            self.notify_committed()?;
+        }
+        Ok(())
+    }
+
     pub(super) fn validate_reference_capture(
         &self,
         operation: &ThreadOperation,
         store: &impl ObjectStore,
     ) -> Result<()> {
         let genesis = self.genesis()?;
+        if let Some(state) = operation.source_state()? {
+            let connection = self.connect()?;
+            for parent in &state.parents {
+                let parent_thread = if *parent == genesis.base {
+                    genesis.parent.unwrap_or(self.thread)
+                } else {
+                    self.thread
+                };
+                let pending: bool = connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM reference_projection_pending WHERE thread=?1 AND revision=?2)",
+                    params![parent_thread.as_bytes(), parent.as_bytes()],
+                    |row| row.get(0),
+                )?;
+                if pending {
+                    return Err(err(
+                        "source evolution requires hydrated inherited reference projection",
+                    ));
+                }
+            }
+        }
         if let Some(proof) = operation.reference_proof(&genesis)? {
             capture::closure(&Source(store), proof.descriptor, &proof.scope, proof.state)?;
         } else if let Some(state) = operation.source_state()?
@@ -398,9 +483,22 @@ impl ThreadReplica {
         state: StateId,
         store: &impl ObjectStore,
     ) -> Result<Vec<ReferenceClosure>> {
+        if self.reference_projection_pending_for_revision(state)? {
+            return Err(Error::ReferenceProjectionPending);
+        }
         let connection = self.connect()?;
         let genesis = self.genesis()?;
         let (owner, bytes) = descriptor_rows_at(&connection, self.thread, state)?;
+        if owner != self.thread {
+            let pending: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM reference_projection_pending WHERE thread=?1 AND revision=?2)",
+                params![owner.as_bytes(), state.as_bytes()],
+                |row| row.get(0),
+            )?;
+            if pending {
+                return Err(Error::ReferenceProjectionPending);
+            }
+        }
         let scope = CollaborationScope {
             spool: genesis.spool.parse().map_err(err)?,
             thread: Some(owner),
@@ -538,9 +636,12 @@ impl ThreadReplica {
                 )?;
             }
         }
-        // Only an unambiguous source head gets a default Thread projection.
-        let count:i64=tx.query_row("SELECT count(*) FROM operations o WHERE o.thread=?1 AND o.facet=1 AND o.status=1 AND NOT EXISTS(SELECT 1 FROM parents p JOIN operations child ON child.id=p.child WHERE p.parent=o.id AND child.status=1)",[self.thread.as_bytes()],|r|r.get(0))?;
-        if count == 1 {
+        // Hydrating an old accepted source must never replace the current
+        // Thread default root. Historical captures remain indexed by revision.
+        let heads: Vec<Vec<u8>> = tx.prepare("SELECT o.id FROM operations o WHERE o.thread=?1 AND o.facet=1 AND o.status=1 AND NOT EXISTS(SELECT 1 FROM parents p JOIN operations child ON child.id=p.child AND child.thread=o.thread AND child.status=1) ORDER BY o.id LIMIT 2")?
+            .query_map([self.thread.as_bytes()], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        if heads.len() == 1 && heads[0] == id.as_bytes() {
             let expected = crate::reference_projection::root(tx, &scope).map_err(err)?;
             crate::reference_projection::publish_root(
                 tx,
@@ -549,7 +650,7 @@ impl ThreadReplica {
                 closure.snapshot.targets,
             )
             .map_err(err)?;
-        } else {
+        } else if heads.iter().any(|head| head == id.as_bytes()) {
             tx.execute(
                 "DELETE FROM reference_roots WHERE spool=?1 AND thread=?2",
                 params![scope.spool.as_bytes(), self.thread.as_bytes()],

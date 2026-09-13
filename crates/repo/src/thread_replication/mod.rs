@@ -72,6 +72,8 @@ pub enum Error {
     Signature(#[from] crypto::SignerError),
     #[error(transparent)]
     SignedOperation(#[from] crypto::thread_operation::Error),
+    #[error("reference projection unavailable until descriptor hydration")]
+    ReferenceProjectionPending,
     #[error("{0}")]
     Invalid(String),
 }
@@ -544,7 +546,7 @@ impl ThreadReplica {
         store: &impl ObjectStore,
         authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
     ) -> Result<Admission> {
-        self.receive_inner(signed, store, authorize, false, None)
+        self.receive_inner(signed, store, authorize, false, None, false)
     }
     /// Execute local landing only against the exact currently observed target
     /// frontier. Historical replication uses `receive` and preserves branches.
@@ -559,7 +561,21 @@ impl ThreadReplica {
                 "local integration CAS requires a local receipt".into(),
             ));
         }
-        self.receive_inner(signed, store, authorize, true, None)
+        self.receive_inner(signed, store, authorize, true, None, false)
+    }
+    /// Admit an original signed source whose referenced filename/anchor closure
+    /// was deliberately withheld by a partial transfer. This preserves its
+    /// authority and causal history without attesting full source possession or
+    /// publishing an empty reference projection. Complete the exact descriptor
+    /// later with `complete_reference_projection`.
+    pub fn receive_source_metadata(
+        &self,
+        signed: &SignedOperation,
+        store: &impl ObjectStore,
+        authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
+        authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
+    ) -> Result<Admission> {
+        self.receive_inner(signed, store, authorize, false, authority_receipt, true)
     }
     fn receive_inner(
         &self,
@@ -568,6 +584,7 @@ impl ThreadReplica {
         authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
         compare_frontier: bool,
         authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
+        defer_references: bool,
     ) -> Result<Admission> {
         let operation = signed.verify()?;
         if operation.thread != self.thread {
@@ -579,7 +596,15 @@ impl ThreadReplica {
             self.require_authority_admission(signed, receipt)?;
         }
         authorize(&operation)?;
-        self.validate_reference_capture(&operation, store)?;
+        if defer_references {
+            if operation.source_result()?.is_none() {
+                return Err(Error::Invalid("source metadata operation required".into()));
+            }
+        }
+        let defer_this = defer_references && operation.reference_proof(&self.genesis()?)?.is_some();
+        if !defer_this {
+            self.validate_reference_capture(&operation, store)?;
+        }
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let admission = self.receive_in(
@@ -589,9 +614,16 @@ impl ThreadReplica {
             store,
             compare_frontier,
             authority_receipt,
+            defer_this,
         )?;
         tx.commit()?;
         self.notify_committed()?;
+        if !defer_this
+            && admission == Admission::Accepted
+            && self.reference_projection_pending(operation.id()?)?
+        {
+            self.complete_reference_projection(operation.id()?, store)?;
+        }
         Ok(admission)
     }
     fn receive_in(
@@ -602,6 +634,7 @@ impl ThreadReplica {
         store: &impl ObjectStore,
         compare_frontier: bool,
         authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
+        defer_references: bool,
     ) -> Result<Admission> {
         let id = operation.id()?;
         let already_accepted: bool = tx.query_row(
@@ -651,6 +684,12 @@ impl ThreadReplica {
         };
         let inserted = tx.execute("INSERT OR IGNORE INTO operations(id,thread,facet,canonical,signature,source_revision) VALUES(?1,?2,?3,?4,?5,?6)",
             params![id.as_bytes(), self.thread.as_bytes(), facet_number(operation.facet()), signed.canonical, signed.signature, source_revision.map(|id| id.as_bytes().to_vec())])?;
+        if defer_references && !already_accepted {
+            let revision = source_revision
+                .ok_or_else(|| Error::Invalid("source metadata operation required".into()))?;
+            tx.execute("INSERT OR IGNORE INTO reference_projection_pending(thread,operation,revision) VALUES(?1,?2,?3)",
+                params![self.thread.as_bytes(), id.as_bytes(), revision.as_bytes()])?;
+        }
         // The host's original-author gate ran before any immutable bytes were
         // installed. Persist its successful admission in this same transaction;
         // missing causal parents may arrive after the original credential expires.
@@ -813,7 +852,11 @@ impl ThreadReplica {
                             "UPDATE operations SET status=1 WHERE id=?1",
                             [id.as_bytes()],
                         )?;
-                        self.publish_capture_references(tx, &operation, id, store)?;
+                        let deferred: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM reference_projection_pending WHERE thread=?1 AND operation=?2)",
+                            params![self.thread.as_bytes(), id.as_bytes()], |row| row.get(0))?;
+                        if !deferred {
+                            self.publish_capture_references(tx, &operation, id, store)?;
+                        }
                     }
                     Err(error) => {
                         tx.execute(

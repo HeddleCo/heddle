@@ -144,6 +144,169 @@ fn captured(
 }
 
 #[test]
+fn partial_source_keeps_signed_history_without_publishing_hidden_reference_descriptors() {
+    let (_origin_dir, origin, source_thread, base, _target) = fixture();
+    let next = state(&origin, base.id(), "main.rs", "one\ntwo\nthree\nfour\n");
+    let (signed, _) = captured(&origin, &source_thread, "tracked", &next);
+    let operation = signed.verify().expect("original source");
+    let id = operation.id().expect("operation id");
+    let receiver_dir = tempfile::tempdir().expect("receiver");
+    let receiver = Repository::init_default(receiver_dir.path()).expect("receiver repo");
+    let installed = ThreadReplica::create(
+        receiver.heddle_dir(),
+        &source_thread.signed_genesis().expect("original genesis"),
+    )
+    .expect("same Thread identity");
+    assert!(
+        installed
+            .receive(&signed, receiver.store(), |_| Ok(()))
+            .is_err(),
+        "full admission requires missing descriptor closure"
+    );
+    assert_eq!(
+        installed
+            .receive_source_metadata(&signed, receiver.store(), None, |_| Ok(()))
+            .expect("signed metadata admission"),
+        super::super::Admission::Accepted
+    );
+    assert!(
+        installed
+            .reference_projection_pending(id)
+            .expect("pending marker")
+    );
+    assert!(
+        !installed
+            .has_source_possession(next.id())
+            .expect("no full possession")
+    );
+    assert!(matches!(
+        installed.reference_snapshots_at(next.id(), receiver.store()),
+        Err(Error::ReferenceProjectionPending)
+    ));
+    assert!(
+        installed
+            .complete_reference_projection(id, receiver.store())
+            .is_err(),
+        "missing descriptor remains unavailable"
+    );
+    installed
+        .complete_reference_projection(id, origin.store())
+        .expect("exact original descriptor hydrates projection");
+    installed
+        .complete_reference_projection(id, origin.store())
+        .expect("completion replay is idempotent");
+    assert!(
+        !installed
+            .reference_projection_pending(id)
+            .expect("completed marker")
+    );
+    assert_eq!(
+        installed
+            .reference_snapshots_at(next.id(), origin.store())
+            .expect("projected source")
+            .len(),
+        1
+    );
+    let newer = state(&origin, next.id(), "main.rs", "one\ntwo\nthree\nupdated\n");
+    let (newer_original, _) = captured(&origin, &source_thread, "tracked", &newer);
+    let mut newer_operation = newer_original.verify().expect("newer original");
+    newer_operation.parents.insert(id);
+    let signer = origin
+        .native_original_owner_signer(&source_thread)
+        .expect("local owner signer");
+    let newer_signed = SignedOperation::sign(&newer_operation, &signer).expect("causal successor");
+    assert_eq!(
+        installed
+            .receive(&newer_signed, origin.store(), |_| Ok(()))
+            .expect("newer complete source"),
+        super::super::Admission::Accepted
+    );
+    let scope = installed
+        .reference_scope()
+        .expect("receiver reference scope");
+    let current_root =
+        crate::reference_projection::root(&installed.connect().expect("receiver db"), &scope)
+            .expect("current projection");
+    assert!(
+        current_root.is_some(),
+        "newer complete head projects references"
+    );
+    installed
+        .connect()
+        .expect("receiver db")
+        .execute(
+            "INSERT INTO reference_projection_pending(thread,operation,revision) VALUES(?1,?2,?3)",
+            params![
+                installed.thread.as_bytes(),
+                id.as_bytes(),
+                next.id().as_bytes()
+            ],
+        )
+        .expect("simulate delayed historical projection replay");
+    installed
+        .complete_reference_projection(id, origin.store())
+        .expect("historical projection replay");
+    assert_eq!(
+        crate::reference_projection::root(&installed.connect().expect("receiver db"), &scope)
+            .expect("current projection after old hydration"),
+        current_root,
+        "late historical completion cannot replace the newer head root"
+    );
+}
+
+#[test]
+fn pending_historical_reference_does_not_block_independent_complete_source() {
+    let (_origin_dir, origin, thread, base, _) = fixture();
+    let hidden = state(&origin, base.id(), "main.rs", "private branch\n");
+    let (hidden_original, _) = captured(&origin, &thread, "tracked", &hidden);
+    let visible = state(&origin, base.id(), "main.rs", "independent branch\n");
+    let (visible_original, _) = captured(&origin, &thread, "tracked", &visible);
+    let receiver_dir = tempfile::tempdir().expect("receiver");
+    let receiver = Repository::init_default(receiver_dir.path()).expect("receiver repo");
+    let installed = ThreadReplica::create(
+        receiver.heddle_dir(),
+        &thread.signed_genesis().expect("genesis"),
+    )
+    .expect("same Thread");
+    assert_eq!(
+        installed
+            .receive_source_metadata(&hidden_original, receiver.store(), None, |_| Ok(()))
+            .expect("metadata admission"),
+        super::super::Admission::Accepted
+    );
+    assert_eq!(
+        installed
+            .receive(&visible_original, origin.store(), |_| Ok(()))
+            .expect("independent complete admission"),
+        super::super::Admission::Accepted
+    );
+    installed
+        .record_source_possession(visible.id())
+        .expect("complete independent revision remains usable");
+    assert!(
+        installed
+            .has_source_possession(visible.id())
+            .expect("complete possession")
+    );
+    assert!(
+        !installed
+            .has_source_possession(hidden.id())
+            .expect("withheld possession")
+    );
+    assert!(
+        installed
+            .reference_projection_pending(
+                hidden_original
+                    .verify()
+                    .expect("original")
+                    .id()
+                    .expect("id")
+            )
+            .expect("historical pending remains")
+    );
+}
+
+#[test]
 fn production_capture_tracks_shared_lines_and_fork_moves_independently() {
     let (_directory, repo, replica, base, target) = fixture();
     let first = state(&repo, base.id(), "main.rs", "zero\none\ntwo\nthree\n");
