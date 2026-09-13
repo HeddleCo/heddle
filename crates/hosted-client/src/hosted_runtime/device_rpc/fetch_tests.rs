@@ -185,6 +185,54 @@ pub(super) async fn partial_roundtrip(
         capture.source_targets.is_some(),
         "original source commits its reference descriptor"
     );
+    let observed_spool = replica.genesis().expect("target genesis").spool;
+    let mut target_view = remote
+        .observe::<thread_api::rpc::CollaborationServiceObserveCollaboration>(
+            ObserveCollaborationRequest {
+                spool: Some(SpoolRef {
+                    id: observed_spool.clone(),
+                }),
+                source_views: vec![SourceTargetView {
+                    thread: Some(ThreadRef {
+                        spool: Some(SpoolRef {
+                            id: observed_spool.clone(),
+                        }),
+                        id: Some(ThreadId {
+                            value: replica.thread_id().as_bytes().to_vec(),
+                        }),
+                    }),
+                    revision: Some(RevisionRef {
+                        spool: Some(SpoolRef {
+                            id: observed_spool.clone(),
+                        }),
+                        revision: Some(revision_ref::Revision::State(
+                            api::heddle::api::v1alpha1::StateId {
+                                value: state.id().as_bytes().to_vec(),
+                            },
+                        )),
+                    }),
+                }],
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("device collaboration target observation");
+    let target_batch = target_view
+        .next_commit()
+        .await
+        .expect("target stream")
+        .expect("target snapshot");
+    assert!(target_batch.changes.iter().any(|change| matches!(change,
+        collaboration_event::Payload::SourceTarget(value)
+            if matches!(&value.change, Some(source_target_resolution_event::Change::Upsert(resolution))
+                if resolution.status == source_target_resolution::Status::Resolved as i32
+                    && resolution.computed_for.as_ref().and_then(|v|v.revision.as_ref())
+                        == Some(&revision_ref::Revision::State(api::heddle::api::v1alpha1::StateId {
+                            value: state.id().as_bytes().to_vec(),
+                        }))
+                    && resolution.location.as_ref().is_some_and(|location|location.path == "visible.txt"))
+    )), "device must emit exact target projection for signed original");
     assert_eq!(
         capture
             .visibility
