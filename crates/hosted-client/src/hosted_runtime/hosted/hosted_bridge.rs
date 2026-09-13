@@ -529,7 +529,7 @@ fn now_unix_millis() -> Result<i64> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         net::Ipv4Addr,
         sync::{
@@ -1035,6 +1035,3 @@ mod tests {
         client.close().await;
     }
 }
-
-#[cfg(test)]
-pub(crate) use tests::{PinHeddleHome, TEST_WEFT_SERVER, WarmBridgeFixture};

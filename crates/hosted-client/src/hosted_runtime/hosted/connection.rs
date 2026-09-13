@@ -1026,12 +1026,13 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn connect_via_netd_fails_when_the_bridge_socket_is_missing() {
         let _env_guard = config::credentials::lock_test_env();
         let home = tempfile::TempDir::new().unwrap();
-        let _pin = super::hosted_bridge::PinHeddleHome::new(home.path());
+        let _pin = super::hosted_bridge::tests::PinHeddleHome::new(home.path());
         let error = HostedConnection::connect_via_netd(
-            super::hosted_bridge::TEST_WEFT_SERVER,
+            super::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
         )
         .await
@@ -1041,12 +1042,13 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn connect_via_netd_reuses_warm_weft_and_proxied_streams() {
         let _env_guard = config::credentials::lock_test_env();
-        let fixture = super::hosted_bridge::WarmBridgeFixture::start().await;
-        let _pin = super::hosted_bridge::PinHeddleHome::new(fixture.home.path());
+        let fixture = super::hosted_bridge::tests::WarmBridgeFixture::start().await;
+        let _pin = super::hosted_bridge::tests::PinHeddleHome::new(fixture.home.path());
         let connection = HostedConnection::connect_via_netd(
-            super::hosted_bridge::TEST_WEFT_SERVER,
+            super::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
         )
         .await
@@ -1092,12 +1094,13 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn hosted_client_connect_via_netd_runs_a_unary_on_proxied_streams() {
         let _env_guard = config::credentials::lock_test_env();
-        let fixture = super::hosted_bridge::WarmBridgeFixture::start().await;
-        let _pin = super::hosted_bridge::PinHeddleHome::new(fixture.home.path());
+        let fixture = super::hosted_bridge::tests::WarmBridgeFixture::start().await;
+        let _pin = super::hosted_bridge::tests::PinHeddleHome::new(fixture.home.path());
         let client = crate::hosted_runtime::hosted::HostedClient::connect_via_netd(
-            super::hosted_bridge::TEST_WEFT_SERVER,
+            super::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
         )
         .await
@@ -1121,10 +1124,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn session_connect_uses_netd_when_the_bridge_is_up() {
         let _env_guard = config::credentials::lock_test_env();
-        let fixture = super::hosted_bridge::WarmBridgeFixture::start().await;
-        let _pin = super::hosted_bridge::PinHeddleHome::new(fixture.home.path());
+        let fixture = super::hosted_bridge::tests::WarmBridgeFixture::start().await;
+        let _pin = super::hosted_bridge::tests::PinHeddleHome::new(fixture.home.path());
         let session = crate::hosted_runtime::hosted::HostedSession::build(
             &config::UserConfig::default(),
             None,
@@ -1132,7 +1136,7 @@ mod tests {
         )
         .unwrap();
         let client = session
-            .connect(super::hosted_bridge::TEST_WEFT_SERVER)
+            .connect(super::hosted_bridge::tests::TEST_WEFT_SERVER)
             .await
             .expect("session.connect must reuse a running hosted bridge");
         assert!(client.reused_warm_connection());
@@ -1141,11 +1145,12 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn session_connect_falls_back_when_netd_is_down() {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let _env_guard = config::credentials::lock_test_env();
         let home = tempfile::TempDir::new().unwrap();
-        let _pin = super::hosted_bridge::PinHeddleHome::new(home.path());
+        let _pin = super::hosted_bridge::tests::PinHeddleHome::new(home.path());
         let session = crate::hosted_runtime::hosted::HostedSession::build(
             &config::UserConfig::default(),
             None,

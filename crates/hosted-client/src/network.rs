@@ -170,6 +170,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn bind_persistent_hosted_uses_the_device_endpoint() {
         let _env_guard = config::credentials::lock_test_env();
         let home = tempfile::TempDir::new().expect("temp Heddle home");
