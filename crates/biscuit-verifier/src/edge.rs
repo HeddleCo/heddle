@@ -54,6 +54,8 @@ pub const EDGE_SERVE_OPERATION: &str = "EdgeServeExtent";
 /// matter what the edge actually asked for, and then present a different
 /// audience's extent set to the structural checks that follow.
 pub const EDGE_REQUEST_PREDICATE: &str = "edge_extent_request_v1";
+/// Native provider v2 request fact. Only the verifier may inject it.
+pub const NATIVE_PROVIDER_REQUEST_PREDICATE: &str = "edge_extent_request_v2";
 
 /// Marker identifying a first-party edge-serving attenuation block.
 ///
@@ -551,8 +553,17 @@ impl EdgeServingScope {
     /// Because this is a check rather than a fact, a bearer who appends their
     /// own block cannot relax it — the verifier runs every block's checks.
     pub fn datalog_check(&self) -> String {
+        self.datalog_check_for(EDGE_REQUEST_PREDICATE)
+    }
+
+    /// Native typed provider plans pin the v2 canonical extent-set digest.
+    pub fn native_datalog_check(&self) -> String {
+        self.datalog_check_for(NATIVE_PROVIDER_REQUEST_PREDICATE)
+    }
+
+    fn datalog_check_for(&self, predicate: &str) -> String {
         format!(
-            "check if {EDGE_REQUEST_PREDICATE}($repo, $facet, $audience, $digest), \
+            "check if {predicate}($repo, $facet, $audience, $digest), \
              $repo == {repo}, $facet == {facet}, $audience == {audience}, $digest == {digest}",
             repo = biscuit_string(&hex::encode(self.repository_id)),
             facet = biscuit_string(&self.facet),

@@ -1003,14 +1003,13 @@ fn validate_edge_attenuation_block(block: &BlockBuilder, index: usize) -> Result
 pub(crate) fn reject_reserved_request_facts(biscuit: &Biscuit) -> Result<(), BiscuitError> {
     for index in 0..biscuit.block_count() {
         let block = parse_block(biscuit, index)?;
-        let asserts_reserved = block
-            .facts
-            .iter()
-            .any(|fact| fact.predicate.name == crate::edge::EDGE_REQUEST_PREDICATE)
-            || block
-                .rules
-                .iter()
-                .any(|rule| rule.head.name == crate::edge::EDGE_REQUEST_PREDICATE);
+        let asserts_reserved = block.facts.iter().any(|fact| {
+            fact.predicate.name == crate::edge::EDGE_REQUEST_PREDICATE
+                || fact.predicate.name == crate::edge::NATIVE_PROVIDER_REQUEST_PREDICATE
+        }) || block.rules.iter().any(|rule| {
+            rule.head.name == crate::edge::EDGE_REQUEST_PREDICATE
+                || rule.head.name == crate::edge::NATIVE_PROVIDER_REQUEST_PREDICATE
+        });
         if asserts_reserved {
             return Err(BiscuitError::Invalid(format!(
                 "block {index} asserts the reserved request predicate {}",
@@ -1579,6 +1578,31 @@ mod reserved_predicate_tests {
             matches!(&error, BiscuitError::Invalid(message)
                 if message.contains(crate::edge::EDGE_REQUEST_PREDICATE)),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn native_provider_request_fact_cannot_be_authored_by_the_bearer() {
+        let keypair = KeyPair::new();
+        let biscuit = BiscuitBuilder::new()
+            .fact("user(\"caller\")")
+            .expect("subject fact")
+            .fact(
+                format!(
+                    "{}(\"spool\", \"source\", \"public\", \"deadbeef\")",
+                    crate::edge::NATIVE_PROVIDER_REQUEST_PREDICATE
+                )
+                .as_str(),
+            )
+            .expect("self-asserted native request fact")
+            .build(&keypair)
+            .expect("build token");
+        assert!(
+            matches!(
+                reject_reserved_request_facts(&biscuit),
+                Err(BiscuitError::Invalid(_))
+            ),
+            "native provider request facts must be verifier-injected only"
         );
     }
 
