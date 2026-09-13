@@ -1,6 +1,6 @@
 //! Device-owned source Search extraction. Only the explicit analysis worker
 //! invokes this; finite Search reads the persisted projection without parsing.
-use std::time::{Duration, Instant};
+use std::{collections::BTreeMap, time::{Duration, Instant}};
 
 use anyhow::{Context, Result, ensure};
 use objects::{
@@ -28,13 +28,15 @@ fn index_source(
         .store()
         .get_state(&state)?
         .context("source Search state absent")?;
+    ensure!(source.id() == state, "source Search State identity mismatch");
     let mut documents = Vec::new();
-    let mut pending = vec![(String::new(), source.tree, 0usize)];
+    let mut pending = vec![(String::new(), source.tree, 0usize, Vec::<ContentHash>::new())];
+    let mut path_leaves = BTreeMap::<String, Vec<ContentHash>>::new();
     let mut work = 0usize;
     let mut bytes = 0usize;
     let mut content_ready = true;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while let Some((prefix, hash, depth)) = pending.pop() {
+    while let Some((prefix, hash, depth, parent_leaves)) = pending.pop() {
         work += 1;
         ensure!(
             work <= 4096 && depth <= 128 && Instant::now() < deadline,
@@ -45,7 +47,7 @@ fn index_source(
             .get_tree(&hash)?
             .context("source Search tree absent")?;
         ensure!(tree.hash() == hash, "source Search tree identity mismatch");
-        for entry in tree.entries() {
+        for (index, entry) in tree.entries().iter().enumerate() {
             work += 1;
             ensure!(work <= 4096, "source Search entry bound exceeded");
             let path = if prefix.is_empty() {
@@ -54,9 +56,14 @@ fn index_source(
                 format!("{prefix}/{}", entry.name())
             };
             ensure!(path.len() <= 4096, "source Search path bound exceeded");
+            let mut leaf_chain = parent_leaves.clone();
+            if tree.scheme() == objects::object::TreeScheme::V4Salted {
+                leaf_chain.push(tree.v4_leaf_hash_at(index).context("salted source leaf absent")?);
+            }
             if let Some(child) = entry.tree_hash() {
-                pending.push((path, child, depth + 1));
+                pending.push((path, child, depth + 1, leaf_chain));
             } else if let Some(blob) = entry.blob_hash() {
+                path_leaves.insert(path.clone(), leaf_chain.clone());
                 let Some(blob) = repository.store().get_blob(&blob)? else {
                     content_ready = false;
                     continue;
@@ -81,6 +88,7 @@ fn index_source(
                         start_line: None,
                         end_line: None,
                         text: text.to_owned(),
+                        leaf_chain,
                     });
                 }
             }
@@ -98,6 +106,10 @@ fn index_source(
         )?;
         symbols_ready = complete;
         for ((path, address), symbol) in symbols {
+            let Some(leaf_chain) = path_leaves.get(&path).cloned() else {
+                symbols_ready = false;
+                continue;
+            };
             documents.push(repo::thread_replication::source_search::Document {
                 kind: 4,
                 path,
@@ -106,6 +118,7 @@ fn index_source(
                 start_line: Some(symbol.span.0),
                 end_line: Some(symbol.span.1),
                 text: symbol.name,
+                leaf_chain,
             });
         }
         ensure!(

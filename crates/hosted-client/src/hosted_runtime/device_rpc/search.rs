@@ -210,7 +210,6 @@ impl DeviceRpc {
             let worker_session = session.clone();
             let worker = tokio::task::spawn_blocking(move || -> Result<Vec<SearchEvent>> {
                 let _permit = permit;
-                let deadline = std::time::Instant::now() + Duration::from_secs(25);
                 worker_session.check_current(&this.home)?;
                 let mut normalized = request.clone();
                 normalized.page = None;
@@ -304,7 +303,7 @@ impl DeviceRpc {
                     bool,
                 >::new();
                 let mut admitted_sources = vec![Vec::new(); selected.len()];
-                let mut admitted_path_count = 0usize;
+                let mut admitted_target_count = 0usize;
                 if selection.kinds.contains(&(SearchDomain::SourceContent as i32))
                     || selection.kinds.contains(&(SearchDomain::SourceSymbol as i32))
                 {
@@ -313,7 +312,7 @@ impl DeviceRpc {
                         let Some(source) = source_filters[index] else { continue; };
                         let facts = worker_session.facts(Some(&spool.capability_path))?;
                         let repository = repo::Repository::open(&spool.root)?;
-                        repo::thread_replication::source_search::visit_indexed_paths(
+                        repo::thread_replication::source_search::visit_indexed_targets(
                             &spool.heddle_dir,
                             source,
                             |candidate| {
@@ -333,28 +332,22 @@ impl DeviceRpc {
                                     source_projections.insert(key, proof);
                                 }
                                 let Some(redactions) = source_projections.get(&key).and_then(Option::as_ref) else { return Ok(()); };
-                                let path_key = (spool.id, candidate.thread, candidate.revision, candidate.path.clone());
-                                if !source_paths.contains_key(&path_key) {
-                                    let mut path_work = 0;
-                                    let admitted = repository.store().get_state(&candidate.revision)
-                                        .ok().flatten()
-                                        .is_some_and(|state| state.id() == candidate.revision
-                                            && super::content::visible_path_entry(
-                                                repository.store(), state.tree, &candidate.path,
-                                                redactions, &mut path_work,
-                                            ).is_ok());
-                                    source_paths.insert(path_key.clone(), admitted);
-                                }
-                                if source_paths[&path_key] {
-                                    admitted_path_count += 1;
-                                    ensure!(admitted_path_count <= 100_000, "authorized source search scope exceeds path budget");
-                                    admitted_sources[index].push(candidate);
-                                }
+                                admitted_target_count += 1;
+                                ensure!(admitted_target_count <= 4096, "authorized source search scope exceeds target budget");
+                                admitted_sources[index].push(repo::thread_replication::collaboration_search::AdmittedSourceTarget {
+                                    thread: candidate.thread,
+                                    revision: candidate.revision,
+                                    denied_leaves: redactions.leaves().iter().copied().collect(),
+                                });
                                 Ok(())
                             },
                         )?;
                     }
                 }
+                // Candidate-row work is bounded independently of disclosure
+                // preparation. Hidden source targets cannot consume this
+                // page deadline and change a visible result into an error.
+                let deadline = std::time::Instant::now() + Duration::from_secs(25);
                 let mut next_boundary = (position, None);
                 let mut has_more = false;
                 if matches!(mode, search_request::Mode::Unspecified | search_request::Mode::Lexical) {
