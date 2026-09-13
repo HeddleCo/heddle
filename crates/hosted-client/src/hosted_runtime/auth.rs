@@ -3,13 +3,11 @@
 use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::{
-    CreateServiceAccountRequest, IssueServiceAccountCredentialRequest,
-};
+use api::heddle::api::v2alpha1 as identity;
+use base64::Engine;
 use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
 use objects::{HeddleError, RecoveryDetails};
-use sha2::{Digest, Sha256};
 
 use super::{
     auth_requests::{AuthCommand, AuthOptions, AuthTrustCommand},
@@ -26,7 +24,6 @@ use super::{
 
 const SERVICE_TOKEN_TTL_DAYS: u32 = 30;
 const SERVICE_TOKEN_TTL_SECS: i64 = SERVICE_TOKEN_TTL_DAYS as i64 * 24 * 3600;
-const ISSUE_SA_PROOF_DOMAIN: &[u8] = b"heddle-sa-credential-issue-v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AuthEvent {
@@ -154,7 +151,6 @@ pub struct DerivedAgent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceTokenCreated {
     pub name: String,
-    pub namespace: String,
     pub scope: String,
     pub credential_path: String,
     pub expires_in_days: u32,
@@ -220,10 +216,10 @@ pub async fn execute(
         .map(AuthOutcome::AgentDerived),
         AuthCommand::CreateServiceToken {
             name,
-            namespace,
+            scope,
             server,
             out,
-        } => create_service_token(&options, server.as_deref(), name, namespace, out.as_deref())
+        } => create_service_token(&options, server.as_deref(), name, scope, out.as_deref())
             .await
             .map(AuthOutcome::ServiceTokenCreated),
     }
@@ -972,7 +968,7 @@ fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> Auth
 // Create service token
 // ---------------------------------------------------------------------------
 
-/// Create a namespace-scoped service token for CI/ephemeral runners.
+/// Create an explicitly scoped service delegation for CI/ephemeral runners.
 ///
 /// Emits a single self-verifying `.hcred` credential file. The token and proof
 /// key never touch stdout or the JSON contract — only the credential path,
@@ -981,11 +977,10 @@ async fn create_service_token(
     options: &AuthOptions,
     server: Option<&str>,
     name: String,
-    namespace: String,
+    scope: String,
     out: Option<&Path>,
 ) -> Result<ServiceTokenCreated> {
     let server = resolve_server(server)?;
-    let scope = format!("repo:{namespace}/*");
 
     // Resolve (and fail-fast reject an existing) credential path BEFORE any
     // server round trip, so a name collision doesn't strand a created service
@@ -1012,7 +1007,6 @@ async fn create_service_token(
         &mut auth_client,
         server,
         name,
-        namespace,
         scope,
         credential_path,
     )
@@ -1026,80 +1020,214 @@ async fn create_service_token_connected(
     auth_client: &mut HostedClient,
     server: String,
     name: String,
-    namespace: String,
     scope: String,
     credential_path: std::path::PathBuf,
 ) -> Result<ServiceTokenCreated> {
-    let create_operation_id = ClientOperationId::caller_or_fresh(
-        "heddle.api.v1alpha1.IdentityService/CreateServiceAccount",
-        options.operation_id().unwrap_or_default(),
-    );
+    let method = "heddle.api.v2alpha1.IdentityService/PutDelegation";
+    let create_operation_id =
+        ClientOperationId::caller_or_fresh(method, options.operation_id().unwrap_or_default());
     let issue_operation_id = ClientOperationId::for_required_method(
-        "heddle.api.v1alpha1.IdentityService/IssueServiceAccountCredential",
+        "heddle.api.v2alpha1.IdentityService/IssueDelegationCredential",
         create_operation_id.to_wire(),
     )?;
+    let (principal, _) = auth_client
+        .observe_current_identity()
+        .await
+        .context("observing the active account for service delegation")?;
+    let parent_signer = auth_client
+        .claim_proof_signer()
+        .context("service delegation requires the active credential proof key")?;
+    let parent_token_b64 = std::str::from_utf8(auth_client.claim_authority_token())
+        .context("active credential is not a base64 Biscuit")?;
+    let effective_key = effective_pop_public_key_hex(parent_token_b64)?;
+    if !effective_key.eq_ignore_ascii_case(&hex::encode(parent_signer.public_key())) {
+        bail!("active credential proof key does not match its effective Biscuit key");
+    }
+    let parent_raw = base64::engine::general_purpose::URL_SAFE
+        .decode(parent_token_b64)
+        .context("decoding the exact active parent Biscuit")?;
+    let remote = auth_client.native().await?;
+    let inspection = remote
+        .api
+        .call::<thread_api::rpc::IdentityServiceIntrospectCredential>(
+            &identity::IntrospectCredentialRequest {
+                biscuit: parent_raw.clone(),
+            },
+        )
+        .await
+        .context("introspecting active parent credential")?;
+    let parent_expiry = inspection.expires_at.as_ref().map(|value| value.seconds);
+    let root_key = inspection
+        .authority
+        .context("parent credential has no verified root attachment")?
+        .root_public_key;
+    if root_key.len() != 32 {
+        bail!("parent credential root key is invalid");
+    }
 
-    // Generate a fresh Ed25519 keypair for the service account credential.
-    let signer = Ed25519Signer::generate()
-        .map_err(|e| anyhow::anyhow!("failed to generate keypair: {e}"))?;
-    let public_key_bytes = signer.public_key().to_vec();
+    let signer = Ed25519Signer::generate().context("generating service credential key")?;
+    let child_key = signer.public_key().to_vec();
     let private_key_pem = signer
         .to_pem()
-        .map_err(|e| anyhow::anyhow!("failed to export service-account private key: {e}"))?;
-
-    // 1. Create the service account.
-    let sa_response = auth_client
-        .create_service_account(CreateServiceAccountRequest {
-            subject: name.clone(),
-            display_name: name.clone(),
-            scope: scope.clone(),
-            client_operation_id: create_operation_id.to_wire(),
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("create_service_account failed: {error}"))?;
-
-    tracing::info!(
-        service_account_id = %sa_response.service_account_id,
-        subject = %sa_response.subject,
-        "service account created"
-    );
-
-    // 2. Issue a credential (token) for the service account.
-    let credential_request = IssueServiceAccountCredentialRequest {
-        service_account_id: sa_response.service_account_id,
-        public_key: public_key_bytes,
+        .context("exporting service credential key")?;
+    let now = current_unix_timestamp_i64()?;
+    let requested_expiry = now
+        .checked_add(SERVICE_TOKEN_TTL_SECS)
+        .context("service credential expiry overflow")?;
+    let expiry = parent_expiry.map_or(requested_expiry, |parent| parent.min(requested_expiry));
+    if expiry <= now + 1 {
+        bail!("active parent credential expires too soon to issue a service credential");
+    }
+    let delegation_id = uuid::Uuid::now_v7().to_string();
+    let reference = identity::RecordRef {
+        spool: None,
+        id: delegation_id.clone(),
+    };
+    let statement = api::v2::identity_management::DelegationStatement {
+        account_id: principal.account_id.clone(),
+        delegation_id,
+        label: name.clone(),
+        kind: identity::delegation_record::Kind::Service as i32,
+        root_public_key: root_key.clone(),
+        subject_public_key: child_key.clone(),
+        endpoint_public_key: Vec::new(),
         scope: scope.clone(),
-        // CLI-issued tokens retain their pre-TTL behaviour: 30-day
-        // expiry from the server's default (applied when ttl_secs == 0
-        // in the handler is "never expires", so pass 30 days here
-        // explicitly to preserve prior semantics).
-        ttl_secs: Some(prost_types::Duration {
-            seconds: SERVICE_TOKEN_TTL_SECS,
+        expires_at_unix_seconds: expiry,
+        parent_credential_digest: blake3::hash(&parent_raw).as_bytes().to_vec(),
+    };
+    let canonical = statement.encode().context("encoding service delegation")?;
+    let record = identity::DelegationRecord {
+        r#ref: Some(reference.clone()),
+        label: name.clone(),
+        kind: identity::delegation_record::Kind::Service as i32,
+        subject: Some(identity::RootAttachment {
+            root_public_key: root_key,
+            subject_public_key: child_key.clone(),
+            ..Default::default()
+        }),
+        delegation: Some(sign_identity_record(
+            api::v2::identity_management::DELEGATION,
+            canonical,
+            parent_signer,
+        )?),
+        ..Default::default()
+    };
+    let put = identity::PutDelegationRequest {
+        client_operation_id: create_operation_id.to_wire(),
+        delegation: Some(record),
+        ..Default::default()
+    };
+    let response = remote
+        .api
+        .call::<thread_api::rpc::IdentityServicePutDelegation>(&put)
+        .await
+        .context("creating native service delegation")?;
+    let receipt = response
+        .receipt
+        .context("service delegation receipt absent")?;
+    if receipt.client_operation_id != put.client_operation_id
+        || receipt.endpoint != remote.description.endpoint
+    {
+        bail!("service delegation receipt does not match the requested operation");
+    }
+    let applied = match receipt.outcome {
+        Some(identity::mutation_receipt::Outcome::Applied(value)) => value,
+        _ => bail!("service delegation was not applied"),
+    };
+    let version = applied.resulting_versions.iter()
+        .find(|item| item.resource.as_ref().is_some_and(|resource|
+            matches!(&resource.entity, Some(identity::entity_ref::Entity::Delegation(value)) if value == &reference)))
+        .context("service delegation receipt omitted its resulting version")?
+        .version.clone();
+    let mut issue = identity::IssueDelegationCredentialRequest {
+        client_operation_id: issue_operation_id.to_wire(),
+        delegation: Some(reference),
+        proof_public_key: child_key.clone(),
+        scope: String::new(),
+        expires_at: Some(prost_types::Timestamp {
+            seconds: expiry,
             nanos: 0,
         }),
-        client_operation_id: issue_operation_id.to_wire(),
-        proof_timestamp_seconds: 0,
-        proof_signature: Vec::new(),
+        expected_delegation_version: version,
+        ..Default::default()
     };
-    let credential_request = issue_service_account_credential_request(credential_request, &signer)?;
-    let issued = auth_client
-        .issue_service_account_credential(credential_request)
+    let intent = api::v2::identity_management::issuance(&principal.account_id, &issue)
+        .context("encoding service credential issuance")?;
+    issue.subject_possession = Some(sign_identity_record(
+        api::v2::identity_management::ISSUE_POSSESSION,
+        intent.clone(),
+        &signer,
+    )?);
+    let child: &[u8; 32] = child_key
+        .as_slice()
+        .try_into()
+        .context("generated child key must be 32 bytes")?;
+    let transfer = parent_signer
+        .sign(
+            &biscuit_verifier::key_delegation::statement(parent_token_b64, child)
+                .context("encoding proof-key transfer")?,
+        )
+        .context("signing proof-key transfer")?;
+    if transfer.len() != 64 {
+        bail!("proof-key transfer signature is not Ed25519");
+    }
+    let mut authority = intent;
+    authority.extend_from_slice(&transfer);
+    issue.authority_proof = Some(sign_identity_record(
+        api::v2::identity_management::ISSUE_AUTHORITY,
+        authority,
+        parent_signer,
+    )?);
+    let response = remote
+        .api
+        .call::<thread_api::rpc::IdentityServiceIssueDelegationCredential>(&issue)
         .await
-        .map_err(|error| anyhow::anyhow!("issue_service_account_credential failed: {error}"))?;
-
-    // Re-derive the subject from the issued token so the written credential is
-    // self-consistent (`load_credential_file` re-checks this on every read).
-    let subject = crate::hosted_runtime::device_flow::authenticated_subject(&issued.token)
-        .context("reading the issued service token's authenticated subject")?;
-    let expires_at =
-        (chrono::Utc::now() + chrono::Duration::seconds(SERVICE_TOKEN_TTL_SECS)).to_rfc3339();
-
+        .context("issuing native service credential")?;
+    let receipt = response
+        .receipt
+        .context("service credential issuance receipt absent")?;
+    if receipt.client_operation_id != issue.client_operation_id
+        || receipt.endpoint != remote.description.endpoint
+        || !matches!(
+            receipt.outcome,
+            Some(identity::mutation_receipt::Outcome::Applied(_))
+        )
+    {
+        bail!("service credential issuance was not applied to the requested endpoint");
+    }
+    let credential = response
+        .credential
+        .context("service credential issuance result absent")?;
+    let issued = match credential.outcome {
+        Some(identity::credential_result::Outcome::Issued(value)) => value,
+        _ => bail!("service credential issuance did not return an issued token"),
+    };
+    if issued.kind != identity::CredentialKind::Service as i32
+        || issued.proof_public_key != child_key
+        || issued.biscuit.is_empty()
+        || issued.subject.trim().is_empty()
+        || issued
+            .expires_at
+            .as_ref()
+            .is_none_or(|value| value.seconds != expiry)
+    {
+        bail!("issued service credential does not match the requested child, class or lifetime");
+    }
+    let token = base64::engine::general_purpose::URL_SAFE.encode(&issued.biscuit);
+    let subject = crate::hosted_runtime::device_flow::authenticated_subject(&token)
+        .context("verifying issued service credential subject")?;
+    if subject != issued.subject {
+        bail!("issued service credential subject mismatch");
+    }
+    let expires_at = chrono::DateTime::from_timestamp(expiry, 0)
+        .context("issued service credential expiry outside supported range")?
+        .to_rfc3339();
     let verified = VerifiedCredential {
         mint_root_attachment: None,
         server: server.clone(),
         kind: CredentialKind::Service,
         subject,
-        token: issued.token,
+        token,
         proof_key_pem: private_key_pem,
         expires_at: Some(expires_at),
         credential_id: None,
@@ -1113,10 +1241,10 @@ async fn create_service_token_connected(
 
     Ok(ServiceTokenCreated {
         name,
-        namespace,
         scope,
         credential_path: credential_path_display,
-        expires_in_days: SERVICE_TOKEN_TTL_DAYS,
+        expires_in_days: u32::try_from((expiry - now) / (24 * 3600))
+            .context("service credential lifetime exceeds supported days")?,
     })
 }
 
@@ -1146,60 +1274,21 @@ fn resolve_service_account_credential_path(name: &str, out: Option<&Path>) -> st
         .join(format!("{safe}.hcred"))
 }
 
-fn issue_service_account_credential_request(
-    request: IssueServiceAccountCredentialRequest,
+fn sign_identity_record(
+    format: &str,
+    canonical_record: Vec<u8>,
     signer: &Ed25519Signer,
-) -> Result<IssueServiceAccountCredentialRequest> {
-    let timestamp = current_unix_timestamp_i64()?;
-    issue_service_account_credential_request_at(request, signer, timestamp)
-}
-
-fn issue_service_account_credential_request_at(
-    mut request: IssueServiceAccountCredentialRequest,
-    signer: &Ed25519Signer,
-    timestamp: i64,
-) -> Result<IssueServiceAccountCredentialRequest> {
-    let signature = issue_service_account_credential_signature(
-        signer,
-        timestamp,
-        &request.service_account_id,
-        &request.public_key,
-    )?;
-    request.proof_timestamp_seconds = timestamp;
-    request.proof_signature = signature;
-    Ok(request)
-}
-
-fn issue_service_account_credential_signature(
-    signer: &Ed25519Signer,
-    timestamp: i64,
-    service_account_id: &str,
-    public_key: &[u8],
-) -> Result<Vec<u8>> {
-    let canonical = derive_issue_service_account_credential_canonical(
-        timestamp,
-        service_account_id,
-        public_key,
-    );
-    signer
-        .sign(&canonical)
-        .map_err(|e| anyhow::anyhow!("failed to sign service-account proof: {e}"))
-}
-
-fn derive_issue_service_account_credential_canonical(
-    timestamp: i64,
-    service_account_id: &str,
-    public_key: &[u8],
-) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(ISSUE_SA_PROOF_DOMAIN);
-    hasher.update([0u8]);
-    hasher.update(timestamp.to_be_bytes());
-    hasher.update([0u8]);
-    hasher.update(service_account_id.as_bytes());
-    hasher.update([0u8]);
-    hasher.update(public_key);
-    hasher.finalize().into()
+) -> Result<identity::SignedRecord> {
+    let message = api::v2::identity_management::signing_bytes(format, &canonical_record)
+        .context("encoding identity signature domain")?;
+    Ok(identity::SignedRecord {
+        format: format.to_owned(),
+        canonical_record,
+        signatures: vec![identity::RecordSignature {
+            public_key: signer.public_key().to_vec(),
+            signature: signer.sign(&message).context("signing identity record")?,
+        }],
+    })
 }
 
 fn current_unix_timestamp_i64() -> Result<i64> {
@@ -1539,36 +1628,35 @@ mod tests {
     }
 
     #[test]
-    fn issue_service_account_request_attaches_pop_fields() {
+    fn service_delegation_signature_binds_canonical_bytes() {
         let signer = Ed25519Signer::generate().expect("signer");
-        let public_key = signer.public_key().to_vec();
-        let request = IssueServiceAccountCredentialRequest {
-            service_account_id: "sa-123".to_string(),
-            public_key: public_key.clone(),
-            scope: "repo:heddle/platform/*".to_string(),
-            ttl_secs: Some(prost_types::Duration {
-                seconds: SERVICE_TOKEN_TTL_SECS,
-                nanos: 0,
-            }),
-            client_operation_id: "op-1".to_string(),
-            proof_timestamp_seconds: 0,
-            proof_signature: Vec::new(),
-        };
-
-        let timestamp = 1_700_000_000;
-        let request = issue_service_account_credential_request_at(request, &signer, timestamp)
-            .expect("request with proof");
-
-        assert_eq!(request.proof_timestamp_seconds, timestamp);
-        let signature = &request.proof_signature;
-        let canonical =
-            derive_issue_service_account_credential_canonical(timestamp, "sa-123", &public_key);
-        Ed25519Signer::verify_with_public_key(&canonical, &public_key, signature)
-            .expect("proof must be signed by the new service-account key");
-
-        assert_eq!(request.service_account_id, "sa-123");
-        assert_eq!(request.public_key, public_key);
-        assert_eq!(request.scope, "repo:heddle/platform/*");
+        let canonical = b"service delegation".to_vec();
+        let record = sign_identity_record(
+            api::v2::identity_management::DELEGATION,
+            canonical.clone(),
+            &signer,
+        )
+        .expect("signed record");
+        let message = api::v2::identity_management::signing_bytes(&record.format, &canonical)
+            .expect("signature domain");
+        Ed25519Signer::verify_with_public_key(
+            &message,
+            signer.public_key(),
+            &record.signatures[0].signature,
+        )
+        .expect("original statement verifies");
+        let mut changed = canonical;
+        changed.push(b'!');
+        let changed_message = api::v2::identity_management::signing_bytes(&record.format, &changed)
+            .expect("changed signature domain");
+        assert!(
+            Ed25519Signer::verify_with_public_key(
+                &changed_message,
+                signer.public_key(),
+                &record.signatures[0].signature,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1581,26 +1669,6 @@ mod tests {
         assert!(
             !source.contains(concat!("ton", "ic::")),
             "authentication must not depend on the retired product transport"
-        );
-    }
-
-    #[test]
-    fn issue_service_account_canonical_commits_to_each_field() {
-        let public_key = vec![0xAA; 32];
-        let base =
-            derive_issue_service_account_credential_canonical(1_700_000_000, "sa-1", &public_key);
-
-        assert_ne!(
-            base,
-            derive_issue_service_account_credential_canonical(1_700_000_001, "sa-1", &public_key,),
-        );
-        assert_ne!(
-            base,
-            derive_issue_service_account_credential_canonical(1_700_000_000, "sa-2", &public_key,),
-        );
-        assert_ne!(
-            base,
-            derive_issue_service_account_credential_canonical(1_700_000_000, "sa-1", &[0xBB; 32],),
         );
     }
 

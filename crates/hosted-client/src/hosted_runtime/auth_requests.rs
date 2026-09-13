@@ -71,7 +71,7 @@ pub enum AuthCommand {
     },
     CreateServiceToken {
         name: String,
-        namespace: String,
+        scope: String,
         server: Option<String>,
         /// Path for the `.hcred` credential file
         /// (default: `~/.heddle/service-accounts/<name>.hcred`).

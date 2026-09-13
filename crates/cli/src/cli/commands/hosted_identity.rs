@@ -440,7 +440,6 @@ fn write_service_token(
             serde_json::to_string(&ServiceTokenOutput {
                 output_kind: "auth_create_service_token",
                 name: outcome.name,
-                namespace: outcome.namespace,
                 scope: outcome.scope,
                 credential_path: outcome.credential_path,
                 expires_in_days: outcome.expires_in_days,
@@ -464,11 +463,6 @@ fn write_service_token(
             writer,
             "Point the runtime at it with HEDDLE_CREDENTIAL={}.",
             outcome.credential_path
-        )?;
-        writeln!(
-            writer,
-            "This token is scoped to the {} namespace.",
-            outcome.namespace
         )?;
     }
     Ok(())
@@ -762,12 +756,12 @@ fn auth_command(command: AuthCommands, interactive: bool) -> AuthCommand {
         },
         AuthCommands::CreateServiceToken {
             name,
-            namespace,
+            scope,
             server,
             out,
         } => AuthCommand::CreateServiceToken {
             name,
-            namespace,
+            scope,
             server,
             out,
         },
@@ -867,8 +861,7 @@ mod tests {
     fn service_token() -> ServiceTokenCreated {
         ServiceTokenCreated {
             name: "ci-main".into(),
-            namespace: "heddle".into(),
-            scope: "namespace:heddle".into(),
+            scope: "spool:heddle/platform read write".into(),
             credential_path: "/tmp/ci-main.hcred".into(),
             expires_in_days: 30,
         }
@@ -1089,7 +1082,7 @@ mod tests {
             true,
         ))
         .expect("service token JSON");
-        assert_eq!(service_json["namespace"], "heddle");
+        assert_eq!(service_json["scope"], "spool:heddle/platform read write");
         let service_human = rendered(AuthOutcome::ServiceTokenCreated(service_token()), false);
         assert!(service_human.contains("HEDDLE_CREDENTIAL=/tmp/ci-main.hcred"));
         assert!(service_human.contains("mode 0600"));
@@ -1400,7 +1393,7 @@ mod tests {
         match auth_command(
             AuthCommands::CreateServiceToken {
                 name: "ci-main".into(),
-                namespace: "heddle".into(),
+                scope: "spool:heddle/platform read write".into(),
                 server: Some("api.heddle.test".into()),
                 out: Some(PathBuf::from("ci-main.hcred")),
             },
@@ -1408,12 +1401,12 @@ mod tests {
         ) {
             AuthCommand::CreateServiceToken {
                 name,
-                namespace,
+                scope,
                 server,
                 out,
             } => {
                 assert_eq!(name, "ci-main");
-                assert_eq!(namespace, "heddle");
+                assert_eq!(scope, "spool:heddle/platform read write");
                 assert_eq!(server.as_deref(), Some("api.heddle.test"));
                 assert_eq!(out.as_deref(), Some(std::path::Path::new("ci-main.hcred")));
             }

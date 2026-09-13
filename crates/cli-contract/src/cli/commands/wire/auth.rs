@@ -147,7 +147,6 @@ pub struct AuthTrustOutput {
 pub struct ServiceTokenOutput {
     pub output_kind: &'static str,
     pub name: String,
-    pub namespace: String,
     pub scope: String,
     /// Absolute path of the `.hcred` credential file written with mode 0600.
     /// The token and proof key never appear on stdout or in JSON.

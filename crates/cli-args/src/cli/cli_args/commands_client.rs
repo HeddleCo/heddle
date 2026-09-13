@@ -221,14 +221,14 @@ It does not grant spool access. Add a collaborator with:
         out: Option<std::path::PathBuf>,
     },
 
-    /// Create a service token for CI/scripts, scoped to a namespace.
+    /// Create a service token for CI/scripts with explicit native capabilities.
     /// Advanced: not a first-screen noun.
     CreateServiceToken {
         /// Display name for the service account (e.g. "github-ci-main")
         name: String,
-        /// Namespace to scope the token to (e.g. "heddle/platform")
+        /// Native delegation scope, e.g. "spool:heddle/platform read write"
         #[arg(long)]
-        namespace: String,
+        scope: String,
         /// Heddle server address
         #[arg(long)]
         server: Option<String>,
