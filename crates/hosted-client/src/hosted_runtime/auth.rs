@@ -2052,6 +2052,40 @@ mod tests {
     }
 
     #[test]
+    fn private_service_preparation_refuses_oversized_or_public_files() {
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().expect("private directory");
+        let output = directory.path().join("oversized.hcred");
+        let pending = PreparedServiceToken::path(&output);
+        std::fs::write(&pending, vec![b' '; 256 * 1024 + 1])
+            .expect("oversized preparation fixture");
+        #[cfg(unix)]
+        {
+            std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o600))
+                .expect("private mode");
+        }
+        let oversized = PreparedServiceToken::load(&pending)
+            .err()
+            .expect("oversized preparation must fail");
+        assert!(
+            oversized
+                .to_string()
+                .contains("exceeds private storage bound")
+        );
+        #[cfg(unix)]
+        {
+            std::fs::write(&pending, b"{}").expect("small public fixture");
+            std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o644))
+                .expect("public mode");
+            let public = PreparedServiceToken::load(&pending)
+                .err()
+                .expect("public preparation must fail");
+            assert!(public.to_string().contains("group/other-accessible"));
+        }
+    }
+
+    #[test]
     fn issued_service_token_requires_signed_exact_parent_child_and_expiry() {
         use biscuit_auth::{Biscuit, KeyPair, builder::BlockBuilder};
         let root = KeyPair::new();
