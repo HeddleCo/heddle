@@ -726,25 +726,48 @@ pub(super) fn review_candidates_visible(
             principal,
             agent,
             review.source,
-        )? else { return Ok(false) };
+        )?
+        else {
+            return Ok(false);
+        };
         if super::auth::source_content_visibility(
-                repository,
-                &target,
-                principal,
-                agent,
-                review.target,
-            )?
-            .is_none()
+            repository,
+            &target,
+            principal,
+            agent,
+            review.target,
+        )?
+        .is_none()
         {
             return Ok(false);
         }
         match review.coverage {
-            Some(objects::object::thread_replication::metadata::ReviewCoverage::WholeSource) if !redactions.is_empty() => return Ok(false),
-            Some(objects::object::thread_replication::metadata::ReviewCoverage::Symbols(ref anchors)) => {
-                let Some(state) = repository.store().get_state(&review.source)? else { return Ok(false) };
+            Some(objects::object::thread_replication::metadata::ReviewCoverage::WholeSource) => {
+                if !super::auth::selected_source_full_content_visible(
+                    repository,
+                    review.source,
+                    &redactions,
+                )? {
+                    return Ok(false);
+                }
+            }
+            Some(objects::object::thread_replication::metadata::ReviewCoverage::Symbols(
+                ref anchors,
+            )) => {
+                let Some(state) = repository.store().get_state(&review.source)? else {
+                    return Ok(false);
+                };
                 let mut work = 0;
                 for anchor in anchors {
-                    if super::content::visible_path_entry(repository.store(), state.tree, &anchor.file, &redactions, &mut work).is_err() {
+                    if super::content::visible_path_entry(
+                        repository.store(),
+                        state.tree,
+                        &anchor.file,
+                        &redactions,
+                        &mut work,
+                    )
+                    .is_err()
+                    {
                         return Ok(false);
                     }
                 }
