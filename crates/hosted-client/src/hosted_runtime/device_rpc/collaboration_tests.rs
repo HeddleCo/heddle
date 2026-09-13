@@ -27,6 +27,28 @@ pub(super) async fn roundtrip(
         },
         mentions: vec![],
     };
+    let base = replica.genesis().expect("genesis").base;
+    let mut unadmitted_anchor = Anchor::State { state_id: base };
+    let (coverage, _) = super::collaboration_targets::project_for(
+        &repo::device_catalog::DeviceSpool {
+            id: spool,
+            root: repository.root().to_owned(),
+            heddle_dir: repository.heddle_dir().to_owned(),
+            capability_path: spool.to_string(),
+        },
+        metadata.actor.principal_id,
+        None,
+        replica,
+        &metadata.scope,
+        &mut unadmitted_anchor,
+        &mut [],
+    )
+    .expect("project source reference");
+    assert_eq!(
+        coverage,
+        Coverage::Unavailable,
+        "a genesis base without an accepted source operation cannot authorize a reference"
+    );
     let command = |id: uuid::Uuid, body| thread_api::collaboration::Command {
         discussion,
         operation_id: CollaborationIdempotencyKey::new(id.to_string()).expect("command ID"),

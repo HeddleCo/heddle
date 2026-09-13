@@ -359,8 +359,20 @@ pub(super) fn record_visible(
     agent: Option<&str>,
     tier: &objects::object::VisibilityTier,
 ) -> Result<bool> {
-    if !thread_visible(repository, replica, principal, agent)? {
+    let Some(audience) = reader_audience(repository, replica, principal, agent)? else {
         return Ok(false);
+    };
+    Ok(objects::object::visible(tier, &audience))
+}
+
+fn reader_audience(
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+) -> Result<Option<objects::object::AudienceTier>> {
+    if !thread_visible(repository, replica, principal, agent)? {
+        return Ok(None);
     }
     let genesis = replica.genesis()?;
     let local = match genesis.owner {
@@ -377,7 +389,55 @@ pub(super) fn record_visible(
     } else {
         objects::object::AudienceTier::Public
     };
-    Ok(objects::object::visible(tier, &audience))
+    Ok(Some(audience))
+}
+
+/// Exact accepted source membership and downward-closed state visibility are
+/// independent of a readable Thread's metadata or a guessed genesis base.
+pub(super) fn source_revision_visible(
+    repository: &repo::Repository,
+    replica: &repo::thread_replication::ThreadReplica,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+    revision: objects::object::StateId,
+) -> Result<bool> {
+    let Some(audience) = reader_audience(repository, replica, principal, agent)? else {
+        return Ok(false);
+    };
+    if replica.accepted_source_revision(revision)?.is_none() {
+        return Ok(false);
+    }
+    // A metadata-only courier can supply the accepted signed source before
+    // this checkout has a local visibility sidecar. The original declaration
+    // still binds the reader, including when the same State has several
+    // accepted source operations.
+    let operations = replica.source_operation_page(revision, None, 65)?;
+    if operations.len() > 64 {
+        return Ok(false);
+    }
+    for id in operations {
+        let Some((signed, _)) = replica.operation(&id)? else {
+            return Ok(false);
+        };
+        let operation = signed.verify()?;
+        let Some(capture) = operation.source_result()? else {
+            return Ok(false);
+        };
+        match capture.visibility.and_then(|visibility| visibility.state) {
+            Some(tier) if !objects::object::visible(&tier, &audience) => return Ok(false),
+            None if !objects::object::visible(
+                &repository.resolve_capture_default_visibility(),
+                &audience,
+            ) =>
+            {
+                return Ok(false);
+            }
+            _ => {}
+        }
+    }
+    Ok(repository
+        .withholding_visibility_for_audience(&revision, &audience)?
+        .is_none())
 }
 
 pub(super) fn discussion_visible(

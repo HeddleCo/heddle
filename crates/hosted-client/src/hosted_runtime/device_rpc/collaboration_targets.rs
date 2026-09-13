@@ -40,65 +40,96 @@ pub(super) fn project_for(
     let repository = repo::Repository::open(&spool.root)?;
     let projection = replica.projection()?;
     let viewed = match projection.source_heads.as_slice() {
-        [] => projection.genesis.base,
-        [state] => *state,
-        _ => return Ok((Coverage::Partial, scope.clone())),
+        [] => Some(projection.genesis.base),
+        [state] => Some(*state),
+        _ => None,
     };
     let mut coverage = Coverage::Complete;
-    let mut resolve =
-        |scope: &mut CollaborationScope, source: &mut CollaborationSourceAnchor| -> Result<()> {
-            let Some(reference) = &source.target else {
-                return Ok(());
+    let source_visible =
+        |scope: &CollaborationScope, source: &CollaborationSourceAnchor| -> Result<bool> {
+            if scope.spool != spool.id {
+                return Ok(false);
+            }
+            let Some(thread) = scope.thread else {
+                return Ok(false);
             };
-            let selected = reference.binding.scope(scope)?;
-            if selected.spool != spool.id {
+            let target = if thread == replica.thread_id() {
+                replica.clone()
+            } else {
+                ThreadReplica::open(&spool.heddle_dir, thread)?
+            };
+            let CollaborationRevision::State { state_id } = &source.revision else {
+                return Ok(false);
+            };
+            super::auth::source_revision_visible(&repository, &target, principal, agent, *state_id)
+        };
+    let mut resolve = |scope: &mut CollaborationScope,
+                       source: &mut CollaborationSourceAnchor|
+     -> Result<()> {
+        if !source_visible(scope, source)? {
+            coverage = Coverage::Unavailable;
+            return Ok(());
+        }
+        let Some(reference) = &source.target else {
+            return Ok(());
+        };
+        let Some(viewed) = viewed else {
+            coverage = Coverage::Unavailable;
+            return Ok(());
+        };
+        let selected = reference.binding.scope(scope)?;
+        if selected.spool != spool.id {
+            coverage = Coverage::Unavailable;
+            return Ok(());
+        }
+        if let Some(thread) = selected.thread {
+            let target_replica = ThreadReplica::open(&spool.heddle_dir, thread)?;
+            if !super::auth::thread_visible(&repository, &target_replica, principal, agent)? {
                 coverage = Coverage::Unavailable;
                 return Ok(());
             }
-            if let Some(thread) = selected.thread {
-                let target_replica = ThreadReplica::open(&spool.heddle_dir, thread)?;
-                if !super::auth::thread_visible(&repository, &target_replica, principal, agent)? {
-                    coverage = Coverage::Unavailable;
-                    return Ok(());
-                }
-            }
-            // Reference indirection cannot authorize another resource. This endpoint
-            // has admitted only this exact locally owned Spool for the request.
-            ensure!(
-                scope.spool == spool.id,
-                "source anchor belongs to another Spool"
-            );
-            match replica.resolve_source_target(&repository, reference, viewed)? {
-                Some(value)
-                    if value.file.status == ResolutionStatus::Resolved
-                        && value.target.status == ResolutionStatus::Resolved =>
-                {
-                    *scope = value.scope;
-                    source.revision = CollaborationRevision::State {
-                        state_id: value.state,
-                    };
-                    source.path = value.file.path;
-                    source.symbol_id = String::new();
-                    source.start_line = None;
-                    source.end_line = None;
-                    match value.target.selector {
-                        SourceSelector::File => {}
-                        SourceSelector::Symbol { address } => source.symbol_id = address,
-                        SourceSelector::Lines { range } => {
-                            source.start_line = Some(range.start + 1);
-                            source.end_line = Some(range.end);
-                        }
+        }
+        // Reference indirection cannot authorize another resource. This endpoint
+        // has admitted only this exact locally owned Spool for the request.
+        ensure!(
+            scope.spool == spool.id,
+            "source anchor belongs to another Spool"
+        );
+        if !super::auth::source_revision_visible(&repository, replica, principal, agent, viewed)? {
+            coverage = Coverage::Unavailable;
+            return Ok(());
+        }
+        match replica.resolve_source_target(&repository, reference, viewed)? {
+            Some(value)
+                if value.file.status == ResolutionStatus::Resolved
+                    && value.target.status == ResolutionStatus::Resolved =>
+            {
+                *scope = value.scope;
+                source.revision = CollaborationRevision::State {
+                    state_id: value.state,
+                };
+                source.path = value.file.path;
+                source.symbol_id = String::new();
+                source.start_line = None;
+                source.end_line = None;
+                match value.target.selector {
+                    SourceSelector::File => {}
+                    SourceSelector::Symbol { address } => source.symbol_id = address,
+                    SourceSelector::Lines { range } => {
+                        source.start_line = Some(range.start + 1);
+                        source.end_line = Some(range.end);
                     }
                 }
-                Some(_) => coverage = Coverage::Partial,
-                None => coverage = Coverage::Unavailable,
+                if !source_visible(scope, source)? {
+                    coverage = Coverage::Unavailable;
+                }
             }
-            Ok(())
-        };
-    let mut selected = scope.clone();
-    if let CollaborationAnchor::Source { source } = anchor {
-        resolve(&mut selected, source)?;
-    }
+            Some(_) if coverage == Coverage::Complete => coverage = Coverage::Partial,
+            Some(_) => {}
+            None => coverage = Coverage::Unavailable,
+        }
+        Ok(())
+    };
     for tag in tags {
         match tag {
             AnnotationTag::Source { target }
@@ -108,6 +139,29 @@ pub(super) fn project_for(
             } => resolve(&mut target.scope, &mut target.source)?,
             _ => {}
         }
+    }
+    let mut selected = scope.clone();
+    if let CollaborationAnchor::Source { source } = anchor {
+        resolve(&mut selected, source)?;
+    } else if let CollaborationAnchor::State { state_id }
+    | CollaborationAnchor::Path { state_id, .. }
+    | CollaborationAnchor::Symbol { state_id, .. } = anchor
+    {
+        let source = CollaborationSourceAnchor {
+            revision: CollaborationRevision::State {
+                state_id: *state_id,
+            },
+            path: String::new(),
+            symbol_id: String::new(),
+            start_line: None,
+            end_line: None,
+            target: None,
+        };
+        if !source_visible(&selected, &source)? {
+            coverage = Coverage::Unavailable;
+        }
+    } else if matches!(anchor, CollaborationAnchor::Change { .. }) {
+        coverage = Coverage::Unavailable;
     }
     Ok((coverage, selected))
 }
