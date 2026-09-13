@@ -1,5 +1,9 @@
 //! Finite indexed local search; result frames never retain a SQLite transaction.
-use std::{collections::{BTreeMap, BTreeSet}, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, ensure};
 use api::heddle::api::{v1alpha1::CallFailureCode, v2alpha1::*};
@@ -15,37 +19,86 @@ struct SearchSelection {
 
 impl SearchSelection {
     fn parse(request: &SearchRequest) -> Result<Self> {
-        ensure!(request.spools.len() <= 32 && request.threads.len() <= 64 && request.domains.len() <= 3, "search selector bound exceeded");
+        ensure!(
+            request.spools.len() <= 32 && request.threads.len() <= 64 && request.domains.len() <= 3,
+            "search selector bound exceeded"
+        );
         let mut spools = BTreeSet::new();
         for spool in &request.spools {
-            ensure!(spools.insert(uuid::Uuid::parse_str(&spool.id)?), "duplicate search Spool");
+            ensure!(
+                spools.insert(uuid::Uuid::parse_str(&spool.id)?),
+                "duplicate search Spool"
+            );
         }
         let mut threads = BTreeMap::<uuid::Uuid, BTreeSet<Vec<u8>>>::new();
         for thread in &request.threads {
-            let spool = thread.spool.as_ref().context("search Thread requires Spool")?;
+            let spool = thread
+                .spool
+                .as_ref()
+                .context("search Thread requires Spool")?;
             let spool = uuid::Uuid::parse_str(&spool.id)?;
-            let id = thread.id.as_ref().context("search Thread requires identity")?;
-            ensure!(id.value.len() == 32, "search Thread identity must be 32 bytes");
-            ensure!(threads.entry(spool).or_default().insert(id.value.clone()), "duplicate search Thread");
+            let id = thread
+                .id
+                .as_ref()
+                .context("search Thread requires identity")?;
+            ensure!(
+                id.value.len() == 32,
+                "search Thread identity must be 32 bytes"
+            );
+            ensure!(
+                threads.entry(spool).or_default().insert(id.value.clone()),
+                "duplicate search Thread"
+            );
         }
-        if spools.is_empty() { spools.extend(threads.keys().copied()); }
-        else if !threads.is_empty() { spools.retain(|spool| threads.contains_key(spool)); }
-        let annotations = request.annotations.as_ref().map(thread_api::collaboration::annotation_query).transpose()?;
+        if spools.is_empty() {
+            spools.extend(threads.keys().copied());
+        } else if !threads.is_empty() {
+            spools.retain(|spool| threads.contains_key(spool));
+        }
+        let annotations = request
+            .annotations
+            .as_ref()
+            .map(thread_api::collaboration::annotation_query)
+            .transpose()?;
         let mut kinds = BTreeSet::new();
         if request.domains.is_empty() {
-            if annotations.is_some() { kinds.insert(SearchDomain::Context as i32); }
-            else { kinds.extend([SearchDomain::Thread as i32, SearchDomain::Discussion as i32, SearchDomain::Context as i32]); }
+            if annotations.is_some() {
+                kinds.insert(SearchDomain::Context as i32);
+            } else {
+                kinds.extend([
+                    SearchDomain::Thread as i32,
+                    SearchDomain::Discussion as i32,
+                    SearchDomain::Context as i32,
+                ]);
+            }
         } else {
             for domain in &request.domains {
                 let kind = SearchDomain::try_from(*domain).context("invalid search domain")?;
-                ensure!(matches!(kind, SearchDomain::Thread | SearchDomain::Discussion | SearchDomain::Context), "unsupported search domain");
+                ensure!(
+                    matches!(
+                        kind,
+                        SearchDomain::Thread | SearchDomain::Discussion | SearchDomain::Context
+                    ),
+                    "unsupported search domain"
+                );
                 ensure!(kinds.insert(kind as i32), "duplicate search domain");
             }
         }
-        ensure!(annotations.is_none() || kinds == BTreeSet::from([SearchDomain::Context as i32]), "annotation filters select context revisions only");
-        ensure!(!request.text.trim().is_empty() || annotations.is_some(), "search requires text or annotation filters");
+        ensure!(
+            annotations.is_none() || kinds == BTreeSet::from([SearchDomain::Context as i32]),
+            "annotation filters select context revisions only"
+        );
+        ensure!(
+            !request.text.trim().is_empty() || annotations.is_some(),
+            "search requires text or annotation filters"
+        );
         ensure!(request.text.len() <= 4096, "search text exceeds bound");
-        Ok(Self { spools, threads, kinds, annotations })
+        Ok(Self {
+            spools,
+            threads,
+            kinds,
+            annotations,
+        })
     }
 }
 
@@ -189,15 +242,22 @@ impl DeviceRpc {
                                 continue;
                             }
                             if hit.kind == 1 {
-                                let id = uuid::Uuid::parse_str(&hit.record)?;
-                                if !super::auth::discussion_visible(&repository, &replica, principal, facts.delegation_agent_id.as_deref(), objects::object::DiscussionRecordId::from_uuid(id)?)? { continue; }
+                                let id = hit.record.parse::<objects::object::DiscussionRecordId>()?;
+                                if !super::auth::discussion_visible(&repository, &replica, principal, facts.delegation_agent_id.as_deref(), id)? { continue; }
+                                let mut anchor = replica.discussion_summary(id, bytes as usize)?.discussion.anchor;
+                                let scope = objects::object::CollaborationScope { spool: spool.id, thread: Some(hit.thread) };
+                                let (coverage, _) = super::collaboration_targets::project_for(spool, principal, facts.delegation_agent_id.as_deref(), &replica, &scope, &mut anchor, &mut [])?;
+                                if coverage == Coverage::Unavailable { continue; }
                             }
                             if hit.kind == 2 {
                                 let (signed, _) = replica.operation(&hit.operation)?.context("indexed context operation absent")?;
-                                let context = signed.verify()?.context_revision()?.context("indexed context revision absent")?;
+                                let mut context = signed.verify()?.context_revision()?.context("indexed context revision absent")?;
                                 if let Some(discussion) = context.extracted_from {
                                     if !super::auth::discussion_visible(&repository, &replica, principal, facts.delegation_agent_id.as_deref(), discussion)? { continue; }
                                 }
+                                let scope = objects::object::CollaborationScope { spool: spool.id, thread: Some(hit.thread) };
+                                let (coverage, _) = super::collaboration_targets::project_for(spool, principal, facts.delegation_agent_id.as_deref(), &replica, &scope, &mut context.anchor, &mut context.tags)?;
+                                if coverage == Coverage::Unavailable || selection.annotations.as_ref().is_some_and(|query| !query.matches(&context.tags)) { continue; }
                             }
                             let reference = RecordRef {
                                 spool: Some(SpoolRef {

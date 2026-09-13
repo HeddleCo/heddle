@@ -69,9 +69,9 @@ pub struct NativeBatch {
     pub scanned: usize,
 }
 
-/// Bounded current-record candidates. Search text is literal. Annotation
-/// predicates are evaluated on each signed context revision, never on a union
-/// of tags belonging to concurrent operations.
+/// Bounded current-record candidates. Search text is literal. The caller
+/// projects and evaluates typed tags on each exact signed context revision
+/// after its authorization check.
 pub fn search_native(
     directory: &std::path::Path,
     text: &str,
@@ -80,12 +80,19 @@ pub fn search_native(
     kinds: &[i32],
     annotations: Option<&objects::object::AnnotationQuery>,
 ) -> Result<NativeBatch> {
-    if text.len() > 4096 || limit == 0 || limit > 257 || offset > 10_000
-        || kinds.is_empty() || kinds.len() > 3 || kinds.iter().any(|kind| !(0..=2).contains(kind))
+    if text.len() > 4096
+        || limit == 0
+        || limit > 257
+        || offset > 10_000
+        || kinds.is_empty()
+        || kinds.len() > 3
+        || kinds.iter().any(|kind| !(0..=2).contains(kind))
         || (text.trim().is_empty() && annotations.is_none())
         || (annotations.is_some() && kinds != [2])
     {
-        return Err(Error::Invalid("invalid native search query or page bound".into()));
+        return Err(Error::Invalid(
+            "invalid native search query or page bound".into(),
+        ));
     }
     let connection = crate::local_metadata::open_existing(directory)?
         .ok_or_else(|| Error::Invalid("local metadata missing".into()))?;
@@ -118,29 +125,51 @@ pub fn search_native(
             WHERE p.parent=o.id AND child.status=1 AND c.thread=s.thread
               AND c.record_kind=2 AND c.record_id=s.record)
         ORDER BY score,s.thread,s.operation,s.kind,s.record LIMIT ?1 OFFSET ?2";
-    let mut statement = connection.prepare(if text.trim().is_empty() { filters_only } else { lexical })?;
+    let mut statement = connection.prepare(if text.trim().is_empty() {
+        filters_only
+    } else {
+        lexical
+    })?;
     type Row = (Vec<u8>, Vec<u8>, i32, String, String, f64, Vec<u8>);
     let read = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Row> {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?))
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
     };
     let rows = if text.trim().is_empty() {
         statement.query_map(params![limit, offset], read)?
     } else {
-        statement.query_map(params![phrase, kinds.contains(&1), kinds.contains(&2), kinds.contains(&0), text.trim(), limit, offset], read)?
+        statement.query_map(
+            params![
+                phrase,
+                kinds.contains(&1),
+                kinds.contains(&2),
+                kinds.contains(&0),
+                text.trim(),
+                limit,
+                offset
+            ],
+            read,
+        )?
     };
     let mut hits = Vec::new();
     let mut scanned = 0;
     for row in rows {
-        let (thread, operation, kind, record, summary, score, canonical) = row?;
+        let (thread, operation, kind, record, summary, score, _canonical) = row?;
         scanned += 1;
-        if let Some(query) = annotations {
-            let operation = objects::object::thread_replication::ThreadOperation::decode(&canonical)?;
-            let context = operation.context_revision()?.ok_or_else(|| Error::Invalid("context search index mismatch".into()))?;
-            if !query.matches(&context.tags) { continue; }
-        }
         hits.push(Hit {
-            thread: super::hash(&thread)?, operation: super::hash(&operation)?, kind,
-            record, snippet: summary, score,
+            thread: super::hash(&thread)?,
+            operation: super::hash(&operation)?,
+            kind,
+            record,
+            snippet: summary,
+            score,
         });
     }
     Ok(NativeBatch { hits, scanned })

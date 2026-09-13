@@ -365,7 +365,10 @@ pub(super) fn record_visible(
     let genesis = replica.genesis()?;
     let local = match genesis.owner {
         objects::object::thread_replication::GenesisOwner::LocalKey(key)
-            if repository.holds_native_owner_key(&key)? => Some(key),
+            if repository.holds_native_owner_key(&key)? =>
+        {
+            Some(key)
+        }
         _ => None,
     };
     let explicit = replica.audience_allows(principal, agent, false, local.as_ref())?;
@@ -385,5 +388,11 @@ pub(super) fn discussion_visible(
     id: objects::object::DiscussionRecordId,
 ) -> Result<bool> {
     let summary = replica.discussion_summary(id, 1024 * 1024)?;
-    record_visible(repository, replica, principal, agent, &summary.discussion.visibility)
+    record_visible(
+        repository,
+        replica,
+        principal,
+        agent,
+        &summary.discussion.visibility,
+    )
 }

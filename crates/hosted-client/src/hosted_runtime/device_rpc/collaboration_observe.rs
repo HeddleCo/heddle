@@ -172,9 +172,14 @@ impl DeviceRpc {
                     )?;
                     let discussion = &summary.discussion;
                     if !super::auth::record_visible(
-                        &repository, &replica, uuid::Uuid::parse_str(&session.principal)?,
-                        session.agent_id.as_deref(), &discussion.visibility,
-                    )? { continue; }
+                        &repository,
+                        &replica,
+                        uuid::Uuid::parse_str(&session.principal)?,
+                        session.agent_id.as_deref(),
+                        &discussion.visibility,
+                    )? {
+                        continue;
+                    }
                     let status = if discussion.anchor_status == CollaborationAnchorStatus::Orphaned
                     {
                         discussion_record::Status::Orphaned
@@ -188,13 +193,16 @@ impl DeviceRpc {
                         continue;
                     }
                     let mut resolved_anchor = discussion.anchor.clone();
-                    let (_, anchor_scope) = super::collaboration_targets::project(
+                    let (anchor_coverage, anchor_scope) = super::collaboration_targets::project(
                         session,
                         &replica,
                         &scope,
                         &mut resolved_anchor,
                         &mut [],
                     )?;
+                    if anchor_coverage == Coverage::Unavailable {
+                        continue;
+                    }
                     let anchor =
                         thread_api::collaboration::anchor_ref(&resolved_anchor, &anchor_scope)?;
                     if !anchor_matches(request, &anchor) {
@@ -266,9 +274,14 @@ impl DeviceRpc {
                         .context("context candidate missing context")?;
                     if let Some(discussion) = record.extracted_from {
                         if !super::auth::discussion_visible(
-                            &repository, &replica, uuid::Uuid::parse_str(&session.principal)?,
-                            session.agent_id.as_deref(), discussion,
-                        )? { continue; }
+                            &repository,
+                            &replica,
+                            uuid::Uuid::parse_str(&session.principal)?,
+                            session.agent_id.as_deref(),
+                            discussion,
+                        )? {
+                            continue;
+                        }
                     }
                     if !selected(&record.id.to_string(), true) {
                         continue;
@@ -280,6 +293,9 @@ impl DeviceRpc {
                         &mut record.anchor,
                         &mut record.tags,
                     )?;
+                    if anchor_coverage == Coverage::Unavailable {
+                        continue;
+                    }
                     if query
                         .as_ref()
                         .is_some_and(|query| !query.matches(&record.tags))
@@ -326,16 +342,30 @@ impl DeviceRpc {
                 }
                 3 => {
                     if let Some(mut context) = operation.context_revision()? {
+                        if let Some(discussion) = context.extracted_from {
+                            if !super::auth::discussion_visible(
+                                &repository,
+                                &replica,
+                                uuid::Uuid::parse_str(&session.principal)?,
+                                session.agent_id.as_deref(),
+                                discussion,
+                            )? {
+                                continue;
+                            }
+                        }
                         if !selected(&context.id.to_string(), true) {
                             continue;
                         }
-                        let (_, selected_scope) = super::collaboration_targets::project(
+                        let (coverage, selected_scope) = super::collaboration_targets::project(
                             session,
                             &replica,
                             &scope,
                             &mut context.anchor,
                             &mut context.tags,
                         )?;
+                        if coverage == Coverage::Unavailable {
+                            continue;
+                        }
                         if query
                             .as_ref()
                             .is_some_and(|query| !query.matches(&context.tags))
@@ -361,6 +391,15 @@ impl DeviceRpc {
                             discussion.discussion_id,
                             budget.max_snapshot_bytes as usize,
                         )?;
+                        if !super::auth::record_visible(
+                            &repository,
+                            &replica,
+                            uuid::Uuid::parse_str(&session.principal)?,
+                            session.agent_id.as_deref(),
+                            &summary.discussion.visibility,
+                        )? {
+                            continue;
+                        }
                         let status = if summary.discussion.anchor_status
                             == CollaborationAnchorStatus::Orphaned
                         {
@@ -376,13 +415,16 @@ impl DeviceRpc {
                             continue;
                         }
                         let mut resolved_anchor = summary.discussion.anchor.clone();
-                        let (_, selected_scope) = super::collaboration_targets::project(
+                        let (coverage, selected_scope) = super::collaboration_targets::project(
                             session,
                             &replica,
                             &scope,
                             &mut resolved_anchor,
                             &mut [],
                         )?;
+                        if coverage == Coverage::Unavailable {
+                            continue;
+                        }
                         let anchor = thread_api::collaboration::anchor_ref(
                             &resolved_anchor,
                             &selected_scope,

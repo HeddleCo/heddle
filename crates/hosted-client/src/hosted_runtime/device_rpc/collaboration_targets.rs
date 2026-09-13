@@ -17,7 +17,27 @@ pub(super) fn project(
     anchor: &mut CollaborationAnchor,
     tags: &mut [AnnotationTag],
 ) -> Result<(Coverage, CollaborationScope)> {
-    let repository = repo::Repository::open(&session.spool.root)?;
+    project_for(
+        &session.spool,
+        uuid::Uuid::parse_str(&session.principal)?,
+        session.agent_id.as_deref(),
+        replica,
+        scope,
+        anchor,
+        tags,
+    )
+}
+
+pub(super) fn project_for(
+    spool: &repo::device_catalog::DeviceSpool,
+    principal: uuid::Uuid,
+    agent: Option<&str>,
+    replica: &ThreadReplica,
+    scope: &CollaborationScope,
+    anchor: &mut CollaborationAnchor,
+    tags: &mut [AnnotationTag],
+) -> Result<(Coverage, CollaborationScope)> {
+    let repository = repo::Repository::open(&spool.root)?;
     let projection = replica.projection()?;
     let viewed = match projection.source_heads.as_slice() {
         [] => projection.genesis.base,
@@ -31,18 +51,13 @@ pub(super) fn project(
                 return Ok(());
             };
             let selected = reference.binding.scope(scope)?;
-            if selected.spool != session.spool.id {
+            if selected.spool != spool.id {
                 coverage = Coverage::Unavailable;
                 return Ok(());
             }
             if let Some(thread) = selected.thread {
-                let target_replica = ThreadReplica::open(&session.spool.heddle_dir, thread)?;
-                if !super::auth::thread_visible(
-                    &repository,
-                    &target_replica,
-                    uuid::Uuid::parse_str(&session.principal)?,
-                    session.agent_id.as_deref(),
-                )? {
+                let target_replica = ThreadReplica::open(&spool.heddle_dir, thread)?;
+                if !super::auth::thread_visible(&repository, &target_replica, principal, agent)? {
                     coverage = Coverage::Unavailable;
                     return Ok(());
                 }
@@ -50,7 +65,7 @@ pub(super) fn project(
             // Reference indirection cannot authorize another resource. This endpoint
             // has admitted only this exact locally owned Spool for the request.
             ensure!(
-                scope.spool == session.spool.id,
+                scope.spool == spool.id,
                 "source anchor belongs to another Spool"
             );
             match replica.resolve_source_target(&repository, reference, viewed)? {
