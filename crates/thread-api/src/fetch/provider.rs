@@ -769,7 +769,7 @@ mod tests {
         },
         v2::{
             MethodDescriptor,
-            client::{Client, RpcTransport},
+            client::{Client, Rpc, RpcTransport},
         },
     };
     use prost::Message;
