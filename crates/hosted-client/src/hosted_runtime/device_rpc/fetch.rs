@@ -104,7 +104,6 @@ impl DeviceRpc {
             .as_ref()
             .context("source selection required")?;
         if open.checkpoint.is_some()
-            || open.proof.is_some()
             || selection.facets != [SharedFacet::Source as i32]
             || !selection.exclude_revisions.is_empty()
             || selection.depth != 0
