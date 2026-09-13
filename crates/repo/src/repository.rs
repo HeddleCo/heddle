@@ -70,7 +70,7 @@ pub use refs::SpoolFacet;
 use refs::{Head, RefBackend, RefExpectation, RefManager, RefUpdate};
 pub use repo_config::{
     HostedConfig, KeyBindingRegistryAnchor, OutputFormat, ProvenanceConfig, RepoConfig,
-    RepoRemoteConfig, RepositorySourceAuthority, TreeSchemePolicy, TrustedKey,
+    RepoRemoteConfig, RepositorySourceAuthority, TrustedKey,
 };
 // Review-epic config types — re-exported here so the new
 // `signals.rs` (and external crates wanting to construct a
@@ -711,14 +711,6 @@ impl Repository {
         self.repo_config()
     }
 
-    /// The tree-hashing scheme a fresh capture on this spool produces, read
-    /// from the `[policies] tree_scheme` flag (default `v3`). Advisory on read:
-    /// the store dispatches on body magic, so this only gates *write* scheme at
-    /// the capture chokepoint (v4 redactable trees).
-    pub fn capture_tree_scheme(&self) -> objects::object::TreeScheme {
-        self.config().policies.tree_scheme.tree_scheme()
-    }
-
     pub fn get_tree_for_state(&self, state_id: &StateId) -> Result<Option<Tree>> {
         let state = match self.store.get_state(state_id)? {
             Some(state) => state,
@@ -843,7 +835,8 @@ impl Repository {
     pub fn seed_default_thread(&self) -> Result<()> {
         let main_thread = ThreadName::from("main");
         if self.refs.get_thread(&main_thread)?.is_none() {
-            let state = objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+            let state =
+                objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
             self.store.put_tree(&Tree::new())?;
             self.store.put_state(&state)?;
             self.refs.set_thread(&main_thread, &state.id())?;

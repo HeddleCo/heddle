@@ -2,10 +2,9 @@
 //! Sticky-salt V4 tree conversion at the capture chokepoint.
 //!
 //! The worktree walker always builds flat V3 trees (every directory is a
-//! `Tree::from_entries`). When the spool policy selects
-//! [`TreeScheme::V4Salted`](objects::object::TreeScheme::V4Salted) the capture
-//! chokepoint post-processes that freshly-built tree into a salted per-entry
-//! Merkle V4 tree, applying the **sticky-salt inheritance** rule (design
+//! `Tree::from_entries`). Every authored capture converts that internal
+//! representation to [`TreeScheme::V4Salted`](objects::object::TreeScheme::V4Salted),
+//! a salted per-entry Merkle V4 tree, applying the **sticky-salt inheritance** rule (design
 //! v4-redactable-tree §3):
 //!
 //! - An entry that is **unchanged** from the parent (lineage) tree — same name
@@ -178,7 +177,7 @@ mod tests {
     use objects::{object::TreeScheme, store::ObjectStore};
     use tempfile::TempDir;
 
-    use crate::{RepoConfig, Repository, TreeSchemePolicy};
+    use crate::Repository;
 
     thread_local! {
         static FORCE_FRESH_SALTS: Cell<bool> = const { Cell::new(false) };
@@ -196,16 +195,66 @@ mod tests {
         out
     }
 
-    /// A repo whose `[policies] tree_scheme` is set to `scheme`.
-    fn repo_with_scheme(scheme: TreeSchemePolicy) -> (TempDir, Repository) {
-        let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
-        let config_path = repo.heddle_dir().join("config.toml");
-        let mut config = RepoConfig::load_for_repository(&config_path).unwrap();
-        config.policies.tree_scheme = scheme;
-        config.save(&config_path).unwrap();
-        let repo = Repository::open(temp.path()).unwrap();
+    fn native_repo() -> (TempDir, Repository) {
+        let temp = TempDir::new().expect("repository directory");
+        let repo = Repository::init_default(temp.path()).expect("native repository");
         (temp, repo)
+    }
+
+    #[test]
+    fn empty_checkout_does_not_capture_a_tree_encoding_change() {
+        let (_temp, repo) = native_repo();
+        let initial = repo.head().expect("initial seed");
+        let result = repo.snapshot_with_attribution_profiled_if_changed(
+            Some("empty checkout".into()),
+            None,
+            repo.get_attribution().expect("local signer"),
+        );
+        assert!(
+            matches!(result, Err(objects::error::HeddleError::NoChanges)),
+            "empty source is unchanged regardless of internal seed encoding: {result:?}"
+        );
+        assert_eq!(repo.head().expect("unchanged head"), initial);
+    }
+
+    #[test]
+    fn supplied_tree_capture_commits_salted_source_before_admission() {
+        use objects::object::{Blob, Tree, TreeEntry};
+
+        let (temp, repo) = native_repo();
+        let content = repo
+            .store()
+            .put_blob(&Blob::from_slice(b"source"))
+            .expect("blob");
+        let supplied = Tree::from_entries(vec![
+            TreeEntry::file("source.txt", content, false).expect("entry"),
+        ]);
+        let captured = repo
+            .snapshot_tree_with_attribution_profiled(
+                supplied,
+                Some("supplied source".into()),
+                None,
+                repo.get_attribution().expect("local signer"),
+            )
+            .expect("source committed before native admission");
+        assert_eq!(captured.tree.scheme(), TreeScheme::V4Salted);
+        let state = captured.state;
+        drop(repo);
+        let reopened = Repository::open(temp.path()).expect("reopen capture");
+        assert_eq!(
+            reopened
+                .store()
+                .get_state(&state.id())
+                .expect("durable state"),
+            Some(state.clone())
+        );
+        assert_eq!(
+            reopened
+                .store()
+                .get_tree(&state.tree)
+                .expect("durable tree"),
+            Some(captured.tree)
+        );
     }
 
     /// The salt the captured tree assigned to the top-level entry `name`.
@@ -225,7 +274,7 @@ mod tests {
 
     #[test]
     fn v4_spool_produces_salted_trees() {
-        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V4);
+        let (temp, repo) = native_repo();
         fs::write(temp.path().join("readme.md"), b"hello\n").unwrap();
         let state = repo.snapshot(Some("first".into()), None).unwrap();
         let tree = repo.store().get_tree(&state.tree).unwrap().expect("tree");
@@ -234,27 +283,26 @@ mod tests {
     }
 
     #[test]
-    fn v3_spool_captures_flat_trees() {
-        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V3);
-        fs::write(temp.path().join("readme.md"), b"hello\n").unwrap();
-        let state = repo.snapshot(Some("first".into()), None).unwrap();
-        let tree = repo.store().get_tree(&state.tree).unwrap().expect("tree");
-        assert_eq!(tree.scheme(), TreeScheme::V3Flat);
-        assert!(tree.salts().is_empty());
-        // A v3 spool captures byte-identical to a direct v3 build of the same
-        // worktree — the scheme flag is the only difference from v4.
-        let (_temp2, repo3) = repo_with_scheme(TreeSchemePolicy::V3);
-        fs::write(_temp2.path().join("readme.md"), b"hello\n").unwrap();
-        let state3 = repo3.snapshot(Some("first".into()), None).unwrap();
-        assert_eq!(
-            state.tree, state3.tree,
-            "v3 capture must be content-addressed"
+    fn independent_captures_do_not_share_private_leaf_commitments() {
+        let (left_dir, left) = native_repo();
+        let (right_dir, right) = native_repo();
+        fs::write(left_dir.path().join("readme.md"), b"hello\n").expect("left source");
+        fs::write(right_dir.path().join("readme.md"), b"hello\n").expect("right source");
+        let left = left
+            .snapshot(Some("left".into()), None)
+            .expect("left capture");
+        let right = right
+            .snapshot(Some("right".into()), None)
+            .expect("right capture");
+        assert_ne!(
+            left.tree, right.tree,
+            "independent lineages mint independent salts"
         );
     }
 
     #[test]
     fn v4_recapture_with_no_change_is_identical_id() {
-        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V4);
+        let (temp, repo) = native_repo();
         fs::write(temp.path().join("a.txt"), b"alpha\n").unwrap();
         fs::write(temp.path().join("b.txt"), b"bravo\n").unwrap();
         fs::create_dir(temp.path().join("dir")).unwrap();
@@ -269,7 +317,7 @@ mod tests {
 
     #[test]
     fn v4_changing_one_file_changes_only_that_leaf() {
-        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V4);
+        let (temp, repo) = native_repo();
         fs::write(temp.path().join("a.txt"), b"alpha\n").unwrap();
         fs::write(temp.path().join("b.txt"), b"bravo\n").unwrap();
         let first = repo.snapshot(Some("first".into()), None).unwrap();
@@ -291,7 +339,7 @@ mod tests {
 
     #[test]
     fn v4_new_file_gets_fresh_salt_and_siblings_inherit() {
-        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V4);
+        let (temp, repo) = native_repo();
         fs::write(temp.path().join("a.txt"), b"alpha\n").unwrap();
         let first = repo.snapshot(Some("first".into()), None).unwrap();
         let a_salt_1 = root_salt_for(&repo, &first.tree, "a.txt");
@@ -310,7 +358,7 @@ mod tests {
 
     #[test]
     fn falsify_forcing_fresh_salts_breaks_recapture_identity() {
-        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V4);
+        let (temp, repo) = native_repo();
         fs::write(temp.path().join("a.txt"), b"alpha\n").unwrap();
         fs::write(temp.path().join("b.txt"), b"bravo\n").unwrap();
         let first = repo.snapshot(Some("first".into()), None).unwrap();
@@ -327,7 +375,7 @@ mod tests {
     #[test]
     fn single_file_fast_path_on_v4_spool_does_not_spuriously_conflict() {
         use objects::worktree::WorktreeStatus;
-        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V4);
+        let (temp, repo) = native_repo();
         fs::write(temp.path().join("a.txt"), b"1\n").unwrap();
         fs::write(temp.path().join("b.txt"), b"1\n").unwrap();
         let _first = repo.snapshot(Some("first".into()), None).unwrap(); // baseline V4
@@ -359,7 +407,7 @@ mod tests {
         use super::super::repository_snapshot::{
             authoritative_rewalk_count, authoritative_rewalk_count_reset,
         };
-        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V4);
+        let (temp, repo) = native_repo();
         fs::write(temp.path().join("a.txt"), b"1\n").unwrap();
         let _first = repo.snapshot(Some("first".into()), None).unwrap(); // baseline V4
         authoritative_rewalk_count_reset();
@@ -383,7 +431,7 @@ mod tests {
 
     #[test]
     fn merge_tip_on_v4_spool_is_salted_and_leaf_stable_to_first_parent() {
-        let (temp, repo) = repo_with_scheme(TreeSchemePolicy::V4);
+        let (temp, repo) = native_repo();
         fs::write(temp.path().join("a.txt"), b"1\n").unwrap();
         fs::write(temp.path().join("b.txt"), b"1\n").unwrap();
         let a = repo.snapshot(Some("a".into()), None).unwrap();

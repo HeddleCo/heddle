@@ -171,7 +171,7 @@ impl Repository {
                     // NOT `RedactedTree` — Leg 3 maps `RedactedTree` to a wire
                     // status and this must not be misclassified as one.
                     HeddleError::Config(format!(
-                        "entry-visibility mark for '{}' requires a v4 (tree_scheme = v4) spool; \
+                        "entry-visibility mark for '{}' requires salted source commitments; \
                          the captured tree is not salted",
                         path.display()
                     ))
@@ -303,7 +303,7 @@ mod tests {
     use oplog::{OpLogBackend, OpRecord};
     use tempfile::TempDir;
 
-    use crate::{RepoConfig, Repository, TreeSchemePolicy};
+    use crate::Repository;
 
     #[test]
     fn default_capture_supports_entry_visibility_without_configuration() {
@@ -346,11 +346,6 @@ mod tests {
     fn v4_repo() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
-        let config_path = repo.heddle_dir().join("config.toml");
-        let mut config = RepoConfig::load_for_repository(&config_path).unwrap();
-        config.policies.tree_scheme = TreeSchemePolicy::V4;
-        config.save(&config_path).unwrap();
-        let repo = Repository::open(temp.path()).unwrap();
         (temp, repo)
     }
 

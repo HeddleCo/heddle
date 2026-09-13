@@ -7,7 +7,7 @@ use objects::{
     lock::RepositoryLockExt,
     object::{
         Attribution, Blob, ChangeId, ChangeLineage, ContentHash, State, StateAttachment,
-        StateAttachmentBody, StateId, Tree, TreeEntry, TreeScheme,
+        StateAttachmentBody, StateId, Tree, TreeEntry,
     },
     store::{ObjectStore, SnapshotCommitArtifact, SnapshotCommitDescriptor, TreeWrite},
     worktree::WorktreeStatus,
@@ -22,7 +22,7 @@ use super::{
 };
 use crate::{
     WorktreeIndex,
-    atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute, execute_reconstructible},
+    atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute_reconstructible},
     fsmonitor::{ChangeMonitorSession, ChangeMonitorToken, MonitorStatus},
     thread_manifest::ManifestFile,
     worktree_ignore::WorktreeIgnoreMatcher,
@@ -464,34 +464,30 @@ impl SnapshotMutation<'_> {
             self.worktree_revalidation_tree = Some(tree.clone());
         }
 
-        // v4 redactable trees: a spool whose `[policies] tree_scheme = v4`
-        // captures salted per-entry Merkle trees. The walker always builds flat
-        // V3 trees; convert here, inheriting each unchanged entry's salt from
-        // the lineage parent so a no-op recapture reproduces the same id. Only
-        // the worktree path (which carries its nested subtrees in
-        // `supplied_blobs`) is converted; supplied-tree merge/synthetic sources
-        // stay as provided.
-        if self.repo.capture_tree_scheme() == TreeScheme::V4Salted
-            && let Some((_, trees)) = supplied_blobs.as_ref()
-        {
-            let parent_root = match self.prev_head {
-                Some(id) => self
-                    .repo
-                    .store
-                    .get_state(&id)?
-                    .map(|state| self.repo.store.get_tree(&state.tree))
-                    .transpose()?
-                    .flatten(),
-                None => None,
-            };
-            let (v4_root, v4_subtrees) =
-                self.repo
-                    .v4ify_capture_tree(&tree, trees, parent_root.as_ref())?;
-            tree = v4_root;
-            if let Some((_, trees)) = supplied_blobs.as_mut() {
-                *trees = v4_subtrees.into_iter().map(TreeWrite::anchor).collect();
-            }
-        }
+        // All authored captures use salted commitments. The internal worktree
+        // fingerprint remains flat for revalidation; source trees inherit salts
+        // only from unchanged entries in the first-parent lineage.
+        let parent_root = match self.prev_head {
+            Some(id) => self
+                .repo
+                .store
+                .get_state(&id)?
+                .map(|state| self.repo.store.get_tree(&state.tree))
+                .transpose()?
+                .flatten(),
+            None => None,
+        };
+        let pending_trees = supplied_blobs
+            .as_ref()
+            .map(|(_, trees)| trees.as_slice())
+            .unwrap_or(&[]);
+        let (v4_root, v4_subtrees) =
+            self.repo
+                .v4ify_capture_tree(&tree, pending_trees, parent_root.as_ref())?;
+        tree = v4_root;
+        supplied_blobs
+            .get_or_insert_with(|| (Vec::new(), Vec::new()))
+            .1 = v4_subtrees.into_iter().map(TreeWrite::anchor).collect();
 
         if self.require_worktree_change && matches!(&self.source, SnapshotSource::Worktree) {
             let previous_tree = match self.prev_head {
@@ -859,14 +855,10 @@ impl SnapshotMutation<'_> {
         // consistent (a genuine no-op reproduces the baseline id; a change or a
         // failed conversion counts as "changed" and still triggers the re-walk).
         let looks_unchanged = baseline_tree.as_ref().is_some_and(|baseline| {
-            if self.repo.capture_tree_scheme() == TreeScheme::V4Salted {
-                self.repo
-                    .v4ify_capture_tree(&output.0, &output.4, Some(baseline))
-                    .map(|(v4_root, _)| v4_root.hash() == baseline.hash())
-                    .unwrap_or(false)
-            } else {
-                output.0.hash() == baseline.hash()
-            }
+            self.repo
+                .v4ify_capture_tree(&output.0, &output.4, Some(baseline))
+                .map(|(v4_root, _)| v4_root.hash() == baseline.hash())
+                .unwrap_or(false)
         });
         if self.require_worktree_change && looks_unchanged {
             #[cfg(test)]
@@ -1710,8 +1702,6 @@ impl Repository {
         confidence: Option<f32>,
         attribution: Attribution,
     ) -> Result<SnapshotExecution> {
-        let authoritative_artifact =
-            matches!(&source, SnapshotSource::SuppliedTreeWithBlobs { .. });
         let mut head_change_attempts = 0;
         // Drain queued entry-visibility marks ONCE (see the worktree loop) so a
         // head-contention retry that commits still stages the sidecar.
@@ -1756,29 +1746,22 @@ impl Repository {
             }
 
             let atomic_execute_started = std::time::Instant::now();
-            let (mut execution, committed_tip) = if authoritative_artifact {
-                let committed =
-                    execute_reconstructible(self, mutation, |mutation, base_head_id, records| {
-                        mutation.install_prepared_artifact(base_head_id, records)
-                    })?;
-                let committed_tip = committed.committed_tip;
-                let mut output = committed.output;
-                if let Some((descriptor, artifact_write_ms)) = committed.artifact {
-                    output.profile.blob_write_ms = artifact_write_ms;
-                    debug!(
-                        pack = %descriptor.pack_name,
-                        path = %descriptor.pack_path.display(),
-                        objects = descriptor.object_ids.len(),
-                        state = %descriptor.artifact.state,
-                        "structured snapshot committed through authoritative pack artifact"
-                    );
-                }
-                (output, committed_tip)
-            } else {
-                let output = execute(self, mutation)?;
-                let committed_tip = self.oplog().head_id()?;
-                (output, committed_tip)
-            };
+            let committed =
+                execute_reconstructible(self, mutation, |mutation, base_head_id, records| {
+                    mutation.install_prepared_artifact(base_head_id, records)
+                })?;
+            let committed_tip = committed.committed_tip;
+            let mut execution = committed.output;
+            if let Some((descriptor, artifact_write_ms)) = committed.artifact {
+                execution.profile.blob_write_ms = artifact_write_ms;
+                debug!(
+                    pack = %descriptor.pack_name,
+                    path = %descriptor.pack_path.display(),
+                    objects = descriptor.object_ids.len(),
+                    state = %descriptor.artifact.state,
+                    "structured snapshot committed through authoritative pack artifact"
+                );
+            }
             execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
 
             objects::fault_inject::maybe_panic_at(
@@ -1878,8 +1861,8 @@ impl Repository {
     ) -> Result<State> {
         self.require_attached_native_source_signer()?;
         self.require_complete_checkout()?;
-        // A merge capture builds its own tree and never runs the v4
-        // salt/sidecar path; queued entry-visibility marks would silently
+        // Merge capture seals its own salted tree but does not apply queued
+        // sidecar declarations; entry-visibility marks would silently
         // attach to nothing. Fail loud so they are never dropped (the worktree
         // locked path already guards before reaching here for its own drained
         // copy; this covers direct callers of the merge entry points).
@@ -1904,7 +1887,7 @@ impl Repository {
         // store fallback, produces V4 subtrees, and we persist those. Entry
         // marks are NOT supported on a merge (guarded above); this converts the
         // tip tree only.
-        let tree = if self.capture_tree_scheme() == TreeScheme::V4Salted {
+        let tree = {
             let first_parent_tree = self
                 .store
                 .get_state(&first_parent)?
@@ -1917,8 +1900,6 @@ impl Repository {
                 self.store.put_tree(subtree)?;
             }
             v4_root
-        } else {
-            tree
         };
         let tree_hash = self.store.put_tree(&tree)?;
 
