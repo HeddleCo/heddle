@@ -534,6 +534,15 @@ pub struct AuthorizedExtent {
     pub audience: EdgeAudience,
 }
 
+/// Native v2 physical range admitted by the retained canonical plan.
+#[cfg(feature = "native-provider")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeAuthorizedExtent {
+    pub range: heddle_api::heddle::api::v2alpha1::ProviderPhysicalRange,
+    pub subject: String,
+    pub audience: EdgeAudience,
+}
+
 /// The scope weft pins into its attenuation block.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EdgeServingScope {
@@ -703,6 +712,128 @@ pub fn authorize_extent_request(
         extent: extent.clone(),
         subject: facts.sub,
         audience: extent_set.audience,
+    })
+}
+
+/// Verify one native v2 provider read against an issuer-retained plan. The
+/// caller supplies the plan from the server's immutable grant store, never
+/// from the untrusted request. The selected content root comes from the
+/// independently admitted signed State.
+#[cfg(feature = "native-provider")]
+#[allow(clippy::too_many_arguments)]
+pub fn authorize_native_provider_extent(
+    grant_envelope_b64: Option<&str>,
+    trust_list: &[PublicKey],
+    trusted_presence_signers: &[PublicKey],
+    retained_plan: &heddle_api::heddle::api::v2alpha1::ProviderPlan,
+    request: &heddle_api::heddle::api::v2alpha1::ReadProviderExtentRequest,
+    authenticated_client: &[u8; 32],
+    serving_provider: &[u8; 32],
+    selected_content_root: &[u8; 32],
+    now: DateTime<Utc>,
+) -> Result<NativeAuthorizedExtent> {
+    use heddle_api::heddle::api::v2alpha1::SharedFacet;
+
+    heddle_api::provider_v2::validate_provider_plan(retained_plan)
+        .map_err(|error| EdgeError::Invalid(error.to_string()))?;
+    let challenge = retained_plan
+        .challenge
+        .as_ref()
+        .ok_or_else(|| EdgeError::Invalid("missing provider challenge".to_string()))?;
+    let source_thread = challenge
+        .thread
+        .as_ref()
+        .ok_or_else(|| EdgeError::Invalid("missing source Thread".to_string()))?;
+    let source_spool = source_thread
+        .spool
+        .as_ref()
+        .ok_or_else(|| EdgeError::Invalid("missing source Spool".to_string()))?;
+    let spool_id = uuid::Uuid::parse_str(&source_spool.id)
+        .map_err(|_| EdgeError::Invalid("invalid source Spool".to_string()))?;
+    if challenge
+        .client
+        .as_ref()
+        .map(|peer| peer.public_key.as_slice())
+        != Some(authenticated_client.as_slice())
+    {
+        return Err(EdgeError::Unauthorized(
+            "client peer differs from plan".to_string(),
+        ));
+    }
+    let request_ticket = request
+        .ticket
+        .as_ref()
+        .ok_or_else(|| EdgeError::Invalid("missing provider ticket".to_string()))?;
+    let request_range = request
+        .range
+        .as_ref()
+        .ok_or_else(|| EdgeError::Invalid("missing provider range".to_string()))?;
+    retained_plan
+        .extents
+        .iter()
+        .find(|extent| {
+            extent.ticket.as_ref() == Some(request_ticket)
+                && extent.range.as_ref() == Some(request_range)
+        })
+        .ok_or_else(|| EdgeError::Unauthorized("range is absent from retained plan".to_string()))?;
+    if request.extent_set_digest != retained_plan.extent_set_digest
+        || request_ticket.extent_set_digest != retained_plan.extent_set_digest
+        || request_ticket.assembly_digest != retained_plan.assembly_digest
+        || request_ticket
+            .provider
+            .as_ref()
+            .map(|peer| peer.public_key.as_slice())
+            != Some(serving_provider.as_slice())
+        || request_ticket
+            .client
+            .as_ref()
+            .map(|peer| peer.public_key.as_slice())
+            != Some(authenticated_client.as_slice())
+        || request_ticket.content_root != selected_content_root
+        || request_ticket.spool.as_ref() != Some(source_spool)
+        || request_ticket.facet != SharedFacet::Source as i32
+    {
+        return Err(EdgeError::Unauthorized(
+            "provider plan binding differs".to_string(),
+        ));
+    }
+    let expiry = request_ticket
+        .expires_at
+        .as_ref()
+        .ok_or_else(|| EdgeError::Invalid("missing ticket expiry".to_string()))?;
+    let now_seconds = now.timestamp();
+    if now_seconds > expiry.seconds
+        || (now_seconds == expiry.seconds && now.timestamp_subsec_nanos() >= expiry.nanos as u32)
+    {
+        return Err(EdgeError::Unauthorized(
+            "provider ticket expired".to_string(),
+        ));
+    }
+    let audience = EdgeAudience::parse(&request_ticket.audience)
+        .ok_or_else(|| EdgeError::Invalid("invalid provider audience".to_string()))?;
+    let token = std::str::from_utf8(&request_ticket.attenuated_capability)
+        .map_err(|_| EdgeError::Invalid("provider capability is not UTF-8".to_string()))?;
+    let request_fact = format!(
+        "{NATIVE_PROVIDER_REQUEST_PREDICATE}({}, {}, {}, {})",
+        biscuit_string(&hex::encode(spool_id.as_bytes())),
+        biscuit_string("source"),
+        biscuit_string(&audience.as_canonical()),
+        biscuit_string(&hex::encode(&retained_plan.extent_set_digest)),
+    );
+    let facts = crate::verify_any_at_with_extra_facts(
+        token,
+        grant_envelope_b64,
+        trust_list,
+        trusted_presence_signers,
+        EDGE_SERVE_OPERATION,
+        None,
+        &[request_fact],
+        now,
+    )?;
+    Ok(NativeAuthorizedExtent {
+        range: request_range.clone(),
+        subject: facts.sub,
+        audience,
     })
 }
 

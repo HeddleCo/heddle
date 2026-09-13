@@ -2189,6 +2189,7 @@ dependencies = [
  "heddleco-capability-verifier",
  "hex",
  "proptest",
+ "prost-types 0.14.1",
  "thiserror 2.0.18",
  "uuid",
 ]
