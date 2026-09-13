@@ -290,6 +290,19 @@ impl DeviceRpc {
                 }
                 let mut examined = 0usize;
                 let mut visible = 0usize;
+                // The final generation fence discards this buffered page if
+                // either accepted sources or visibility changes during the
+                // scan. Reuse one verified source projection per exact target
+                // within that snapshot, including multiple indexed symbols
+                // or content rows from the same original State.
+                let mut source_projections = BTreeMap::<
+                    (uuid::Uuid, objects::object::ContentHash, objects::object::StateId),
+                    Option<objects::object::EntryRedactions>,
+                >::new();
+                let mut source_paths = BTreeMap::<
+                    (uuid::Uuid, objects::object::ContentHash, objects::object::StateId, String),
+                    bool,
+                >::new();
                 let mut next_boundary = (position, None);
                 let mut has_more = false;
                 if matches!(mode, search_request::Mode::Unspecified | search_request::Mode::Lexical) {
@@ -386,18 +399,28 @@ impl DeviceRpc {
                                 if coverage == Coverage::Unavailable { continue; }
                             }
                             let revision_hit = if let Some(revision) = hit.revision {
-                                let Some(redactions) = super::auth::source_content_visibility(
-                                    &repository, &replica, principal,
-                                    facts.delegation_agent_id.as_deref(), revision,
-                                )? else { continue; };
+                                let key = (spool.id, hit.thread, revision);
+                                if !source_projections.contains_key(&key) {
+                                    let proof = super::auth::source_content_visibility(
+                                        &repository, &replica, principal,
+                                        facts.delegation_agent_id.as_deref(), revision,
+                                    )?;
+                                    source_projections.insert(key, proof);
+                                }
+                                let Some(redactions) = source_projections.get(&key).and_then(Option::as_ref) else { continue; };
                                 if matches!(hit.kind, 3 | 4) {
-                                    let state = repository.store().get_state(&revision)?.context("indexed source state absent")?;
-                                    let mut path_work = 0;
-                                    if super::content::visible_path_entry(
-                                        repository.store(), state.tree, &hit.path,
-                                        &redactions,
-                                        &mut path_work,
-                                    ).is_err() { continue; }
+                                    let path_key = (spool.id, hit.thread, revision, hit.path.clone());
+                                    if !source_paths.contains_key(&path_key) {
+                                        let state = repository.store().get_state(&revision)?.context("indexed source state absent")?;
+                                        let mut path_work = 0;
+                                        let admitted = super::content::visible_path_entry(
+                                            repository.store(), state.tree, &hit.path,
+                                            redactions,
+                                            &mut path_work,
+                                        ).is_ok();
+                                        source_paths.insert(path_key.clone(), admitted);
+                                    }
+                                    if !source_paths[&path_key] { continue; }
                                 }
                                 Some(RevisionRef {
                                     spool: Some(SpoolRef { id: spool.id.to_string() }),
