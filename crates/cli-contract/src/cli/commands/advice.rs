@@ -1273,7 +1273,7 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "grant_denied",
             format!("Cannot manage grants on '{spool}': permission denied"),
-            "Only an owner or admin of this spool can create or delete grants. Check roles with `heddle whoami`.",
+            "A current administrator grant is required to manage this spool's grants. Check access with `heddle whoami`.",
             "the caller does not hold GrantWrite on the spool",
             "no collaborator grant was created or removed",
             "hosted grants and local checkouts were left unchanged",
@@ -1283,32 +1283,11 @@ impl RecoveryAdvice {
     }
 
     #[cfg(feature = "client")]
-    pub fn grant_agent_ceiling(spool: &str, role: &str) -> Self {
-        Self::safety_refusal(
-            "grant_agent_ceiling",
-            format!(
-                "Cannot grant '{role}' on '{spool}': agent sessions cannot grant maintainer, admin, or owner"
-            ),
-            "Grant reader or contributor from this session. Maintainer, admin, and owner require a human-verified session (Tapestry or an unattenuated owner credential).",
-            "the active credential is an attenuated agent session and the requested role is above writer",
-            "no collaborator grant was created",
-            "hosted grants and local checkouts were left unchanged",
-            format!("heddle grant create --spool {spool} --principal <handle> --role contributor"),
-            vec![
-                format!(
-                    "heddle grant create --spool {spool} --principal <handle> --role contributor"
-                ),
-                "heddle whoami".to_string(),
-            ],
-        )
-    }
-
-    #[cfg(feature = "client")]
     pub fn grant_needs_human(spool: &str) -> Self {
         Self::safety_refusal(
             "grant_needs_human",
             format!("Cannot manage grants on '{spool}': human verification required"),
-            "Maintainer, admin, and owner grants require a human-verified session. Agent sessions may grant writer or below (reader, contributor) without WebAuthn.",
+            "This grant change needs current human verification. Use an owner-authorized session and retry.",
             "the server demanded human verification for this grant write",
             "no collaborator grant was created or removed",
             "hosted grants and local checkouts were left unchanged",
