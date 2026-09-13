@@ -3,13 +3,12 @@ use api::heddle::api::v1alpha1::{
     BootstrapOwnerRootResponse, CheckMergeEligibilityRequest, CheckMergeEligibilityResponse,
     CreateGrantRequest, CreateInvitationRequest, CreateServiceAccountRequest,
     CreateSignupInviteRequest, CreateSignupInviteResponse, DeleteGrantRequest,
-    GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse,
-    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
-    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
-    ListSignupInvitesRequest, ListSignupInvitesResponse, ListSpoolsRequest,
-    ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode,
-    ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
-    ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
+    GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse, GrantSupportAccessRequest,
+    GrantTargetRef, Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest,
+    IssuedCredentialResponse, ListGrantsRequest, ListSignupInvitesRequest,
+    ListSignupInvitesResponse, ListSupportAccessGrantsRequest, ListThreadApprovalsRequest,
+    MonorepoNode, ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
+    ServiceAccountResponse, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
     UpdateSpoolRequest, grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
@@ -208,15 +207,84 @@ impl HostedClient {
 
     pub async fn list_spools(
         &mut self,
-        repos_only: bool,
-    ) -> Result<Vec<SpoolSummary>, ProtocolError> {
-        let response = authed_call!(
-            self,
-            list_spools,
-            "ListSpools",
-            ListSpoolsRequest { repos_only }
-        );
-        Ok(response.spools)
+    ) -> Result<Vec<api::heddle::api::v2alpha1::SpoolOverview>, ProtocolError> {
+        use api::heddle::api::v2alpha1 as contract;
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let mut rows = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut after_page = Vec::new();
+        loop {
+            let mut observation = remote
+                .observe::<thread_api::rpc::WorkspaceServiceObserveWorkspace>(
+                    contract::ObserveWorkspaceRequest {
+                        pages: Some(contract::WorkspacePages {
+                            spools: Some(contract::PageRequest {
+                                after_page: after_page.clone(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        observe: Some(contract::ObserveOptions {
+                            mode: contract::ObservationMode::Once as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await
+                .map_err(native_protocol_error)?;
+            let batch = observation
+                .next_commit()
+                .await
+                .map_err(native_protocol_error)?
+                .ok_or_else(|| {
+                    ProtocolError::InvalidState(
+                        "workspace Spool list ended without checkpoint".into(),
+                    )
+                })?;
+            let mut spool_page = None;
+            for change in batch.changes {
+                match change {
+                    contract::workspace_event::Payload::Spool(spool) => {
+                        let reference = spool.r#ref.as_ref().ok_or_else(|| {
+                            ProtocolError::InvalidState("Spool list row has no identity".into())
+                        })?;
+                        uuid::Uuid::parse_str(&reference.id).map_err(native_protocol_error)?;
+                        if !seen.insert(reference.id.clone()) || rows.len() >= 4096 {
+                            return Err(ProtocolError::InvalidState(
+                                "Spool list contains duplicates or exceeds local bound".into(),
+                            ));
+                        }
+                        rows.push(spool);
+                    }
+                    contract::workspace_event::Payload::Status(status)
+                        if status.section == "spools" =>
+                    {
+                        if status.coverage != contract::Coverage::Complete as i32
+                            || spool_page.replace(status.page).is_some()
+                        {
+                            return Err(ProtocolError::InvalidState(
+                                "Spool list coverage is incomplete or duplicated".into(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let page = spool_page.flatten().ok_or_else(|| {
+                ProtocolError::InvalidState("Spool list page status absent".into())
+            })?;
+            if page.exhausted {
+                return Ok(rows);
+            }
+            if page.next_page.is_empty() || page.next_page == after_page {
+                return Err(ProtocolError::InvalidState(
+                    "Spool list cursor did not advance".into(),
+                ));
+            }
+            after_page = page.next_page;
+        }
     }
 
     pub async fn bootstrap_owner_root(
@@ -881,6 +949,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spool_list_comes_from_native_workspace_observation() {
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        assert!(
+            client
+                .list_spools()
+                .await
+                .expect("v2 Spool list")
+                .is_empty()
+        );
+        client.close().await;
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
     async fn administration_facade_builds_and_dispatches_every_native_request() {
         let _home = IsolatedHeddleHome::new();
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
@@ -914,7 +996,7 @@ mod tests {
             personal.spool_id,
             uuid::Uuid::from_bytes([2; 16]).to_string()
         );
-        assert!(client.list_spools(true).await.unwrap().is_empty());
+        assert!(client.list_spools().await.unwrap().is_empty());
         client
             .create_spool("acme", "widgets", true, Some("Widgets".to_string()))
             .await

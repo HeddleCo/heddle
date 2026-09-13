@@ -252,6 +252,20 @@ async fn start_inner(
         .unwrap();
     let server_addr = server.addr();
     let server_key = server.id().as_bytes().to_vec();
+    let signer = Ed25519Signer::generate().unwrap();
+    let recovery = Ed25519Signer::from_seed(&[97; 32]).unwrap();
+    let root = repo::sign_custodial_owner_root(&signer, &recovery, [9; 16], [98; 32]).unwrap();
+    let binding = repo::sign_custodial_owner_binding(&signer, &root, [99; 32]).unwrap();
+    let verified = heddleco_capability_verifier::verify_owner_root(&root).unwrap();
+    let owner = v2::OwnerState {
+        owner: Some(v2::PrincipalRef {
+            id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+        }),
+        root: Some(root),
+        binding: Some(binding),
+        version: verified.state_hash().to_vec(),
+        ..Default::default()
+    };
     let server_task = tokio::spawn(async move {
         let connection = server
             .accept()
@@ -271,6 +285,7 @@ async fn start_inner(
                 context.clone(),
                 collaboration.clone(),
                 server_key.clone(),
+                owner.clone(),
             ));
         }
         server.close().await;
@@ -282,7 +297,6 @@ async fn start_inner(
         .bind()
         .await
         .unwrap();
-    let signer = Ed25519Signer::generate().unwrap();
     let context = CallContextFactory::default()
         .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
         .unwrap();
@@ -304,6 +318,7 @@ async fn serve_call(
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
     server_key: Vec<u8>,
+    owner: v2::OwnerState,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -335,6 +350,9 @@ async fn serve_call(
                         "/heddle.api.v2alpha1.SpoolService/ObserveSpool".into(),
                         "/heddle.api.v2alpha1.SpoolService/DeleteSpool".into(),
                         "/heddle.api.v2alpha1.IdentityService/ObserveIdentity".into(),
+                        "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace".into(),
+                        "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership".into(),
+                        "/heddle.api.v2alpha1.SpoolService/CreateSpool".into(),
                     ],
                     default_read_budget: Some(v2::ReadBudget {
                         max_items: 64,
@@ -376,6 +394,9 @@ async fn serve_call(
                     server_key,
                 )
                 .await;
+            } else if method == "/heddle.api.v2alpha1.SpoolService/CreateSpool" {
+                serve_native_create_spool(&mut send, &mut recv, &mut request, server_key, owner)
+                    .await;
             } else if method == CREATE_SPOOL_METHOD {
                 serve_create_spool(&mut send, &mut recv, &mut request, create_spool).await;
             } else if method == UPDATE_SPOOL_METHOD {
@@ -403,6 +424,10 @@ async fn serve_call(
                 serve_native_spool_observation(&mut send, server_key).await;
             } else if method == "/heddle.api.v2alpha1.IdentityService/ObserveIdentity" {
                 serve_native_identity_observation(&mut send, server_key).await;
+            } else if method == "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace" {
+                serve_native_workspace_observation(&mut send, server_key).await;
+            } else if method == "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership" {
+                serve_native_owner_observation(&mut send, server_key, owner).await;
             } else if method == LIST_CONTEXT_METHOD {
                 if let Some(context) = context {
                     serve_list_context(&mut send, &mut recv, &mut request, context).await;
@@ -465,6 +490,195 @@ async fn serve_call(
         }
     }
     send.finish().unwrap();
+}
+
+async fn serve_native_workspace_observation(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+) {
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let events = [
+        v2::WorkspaceEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 1,
+                body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                    source: Some(source),
+                    binding_digest: vec![8; 32],
+                    accepted_budget: Some(budget),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+        v2::WorkspaceEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 2,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(v2::workspace_event::Payload::Status(v2::SectionStatus {
+                section: "spools".into(),
+                coverage: v2::Coverage::Complete as i32,
+                page: Some(v2::PageInfo {
+                    exhausted: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+        },
+        v2::WorkspaceEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 3,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+    ];
+    for event in events {
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+}
+
+async fn serve_native_owner_observation(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+    owner: v2::OwnerState,
+) {
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let events = [
+        v2::OwnershipEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 1,
+                body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                    source: Some(source),
+                    binding_digest: vec![8; 32],
+                    accepted_budget: Some(budget),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+        v2::OwnershipEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 2,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(v2::ownership_event::Payload::Owner(owner)),
+        },
+        v2::OwnershipEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 3,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+    ];
+    for event in events {
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+}
+
+async fn serve_native_create_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    owner: v2::OwnerState,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::CreateSpoolRequest::decode(frame.body).ok())
+        .expect("native create Spool request");
+    let genesis = match body.ownership.expect("creation ownership") {
+        v2::create_spool_request::Ownership::OwnerGenesis(genesis) => genesis,
+        v2::create_spool_request::Ownership::CustodialSpool(_) => {
+            panic!("native test server expects owner genesis creation")
+        }
+    };
+    let spool_uuid = genesis
+        .genesis
+        .as_ref()
+        .expect("genesis")
+        .spool_uuid
+        .clone();
+    let response = v2::SpoolMutationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
+        spool: Some(v2::SpoolOverview {
+            r#ref: Some(v2::SpoolRef {
+                id: uuid::Uuid::from_slice(&spool_uuid)
+                    .expect("Spool UUID")
+                    .to_string(),
+            }),
+            parent: body.parent,
+            slug: body.slug.clone(),
+            name: body.display_name.unwrap_or(body.slug),
+            owner_genesis: Some(genesis),
+            version: vec![7; 32],
+            ..Default::default()
+        }),
+        ownership: Some(owner),
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
 }
 
 async fn serve_native_identity_observation(
