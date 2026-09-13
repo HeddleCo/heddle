@@ -62,6 +62,34 @@ pub struct PutVisibilityOutcome {
     pub new_sidecar: Option<Vec<u8>>,
 }
 
+/// Verified local sidecar requirements for one exact source ancestry. This is
+/// rebuildable metadata, never Thread admission or a grant. Callers must still
+/// intersect signed original captures and independently authorize each Thread.
+#[derive(Clone, Debug)]
+pub struct ContentDisclosureProof {
+    selected: StateId,
+    tiers: Vec<(StateId, VisibilityTier)>,
+    entries: Vec<objects::object::EntryVisibilityEntry>,
+}
+
+impl ContentDisclosureProof {
+    /// Apply the canonical visibility predicate without re-reading sidecars.
+    /// An ancestor's Internal/Team tier does not taint the selected tip.
+    pub fn for_audience(
+        &self,
+        audience: &AudienceTier,
+    ) -> Option<objects::object::EntryRedactions> {
+        if self.tiers.iter().any(|(id, tier)| {
+            (*id == self.selected || tier.is_embargo()) && !visible(tier, audience)
+        }) {
+            return None;
+        }
+        let mut redactions = objects::object::EntryRedactions::default();
+        redactions.extend_overrides(&self.entries, |tier| visible(tier, audience));
+        Some(redactions)
+    }
+}
+
 /// Which audit op a [`Repository::commit_state_visibility`] emits — and thus
 /// how it resolves the record under the write lock.
 #[derive(Debug, Clone, Copy)]
@@ -625,7 +653,11 @@ impl Repository {
         state_id: &StateId,
         audience: &AudienceTier,
     ) -> Result<Option<(StateId, VisibilityTier)>> {
-        self.walk_content_visibility(state_id, audience, |_| Ok(0))
+        self.walk_content_visibility(
+            state_id,
+            |id, tier| (id == *state_id || tier.is_embargo()) && !visible(tier, audience),
+            |_| Ok(0),
+        )
     }
 
     /// Local sidecar projection for a whole-tip-admitted state. `None` means
@@ -642,24 +674,62 @@ impl Repository {
         audience: &AudienceTier,
     ) -> Result<Option<objects::object::EntryRedactions>> {
         let mut redactions = objects::object::EntryRedactions::default();
-        let withheld = self.walk_content_visibility(state_id, audience, |state| {
-            let Some(bytes) = self.get_entry_visibility_bytes(&state.change_id)? else {
-                return Ok(0);
-            };
-            let sidecar = objects::object::EntryVisibility::decode(&bytes)?;
-            if sidecar.change_id != state.change_id || sidecar.tree_root != state.tree {
-                anyhow::bail!("entry visibility does not belong to the source state");
-            }
-            redactions.extend_overrides(&sidecar.entries, |tier| visible(tier, audience));
-            Ok(bytes.len())
-        })?;
+        let withheld = self.walk_content_visibility(
+            state_id,
+            |id, tier| (id == *state_id || tier.is_embargo()) && !visible(tier, audience),
+            |state| {
+                let Some(bytes) = self.get_entry_visibility_bytes(&state.change_id)? else {
+                    return Ok(0);
+                };
+                let sidecar = objects::object::EntryVisibility::decode(&bytes)?;
+                if sidecar.change_id != state.change_id || sidecar.tree_root != state.tree {
+                    anyhow::bail!("entry visibility does not belong to the source state");
+                }
+                redactions.extend_overrides(&sidecar.entries, |tier| visible(tier, audience));
+                Ok(bytes.len())
+            },
+        )?;
         Ok(withheld.is_none().then_some(redactions))
+    }
+
+    /// Collect exact local visibility requirements through the same bounded,
+    /// identity-checked ancestry walker used by current reads. An unresolved
+    /// ancestor yields `None`; malformed sidecars fail loudly.
+    pub fn collect_content_disclosure(
+        &self,
+        state_id: &StateId,
+    ) -> Result<Option<ContentDisclosureProof>> {
+        let mut tiers = Vec::new();
+        let mut entries = Vec::new();
+        let unresolved = self.walk_content_visibility(
+            state_id,
+            |id, tier| {
+                tiers.push((id, tier.clone()));
+                false
+            },
+            |state| {
+                let Some(bytes) = self.get_entry_visibility_bytes(&state.change_id)? else {
+                    return Ok(0);
+                };
+                let sidecar = objects::object::EntryVisibility::decode(&bytes)?;
+                if sidecar.change_id != state.change_id || sidecar.tree_root != state.tree {
+                    anyhow::bail!("entry visibility does not belong to the source state");
+                }
+                entries.extend(sidecar.entries);
+                Ok(bytes.len())
+            },
+        )?;
+        Ok(unresolved.is_none().then_some(ContentDisclosureProof {
+            selected: *state_id,
+            tiers,
+            entries,
+        }))
     }
 
     fn walk_content_visibility(
         &self,
         state_id: &StateId,
-        audience: &AudienceTier,
+        mut should_withhold: impl FnMut(StateId, &VisibilityTier) -> bool,
         mut visit: impl FnMut(&objects::object::State) -> Result<usize>,
     ) -> Result<Option<(StateId, VisibilityTier)>> {
         let mut seen = HashSet::new();
@@ -681,7 +751,7 @@ impl Repository {
                 return Ok(unresolved(id));
             }
             let tier = self.effective_visibility_tier(&id)?;
-            if (id == *state_id || tier.is_embargo()) && !visible(&tier, audience) {
+            if should_withhold(id, &tier) {
                 return Ok(Some((id, tier)));
             }
             let Some(state) = self.store().get_state(&id)? else {
@@ -1412,6 +1482,15 @@ mod tests {
                 .withholding_visibility_for_audience(&child.id(), &crate::AudienceTier::Public)
                 .expect("descendant gate");
             assert_eq!(descendant.is_some(), blocked, "ancestor tier {tier:?}");
+            let proof = repo
+                .collect_content_disclosure(&child.id())
+                .expect("checked proof")
+                .expect("complete ancestry");
+            assert_eq!(
+                proof.for_audience(&crate::AudienceTier::Public).is_none(),
+                blocked,
+                "proof and live gate must agree for ancestor {tier:?}"
+            );
         }
     }
 
@@ -1446,6 +1525,12 @@ mod tests {
             VisibilityTier::Private {
                 scope_label: UNRESOLVED_ANCESTOR_SCOPE.into()
             }
+        );
+        assert!(
+            repo.collect_content_disclosure(&child.id())
+                .expect("checked proof")
+                .is_none(),
+            "shallow marker cannot mint a proof"
         );
     }
 

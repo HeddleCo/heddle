@@ -336,6 +336,17 @@ mod tests {
             !projection.entry_visible(&tree, 0),
             "explicit private entry is withheld"
         );
+        let proof = repo
+            .collect_content_disclosure(&state.id())
+            .expect("verified local proof")
+            .expect("complete source");
+        let projected = proof
+            .for_audience(&crate::AudienceTier::Internal)
+            .expect("whole State visible");
+        assert!(
+            !projected.entry_visible(&tree, 0),
+            "proof carries the exact denied salted leaf"
+        );
         let unchanged = repo
             .snapshot(Some("no source edit".into()), None)
             .expect("recapture preserves salts");
