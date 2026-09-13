@@ -182,26 +182,45 @@ impl DeviceRpc {
                     generations.push(generation);
                 }
                 let binding = digest.finalize();
+                let cursor_directory = selected.first().map(|spool| &spool.heddle_dir);
+                let mut cursor_scope = blake3::Hasher::new_derive_key("heddle-device-search-cursor-actor-v1");
+                cursor_scope.update(&worker_session.binding());
+                cursor_scope.update(&this.endpoint);
+                if let Some(spool) = selected.first() {
+                    let facts = worker_session.facts(Some(&spool.capability_path))?;
+                    cursor_scope.update(facts.delegation_agent_id.as_deref().unwrap_or("").as_bytes());
+                }
+                let cursor_scope = *cursor_scope.finalize().as_bytes();
                 let (mut position, mut offset) = if page.after_page.is_empty() {
                     (0usize, 0u32)
                 } else {
-                    ensure!(
-                        page.after_page.len() == 40 && &page.after_page[..32] == binding.as_bytes(),
-                        "search cursor differs from query, caller or committed data"
-                    );
+                    let directory = cursor_directory.context("search cursor has no selected Spool")?;
+                    let stored = repo::device_page_cursors::resume(
+                        directory, cursor_scope, binding.as_bytes(), "search", &page.after_page,
+                    )?;
                     (
-                        u32::from_be_bytes(page.after_page[32..36].try_into()?) as usize,
-                        u32::from_be_bytes(page.after_page[36..40].try_into()?),
+                        u32::from_be_bytes(stored[..4].try_into()?) as usize,
+                        u32::from_be_bytes(stored[4..8].try_into()?),
                     )
                 };
                 ensure!(position <= selected.len(), "search cursor outside Spools");
                 let mut events = Vec::new();
+                for domain in &selection.kinds {
+                    events.push(SearchEvent {
+                        source: Some(this.endpoint()),
+                        payload: Some(search_event::Payload::DomainStatus(SearchDomainStatus {
+                            domain: *domain,
+                            coverage: Coverage::Complete as i32,
+                            supported_modes: vec![search_request::Mode::Lexical as i32],
+                        })),
+                    });
+                }
                 let mut examined = 0usize;
+                let mut visible = 0usize;
+                let mut next_boundary = (position, offset);
+                let mut has_more = false;
                 if matches!(mode, search_request::Mode::Unspecified | search_request::Mode::Lexical) {
-                    while position < selected.len()
-                        && events.len() < limit as usize
-                        && examined < 1024
-                    {
+                    'scan: while position < selected.len() {
                         ensure!(
                             std::time::Instant::now() < deadline,
                             "device query work deadline exceeded"
@@ -209,7 +228,8 @@ impl DeviceRpc {
                         worker_session.check_clock()?;
                         let spool = &selected[position];
                         worker_session.facts(Some(&spool.capability_path))?;
-                        let remaining = limit as usize - events.len();
+                        ensure!(examined < 10_000, "device search candidate work bound exceeded");
+                        let remaining = (10_000 - examined).min(256);
                         let kinds: Vec<_> = selection.kinds.iter().copied().map(|kind| kind - 1).collect();
                         let batch = repo::thread_replication::collaboration_search::search_native(
                             &spool.heddle_dir,
@@ -220,14 +240,12 @@ impl DeviceRpc {
                             selection.annotations.as_ref(),
                         )?;
                         let exhausted = batch.scanned < remaining;
-                        examined = examined.saturating_add(batch.scanned);
-                        offset = offset
-                            .checked_add(batch.scanned as u32)
-                            .context("search offset overflow")?;
                         let repository = repo::Repository::open(&spool.root)?;
                         let facts = worker_session.facts(Some(&spool.capability_path))?;
                         let principal = uuid::Uuid::parse_str(&worker_session.principal)?;
                         for hit in batch.hits {
+                            offset = offset.checked_add(1).context("search offset overflow")?;
+                            examined += 1;
                             if selection.threads.get(&spool.id).is_some_and(|threads| !threads.contains(hit.thread.as_bytes().as_slice())) { continue; }
                             let replica = repo::thread_replication::ThreadReplica::open(
                                 &spool.heddle_dir,
@@ -248,6 +266,21 @@ impl DeviceRpc {
                                 let scope = objects::object::CollaborationScope { spool: spool.id, thread: Some(hit.thread) };
                                 let (coverage, _) = super::collaboration_targets::project_for(spool, principal, facts.delegation_agent_id.as_deref(), &replica, &scope, &mut anchor, &mut [])?;
                                 if coverage == Coverage::Unavailable { continue; }
+                                let (signed, _) = replica.operation(&hit.operation)?.context("indexed discussion operation absent")?;
+                                let objects::object::thread_replication::ThreadOperationBody::Discussion(original) = &signed.verify()?.body else {
+                                    anyhow::bail!("indexed discussion facet mismatch")
+                                };
+                                let original = objects::object::CollaborationOperationEnvelope::decode(original)?.operation;
+                                let mut authored_anchor = match original.body {
+                                    objects::object::CollaborationOperationBodyV1::Open { anchor, .. }
+                                    | objects::object::CollaborationOperationBodyV1::RebindAnchor { anchor, .. }
+                                    | objects::object::CollaborationOperationBodyV1::LegacyImported { anchor, .. } => Some(anchor),
+                                    _ => None,
+                                };
+                                if let Some(anchor) = authored_anchor.as_mut() {
+                                    let (coverage, _) = super::collaboration_targets::project_for(spool, principal, facts.delegation_agent_id.as_deref(), &replica, &scope, anchor, &mut [])?;
+                                    if coverage == Coverage::Unavailable { continue; }
+                                }
                             }
                             if hit.kind == 2 {
                                 let (signed, _) = replica.operation(&hit.operation)?.context("indexed context operation absent")?;
@@ -258,6 +291,10 @@ impl DeviceRpc {
                                 let scope = objects::object::CollaborationScope { spool: spool.id, thread: Some(hit.thread) };
                                 let (coverage, _) = super::collaboration_targets::project_for(spool, principal, facts.delegation_agent_id.as_deref(), &replica, &scope, &mut context.anchor, &mut context.tags)?;
                                 if coverage == Coverage::Unavailable || selection.annotations.as_ref().is_some_and(|query| !query.matches(&context.tags)) { continue; }
+                            }
+                            if visible == limit as usize {
+                                has_more = true;
+                                break 'scan;
                             }
                             let reference = RecordRef {
                                 spool: Some(SpoolRef {
@@ -283,6 +320,8 @@ impl DeviceRpc {
                                     }),
                                     summary: hit.snippet,
                                     score: -hit.score,
+                                    domain: i32::from(hit.kind) + 1,
+                                    match_kind: if request.text.trim().is_empty() { SearchMatchKind::Structured } else { SearchMatchKind::Fulltext } as i32,
                                     thread: Some(ThreadRef {
                                         spool: Some(SpoolRef { id: spool.id.to_string() }),
                                         id: Some(ThreadId { value: hit.thread.as_bytes().to_vec() }),
@@ -291,35 +330,31 @@ impl DeviceRpc {
                                     ..Default::default()
                                 })),
                             });
+                            visible += 1;
+                            next_boundary = (position, offset);
                         }
                         if exhausted {
                             position += 1;
                             offset = 0;
-                        } else if events.len() >= limit as usize {
-                            break;
                         }
                     }
-                } else {
-                    position = selected.len();
                 }
-                let exhausted = position == selected.len();
-                let next_page = if exhausted {
+                let next_page = if !has_more {
                     vec![]
                 } else {
-                    [
-                        binding.as_bytes().as_slice(),
-                        &(position as u32).to_be_bytes(),
-                        &offset.to_be_bytes(),
-                    ]
-                    .concat()
+                    let directory = cursor_directory.context("search cursor has no selected Spool")?;
+                    let mut stored = [0u8; 32];
+                    stored[..4].copy_from_slice(&(next_boundary.0 as u32).to_be_bytes());
+                    stored[4..8].copy_from_slice(&next_boundary.1.to_be_bytes());
+                    repo::device_page_cursors::issue(directory, cursor_scope, binding.as_bytes(), "search", stored)?.to_vec()
                 };
                 events.push(SearchEvent {
                     source: Some(this.endpoint()),
                     payload: Some(search_event::Payload::Complete(SectionStatus {
                         section: "search".into(),
-                        coverage: if exhausted { Coverage::Complete } else { Coverage::Partial } as i32,
+                        coverage: Coverage::Complete as i32,
                         page: Some(PageInfo {
-                            exhausted,
+                            exhausted: !has_more,
                             next_page,
                             ..Default::default()
                         }),

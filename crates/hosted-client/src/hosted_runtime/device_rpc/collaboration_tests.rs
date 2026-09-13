@@ -63,7 +63,11 @@ pub(super) async fn roundtrip(
         &mut [],
     )
     .expect("project unknown source reference");
-    assert_eq!(coverage, Coverage::Unavailable, "arbitrary State hash is not an admitted source");
+    assert_eq!(
+        coverage,
+        Coverage::Unavailable,
+        "arbitrary State hash is not an admitted source"
+    );
     let command = |id: uuid::Uuid, body| thread_api::collaboration::Command {
         discussion,
         operation_id: CollaborationIdempotencyKey::new(id.to_string()).expect("command ID"),
@@ -569,10 +573,33 @@ pub(super) async fn roundtrip(
         .await
         .expect("embargo Search observation");
     while let Some(event) = embargo_search.next().await.expect("embargo Search frame") {
-        assert!(
-            !matches!(event.payload, Some(search_event::Payload::Hit(_))),
-            "without an explicit label grant even owner Internal must not see Private"
-        );
+        match event.payload {
+            Some(search_event::Payload::Hit(_)) => {
+                panic!("without an explicit label grant even owner Internal must not see Private")
+            }
+            Some(search_event::Payload::DomainStatus(status)) => {
+                assert_eq!(status.domain, SearchDomain::Discussion as i32);
+                assert_eq!(status.coverage, Coverage::Complete as i32);
+                assert_eq!(
+                    status.supported_modes,
+                    vec![search_request::Mode::Lexical as i32]
+                );
+            }
+            Some(search_event::Payload::Complete(status)) => {
+                assert_eq!(
+                    status.coverage,
+                    Coverage::Complete as i32,
+                    "hidden rows do not create partial coverage"
+                );
+                let page = status.page.expect("hidden-only search page");
+                assert!(page.exhausted);
+                assert!(
+                    page.next_page.is_empty(),
+                    "hidden-only results do not issue a cursor"
+                );
+            }
+            _ => {}
+        }
     }
     let hits = repo::thread_replication::collaboration_search::search(
         repository.heddle_dir(),
