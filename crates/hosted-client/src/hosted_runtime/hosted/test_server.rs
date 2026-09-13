@@ -332,6 +332,7 @@ pub(crate) struct DurableSyncStore {
 }
 
 impl DurableSyncStore {
+    #[cfg(test)]
     fn pull_fixture(&self) -> Option<PullFixture> {
         self.published
             .lock()
@@ -339,6 +340,7 @@ impl DurableSyncStore {
             .clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn stage(&self, remote_state: StateId, pack_data: Vec<u8>, index_data: Vec<u8>) {
         *self
             .staged
