@@ -1,14 +1,11 @@
 use api::heddle::api::v1alpha1::{
-    BeginWebAuthnAuthenticationRequest, BootstrapOwnerRootRequest,
-    BootstrapOwnerRootResponse, CreateAgentAccountRequest, CreateAgentAccountResponse,
-    CreateInvitationRequest,
-    CreateServiceAccountRequest, CreateSignupInviteRequest, CreateSignupInviteResponse,
-    GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse, GrantSupportAccessRequest,
-    GrantTargetRef, Invitation as ProtoInvitation, IssueServiceAccountCredentialRequest,
-    IssuedCredentialResponse, ListSignupInvitesRequest, ListSignupInvitesResponse,
-    ListSupportAccessGrantsRequest, MonorepoNode,
-    ResolveMonorepoRequest, RevokeSupportAccessRequest,
-    ServiceAccountResponse, SupportAccessGrant, grant_target_ref::Target as GrantTargetKind,
+    BeginWebAuthnAuthenticationRequest, BootstrapOwnerRootRequest, BootstrapOwnerRootResponse,
+    CreateAgentAccountRequest, CreateAgentAccountResponse, CreateInvitationRequest,
+    CreateServiceAccountRequest, GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse,
+    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
+    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListSupportAccessGrantsRequest,
+    MonorepoNode, ResolveMonorepoRequest, RevokeSupportAccessRequest, ServiceAccountResponse,
+    SupportAccessGrant, grant_target_ref::Target as GrantTargetKind,
 };
 use wire::ProtocolError;
 
@@ -81,15 +78,21 @@ impl HostedClient {
 
     pub async fn create_signup_invite(
         &mut self,
-        request: CreateSignupInviteRequest,
-    ) -> Result<CreateSignupInviteResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            create_signup_invite,
-            "/heddle.api.v1alpha1.IdentityService/CreateSignupInvite",
-            request
-        ))
+        request: api::heddle::api::v2alpha1::CreateSignupInvitationRequest,
+    ) -> Result<api::heddle::api::v2alpha1::CreateSignupInvitationResponse, ProtocolError> {
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::IdentityServiceCreateSignupInvitation>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        require_applied_receipt(
+            response.receipt.clone(),
+            &request.client_operation_id,
+            &remote.description.endpoint,
+            "signup invitation creation",
+        )?;
+        Ok(response)
     }
 
     pub async fn issue_service_account_credential(
@@ -102,17 +105,123 @@ impl HostedClient {
             .map_err(hosted_to_protocol_error)
     }
 
-    pub async fn list_signup_invites(
+    pub async fn list_signup_invitations(
         &mut self,
-        request: ListSignupInvitesRequest,
-    ) -> Result<ListSignupInvitesResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            list_signup_invites,
-            "/heddle.api.v1alpha1.IdentityService/ListSignupInvites",
-            request
-        ))
+    ) -> Result<(Vec<api::heddle::api::v2alpha1::SignupInvitation>, u32), ProtocolError> {
+        self.signup_invitation_view(false).await
+    }
+
+    pub async fn signup_invitation_quota(&mut self) -> Result<u32, ProtocolError> {
+        self.signup_invitation_view(true)
+            .await
+            .map(|(_, quota)| quota)
+    }
+
+    async fn signup_invitation_view(
+        &mut self,
+        only_quota: bool,
+    ) -> Result<(Vec<api::heddle::api::v2alpha1::SignupInvitation>, u32), ProtocolError> {
+        use api::heddle::api::v2alpha1 as contract;
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let mut records = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut after_page = Vec::new();
+        let mut quota = None;
+        loop {
+            let mut observation = remote
+                .observe::<thread_api::rpc::IdentityServiceObserveIdentity>(
+                    contract::ObserveIdentityRequest {
+                        signup_invitations: Some(contract::PageRequest {
+                            after_page: after_page.clone(),
+                            size: if only_quota { 1 } else { 32 },
+                        }),
+                        observe: Some(contract::ObserveOptions {
+                            mode: contract::ObservationMode::Once as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await
+                .map_err(native_protocol_error)?;
+            let batch = observation
+                .next_commit()
+                .await
+                .map_err(native_protocol_error)?
+                .ok_or_else(|| {
+                    ProtocolError::InvalidState("invitation view ended without a checkpoint".into())
+                })?;
+            let mut page = None;
+            let mut page_quota = None;
+            for change in batch.changes {
+                match change {
+                    contract::identity_event::Payload::SignupInvitation(record) => {
+                        let id = record
+                            .r#ref
+                            .as_ref()
+                            .ok_or_else(|| {
+                                ProtocolError::InvalidState("invitation row has no identity".into())
+                            })?
+                            .id
+                            .clone();
+                        uuid::Uuid::parse_str(&id).map_err(native_protocol_error)?;
+                        if !seen.insert(id) || records.len() >= 4096 {
+                            return Err(ProtocolError::InvalidState(
+                                "invitation view contains duplicate or too many rows".into(),
+                            ));
+                        }
+                        records.push(record);
+                    }
+                    contract::identity_event::Payload::InvitationQuota(value) => {
+                        if !value.distribution_id.is_empty()
+                            || page_quota.replace(value.remaining).is_some()
+                        {
+                            return Err(ProtocolError::InvalidState(
+                                "account invitation quota is ambiguous".into(),
+                            ));
+                        }
+                    }
+                    contract::identity_event::Payload::Status(status)
+                        if status.section == "signup_invitations" =>
+                    {
+                        if !matches!(
+                            contract::Coverage::try_from(status.coverage),
+                            Ok(contract::Coverage::Complete | contract::Coverage::Partial)
+                        ) || page.replace(status.page).is_some()
+                        {
+                            return Err(ProtocolError::InvalidState(
+                                "invitation list coverage is incomplete or duplicated".into(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let current = page_quota.ok_or_else(|| {
+                ProtocolError::InvalidState("account invitation quota absent".into())
+            })?;
+            if quota.replace(current).is_some_and(|prior| prior != current) {
+                return Err(ProtocolError::InvalidState(
+                    "invitation quota changed during pagination".into(),
+                ));
+            }
+            if only_quota {
+                return Ok((Vec::new(), current));
+            }
+            let page = page.flatten().ok_or_else(|| {
+                ProtocolError::InvalidState("invitation page status absent".into())
+            })?;
+            if page.exhausted {
+                return Ok((records, current));
+            }
+            if page.next_page.is_empty() || page.next_page == after_page {
+                return Err(ProtocolError::InvalidState(
+                    "invitation page cursor did not advance".into(),
+                ));
+            }
+            after_page = page.next_page;
+        }
     }
 
     pub async fn begin_login(
@@ -1188,14 +1297,31 @@ mod tests {
         use thread_api::thread_control::{Author, Control, PreparedControl, Review, ReviewKind};
 
         let (client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-        let snapshot = client.observe_review("acme", "feature").await.expect("review snapshot");
+        let snapshot = client
+            .observe_review("acme", "feature")
+            .await
+            .expect("review snapshot");
         assert_eq!(snapshot.overview.name, "feature");
-        assert_eq!(snapshot.comparison.as_ref().expect("comparison").policy_version, vec![6; 32]);
-        let landing = client.observe_landing_assessment("acme", "feature", "main")
+        assert_eq!(
+            snapshot
+                .comparison
+                .as_ref()
+                .expect("comparison")
+                .policy_version,
+            vec![6; 32]
+        );
+        let landing = client
+            .observe_landing_assessment("acme", "feature", "main")
             .await
             .expect("target-bound assessment");
-        let assessment = landing.overview.landing_assessment.expect("exact landing target");
-        assert_eq!(assessment.target.expect("target").id.expect("ID").value, vec![4; 32]);
+        let assessment = landing
+            .overview
+            .landing_assessment
+            .expect("exact landing target");
+        assert_eq!(
+            assessment.target.expect("target").id.expect("ID").value,
+            vec![4; 32]
+        );
         let signer = crypto::Ed25519Signer::from_seed(&[13; 32]).expect("test author");
         let prepared = PreparedControl::sign(
             &snapshot.overview,
@@ -1219,7 +1345,8 @@ mod tests {
             &signer,
         )
         .expect("sign exact review comparison");
-        client.record_review(&prepared.record_review().expect("wire request"))
+        client
+            .record_review(&prepared.record_review().expect("wire request"))
             .await
             .expect("native typed review RPC");
         client.close().await;
@@ -1235,21 +1362,29 @@ mod tests {
         let _ = client
             .create_service_account(CreateServiceAccountRequest::default())
             .await;
-        let _ = client
-            .create_signup_invite(CreateSignupInviteRequest {
-                recipient_email: Some("alice@example.com".to_string()),
+        let created = client
+            .create_signup_invite(api::heddle::api::v2alpha1::CreateSignupInvitationRequest {
+                invitation: Some(api::heddle::api::v2alpha1::SignupInvitation {
+                    bound_email: "alice@example.com".to_string(),
+                    ..Default::default()
+                }),
                 client_operation_id: "signup-invite-op".to_string(),
             })
-            .await;
+            .await
+            .expect("native invitation mutation");
+        assert_eq!(created.redemption_secret, b"one-time-invite");
         let _ = client
             .issue_service_account_credential(IssueServiceAccountCredentialRequest::default())
             .await;
-        let _ = client
-            .list_signup_invites(ListSignupInvitesRequest {
-                page_size: 200,
-                page_token: String::new(),
-            })
-            .await;
+        let (invites, quota) = client
+            .list_signup_invitations()
+            .await
+            .expect("native invitation observation");
+        assert!(
+            invites.is_empty(),
+            "undistributed allowance is not an invitation"
+        );
+        assert_eq!(quota, 2);
         client.begin_login("alice@example.com").await.unwrap();
         let personal = client
             .get_current_user_spool()

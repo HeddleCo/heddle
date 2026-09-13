@@ -4,8 +4,7 @@ use std::{collections::BTreeSet, path::Path};
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha1::{
-    CreateServiceAccountRequest, CreateSignupInviteRequest, IssueServiceAccountCredentialRequest,
-    ListSignupInvitesRequest, SignupInviteOwnerStatus, SignupInviteSummary,
+    CreateServiceAccountRequest, IssueServiceAccountCredentialRequest,
 };
 use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
@@ -114,23 +113,23 @@ pub struct AuthTrust {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignupInviteCreated {
     pub invite_id: String,
-    pub invite_code: String,
-    pub allowance_remaining: u32,
+    /// Shown once from the mutation result; list views never recreate it.
+    pub redemption_secret: String,
+    pub allowance_remaining: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignupInvite {
-    pub invite_code: String,
+    pub invite_id: String,
     pub status: String,
-    pub created_at: Option<String>,
-    pub consumed: bool,
-    pub consumed_at: Option<String>,
+    pub bound_email: Option<String>,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignupInviteList {
     pub invites: Vec<SignupInvite>,
-    pub allowance_remaining: u32,
+    pub allowance_remaining: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -230,8 +229,8 @@ pub async fn execute(
     }
 }
 
-const CREATE_SIGNUP_INVITE_METHOD: &str = "heddle.api.v1alpha1.IdentityService/CreateSignupInvite";
-const SIGNUP_INVITE_PAGE_SIZE: u32 = 200;
+const CREATE_SIGNUP_INVITE_METHOD: &str =
+    "heddle.api.v2alpha1.IdentityService/CreateSignupInvitation";
 
 async fn auth_invite(
     options: &AuthOptions,
@@ -277,68 +276,85 @@ async fn create_signup_invite_connected(
         .await
         .map_err(|error| anyhow::anyhow!("create_signup_invite failed: {error}"))?;
 
+    let invite_id = response
+        .invitation
+        .as_ref()
+        .and_then(|invite| invite.r#ref.as_ref())
+        .context("created signup invitation has no identity")?
+        .id
+        .clone();
+    let redemption_secret = String::from_utf8(response.redemption_secret)
+        .context("signup invitation redemption secret is not UTF-8")?;
+    anyhow::ensure!(
+        !redemption_secret.is_empty(),
+        "signup invitation has no redemption secret"
+    );
+    // The mutation's one-time secret must be returned even if the separate
+    // read-side quota observation becomes unavailable immediately afterward.
+    let allowance_remaining = auth_client.signup_invitation_quota().await.ok();
     Ok(SignupInviteCreated {
-        invite_id: response.invite_id,
-        invite_code: response.invite_code,
-        allowance_remaining: response.allowance_remaining,
+        invite_id,
+        redemption_secret,
+        allowance_remaining,
     })
 }
 
 fn create_signup_invite_request(
     recipient_email: Option<String>,
     client_operation_id: String,
-) -> CreateSignupInviteRequest {
-    CreateSignupInviteRequest {
-        recipient_email,
+) -> api::heddle::api::v2alpha1::CreateSignupInvitationRequest {
+    api::heddle::api::v2alpha1::CreateSignupInvitationRequest {
         client_operation_id,
+        invitation: Some(api::heddle::api::v2alpha1::SignupInvitation {
+            bound_email: recipient_email.unwrap_or_default(),
+            ..Default::default()
+        }),
     }
 }
 
 async fn list_signup_invites_connected(auth_client: &mut HostedClient) -> Result<SignupInviteList> {
-    let mut page_token = String::new();
-    let mut seen_page_tokens = BTreeSet::new();
-    let mut invites = Vec::new();
-    let allowance_remaining = loop {
-        let response = auth_client
-            .list_signup_invites(list_signup_invites_request(page_token))
-            .await
-            .map_err(|error| anyhow::anyhow!("list_signup_invites failed: {error}"))?;
-        invites.extend(response.invites.into_iter().map(signup_invite_output));
-        if response.next_page_token.is_empty() {
-            break response.allowance_remaining;
-        }
-        if !seen_page_tokens.insert(response.next_page_token.clone()) {
-            bail!("list_signup_invites returned a repeated page token");
-        }
-        page_token = response.next_page_token;
-    };
-
+    let (records, allowance_remaining) = auth_client
+        .list_signup_invitations()
+        .await
+        .map_err(|error| anyhow::anyhow!("list_signup_invitations failed: {error}"))?;
     Ok(SignupInviteList {
-        invites,
-        allowance_remaining,
+        invites: records
+            .into_iter()
+            .map(signup_invite_output)
+            .collect::<Result<_>>()?,
+        allowance_remaining: Some(allowance_remaining),
     })
 }
 
-fn list_signup_invites_request(page_token: String) -> ListSignupInvitesRequest {
-    ListSignupInvitesRequest {
-        page_size: SIGNUP_INVITE_PAGE_SIZE,
-        page_token,
-    }
-}
-
-fn signup_invite_output(invite: SignupInviteSummary) -> SignupInvite {
-    let status = match SignupInviteOwnerStatus::try_from(invite.status) {
-        Ok(SignupInviteOwnerStatus::Open) => "open",
-        Ok(SignupInviteOwnerStatus::Consumed) => "consumed",
-        Ok(SignupInviteOwnerStatus::Unspecified) | Err(_) => "unknown",
+fn signup_invite_output(
+    invite: api::heddle::api::v2alpha1::SignupInvitation,
+) -> Result<SignupInvite> {
+    let invite_id = invite
+        .r#ref
+        .as_ref()
+        .context("invitation identity missing")?
+        .id
+        .clone();
+    uuid::Uuid::parse_str(&invite_id).context("invalid invitation identity")?;
+    let status = if invite.revoked {
+        "revoked"
+    } else if invite.redeemed {
+        "redeemed"
+    } else if invite
+        .expires_at
+        .as_ref()
+        .is_some_and(|expiry| expiry.seconds <= chrono::Utc::now().timestamp())
+    {
+        "expired"
+    } else {
+        "open"
     };
-    SignupInvite {
-        invite_code: invite.invite_code,
-        status: status.to_string(),
-        created_at: invite.created_at.as_ref().and_then(format_proto_timestamp),
-        consumed: invite.consumed,
-        consumed_at: invite.consumed_at.as_ref().and_then(format_proto_timestamp),
-    }
+    Ok(SignupInvite {
+        invite_id,
+        status: status.into(),
+        bound_email: (!invite.bound_email.is_empty()).then_some(invite.bound_email),
+        expires_at: invite.expires_at.as_ref().and_then(format_proto_timestamp),
+    })
 }
 
 fn format_proto_timestamp(timestamp: &prost_types::Timestamp) -> Option<String> {
@@ -1401,12 +1417,14 @@ mod tests {
             Some("alice@example.com".to_string()),
             "invite-op".to_string(),
         );
-        assert_eq!(create.recipient_email.as_deref(), Some("alice@example.com"));
+        assert_eq!(
+            create
+                .invitation
+                .as_ref()
+                .map(|invite| invite.bound_email.as_str()),
+            Some("alice@example.com")
+        );
         assert_eq!(create.client_operation_id, "invite-op");
-
-        let list = list_signup_invites_request("next-page".to_string());
-        assert_eq!(list.page_size, 200);
-        assert_eq!(list.page_token, "next-page");
     }
 
     #[test]

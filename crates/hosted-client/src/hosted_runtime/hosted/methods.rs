@@ -64,13 +64,6 @@ impl HostedRoutes<'_> {
         ServiceAccountResponse
     );
     unary_method!(
-        create_signup_invite,
-        "IdentityService",
-        "CreateSignupInvite",
-        CreateSignupInviteRequest,
-        CreateSignupInviteResponse
-    );
-    unary_method!(
         exchange_device_authorization,
         "IdentityService",
         "ExchangeDeviceAuthorization",
@@ -83,13 +76,6 @@ impl HostedRoutes<'_> {
         "IssueServiceAccountCredential",
         IssueServiceAccountCredentialRequest,
         IssuedCredentialResponse
-    );
-    unary_method!(
-        list_signup_invites,
-        "IdentityService",
-        "ListSignupInvites",
-        ListSignupInvitesRequest,
-        ListSignupInvitesResponse
     );
     unary_method!(
         create_agent_account,

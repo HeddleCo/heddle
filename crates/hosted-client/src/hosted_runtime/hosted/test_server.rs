@@ -358,6 +358,7 @@ async fn serve_call(
                         "/heddle.api.v2alpha1.ThreadService/ObserveThread".into(),
                         "/heddle.api.v2alpha1.ThreadService/RecordReview".into(),
                         "/heddle.api.v2alpha1.IdentityService/ObserveIdentity".into(),
+                        "/heddle.api.v2alpha1.IdentityService/CreateSignupInvitation".into(),
                         "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace".into(),
                         "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership".into(),
                         "/heddle.api.v2alpha1.SpoolService/CreateSpool".into(),
@@ -397,7 +398,9 @@ async fn serve_call(
                     .then(|| body.selectors[0].selector.as_ref())
                     .flatten()
                     .and_then(|selector| match selector {
-                        v2::resource_selector::Selector::ThreadName(value) => Some(value.name.as_str()),
+                        v2::resource_selector::Selector::ThreadName(value) => {
+                            Some(value.name.as_str())
+                        }
                         _ => None,
                     });
                 let mut results = vec![v2::ResourceResolution {
@@ -405,7 +408,9 @@ async fn serve_call(
                         entity: Some(if let Some(name) = thread_name {
                             v2::entity_ref::Entity::Thread(v2::ThreadRef {
                                 spool: Some(spool.clone()),
-                                id: Some(v2::ThreadId { value: vec![if name == "main" { 4 } else { 3 }; 32] }),
+                                id: Some(v2::ThreadId {
+                                    value: vec![if name == "main" { 4 } else { 3 }; 32],
+                                }),
                             })
                         } else {
                             v2::entity_ref::Entity::Spool(spool)
@@ -462,6 +467,14 @@ async fn serve_call(
             } else if method == "/heddle.api.v2alpha1.SpoolService/CreateSpool" {
                 serve_native_create_spool(&mut send, &mut recv, &mut request, server_key, owner)
                     .await;
+            } else if method == "/heddle.api.v2alpha1.IdentityService/CreateSignupInvitation" {
+                serve_native_create_signup_invitation(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                )
+                .await;
             } else if method == CREATE_SPOOL_METHOD {
                 serve_create_spool(&mut send, &mut recv, &mut request, create_spool).await;
             } else if method == DELETE_SPOOL_METHOD {
@@ -495,7 +508,8 @@ async fn serve_call(
                 )
                 .await;
             } else if method == "/heddle.api.v2alpha1.IdentityService/ObserveIdentity" {
-                serve_native_identity_observation(&mut send, server_key).await;
+                serve_native_identity_observation(&mut send, &mut recv, &mut request, server_key)
+                    .await;
             } else if method == "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace" {
                 serve_native_workspace_observation(&mut send, server_key).await;
             } else if method == "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership" {
@@ -753,10 +767,65 @@ async fn serve_native_create_spool(
     .unwrap();
 }
 
-async fn serve_native_identity_observation(
+async fn serve_native_create_signup_invitation(
     send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
     server_key: Vec<u8>,
 ) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::CreateSignupInvitationRequest::decode(frame.body).ok())
+        .expect("native signup invitation request");
+    let response = v2::CreateSignupInvitationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
+        invitation: Some(v2::SignupInvitation {
+            r#ref: Some(v2::RecordRef {
+                id: uuid::Uuid::from_bytes([11; 16]).to_string(),
+                ..Default::default()
+            }),
+            bound_email: body
+                .invitation
+                .map(|invitation| invitation.bound_email)
+                .unwrap_or_default(),
+            ..Default::default()
+        }),
+        redemption_secret: b"one-time-invite".to_vec(),
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_native_identity_observation(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveIdentityRequest::decode(frame.body).ok())
+        .expect("native identity observation request");
+    let signup_requested = body.signup_invitations.is_some();
     let source = v2::EndpointRef {
         kind: v2::EndpointKind::Weft as i32,
         public_key: server_key,
@@ -766,7 +835,7 @@ async fn serve_native_identity_observation(
         max_frame_bytes: 65536,
         max_snapshot_bytes: 1048576,
     };
-    let events = [
+    let mut events = vec![
         v2::IdentityEvent {
             frame: Some(v2::StreamFrame {
                 sequence: 1,
@@ -814,6 +883,46 @@ async fn serve_native_identity_observation(
             ..Default::default()
         },
     ];
+    if signup_requested {
+        events.insert(
+            2,
+            v2::IdentityEvent {
+                frame: Some(v2::StreamFrame {
+                    sequence: 3,
+                    body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                        kind: v2::StreamDataKind::Snapshot as i32,
+                    })),
+                }),
+                payload: Some(v2::identity_event::Payload::InvitationQuota(
+                    v2::InvitationQuota {
+                        remaining: 2,
+                        ..Default::default()
+                    },
+                )),
+            },
+        );
+        events.insert(
+            3,
+            v2::IdentityEvent {
+                frame: Some(v2::StreamFrame {
+                    sequence: 4,
+                    body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                        kind: v2::StreamDataKind::Snapshot as i32,
+                    })),
+                }),
+                payload: Some(v2::identity_event::Payload::Status(v2::SectionStatus {
+                    section: "signup_invitations".into(),
+                    coverage: v2::Coverage::Complete as i32,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            },
+        );
+        events[4].frame.as_mut().expect("checkpoint frame").sequence = 5;
+    }
     for event in events {
         send.write_chunk(Bytes::from(
             encode_stream_message(&event.encode_to_vec()).unwrap(),
@@ -841,9 +950,9 @@ async fn serve_native_thread_review(
     let thread = body.thread.expect("review Thread identity");
     let revision = v2::RevisionRef {
         spool: thread.spool.clone(),
-        revision: Some(v2::revision_ref::Revision::State(api::heddle::api::v1alpha1::StateId {
-            value: vec![5; 32],
-        })),
+        revision: Some(v2::revision_ref::Revision::State(
+            api::heddle::api::v1alpha1::StateId { value: vec![5; 32] },
+        )),
     };
     let data = |sequence, payload| v2::ThreadEvent {
         frame: Some(v2::StreamFrame {
@@ -874,38 +983,47 @@ async fn serve_native_thread_review(
             }),
             ..Default::default()
         },
-        data(2, v2::thread_event::Payload::Comparison(v2::ReviewComparison {
-            source: Some(revision.clone()),
-            base: Some(revision.clone()),
-            policy_version: vec![6; 32],
-        })),
-        data(3, v2::thread_event::Payload::Overview(v2::ThreadOverview {
-            r#ref: Some(thread),
-            name: "feature".into(),
-            version: vec![7; 32],
-            review_policy_version: vec![6; 32],
-            source_heads: vec![revision.clone()],
-            base: Some(revision.clone()),
-            readiness: v2::ReviewReadiness::Unknown as i32,
-            landing_assessment: landing_target.map(|target| v2::LandingAssessment {
-                target: Some(target),
+        data(
+            2,
+            v2::thread_event::Payload::Comparison(v2::ReviewComparison {
                 source: Some(revision.clone()),
-                expected_target: Some(revision.clone()),
+                base: Some(revision.clone()),
                 policy_version: vec![6; 32],
-                readiness: v2::ReviewReadiness::Eligible as i32,
+            }),
+        ),
+        data(
+            3,
+            v2::thread_event::Payload::Overview(v2::ThreadOverview {
+                r#ref: Some(thread),
+                name: "feature".into(),
+                version: vec![7; 32],
+                review_policy_version: vec![6; 32],
+                source_heads: vec![revision.clone()],
+                base: Some(revision.clone()),
+                readiness: v2::ReviewReadiness::Unknown as i32,
+                landing_assessment: landing_target.map(|target| v2::LandingAssessment {
+                    target: Some(target),
+                    source: Some(revision.clone()),
+                    expected_target: Some(revision.clone()),
+                    policy_version: vec![6; 32],
+                    readiness: v2::ReviewReadiness::Eligible as i32,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
-            ..Default::default()
-        })),
-        data(4, v2::thread_event::Payload::Status(v2::SectionStatus {
-            section: "review".into(),
-            coverage: v2::Coverage::Complete as i32,
-            page: Some(v2::PageInfo {
-                exhausted: true,
+        ),
+        data(
+            4,
+            v2::thread_event::Payload::Status(v2::SectionStatus {
+                section: "review".into(),
+                coverage: v2::Coverage::Complete as i32,
+                page: Some(v2::PageInfo {
+                    exhausted: true,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
-            ..Default::default()
-        })),
+        ),
         v2::ThreadEvent {
             frame: Some(v2::StreamFrame {
                 sequence: 5,
@@ -923,9 +1041,11 @@ async fn serve_native_thread_review(
         },
     ];
     for event in events {
-        send.write_chunk(Bytes::from(encode_stream_message(&event.encode_to_vec()).unwrap()))
-            .await
-            .unwrap();
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
     }
 }
 

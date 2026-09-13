@@ -258,18 +258,18 @@ fn write_invite_created(
             serde_json::to_string(&SignupInviteCreatedOutput {
                 output_kind: "auth_invite",
                 invite_id: outcome.invite_id,
-                invite_code: outcome.invite_code,
+                redemption_secret: outcome.redemption_secret,
                 allowance_remaining: outcome.allowance_remaining,
             })?
         )?;
     } else {
-        // The code deliberately appears on exactly one output line.
-        writeln!(writer, "{}", outcome.invite_code)?;
-        writeln!(
-            writer,
-            "Allowance remaining: {}",
-            outcome.allowance_remaining
-        )?;
+        // The one-time secret deliberately appears on exactly one output line.
+        writeln!(writer, "{}", outcome.redemption_secret)?;
+        if let Some(remaining) = outcome.allowance_remaining {
+            writeln!(writer, "Allowance remaining: {remaining}")?;
+        } else {
+            writeln!(writer, "Allowance remaining: unavailable")?;
+        }
     }
     Ok(())
 }
@@ -289,34 +289,33 @@ fn write_invite_list(writer: &mut impl Write, outcome: SignupInviteList, json: b
         if outcome.invites.is_empty() {
             writeln!(writer, "No signup invites.")?;
         } else {
-            writeln!(writer, "CODE\tSTATUS\tCREATED_AT\tCONSUMED_AT")?;
+            writeln!(writer, "ID\tSTATUS\tBOUND_EMAIL\tEXPIRES_AT")?;
             for invite in outcome.invites {
                 writeln!(
                     writer,
                     "{}\t{}\t{}\t{}",
-                    invite.invite_code,
+                    invite.invite_id,
                     invite.status,
-                    invite.created_at.as_deref().unwrap_or("-"),
-                    invite.consumed_at.as_deref().unwrap_or("-")
+                    invite.bound_email.as_deref().unwrap_or("-"),
+                    invite.expires_at.as_deref().unwrap_or("-")
                 )?;
             }
         }
-        writeln!(
-            writer,
-            "Allowance remaining: {}",
-            outcome.allowance_remaining
-        )?;
+        if let Some(remaining) = outcome.allowance_remaining {
+            writeln!(writer, "Allowance remaining: {remaining}")?;
+        } else {
+            writeln!(writer, "Allowance remaining: unavailable")?;
+        }
     }
     Ok(())
 }
 
 fn invite_output(invite: SignupInvite) -> SignupInviteOutput {
     SignupInviteOutput {
-        invite_code: invite.invite_code,
+        invite_id: invite.invite_id,
         status: invite.status,
-        created_at: invite.created_at,
-        consumed: invite.consumed,
-        consumed_at: invite.consumed_at,
+        bound_email: invite.bound_email,
+        expires_at: invite.expires_at,
     }
 }
 
@@ -837,11 +836,10 @@ mod tests {
 
     fn invite() -> SignupInvite {
         SignupInvite {
-            invite_code: "invite-code".into(),
-            status: "consumed".into(),
-            created_at: Some("2026-09-07T00:00:00Z".into()),
-            consumed: true,
-            consumed_at: Some("2026-09-07T01:00:00Z".into()),
+            invite_id: "invite-1".into(),
+            status: "redeemed".into(),
+            bound_email: Some("alice@example.com".into()),
+            expires_at: Some("2026-09-08T00:00:00Z".into()),
         }
     }
 
@@ -1007,8 +1005,8 @@ mod tests {
 
         let created = SignupInviteCreated {
             invite_id: "invite-1".into(),
-            invite_code: "invite-code".into(),
-            allowance_remaining: 3,
+            redemption_secret: "invite-code".into(),
+            allowance_remaining: Some(3),
         };
         assert!(
             rendered(AuthOutcome::SignupInviteCreated(created.clone()), false)
@@ -1021,20 +1019,22 @@ mod tests {
 
         let invites = SignupInviteList {
             invites: vec![invite()],
-            allowance_remaining: 2,
+            allowance_remaining: Some(2),
         };
         let invite_list = rendered(AuthOutcome::SignupInviteList(invites.clone()), false);
-        assert!(invite_list.contains("CODE\tSTATUS"));
-        assert!(invite_list.contains("invite-code\tconsumed"));
+        assert!(invite_list.contains("ID\tSTATUS"));
+        assert!(invite_list.contains("invite-1\tredeemed"));
+        assert!(!invite_list.contains("invite-code"));
         let invite_json: serde_json::Value =
             serde_json::from_str(&rendered(AuthOutcome::SignupInviteList(invites), true))
                 .expect("invite list JSON");
-        assert_eq!(invite_json["invites"][0]["consumed"], true);
+        assert_eq!(invite_json["invites"][0]["status"], "redeemed");
+        assert!(invite_json["invites"][0].get("redemption_secret").is_none());
         assert!(
             rendered(
                 AuthOutcome::SignupInviteList(SignupInviteList {
                     invites: Vec::new(),
-                    allowance_remaining: 4,
+                    allowance_remaining: Some(4),
                 }),
                 false,
             )
