@@ -46,6 +46,7 @@ impl HostedClient {
         if results.next().is_some()
             || scope.selection_index != 0
             || scope.coverage != contract::Coverage::Complete as i32
+            || !scope.principal_id.is_empty()
             || scope
                 .resource
                 .as_ref()
@@ -53,6 +54,7 @@ impl HostedClient {
                 != Some(&contract::entity_ref::Entity::Spool(spool.clone()))
             || result.selection_index != 1
             || result.coverage != contract::Coverage::Complete as i32
+            || result.resource.is_some()
         {
             return Err(ProtocolError::InvalidState(
                 "principal resolution was incomplete or ambiguous".into(),
