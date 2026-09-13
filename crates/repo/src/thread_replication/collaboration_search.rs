@@ -76,6 +76,16 @@ pub struct NativeBatch {
     pub scanned: usize,
 }
 
+/// Query-local admission for one exact source target. These facts come from
+/// verified signed originals and current local sidecars, never from the
+/// rebuildable Search index itself.
+#[derive(Clone, Debug)]
+pub struct AdmittedSourceTarget {
+    pub thread: objects::object::ContentHash,
+    pub revision: objects::object::StateId,
+    pub denied_leaves: Vec<objects::object::ContentHash>,
+}
+
 /// Source-domain selection only. Revision identifier hits remain historical.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceSelection {
@@ -100,9 +110,9 @@ pub(crate) fn search_native(
     search_native_inner(directory, text, after_operation, limit, kinds, annotations, source, None)
 }
 
-/// Search with a query-local set of exact source paths admitted by the caller's
-/// signed Thread/source and selected-leaf gates. Source rows are joined to this
-/// set before ORDER BY/LIMIT, so hidden rows cannot consume page slots.
+/// Search with query-local exact source targets admitted by signed Thread and
+/// source checks. Candidate path leaf chains are anti-joined with denied
+/// commitments before ORDER BY/LIMIT, so hidden rows cannot consume page slots.
 pub fn search_native_admitted(
     directory: &std::path::Path,
     text: &str,
@@ -111,7 +121,7 @@ pub fn search_native_admitted(
     kinds: &[i32],
     annotations: Option<&objects::object::AnnotationQuery>,
     source: SourceSelection,
-    admitted: &[super::source_search::IndexedSourcePath],
+    admitted: &[AdmittedSourceTarget],
 ) -> Result<NativeBatch> {
     search_native_inner(directory, text, after_operation, limit, kinds, annotations, source, Some(admitted))
 }
@@ -124,7 +134,7 @@ fn search_native_inner(
     kinds: &[i32],
     annotations: Option<&objects::object::AnnotationQuery>,
     source: SourceSelection,
-    admitted: Option<&[super::source_search::IndexedSourcePath]>,
+    admitted: Option<&[AdmittedSourceTarget]>,
 ) -> Result<NativeBatch> {
     if text.len() > 4096
         || limit == 0
@@ -142,11 +152,16 @@ fn search_native_inner(
     let connection = crate::local_metadata::open_existing(directory)?
         .ok_or_else(|| Error::Invalid("local metadata missing".into()))?;
     bound_query_work(&connection)?;
-    connection.execute_batch("CREATE TEMP TABLE admitted_source_paths(thread BLOB NOT NULL,revision BLOB NOT NULL,path TEXT NOT NULL,PRIMARY KEY(thread,revision,path)) WITHOUT ROWID")?;
+    connection.execute_batch("CREATE TEMP TABLE admitted_source_targets(thread BLOB NOT NULL,revision BLOB NOT NULL,PRIMARY KEY(thread,revision)) WITHOUT ROWID;
+        CREATE TEMP TABLE denied_source_leaves(thread BLOB NOT NULL,revision BLOB NOT NULL,leaf BLOB NOT NULL,PRIMARY KEY(thread,revision,leaf)) WITHOUT ROWID")?;
     if let Some(admitted) = admitted {
-        let mut insert = connection.prepare("INSERT OR IGNORE INTO admitted_source_paths(thread,revision,path) VALUES(?1,?2,?3)")?;
+        let mut insert = connection.prepare("INSERT OR IGNORE INTO admitted_source_targets(thread,revision) VALUES(?1,?2)")?;
+        let mut deny = connection.prepare("INSERT OR IGNORE INTO denied_source_leaves(thread,revision,leaf) VALUES(?1,?2,?3)")?;
         for item in admitted {
-            insert.execute(rusqlite::params![item.thread.as_bytes(),item.revision.as_bytes(),item.path])?;
+            insert.execute(rusqlite::params![item.thread.as_bytes(),item.revision.as_bytes()])?;
+            for leaf in &item.denied_leaves {
+                deny.execute(rusqlite::params![item.thread.as_bytes(),item.revision.as_bytes(),leaf.as_bytes()])?;
+            }
         }
     }
     let phrase = format!("\"{}\"", text.trim().replace('"', "\"\""));
@@ -183,14 +198,21 @@ fn search_native_inner(
                c.revision,c.path,c.symbol_id,c.symbol_name,c.start_line,c.end_line
         FROM source_search_fts JOIN source_search_candidates c ON c.rowid=source_search_fts.rowid
         JOIN operations o ON o.id=c.operation
-        JOIN source_search_ready ready ON ready.operation=c.operation AND ready.revision=c.revision AND ready.extractor_version=1
+        JOIN source_search_ready ready ON ready.operation=c.operation AND ready.revision=c.revision AND ready.extractor_version=2
         WHERE source_search_fts MATCH ?1 AND o.status=1 AND o.facet=1
           AND o.thread=c.thread AND o.source_revision=c.revision
           AND ((c.kind=3 AND ?11) OR (c.kind=4 AND ?12))
           AND (?13 OR EXISTS(SELECT 1 FROM thread_source_head_revisions head WHERE head.thread=c.thread AND head.revision=c.revision))
           AND (?14 IS NULL OR c.revision=?14)
-          AND (?15=0 OR EXISTS(SELECT 1 FROM admitted_source_paths a
-            WHERE a.thread=c.thread AND a.revision=c.revision AND a.path=c.path))
+          AND EXISTS(SELECT 1 FROM source_search_candidate_proofs proof
+            WHERE proof.candidate=c.candidate AND proof.leaf_count=(
+                SELECT count(*) FROM source_search_candidate_leaves checked
+                WHERE checked.candidate=c.candidate))
+          AND (?15=0 OR (EXISTS(SELECT 1 FROM admitted_source_targets a
+            WHERE a.thread=c.thread AND a.revision=c.revision)
+            AND NOT EXISTS(SELECT 1 FROM source_search_candidate_leaves cl
+                JOIN denied_source_leaves d ON d.thread=c.thread AND d.revision=c.revision AND d.leaf=cl.leaf
+                WHERE cl.candidate=c.candidate)))
       ), anchor AS (
         SELECT score,thread,cursor,kind,record FROM hits WHERE cursor=?6
       ) SELECT thread,operation,kind,record,summary,score,canonical,cursor,revision,path,symbol_id,symbol_name,start_line,end_line FROM hits

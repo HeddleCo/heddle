@@ -5,40 +5,39 @@ use rusqlite::{TransactionBehavior, params};
 
 use super::{Error, Result};
 
-/// One indexed source path. It is a search candidate, never read authority;
-/// callers must verify its exact Thread, source and selected salted entry.
+/// One indexed source target. It is a search candidate, never read authority;
+/// callers must verify its exact Thread and signed source before admission.
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub struct IndexedSourcePath {
+pub struct IndexedSourceTarget {
     pub thread: ContentHash,
     pub revision: StateId,
-    pub path: String,
 }
 
-/// Visit indexed paths in bounded keyset batches without retaining a SQLite
+/// Visit indexed targets in bounded keyset batches without retaining a SQLite
 /// statement while the caller checks signed source and filesystem visibility.
 /// This enumerates the selected source scope independent of search text, so
 /// hidden matching rows cannot change a page's continuation or coverage.
-pub fn visit_indexed_paths(
+pub fn visit_indexed_targets(
     directory: &std::path::Path,
     source: super::collaboration_search::SourceSelection,
-    mut visit: impl FnMut(IndexedSourcePath) -> anyhow::Result<()>,
+    mut visit: impl FnMut(IndexedSourceTarget) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     let connection = crate::local_metadata::open_existing(directory)?
         .ok_or_else(|| Error::Invalid("local metadata missing".into()))?;
-    let mut after: Option<IndexedSourcePath> = None;
+    let mut after: Option<IndexedSourceTarget> = None;
     loop {
         let page = {
             let mut statement = connection.prepare(
-                "SELECT DISTINCT c.thread,c.revision,c.path FROM source_search_candidates c
+                "SELECT DISTINCT c.thread,c.revision FROM source_search_candidates c
                  JOIN operations o ON o.id=c.operation AND o.thread=c.thread
                     AND o.source_revision=c.revision AND o.status=1 AND o.facet=1
                  JOIN source_search_ready r ON r.operation=c.operation
-                    AND r.revision=c.revision AND r.extractor_version=1
+                    AND r.revision=c.revision AND r.extractor_version=2
                  WHERE (?1 OR EXISTS(SELECT 1 FROM thread_source_head_revisions h
                     WHERE h.thread=c.thread AND h.revision=c.revision))
                    AND (?2 IS NULL OR c.revision=?2)
-                   AND (?3 IS NULL OR (c.thread,c.revision,c.path)>(?3,?4,?5))
-                 ORDER BY c.thread,c.revision,c.path LIMIT 256",
+                   AND (?3 IS NULL OR (c.thread,c.revision)>(?3,?4))
+                 ORDER BY c.thread,c.revision LIMIT 256",
             )?;
             let exact = match source {
                 super::collaboration_search::SourceSelection::Exact(id) => Some(id),
@@ -50,16 +49,14 @@ pub fn visit_indexed_paths(
                     exact.as_ref().map(StateId::as_bytes),
                     after.as_ref().map(|value| value.thread.as_bytes().as_slice()),
                     after.as_ref().map(|value| value.revision.as_bytes().as_slice()),
-                    after.as_ref().map(|value| value.path.as_str()),
                 ],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, String>(2)?)),
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
             )?;
             rows.map(|row| {
-                let (thread, revision, path) = row?;
-                Ok(IndexedSourcePath {
+                let (thread, revision) = row?;
+                Ok(IndexedSourceTarget {
                     thread: super::hash(&thread)?,
                     revision: StateId::from_bytes(*super::hash(&revision)?.as_bytes()),
-                    path,
                 })
             }).collect::<Result<Vec<_>>>()?
         };
@@ -89,6 +86,15 @@ CREATE TABLE IF NOT EXISTS source_search_candidates(
  CHECK(length(path)<=4096 AND length(symbol_id)<=4096 AND length(symbol_name)<=4096)
 );
 CREATE INDEX IF NOT EXISTS source_search_candidates_operation ON source_search_candidates(operation);
+CREATE TABLE IF NOT EXISTS source_search_candidate_leaves(
+ candidate BLOB NOT NULL CHECK(length(candidate)=32),
+ leaf BLOB NOT NULL CHECK(length(leaf)=32),
+ PRIMARY KEY(candidate,leaf)
+);
+CREATE TABLE IF NOT EXISTS source_search_candidate_proofs(
+ candidate BLOB PRIMARY KEY CHECK(length(candidate)=32),
+ leaf_count INTEGER NOT NULL CHECK(leaf_count BETWEEN 0 AND 128)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS source_search_fts USING fts5(text,tokenize='unicode61');
 CREATE TABLE IF NOT EXISTS source_search_ready(
  operation BLOB PRIMARY KEY CHECK(length(operation)=32),
@@ -109,13 +115,13 @@ CREATE TABLE IF NOT EXISTS source_search_bootstrap(version INTEGER PRIMARY KEY C
 INSERT OR IGNORE INTO source_search_queue(operation,thread,revision)
 SELECT o.id,o.thread,o.source_revision FROM operations o
 WHERE o.status=1 AND o.facet=1
-  AND NOT EXISTS(SELECT 1 FROM source_search_ready r WHERE r.operation=o.id AND r.revision=o.source_revision AND r.extractor_version=1)
-  AND NOT EXISTS(SELECT 1 FROM source_search_bootstrap WHERE version=1);
-INSERT OR IGNORE INTO source_search_bootstrap(version) VALUES(1);
+  AND NOT EXISTS(SELECT 1 FROM source_search_ready r WHERE r.operation=o.id AND r.revision=o.source_revision AND r.extractor_version=2)
+  AND NOT EXISTS(SELECT 1 FROM source_search_bootstrap WHERE version=2);
+INSERT OR IGNORE INTO source_search_bootstrap(version) VALUES(2);
 INSERT OR IGNORE INTO source_search_queue(operation,thread,revision)
 SELECT o.id,o.thread,o.source_revision FROM source_search_ready r
 JOIN operations o ON o.id=r.operation AND o.status=1 AND o.facet=1
-WHERE r.extractor_version<>1;
+WHERE r.extractor_version<>2;
 CREATE TRIGGER IF NOT EXISTS source_search_admitted_update AFTER UPDATE OF status ON operations
 WHEN OLD.status<>1 AND NEW.status=1 AND NEW.facet=1
 BEGIN
@@ -193,6 +199,9 @@ pub struct Document {
     pub start_line: Option<u32>,
     pub end_line: Option<u32>,
     pub text: String,
+    /// Salted leaf commitments on the path, including directory ancestors.
+    /// Captured during the identity-checked source tree walk by the indexer.
+    pub leaf_chain: Vec<ContentHash>,
 }
 
 /// Replace one accepted original's index atomically. Source Search verifies
@@ -213,6 +222,7 @@ pub fn publish(
                 || document.symbol_id.len() > 4096
                 || document.symbol_name.len() > 4096
                 || document.text.len() > 65536
+                || document.leaf_chain.len() > 128
         })
     {
         return Err(Error::Invalid(
@@ -236,6 +246,14 @@ pub fn publish(
         [operation.as_bytes().as_slice()],
     )?;
     transaction.execute(
+        "DELETE FROM source_search_candidate_leaves WHERE candidate IN (SELECT candidate FROM source_search_candidates WHERE operation=?1)",
+        [operation.as_bytes().as_slice()],
+    )?;
+    transaction.execute(
+        "DELETE FROM source_search_candidate_proofs WHERE candidate IN (SELECT candidate FROM source_search_candidates WHERE operation=?1)",
+        [operation.as_bytes().as_slice()],
+    )?;
+    transaction.execute(
         "DELETE FROM source_search_candidates WHERE operation=?1",
         [operation.as_bytes().as_slice()],
     )?;
@@ -252,12 +270,22 @@ pub fn publish(
         )?;
         let rowid = transaction.last_insert_rowid();
         transaction.execute(
+            "INSERT INTO source_search_candidate_proofs(candidate,leaf_count) VALUES(?1,?2)",
+            params![candidate.as_bytes(), document.leaf_chain.iter().collect::<std::collections::HashSet<_>>().len() as i64],
+        )?;
+        transaction.execute(
             "INSERT INTO source_search_fts(rowid,text) VALUES(?1,?2)",
             params![rowid, document.text],
         )?;
+        for leaf in &document.leaf_chain {
+            transaction.execute(
+                "INSERT OR IGNORE INTO source_search_candidate_leaves(candidate,leaf) VALUES(?1,?2)",
+                params![candidate.as_bytes(), leaf.as_bytes()],
+            )?;
+        }
     }
     transaction.execute(
-        "INSERT INTO source_search_ready(operation,revision,extractor_version,content_ready,symbols_ready) VALUES(?1,?2,1,?3,?4) ON CONFLICT(operation) DO UPDATE SET revision=excluded.revision,extractor_version=excluded.extractor_version,content_ready=excluded.content_ready,symbols_ready=excluded.symbols_ready",
+        "INSERT INTO source_search_ready(operation,revision,extractor_version,content_ready,symbols_ready) VALUES(?1,?2,2,?3,?4) ON CONFLICT(operation) DO UPDATE SET revision=excluded.revision,extractor_version=excluded.extractor_version,content_ready=excluded.content_ready,symbols_ready=excluded.symbols_ready",
         params![operation.as_bytes(),revision.as_bytes(),content_ready,symbols_ready],
     )?;
     transaction.execute(
@@ -286,7 +314,7 @@ mod tests {
 
     #[test]
     fn admitted_paths_filter_hidden_matches_before_page_limit() {
-        use super::super::collaboration_search::{SourceSelection, search_native_admitted};
+        use super::super::collaboration_search::{AdmittedSourceTarget, SourceSelection, search_native_admitted};
         let root = tempfile::tempdir().expect("temporary metadata");
         let directory = root.path().join(".heddle");
         std::fs::create_dir(&directory).expect("metadata directory");
@@ -304,17 +332,20 @@ mod tests {
             start_line: None,
             end_line: None,
             text: "alpha".into(),
+            leaf_chain: if path == "hidden.rs" { vec![ContentHash::from_bytes([9; 32])] } else { vec![ContentHash::from_bytes([8; 32])] },
         };
         publish(&directory, thread, operation, revision,
             &[document("hidden.rs"), document("visible.rs")], true, false)
             .expect("indexed source");
         let mut indexed = Vec::new();
-        visit_indexed_paths(&directory, SourceSelection::Retained, |path| {
-            indexed.push(path);
+        visit_indexed_targets(&directory, SourceSelection::Retained, |target| {
+            indexed.push(target);
             Ok(())
-        }).expect("indexed paths");
-        assert_eq!(indexed.len(), 2);
-        let admitted: Vec<_> = indexed.into_iter().filter(|path| path.path == "visible.rs").collect();
+        }).expect("indexed targets");
+        assert_eq!(indexed.len(), 1);
+        let admitted = vec![super::super::collaboration_search::AdmittedSourceTarget {
+            thread, revision, denied_leaves: vec![ContentHash::from_bytes([9;32])],
+        }];
         let page = search_native_admitted(&directory, "alpha", None, 1, &[3], None,
             SourceSelection::Retained, &admitted).expect("first page");
         assert_eq!(page.scanned, 1);
@@ -326,6 +357,17 @@ mod tests {
             SourceSelection::Retained, &[]).expect("hidden-only page");
         assert!(hidden_only.hits.is_empty());
         assert_eq!(hidden_only.scanned, 0);
+        connection.execute("DELETE FROM source_search_candidate_leaves WHERE candidate=(SELECT candidate FROM source_search_candidates WHERE path='visible.rs')", [])
+            .expect("drop one indexed proof leaf");
+        let incomplete = search_native_admitted(&directory, "alpha", None, 1, &[3], None,
+            SourceSelection::Retained, &admitted).expect("incomplete proof query");
+        assert!(incomplete.hits.is_empty(), "missing leaf index cannot admit a path");
+        connection.execute("DELETE FROM source_search_candidate_proofs WHERE candidate=(SELECT candidate FROM source_search_candidates WHERE path='hidden.rs')", [])
+            .expect("drop path proof marker");
+        let no_marker = search_native_admitted(&directory, "alpha", None, 1, &[3], None,
+            SourceSelection::Retained, &[AdmittedSourceTarget { thread, revision, denied_leaves: Vec::new() }])
+            .expect("missing proof marker query");
+        assert!(no_marker.hits.is_empty(), "missing path proof cannot enter a page");
     }
 
     #[test]
@@ -369,6 +411,13 @@ mod tests {
         assert!(due(&directory, 21, 1).expect("queue drained").is_empty());
         assert_eq!(next_due(&directory).expect("next"), None);
         assert!(due(&directory, 21, 33).is_err());
+        connection.execute("UPDATE source_search_ready SET extractor_version=1 WHERE operation=?1",
+            [operation.as_bytes().as_slice()]).expect("old path-only projection");
+        connection.execute_batch(SCHEMA).expect("upgrade source projection");
+        assert_eq!(due(&directory, 21, 1).expect("old projection requeued").len(), 1);
+        publish(&directory, thread, operation, revision, &[], true, false)
+            .expect("leaf-aware projection rebuilt");
+        assert!(due(&directory, 21, 1).expect("upgraded queue drained").is_empty());
         connection
             .execute("DELETE FROM source_search_ready", [])
             .expect("legacy projection absent");
@@ -425,6 +474,7 @@ mod tests {
             start_line: None,
             end_line: None,
             text: text.into(),
+            leaf_chain: Vec::new(),
         };
         publish(
             &directory,
@@ -514,7 +564,7 @@ mod tests {
         assert_eq!(exact.hits[0].revision, Some(revision));
         connection
             .execute(
-                "UPDATE source_search_ready SET extractor_version=2 WHERE operation=?1",
+                "UPDATE source_search_ready SET extractor_version=3 WHERE operation=?1",
                 [visible_operation.as_bytes().as_slice()],
             )
             .expect("stale extractor projection");
