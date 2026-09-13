@@ -16,8 +16,8 @@ use crate::{
     creation::mint_root_signing_digest,
     crypto::{validate_key, verify_signature},
     wire::{
-        AuthorizationVerificationKey, MintRootAttachment, PasskeyAuthority,
-        PasskeyMintDelegation, SignedPasskeyAuthority,
+        AuthorizationVerificationKey, MintRootAttachment, PasskeyAuthority, PasskeyMintDelegation,
+        SignedPasskeyAuthority,
     },
 };
 
@@ -34,7 +34,10 @@ fn invalid(message: &str) -> Error {
 }
 
 fn owner_key(value: &PasskeyAuthority) -> Result<&AuthorizationVerificationKey> {
-    value.owner_key.as_ref().ok_or_else(|| invalid("passkey owner key missing"))
+    value
+        .owner_key
+        .as_ref()
+        .ok_or_else(|| invalid("passkey owner key missing"))
 }
 
 /// Canonical owner certificate fields in protocol tag order.
@@ -50,12 +53,20 @@ pub fn canonical_passkey_authority(value: &PasskeyAuthority) -> Result<Vec<u8>> 
         || value.max_session_ttl_seconds > MAX_SESSION_TTL_SECONDS
         || value.relying_party_id.is_empty()
         || value.relying_party_id.len() > 253
-        || value.relying_party_id.bytes().any(|byte| !byte.is_ascii_alphanumeric() && byte != b'.' && byte != b'-')
+        || value
+            .relying_party_id
+            .bytes()
+            .any(|byte| !byte.is_ascii_alphanumeric() && byte != b'.' && byte != b'-')
         || value.allowed_origins.is_empty()
         || value.allowed_origins.len() > 8
-        || value.allowed_origins.windows(2).any(|pair| pair[0] >= pair[1])
+        || value
+            .allowed_origins
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
         || value.allowed_origins.iter().any(|origin| {
-            origin.is_empty() || origin.len() > 2048 || origin.contains('*')
+            origin.is_empty()
+                || origin.len() > 2048
+                || origin.contains('*')
                 || origin.chars().any(char::is_whitespace)
         })
     {
@@ -86,7 +97,10 @@ pub fn canonical_passkey_authority(value: &PasskeyAuthority) -> Result<Vec<u8>> 
 
 /// Digest signed by the account's current owner authority.
 pub fn passkey_authority_signing_digest(value: &PasskeyAuthority) -> Result<[u8; 32]> {
-    Ok(digest(PASSKEY_AUTHORITY_DOMAIN, &canonical_passkey_authority(value)?))
+    Ok(digest(
+        PASSKEY_AUTHORITY_DOMAIN,
+        &canonical_passkey_authority(value)?,
+    ))
 }
 
 /// Validate a newly registered or reauthorized passkey against the current owner.
@@ -97,34 +111,59 @@ pub fn verify_passkey_authority(
     current: &VerifiedOwnerState,
     expected_account_uuid: &[u8],
 ) -> Result<()> {
-    let value = signed.authority.as_ref().ok_or_else(|| invalid("passkey authority missing"))?;
-    let root = current.signed_root().root.as_ref().ok_or_else(|| invalid("owner root missing"))?;
-    if value.account_uuid != expected_account_uuid || value.account_uuid != root.account_uuid
+    let value = signed
+        .authority
+        .as_ref()
+        .ok_or_else(|| invalid("passkey authority missing"))?;
+    let root = current
+        .signed_root()
+        .root
+        .as_ref()
+        .ok_or_else(|| invalid("owner root missing"))?;
+    if value.account_uuid != expected_account_uuid
+        || value.account_uuid != root.account_uuid
         || value.owner_state_hash.as_slice() != current.state_hash()
         || value.owner_sequence != current.sequence()
         || owner_key(value)? != current.authority_key()
     {
-        return Err(invalid("passkey authority differs from current account owner"));
+        return Err(invalid(
+            "passkey authority differs from current account owner",
+        ));
     }
     verify_certificate(signed, current.authority_key())
 }
 
-fn verify_certificate(signed: &SignedPasskeyAuthority, issuer: &AuthorizationVerificationKey) -> Result<()> {
-    let value = signed.authority.as_ref().ok_or_else(|| invalid("passkey authority missing"))?;
+fn verify_certificate(
+    signed: &SignedPasskeyAuthority,
+    issuer: &AuthorizationVerificationKey,
+) -> Result<()> {
+    let value = signed
+        .authority
+        .as_ref()
+        .ok_or_else(|| invalid("passkey authority missing"))?;
     if owner_key(value)? != issuer {
-        return Err(invalid("passkey certificate issuer differs from attachment owner"));
+        return Err(invalid(
+            "passkey certificate issuer differs from attachment owner",
+        ));
     }
     verify_signature(
         issuer,
-        signed.owner_signature.as_ref().ok_or_else(|| invalid("passkey owner signature missing"))?,
+        signed
+            .owner_signature
+            .as_ref()
+            .ok_or_else(|| invalid("passkey owner signature missing"))?,
         PASSKEY_AUTHORITY_DOMAIN,
         &canonical_passkey_authority(value)?,
     )
 }
 
 fn ed25519_key(spki: &[u8]) -> Result<VerifyingKey> {
-    let raw = spki.strip_prefix(ED25519_SPKI_PREFIX).ok_or_else(|| invalid("invalid Ed25519 SPKI"))?;
-    let bytes: &[u8; 32] = raw.try_into().map_err(|_| invalid("invalid Ed25519 SPKI length"))?;
+    let raw = spki
+        .strip_prefix(ED25519_SPKI_PREFIX)
+        .ok_or_else(|| invalid("invalid Ed25519 SPKI"))?;
+    let bytes: &[u8; 32] = raw
+        .try_into()
+        .map_err(|_| invalid("invalid Ed25519 SPKI length"))?;
     VerifyingKey::from_bytes(bytes).map_err(|_| Error::InvalidSignature)
 }
 
@@ -134,7 +173,9 @@ pub fn validate_passkey_key(algorithm: i32, spki: &[u8]) -> Result<()> {
         return Err(invalid("passkey SPKI exceeds bound"));
     }
     match algorithm {
-        -8 => { ed25519_key(spki)?; }
+        -8 => {
+            ed25519_key(spki)?;
+        }
         -7 => {
             p256::ecdsa::VerifyingKey::from_public_key_der(spki)
                 .map_err(|_| invalid("invalid ES256 SPKI"))?;
@@ -161,28 +202,41 @@ pub(crate) fn verify_mint_delegation(
     attachment: &MintRootAttachment,
     issuer: &AuthorizationVerificationKey,
 ) -> Result<()> {
-    let certificate = proof.authority.as_ref().ok_or_else(|| invalid("passkey certificate missing"))?;
+    let certificate = proof
+        .authority
+        .as_ref()
+        .ok_or_else(|| invalid("passkey certificate missing"))?;
     verify_certificate(certificate, issuer)?;
-    let authority = certificate.authority.as_ref().ok_or_else(|| invalid("passkey authority missing"))?;
-    let duration = attachment.expires_at_unix_seconds.checked_sub(attachment.not_before_unix_seconds)
+    let authority = certificate
+        .authority
+        .as_ref()
+        .ok_or_else(|| invalid("passkey authority missing"))?;
+    let duration = attachment
+        .expires_at_unix_seconds
+        .checked_sub(attachment.not_before_unix_seconds)
         .ok_or_else(|| invalid("passkey delegation interval overflow"))?;
     if authority.account_uuid != attachment.account_uuid
         || authority.owner_state_hash != attachment.owner_state_hash
         || authority.owner_sequence != attachment.owner_sequence
         || authority.owner_key != attachment.owner_key
-        || duration <= 0 || duration > i64::from(authority.max_session_ttl_seconds)
+        || duration <= 0
+        || duration > i64::from(authority.max_session_ttl_seconds)
         || proof.client_data_json.len() > 8192
         || !(37..=4096).contains(&proof.authenticator_data.len())
-        || proof.signature.is_empty() || proof.signature.len() > 80
+        || proof.signature.is_empty()
+        || proof.signature.len() > 80
     {
-        return Err(invalid("passkey delegation differs from attachment or exceeds bounds"));
+        return Err(invalid(
+            "passkey delegation differs from attachment or exceeds bounds",
+        ));
     }
     let client: ClientData = serde_json::from_slice(&proof.client_data_json)
         .map_err(|_| invalid("invalid passkey client data"))?;
     if client.ceremony_type != "webauthn.get"
         || client.challenge != URL_SAFE_NO_PAD.encode(mint_root_signing_digest(attachment)?)
         || !authority.allowed_origins.contains(&client.origin)
-        || client.cross_origin || client.top_origin.is_some()
+        || client.cross_origin
+        || client.top_origin.is_some()
     {
         return Err(invalid("passkey assertion challenge or origin mismatch"));
     }
@@ -193,19 +247,26 @@ pub(crate) fn verify_mint_delegation(
         || flags & 0x40 != 0
         || (flags & 0x10 != 0 && flags & 0x08 == 0)
     {
-        return Err(invalid("passkey RP, presence, verification or backup flags invalid"));
+        return Err(invalid(
+            "passkey RP, presence, verification or backup flags invalid",
+        ));
     }
     let mut signed = proof.authenticator_data.clone();
     signed.extend_from_slice(&Sha256::digest(&proof.client_data_json));
     match authority.cose_algorithm {
-        -8 => ed25519_key(&authority.public_key_spki)?.verify_strict(
-            &signed,
-            &Signature::from_slice(&proof.signature).map_err(|_| Error::InvalidSignature)?,
-        ).map_err(|_| Error::InvalidSignature),
+        -8 => ed25519_key(&authority.public_key_spki)?
+            .verify_strict(
+                &signed,
+                &Signature::from_slice(&proof.signature).map_err(|_| Error::InvalidSignature)?,
+            )
+            .map_err(|_| Error::InvalidSignature),
         -7 => p256::ecdsa::VerifyingKey::from_public_key_der(&authority.public_key_spki)
             .map_err(|_| Error::InvalidSignature)?
-            .verify(&signed, &p256::ecdsa::Signature::from_der(&proof.signature)
-                .map_err(|_| Error::InvalidSignature)?)
+            .verify(
+                &signed,
+                &p256::ecdsa::Signature::from_der(&proof.signature)
+                    .map_err(|_| Error::InvalidSignature)?,
+            )
             .map_err(|_| Error::InvalidSignature),
         _ => Err(invalid("unsupported passkey signature algorithm")),
     }

@@ -167,12 +167,7 @@ pub fn verify_mint_root_attachment(
     if now < attachment.not_before_unix_seconds || now >= attachment.expires_at_unix_seconds {
         return Err(invalid("mint-root attachment is not currently valid"));
     }
-    verify_signature(
-        current.authority_key(),
-        required(&signed.owner_signature, "mint-root signature")?,
-        MINT_ROOT_DOMAIN,
-        &body,
-    )
+    verify_mint_root_signature(signed, attachment, current.authority_key(), &body)
 }
 
 /// Re-verify an exact mint certificate independently admitted before rotation.
@@ -208,12 +203,24 @@ pub fn verify_retained_mint_root_attachment(
             "retained mint-root attachment is not currently valid",
         ));
     }
-    verify_signature(
-        issuer,
-        required(&signed.owner_signature, "mint-root signature")?,
-        MINT_ROOT_DOMAIN,
-        &body,
-    )
+    verify_mint_root_signature(signed, attachment, issuer, &body)
+}
+
+fn verify_mint_root_signature(
+    signed: &SignedMintRootAttachment,
+    attachment: &MintRootAttachment,
+    issuer: &AuthorizationVerificationKey,
+    body: &[u8],
+) -> Result<()> {
+    match (&signed.owner_signature, &signed.passkey_delegation) {
+        (Some(signature), None) => verify_signature(issuer, signature, MINT_ROOT_DOMAIN, body),
+        (None, Some(proof)) => {
+            crate::passkey_delegation::verify_mint_delegation(proof, attachment, issuer)
+        }
+        _ => Err(invalid(
+            "mint-root attachment requires exactly one owner authorization proof",
+        )),
+    }
 }
 
 /// Exact final narrowing block. The creator appends the existing standard
@@ -315,15 +322,7 @@ pub fn validate_spool_creation_structure(
         {
             return Err(invalid("mint root is attached to another owner state"));
         }
-        verify_signature(
-            state.authority_key(),
-            required(
-                &signed_attachment.owner_signature,
-                "mint-root owner signature",
-            )?,
-            MINT_ROOT_DOMAIN,
-            &body,
-        )?;
+        verify_mint_root_signature(signed_attachment, attachment, state.authority_key(), &body)?;
         required(&attachment.mint_root_key, "mint root")?
     } else {
         state.authority_key()
