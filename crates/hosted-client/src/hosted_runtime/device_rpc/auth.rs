@@ -526,8 +526,10 @@ fn source_content_projection(
     let Some(audience) = reader_audience(repository, replica, principal, agent)? else {
         return Ok(None);
     };
-    let Some(mut redactions) = repository.content_visibility_for_audience(&revision, &audience)?
-    else {
+    let Some(local_proof) = repository.collect_content_disclosure(&revision)? else {
+        return Ok(None);
+    };
+    let Some(mut redactions) = local_proof.for_audience(&audience) else {
         return Ok(None);
     };
     let mut floor = repository.effective_visibility_tier(&revision)?;
