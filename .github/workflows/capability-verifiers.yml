@@ -29,6 +29,8 @@ jobs:
         run: cargo test --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- --nocapture
       - name: Keep signing and verification dependencies narrow
         run: python3 ../../.github/check_leaf_dependencies.py
+      - name: Verify publish inventory and dependency order
+        run: ../../scripts/check-publish-pipeline.sh
       - name: Clippy
         run: cargo clippy --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- -D warnings
       - name: Public crate documentation
@@ -63,14 +65,17 @@ jobs:
           CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
         run: cargo test --locked -p heddleco-capability-verifier --target wasm32-unknown-unknown --lib -- --nocapture
 
-  publish-dry-run:
-    name: crates.io package dry-run
+  publish-packages:
+    name: crates.io package surfaces
     runs-on: blacksmith-2vcpu-ubuntu-2404
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Verify the ordinary verifier package
-        run: cargo publish -p heddle-biscuit-verifier --dry-run
-      - name: Verify the owner verifier package
-        run: cargo publish -p heddleco-capability-verifier --dry-run
+      # API 0.31 and the ordinary verifier are first-publish dependencies.
+      # The main-only publish workflow validates and publishes the registry
+      # graph in dependency order; PRs can still verify both exact file sets.
+      - name: Verify the ordinary verifier package surface
+        run: cargo package -p heddle-biscuit-verifier --list
+      - name: Verify the owner verifier package surface
+        run: cargo package -p heddleco-capability-verifier --list

@@ -49,6 +49,12 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Changed
 
+- **Canonical capability verification now ships from the Heddle workspace.**
+  The owner verifier resumes its independent release line at 0.20.0 after the
+  standalone 0.19.0/API-0.30 release; Rust and npm surfaces consume the pinned
+  `heddle-api` 0.31.0-alpha.1 contract. The ordinary Biscuit verifier publishes
+  first because the owner verifier depends on it.
+
 - **Agent-driven `heddle grant` at writer or below.** Attenuated / derive-agent
   sessions may create and delete `reader` and `contributor` (developer) grants
   without WebAuthn. Maintainer, admin, and owner still require human

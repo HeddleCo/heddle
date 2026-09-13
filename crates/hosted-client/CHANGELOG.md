@@ -21,6 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GetSpool` / `PromoteSpool` client routes and personal-first read
   resolution for a bare hosted path (heddle#1728).
 
+### Changed
+
+- Consume the Heddle-hosted capability verifier 0.20.0 on the pinned
+  heddle-api 0.31.0-alpha.1 contract.
+
 ### Fixed
 
 - Side-channel `heddle-pull-refs-v1` removed. Clone bootstrap refs are

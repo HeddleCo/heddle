@@ -7,7 +7,7 @@ def check(package: str, tree: str) -> None:
     names = {line.split()[0] for line in tree.splitlines() if line.strip()}
     required = {package}
     forbidden = {"heddle-objects", "heddle-repo", "heddle-pack", "heddle-fs-prims", "sley", "sley-odb", "sley-transport"}
-    if package == "heddleco-capability-verifier":
+    if package in {"heddle-biscuit-verifier", "heddleco-capability-verifier"}:
         required |= {"biscuit-auth", "ed25519-dalek"}
         forbidden |= {"wasm-bindgen", "js-sys", "web-sys"}
     elif package == "heddle-object-model":
@@ -21,7 +21,12 @@ def check(package: str, tree: str) -> None:
 
 
 if __name__ == "__main__":
-    for package in ("heddle-object-model", "heddle-crypto", "heddleco-capability-verifier"):
+    for package in (
+        "heddle-object-model",
+        "heddle-crypto",
+        "heddle-biscuit-verifier",
+        "heddleco-capability-verifier",
+    ):
         tree = subprocess.check_output(
             ["cargo", "tree", "--locked", "-p", package, "--edges", "normal",
              "--prefix", "none", "--format", "{p}"],
