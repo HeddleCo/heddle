@@ -70,5 +70,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Verify the publishable package
+      - name: Verify the ordinary verifier package
+        run: cargo publish -p heddle-biscuit-verifier --dry-run
+      - name: Verify the owner verifier package
         run: cargo publish -p heddleco-capability-verifier --dry-run

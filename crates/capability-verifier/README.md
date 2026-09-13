@@ -10,15 +10,17 @@ keys or signatures. Callers supply public evidence, pinned state, and the
 evaluation time.
 
 Source moved from `HeddleCo/capability-verifier` at `329c0ae` into the public
-Heddle workspace. Rust and npm package names remain the same. This crate has
-no dependency on Heddle repository, checkout, daemon, or transport code. The
-adjacent `heddle-biscuit-verifier` handles ordinary access; owner authority
-continues to use the purge-only rules below.
+Heddle workspace. The standalone line ended at version 0.19 with
+`heddle-api = "0.30"`; the Heddle-hosted line resumes at version 0.20 with
+`heddle-api = "0.31.0-alpha.1"`. Rust and npm package names remain the same.
+This crate has no dependency on Heddle repository, checkout, daemon, or
+transport code. The adjacent `heddle-biscuit-verifier` handles ordinary
+access; owner authority continues to use the purge-only rules below.
 
 ## Contract
 
-Version 0.17 consumes `heddle-api = "0.29"`. Public proof types come from
-`heddle.api.v2alpha1`; the durable signing formats keep their own versions.
+Version 0.20 consumes `heddle-api = "0.31.0-alpha.1"`. Public proof types come
+from `heddle.api.v2alpha1`; the durable signing formats keep their own versions.
 The verifier implements the purge-only owner contract:
 
 - `verify_spool_owner_genesis` verifies the owner signature over

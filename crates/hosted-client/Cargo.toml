@@ -15,7 +15,7 @@ name = "hosted_client"
 
 [dependencies]
 anyhow.workspace = true
-heddleco-capability-verifier = { path = "../capability-verifier", version = "0.17.0", optional = true }
+heddleco-capability-verifier = { path = "../capability-verifier", version = "0.20.0", optional = true }
 thread-api = { package = "heddle-thread-api", path = "../thread-api", version = "0.23.0", default-features = false, features = ["native", "iroh", "signing", "root-attachment"], optional = true }
 biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.23.0", optional = true }
 api = { workspace = true, optional = true }
@@ -67,7 +67,7 @@ opentelemetry_sdk = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 
 [dev-dependencies]
-heddleco-capability-verifier = { path = "../capability-verifier", version = "0.17.0" }
+heddleco-capability-verifier = { path = "../capability-verifier", version = "0.20.0" }
 iroh-relay = { version = "=1.0.3", default-features = false, features = ["server"] }
 rcgen = "0.14.8"
 rusqlite.workspace = true

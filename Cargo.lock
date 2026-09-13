@@ -2898,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "heddleco-capability-verifier"
-version = "0.17.0"
+version = "0.20.0"
 dependencies = [
  "base64 0.22.1",
  "biscuit-auth",

@@ -21,11 +21,11 @@ name = "treadle-schema"
 release = false
 
 [[package]]
-name = "heddleco-capability-verifier"
+name = "heddle-biscuit-verifier"
 release = true
 
 [[package]]
-name = "heddle-biscuit-verifier"
+name = "heddleco-capability-verifier"
 release = true
 
 [[package]]
