@@ -176,7 +176,10 @@ impl DeviceRpc {
         let authority = session.owner(&self.home)?;
         let now = chrono::Utc::now().timestamp();
         let current = repo::verify_account_owner_observation(&authority.owner, now)?;
+        let presented =
+            root == session.root && query.biscuit == session.token.to_base64()?.as_bytes();
         let recognized = current.authority_key().public_key == root.to_bytes()
+            || presented
             || current
                 .signed_root()
                 .root
@@ -213,7 +216,7 @@ impl DeviceRpc {
             .as_slice()
             .try_into()
             .context("proof key")?;
-        let revoked = authority.verify_mint_root(&root.to_bytes(), now).is_err()
+        let revoked = (!presented && authority.verify_mint_root(&root.to_bytes(), now).is_err())
             || authority.verify_publisher(&publisher).is_err()
             || inspected
                 .revocation_ids
