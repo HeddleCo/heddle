@@ -362,13 +362,11 @@ impl Repository {
     }
 
     /// Record a capture or local integration on a named native Thread.
-    /// Missing native identity is not created here; capture/start own genesis.
+    /// Missing or damaged native identity fails before publishing a checkout ref.
     /// Cross-thread merge snapshots record LocalIntegration, never a Capture
     /// whose parents include another Thread's revision.
     pub fn record_native_source(&self, name: &str, state_id: StateId) -> Result<()> {
-        if self.native_thread(name).is_err() {
-            return Ok(());
-        }
+        self.native_thread(name)?;
         let state = self
             .store()
             .get_state(&state_id)?
@@ -408,9 +406,12 @@ impl Repository {
             return Ok(());
         };
         let name = thread.to_string();
-        let Ok(replica) = self.native_thread(&name) else {
-            return Ok(());
-        };
+        let replica = self.native_thread(&name).map_err(|error| {
+            HeddleError::NativeSourceSignerUnavailable {
+                thread: name.clone(),
+                reason: error.to_string(),
+            }
+        })?;
         self.native_thread_signer(&replica)
             .map(|_| ())
             .map_err(|error| HeddleError::NativeSourceSignerUnavailable {
