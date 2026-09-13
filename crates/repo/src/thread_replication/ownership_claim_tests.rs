@@ -380,6 +380,72 @@ fn explicit_claim_preserves_identity_cutoff_and_conflicts_fail_closed() {
             .local_source_author_allowed(&old.verify().expect("old"))
             .expect("conflict denies")
     );
+
+    let claim_ids = [
+        signed.verify().expect("first").id().expect("id"),
+        conflicting.verify().expect("second").id().expect("id"),
+    ]
+    .into();
+    let resolution =
+        objects::object::thread_replication::ownership_resolution::ThreadOwnershipResolution {
+            version: 1,
+            spool,
+            thread: replica.thread_id(),
+            winning_claim: id,
+            conflicting_claims: claim_ids,
+            frontier: replica
+                .frontier_page(
+                    objects::object::thread_replication::ThreadFacet::Source,
+                    None,
+                    128,
+                )
+                .expect("current frontier")
+                .into_iter()
+                .collect(),
+            local_owner: local.public_key().try_into().expect("local key"),
+            accepting_publisher: account.public_key().try_into().expect("current recipient"),
+            acceptance: acceptance(
+                &authority,
+                &account,
+                spool,
+                "ResolveOwnershipConflict",
+                false,
+            ),
+            occurred_at_ms: 100,
+        };
+    let signed_resolution = crypto::thread_ownership_resolution::SignedOwnershipResolution::sign(
+        &resolution,
+        &local,
+        &account,
+    )
+    .expect("owner choice and fresh acceptance");
+    let resolution_id = replica
+        .resolve_ownership(&signed_resolution, &authority, "acme/project", 100)
+        .expect("resolve complete conflict");
+    assert_eq!(
+        replica.effective_owner().expect("resolved owner"),
+        GenesisOwner::Account(uuid::Uuid::from_bytes([9; 16]))
+    );
+    let generation = replica.generation().expect("generation");
+    assert_eq!(
+        replica
+            .resolve_ownership(&signed_resolution, &authority, "wrong/path", i64::MAX)
+            .expect("exact retained retry"),
+        resolution_id,
+    );
+    assert_eq!(
+        replica.generation().expect("no replay mutation"),
+        generation
+    );
+    assert_eq!(
+        replica.ownership_claims().expect("claims retained").len(),
+        2
+    );
+    assert!(
+        replica
+            .claim_ownership(&conflicting, &authority, "acme/project", 100)
+            .is_err()
+    );
 }
 
 fn receipt_backfill(

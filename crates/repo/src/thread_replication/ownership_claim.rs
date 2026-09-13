@@ -117,16 +117,16 @@ impl ThreadReplica {
         let Some(author) = operation.source_author()? else {
             return Ok(());
         };
-        let (count,historical):(i64,bool) = connection.query_row(
-            "SELECT (SELECT count(*) FROM thread_owner_claims WHERE thread=?1),EXISTS(SELECT 1 FROM thread_owner_claim_history WHERE thread=?1 AND operation=?2)",
-            params![self.thread.as_bytes(),operation.id()?.as_bytes()],|row|Ok((row.get(0)?,row.get(1)?)),
+        let (count,historical,resolved):(i64,bool,bool) = connection.query_row(
+            "SELECT (SELECT count(*) FROM thread_owner_claims WHERE thread=?1),EXISTS(SELECT 1 FROM thread_owner_claim_history h WHERE h.thread=?1 AND h.operation=?2 AND (NOT EXISTS(SELECT 1 FROM thread_owner_resolutions r WHERE r.thread=?1) OR h.claim=(SELECT winner FROM thread_owner_resolutions r WHERE r.thread=?1))),EXISTS(SELECT 1 FROM thread_owner_resolutions WHERE thread=?1)",
+            params![self.thread.as_bytes(),operation.id()?.as_bytes()],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
         )?;
-        if count >= 2 {
+        if count >= 2 && !resolved {
             return Err(Error::Invalid(
                 "conflicting Thread ownership claims require explicit resolution".into(),
             ));
         }
-        if count == 1 && matches!(author, SourceAuthor::LocalKey) && !historical {
+        if count >= 1 && matches!(author, SourceAuthor::LocalKey) && !historical {
             return Err(Error::Invalid(
                 "former local source author is outside signed ownership cutoff".into(),
             ));
@@ -174,6 +174,10 @@ impl ThreadReplica {
             .collect())
     }
     pub fn effective_owner(&self) -> Result<GenesisOwner> {
+        if let Some(signed) = self.ownership_resolution()? {
+            let resolution = objects::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&signed.canonical)?;
+            return Ok(GenesisOwner::Account(resolution.account()?));
+        }
         let claims = self.ownership_claims()?;
         match claims.as_slice() {
             [] => Ok(self.genesis()?.owner),
@@ -199,12 +203,12 @@ impl ThreadReplica {
         if claims.is_empty() {
             return Ok(true);
         }
-        if claims.len() != 1 {
+        if claims.len() != 1 && self.ownership_resolution()?.is_none() {
             return Ok(false);
         }
         let connection = self.connect()?;
         let id = operation.id()?;
-        let found: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM thread_owner_claim_history WHERE thread=?1 AND operation=?2)", params![self.thread.as_bytes(), id.as_bytes()], |row| row.get(0))?;
+        let found: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM thread_owner_claim_history h WHERE h.thread=?1 AND h.operation=?2 AND (NOT EXISTS(SELECT 1 FROM thread_owner_resolutions r WHERE r.thread=?1) OR h.claim=(SELECT winner FROM thread_owner_resolutions r WHERE r.thread=?1)))", params![self.thread.as_bytes(), id.as_bytes()], |row| row.get(0))?;
         Ok(found)
     }
     pub fn ownership_claim_admission(
@@ -276,6 +280,19 @@ impl ThreadReplica {
         let id = claim.id()?;
         let existing = self.ownership_claims()?;
         let retained = existing.iter().any(|stored| stored == signed);
+        if let Some(resolution) = self.ownership_resolution()? {
+            let resolution = objects::object::thread_replication::ownership_resolution::ThreadOwnershipResolution::decode(&resolution.canonical)?;
+            if retained
+                && id == resolution.winning_claim
+                && command.is_none()
+                && admission.is_none()
+            {
+                return Ok((id, None));
+            }
+            return Err(Error::Invalid(
+                "Thread ownership has already been resolved".into(),
+            ));
+        }
         if let Some(receipt) = admission {
             // A retained claim is not permission to attach an untrusted witness.
             receipt.verify_claim(signed, &genesis, &self.authority_admission_trust(receipt)?)?;

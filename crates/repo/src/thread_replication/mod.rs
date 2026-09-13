@@ -18,6 +18,7 @@ pub mod listing;
 mod local;
 pub mod metadata;
 pub mod ownership_claim;
+pub mod ownership_resolution;
 #[cfg(test)]
 mod ownership_claim_tests;
 mod peers;
@@ -112,6 +113,7 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
             CREATE TABLE IF NOT EXISTS thread_control_heads(thread BLOB NOT NULL,property TEXT NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,property,operation));
             CREATE TABLE IF NOT EXISTS thread_control_commands(thread BLOB NOT NULL,publisher BLOB NOT NULL,command BLOB NOT NULL,operation BLOB NOT NULL,PRIMARY KEY(thread,publisher,command));")?;
     connection.execute_batch(ownership_claim::SCHEMA)?;
+    connection.execute_batch(ownership_resolution::SCHEMA)?;
     connection.execute_batch(boundary_evidence::SCHEMA)?;
     connection.execute_batch(collaboration::SCHEMA)?;
     connection.execute_batch(collaboration_search::SCHEMA)?;
