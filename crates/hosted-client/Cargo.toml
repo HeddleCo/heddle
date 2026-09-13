@@ -96,6 +96,13 @@ client = [
     "dep:tokio-tungstenite",
     "dep:webpki-roots",
 ]
+# Preview AX home relay for `heddle netd serve`
+# (`https://relay.preview.heddle.sh/`). Off by default so stock and
+# `--release` installs home on production (`https://relay.heddle.sh/`).
+# Does not change hosted CLI connections, which still take relays
+# from the signed descriptor. Enable via `heddle-cli`'s `preview`
+# forward: `cargo build --release -p heddle-cli --features client,preview`.
+preview = []
 # In-process hosted fixture for crate tests and CLI grant integration.
 # Production client builds do not enable this.
 test-utils = []

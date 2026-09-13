@@ -45,21 +45,20 @@ pub use crate::hosted_runtime::claim_bridge::{
 /// Home relay for this build flavor. Trailing slash matches the
 /// signed endpoint-descriptor encoding.
 ///
-/// Split on `debug_assertions` — the existing cargo profile gate
-/// (`cargo test` / `cargo build` vs `cargo build --release`). Dev and
-/// preview-shaped debug binaries hardcode preview only; shipped
-/// `--release` binaries hardcode production only. The unused URL is
-/// cfg'd out, so a release binary cannot embed preview and a debug
-/// binary cannot embed prod.
+/// Split on the `preview` cargo feature (forwarded from `heddle-cli`):
+/// stock / `--release` without the feature hardcodes production only;
+/// `--features preview` hardcodes preview only. The unused URL is
+/// cfg'd out, so a production binary cannot embed preview and a
+/// preview binary cannot embed prod.
 ///
 /// Hosted CLI connections still take their relay list from the signed
 /// descriptor (`RelayMode::custom`). This constant is only the netd
 /// home-relay map when no descriptor is in hand. Never
 /// [`RelayMode::Default`]: that map is n0's `*.relay.n0.iroh.link`.
-#[cfg(all(feature = "client", debug_assertions))]
+#[cfg(all(feature = "client", feature = "preview"))]
 const HEDDLE_HOME_RELAY_URL: &str = "https://relay.preview.heddle.sh/";
 
-#[cfg(all(feature = "client", not(debug_assertions)))]
+#[cfg(all(feature = "client", not(feature = "preview")))]
 const HEDDLE_HOME_RELAY_URL: &str = "https://relay.heddle.sh/";
 
 /// Relay mode that keeps the endpoint reachable through this build's
@@ -131,21 +130,21 @@ mod tests {
             "n0 default relay leaked into netd bind: {host}"
         );
 
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "preview")]
         {
             assert_eq!(HEDDLE_HOME_RELAY_URL, "https://relay.preview.heddle.sh/");
             assert!(
                 !HEDDLE_HOME_RELAY_URL.contains("://relay.heddle.sh"),
-                "debug/dev build must not embed the production relay"
+                "preview feature must not embed the production relay"
             );
             assert_eq!(host, "relay.preview.heddle.sh");
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(feature = "preview"))]
         {
             assert_eq!(HEDDLE_HOME_RELAY_URL, "https://relay.heddle.sh/");
             assert!(
                 !HEDDLE_HOME_RELAY_URL.contains("preview"),
-                "release build must not embed the preview relay"
+                "default/release build must not embed the preview relay"
             );
             assert_eq!(host, "relay.heddle.sh");
         }
