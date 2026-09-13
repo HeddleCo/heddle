@@ -15,6 +15,7 @@ pub mod collaboration;
 mod diff;
 mod discussion;
 mod entry_visibility;
+mod entry_redactions;
 mod facet_kind;
 mod frontier_ref;
 mod git_note;
@@ -73,6 +74,7 @@ pub use discussion::{
     DiscussionResolution, DiscussionTurn, DiscussionsBlob, generate_discussion_id,
 };
 pub use entry_visibility::{EntryVisibility, EntryVisibilityEntry, EntryVisibilityError};
+pub use entry_redactions::EntryRedactions;
 pub use facet_kind::{FacetKind, SourceHistoryLaws};
 pub use frontier_ref::{
     GIT_SYNTHETIC_FRONTIER_PREFIX, SYNTHETIC_FRONTIER_PREFIX, SyntheticFrontierName,
