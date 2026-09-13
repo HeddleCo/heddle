@@ -1,5 +1,8 @@
 //! Retained authenticated views cannot consume command admission indefinitely.
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crypto::{Ed25519Signer, Signer};
 use objects::object::thread_replication::ThreadGenesis;
@@ -28,7 +31,11 @@ pub(super) async fn roundtrip(
     for round in 0..2 {
         drained(device, budgets).await;
         let mut views = Vec::new();
+        let started = Instant::now();
+        let before = heddle_perf_contract::snapshot();
+        let mut slowest = Duration::ZERO;
         for index in 0..40 {
+            let opening = Instant::now();
             let mut view = remote
                 .observe::<thread_api::rpc::ThreadServiceObserveThread>(
                     ObserveThreadRequest {
@@ -46,13 +53,29 @@ pub(super) async fn roundtrip(
                 .unwrap_or_else(|error| panic!("round {round} view {index} opens: {error}"));
             tokio::time::timeout(Duration::from_secs(5), view.next_commit())
                 .await
-                .expect("initial commit deadline")
+                .unwrap_or_else(|_| {
+                    panic!("round {round} view {index} initial commit exceeded five seconds; admission {}, retained {}", budgets.0.available_permits(), budgets.1.available_permits())
+                })
                 .unwrap_or_else(|error| {
                     panic!("round {round} view {index} snapshot protocol: {error}")
                 })
                 .expect("snapshot");
+            slowest = slowest.max(opening.elapsed());
             views.push(view);
         }
+        eprintln!(
+            "capacity round {round}: opened {} views in {:?}; slowest {:?}",
+            views.len(),
+            started.elapsed(),
+            slowest
+        );
+        let after = heddle_perf_contract::snapshot();
+        eprintln!(
+            "capacity counters: repository opens {}, object decodes {}, ref reads {}",
+            after.repository_opens - before.repository_opens,
+            after.object_decodes - before.object_decodes,
+            after.ref_reads - before.ref_reads
+        );
         assert_eq!(
             budgets.0.available_permits(),
             32,
