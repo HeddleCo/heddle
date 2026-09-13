@@ -305,6 +305,44 @@ mod tests {
 
     use crate::{RepoConfig, Repository, TreeSchemePolicy};
 
+    #[test]
+    fn default_capture_supports_entry_visibility_without_configuration() {
+        let directory = TempDir::new().expect("repository directory");
+        let repo = Repository::init_default(directory.path()).expect("default repository");
+        fs::write(directory.path().join("secret.md"), b"private content").expect("write source");
+        repo.mark_entry_visibility(
+            "secret.md",
+            VisibilityTier::Private {
+                scope_label: "security".into(),
+            },
+        )
+        .expect("mark private entry");
+        let state = repo
+            .snapshot(Some("private entry".into()), None)
+            .expect("default capture supports explicit entry privacy");
+        let tree = repo
+            .store()
+            .get_tree(&state.tree)
+            .expect("stored tree")
+            .expect("source root");
+        assert_eq!(tree.scheme(), objects::object::TreeScheme::V4Salted);
+        let projection = repo
+            .content_visibility_for_audience(&state.id(), &crate::AudienceTier::Internal)
+            .expect("content visibility")
+            .expect("whole state visible");
+        assert!(
+            !projection.entry_visible(&tree, 0),
+            "explicit private entry is withheld"
+        );
+        let unchanged = repo
+            .snapshot(Some("no source edit".into()), None)
+            .expect("recapture preserves salts");
+        assert_eq!(
+            unchanged.tree, state.tree,
+            "unchanged source has a stable identity"
+        );
+    }
+
     fn v4_repo() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
