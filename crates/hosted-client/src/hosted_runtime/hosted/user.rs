@@ -2,7 +2,7 @@ use api::heddle::api::v1alpha1::{
     ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, BootstrapOwnerRootRequest,
     BootstrapOwnerRootResponse, CheckMergeEligibilityRequest, CheckMergeEligibilityResponse,
     CreateGrantRequest, CreateInvitationRequest, CreateServiceAccountRequest,
-    CreateSignupInviteRequest, CreateSignupInviteResponse, DeleteGrantRequest, DeleteSpoolRequest,
+    CreateSignupInviteRequest, CreateSignupInviteResponse, DeleteGrantRequest,
     GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse, GetCurrentUserSpoolRequest,
     GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
     IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
@@ -371,17 +371,33 @@ impl HostedClient {
     }
 
     pub async fn delete_spool(&mut self, full_path: &str) -> Result<(), ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteSpool");
-        authed_call!(
-            self,
-            delete_spool,
-            "DeleteSpool",
-            DeleteSpoolRequest {
-                full_path: full_path.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
+        let overview = self.native_spool_overview(full_path).await?;
+        let operation_id = ClientOperationId::fresh("heddle.api.v2alpha1.SpoolService/DeleteSpool");
+        let request = api::heddle::api::v2alpha1::DeleteSpoolRequest {
+            client_operation_id: operation_id.to_wire(),
+            spool: overview.r#ref,
+            expected_version: overview.version,
+        };
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServiceDeleteSpool>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        let receipt = response
+            .receipt
+            .ok_or_else(|| ProtocolError::InvalidState("Spool deletion receipt absent".into()))?;
+        if receipt.client_operation_id != request.client_operation_id
+            || receipt.endpoint != remote.description.endpoint
+            || !matches!(
+                receipt.outcome,
+                Some(api::heddle::api::v2alpha1::mutation_receipt::Outcome::Applied(_))
+            )
+        {
+            return Err(ProtocolError::InvalidState(
+                "Spool deletion was not applied to the requested endpoint".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -943,7 +959,7 @@ mod tests {
 
         let captured = captured.lock().unwrap_or_else(|poison| poison.into_inner());
         assert_eq!(captured.updates.len(), 2);
-        assert_eq!(captured.deletes.len(), 2);
+        assert_eq!(captured.native_deletes.len(), 2);
 
         let namespace_update = &captured.updates[0];
         assert_eq!(namespace_update.full_path, "acme");
@@ -959,10 +975,14 @@ mod tests {
         assert!(!repository_update.clear_display_name);
         assert!(!repository_update.client_operation_id.is_empty());
 
-        assert_eq!(captured.deletes[0].full_path, "acme-new");
-        assert!(!captured.deletes[0].client_operation_id.is_empty());
-        assert_eq!(captured.deletes[1].full_path, "acme/widgets-new");
-        assert!(!captured.deletes[1].client_operation_id.is_empty());
+        for deletion in &captured.native_deletes {
+            assert_eq!(
+                deletion.spool.as_ref().expect("resolved Spool").id,
+                uuid::Uuid::from_bytes([2; 16]).to_string()
+            );
+            assert_eq!(deletion.expected_version, vec![7; 32]);
+            assert!(!deletion.client_operation_id.is_empty());
+        }
     }
 
     #[test]

@@ -13,19 +13,23 @@ use api::{
         encode_failure_response, encode_stream_failure, encode_stream_message,
         encode_success_response,
     },
-    heddle::api::v1alpha1::{
-        AnnotatedFile, BlobResponse, CallFailure, CallFailureCode, ContextRevision,
-        CreateSpoolRequest, DeleteSpoolRequest, Discussion, GetBlobRequest,
-        GetContextHistoryPageEnd, GetContextHistoryRequest, GetContextHistoryResponse,
-        GetDiscussionRequest, HostedSpool, ListContextPageEnd, ListContextRequest,
-        ListContextResponse, ListDiscussionsByStateRequest, ListDiscussionsPageEnd,
-        ListDiscussionsResponse, ListRefsPageEnd, ListRefsResponse, ListThreadsPageEnd,
-        ListThreadsResponse, PackChunk, PackStreamKind, PullComplete, PullReady, PullServerFrame,
-        PushClientFrame, PushComplete, PushReady, PushRequest, PushServerFrame, RepoEvent,
-        SignedSpoolOwnerGenesis, StateContextEntry, StateId, SubscribeRepoEventsRequest,
-        TransferCheckpoint, TransportMode, UpdateSpoolRequest, get_context_history_response,
-        list_context_response, list_discussions_response, list_refs_response,
-        list_threads_response, pull_server_frame, push_client_frame, push_server_frame,
+    heddle::api::{
+        v1alpha1::{
+            AnnotatedFile, BlobResponse, CallFailure, CallFailureCode, ContextRevision,
+            CreateSpoolRequest, DeleteSpoolRequest, Discussion, GetBlobRequest,
+            GetContextHistoryPageEnd, GetContextHistoryRequest, GetContextHistoryResponse,
+            GetDiscussionRequest, HostedSpool, ListContextPageEnd, ListContextRequest,
+            ListContextResponse, ListDiscussionsByStateRequest, ListDiscussionsPageEnd,
+            ListDiscussionsResponse, ListRefsPageEnd, ListRefsResponse, ListThreadsPageEnd,
+            ListThreadsResponse, PackChunk, PackStreamKind, PullComplete, PullReady,
+            PullServerFrame, PushClientFrame, PushComplete, PushReady, PushRequest,
+            PushServerFrame, RepoEvent, SignedSpoolOwnerGenesis, StateContextEntry, StateId,
+            SubscribeRepoEventsRequest, TransferCheckpoint, TransportMode, UpdateSpoolRequest,
+            get_context_history_response, list_context_response, list_discussions_response,
+            list_refs_response, list_threads_response, pull_server_frame, push_client_frame,
+            push_server_frame,
+        },
+        v2alpha1 as v2,
     },
     method_descriptor,
 };
@@ -54,6 +58,7 @@ const SUBSCRIBE_REPO_EVENTS_METHOD: &str =
 pub(crate) struct SpoolMutationCapture {
     pub updates: Vec<UpdateSpoolRequest>,
     pub deletes: Vec<DeleteSpoolRequest>,
+    pub native_deletes: Vec<v2::DeleteSpoolRequest>,
 }
 
 fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
@@ -246,6 +251,7 @@ async fn start_inner(
         .await
         .unwrap();
     let server_addr = server.addr();
+    let server_key = server.id().as_bytes().to_vec();
     let server_task = tokio::spawn(async move {
         let connection = server
             .accept()
@@ -264,6 +270,7 @@ async fn start_inner(
                 push_requests.clone(),
                 context.clone(),
                 collaboration.clone(),
+                server_key.clone(),
             ));
         }
         server.close().await;
@@ -296,6 +303,7 @@ async fn serve_call(
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
+    server_key: Vec<u8>,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -309,10 +317,65 @@ async fn serve_call(
             break (prelude.method.to_string(), consumed);
         }
     };
-    let descriptor = method_descriptor(&method).expect("registered hosted method");
-    match descriptor.streaming {
+    let streaming = method_descriptor(&method)
+        .map(|descriptor| descriptor.streaming)
+        .or_else(|| api::v2::method_descriptor(&method).map(|descriptor| descriptor.streaming))
+        .expect("registered hosted method");
+    match streaming {
         StreamingShape::Unary | StreamingShape::ClientStreaming => {
-            if method == CREATE_SPOOL_METHOD {
+            if method == "/heddle.api.v2alpha1.EndpointService/DescribeEndpoint" {
+                let response = v2::DescribeEndpointResponse {
+                    endpoint: Some(v2::EndpointRef {
+                        kind: v2::EndpointKind::Weft as i32,
+                        public_key: server_key.clone(),
+                    }),
+                    supported_packages: vec!["heddle.api.v2alpha1".into()],
+                    implemented_methods: vec![
+                        "/heddle.api.v2alpha1.WorkspaceService/ResolveResources".into(),
+                        "/heddle.api.v2alpha1.SpoolService/ObserveSpool".into(),
+                        "/heddle.api.v2alpha1.SpoolService/DeleteSpool".into(),
+                    ],
+                    default_read_budget: Some(v2::ReadBudget {
+                        max_items: 64,
+                        max_frame_bytes: 65536,
+                        max_snapshot_bytes: 1048576,
+                    }),
+                    max_pending_batch_bytes: 1048576,
+                    ..Default::default()
+                };
+                send.write_chunk(Bytes::from(
+                    encode_success_response(&response.encode_to_vec()).unwrap(),
+                ))
+                .await
+                .unwrap();
+            } else if method == "/heddle.api.v2alpha1.WorkspaceService/ResolveResources" {
+                let response = v2::ResolveResourcesResponse {
+                    results: vec![v2::ResourceResolution {
+                        resource: Some(v2::EntityRef {
+                            entity: Some(v2::entity_ref::Entity::Spool(v2::SpoolRef {
+                                id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+                            })),
+                        }),
+                        coverage: v2::Coverage::Complete as i32,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                };
+                send.write_chunk(Bytes::from(
+                    encode_success_response(&response.encode_to_vec()).unwrap(),
+                ))
+                .await
+                .unwrap();
+            } else if method == "/heddle.api.v2alpha1.SpoolService/DeleteSpool" {
+                serve_native_delete_spool(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    spool_mutations,
+                    server_key,
+                )
+                .await;
+            } else if method == CREATE_SPOOL_METHOD {
                 serve_create_spool(&mut send, &mut recv, &mut request, create_spool).await;
             } else if method == UPDATE_SPOOL_METHOD {
                 serve_update_spool(&mut send, &mut recv, &mut request, spool_mutations).await;
@@ -335,7 +398,9 @@ async fn serve_call(
             }
         }
         StreamingShape::ServerStreaming => {
-            if method == LIST_CONTEXT_METHOD {
+            if method == "/heddle.api.v2alpha1.SpoolService/ObserveSpool" {
+                serve_native_spool_observation(&mut send, server_key).await;
+            } else if method == LIST_CONTEXT_METHOD {
                 if let Some(context) = context {
                     serve_list_context(&mut send, &mut recv, &mut request, context).await;
                 } else {
@@ -397,6 +462,112 @@ async fn serve_call(
         }
     }
     send.finish().unwrap();
+}
+
+async fn serve_native_spool_observation(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+) {
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let events = [
+        v2::SpoolEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 1,
+                body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                    source: Some(source),
+                    binding_digest: vec![9; 32],
+                    accepted_budget: Some(budget),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+        v2::SpoolEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 2,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(v2::spool_event::Payload::Spool(v2::SpoolOverview {
+                r#ref: Some(v2::SpoolRef {
+                    id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+                }),
+                version: vec![7; 32],
+                ..Default::default()
+            })),
+        },
+        v2::SpoolEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 3,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+    ];
+    for event in events {
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+}
+
+async fn serve_native_delete_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    captured: Option<Arc<Mutex<SpoolMutationCapture>>>,
+    server_key: Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::DeleteSpoolRequest::decode(frame.body).ok());
+    if let (Some(captured), Some(body)) = (captured.as_ref(), body.as_ref()) {
+        captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .native_deletes
+            .push(body.clone());
+    }
+    let response = v2::MutationResponse {
+        receipt: body.map(|body| v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
 }
 
 async fn serve_push(

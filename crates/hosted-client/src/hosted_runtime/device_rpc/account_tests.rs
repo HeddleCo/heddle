@@ -258,6 +258,7 @@ pub(super) async fn roundtrip(
     let created = created.spool.expect("created overview");
     assert_eq!(created.r#ref.as_ref().expect("ref").id, id.to_string());
     let revise = ReviseSpoolRequest {
+        slug: None,
         client_operation_id: uuid::Uuid::new_v4().to_string(),
         spool: created.r#ref.clone(),
         expected_version: created.version.clone(),

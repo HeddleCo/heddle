@@ -6,6 +6,51 @@ use wire::ProtocolError;
 use super::HostedClient;
 
 impl HostedClient {
+    pub(super) async fn native_spool_overview(
+        &self,
+        address: &str,
+    ) -> Result<contract::SpoolOverview, ProtocolError> {
+        let spool = self.resolve_spool_ref(address).await?;
+        let remote = self.native().await.map_err(native_error)?;
+        let mut observation = remote
+            .observe::<rpc::SpoolServiceObserveSpool>(
+                contract::ObserveSpoolRequest {
+                    spool: Some(spool.clone()),
+                    sections: vec![contract::SpoolSection::Overview as i32],
+                    observe: Some(contract::ObserveOptions {
+                        mode: contract::ObservationMode::Once as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(native_error)?;
+        let batch = observation
+            .next_commit()
+            .await
+            .map_err(native_error)?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState("spool observation ended without a checkpoint".into())
+            })?;
+        let mut overviews = batch.changes.into_iter().filter_map(|change| match change {
+            contract::spool_event::Payload::Spool(overview) => Some(overview),
+            _ => None,
+        });
+        let overview = overviews
+            .next()
+            .ok_or_else(|| ProtocolError::InvalidState("spool overview unavailable".into()))?;
+        if overview.r#ref.as_ref() != Some(&spool)
+            || overviews.next().is_some()
+            || overview.version.is_empty()
+        {
+            return Err(ProtocolError::InvalidState(
+                "spool observation identity or version is inconsistent".into(),
+            ));
+        }
+        Ok(overview)
+    }
     pub async fn resolve_spool_ref(
         &self,
         address: &str,
