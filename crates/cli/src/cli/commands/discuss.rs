@@ -177,14 +177,21 @@ fn run_append(
     store: &CollaborationStore,
     args: &DiscussAppendArgs,
 ) -> Result<()> {
+    let (discussion_id, body) = match args.open_body.as_deref() {
+        Some(body) => (
+            lookup_discussion_id(store, &args.discussion_id, &args.body)?,
+            body.to_string(),
+        ),
+        None => (args.discussion_id.clone(), args.body.clone()),
+    };
     write_descendant(
         cli,
         repo,
         store,
-        &args.discussion_id,
+        &discussion_id,
         "discuss_append",
         CollaborationOperationBodyV1::AppendTurn {
-            turn: DiscussionTurnV1::new(args.body.clone())?,
+            turn: DiscussionTurnV1::new(body)?,
         },
     )
 }
@@ -195,6 +202,8 @@ fn run_resolve(
     store: &CollaborationStore,
     args: &DiscussResolveArgs,
 ) -> Result<()> {
+    let discussion_id =
+        resolve_discussion_locator(store, &args.discussion_id, args.symbol.as_deref())?;
     let resolution = match (args.mode.as_ref(), args.into_annotation) {
         (Some(ResolveModeArg::ByEdit), false) => CollaborationResolution::AddressedByState {
             state_id: resolve_state(repo, args.state.as_deref())?,
@@ -208,7 +217,7 @@ fn run_resolve(
                 .ok_or_else(|| anyhow!(RecoveryAdvice::discuss_resolve_missing_dismiss_reason()))?
                 .to_string(),
         },
-        (None, true) => resolve_into_context_annotation(repo, store, args)?,
+        (None, true) => resolve_into_context_annotation(repo, store, args, &discussion_id)?,
         _ => {
             return Err(anyhow!(
                 "discuss resolve requires exactly one of --mode or --into-annotation"
@@ -219,7 +228,7 @@ fn run_resolve(
         cli,
         repo,
         store,
-        &args.discussion_id,
+        &discussion_id,
         "discuss_resolve",
         CollaborationOperationBodyV1::Resolve { resolution },
     )
@@ -230,8 +239,9 @@ fn resolve_into_context_annotation(
     repo: &repo::Repository,
     store: &CollaborationStore,
     args: &DiscussResolveArgs,
+    discussion_id: &str,
 ) -> Result<CollaborationResolution> {
-    let discussion_id = parse_discussion_id(&args.discussion_id)?;
+    let discussion_id = parse_discussion_id(discussion_id)?;
     let discussion = store
         .materialize_discussion(&discussion_id)?
         .ok_or_else(|| {
@@ -596,7 +606,11 @@ fn emit_wait_line(cli: &Cli, line: DiscussWaitLineOutput) -> Result<()> {
 }
 
 fn run_show(cli: &Cli, store: &CollaborationStore, args: &DiscussShowArgs) -> Result<()> {
-    let discussion_id = parse_discussion_id(&args.discussion_id)?;
+    let discussion_id = parse_discussion_id(&resolve_discussion_locator(
+        store,
+        &args.discussion_id,
+        args.symbol.as_deref(),
+    )?)?;
     let discussion = store
         .materialize_discussion(&discussion_id)?
         .ok_or_else(|| {
@@ -761,6 +775,62 @@ fn parse_discussion_id(value: &str) -> Result<DiscussionRecordId> {
     value
         .parse()
         .map_err(|error| anyhow!("invalid discussion id {value:?}: {error}"))
+}
+
+fn resolve_discussion_locator(
+    store: &CollaborationStore,
+    discussion_id: &str,
+    symbol: Option<&str>,
+) -> Result<String> {
+    match symbol {
+        Some(symbol) => lookup_discussion_id(store, discussion_id, symbol),
+        None => Ok(discussion_id.to_string()),
+    }
+}
+
+fn lookup_discussion_id(store: &CollaborationStore, file: &str, symbol: &str) -> Result<String> {
+    let materialized = store.materialize()?;
+    let mut matches: Vec<_> = materialized
+        .discussions
+        .into_values()
+        .filter(|discussion| {
+            matches!(
+                &discussion.anchor,
+                CollaborationAnchor::Symbol {
+                    path,
+                    symbol: candidate,
+                    ..
+                } if path == file && candidate == symbol
+            )
+        })
+        .collect();
+    matches.sort_by_key(|discussion| discussion.discussion_id.to_string());
+    match matches.as_slice() {
+        [one] => Ok(one.discussion_id.to_string()),
+        [] => Err(anyhow!(RecoveryAdvice::discussion_not_found(&format!(
+            "{file}:{symbol}"
+        )))),
+        many => {
+            let open: Vec<_> = many
+                .iter()
+                .filter(|discussion| discussion.resolution.is_none())
+                .collect();
+            if let [one] = open.as_slice() {
+                return Ok(one.discussion_id.to_string());
+            }
+            let ids = many
+                .iter()
+                .map(|discussion| discussion.discussion_id.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(anyhow!(RecoveryAdvice::invalid_usage(
+                "discuss_anchor_ambiguous",
+                format!("multiple discussions match {file}:{symbol}: {ids}"),
+                "Pass the discussion id from `heddle discuss list` instead of FILE SYMBOL.",
+                "heddle discuss list --file <file> --symbol <symbol>",
+            )))
+        }
+    }
 }
 
 fn idempotency_key(cli: &Cli) -> Result<CollaborationIdempotencyKey> {

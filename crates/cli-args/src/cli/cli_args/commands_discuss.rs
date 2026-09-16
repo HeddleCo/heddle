@@ -91,8 +91,15 @@ pub struct DiscussOpenArgs {
 
 #[derive(Clone, Debug, Args)]
 pub struct DiscussAppendArgs {
+    /// Discussion id, or FILE when copying `discuss open` argv.
+    #[arg(value_name = "ID|FILE")]
     pub discussion_id: String,
+    /// Turn body, or SYMBOL when copying `discuss open` argv.
+    #[arg(value_name = "BODY|SYMBOL")]
     pub body: String,
+    /// Turn body when using `FILE SYMBOL BODY`.
+    #[arg(value_name = "BODY")]
+    pub open_body: Option<String>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -102,7 +109,12 @@ pub struct DiscussAppendArgs {
         .args(["mode", "into_annotation"])
 ))]
 pub struct DiscussResolveArgs {
+    /// Discussion id, or FILE when copying `discuss open` argv.
+    #[arg(value_name = "ID|FILE")]
     pub discussion_id: String,
+    /// SYMBOL when resolving with `FILE SYMBOL` instead of an id.
+    #[arg(value_name = "SYMBOL")]
+    pub symbol: Option<String>,
     /// Resolution kind: `by-edit` or `dismiss`.
     #[arg(long, value_enum)]
     pub mode: Option<ResolveModeArg>,
@@ -162,7 +174,12 @@ pub struct DiscussListArgs {
 
 #[derive(Clone, Debug, Args)]
 pub struct DiscussShowArgs {
+    /// Discussion id, or FILE when copying `discuss open` argv.
+    #[arg(value_name = "ID|FILE")]
     pub discussion_id: String,
+    /// SYMBOL when showing with `FILE SYMBOL` instead of an id.
+    #[arg(value_name = "SYMBOL")]
+    pub symbol: Option<String>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -179,4 +196,86 @@ pub struct DiscussWaitArgs {
     /// Internal helper for tests: stop after this many events (including ignored ones).
     #[arg(long, hide = true)]
     pub max_events: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::cli::{Cli, Commands, DiscussCommands};
+
+    #[test]
+    fn append_accepts_id_or_open_argv() {
+        match Cli::try_parse_from(["heddle", "discuss", "append", "disc-id", "body"])
+            .expect("id argv")
+            .command
+        {
+            Commands::Discuss {
+                command: DiscussCommands::Append(args),
+            } => {
+                assert_eq!(args.discussion_id, "disc-id");
+                assert_eq!(args.body, "body");
+                assert!(args.open_body.is_none());
+            }
+            _ => panic!("expected discuss append"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "discuss",
+            "append",
+            "src/auth.rs",
+            "verify",
+            "body",
+        ])
+        .expect("open argv")
+        .command
+        {
+            Commands::Discuss {
+                command: DiscussCommands::Append(args),
+            } => {
+                assert_eq!(args.discussion_id, "src/auth.rs");
+                assert_eq!(args.body, "verify");
+                assert_eq!(args.open_body.as_deref(), Some("body"));
+            }
+            _ => panic!("expected discuss append"),
+        }
+    }
+
+    #[test]
+    fn show_and_resolve_accept_file_symbol() {
+        match Cli::try_parse_from(["heddle", "discuss", "show", "src/auth.rs", "verify"])
+            .expect("show open argv")
+            .command
+        {
+            Commands::Discuss {
+                command: DiscussCommands::Show(args),
+            } => {
+                assert_eq!(args.discussion_id, "src/auth.rs");
+                assert_eq!(args.symbol.as_deref(), Some("verify"));
+            }
+            _ => panic!("expected discuss show"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "discuss",
+            "resolve",
+            "src/auth.rs",
+            "verify",
+            "--mode",
+            "dismiss",
+            "--reason",
+            "done",
+        ])
+        .expect("resolve open argv")
+        .command
+        {
+            Commands::Discuss {
+                command: DiscussCommands::Resolve(args),
+            } => {
+                assert_eq!(args.discussion_id, "src/auth.rs");
+                assert_eq!(args.symbol.as_deref(), Some("verify"));
+            }
+            _ => panic!("expected discuss resolve"),
+        }
+    }
 }

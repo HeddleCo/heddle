@@ -76,6 +76,22 @@ fn show_json(temp: &Path, state: &str) -> Value {
 }
 
 #[test]
+fn visibility_show_defaults_to_head() {
+    let (temp, _) = init_and_capture("head default");
+    let state = capture_state(temp.path(), "captured for head default");
+    let explicit = show_json(temp.path(), &state);
+    let raw = heddle(
+        &["--output", "json", "visibility", "show"],
+        Some(temp.path()),
+    )
+    .expect("visibility show defaults to HEAD");
+    let omitted: Value = serde_json::from_str(&raw).expect("visibility show output should be JSON");
+    assert_eq!(omitted["output_kind"], "visibility_show");
+    assert_eq!(omitted["state"], explicit["state"]);
+    assert_eq!(omitted["tier"], explicit["tier"]);
+}
+
+#[test]
 fn invariant_a_captured_tier_unchanged_when_default_drifts_public() {
     // Capture under a restrictive default…
     let (temp, _) = init_and_capture("secret");

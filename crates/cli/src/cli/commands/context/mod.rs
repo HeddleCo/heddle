@@ -256,6 +256,49 @@ pub(crate) fn parse_scope(input: Option<&str>) -> Result<AnnotationScope> {
     }
 }
 
+pub(crate) fn resolve_annotation_locator(
+    repo: &Repository,
+    context_root: &ContentHash,
+    annotation_id: Option<&str>,
+    path: Option<String>,
+    state: Option<String>,
+) -> Result<String> {
+    if let Some(id) = annotation_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(id.to_string());
+    }
+    let target = resolve_target(repo, path, state)?;
+    let blob = repo
+        .get_context_blob(context_root, &target)?
+        .ok_or_else(|| anyhow!(RecoveryAdvice::annotation_not_found("<target>")))?;
+    let active: Vec<_> = blob
+        .annotations
+        .iter()
+        .filter(|annotation| annotation.status == AnnotationStatus::Active)
+        .collect();
+    match active.as_slice() {
+        [one] => Ok(one.annotation_id.clone()),
+        [] => Err(anyhow!(RecoveryAdvice::annotation_not_found(
+            &target_label(&target).1
+        ))),
+        many => {
+            let ids = many
+                .iter()
+                .map(|annotation| annotation.annotation_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(anyhow!(RecoveryAdvice::invalid_usage(
+                "context_target_ambiguous",
+                format!("multiple annotations match this target: {ids}"),
+                "Pass the annotation id from `heddle context get --path <path>`.",
+                "heddle context get --path <path>",
+            )))
+        }
+    }
+}
+
 pub(crate) fn resolve_target(
     repo: &Repository,
     path: Option<String>,

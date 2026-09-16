@@ -201,9 +201,12 @@ pub async fn cmd_context_set(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn cmd_context_edit(
     cli: &Cli,
-    annotation_id: String,
+    annotation_id: Option<String>,
+    path: Option<String>,
+    state: Option<String>,
     kind: Option<String>,
     tags: Vec<String>,
     message: Option<String>,
@@ -217,6 +220,13 @@ pub async fn cmd_context_edit(
     let head_state = resolve_state(&repo, None)?;
     let context_root = context_root_for_state(&repo, &head_state)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
+    let annotation_id = super::resolve_annotation_locator(
+        &repo,
+        &context_root,
+        annotation_id.as_deref(),
+        path,
+        state,
+    )?;
 
     let (target, mut blob, index) = repo
         .find_annotation(&context_root, &annotation_id)?
