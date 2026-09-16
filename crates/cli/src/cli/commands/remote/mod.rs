@@ -1748,15 +1748,15 @@ async fn auto_provision_hosted_repo(
     client: &mut HostedClient,
     options: &PushNetworkOptions<'_>,
 ) -> Result<String> {
+    if let Some(path) = options.repo_path.filter(|path| !path.is_empty()) {
+        return Ok(path.to_string());
+    }
     let user_spool = client.get_current_user_spool().await?;
-    let full_path = match options.repo_path {
-        Some(path) => path.to_string(),
-        None => format!(
-            "{}/{}",
-            user_spool.full_path,
-            default_spool_slug_from_repo_root(repo.root())?
-        ),
-    };
+    let full_path = format!(
+        "{}/{}",
+        user_spool.full_path,
+        default_spool_slug_from_repo_root(repo.root())?
+    );
     let Some(relative_path) = full_path
         .strip_prefix(&user_spool.full_path)
         .and_then(|path| path.strip_prefix('/'))

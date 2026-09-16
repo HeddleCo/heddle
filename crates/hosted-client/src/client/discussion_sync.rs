@@ -381,14 +381,14 @@ async fn push_one(
         // Only symbol-anchored discussions map to the hosted PathSymbolRef.
         return Ok(false);
     };
-    let Some(state) = repo
+    if repo
         .store()
         .get_state(state_id)
         .context("load discussion anchor state")?
-    else {
+        .is_none()
+    {
         return Ok(false);
-    };
-    let change_id = state.change_id;
+    }
     let visibility = discussion.visibility.as_str().to_string();
 
     let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
@@ -441,7 +441,7 @@ async fn push_one(
                 let mut hosted = client
                     .open_discussion(
                         repo_path,
-                        change_id,
+                        *state_id,
                         path,
                         symbol,
                         &open_body,

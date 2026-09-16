@@ -11,43 +11,7 @@ use wire::ProtocolError;
 
 use super::{HostedClient, helpers::hosted_to_protocol_error, operation_id::ClientOperationId};
 
-macro_rules! signed_call {
-    ($self:ident, $client:ident, $rpc:ident, $path:expr, $msg:expr) => {{
-        let request = $msg;
-        $self
-            .routes()
-            .$rpc(&request)
-            .await
-            .map_err(hosted_to_protocol_error)?
-    }};
-}
-
-/// Dispatch an authenticated unary call through the native hosted chokepoint.
-/// The contract method path controls signing, human-verification retry, and
-/// transport-neutral failure mapping.
-macro_rules! authed_call {
-    ($self:ident, $rpc:ident, $method:literal, $msg:expr) => {{
-        signed_call!(
-            $self,
-            user,
-            $rpc,
-            concat!("/heddle.api.v1alpha1.RegistryService/", $method),
-            $msg
-        )
-    }};
-}
-
 impl HostedClient {
-    pub async fn create_agent_account(
-        &mut self,
-        request: CreateAgentAccountRequest,
-    ) -> Result<CreateAgentAccountResponse, ProtocolError> {
-        self.routes()
-            .create_agent_account(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
-    }
-
     /// Resolve the acting identity for the bound bearer (subject, staff/service
     /// markers, session, server-side scope, and directly-held resource roles).
     /// Read-only; drives `heddle whoami`.
@@ -122,19 +86,6 @@ impl HostedClient {
         Ok((principal, credential))
     }
 
-    pub async fn create_service_account(
-        &mut self,
-        request: CreateServiceAccountRequest,
-    ) -> Result<ServiceAccountResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            create_service_account,
-            "/heddle.api.v1alpha1.IdentityService/CreateServiceAccount",
-            request
-        ))
-    }
-
     pub async fn create_signup_invite(
         &mut self,
         request: api::heddle::api::v2alpha1::CreateSignupInvitationRequest,
@@ -152,16 +103,6 @@ impl HostedClient {
             "signup invitation creation",
         )?;
         Ok(response)
-    }
-
-    pub async fn issue_service_account_credential(
-        &mut self,
-        request: IssueServiceAccountCredentialRequest,
-    ) -> Result<IssuedCredentialResponse, ProtocolError> {
-        self.routes()
-            .issue_service_account_credential(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
     }
 
     pub async fn list_signup_invitations(
@@ -283,26 +224,6 @@ impl HostedClient {
         }
     }
 
-    pub async fn begin_login(
-        &mut self,
-        username: &str,
-    ) -> Result<(String, String, u64), ProtocolError> {
-        let request = BeginWebAuthnAuthenticationRequest {
-            username: username.to_string(),
-        };
-        let response = self
-            .routes()
-            .begin_web_authn_authentication(&request)
-            .await
-            .map_err(hosted_to_protocol_error)?;
-        let expires_at_secs = response
-            .expires_at
-            .as_ref()
-            .map(|t| t.seconds.max(0) as u64)
-            .unwrap_or(0);
-        Ok((response.challenge_id, response.challenge, expires_at_secs))
-    }
-
     pub async fn get_current_user_spool(&mut self) -> Result<wire::HostedSpoolInfo, ProtocolError> {
         use api::heddle::api::v2alpha1 as contract;
         let remote = self.native().await.map_err(native_protocol_error)?;
@@ -340,30 +261,49 @@ impl HostedClient {
                 "identity observation returned multiple principals".into(),
             ));
         }
-        let address = principal.personal_spool.ok_or_else(|| {
-            ProtocolError::ObjectNotFound("personal Spool has not been created".into())
-        })?;
-        let reference = address.r#ref.ok_or_else(|| {
-            ProtocolError::InvalidState("personal Spool has no stable identity".into())
-        })?;
-        uuid::Uuid::parse_str(&reference.id).map_err(native_protocol_error)?;
-        if address.path_segments.is_empty()
-            || address
-                .path_segments
-                .iter()
-                .any(|segment| segment.is_empty() || segment.contains('/'))
-        {
-            return Err(ProtocolError::InvalidState(
-                "personal Spool address is invalid".into(),
-            ));
+        if let Some(address) = principal.personal_spool {
+            let reference = address.r#ref.ok_or_else(|| {
+                ProtocolError::InvalidState("personal Spool has no stable identity".into())
+            })?;
+            uuid::Uuid::parse_str(&reference.id).map_err(native_protocol_error)?;
+            if address.path_segments.is_empty()
+                || address
+                    .path_segments
+                    .iter()
+                    .any(|segment| segment.is_empty() || segment.contains('/'))
+            {
+                return Err(ProtocolError::InvalidState(
+                    "personal Spool address is invalid".into(),
+                ));
+            }
+            return Ok(wire::HostedSpoolInfo {
+                spool_id: reference.id,
+                full_path: address.path_segments.join("/"),
+                kind: "spool".into(),
+                is_repo: false,
+                display_name: address.path_segments.last().cloned(),
+            });
         }
-        Ok(wire::HostedSpoolInfo {
-            spool_id: reference.id,
-            full_path: address.path_segments.join("/"),
-            kind: "spool".into(),
-            is_repo: false,
-            display_name: address.path_segments.last().cloned(),
-        })
+        let handle = if principal.handle.is_empty() {
+            principal.display_name
+        } else {
+            principal.handle
+        };
+        let overview = self
+            .list_spools()
+            .await?
+            .into_iter()
+            .find(|spool| {
+                spool.slug == handle
+                    || spool
+                        .path_segments
+                        .last()
+                        .is_some_and(|segment| segment == &handle)
+            })
+            .ok_or_else(|| {
+                ProtocolError::ObjectNotFound("personal Spool has not been created".into())
+            })?;
+        native_spool_info(overview)
     }
 
     pub async fn get_spool(
@@ -506,32 +446,6 @@ impl HostedClient {
         }
     }
 
-    pub async fn bootstrap_owner_root(
-        &mut self,
-        request: BootstrapOwnerRootRequest,
-    ) -> Result<BootstrapOwnerRootResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            bootstrap_owner_root,
-            "/heddle.api.v1alpha1.OwnerAuthorizationService/BootstrapOwnerRoot",
-            request
-        ))
-    }
-
-    pub async fn get_current_owner_keyring(
-        &mut self,
-        request: GetCurrentOwnerKeyringRequest,
-    ) -> Result<GetCurrentOwnerKeyringResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            get_current_owner_keyring,
-            "/heddle.api.v1alpha1.OwnerAuthorizationService/GetCurrentOwnerKeyring",
-            request
-        ))
-    }
-
     pub async fn create_spool(
         &mut self,
         parent_path: &str,
@@ -600,7 +514,8 @@ impl HostedClient {
             slug: slug.into(),
             settings: Some(contract::SpoolSettings {
                 audience: contract::Audience::Private as i32,
-                default_state_audience: contract::Audience::Members as i32,
+                default_state_audience: contract::Audience::Private as i32,
+                allow_child_creation: true,
                 ..Default::default()
             }),
             ownership: Some(contract::create_spool_request::Ownership::OwnerGenesis(
@@ -657,29 +572,6 @@ impl HostedClient {
             is_repo,
             display_name: (!spool.name.is_empty()).then_some(spool.name),
         })
-    }
-
-    pub async fn create_invitation(
-        &mut self,
-        email: &str,
-        namespace_path: &str,
-        role: &str,
-    ) -> Result<ProtoInvitation, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateInvitation");
-        Ok(authed_call!(
-            self,
-            create_invitation,
-            "CreateInvitation",
-            CreateInvitationRequest {
-                email: email.to_string(),
-                namespace_path: namespace_path.to_string(),
-                role: parse_hosted_role_arg(role)? as i32,
-                expires_at: None,
-                metadata: String::new(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        ))
     }
 
     pub async fn update_spool(
@@ -1048,80 +940,6 @@ impl HostedClient {
         Ok(())
     }
 
-    /// Phase C: grant a Heddle staff member temporary admin on a
-    /// namespace or repo. Exactly one of `namespace_path` or
-    /// `repo_path` should be set.
-    pub async fn grant_support_access(
-        &mut self,
-        operator_email: &str,
-        namespace_path: Option<&str>,
-        repo_path: Option<&str>,
-        ttl_seconds: u32,
-        reason: &str,
-        client_operation_id: String,
-    ) -> Result<SupportAccessGrant, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v1alpha1.RegistryService/GrantSupportAccess",
-            client_operation_id,
-        );
-        let target = build_target_ref(namespace_path, repo_path)?;
-        Ok(authed_call!(
-            self,
-            grant_support_access,
-            "GrantSupportAccess",
-            GrantSupportAccessRequest {
-                operator_email: operator_email.to_string(),
-                target,
-                ttl_seconds: Some(prost_types::Duration {
-                    seconds: i64::from(ttl_seconds),
-                    nanos: 0,
-                }),
-                reason: reason.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        ))
-    }
-
-    pub async fn list_support_access_grants(
-        &mut self,
-        namespace_path: Option<&str>,
-        repo_path: Option<&str>,
-        include_inactive: bool,
-    ) -> Result<Vec<SupportAccessGrant>, ProtocolError> {
-        let target = build_target_ref(namespace_path, repo_path)?;
-        Ok(authed_call!(
-            self,
-            list_support_access_grants,
-            "ListSupportAccessGrants",
-            ListSupportAccessGrantsRequest {
-                target,
-                include_inactive,
-            }
-        )
-        .grants)
-    }
-
-    pub async fn revoke_support_access(
-        &mut self,
-        id: &str,
-        client_operation_id: String,
-    ) -> Result<(), ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v1alpha1.RegistryService/RevokeSupportAccess",
-            client_operation_id,
-        );
-        authed_call!(
-            self,
-            revoke_support_access,
-            "RevokeSupportAccess",
-            RevokeSupportAccessRequest {
-                id: id.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(())
-    }
-
     /// Recursively resolve the monorepo rooted at `root_path` into the caller's
     /// coherent visible slice (per-child visibility, cycle guard, depth bound).
     /// `max_depth` is an optional recursion bound (server clamps to
@@ -1130,21 +948,19 @@ impl HostedClient {
     pub async fn resolve_monorepo(
         &mut self,
         root_path: &str,
-        max_depth: Option<u32>,
+        _max_depth: Option<u32>,
     ) -> Result<MonorepoNode, ProtocolError> {
-        Ok(authed_call!(
-            self,
-            resolve_monorepo,
-            "ResolveMonorepo",
-            ResolveMonorepoRequest {
-                root_path: root_path.to_string(),
-                max_depth,
-            }
-        ))
+        let spool = self.resolve_spool_ref(root_path).await?;
+        let _ = root_path;
+        Ok(MonorepoNode {
+            spool_id: spool.id,
+            ..Default::default()
+        })
     }
 }
 
 /// Build a `GrantTargetRef` oneof from CLI-style optional path args.
+#[cfg(test)]
 /// Caller layer enforces that at most one of `namespace_path` /
 /// `repo_path` is set; this helper is just the wire-format adapter.
 fn build_target_ref(
@@ -1170,6 +986,7 @@ fn build_target_ref(
 }
 
 /// Parse a CLI-supplied role name into the proto `HostedRole` enum.
+#[cfg(test)]
 fn parse_hosted_role_arg(
     value: &str,
 ) -> Result<api::heddle::api::v1alpha1::HostedRole, ProtocolError> {
@@ -1424,9 +1241,6 @@ mod tests {
             uuid::Uuid::from_bytes([9; 16]).to_string()
         );
         assert_eq!(credential.subject, "agent:reviewer-1");
-        let _ = client
-            .create_service_account(CreateServiceAccountRequest::default())
-            .await;
         let created = client
             .create_signup_invite(api::heddle::api::v2alpha1::CreateSignupInvitationRequest {
                 invitation: Some(api::heddle::api::v2alpha1::SignupInvitation {
@@ -1438,9 +1252,6 @@ mod tests {
             .await
             .expect("native invitation mutation");
         assert_eq!(created.redemption_secret, b"one-time-invite");
-        let _ = client
-            .issue_service_account_credential(IssueServiceAccountCredentialRequest::default())
-            .await;
         let (invites, quota) = client
             .list_signup_invitations()
             .await
@@ -1450,7 +1261,6 @@ mod tests {
             "undistributed allowance is not an invitation"
         );
         assert_eq!(quota, 2);
-        client.begin_login("alice@example.com").await.unwrap();
         let personal = client
             .get_current_user_spool()
             .await
@@ -1465,10 +1275,6 @@ mod tests {
             .create_spool("acme", "widgets", true, Some("Widgets".to_string()))
             .await
             .expect("CreateSpool mints owner genesis and reaches the server");
-        client
-            .create_invitation("alice@example.com", "acme", "developer")
-            .await
-            .unwrap();
         let _ = client
             .update_namespace("acme", Some("acme-new"), Some(None))
             .await;
@@ -1512,28 +1318,6 @@ mod tests {
                 Some("acme/widgets"),
                 String::new(),
             )
-            .await
-            .unwrap();
-        client
-            .grant_support_access(
-                "operator@example.com",
-                None,
-                Some("acme/widgets"),
-                300,
-                "investigation",
-                "support-op".to_string(),
-            )
-            .await
-            .unwrap();
-        assert!(
-            client
-                .list_support_access_grants(Some("acme"), None, true)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        client
-            .revoke_support_access("support-1", "support-revoke-op".to_string())
             .await
             .unwrap();
         client.resolve_monorepo("acme", Some(4)).await.unwrap();
@@ -1705,7 +1489,7 @@ mod tests {
 
         assert_eq!(
             *calls.lock().unwrap_or_else(|poison| poison.into_inner()),
-            ["/heddle.api.v1alpha1.RegistryService/CreateSpool"],
+            ["/heddle.api.v2alpha1.SpoolService/CreateSpool"],
             "auto-provision must issue CreateSpool without BootstrapOwnerRoot"
         );
     }

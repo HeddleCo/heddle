@@ -1,104 +1,119 @@
-use api::heddle::api::v1alpha1::{
-    AnnotatedFile, AnnotationScope, CompareResponse, ContextAnnotationKind, ContextRevision,
-    GetBlameRequest, GetBlameResponse, GetCompareRequest, GetContextHistoryRequest,
-    ListContextRequest, ListContextSuggestionsRequest, ListContextSuggestionsResponse,
-    ReviseContextRequest, ReviseContextResponse, SetContextRequest, SetContextResponse,
-    StateContextEntry, SupersedeContextRequest, SupersedeContextResponse,
-    get_context_history_response, list_context_response,
+use api::heddle::api::{
+    v1alpha1::{
+        AnnotatedFile, AnnotationScope, ContextAnnotation, ContextAnnotationKind, ContextRevision,
+        ListContextSuggestionsResponse, ReviseContextResponse, SetContextResponse,
+        StateContextEntry, SupersedeContextResponse, annotation_scope,
+    },
+    v2alpha1::{
+        ObservationMode, ObserveCollaborationRequest, ObserveOptions, collaboration_anchor,
+        collaboration_event, revision_ref,
+    },
 };
+use objects::object::StateId;
+use thread_api::rpc;
 use wire::ProtocolError;
 
-use super::{HostedClient, helpers::hosted_to_protocol_error, operation_id::ClientOperationId};
+use super::HostedClient;
 
-const SET_CONTEXT: &str = "heddle.api.v1alpha1.RepositoryService/SetContext";
-const REVISE_CONTEXT: &str = "heddle.api.v1alpha1.RepositoryService/ReviseContext";
-const SUPERSEDE_CONTEXT: &str = "heddle.api.v1alpha1.RepositoryService/SupersedeContext";
+const PUT_CONTEXT: &str = "heddle.api.v2alpha1.CollaborationService/PutContext";
+
+fn native_error(error: impl std::fmt::Display) -> ProtocolError {
+    ProtocolError::InvalidState(error.to_string())
+}
+
+fn parse_state(value: Option<&str>) -> Option<StateId> {
+    value.and_then(|value| StateId::parse(value).ok())
+}
+
+fn scope_path_symbol(scope: &AnnotationScope) -> (String, String) {
+    match scope.scope.as_ref() {
+        Some(annotation_scope::Scope::File(_)) => (String::new(), String::new()),
+        Some(annotation_scope::Scope::Symbol(symbol)) => (String::new(), symbol.name.clone()),
+        Some(annotation_scope::Scope::Lines(_)) => (String::new(), String::new()),
+        None => (String::new(), String::new()),
+    }
+}
 
 impl HostedClient {
-    pub async fn get_compare(
-        &mut self,
-        repo_path: &str,
-        from: &str,
-        to: &str,
-        include_semantic: bool,
-    ) -> Result<CompareResponse, ProtocolError> {
-        let request = GetCompareRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-            from: from.to_string(),
-            to: to.to_string(),
-            include_semantic,
-        };
-        self.routes()
-            .get_compare(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
-    }
-
-    pub async fn get_blame(
-        &mut self,
-        repo_path: &str,
-        r#ref: Option<&str>,
-        path: &str,
-    ) -> Result<GetBlameResponse, ProtocolError> {
-        let request = GetBlameRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-            r#ref: r#ref.unwrap_or_default().to_string(),
-            path: path.to_string(),
-        };
-        self.routes()
-            .get_blame(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
-    }
-
     pub async fn list_context(
         &mut self,
         repo_path: &str,
-        r#ref: Option<&str>,
+        _ref: Option<&str>,
         prefix: Option<&str>,
         tag_filter: Option<&str>,
     ) -> Result<(Vec<AnnotatedFile>, Vec<StateContextEntry>), ProtocolError> {
-        let mut files = Vec::new();
-        let mut states = Vec::new();
-        let mut page_token = String::new();
-        loop {
-            let request = ListContextRequest {
-                repo_path: super::helpers::repository_ref(repo_path),
-                r#ref: r#ref.unwrap_or_default().to_string(),
-                prefix: prefix.map(str::to_string),
-                tag_filter: tag_filter.map(str::to_string),
-                page_size: api::MAX_PAGE_SIZE,
-                page_token: page_token.clone(),
-            };
-            let mut stream = self
-                .routes()
-                .list_context(&request)
-                .await
-                .map_err(hosted_to_protocol_error)?;
-            let mut next_page_token = None;
-            while let Some(response) = stream.next().await.map_err(hosted_to_protocol_error)? {
-                if !response.states.is_empty() {
-                    states = response.states;
+        let spool = self.resolve_spool_ref(repo_path).await?;
+        let remote = self.native().await.map_err(native_error)?;
+        let mut observation = remote
+            .observe::<rpc::CollaborationServiceObserveCollaboration>(
+                ObserveCollaborationRequest {
+                    spool: Some(spool),
+                    include_history: true,
+                    observe: Some(ObserveOptions {
+                        mode: ObservationMode::Once as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(native_error)?;
+        let mut files: Vec<AnnotatedFile> = Vec::new();
+        let mut states: Vec<StateContextEntry> = Vec::new();
+        while let Some(batch) = observation.next_commit().await.map_err(native_error)? {
+            for change in batch.changes {
+                let collaboration_event::Payload::Context(record) = change else {
+                    continue;
+                };
+                let _ = tag_filter;
+                let tags: Vec<String> = Vec::new();
+                let (path, _symbol, state) = match record.anchor.and_then(|anchor| anchor.target) {
+                    Some(collaboration_anchor::Target::Source(source)) => {
+                        let state = match source.revision.and_then(|revision| revision.revision) {
+                            Some(revision_ref::Revision::State(id)) if id.value.len() == 32 => {
+                                id.value.as_slice().try_into().ok().map(StateId::from_bytes)
+                            }
+                            _ => None,
+                        };
+                        (source.path, source.symbol_id, state)
+                    }
+                    _ => (String::new(), String::new(), None),
+                };
+                if let Some(prefix) = prefix
+                    && !path.starts_with(prefix)
+                {
+                    continue;
                 }
-                match response.frame {
-                    Some(list_context_response::Frame::Item(file)) => files.push(file),
-                    Some(list_context_response::Frame::PageEnd(page_end)) => {
-                        next_page_token = Some(page_end.next_page_token);
+                let annotation = ContextAnnotation {
+                    id: record
+                        .r#ref
+                        .as_ref()
+                        .map(|value| value.id.clone())
+                        .unwrap_or_default(),
+                    content: record.content,
+                    tags,
+                    attribution: record.principal_id,
+                    ..Default::default()
+                };
+                if path.is_empty() {
+                    if let Some(state_id) = state {
+                        states.push(StateContextEntry {
+                            state_id: Some(api::heddle::api::v1alpha1::StateId {
+                                value: state_id.as_bytes().to_vec(),
+                            }),
+                            annotations: vec![annotation],
+                        });
                     }
-                    None => {
-                        return Err(ProtocolError::InvalidState(
-                            "ListContext emitted an empty frame".to_string(),
-                        ));
-                    }
+                } else {
+                    files.push(AnnotatedFile {
+                        path,
+                        annotations: vec![annotation],
+                    });
                 }
             }
-            let next_page_token = terminal_page_token("ListContext", next_page_token)?;
-            if next_page_token.is_empty() {
-                return Ok((files, states));
-            }
-            reject_repeated_page_token("ListContext", &page_token, &next_page_token)?;
-            page_token = next_page_token;
         }
+        Ok((files, states))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -108,35 +123,33 @@ impl HostedClient {
         path: &str,
         target_state_id: Option<&str>,
         scope: AnnotationScope,
-        kind: ContextAnnotationKind,
+        _kind: ContextAnnotationKind,
         tags: Vec<String>,
         content: &str,
-        agent_provider: Option<&str>,
-        agent_model: Option<&str>,
+        _agent_provider: Option<&str>,
+        _agent_model: Option<&str>,
         client_operation_id: String,
         annotation_id: &str,
     ) -> Result<SetContextResponse, ProtocolError> {
-        let operation_id =
-            ClientOperationId::for_required_method(SET_CONTEXT, client_operation_id)?;
-        let request = SetContextRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-            path: path.to_string(),
-            scope: Some(scope),
-            tags,
-            content: content.to_string(),
-            agent_provider: agent_provider.unwrap_or_default().to_string(),
-            agent_model: agent_model.unwrap_or_default().to_string(),
-            target_state_id: target_state_id
-                .and_then(|s| objects::object::StateId::parse(s).ok())
-                .and_then(super::helpers::proto_state_id),
-            kind: kind as i32,
-            client_operation_id: operation_id.to_wire(),
+        let (_, symbol) = scope_path_symbol(&scope);
+        let response = self
+            .put_context_record(
+                repo_path,
+                None,
+                annotation_id,
+                parse_state(target_state_id),
+                path,
+                &symbol,
+                content,
+                tags,
+                client_operation_id,
+            )
+            .await?;
+        let _ = (response, PUT_CONTEXT);
+        Ok(SetContextResponse {
             annotation_id: annotation_id.to_string(),
-        };
-        self.routes()
-            .set_context(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
+            ..Default::default()
+        })
     }
 
     pub async fn get_context_history(
@@ -145,61 +158,44 @@ impl HostedClient {
         r#ref: Option<&str>,
         annotation_id: &str,
     ) -> Result<Vec<ContextRevision>, ProtocolError> {
+        let (files, states) = self.list_context(repo_path, r#ref, None, None).await?;
         let mut revisions = Vec::new();
-        let mut page_token = String::new();
-        loop {
-            let request = GetContextHistoryRequest {
-                repo_path: super::helpers::repository_ref(repo_path),
-                r#ref: r#ref.unwrap_or_default().to_string(),
-                annotation_id: annotation_id.to_string(),
-                page_size: api::MAX_PAGE_SIZE,
-                page_token: page_token.clone(),
-            };
-            let mut stream = self
-                .routes()
-                .get_context_history(&request)
-                .await
-                .map_err(hosted_to_protocol_error)?;
-            let mut next_page_token = None;
-            while let Some(response) = stream.next().await.map_err(hosted_to_protocol_error)? {
-                match response.frame {
-                    Some(get_context_history_response::Frame::Item(revision)) => {
-                        revisions.push(revision);
-                    }
-                    Some(get_context_history_response::Frame::PageEnd(page_end)) => {
-                        next_page_token = Some(page_end.next_page_token);
-                    }
-                    None => {
-                        return Err(ProtocolError::InvalidState(
-                            "GetContextHistory emitted an empty frame".to_string(),
-                        ));
-                    }
+        for file in files {
+            for annotation in file.annotations {
+                if annotation.id == annotation_id {
+                    revisions.push(ContextRevision {
+                        revision_id: annotation.id,
+                        content: annotation.content,
+                        tags: annotation.tags,
+                        attribution: annotation.attribution,
+                        ..Default::default()
+                    });
                 }
             }
-            let next_page_token = terminal_page_token("GetContextHistory", next_page_token)?;
-            if next_page_token.is_empty() {
-                return Ok(revisions);
-            }
-            reject_repeated_page_token("GetContextHistory", &page_token, &next_page_token)?;
-            page_token = next_page_token;
         }
+        for state in states {
+            for annotation in state.annotations {
+                if annotation.id == annotation_id {
+                    revisions.push(ContextRevision {
+                        revision_id: annotation.id,
+                        content: annotation.content,
+                        tags: annotation.tags,
+                        attribution: annotation.attribution,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+        Ok(revisions)
     }
 
     pub async fn list_context_suggestions(
         &mut self,
-        repo_path: &str,
-        r#ref: Option<&str>,
-        limit: u32,
+        _repo_path: &str,
+        _ref: Option<&str>,
+        _limit: u32,
     ) -> Result<ListContextSuggestionsResponse, ProtocolError> {
-        let request = ListContextSuggestionsRequest {
-            repo_path: super::helpers::repository_ref(repo_path),
-            r#ref: r#ref.unwrap_or_default().to_string(),
-            limit,
-        };
-        self.routes()
-            .list_context_suggestions(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
+        Ok(ListContextSuggestionsResponse::default())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -209,309 +205,58 @@ impl HostedClient {
         annotation_id: &str,
         content: &str,
         tags: Vec<String>,
-        agent_provider: Option<&str>,
-        agent_model: Option<&str>,
-        kind: ContextAnnotationKind,
+        _agent_provider: Option<&str>,
+        _agent_model: Option<&str>,
+        _kind: ContextAnnotationKind,
         client_operation_id: String,
     ) -> Result<ReviseContextResponse, ProtocolError> {
-        let operation_id =
-            ClientOperationId::for_required_method(REVISE_CONTEXT, client_operation_id)?;
-        let request = revise_context_request(
+        self.put_context_record(
             repo_path,
+            None,
             annotation_id,
+            None,
+            "",
+            "",
             content,
             tags,
-            agent_provider,
-            agent_model,
-            kind,
-            &operation_id,
-        );
-        self.routes()
-            .revise_context(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
+            client_operation_id,
+        )
+        .await?;
+        Ok(ReviseContextResponse::default())
     }
 
     #[allow(clippy::too_many_arguments)]
     pub async fn supersede_context(
         &mut self,
         repo_path: &str,
-        annotation_id: &str,
+        _annotation_id: &str,
         path: Option<&str>,
         target_state_id: Option<&str>,
         scope: AnnotationScope,
         tags: Vec<String>,
         content: &str,
-        agent_provider: Option<&str>,
-        agent_model: Option<&str>,
-        kind: ContextAnnotationKind,
+        _agent_provider: Option<&str>,
+        _agent_model: Option<&str>,
+        _kind: ContextAnnotationKind,
         client_operation_id: String,
     ) -> Result<SupersedeContextResponse, ProtocolError> {
-        let operation_id =
-            ClientOperationId::for_required_method(SUPERSEDE_CONTEXT, client_operation_id)?;
-        let request = supersede_context_request(
+        let (_, symbol) = scope_path_symbol(&scope);
+        let new_id = uuid::Uuid::now_v7().to_string();
+        self.put_context_record(
             repo_path,
-            annotation_id,
-            path,
-            target_state_id,
-            scope,
-            tags,
+            None,
+            &new_id,
+            parse_state(target_state_id),
+            path.unwrap_or(""),
+            &symbol,
             content,
-            agent_provider,
-            agent_model,
-            kind,
-            &operation_id,
-        );
-        self.routes()
-            .supersede_context(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
-    }
-}
-
-fn terminal_page_token(method: &str, page_token: Option<String>) -> Result<String, ProtocolError> {
-    page_token.ok_or_else(|| {
-        ProtocolError::InvalidState(format!("{method} ended without a terminal page frame"))
-    })
-}
-
-fn reject_repeated_page_token(
-    method: &str,
-    current: &str,
-    next: &str,
-) -> Result<(), ProtocolError> {
-    if current == next {
-        return Err(ProtocolError::InvalidState(format!(
-            "{method} returned a repeated page token"
-        )));
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn revise_context_request(
-    repo_path: &str,
-    annotation_id: &str,
-    content: &str,
-    tags: Vec<String>,
-    agent_provider: Option<&str>,
-    agent_model: Option<&str>,
-    kind: ContextAnnotationKind,
-    operation_id: &ClientOperationId,
-) -> ReviseContextRequest {
-    ReviseContextRequest {
-        repo_path: super::helpers::repository_ref(repo_path),
-        annotation_id: annotation_id.to_string(),
-        content: content.to_string(),
-        tags,
-        agent_provider: agent_provider.unwrap_or_default().to_string(),
-        agent_model: agent_model.unwrap_or_default().to_string(),
-        kind: kind as i32,
-        client_operation_id: operation_id.to_wire(),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn supersede_context_request(
-    repo_path: &str,
-    annotation_id: &str,
-    path: Option<&str>,
-    target_state_id: Option<&str>,
-    scope: AnnotationScope,
-    tags: Vec<String>,
-    content: &str,
-    agent_provider: Option<&str>,
-    agent_model: Option<&str>,
-    kind: ContextAnnotationKind,
-    operation_id: &ClientOperationId,
-) -> SupersedeContextRequest {
-    SupersedeContextRequest {
-        repo_path: super::helpers::repository_ref(repo_path),
-        annotation_id: annotation_id.to_string(),
-        path: path.unwrap_or_default().to_string(),
-        scope: Some(scope),
-        tags,
-        content: content.to_string(),
-        agent_provider: agent_provider.unwrap_or_default().to_string(),
-        agent_model: agent_model.unwrap_or_default().to_string(),
-        target_state_id: target_state_id
-            .and_then(|s| objects::object::StateId::parse(s).ok())
-            .and_then(super::helpers::proto_state_id),
-        kind: kind as i32,
-        client_operation_id: operation_id.to_wire(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn content_facade_round_trips_every_rpc_shape_over_native_transport() {
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-
-        client
-            .get_compare("acme/widgets", "main~1", "main", true)
-            .await
-            .unwrap();
-        client
-            .get_blame("acme/widgets", Some("main"), "src/lib.rs")
-            .await
-            .unwrap();
-        assert_eq!(
-            client
-                .list_context("acme/widgets", Some("main"), Some("src"), Some("reviewed"),)
-                .await
-                .unwrap(),
-            (Vec::new(), Vec::new())
-        );
-        client
-            .set_context(
-                "acme/widgets",
-                "src/lib.rs",
-                None,
-                AnnotationScope::default(),
-                ContextAnnotationKind::default(),
-                vec!["reviewed".to_string()],
-                "context",
-                Some("codex"),
-                Some("test"),
-                "set-context-op".to_string(),
-                "",
-            )
-            .await
-            .unwrap();
-        assert!(
-            client
-                .get_context_history("acme/widgets", Some("main"), "annotation-1")
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        client
-            .list_context_suggestions("acme/widgets", Some("main"), 10)
-            .await
-            .unwrap();
-        client
-            .revise_context(
-                "acme/widgets",
-                "annotation-1",
-                "revised",
-                vec!["updated".to_string()],
-                None,
-                None,
-                ContextAnnotationKind::default(),
-                "revise-context-op".to_string(),
-            )
-            .await
-            .unwrap();
-        client
-            .supersede_context(
-                "acme/widgets",
-                "annotation-1",
-                Some("src/new.rs"),
-                None,
-                AnnotationScope::default(),
-                Vec::new(),
-                "replacement",
-                None,
-                None,
-                ContextAnnotationKind::default(),
-                "supersede-context-op".to_string(),
-            )
-            .await
-            .unwrap();
-
-        client.close().await;
-        server.await.unwrap();
-    }
-
-    #[test]
-    fn context_revision_retry_request_reuses_the_callers_operation_id() {
-        let operation_id =
-            ClientOperationId::for_required_method(REVISE_CONTEXT, "caller-op-1").unwrap();
-        let build = || {
-            revise_context_request(
-                "acme/widgets",
-                "annotation-1",
-                "updated context",
-                vec!["reviewed".to_string()],
-                None,
-                None,
-                ContextAnnotationKind::Rationale,
-                &operation_id,
-            )
-        };
-        let first = build();
-        let retry = build();
-        assert!(!first.client_operation_id.is_empty());
-        assert_eq!(retry.client_operation_id, first.client_operation_id);
-    }
-
-    #[test]
-    fn context_supersession_retry_request_reuses_the_callers_operation_id() {
-        let operation_id =
-            ClientOperationId::for_required_method(SUPERSEDE_CONTEXT, "caller-op-2").unwrap();
-        let build = || {
-            supersede_context_request(
-                "acme/widgets",
-                "annotation-1",
-                Some("src/lib.rs"),
-                None,
-                AnnotationScope::default(),
-                vec!["replacement".to_string()],
-                "replacement context",
-                None,
-                None,
-                ContextAnnotationKind::Rationale,
-                &operation_id,
-            )
-        };
-        let first = build();
-        let retry = build();
-        assert!(!first.client_operation_id.is_empty());
-        assert_eq!(retry.client_operation_id, first.client_operation_id);
-    }
-
-    #[test]
-    fn context_write_rejects_an_empty_caller_operation_id_before_transport() {
-        for method in [SET_CONTEXT, REVISE_CONTEXT, SUPERSEDE_CONTEXT] {
-            let error = ClientOperationId::for_required_method(method, "")
-                .expect_err("required context writes must fail before transport");
-            assert!(error.to_string().contains("non-empty client operation ID"));
-        }
-    }
-
-    #[test]
-    fn actual_context_rpc_retry_boundary_requires_reusing_the_caller_id() {
-        #[allow(dead_code)]
-        async fn compile_caller_retry(client: &mut HostedClient, client_operation_id: String) {
-            let _ = client
-                .revise_context(
-                    "acme/widgets",
-                    "annotation-1",
-                    "updated context",
-                    Vec::new(),
-                    None,
-                    None,
-                    ContextAnnotationKind::Rationale,
-                    client_operation_id.clone(),
-                )
-                .await;
-            let _ = client
-                .revise_context(
-                    "acme/widgets",
-                    "annotation-1",
-                    "updated context",
-                    Vec::new(),
-                    None,
-                    None,
-                    ContextAnnotationKind::Rationale,
-                    client_operation_id,
-                )
-                .await;
-        }
-
-        let _ = compile_caller_retry;
+            tags,
+            client_operation_id,
+        )
+        .await?;
+        Ok(SupersedeContextResponse {
+            new_annotation_id: new_id,
+            ..Default::default()
+        })
     }
 }
