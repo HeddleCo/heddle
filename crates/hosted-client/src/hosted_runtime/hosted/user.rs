@@ -281,21 +281,15 @@ impl HostedClient {
         } else {
             principal.handle
         };
-        let overview = self
-            .list_spools()
+        let listed = self
+            .list_spools(false)
             .await?
             .into_iter()
-            .find(|spool| {
-                spool.slug == handle
-                    || spool
-                        .path_segments
-                        .last()
-                        .is_some_and(|segment| segment == &handle)
-            })
+            .find(|spool| spool_matches_handle(spool, &handle))
             .ok_or_else(|| {
                 ProtocolError::ObjectNotFound("personal Spool has not been created".into())
             })?;
-        native_spool_info(overview)
+        listed_spool_info(listed)
     }
 
     pub async fn get_spool(
@@ -356,86 +350,46 @@ impl HostedClient {
         native_spool_info(promoted)
     }
 
+    /// Grant-reachable Spools for the bound credential. `repos_only` keeps
+    /// content-bearing rows. ObserveWorkspace remains the live composed view.
     pub async fn list_spools(
         &mut self,
-    ) -> Result<Vec<api::heddle::api::v2alpha1::SpoolOverview>, ProtocolError> {
+        repos_only: bool,
+    ) -> Result<Vec<api::heddle::api::v2alpha1::ListedSpool>, ProtocolError> {
         use api::heddle::api::v2alpha1 as contract;
         let remote = self.native().await.map_err(native_protocol_error)?;
-        let mut rows = Vec::new();
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServiceListSpools>(&contract::ListSpoolsRequest {
+                repos_only,
+            })
+            .await
+            .map_err(super::helpers::native_client_error)?;
         let mut seen = std::collections::BTreeSet::new();
-        let mut after_page = Vec::new();
-        loop {
-            let mut observation = remote
-                .observe::<thread_api::rpc::WorkspaceServiceObserveWorkspace>(
-                    contract::ObserveWorkspaceRequest {
-                        pages: Some(contract::WorkspacePages {
-                            spools: Some(contract::PageRequest {
-                                after_page: after_page.clone(),
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        }),
-                        observe: Some(contract::ObserveOptions {
-                            mode: contract::ObservationMode::Once as i32,
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    },
-                    None,
-                )
-                .await
-                .map_err(native_protocol_error)?;
-            let batch = observation
-                .next_commit()
-                .await
-                .map_err(native_protocol_error)?
-                .ok_or_else(|| {
-                    ProtocolError::InvalidState(
-                        "workspace Spool list ended without checkpoint".into(),
-                    )
-                })?;
-            let mut spool_page = None;
-            for change in batch.changes {
-                match change {
-                    contract::workspace_event::Payload::Spool(spool) => {
-                        let reference = spool.r#ref.as_ref().ok_or_else(|| {
-                            ProtocolError::InvalidState("Spool list row has no identity".into())
-                        })?;
-                        uuid::Uuid::parse_str(&reference.id).map_err(native_protocol_error)?;
-                        if !seen.insert(reference.id.clone()) || rows.len() >= 4096 {
-                            return Err(ProtocolError::InvalidState(
-                                "Spool list contains duplicates or exceeds local bound".into(),
-                            ));
-                        }
-                        rows.push(spool);
-                    }
-                    contract::workspace_event::Payload::Status(status)
-                        if status.section == "spools" =>
-                    {
-                        if status.coverage != contract::Coverage::Complete as i32
-                            || spool_page.replace(status.page).is_some()
-                        {
-                            return Err(ProtocolError::InvalidState(
-                                "Spool list coverage is incomplete or duplicated".into(),
-                            ));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let page = spool_page.flatten().ok_or_else(|| {
-                ProtocolError::InvalidState("Spool list page status absent".into())
+        let mut rows = Vec::with_capacity(response.spools.len());
+        for spool in response.spools {
+            let reference = spool.r#ref.as_ref().ok_or_else(|| {
+                ProtocolError::InvalidState("Spool list row has no identity".into())
             })?;
-            if page.exhausted {
-                return Ok(rows);
-            }
-            if page.next_page.is_empty() || page.next_page == after_page {
+            uuid::Uuid::parse_str(&reference.id).map_err(native_protocol_error)?;
+            if spool.path_segments.is_empty()
+                || spool
+                    .path_segments
+                    .iter()
+                    .any(|segment| segment.is_empty() || segment.contains('/'))
+            {
                 return Err(ProtocolError::InvalidState(
-                    "Spool list cursor did not advance".into(),
+                    "Spool list row has no canonical address".into(),
                 ));
             }
-            after_page = page.next_page;
+            if !seen.insert(reference.id.clone()) || rows.len() >= 4096 {
+                return Err(ProtocolError::InvalidState(
+                    "Spool list contains duplicates or exceeds local bound".into(),
+                ));
+            }
+            rows.push(spool);
         }
+        Ok(rows)
     }
 
     pub async fn create_spool(
@@ -951,6 +905,40 @@ impl HostedClient {
     }
 }
 
+fn listed_spool_info(
+    spool: api::heddle::api::v2alpha1::ListedSpool,
+) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+    let reference = spool.r#ref.ok_or_else(|| {
+        ProtocolError::InvalidState("Spool list row has no stable identity".into())
+    })?;
+    uuid::Uuid::parse_str(&reference.id).map_err(native_protocol_error)?;
+    if spool.path_segments.is_empty()
+        || spool
+            .path_segments
+            .iter()
+            .any(|segment| segment.is_empty() || segment.contains('/'))
+    {
+        return Err(ProtocolError::InvalidState(
+            "Spool list row has no canonical address".into(),
+        ));
+    }
+    Ok(wire::HostedSpoolInfo {
+        spool_id: reference.id,
+        full_path: spool.path_segments.join("/"),
+        kind: "spool".into(),
+        is_repo: spool.is_repo,
+        display_name: spool.path_segments.last().cloned(),
+    })
+}
+
+fn spool_matches_handle(spool: &api::heddle::api::v2alpha1::ListedSpool, handle: &str) -> bool {
+    match spool.path_segments.as_slice() {
+        [name] => name == handle,
+        [kind, name] if kind == "spool" => name == handle,
+        _ => false,
+    }
+}
+
 fn native_spool_info(
     spool: api::heddle::api::v2alpha1::SpoolOverview,
 ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
@@ -1081,14 +1069,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spool_list_comes_from_native_workspace_observation() {
+    async fn spool_list_comes_from_native_list_spools_unary() {
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-        assert!(
-            client
-                .list_spools()
-                .await
-                .expect("v2 Spool list")
-                .is_empty()
+        let all = client.list_spools(false).await.expect("v2 Spool list");
+        let paths: Vec<_> = all
+            .iter()
+            .map(|spool| spool.path_segments.join("/"))
+            .collect();
+        assert_eq!(
+            paths,
+            ["spool/acme", "spool/acme/notes"],
+            "grant-reachable listing must surface spool/<handle>/<name>"
+        );
+        assert!(!all[0].is_repo);
+        assert!(all[1].is_repo);
+        let repos = client
+            .list_spools(true)
+            .await
+            .expect("repos_only Spool list");
+        assert_eq!(
+            repos
+                .iter()
+                .map(|spool| spool.path_segments.join("/"))
+                .collect::<Vec<_>>(),
+            ["spool/acme/notes"]
         );
         client.close().await;
         server.await.expect("server");
@@ -1214,7 +1218,14 @@ mod tests {
             personal.spool_id,
             uuid::Uuid::from_bytes([2; 16]).to_string()
         );
-        assert!(client.list_spools().await.unwrap().is_empty());
+        let listed = client.list_spools(false).await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|spool| spool.path_segments.join("/"))
+                .collect::<Vec<_>>(),
+            ["spool/acme", "spool/acme/notes"]
+        );
         client
             .create_spool("acme", "widgets", true, Some("Widgets".to_string()))
             .await

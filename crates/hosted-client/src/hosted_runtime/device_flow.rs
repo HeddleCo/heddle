@@ -26,6 +26,7 @@ const TEMPLATE_READ_OPERATIONS: &[&str] = &[
     "ObserveIdentity",
     "ObserveOwnership",
     "ObserveWorkspace",
+    "ListSpools",
     "ObserveSpool",
     "ObserveThreads",
     "ObserveThread",

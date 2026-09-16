@@ -77,6 +77,20 @@ pub(super) async fn roundtrip(
         .await
         .expect("sibling authenticated snapshot")
         .expect("snapshot");
+    let listed = remote
+        .api
+        .call::<thread_api::rpc::SpoolServiceListSpools>(&ListSpoolsRequest { repos_only: false })
+        .await
+        .expect("sibling ListSpools");
+    let expected_id = spool.to_string();
+    assert!(
+        listed.spools.iter().any(|row| {
+            row.r#ref
+                .as_ref()
+                .is_some_and(|reference| reference.id == expected_id)
+        }),
+        "grant-reachable ListSpools must include the owned local Spool: {listed:?}"
+    );
     let passkey = Ed25519Signer::from_seed(&[74; 32]).expect("passkey");
     let temporary = Ed25519Signer::from_seed(&[75; 32]).expect("temporary root");
     let verified = repo::verify_account_owner_observation(owner, now).expect("owner");

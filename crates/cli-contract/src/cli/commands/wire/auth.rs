@@ -224,6 +224,9 @@ pub struct WhoamiOutput {
     pub proof_key_available: bool,
     /// Server-authoritative identity, present only when `reachable`.
     pub identity: Option<WhoamiIdentity>,
+    /// Grant-reachable hosted paths as `spool/<handle>/<name>`.
+    /// Empty when unauthenticated, unreachable, or ListSpools was unavailable.
+    pub spools: Vec<String>,
     pub recommended_action: Option<String>,
 }
 

@@ -109,6 +109,7 @@ pub(crate) const METHODS: &[&str] = &[
     "/heddle.api.v2alpha1.WorkspaceService/ResolveResources",
     "/heddle.api.v2alpha1.WorkspaceService/SetBookmark",
     "/heddle.api.v2alpha1.SpoolService/ObserveSpool",
+    "/heddle.api.v2alpha1.SpoolService/ListSpools",
     "/heddle.api.v2alpha1.SpoolService/CreateSpool",
     "/heddle.api.v2alpha1.SpoolService/ReviseSpool",
     "/heddle.api.v2alpha1.SpoolService/DeleteSpool",

@@ -350,6 +350,7 @@ async fn serve_call(
                     implemented_methods: vec![
                         "/heddle.api.v2alpha1.WorkspaceService/ResolveResources".into(),
                         "/heddle.api.v2alpha1.SpoolService/ObserveSpool".into(),
+                        "/heddle.api.v2alpha1.SpoolService/ListSpools".into(),
                         "/heddle.api.v2alpha1.SpoolService/DeleteSpool".into(),
                         "/heddle.api.v2alpha1.SpoolService/ReviseSpool".into(),
                         "/heddle.api.v2alpha1.SpoolService/PromoteSpool".into(),
@@ -436,6 +437,8 @@ async fn serve_call(
                 ))
                 .await
                 .unwrap();
+            } else if method == "/heddle.api.v2alpha1.SpoolService/ListSpools" {
+                serve_native_list_spools(&mut send, &mut recv, &mut request).await;
             } else if method == "/heddle.api.v2alpha1.SpoolService/DeleteSpool" {
                 serve_native_delete_spool(
                     &mut send,
@@ -576,6 +579,47 @@ async fn serve_call(
         }
     }
     send.finish().unwrap();
+}
+
+async fn serve_native_list_spools(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ListSpoolsRequest::decode(frame.body).ok())
+        .expect("native ListSpools request");
+    let mut spools = vec![
+        v2::ListedSpool {
+            r#ref: Some(v2::SpoolRef {
+                id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+            }),
+            path_segments: vec!["spool".into(), "acme".into()],
+            is_repo: false,
+            ..Default::default()
+        },
+        v2::ListedSpool {
+            r#ref: Some(v2::SpoolRef {
+                id: uuid::Uuid::from_bytes([3; 16]).to_string(),
+            }),
+            path_segments: vec!["spool".into(), "acme".into(), "notes".into()],
+            is_repo: true,
+            ..Default::default()
+        },
+    ];
+    if body.repos_only {
+        spools.retain(|spool| spool.is_repo);
+    }
+    let response = v2::ListSpoolsResponse { spools };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
 }
 
 async fn serve_native_workspace_observation(

@@ -41,6 +41,9 @@ pub struct WhoamiReport {
     pub ttl_seconds_remaining: Option<i64>,
     pub proof_key_available: bool,
     pub identity: Option<WhoamiIdentity>,
+    /// Grant-reachable hosted paths as `spool/<handle>/<name>`.
+    /// Empty when unauthenticated, unreachable, or ListSpools was unavailable.
+    pub spools: Vec<String>,
     pub recommended_action: Option<String>,
 }
 
@@ -85,13 +88,21 @@ async fn resolve_whoami(start_path: &std::path::Path, server: &str) -> Result<Wh
         return Ok(output);
     }
 
-    // Server round trip for the authoritative identity. Failure (unreachable,
-    // rejected, or missing proof key) degrades to a local-only answer rather
-    // than erroring — `reachable` records which case this is.
-    output.identity = fetch_identity(server).await.ok();
-    output.reachable = output.identity.is_some();
-    if let Some(identity) = &output.identity {
-        output.token_kind = Some(identity.credential_kind.clone());
+    // Server round trip for the authoritative identity and grant-reachable
+    // Spool set. Failure (unreachable, rejected, or missing proof key)
+    // degrades to a local-only answer rather than erroring — `reachable`
+    // records which case this is. ListSpools is additive: an older server
+    // still yields identity without failing whoami.
+    match fetch_identity(server).await {
+        Ok((identity, spools)) => {
+            output.token_kind = Some(identity.credential_kind.clone());
+            output.identity = Some(identity);
+            output.spools = spools;
+            output.reachable = true;
+        }
+        Err(_) => {
+            output.reachable = false;
+        }
     }
     output.recommended_action = if !output.proof_key_available {
         Some(format!("heddle auth login --server {server}"))
@@ -143,6 +154,7 @@ fn resolve_local_whoami(
             ttl_seconds_remaining: None,
             proof_key_available: false,
             identity: None,
+            spools: Vec::new(),
             recommended_action: Some(format!("heddle auth login --server {server}")),
         });
     };
@@ -192,11 +204,12 @@ fn resolve_local_whoami(
         ttl_seconds_remaining,
         proof_key_available,
         identity: None,
+        spools: Vec::new(),
         recommended_action,
     })
 }
 
-async fn fetch_identity(server: &str) -> Result<WhoamiIdentity> {
+async fn fetch_identity(server: &str) -> Result<(WhoamiIdentity, Vec<String>)> {
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build(
         &user_config,
@@ -208,13 +221,45 @@ async fn fetch_identity(server: &str) -> Result<WhoamiIdentity> {
         .connect(server)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
-    let response = client
-        .observe_current_identity()
-        .await
-        .map_err(|error| anyhow::anyhow!(error));
+    let result = async {
+        let (principal, credential) = client
+            .observe_current_identity()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let identity = project_current_identity(principal, credential)?;
+        let spools = match client.list_spools(false).await {
+            Ok(rows) => {
+                let mut paths = rows
+                    .into_iter()
+                    .filter_map(|spool| listed_spool_path(&spool.path_segments))
+                    .collect::<Vec<_>>();
+                paths.sort();
+                paths.dedup();
+                paths
+            }
+            Err(_) => Vec::new(),
+        };
+        Ok((identity, spools))
+    }
+    .await;
     client.close().await;
-    let (principal, credential) = response?;
-    project_current_identity(principal, credential)
+    result
+}
+
+fn listed_spool_path(path_segments: &[String]) -> Option<String> {
+    if path_segments.is_empty()
+        || path_segments
+            .iter()
+            .any(|segment| segment.is_empty() || segment.contains('/'))
+    {
+        return None;
+    }
+    let path = path_segments.join("/");
+    Some(if path == "spool" || path.starts_with("spool/") {
+        path
+    } else {
+        format!("spool/{path}")
+    })
 }
 
 fn project_current_identity(
@@ -470,6 +515,21 @@ mod tests {
             biscuit_string_literals(r#"check if operation($op), $op == "repo.read""#),
             vec!["repo.read".to_string()]
         );
+    }
+
+    #[test]
+    fn listed_spool_path_is_spool_handle_name() {
+        assert_eq!(
+            listed_spool_path(&["spool".into(), "acme".into(), "notes".into()]),
+            Some("spool/acme/notes".into())
+        );
+        assert_eq!(
+            listed_spool_path(&["acme".into(), "notes".into()]),
+            Some("spool/acme/notes".into())
+        );
+        assert_eq!(listed_spool_path(&[]), None);
+        assert_eq!(listed_spool_path(&["spool".into(), String::new()]), None);
+        assert_eq!(listed_spool_path(&["spool/acme".into()]), None);
     }
 
     struct PrincipalEnvGuard {

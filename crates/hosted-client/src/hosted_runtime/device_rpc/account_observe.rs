@@ -519,6 +519,52 @@ impl DeviceRpc {
             },
         ))
     }
+    pub(super) fn list_local_spools(
+        &self,
+        session: &AccountSession,
+        request: &ListSpoolsRequest,
+    ) -> Result<ListSpoolsResponse> {
+        let Some(catalog) = repo::device_catalog::store::Catalog::read(&self.home)? else {
+            return Ok(ListSpoolsResponse { spools: Vec::new() });
+        };
+        let mut after = String::new();
+        let mut spools = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            let page = catalog.spools(
+                &after,
+                repo::device_catalog::store::MAX_SPOOLS,
+                repo::device_catalog::store::MAX_PAGE_BYTES,
+            )?;
+            let last = page
+                .records
+                .last()
+                .map(|record| record.registration.id.to_string());
+            for record in page.records {
+                if !session.permits(&record.registration.capability_path) {
+                    continue;
+                }
+                let listed = listed_local_spool(&record)?;
+                if request.repos_only && !listed.is_repo {
+                    continue;
+                }
+                let id = listed
+                    .r#ref
+                    .as_ref()
+                    .map(|reference| reference.id.clone())
+                    .context("local Spool list row has no identity")?;
+                if !seen.insert(id) || spools.len() >= repo::device_catalog::store::MAX_SPOOLS {
+                    bail!("local Spool list contains duplicates or exceeds bound");
+                }
+                spools.push(listed);
+            }
+            if !page.has_more {
+                break;
+            }
+            after = last.context("Spool page progress")?;
+        }
+        Ok(ListSpoolsResponse { spools })
+    }
     fn spool_actions(
         &self,
         session: &AccountSession,
@@ -588,6 +634,38 @@ impl DeviceRpc {
             .is_some_and(|r| session.permits(&r.registration.capability_path)))
     }
 }
+fn listed_local_spool(record: &repo::device_catalog::store::SpoolRecord) -> Result<ListedSpool> {
+    let mut path_segments = if record.overview.path_segments.is_empty() {
+        record
+            .registration
+            .capability_path
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        record.overview.path_segments.clone()
+    };
+    if path_segments.is_empty()
+        || path_segments
+            .iter()
+            .any(|segment| segment.is_empty() || segment.contains('/'))
+    {
+        bail!("local Spool has no canonical address");
+    }
+    if path_segments.first().map(String::as_str) != Some("spool") {
+        path_segments.insert(0, "spool".into());
+    }
+    Ok(ListedSpool {
+        r#ref: Some(SpoolRef {
+            id: record.registration.id.to_string(),
+        }),
+        path_segments,
+        is_repo: true,
+        ..Default::default()
+    })
+}
+
 fn workspace(payload: workspace_event::Payload) -> WorkspaceEvent {
     WorkspaceEvent {
         frame: None,

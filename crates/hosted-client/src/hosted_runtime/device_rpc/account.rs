@@ -19,6 +19,7 @@ pub(super) const METHODS: &[&str] = &[
     "/heddle.api.v2alpha1.WorkspaceService/ResolveResources",
     "/heddle.api.v2alpha1.WorkspaceService/SetBookmark",
     "/heddle.api.v2alpha1.SpoolService/ObserveSpool",
+    "/heddle.api.v2alpha1.SpoolService/ListSpools",
     "/heddle.api.v2alpha1.SpoolService/CreateSpool",
     "/heddle.api.v2alpha1.SpoolService/ReviseSpool",
     "/heddle.api.v2alpha1.SpoolService/DeleteSpool",
@@ -93,6 +94,9 @@ impl DeviceRpc {
             self.verify_local_evidence(&session, body)
         } else if method.ends_with("/ResolveResources") {
             self.resolve_local_resources(&session, &ResolveResourcesRequest::decode(body)?)
+                .map(|r| r.encode_to_vec())
+        } else if method.ends_with("/ListSpools") {
+            self.list_local_spools(&session, &ListSpoolsRequest::decode(body)?)
                 .map(|r| r.encode_to_vec())
         } else {
             self.account_command(&session, method, body)

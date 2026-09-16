@@ -561,6 +561,7 @@ fn whoami_output(report: WhoamiReport) -> WhoamiOutput {
         ttl_seconds_remaining: report.ttl_seconds_remaining,
         proof_key_available: report.proof_key_available,
         identity: report.identity.map(whoami_identity),
+        spools: report.spools,
         recommended_action: report.recommended_action,
     }
 }
@@ -646,6 +647,11 @@ fn write_whoami_human(
                 "Method hints:  {}",
                 identity.available_actions.join(", ")
             )?;
+        }
+        if output.spools.is_empty() {
+            writeln!(writer, "Spools:        none")?;
+        } else {
+            writeln!(writer, "Spools:        {}", output.spools.join(", "))?;
         }
     } else {
         writeln!(
@@ -1125,6 +1131,7 @@ mod tests {
             ttl_seconds_remaining: Some(60),
             proof_key_available: true,
             identity: Some(identity()),
+            spools: vec!["spool/acme".into(), "spool/acme/notes".into()],
             recommended_action: Some("heddle auth login".into()),
         }
     }
@@ -1150,6 +1157,7 @@ mod tests {
             "Session:       session-1",
             "Account root:  self-rooted",
             "Method hints:  /heddle.api.v2alpha1.ThreadService/RecordReview",
+            "Spools:        spool/acme, spool/acme/notes",
             "Scopes:        repo:heddle/heddle",
             "Op ceiling:    Pull, Push",
             "(in 60s)",
