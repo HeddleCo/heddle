@@ -8,14 +8,14 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    commands_args::{
-        AdoptArgs, CloneArgs, DiffArgs, DoctorArgs, InitArgs, LandArgs, LogArgs, PullArgs,
-        PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadStartArgs,
-        UndoArgs, WatchArgs, INIT_VERB,
-    },
     AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, EnvCommands, HookCommands,
     IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
     ShellCommands, ThreadCommands, VisibilityCommands,
+    commands_args::{
+        AdoptArgs, CloneArgs, DiffArgs, DoctorArgs, INIT_VERB, InitArgs, LandArgs, LogArgs,
+        PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs,
+        ThreadStartArgs, UndoArgs, WatchArgs,
+    },
 };
 #[cfg(feature = "client")]
 use super::{AuthCommands, ClaimArgs, GrantCommands, PromoteArgs};
@@ -234,6 +234,7 @@ Scope:
 Examples:
   heddle discuss open src/auth.rs verify 'Should this reject expired tokens?'  # anchor a discussion
   heddle discuss append <id> 'switched to argon2'          # add a turn
+  heddle discuss append src/auth.rs verify 'switched to argon2'  # same FILE SYMBOL as open
   heddle discuss resolve <id> --mode by-edit --state HEAD
 ")]
     Discuss {
@@ -471,6 +472,7 @@ Scope:
 Examples:
   heddle context set --path src/auth.rs --scope symbol:verify --kind invariant -m 'returns false on timing mismatch'
   heddle context get --path src/auth.rs --scope symbol:verify
+  heddle context history --path src/auth.rs      # same --path as set, or pass the id
   heddle context list --prefix src/auth          # everything attached under a path
   heddle context check --path src/auth.rs        # surface annotations for editor tooling
 ")]

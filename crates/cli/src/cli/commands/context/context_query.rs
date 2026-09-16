@@ -219,7 +219,9 @@ pub async fn cmd_context_list(
 
 pub async fn cmd_context_history(
     cli: &Cli,
-    annotation_id: String,
+    annotation_id: Option<String>,
+    path: Option<String>,
+    state: Option<String>,
     r#ref: Option<String>,
 ) -> Result<()> {
     let Some(repo) = open_for_read(cli, "context_history", false)? else {
@@ -228,6 +230,13 @@ pub async fn cmd_context_history(
     let state_obj = resolve_state(&repo, r#ref.as_deref())?;
     let context_root = context_root_for_state(&repo, &state_obj)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::context_empty()))?;
+    let annotation_id = super::resolve_annotation_locator(
+        &repo,
+        &context_root,
+        annotation_id.as_deref(),
+        path,
+        state,
+    )?;
 
     let (target, blob, index) = repo
         .find_annotation(&context_root, &annotation_id)?

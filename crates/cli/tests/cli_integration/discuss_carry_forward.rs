@@ -77,6 +77,39 @@ fn append_writes_a_new_collaboration_operation() {
 }
 
 #[test]
+fn append_and_show_accept_open_argv() {
+    let temp = setup();
+    open(&temp);
+    let appended = json(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "discuss",
+                "append",
+                "main.rs",
+                "main",
+                "from open argv",
+            ],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        appended["discussion"]["turns"][1]["body"].as_str(),
+        Some("from open argv")
+    );
+    let shown = json(
+        &heddle(
+            &["--output", "json", "discuss", "show", "main.rs", "main"],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    );
+    assert_eq!(shown["discussion"]["turns"].as_array().unwrap().len(), 2);
+}
+
+#[test]
 fn reopen_compensates_resolution_without_erasing_it() {
     let temp = setup();
     let opened = open(&temp);

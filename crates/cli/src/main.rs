@@ -733,12 +733,21 @@ async fn async_main() -> Result<()> {
                 .await
             }
             ContextCommands::History(args) => {
-                cmd_context_history(&cli, args.annotation_id.clone(), args.r#ref.clone()).await
+                cmd_context_history(
+                    &cli,
+                    args.annotation_id.clone(),
+                    args.target.path.clone(),
+                    args.target.state.clone(),
+                    args.r#ref.clone(),
+                )
+                .await
             }
             ContextCommands::Edit(args) => {
                 cmd_context_edit(
                     &cli,
                     args.annotation_id.clone(),
+                    args.target.path.clone(),
+                    args.target.state.clone(),
                     args.kind.clone(),
                     args.tag.clone(),
                     args.message.clone(),

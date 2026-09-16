@@ -7,7 +7,7 @@
 use api::heddle::api::v2alpha1::{
     self as contract, AppendDiscussionRequest, Audience, CollaborationAnchor, MutationResponse,
     ObservationMode, ObserveCollaborationRequest, ObserveOptions, OpenDiscussionRequest,
-    PutContextRequest, RecordRef, ResolveDiscussionRequest, collaboration_anchor,
+    PageRequest, PutContextRequest, RecordRef, ResolveDiscussionRequest, collaboration_anchor,
     collaboration_event, discussion_record, resolve_discussion_request, revision_ref,
 };
 use objects::object::{
@@ -78,10 +78,36 @@ fn native_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::InvalidState(error.to_string())
 }
 
+const COLLABORATION_PAGE_SIZE: u32 = 64;
+
 fn once_observe() -> ObserveOptions {
     ObserveOptions {
         mode: ObservationMode::Once as i32,
         ..Default::default()
+    }
+}
+
+fn collaboration_page(after_page: Vec<u8>) -> PageRequest {
+    PageRequest {
+        size: COLLABORATION_PAGE_SIZE,
+        after_page,
+    }
+}
+
+/// Once-mode ObserveCollaboration returns a single page, then Completes.
+/// Kind 0/1 (discussions/turns) sort before kind 2 (context), so a missing
+/// page size plus no pagination drops context revisions on a busy spool.
+fn ensure_observe_page(request: &mut ObserveCollaborationRequest) {
+    if request.observe.is_none() {
+        request.observe = Some(once_observe());
+    }
+    if request.page.as_ref().is_none_or(|page| page.size == 0) {
+        let after_page = request
+            .page
+            .as_ref()
+            .map(|page| page.after_page.clone())
+            .unwrap_or_default();
+        request.page = Some(collaboration_page(after_page));
     }
 }
 
@@ -115,6 +141,16 @@ fn parse_discussion_id(value: &str) -> Result<DiscussionRecordId, ProtocolError>
                 ProtocolError::InvalidState(format!("discussion id {value} is not a UUIDv7"))
             })
     })
+}
+
+fn discussion_ids_match(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    match (parse_discussion_id(left), parse_discussion_id(right)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 fn parse_context_id(value: &str) -> uuid::Uuid {
@@ -370,6 +406,45 @@ impl HostedClient {
         ))
     }
 
+    pub(crate) async fn observe_collaboration_events(
+        &self,
+        mut request: ObserveCollaborationRequest,
+    ) -> Result<Vec<collaboration_event::Payload>, ProtocolError> {
+        ensure_observe_page(&mut request);
+        let remote = self.native().await.map_err(native_error)?;
+        let mut payloads = Vec::new();
+        loop {
+            let mut observation = remote
+                .observe::<rpc::CollaborationServiceObserveCollaboration>(request.clone(), None)
+                .await
+                .map_err(native_error)?;
+            let mut exhausted = true;
+            let mut next_page = Vec::new();
+            while let Some(batch) = observation.next_commit().await.map_err(native_error)? {
+                if let Some(page) = &batch.page {
+                    exhausted = page.exhausted;
+                    next_page = page.next_page.clone();
+                }
+                payloads.extend(batch.changes);
+            }
+            if exhausted {
+                break;
+            }
+            if next_page.is_empty()
+                || request
+                    .page
+                    .as_ref()
+                    .is_some_and(|page| page.after_page == next_page)
+            {
+                return Err(ProtocolError::InvalidState(
+                    "collaboration page cursor did not advance".into(),
+                ));
+            }
+            request.page.get_or_insert_default().after_page = next_page;
+        }
+        Ok(payloads)
+    }
+
     async fn observe_discussion(
         &self,
         spool: contract::SpoolRef,
@@ -391,30 +466,23 @@ impl HostedClient {
         discussion: Option<RecordRef>,
         statuses: Vec<i32>,
     ) -> Result<Vec<HostedDiscussion>, ProtocolError> {
-        let remote = self.native().await.map_err(native_error)?;
-        let mut observation = remote
-            .observe::<rpc::CollaborationServiceObserveCollaboration>(
-                ObserveCollaborationRequest {
-                    spool: Some(spool),
-                    discussions: discussion.into_iter().collect(),
-                    statuses,
-                    include_history: true,
-                    observe: Some(once_observe()),
-                    ..Default::default()
-                },
-                None,
-            )
-            .await
-            .map_err(native_error)?;
+        let events = self
+            .observe_collaboration_events(ObserveCollaborationRequest {
+                spool: Some(spool),
+                discussions: discussion.into_iter().collect(),
+                statuses,
+                include_history: true,
+                observe: Some(once_observe()),
+                ..Default::default()
+            })
+            .await?;
         let mut records = Vec::new();
         let mut turns: Vec<contract::DiscussionTurn> = Vec::new();
-        while let Some(batch) = observation.next_commit().await.map_err(native_error)? {
-            for change in batch.changes {
-                match change {
-                    collaboration_event::Payload::Discussion(record) => records.push(record),
-                    collaboration_event::Payload::Turn(turn) => turns.push(turn),
-                    _ => {}
-                }
+        for change in events {
+            match change {
+                collaboration_event::Payload::Discussion(record) => records.push(record),
+                collaboration_event::Payload::Turn(turn) => turns.push(turn),
+                _ => {}
             }
         }
         Ok(records
@@ -424,9 +492,13 @@ impl HostedClient {
                 let mut matching: Vec<_> = turns
                     .iter()
                     .filter(|turn| {
-                        turn.discussion
-                            .as_ref()
-                            .is_some_and(|reference| Some(reference.id.as_str()) == id)
+                        turn.discussion.as_ref().is_some_and(|reference| {
+                            Some(reference.id.as_str()) == id
+                                || discussion_ids_match(
+                                    reference.id.as_str(),
+                                    id.unwrap_or_default(),
+                                )
+                        })
                     })
                     .cloned()
                     .collect();
@@ -853,6 +925,22 @@ mod tests {
     fn discussion_id_accepts_disc_prefix_and_raw_uuidv7() {
         let id = DiscussionRecordId::generate();
         assert_eq!(parse_discussion_id(&id.to_string()).unwrap(), id);
+        let raw = id.to_string().trim_start_matches("disc-").to_string();
+        assert!(discussion_ids_match(&id.to_string(), &raw));
+    }
+
+    #[test]
+    fn missing_observe_page_is_filled() {
+        let mut request = ObserveCollaborationRequest::default();
+        ensure_observe_page(&mut request);
+        assert_eq!(
+            request.observe.as_ref().map(|options| options.mode),
+            Some(ObservationMode::Once as i32)
+        );
+        assert_eq!(
+            request.page.as_ref().map(|page| page.size),
+            Some(COLLABORATION_PAGE_SIZE)
+        );
     }
 
     fn proof_scope() -> CollaborationScope {

@@ -168,8 +168,12 @@ pub struct ContextListArgs {
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextHistoryArgs {
-    /// Stable logical annotation ID.
-    pub annotation_id: String,
+    /// Stable logical annotation ID. Omit when using `--path` / `--state`.
+    #[arg(required_unless_present_any = ["path", "state"])]
+    pub annotation_id: Option<String>,
+
+    #[command(flatten)]
+    pub target: ContextTargetArgs,
 
     /// Read context from an explicit historical ref/state instead of HEAD.
     #[arg(long)]
@@ -178,8 +182,12 @@ pub struct ContextHistoryArgs {
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextEditArgs {
-    /// Stable logical annotation ID.
-    pub annotation_id: String,
+    /// Stable logical annotation ID. Omit when using `--path` / `--state`.
+    #[arg(required_unless_present_any = ["path", "state"])]
+    pub annotation_id: Option<String>,
+
+    #[command(flatten)]
+    pub target: ContextTargetArgs,
 
     /// Override the annotation kind for the new revision.
     #[arg(long, value_parser = ["constraint", "invariant", "rationale"])]
@@ -282,4 +290,60 @@ pub struct ContextAuditArgs {
     /// Read context from an explicit historical ref/state instead of HEAD.
     #[arg(long)]
     pub r#ref: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::cli::{Cli, Commands, ContextCommands};
+
+    #[test]
+    fn history_and_edit_accept_path_or_id() {
+        match Cli::try_parse_from(["heddle", "context", "history", "ann-1"])
+            .expect("history id")
+            .command
+        {
+            Commands::Context {
+                command: ContextCommands::History(args),
+            } => {
+                assert_eq!(args.annotation_id.as_deref(), Some("ann-1"));
+                assert!(args.target.path.is_none());
+            }
+            _ => panic!("expected context history"),
+        }
+        match Cli::try_parse_from(["heddle", "context", "history", "--path", "src/auth.rs"])
+            .expect("history path")
+            .command
+        {
+            Commands::Context {
+                command: ContextCommands::History(args),
+            } => {
+                assert!(args.annotation_id.is_none());
+                assert_eq!(args.target.path.as_deref(), Some("src/auth.rs"));
+            }
+            _ => panic!("expected context history"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "edit",
+            "--path",
+            "src/auth.rs",
+            "-m",
+            "revised",
+        ])
+        .expect("edit path")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Edit(args),
+            } => {
+                assert!(args.annotation_id.is_none());
+                assert_eq!(args.target.path.as_deref(), Some("src/auth.rs"));
+                assert_eq!(args.message.as_deref(), Some("revised"));
+            }
+            _ => panic!("expected context edit"),
+        }
+    }
 }

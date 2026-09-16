@@ -156,7 +156,7 @@ fn cmd_visibility_promote(cli: &Cli, repo: &Repository, args: VisibilityPromoteA
 }
 
 fn cmd_visibility_show(cli: &Cli, repo: &Repository, args: VisibilityShowArgs) -> Result<()> {
-    let state = resolve_state(repo, &args.state)?;
+    let state = resolve_state(repo, args.state.as_deref().unwrap_or("HEAD"))?;
     let blob = repo.get_state_visibility_for_state(&state)?;
     let effective = blob.latest()?;
     let tier = effective
