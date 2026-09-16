@@ -447,7 +447,7 @@ mod tests {
     #[test]
     fn human_verification_is_not_swallowed_as_a_generic_failure() {
         assert!(is_human_verification_required(
-            "user verification required for /heddle.api.v1alpha1.RegistryService/CreateGrant"
+            "user verification required for /heddle.api.v2alpha1.SpoolService/PutGrant"
         ));
         let err = ProtocolError::AuthorizationFailed(
             "user verification required for CreateGrant: use a client with a WebAuthn authenticator"

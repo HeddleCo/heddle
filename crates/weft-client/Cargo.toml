@@ -1,0 +1,30 @@
+[package]
+name = "weft-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "Native v2 Weft client: descriptor-trusted Iroh transport and Remote::discover"
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+anyhow.workspace = true
+api.workspace = true
+crypto.workspace = true
+heddle-perf-contract.workspace = true
+iroh.workspace = true
+reqwest.workspace = true
+thread-api = { workspace = true, features = ["iroh", "signing"] }
+tokio.workspace = true
+
+[dev-dependencies]
+ed25519-dalek.workspace = true
+hex.workspace = true
+prost.workspace = true
+serde_json.workspace = true

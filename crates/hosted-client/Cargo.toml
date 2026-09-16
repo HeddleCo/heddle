@@ -17,6 +17,7 @@ name = "hosted_client"
 anyhow.workspace = true
 heddleco-capability-verifier = { path = "../capability-verifier", version = "0.17.0", optional = true }
 thread-api = { package = "heddle-thread-api", path = "../thread-api", version = "0.23.0", default-features = false, features = ["native", "iroh", "signing", "root-attachment"], optional = true }
+weft-client = { workspace = true, optional = true }
 biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.23.0", optional = true }
 api = { workspace = true, optional = true }
 base64.workspace = true
@@ -84,6 +85,7 @@ semantic = ["repo/tree-sitter-symbols"]
 client = [
     "dep:heddleco-capability-verifier",
     "dep:thread-api",
+    "dep:weft-client",
     "dep:biscuit-verifier",
     "api",
     "api/reflection",

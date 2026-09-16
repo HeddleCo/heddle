@@ -1987,7 +1987,7 @@ mod tests {
             .sign(&signing::stream_open_bytes(
                 "principal:alice",
                 "pull:one",
-                "/heddle.api.v1alpha1.RepoSyncService/Pull",
+                "/heddle.api.v2alpha1.SyncService/Fetch",
                 "acme/widgets",
                 "",
                 &capability_context,

@@ -43,15 +43,15 @@ use tokio::task::JoinHandle;
 use super::{CallContextFactory, HostedClient};
 
 const OWNER_GENESIS_FIXTURE_HEX: &str = "0a380a10222222222222222222222222222222221224080112208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c12640a20def88318e44a809464c1022f22230567bae6805d17b1ccfc2bebe5326232c58a1240bfe677c0b6fec8d28e379f584f36dee7258d834222f9b75f61dc75b7db2d836d76d4fb6eaf9e7f561925b2e6882b51eadaf3ec77c565f5b638ad0febfc8cd304";
-const GET_BLOB_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/GetBlob";
-const CREATE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/CreateSpool";
-const DELETE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/DeleteSpool";
-const GET_DISCUSSION_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/GetDiscussion";
-const LIST_BY_STATE_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/ListByState";
-const LIST_CONTEXT_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/ListContext";
-const GET_CONTEXT_HISTORY_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/GetContextHistory";
+const GET_BLOB_METHOD: &str = "/heddle.api.v2alpha1.ContentService/ReadContent";
+const CREATE_SPOOL_METHOD: &str = "/heddle.api.v2alpha1.SpoolService/CreateSpool";
+const DELETE_SPOOL_METHOD: &str = "/heddle.api.v2alpha1.SpoolService/DeleteSpool";
+const GET_DISCUSSION_METHOD: &str = "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
+const LIST_BY_STATE_METHOD: &str = "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
+const LIST_CONTEXT_METHOD: &str = "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
+const GET_CONTEXT_HISTORY_METHOD: &str = "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
 const SUBSCRIBE_REPO_EVENTS_METHOD: &str =
-    "/heddle.api.v1alpha1.RepositoryService/SubscribeRepoEvents";
+    "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
 
 #[derive(Default)]
 pub(crate) struct SpoolMutationCapture {
@@ -557,7 +557,7 @@ async fn serve_call(
             }
         }
         StreamingShape::Bidirectional => {
-            if method == "/heddle.api.v1alpha1.RepoSyncService/Push" {
+            if method == "/heddle.api.v2alpha1.SyncService/PublishContent" {
                 serve_push(send, recv, request.split_off(prelude_len), push_requests).await;
                 return;
             }
@@ -1515,14 +1515,14 @@ async fn serve_push(
 
 fn terminal_page(method: &str) -> Vec<u8> {
     match method {
-        "/heddle.api.v1alpha1.RepoSyncService/ListRefs" => ListRefsResponse {
+        "/heddle.api.v2alpha1.ThreadService/ObserveThreads" => ListRefsResponse {
             frame: Some(list_refs_response::Frame::PageEnd(ListRefsPageEnd {
                 next_page_token: String::new(),
                 ..ListRefsPageEnd::default()
             })),
         }
         .encode_to_vec(),
-        "/heddle.api.v1alpha1.RepositoryService/ListContext" => ListContextResponse {
+        "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration" => ListContextResponse {
             frame: Some(list_context_response::Frame::PageEnd(ListContextPageEnd {
                 next_page_token: String::new(),
                 ..ListContextPageEnd::default()
@@ -1530,7 +1530,7 @@ fn terminal_page(method: &str) -> Vec<u8> {
             states: Vec::new(),
         }
         .encode_to_vec(),
-        "/heddle.api.v1alpha1.RepositoryService/GetContextHistory" => GetContextHistoryResponse {
+        "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration" => GetContextHistoryResponse {
             frame: Some(get_context_history_response::Frame::PageEnd(
                 GetContextHistoryPageEnd {
                     next_page_token: String::new(),
@@ -1539,14 +1539,14 @@ fn terminal_page(method: &str) -> Vec<u8> {
             )),
         }
         .encode_to_vec(),
-        "/heddle.api.v1alpha1.WorkflowService/ListThreads" => ListThreadsResponse {
+        "/heddle.api.v2alpha1.ThreadService/ObserveThreads" => ListThreadsResponse {
             frame: Some(list_threads_response::Frame::PageEnd(ListThreadsPageEnd {
                 next_page_token: String::new(),
                 ..ListThreadsPageEnd::default()
             })),
         }
         .encode_to_vec(),
-        "/heddle.api.v1alpha1.CollaborationService/ListByState" => ListDiscussionsResponse {
+        "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration" => ListDiscussionsResponse {
             frame: Some(list_discussions_response::Frame::PageEnd(
                 ListDiscussionsPageEnd {
                     next_page_token: String::new(),
@@ -1561,7 +1561,7 @@ fn terminal_page(method: &str) -> Vec<u8> {
 fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
     let pull_succeeds = pull.is_some();
     match method {
-        "/heddle.api.v1alpha1.RepoSyncService/Push" => vec![
+        "/heddle.api.v2alpha1.SyncService/PublishContent" => vec![
             PushServerFrame {
                 frame: Some(push_server_frame::Frame::Ready(PushReady::default())),
             }
@@ -1575,7 +1575,7 @@ fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
             }
             .encode_to_vec(),
         ],
-        "/heddle.api.v1alpha1.RepoSyncService/Pull" => {
+        "/heddle.api.v2alpha1.SyncService/Fetch" => {
             let remote_state = pull.as_ref().map(|fixture| fixture.remote_state.clone());
             let has_pack = pull.as_ref().is_some_and(|fixture| fixture.pack.is_some());
             let mut responses = vec![

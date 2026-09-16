@@ -17,6 +17,7 @@ members = [
     "crates/devtools",
     "crates/docsgen",
     "crates/hosted-client",
+    "crates/weft-client",
     "crates/ingest",
     "crates/merge",
     "crates/mount",
@@ -191,6 +192,8 @@ ci-engine = { path = "crates/ci-engine", package = "heddle-ci-engine", version =
 config = { path = "crates/config", package = "heddle-config", version = "0.23.0" }
 crypto = { path = "crates/crypto", package = "heddle-crypto", version = "0.23.0" }
 hosted-client = { path = "crates/hosted-client", package = "heddle-hosted-client", version = "0.23.0", default-features = false }
+weft-client = { path = "crates/weft-client", version = "0.23.0" }
+thread-api = { path = "crates/thread-api", package = "heddle-thread-api", version = "0.23.0", default-features = false }
 ingest = { path = "crates/ingest", package = "heddle-ingest", version = "0.23.0", default-features = false }
 merge = { path = "crates/merge", package = "heddle-merge", version = "0.23.0" }
 mount = { path = "crates/mount", package = "heddle-mount", version = "0.23.0" }

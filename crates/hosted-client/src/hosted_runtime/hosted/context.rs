@@ -110,6 +110,10 @@ impl CallContextFactory {
         self.signing_identity.as_deref()
     }
 
+    pub(super) fn progress_timeout(&self) -> Duration {
+        self.timeout
+    }
+
     pub(super) fn proof_signer(&self) -> Option<&Ed25519Signer> {
         self.signer.as_deref()
     }
@@ -546,7 +550,7 @@ mod tests {
     #[test]
     fn tracing_off_omits_hosted_trace_context() {
         let context = CallContextFactory::default()
-            .streaming("/heddle.api.v1alpha1.RepoSyncService/Pull", "off")
+            .streaming("/heddle.api.v2alpha1.SyncService/Fetch", "off")
             .unwrap();
         assert!(context.trace.is_none());
     }
@@ -567,7 +571,7 @@ mod tests {
                 let span_context = span.context();
                 let expected = span_context.span().span_context().clone();
                 let context = CallContextFactory::default()
-                    .streaming("/heddle.api.v1alpha1.RepoSyncService/Pull", "propagation")
+                    .streaming("/heddle.api.v2alpha1.SyncService/Fetch", "propagation")
                     .unwrap();
                 let trace = context.trace.as_ref().expect("active trace is propagated");
                 let parts = trace.traceparent.split('-').collect::<Vec<_>>();
@@ -578,7 +582,7 @@ mod tests {
                 assert!(trace.baggage.is_empty());
 
                 let frame = api::framing::encode_request_prelude(
-                    "/heddle.api.v1alpha1.RepoSyncService/Pull",
+                    "/heddle.api.v2alpha1.SyncService/Fetch",
                     &context,
                 )
                 .unwrap();
@@ -614,13 +618,17 @@ mod tests {
             .with_authenticated_principal("principal:alice");
         let signed = CallContextFactory::from_client_config(&config)
             .unwrap()
-            .unary("/heddle.api.v1alpha1.IdentityService/WhoAmI", &[], "")
+            .unary(
+                "/heddle.api.v2alpha1.IdentityService/ObserveIdentity",
+                &[],
+                "",
+            )
             .unwrap();
         assert_eq!(signed.context.bearer_capability, b"token");
         let proof = signed.context.request_proof.unwrap();
         let canonical = signing::unary_bytes(
             &proof.signing_identity,
-            "/heddle.api.v1alpha1.IdentityService/WhoAmI",
+            "/heddle.api.v2alpha1.IdentityService/ObserveIdentity",
             proof.timestamp_millis,
             &proof.nonce,
             &[],
@@ -633,7 +641,7 @@ mod tests {
             "token",
             &bearer.timestamp_seconds.to_string(),
             "POST",
-            "/heddle.api.v1alpha1.IdentityService/WhoAmI",
+            "/heddle.api.v2alpha1.IdentityService/ObserveIdentity",
             &hex::encode(&bearer.nonce),
             &bearer.signature,
         )
@@ -655,7 +663,7 @@ mod tests {
         let proof = CallContextFactory::from_client_config(&config)
             .unwrap()
             .stream_opening_proof(
-                "/heddle.api.v1alpha1.RepoSyncService/Pull",
+                "/heddle.api.v2alpha1.SyncService/Fetch",
                 "stream-1",
                 repository,
                 "cursor-1",
@@ -665,7 +673,7 @@ mod tests {
         let canonical = signing::stream_open_bytes(
             "principal:alice",
             "stream-1",
-            "/heddle.api.v1alpha1.RepoSyncService/Pull",
+            "/heddle.api.v2alpha1.SyncService/Fetch",
             "acme/widgets",
             "cursor-1",
             b"capability",
@@ -678,7 +686,7 @@ mod tests {
     fn long_lived_streaming_context_has_no_rpc_deadline() {
         let context = CallContextFactory::default()
             .long_lived_streaming(
-                "/heddle.api.v1alpha1.RepositoryService/SubscribeRepoEvents",
+                "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration",
                 "",
             )
             .unwrap();
@@ -744,7 +752,7 @@ mod tests {
         assert_eq!(enrollment.signing_identity(), Some(expected.as_str()));
         let signed = enrollment
             .unary(
-                "/heddle.api.v1alpha1.IdentityService/RegisterPublicKey",
+                "/heddle.api.v2alpha1.IdentityService/ObserveIdentity",
                 b"claim",
                 "op-1",
             )

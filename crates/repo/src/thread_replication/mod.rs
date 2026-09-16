@@ -26,9 +26,9 @@ mod policy_sync;
 pub mod projection;
 pub mod source_authority;
 mod source_index;
-pub mod source_search;
 mod source_possession;
 pub mod source_publication;
+pub mod source_search;
 mod source_transfer;
 
 pub mod collaboration;
@@ -151,6 +151,31 @@ impl ThreadReplica {
         Self::create_with_proof(heddle_dir, signed, &[], None)
     }
 
+    /// Persist a creator-signed account Thread with its original portable
+    /// authority. Hosted `StartThread` callers keep this exact genesis locally
+    /// so later captures bind the same Thread identity.
+    pub fn create_from_original_authority(
+        heddle_dir: &Path,
+        signed: &SignedGenesis,
+        creator_authority: &[u8],
+    ) -> Result<Self> {
+        let genesis = signed.verify()?;
+        if !matches!(
+            genesis.owner,
+            objects::object::thread_replication::GenesisOwner::Account(_)
+        ) {
+            return Err(Error::Invalid(
+                "original account authority requires an account-owned Thread".into(),
+            ));
+        }
+        if creator_authority.is_empty() {
+            return Err(Error::Invalid(
+                "account-owned Thread requires original creator authority".into(),
+            ));
+        }
+        Self::create_with_proof(heddle_dir, signed, creator_authority, None)
+    }
+
     /// Original account authority and signed genesis become durable together.
     /// The caller independently authorizes delivery and the selected Spool.
     pub fn create_authorized(
@@ -247,6 +272,33 @@ impl ThreadReplica {
         };
         this.signed_genesis()?;
         Ok(this)
+    }
+
+    /// Bind a local display name to this already-created Thread. A different
+    /// Thread already using the name is left unchanged.
+    pub fn bind_local_name(&self, name: &str) -> Result<()> {
+        if name.is_empty() {
+            return Err(Error::Invalid("Thread name is empty".into()));
+        }
+        let connection = self.connect()?;
+        let existing: Option<Vec<u8>> = connection
+            .query_row(
+                "SELECT thread FROM local_thread_names WHERE name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(existing) = existing {
+            if existing != self.thread.as_bytes() {
+                return Ok(());
+            }
+            return Ok(());
+        }
+        connection.execute(
+            "INSERT INTO local_thread_names(name,thread) VALUES(?1,?2)",
+            params![name, self.thread.as_bytes()],
+        )?;
+        Ok(())
     }
 
     pub fn signed_genesis(&self) -> Result<SignedGenesis> {
@@ -588,8 +640,12 @@ impl ThreadReplica {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).optional()?;
         match row {
-            Some((hash, canonical, response)) if hash.as_slice() == request_hash.as_slice() => Ok(Some((canonical, response))),
-            Some(_) => Err(Error::Invalid("landing operation ID reused with different input".into())),
+            Some((hash, canonical, response)) if hash.as_slice() == request_hash.as_slice() => {
+                Ok(Some((canonical, response)))
+            }
+            Some(_) => Err(Error::Invalid(
+                "landing operation ID reused with different input".into(),
+            )),
             None => Ok(None),
         }
     }
@@ -614,10 +670,12 @@ impl ThreadReplica {
             "SELECT request_hash,canonical,response FROM thread_landing_prepared WHERE namespace=?1 AND operation_id=?2",
             params![namespace,operation_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
         if row.0.as_slice() != request_hash.as_slice() {
-            return Err(Error::Invalid("landing operation ID reused with different input".into()));
+            return Err(Error::Invalid(
+                "landing operation ID reused with different input".into(),
+            ));
         }
         tx.commit()?;
-        Ok((row.1,row.2))
+        Ok((row.1, row.2))
     }
     /// Stack preparation uses the same durable metadata database as single
     /// landing, with an aggregate bound for at most 64 signed members.
@@ -633,8 +691,12 @@ impl ThreadReplica {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).optional()?;
         match row {
-            Some((hash, canonical, response)) if hash.as_slice() == request_hash.as_slice() => Ok(Some((canonical, response))),
-            Some(_) => Err(Error::Invalid("landing stack operation ID reused with different input".into())),
+            Some((hash, canonical, response)) if hash.as_slice() == request_hash.as_slice() => {
+                Ok(Some((canonical, response)))
+            }
+            Some(_) => Err(Error::Invalid(
+                "landing stack operation ID reused with different input".into(),
+            )),
             None => Ok(None),
         }
     }
@@ -647,7 +709,9 @@ impl ThreadReplica {
         response: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>)> {
         if canonical.len() > 8 * 1024 * 1024 || response.len() > 1024 * 1024 {
-            return Err(Error::Invalid("prepared landing stack exceeds byte bound".into()));
+            return Err(Error::Invalid(
+                "prepared landing stack exceeds byte bound".into(),
+            ));
         }
         let mut connection = self.connect()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -657,10 +721,12 @@ impl ThreadReplica {
             "SELECT request_hash,canonical,response FROM thread_stack_prepared WHERE namespace=?1 AND operation_id=?2",
             params![namespace,operation_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
         if row.0.as_slice() != request_hash.as_slice() {
-            return Err(Error::Invalid("landing stack operation ID reused with different input".into()));
+            return Err(Error::Invalid(
+                "landing stack operation ID reused with different input".into(),
+            ));
         }
         tx.commit()?;
-        Ok((row.1,row.2))
+        Ok((row.1, row.2))
     }
     pub fn receive_local_integration_cas_command(
         &self,
@@ -671,9 +737,19 @@ impl ThreadReplica {
         response: &[u8],
     ) -> Result<Admission> {
         if signed.verify()?.local_integration()?.is_none() {
-            return Err(Error::Invalid("local integration CAS requires a local receipt".into()));
+            return Err(Error::Invalid(
+                "local integration CAS requires a local receipt".into(),
+            ));
         }
-        self.receive_inner(signed, store, authorize, true, None, false, Some((command,response)))
+        self.receive_inner(
+            signed,
+            store,
+            authorize,
+            true,
+            None,
+            false,
+            Some((command, response)),
+        )
     }
     /// Admit a bounded ordered stack on one Spool in one SQLite transaction.
     /// Each later member sees earlier accepted source frontiers in this same
@@ -696,7 +772,9 @@ impl ThreadReplica {
                 thread: operation.thread,
             };
             if operation.local_integration()?.is_none() {
-                return Err(Error::Invalid("stack member must be a local integration".into()));
+                return Err(Error::Invalid(
+                    "stack member must be a local integration".into(),
+                ));
             }
             target.require_trusted_integration(&operation)?;
             target.require_local_integration_source(&operation)?;
@@ -709,7 +787,9 @@ impl ThreadReplica {
             if target.receive_in(&tx, original, operation, store, true, None, false)?
                 != Admission::Accepted
             {
-                return Err(Error::Invalid("landing stack member is not accepted".into()));
+                return Err(Error::Invalid(
+                    "landing stack member is not accepted".into(),
+                ));
             }
         }
         if crate::device_operations::replay(&tx, command)
@@ -743,7 +823,15 @@ impl ThreadReplica {
         authority_receipt: Option<&crypto::thread_authority_admission::SignedAuthorityAdmission>,
         authorize: impl FnOnce(&ThreadOperation) -> Result<()>,
     ) -> Result<Admission> {
-        self.receive_inner(signed, store, authorize, false, authority_receipt, true, None)
+        self.receive_inner(
+            signed,
+            store,
+            authorize,
+            false,
+            authority_receipt,
+            true,
+            None,
+        )
     }
     fn receive_inner(
         &self,

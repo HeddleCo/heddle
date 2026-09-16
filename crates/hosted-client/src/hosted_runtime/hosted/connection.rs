@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use api::heddle::api::v1alpha1::ProviderSource;
+use api::heddle::api::{v1alpha1::ProviderSource, v2alpha1::DescribeEndpointResponse};
 use config::ClientConfig;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode,
@@ -118,6 +118,26 @@ impl HostedConnection {
     pub(super) async fn connect(endpoint: Endpoint, address: EndpointAddr) -> Result<Arc<Self>> {
         heddle_perf_contract::record_network_client_initialization();
         Self::connect_inner(endpoint, address, None).await
+    }
+
+    /// Wrap a connection already discovered by [`weft_client::HostedClient`].
+    pub(super) fn from_discovered(
+        endpoint: Endpoint,
+        connection: iroh::endpoint::Connection,
+        config: &ClientConfig,
+        description: DescribeEndpointResponse,
+    ) -> Arc<Self> {
+        let native_description = tokio::sync::OnceCell::new();
+        let _ = native_description.set(description);
+        let router = claim_router(endpoint.clone());
+        Arc::new(Self {
+            native_description,
+            router,
+            endpoint,
+            connection,
+            provider_transport: Some(ProviderWebSocketTransport::new(config.clone())),
+            provider_connections: Mutex::new(HashMap::new()),
+        })
     }
 
     async fn connect_inner(

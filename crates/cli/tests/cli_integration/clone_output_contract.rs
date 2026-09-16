@@ -199,7 +199,7 @@ mod fixture {
 
     #[test]
     fn authenticated_clone_starts_with_folded_pull_instead_of_list_refs() {
-        const PULL: &str = "/heddle.api.v1alpha1.RepoSyncService/Pull";
+        const PULL: &str = "/heddle.api.v2alpha1.SyncService/Fetch";
 
         let temp = TempDir::new().expect("create folded clone fixture root");
         let (ephemeral_secret, endpoint_id, direct_address, iroh_thread) =

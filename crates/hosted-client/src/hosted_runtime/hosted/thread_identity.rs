@@ -156,32 +156,39 @@ impl HostedClient {
             });
         }
         let remote = self.native().await.map_err(native_error)?;
-        let response = remote
-            .api
-            .call::<rpc::WorkspaceServiceResolveResources>(&contract::ResolveResourcesRequest {
-                selectors: vec![contract::ResourceSelector {
-                    selector: Some(contract::resource_selector::Selector::ThreadName(
-                        contract::ThreadNameSelector {
-                            spool: Some(spool.clone()),
-                            name: name_or_id.into(),
-                        },
-                    )),
-                }],
-                budget: None,
-            })
+        let mut observation = remote
+            .observe::<rpc::ThreadServiceObserveThreads>(
+                contract::ObserveThreadsRequest {
+                    query: Some(contract::ThreadQuery {
+                        spools: vec![spool.clone()],
+                        order: contract::thread_query::Order::NameAsc as i32,
+                        ..Default::default()
+                    }),
+                    observe: Some(contract::ObserveOptions {
+                        mode: contract::ObservationMode::Once as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
             .await
-            .map_err(super::helpers::native_client_error)?;
-        match resolved_entity(response)? {
-            contract::entity_ref::Entity::Thread(thread)
-                if thread.spool.as_ref() == Some(&spool)
-                    && thread.id.as_ref().is_some_and(|id| id.value.len() == 32) =>
-            {
-                Ok(thread)
+            .map_err(native_error)?;
+        while let Some(batch) = observation.next_commit().await.map_err(native_error)? {
+            for change in batch.changes {
+                if let contract::thread_list_event::Payload::Thread(overview) = change
+                    && overview.name == name_or_id
+                    && let Some(reference) = overview.r#ref
+                    && reference.spool.as_ref() == Some(&spool)
+                    && reference.id.as_ref().is_some_and(|id| id.value.len() == 32)
+                {
+                    return Ok(reference);
+                }
             }
-            _ => Err(ProtocolError::InvalidState(
-                "Thread resolution returned another scope or invalid identity".into(),
-            )),
         }
+        Err(ProtocolError::ObjectNotFound(format!(
+            "Thread '{name_or_id}' is not published on this spool"
+        )))
     }
 
     pub(super) async fn current_owner_state(&self) -> Result<contract::OwnerState, ProtocolError> {

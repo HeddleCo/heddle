@@ -2540,6 +2540,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "webpki-roots 1.0.9",
+ "weft-client",
 ]
 
 [[package]]
@@ -8307,6 +8308,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
 dependencies = [
  "rustls-pki-types",
+]
+
+[[package]]
+name = "weft-client"
+version = "0.23.0"
+dependencies = [
+ "anyhow",
+ "ed25519-dalek 3.0.0",
+ "heddle-api",
+ "heddle-crypto",
+ "heddle-perf-contract",
+ "heddle-thread-api",
+ "heddleco-iroh",
+ "hex",
+ "prost 0.14.1",
+ "reqwest",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

@@ -20,9 +20,10 @@ mod human;
 mod hydration;
 mod methods;
 mod native_hydration;
-mod native_provider;
 #[cfg(test)]
 mod native_hydration_tests;
+mod native_provider;
+mod native_sync;
 #[cfg(test)]
 mod native_transport_tests;
 pub(crate) mod operation_id;
@@ -205,18 +206,22 @@ impl HostedClient {
         >,
     > {
         let credentials = self.context.native_credentials()?;
+        let timeout = self.context.progress_timeout();
         let transport = || {
             thread_api::transport::IrohTransport::new(
                 self.connection.connection.clone(),
                 credentials.clone(),
-                thread_api::replication::opening::FRAME_LIMIT,
-                std::time::Duration::from_secs(30),
+                api::framing::MAX_CONTROL_BODY,
+                timeout,
             )
         };
         let description = self
             .connection
             .native_description
             .get_or_try_init(|| async {
+                // Session connect seeds this from weft_client::HostedClient
+                // (Remote::discover). Tests that inject a raw Iroh connection
+                // still discover here.
                 let remote = thread_api::Remote::discover(
                     transport()?,
                     *self.connection.connection.remote_id().as_bytes(),
@@ -249,30 +254,14 @@ impl HostedClient {
     }
 
     pub async fn connect(descriptor: &VerifiedEndpointDescriptor) -> Result<Self> {
-        let config = ClientConfig::default();
-        Ok(Self {
-            connection: HostedConnection::connect_verified(descriptor, &config).await?,
-            context: CallContextFactory::default(),
-            transport: helpers::HostedTransportPolicy::from_client_config(&config),
-            on_human_signature: None,
-            warnings: Arc::new(NoopWarnings),
-            server_key: None,
-        })
+        Self::connect_weft(descriptor, &ClientConfig::default()).await
     }
 
     pub async fn connect_with_config(
         descriptor: &VerifiedEndpointDescriptor,
         config: &ClientConfig,
     ) -> Result<Self> {
-        let context = CallContextFactory::from_client_config(config)?;
-        Ok(Self {
-            connection: HostedConnection::connect_verified(descriptor, config).await?,
-            context,
-            transport: helpers::HostedTransportPolicy::from_client_config(config),
-            on_human_signature: None,
-            warnings: Arc::new(NoopWarnings),
-            server_key: config.server_key.clone(),
-        })
+        Self::connect_weft(descriptor, config).await
     }
 
     /// Connect for outbound calls only, on an ephemeral endpoint node id
@@ -280,13 +269,41 @@ impl HostedClient {
     /// node id. Used by `heddle claim`, whose inbound claim serving is the
     /// daemon's job while this client only makes authenticated weft calls
     /// (BeginWebAuthnRegistration, BootstrapOwnerRoot, RegisterPublicKey).
+    ///
+    /// `weft_client::HostedClient` always binds an ephemeral node id, so this
+    /// shares the v2 discovery path with [`Self::connect_with_config`].
     pub(crate) async fn connect_outbound_with_config(
         descriptor: &VerifiedEndpointDescriptor,
         config: &ClientConfig,
     ) -> Result<Self> {
+        Self::connect_weft(descriptor, config).await
+    }
+
+    /// Connect through [`weft_client::HostedClient`] so v2 discovery
+    /// (`Remote::discover`) happens on the same Iroh session used for later
+    /// native calls.
+    async fn connect_weft(
+        descriptor: &VerifiedEndpointDescriptor,
+        config: &ClientConfig,
+    ) -> Result<Self> {
         let context = CallContextFactory::from_client_config(config)?;
+        let credential = context.native_credentials()?;
+        let weft = weft_client::HostedClient::connect_endpoint(
+            descriptor.endpoint_addr()?,
+            credential,
+            context.progress_timeout(),
+        )
+        .await
+        .map_err(HostedError::transport)?;
+        let description = weft.remote.description.clone();
+        let (_remote, endpoint, connection) = weft.into_parts();
         Ok(Self {
-            connection: HostedConnection::connect_verified_outbound(descriptor, config).await?,
+            connection: HostedConnection::from_discovered(
+                endpoint,
+                connection,
+                config,
+                description,
+            ),
             context,
             transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
