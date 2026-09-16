@@ -81,6 +81,7 @@ fn creation_fixture(
                     &mint_root_signing_digest(&attachment).expect("certificate digest"),
                 )),
                 attachment: Some(attachment),
+                ..Default::default()
             }
         });
     let proof = SpoolCreationProof {

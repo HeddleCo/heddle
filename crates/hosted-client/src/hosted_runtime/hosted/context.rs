@@ -110,6 +110,10 @@ impl CallContextFactory {
         self.signing_identity.as_deref()
     }
 
+    pub(super) fn progress_timeout(&self) -> Duration {
+        self.timeout
+    }
+
     pub(super) fn proof_signer(&self) -> Option<&Ed25519Signer> {
         self.signer.as_deref()
     }

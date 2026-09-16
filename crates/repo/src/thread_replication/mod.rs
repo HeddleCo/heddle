@@ -360,6 +360,7 @@ impl ThreadReplica {
             }),
             creator_authority,
             admission,
+            ..Default::default()
         })
     }
 

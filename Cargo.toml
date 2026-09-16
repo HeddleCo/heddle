@@ -17,6 +17,7 @@ members = [
     "crates/devtools",
     "crates/docsgen",
     "crates/hosted-client",
+    "crates/weft-client",
     "crates/ingest",
     "crates/merge",
     "crates/mount",
@@ -52,7 +53,8 @@ categories = ["development-tools"]
 [workspace.dependencies]
 aes-gcm = { version = "0.10", features = ["zeroize"] }
 anyhow = "1"
-api = { package = "heddle-api", git = "https://github.com/HeddleCo/api.git", rev = "efd357c778cb59153cfaf387e3986f474010df9a" }
+api = { package = "heddle-api", path = "/home/heddleco/HeddleCo/workspace/v2-api-finish" }
+heddle-api = { path = "/home/heddleco/HeddleCo/workspace/v2-api-finish" }
 async-trait = "0.1"
 base32 = "0.5"
 base64 = "0.22"
@@ -203,7 +205,9 @@ semantic = { path = "crates/semantic", package = "heddle-semantic", version = "0
 semantic-recovery = { path = "crates/semantic-recovery", package = "heddle-semantic-recovery", version = "0.22.0" }
 state_review = { path = "crates/state-review", package = "heddle-state-review", version = "0.22.0" }
 verbs = { path = "crates/verbs", package = "heddle-verbs", version = "0.22.0", default-features = false }
+weft-client = { path = "crates/weft-client", version = "0.22.0" }
 wire = { path = "crates/wire", package = "heddle-wire", version = "0.22.0", default-features = false }
+thread-api = { path = "crates/thread-api", package = "heddle-thread-api", version = "0.22.0", default-features = false }
 
 [profile.dev]
 debug = "line-tables-only"
@@ -216,4 +220,9 @@ strip = true
 
 [patch.crates-io]
 heddleco-capability-verifier = { path = "crates/capability-verifier" }
-heddle-api = { git = "https://github.com/HeddleCo/api.git", rev = "efd357c778cb59153cfaf387e3986f474010df9a" }
+heddle-api = { path = "/home/heddleco/HeddleCo/workspace/v2-api-finish" }
+
+# Unify git-pinned heddle-api (capability-verifier, biscuit-verifier, and any
+# remaining git edges) onto the same v2 document Weft serves.
+[patch."https://github.com/HeddleCo/api.git"]
+heddle-api = { path = "/home/heddleco/HeddleCo/workspace/v2-api-finish" }

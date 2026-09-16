@@ -75,30 +75,86 @@ impl DeviceRpc {
         mut send: iroh::endpoint::SendStream,
     ) -> Result<()> {
         let session = Arc::new(session);
-        let result=(||->Result<(Vec<u8>,Option<StartedAnalysis>)> {
-            let request=StartAnalysisRequest::decode(body)?;
-            ensure!(request.execution_endpoint.as_ref()==Some(&self.endpoint()),"analysis requires this exact execution endpoint");
-            ensure!(request.expected_disclosure_policy_version.is_empty(),"local semantic indexing does not execute provider disclosure policies");
+        let result = (|| -> Result<(Vec<u8>, Option<StartedAnalysis>)> {
+            let request = StartAnalysisRequest::decode(body)?;
+            ensure!(
+                request.execution_endpoint.as_ref() == Some(&self.endpoint()),
+                "analysis requires this exact execution endpoint"
+            );
+            ensure!(
+                request.expected_disclosure_policy_version.is_empty(),
+                "local semantic indexing does not execute provider disclosure policies"
+            );
             ensure!(request.kinds.len()<=6 && request.kinds.iter().all(|kind| matches!(*kind,k if k==AnalysisKind::SemanticIndex as i32||k==AnalysisKind::SemanticDiff as i32)),"this native producer executes semantic index and diff analysis");
-            ensure!(!request.kinds.contains(&(AnalysisKind::SemanticDiff as i32)) || request.base.is_some(),"semantic diff requires exact base revision");
-            let mut state=vec![checkout::revision(&session,request.source.as_ref())?];
-            if let Some(base)=request.base.as_ref() { let base=checkout::revision(&session,Some(base))?;if !state.contains(&base){state.push(base);} }
+            ensure!(
+                !request.kinds.contains(&(AnalysisKind::SemanticDiff as i32))
+                    || request.base.is_some(),
+                "semantic diff requires exact base revision"
+            );
+            let mut state = vec![checkout::revision(&session, request.source.as_ref())?];
+            if let Some(base) = request.base.as_ref() {
+                let base = checkout::revision(&session, Some(base))?;
+                if !state.contains(&base) {
+                    state.push(base);
+                }
+            }
             session.check_current(&self.home)?;
-            let namespace=session.command_namespace()?;
-            let id=request.client_operation_id.parse::<OperationId>()?;
-            let key=repo::operation_dedup::receipt_record_key(&namespace,id);
-            let reference=RecordRef{spool:Some(SpoolRef{id:session.spool.id.to_string()}),id:key.to_string()};
-            let mut receipt=self.receipt(&request.client_operation_id);
-            receipt.outcome=Some(mutation_receipt::Outcome::PendingOperation(reference.clone()));
-            let response=MutationResponse{receipt:Some(receipt)}.encode_to_vec();
-            if let Some(replayed) = repo::device_operations::replay_response(&session.spool.heddle_dir, &repo::device_operations::Command { namespace: &namespace, id, method: "/heddle.api.v2alpha1.AnalysisService/StartAnalysis", request_hash: *blake3::hash(body).as_bytes() })? { return Ok((replayed, None)); }
-            let permit=self.analysis.workers.clone().try_acquire_owned().context("native analysis workers are busy")?;
-            let started=repo::device_operations::start(&session.spool.heddle_dir,repo::device_operations::Command{namespace:&namespace,id,method:"/heddle.api.v2alpha1.AnalysisService/StartAnalysis",request_hash:*blake3::hash(body).as_bytes()},self.analysis.executor()?,OperationRecord{
-                r#ref:Some(reference),client_operation_id:request.client_operation_id,state:operation_record::State::Queued as i32,
-                total_units:Some(state.len() as u64),unit:"semantic index".into(),cancellation_supported:true,..Default::default()
-            },response)?;
-            let response=started.response.clone();
-            Ok((response,Some((started,key,state,namespace,permit))))
+            let namespace = session.command_namespace()?;
+            let id = request.client_operation_id.parse::<OperationId>()?;
+            let key = repo::operation_dedup::receipt_record_key(&namespace, id);
+            let reference = RecordRef {
+                spool: Some(SpoolRef {
+                    id: session.spool.id.to_string(),
+                }),
+                id: key.to_string(),
+            };
+            let mut receipt = self.receipt(&request.client_operation_id);
+            receipt.outcome = Some(mutation_receipt::Outcome::PendingOperation(
+                reference.clone(),
+            ));
+            let response = MutationResponse {
+                receipt: Some(receipt),
+            }
+            .encode_to_vec();
+            if let Some(replayed) = repo::device_operations::replay_response(
+                &session.spool.heddle_dir,
+                &repo::device_operations::Command {
+                    namespace: &namespace,
+                    id,
+                    method: "/heddle.api.v2alpha1.AnalysisService/StartAnalysis",
+                    request_hash: *blake3::hash(body).as_bytes(),
+                },
+            )? {
+                return Ok((replayed, None));
+            }
+            let permit = self
+                .analysis
+                .workers
+                .clone()
+                .try_acquire_owned()
+                .context("native analysis workers are busy")?;
+            let started = repo::device_operations::start(
+                &session.spool.heddle_dir,
+                repo::device_operations::Command {
+                    namespace: &namespace,
+                    id,
+                    method: "/heddle.api.v2alpha1.AnalysisService/StartAnalysis",
+                    request_hash: *blake3::hash(body).as_bytes(),
+                },
+                self.analysis.executor()?,
+                OperationRecord {
+                    r#ref: Some(reference),
+                    client_operation_id: request.client_operation_id,
+                    state: operation_record::State::Queued as i32,
+                    total_units: Some(state.len() as u64),
+                    unit: "semantic index".into(),
+                    cancellation_supported: true,
+                    ..Default::default()
+                },
+                response,
+            )?;
+            let response = started.response.clone();
+            Ok((response, Some((started, key, state, namespace, permit))))
         })();
         let response = match result {
             Ok((response, Some((started, key, state, namespace, permit)))) => {
@@ -470,6 +526,8 @@ impl DeviceRpc {
                 operation: None,
                 version: before.clone(),
                 finding_count: (supported && available).then_some(findings.len() as u64),
+                thread: None,
+                base_thread: None,
             };
             records.push((
                 format!("{key}"),

@@ -109,6 +109,7 @@ impl ThreadCreation {
             genesis: self.request.thread_genesis.clone(),
             creator_authority: self.request.creator_authority.clone(),
             admission: None,
+            ..Default::default()
         }
     }
 }

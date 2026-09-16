@@ -90,6 +90,7 @@ pub(super) fn fixture() -> (FetchOpen, TransferReady, EndpointRef, [Vec<u8>; 2])
             ),
             creator_authority: vec![],
             admission: None,
+            ..Default::default()
         }),
         packs,
         checkpoint: Some(TransferCheckpoint {

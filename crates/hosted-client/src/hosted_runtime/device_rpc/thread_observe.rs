@@ -430,11 +430,13 @@ impl DeviceRpc {
                             // Conflicting review values remain original candidates
                             // in overview; never emit them as one chosen decision.
                             if frontier_candidate_count(&overview, id) == 1 {
+                                let review = prepared.record_review()?;
                                 events.push((
                                     format!("review:{id}"),
-                                    event(thread_event::Payload::Review(
-                                        prepared.record_review()?.decision.context("review")?,
-                                    )),
+                                    event(thread_event::Payload::Review(ReviewRecord {
+                                        decision: review.decision,
+                                        original: Some(prepared.record.clone()),
+                                    })),
                                 ));
                             }
                             if request.include_operations {

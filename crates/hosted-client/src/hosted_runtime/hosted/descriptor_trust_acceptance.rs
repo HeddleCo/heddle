@@ -7,6 +7,10 @@ use std::{
 
 use api::{
     HOSTED_ALPN_V1,
+    descriptor_trust::{
+        AttestedEndpointDescriptorEntry, EndpointDescriptorSetDocument, SET_VERSION,
+        ephemeral_attestation_bytes,
+    },
     heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
     signing::endpoint_descriptor_bytes,
 };
@@ -161,8 +165,8 @@ async fn pin_change_refuses_new_id_and_reused_id_without_state_mutation() {
                 (
                     DESCRIPTOR_PATH.to_string(),
                     VecDeque::from([
-                        TestResponse::protobuf(signed_descriptor("stable-id", &first)),
-                        TestResponse::protobuf(signed_descriptor(changed_id, &changed)),
+                        TestResponse::json(descriptor_set_json("stable-id", &first)),
+                        TestResponse::json(descriptor_set_json(changed_id, &changed)),
                     ]),
                 ),
             ]));
@@ -245,7 +249,7 @@ async fn explicit_pair_skips_discovery_and_old_server_failure_is_actionable() {
         let signer = Ed25519Signer::generate().unwrap();
         let server = TestHttpsServer::start(HashMap::from([(
             DESCRIPTOR_PATH.to_string(),
-            VecDeque::from([TestResponse::protobuf(signed_descriptor(
+            VecDeque::from([TestResponse::json(descriptor_set_json(
                 "explicit-id",
                 &signer,
             ))]),
@@ -270,6 +274,35 @@ async fn explicit_pair_skips_discovery_and_old_server_failure_is_actionable() {
             "server does not publish descriptor trust; configure both values or upgrade the server"
         ));
         assert!(!super::descriptor_trust_path().exists());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn protobuf_descriptor_body_fails_closed() {
+    with_isolated_home_async(|_| async {
+        let signer = Ed25519Signer::generate().unwrap();
+        let server = TestHttpsServer::start(HashMap::from([(
+            DESCRIPTOR_PATH.to_string(),
+            VecDeque::from([TestResponse::protobuf(vec![
+                0x0a, 0x04, b'n', b'o', b'p', b'e',
+            ])]),
+        )]));
+        let public_key: [u8; 32] = signer.public_key().try_into().unwrap();
+        let error = resolve_and_verify_endpoint_descriptor(
+            server.authority(),
+            &trusted_config(&server).with_descriptor_trust("explicit-id", public_key),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("application/json")
+                || error
+                    .to_string()
+                    .contains("decode Iroh endpoint descriptor set"),
+            "protobuf descriptor must fail closed, got: {error}"
+        );
+        assert!(load_automatic_pin(server.authority()).unwrap().is_none());
     })
     .await;
 }
@@ -330,7 +363,7 @@ fn routes_for_pair(
         (
             DESCRIPTOR_PATH.to_string(),
             (0..descriptor_count)
-                .map(|_| TestResponse::protobuf(signed_descriptor(key_id, descriptor_signer)))
+                .map(|_| TestResponse::json(descriptor_set_json(key_id, descriptor_signer)))
                 .collect(),
         ),
     ])
@@ -345,11 +378,21 @@ fn key_document(version: u32, key_id: &str, public_key: &[u8]) -> Vec<u8> {
     .unwrap()
 }
 
-fn signed_descriptor(key_id: &str, signer: &Ed25519Signer) -> Vec<u8> {
+fn descriptor_set_json(root_key_id: &str, root: &Ed25519Signer) -> Vec<u8> {
     let now = chrono::Utc::now().timestamp_millis();
+    let ephemeral = Ed25519Signer::generate().unwrap();
+    let ephemeral_public_key: [u8; 32] = ephemeral.public_key().try_into().unwrap();
+    let ephemeral_key_id = format!("{root_key_id}:ephemeral");
+    let attestation = ephemeral_attestation_bytes(
+        &ephemeral_key_id,
+        &ephemeral_public_key,
+        now - 1_000,
+        now + 60_000,
+        "",
+    );
     let descriptor = EndpointDescriptor {
         version: 1,
-        endpoint_id: hex::encode([9; 32]),
+        endpoint_id: hex::encode(ephemeral_public_key),
         relay_urls: Vec::new(),
         direct_addresses: vec!["127.0.0.1:9".to_string()],
         supported_alpns: vec![HOSTED_ALPN_V1.to_vec()],
@@ -357,14 +400,27 @@ fn signed_descriptor(key_id: &str, signer: &Ed25519Signer) -> Vec<u8> {
         expires_at_unix_millis: now + 60_000,
         rotation: None,
     };
-    SignedEndpointDescriptor {
-        signature: signer
+    let signed = SignedEndpointDescriptor {
+        signature: ephemeral
             .sign(&endpoint_descriptor_bytes(&descriptor))
             .unwrap(),
         descriptor: Some(descriptor),
-        key_id: key_id.to_string(),
-    }
-    .encode_to_vec()
+        key_id: ephemeral_key_id.clone(),
+    };
+    serde_json::to_vec(&EndpointDescriptorSetDocument {
+        version: SET_VERSION,
+        root_key_id: root_key_id.to_string(),
+        entries: vec![AttestedEndpointDescriptorEntry {
+            ephemeral_key_id,
+            ephemeral_public_key: hex::encode(ephemeral_public_key),
+            not_before_unix_millis: now - 1_000,
+            not_after_unix_millis: now + 60_000,
+            region: String::new(),
+            attestation_signature: hex::encode(root.sign(&attestation).unwrap()),
+            signed_descriptor: hex::encode(signed.encode_to_vec()),
+        }],
+    })
+    .unwrap()
 }
 
 fn trusted_config(server: &TestHttpsServer) -> config::ClientConfig {

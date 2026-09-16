@@ -8,7 +8,7 @@ use super::{
         PinInsertOutcome, canonical_server_authority, insert_verified_pin, load_automatic_pin,
         pin_change_message, validate_descriptor_pair,
     },
-    fetch_descriptor_key_document, fetch_signed_endpoint_descriptor,
+    fetch_descriptor_key_document, fetch_endpoint_descriptor_set, preferred_iroh_region,
 };
 
 pub(super) async fn resolve_and_verify_endpoint_descriptor(
@@ -24,10 +24,13 @@ pub(super) async fn resolve_and_verify_endpoint_descriptor(
         (Some(key_id), Some(public_key)) => {
             let mut keys = DescriptorKeyring::default();
             keys.insert(key_id, *public_key, i64::MIN, i64::MAX)?;
-            let signed =
-                fetch_signed_endpoint_descriptor(&descriptor_url(&canonical_server), config)
-                    .await?;
-            keys.verify(&signed, now_unix_millis()?)
+            let document =
+                fetch_endpoint_descriptor_set(&descriptor_url(&canonical_server), config).await?;
+            keys.verify_set(
+                &document,
+                now_unix_millis()?,
+                preferred_iroh_region().as_deref(),
+            )
         }
         (Some(_), None) | (None, Some(_)) => Err(HostedError::DescriptorTrust(
             "ambiguous security posture: both descriptor trust fields are required".to_string(),
@@ -43,11 +46,11 @@ async fn resolve_automatic_descriptor_trust(
     if let Some(pin) = load_automatic_pin(canonical_server)
         .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?
     {
-        let signed =
-            fetch_signed_endpoint_descriptor(&descriptor_url(canonical_server), config).await?;
-        if signed.key_id != pin.key_id {
+        let document =
+            fetch_endpoint_descriptor_set(&descriptor_url(canonical_server), config).await?;
+        if document.root_key_id != pin.key_id {
             return Err(HostedError::DescriptorTrust(
-                pin_change_message(canonical_server, &pin, &signed.key_id)
+                pin_change_message(canonical_server, &pin, &document.root_key_id)
                     .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?,
             ));
         }
@@ -59,9 +62,13 @@ async fn resolve_automatic_descriptor_trust(
             i64::MIN,
             i64::MAX,
         )?;
-        return match keys.verify(&signed, now_unix_millis()?) {
+        return match keys.verify_set(
+            &document,
+            now_unix_millis()?,
+            preferred_iroh_region().as_deref(),
+        ) {
             Err(HostedError::InvalidDescriptorSignature) => Err(HostedError::DescriptorTrust(
-                pin_change_message(canonical_server, &pin, &signed.key_id)
+                pin_change_message(canonical_server, &pin, &document.root_key_id)
                     .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?,
             )),
             result => result,
@@ -88,9 +95,8 @@ async fn resolve_automatic_descriptor_trust(
         .map_err(|error| HostedError::InvalidDescriptor(error.to_string()))?;
     let mut keys = DescriptorKeyring::default();
     keys.insert(&document.key_id, public_key, i64::MIN, i64::MAX)?;
-    let signed =
-        fetch_signed_endpoint_descriptor(&descriptor_url(canonical_server), config).await?;
-    let verified = keys.verify(&signed, now_unix_millis()?)?;
+    let set = fetch_endpoint_descriptor_set(&descriptor_url(canonical_server), config).await?;
+    let verified = keys.verify_set(&set, now_unix_millis()?, preferred_iroh_region().as_deref())?;
     let outcome = insert_verified_pin(canonical_server, &document.key_id, &public_key)
         .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?;
     if outcome == PinInsertOutcome::Created {

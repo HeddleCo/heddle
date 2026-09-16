@@ -62,6 +62,7 @@ fn fixture_mint_method_with_facts(
                 &crate::creation::mint_root_signing_digest(&body).expect("attachment digest"),
             )),
             attachment: Some(body),
+            ..Default::default()
         }
     });
     let bytes = proof::encode(

@@ -265,7 +265,7 @@ pub(super) async fn roundtrip(
     tokio::time::timeout(std::time::Duration::from_secs(5),async {
         loop {
             let batch=observed.next_commit().await.expect("follow protocol").expect("retained Thread");
-            if batch.changes.iter().any(|change| matches!(change,thread_event::Payload::Review(value) if value.explanation=="exact comparison")) {break;}
+            if batch.changes.iter().any(|change| matches!(change,thread_event::Payload::Review(value) if value.decision.as_ref().is_some_and(|decision| decision.explanation=="exact comparison"))) {break;}
         }
     }).await.expect("post-commit review push");
     // Current field heads came from the same endpoint view and retain exact

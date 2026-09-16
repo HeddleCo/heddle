@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use api::heddle::api::v1alpha1::ProviderSource;
+use api::heddle::api::{v1alpha1::ProviderSource, v2alpha1::DescribeEndpointResponse};
 use config::ClientConfig;
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMode,
@@ -36,6 +36,7 @@ pub(super) struct HostedConnection {
 }
 
 impl HostedConnection {
+    #[allow(dead_code)] // used by connection_path_tests; v2 session connect uses weft-client
     pub(super) async fn connect_verified(
         descriptor: &VerifiedEndpointDescriptor,
         config: &ClientConfig,
@@ -53,6 +54,8 @@ impl HostedConnection {
     /// by the credential proof key (bearer + PoP + request proof), which
     /// is independent of the endpoint node id, so an ephemeral endpoint
     /// makes the same authenticated calls without the collision.
+    /// v2 session connect uses weft-client; this remains the HostedConnection path.
+    #[allow(dead_code)]
     pub(super) async fn connect_verified_outbound(
         descriptor: &VerifiedEndpointDescriptor,
         config: &ClientConfig,
@@ -118,6 +121,26 @@ impl HostedConnection {
     pub(super) async fn connect(endpoint: Endpoint, address: EndpointAddr) -> Result<Arc<Self>> {
         heddle_perf_contract::record_network_client_initialization();
         Self::connect_inner(endpoint, address, None).await
+    }
+
+    /// Wrap a connection already discovered by [`weft_client::HostedClient`].
+    pub(super) fn from_discovered(
+        endpoint: Endpoint,
+        connection: iroh::endpoint::Connection,
+        config: &ClientConfig,
+        description: DescribeEndpointResponse,
+    ) -> Arc<Self> {
+        let native_description = tokio::sync::OnceCell::new();
+        let _ = native_description.set(description);
+        let router = claim_router(endpoint.clone());
+        Arc::new(Self {
+            native_description,
+            router,
+            endpoint,
+            connection,
+            provider_transport: Some(ProviderWebSocketTransport::new(config.clone())),
+            provider_connections: Mutex::new(HashMap::new()),
+        })
     }
 
     async fn connect_inner(
@@ -206,9 +229,11 @@ impl HostedConnection {
 enum EndpointIdentity {
     /// The persisted device node id — the machine's single stable
     /// address, also served by the box network daemon.
+    #[allow(dead_code)] // used by connect_verified
     Device,
     /// A fresh per-process node id, for outbound-only connections that
     /// must not contend with the daemon for the device node id.
+    #[allow(dead_code)] // used by connect_verified_outbound
     Ephemeral,
 }
 

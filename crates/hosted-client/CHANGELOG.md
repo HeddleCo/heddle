@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Native hosted bootstrap consumes Weft's JSON `EndpointDescriptorSetDocument`
+  (`parse_endpoint_descriptor_set` + root-key `verify_set`) instead of decoding
+  `/.well-known/heddle/iroh-endpoint` as a protobuf `SignedEndpointDescriptor`.
+  Session connect uses in-tree `weft-client::HostedClient` (`Remote::discover`)
+  rather than opening a raw Iroh bidi and stuffing v1 frames.
+
 ### Fixed
 
 - Side-channel `heddle-pull-refs-v1` removed. Clone bootstrap refs are

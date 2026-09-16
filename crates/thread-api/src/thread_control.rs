@@ -253,6 +253,7 @@ impl PreparedControl {
                 id: id.to_string(),
             }),
             expires_at: None,
+            coverage: None,
         };
         if let Some(seconds) = value.expires_at_unix_seconds {
             decision.expires_at = Some(Default::default());

@@ -307,6 +307,7 @@ mod tests {
                 genesis: Some(signed),
                 creator_authority: vec![],
                 admission: None,
+                ..Default::default()
             }),
             source: Some(EndpointRef {
                 public_key: vec![8; 32],

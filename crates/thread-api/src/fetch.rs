@@ -429,7 +429,9 @@ impl Validation {
             fetch_server_frame::Body::Sidecar(_) => Err(Error::Invalid(
                 "sidecar facet was not explicitly negotiated",
             )),
-            fetch_server_frame::Body::ProviderPlan(_) => Err(Error::Invalid(
+            fetch_server_frame::Body::ProviderPlan(_)
+            | fetch_server_frame::Body::ProviderInline(_)
+            | fetch_server_frame::Body::ProviderOffer(_) => Err(Error::Invalid(
                 "provider transfer requires explicit client consent",
             )),
             fetch_server_frame::Body::Ready(_) => {

@@ -263,6 +263,7 @@ pub(super) async fn roundtrip(
         expected_version: created.version.clone(),
         name: "Renamed local".into(),
         settings: created.settings.clone(),
+        slug: None,
     };
     let revised = remote
         .api

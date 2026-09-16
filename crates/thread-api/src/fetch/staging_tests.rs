@@ -275,6 +275,7 @@ fn integrated_fixture(
             genesis: Some(source_record),
             creator_authority: vec![],
             admission: None,
+            ..Default::default()
         }],
     )
 }

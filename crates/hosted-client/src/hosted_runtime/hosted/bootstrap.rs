@@ -8,13 +8,15 @@ use std::{
 
 use api::{
     HOSTED_ALPN_V1,
+    descriptor_trust::{
+        EndpointDescriptorSetDocument, parse_endpoint_descriptor_set, trusted_live_entries,
+    },
     heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
     signing::endpoint_descriptor_bytes,
 };
 use config::ClientConfig;
 use crypto::Ed25519Signer;
 use iroh::{EndpointAddr, EndpointId, RelayUrl};
-use prost::Message;
 use reqwest::{
     Client, StatusCode,
     header::{CONTENT_TYPE, HOST, HeaderValue},
@@ -101,6 +103,44 @@ impl DescriptorKeyring {
         .map_err(|_| HostedError::InvalidDescriptorSignature)?;
         Ok(VerifiedEndpointDescriptor(descriptor.clone()))
     }
+
+    /// Verify a JSON endpoint-descriptor set against a trusted root key.
+    pub fn verify_set(
+        &self,
+        document: &EndpointDescriptorSetDocument,
+        now_unix_millis: i64,
+        preferred_region: Option<&str>,
+    ) -> Result<VerifiedEndpointDescriptor> {
+        let key = self
+            .keys
+            .get(&document.root_key_id)
+            .filter(|key| {
+                now_unix_millis >= key.not_before_unix_millis
+                    && now_unix_millis < key.not_after_unix_millis
+            })
+            .ok_or_else(|| {
+                HostedError::InvalidDescriptor("descriptor signing key is not trusted".to_string())
+            })?;
+        let (live, _rejects) = trusted_live_entries(document, &key.public_key, now_unix_millis);
+        let mut preferred = None;
+        let mut fallback = None;
+        for verified in live {
+            if validate_descriptor(&verified.endpoint_descriptor, now_unix_millis).is_err() {
+                continue;
+            }
+            let mapped = VerifiedEndpointDescriptor(verified.endpoint_descriptor);
+            if preferred_region.is_some_and(|region| verified.region == region) {
+                preferred = Some(mapped);
+                break;
+            }
+            if fallback.is_none() {
+                fallback = Some(mapped);
+            }
+        }
+        preferred
+            .or(fallback)
+            .ok_or(HostedError::InvalidDescriptorSignature)
+    }
 }
 
 /// Endpoint descriptor after signature, expiry, ALPN, and address validation.
@@ -163,14 +203,18 @@ pub async fn fetch_endpoint_descriptor(
     keys: &DescriptorKeyring,
     config: &ClientConfig,
 ) -> Result<VerifiedEndpointDescriptor> {
-    let signed = fetch_signed_endpoint_descriptor(url, config).await?;
-    keys.verify(&signed, now_unix_millis()?)
+    let document = fetch_endpoint_descriptor_set(url, config).await?;
+    keys.verify_set(
+        &document,
+        now_unix_millis()?,
+        preferred_iroh_region().as_deref(),
+    )
 }
 
-pub async fn fetch_signed_endpoint_descriptor(
+pub async fn fetch_endpoint_descriptor_set(
     url: &str,
     config: &ClientConfig,
-) -> Result<SignedEndpointDescriptor> {
+) -> Result<EndpointDescriptorSetDocument> {
     if !url.starts_with("https://") {
         return Err(HostedError::InvalidDescriptor(
             "endpoint descriptor URL must use HTTPS".to_string(),
@@ -191,8 +235,27 @@ pub async fn fetch_signed_endpoint_descriptor(
             response.status()
         )));
     }
+    let content_type = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if !content_type.is_some_and(|value| value.eq_ignore_ascii_case("application/json")) {
+        return Err(HostedError::InvalidDescriptor(
+            "endpoint descriptor response must use application/json".to_string(),
+        ));
+    }
     let body = bounded_response_body(response, MAX_DESCRIPTOR_BYTES, "endpoint descriptor").await?;
-    Ok(SignedEndpointDescriptor::decode(body.as_slice())?)
+    parse_endpoint_descriptor_set(&body).map_err(|error| {
+        HostedError::InvalidDescriptor(format!("decode Iroh endpoint descriptor set: {error}"))
+    })
+}
+
+pub(crate) fn preferred_iroh_region() -> Option<String> {
+    std::env::var("HEDDLE_REMOTE_IROH_REGION")
+        .ok()
+        .filter(|value| !value.is_empty())
 }
 
 pub async fn fetch_descriptor_key_document(

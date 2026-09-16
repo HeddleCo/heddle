@@ -104,6 +104,11 @@ pub fn mention(value: &EntityRef) -> Result<Mention, Error> {
                     "bookmarks are account-private; mention their Spool or Thread instead",
                 ));
             }
+            Entity::Passkey(_) | Entity::Principal(_) | Entity::Agent(_) => {
+                return Err(Error::Protocol(
+                    "identity mentions are not collaboration records",
+                ));
+            }
         },
     )
 }

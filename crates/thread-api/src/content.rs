@@ -54,6 +54,7 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
                 revision: Some(revision.clone()),
                 selections,
                 budget: Some(budget),
+                thread: None,
             })
             .await?;
         let mut blobs: Vec<_> = sources
