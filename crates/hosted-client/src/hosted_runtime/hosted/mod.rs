@@ -85,7 +85,7 @@ pub use spool_path::{
 pub(crate) use sync::PullBootstrapMetadata;
 pub use sync::{
     HostedRefEntry, PullBootstrapRefs, advertised_user_thread_id, decode_pull_bootstrap,
-    hosted_ref_from_api, persist_advertised_thread_identity,
+    encode_empty_pull_bootstrap, hosted_ref_from_api, persist_advertised_thread_identity,
     persist_advertised_thread_identity_with_live_fallback, pull_refs_from_ready,
     reject_legacy_pull_refs_fold,
 };

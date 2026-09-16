@@ -99,6 +99,24 @@ impl PullBootstrapMetadata {
     }
 }
 
+/// Inline source-only bootstrap. v2 Fetch does not fold discussions/context;
+/// pull/clone still require this header so they can materialize source.
+pub fn encode_empty_pull_bootstrap(state: StateId) -> Result<Vec<u8>, ProtocolError> {
+    let payload = rmp_serde::to_vec_named(&(
+        false,
+        Vec::<Discussion>::new(),
+        false,
+        Vec::<(ContextTarget, ContextBlob)>::new(),
+    ))
+    .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+    Ok(format!(
+        "{PULL_BOOTSTRAP_LINE_PREFIX}{}\t{}\n",
+        hex::encode(payload),
+        state.to_string_full()
+    )
+    .into_bytes())
+}
+
 pub fn decode_pull_bootstrap(
     checkpoint: &[u8],
 ) -> Result<Option<PullBootstrapMetadata>, ProtocolError> {
@@ -501,6 +519,19 @@ mod pull_bootstrap_tests {
     use wire::{AdvertisedRef, RefKind};
 
     use super::*;
+
+    #[test]
+    fn empty_source_bootstrap_round_trips() {
+        let state = StateId::from_bytes([3; 32]);
+        let checkpoint = encode_empty_pull_bootstrap(state).expect("encode");
+        let decoded = decode_pull_bootstrap(&checkpoint)
+            .expect("decode")
+            .expect("header present");
+        assert!(!decoded.discussions_from_pack);
+        assert!(!decoded.context_from_pack);
+        assert!(decoded.discussions.is_empty());
+        assert!(decoded.context.is_empty());
+    }
 
     #[test]
     fn bootstrap_decoder_accepts_structured_empty_metadata() {

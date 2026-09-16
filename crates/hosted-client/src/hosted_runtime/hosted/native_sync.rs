@@ -41,7 +41,7 @@ use super::{
     HostedClient, HostedRefEntry, PullBootstrapRefs, PullMaterialization,
     helpers::native_client_error,
     persist_advertised_thread_identity,
-    sync::{PullProfile, PushProfile},
+    sync::{PullProfile, PushProfile, encode_empty_pull_bootstrap},
 };
 
 const PUBLISH: &str = "heddle.api.v2alpha1.SyncService/PublishContent";
@@ -487,7 +487,7 @@ impl HostedClient {
                 .claim_proof_signer()
                 .ok_or(super::HostedError::SigningIdentityRequired)
                 .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-            record_hosted_capture(
+            admit_hosted_source_ancestry(
                 repo,
                 &replica,
                 local_state,
@@ -766,6 +766,9 @@ impl HostedClient {
         let final_state = staged
             .install(repo, now)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let seed = synthetic_initial_base().map_err(native_error)?;
+        repo.store().put_tree(&objects::object::Tree::new())?;
+        repo.store().put_state(&seed)?;
         let track = local_thread.unwrap_or(remote_thread);
         repo.set_thread_recorded(&ThreadName::new(track), &final_state)?;
         if let Ok(id) = overview_thread_id_from_ref(&reference) {
@@ -794,7 +797,7 @@ impl HostedClient {
             transport_mode: String::new(),
             resume_offset: 0,
             chunk_index: 0,
-            checkpoint: Vec::new(),
+            checkpoint: encode_empty_pull_bootstrap(final_state)?,
             is_complete: true,
         })
     }
@@ -895,6 +898,80 @@ fn overview_thread_id_from_ref(reference: &ThreadRef) -> Result<ContentHash, Pro
     Ok(ContentHash::from_bytes(bytes))
 }
 
+/// Flatten local source ancestry onto a hosted Thread as Captures, parents first.
+/// After `land`, both parents become Captures on this Thread so a Capture of the
+/// merge satisfies `validate_parents`. Do not mint LocalIntegration here: that
+/// receipt is bound to the local Thread id.
+#[allow(clippy::too_many_arguments)]
+fn admit_hosted_source_ancestry(
+    repo: &Repository,
+    replica: &ThreadReplica,
+    local_state: StateId,
+    spool: Uuid,
+    owner_id: Uuid,
+    creator_authority: &[u8],
+    signer: &crypto::Ed25519Signer,
+    agent_id: Option<String>,
+) -> Result<(), ProtocolError> {
+    let base = replica.genesis().map_err(replica_err)?.base;
+    let mut stack = vec![local_state];
+    let mut on_path = std::collections::BTreeSet::new();
+    let mut expanded = std::collections::BTreeSet::new();
+    let mut remaining = SOURCE_OBJECTS;
+    while let Some(state_id) = stack.last().copied() {
+        if state_id == base
+            || !replica
+                .source_operation_page(state_id, None, 1)
+                .map_err(replica_err)?
+                .is_empty()
+        {
+            stack.pop();
+            on_path.remove(&state_id);
+            continue;
+        }
+        if expanded.contains(&state_id) {
+            stack.pop();
+            on_path.remove(&state_id);
+            record_hosted_capture(
+                repo,
+                replica,
+                state_id,
+                spool,
+                owner_id,
+                creator_authority,
+                signer,
+                agent_id.clone(),
+            )?;
+            continue;
+        }
+        if !on_path.insert(state_id) {
+            return Err(ProtocolError::InvalidState(
+                "hosted source ancestry is cyclic".into(),
+            ));
+        }
+        if remaining == 0 {
+            return Err(ProtocolError::InvalidState(
+                "hosted source ancestry exceeds object budget".into(),
+            ));
+        }
+        remaining -= 1;
+        expanded.insert(state_id);
+        let state = repo
+            .store()
+            .get_state(&state_id)?
+            .ok_or_else(|| ProtocolError::ObjectNotFound(state_id.to_string_full()))?;
+        for parent in &state.parents {
+            if *parent != base && on_path.contains(parent) {
+                return Err(ProtocolError::InvalidState(
+                    "hosted source ancestry is cyclic".into(),
+                ));
+            }
+            stack.push(*parent);
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn record_hosted_capture(
     repo: &Repository,
@@ -959,5 +1036,130 @@ fn record_hosted_capture(
         other => Err(ProtocolError::InvalidState(format!(
             "hosted capture was not admitted: {other:?}"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crypto::{Ed25519Signer, Signer, thread_operation::SignedGenesis};
+    use objects::{
+        object::{
+            Attribution, Principal, State, StateId, Tree,
+            thread_replication::{
+                GenesisOwner, ThreadGenesis, hosted_import::synthetic_initial_base,
+            },
+        },
+        store::ObjectStore,
+    };
+    use repo::{Repository, thread_replication::ThreadReplica};
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn hosted_like_replica() -> (
+        tempfile::TempDir,
+        Repository,
+        ThreadReplica,
+        Ed25519Signer,
+        Uuid,
+        Uuid,
+        Vec<u8>,
+    ) {
+        let dir = tempfile::tempdir().expect("workspace");
+        let repo = Repository::init(dir.path()).expect("repo");
+        let signer = Ed25519Signer::from_seed(&[71; 32]).expect("signer");
+        let spool = Uuid::from_u128(1);
+        let owner = Uuid::from_u128(2);
+        let authority = vec![7; 32];
+        let base = synthetic_initial_base().expect("seed");
+        repo.store().put_tree(&Tree::new()).expect("empty tree");
+        repo.store().put_state(&base).expect("seed state");
+        let genesis = ThreadGenesis {
+            version: 1,
+            spool: spool.to_string(),
+            parent: None,
+            base: base.id(),
+            name: "main".into(),
+            intent: String::new(),
+            creator: signer.public_key().try_into().expect("key"),
+            owner: GenesisOwner::Account(owner),
+            nonce: vec![9; 16],
+        };
+        let replica = ThreadReplica::create_from_original_authority(
+            repo.heddle_dir(),
+            &SignedGenesis::sign(&genesis, &signer).expect("genesis"),
+            &authority,
+        )
+        .expect("hosted replica");
+        (dir, repo, replica, signer, spool, owner, authority)
+    }
+
+    fn snapshot(repo: &Repository, parents: Vec<StateId>, intent: &str) -> State {
+        let state = State::new_snapshot(
+            Tree::new().hash(),
+            parents,
+            Attribution::human(Principal::new("dev", "dev@example.test")),
+        )
+        .with_intent(intent);
+        repo.store().put_state(&state).expect("state");
+        state
+    }
+
+    #[test]
+    fn land_shaped_tip_requires_hosted_source_ancestry() {
+        let (_dir, repo, replica, signer, spool, owner, authority) = hosted_like_replica();
+        let base = replica.genesis().expect("genesis").base;
+        let main_tip = snapshot(&repo, vec![base], "main");
+        let feature_tip = snapshot(&repo, vec![main_tip.id()], "feature");
+        let merge = snapshot(&repo, vec![main_tip.id(), feature_tip.id()], "land");
+
+        let tip_only = record_hosted_capture(
+            &repo,
+            &replica,
+            merge.id(),
+            spool,
+            owner,
+            &authority,
+            &signer,
+            None,
+        )
+        .expect_err("merge capture without parents");
+        let tip_only = tip_only.to_string();
+        assert!(
+            tip_only.contains("Rejected")
+                && tip_only.contains("capture source ancestry differs from causal parents"),
+            "admission must surface, got {tip_only}"
+        );
+        assert!(
+            !tip_only.contains("prepared source did not settle"),
+            "opaque settle error: {tip_only}"
+        );
+        assert!(
+            replica
+                .source_operation_page(merge.id(), None, 1)
+                .expect("page")
+                .is_empty()
+        );
+
+        admit_hosted_source_ancestry(
+            &repo,
+            &replica,
+            merge.id(),
+            spool,
+            owner,
+            &authority,
+            &signer,
+            None,
+        )
+        .expect("ancestry");
+        for id in [main_tip.id(), feature_tip.id(), merge.id()] {
+            assert_eq!(
+                replica
+                    .source_operation_page(id, None, 1)
+                    .expect("admitted")
+                    .len(),
+                1
+            );
+        }
     }
 }

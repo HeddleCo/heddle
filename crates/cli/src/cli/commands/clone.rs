@@ -2146,7 +2146,14 @@ fn verify_hosted_clone(
             .map(|objects| objects.len())
             .map_err(anyhow::Error::new)
     } else {
-        wire::enumerate_state_closure_with_options(repo.store(), final_state, options)
+        // v2 Fetch installs one published revision. Parent States arrive as
+        // operations; their trees are not in the selected source pack, so a
+        // full-history walk reports missing objects after a correct Fetch.
+        let tip = wire::StateClosureOptions {
+            depth: Some(0),
+            exclude_states: Vec::new(),
+        };
+        wire::enumerate_state_closure_with_options(repo.store(), final_state, tip)
             .map(|objects| objects.len())
             .map_err(anyhow::Error::new)
     }

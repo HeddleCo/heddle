@@ -99,7 +99,9 @@ impl ThreadReplica {
             false,
         )?;
         if admission != Admission::Accepted {
-            return Err(Error::Invalid("prepared source did not settle".into()));
+            // Roll back the receive transaction. Callers report Pending/Rejected
+            // instead of an opaque "did not settle".
+            return Ok(admission);
         }
         self.record_source_possession_in(&tx, state.id())?;
         tx.commit()?;
