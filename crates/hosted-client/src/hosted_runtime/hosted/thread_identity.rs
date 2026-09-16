@@ -230,63 +230,6 @@ impl HostedClient {
         Ok(owner)
     }
 
-    /// Establish the native resource identity before any source materialization.
-    /// The local repository verifies and pins this original owner signature.
-    pub(super) async fn native_spool_genesis(
-        &self,
-        address: &str,
-    ) -> Result<contract::SignedSpoolOwnerGenesis, ProtocolError> {
-        let spool = self.resolve_spool_ref(address).await?;
-        let remote = self.native().await.map_err(native_error)?;
-        let mut observation = remote
-            .observe::<rpc::SpoolServiceObserveSpool>(
-                contract::ObserveSpoolRequest {
-                    spool: Some(spool.clone()),
-                    sections: vec![contract::SpoolSection::Overview as i32],
-                    observe: Some(contract::ObserveOptions {
-                        mode: contract::ObservationMode::Once as i32,
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                None,
-            )
-            .await
-            .map_err(native_error)?;
-        let batch = observation
-            .next_commit()
-            .await
-            .map_err(native_error)?
-            .ok_or_else(|| {
-                ProtocolError::InvalidState("spool observation ended without a checkpoint".into())
-            })?;
-        let mut genesis = None;
-        for change in batch.changes {
-            if let contract::spool_event::Payload::Spool(overview) = change {
-                if overview.r#ref.as_ref() != Some(&spool) || genesis.is_some() {
-                    return Err(ProtocolError::InvalidState(
-                        "spool observation identity is inconsistent".into(),
-                    ));
-                }
-                genesis = overview.owner_genesis;
-            }
-        }
-        let genesis = genesis.ok_or_else(|| {
-            ProtocolError::InvalidState("spool observation has no owner genesis".into())
-        })?;
-        let id = uuid::Uuid::parse_str(&spool.id).map_err(native_error)?;
-        if genesis
-            .genesis
-            .as_ref()
-            .is_none_or(|body| body.spool_uuid != id.as_bytes())
-        {
-            return Err(ProtocolError::InvalidState(
-                "owner genesis names another spool".into(),
-            ));
-        }
-        Ok(genesis)
-    }
-
     pub async fn require_thread_id(
         &self,
         spool_address: &str,

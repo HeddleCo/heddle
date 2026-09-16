@@ -115,6 +115,7 @@ pub(super) fn project_visible_tree(
     repository.store().put_tree(&projection)?;
     Ok(projection)
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) fn diff(
     repository: &repo::Repository,
     session: &Session,
@@ -286,6 +287,7 @@ pub(super) fn diff(
         Some(page),
     )))
 }
+#[allow(clippy::too_many_arguments)]
 pub(super) fn provenance(
     repository: &repo::Repository,
     session: &Session,

@@ -310,16 +310,6 @@ impl CallContextFactory {
         self.base(method, client_operation_id.into())
     }
 
-    pub(super) fn long_lived_streaming(
-        &self,
-        method: &str,
-        client_operation_id: impl Into<String>,
-    ) -> Result<CallContext> {
-        let mut context = self.streaming(method, client_operation_id)?;
-        context.deadline = None;
-        Ok(context)
-    }
-
     pub fn stream_opening_proof(
         &self,
         method: &str,
@@ -364,33 +354,6 @@ impl CallContextFactory {
             nonce: Vec::new(),
             signature: signer.sign(&canonical)?,
         })
-    }
-
-    pub(crate) fn provider_plan_signature(
-        &self,
-        stream_id: &str,
-        repository: &str,
-        client_endpoint_id: &str,
-        plan_nonce: &[u8],
-        grant_batch_digest: &[u8],
-    ) -> Result<Vec<u8>> {
-        let signer = self
-            .signer
-            .as_ref()
-            .ok_or(HostedError::SigningIdentityRequired)?;
-        let identity = self
-            .signing_identity
-            .as_deref()
-            .ok_or(HostedError::SigningIdentityRequired)?;
-        let canonical = signing::provider_plan_bytes(
-            identity,
-            stream_id,
-            repository,
-            client_endpoint_id,
-            plan_nonce,
-            grant_batch_digest,
-        );
-        Ok(signer.sign(&canonical)?)
     }
 
     fn base(&self, method: &str, client_operation_id: String) -> Result<CallContext> {
@@ -730,17 +693,6 @@ mod tests {
         );
         Ed25519Signer::verify_with_public_key(&canonical, signer.public_key(), &proof.signature)
             .unwrap();
-    }
-
-    #[test]
-    fn long_lived_streaming_context_has_no_rpc_deadline() {
-        let context = CallContextFactory::default()
-            .long_lived_streaming(
-                "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration",
-                "",
-            )
-            .unwrap();
-        assert!(context.deadline.is_none());
     }
 
     #[test]

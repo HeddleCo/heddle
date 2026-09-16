@@ -1,12 +1,4 @@
-use api::heddle::api::v1alpha1::{
-    BeginWebAuthnAuthenticationRequest, BootstrapOwnerRootRequest, BootstrapOwnerRootResponse,
-    CreateAgentAccountRequest, CreateAgentAccountResponse, CreateInvitationRequest,
-    CreateServiceAccountRequest, GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse,
-    GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
-    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListSupportAccessGrantsRequest,
-    MonorepoNode, ResolveMonorepoRequest, RevokeSupportAccessRequest, ServiceAccountResponse,
-    SupportAccessGrant, grant_target_ref::Target as GrantTargetKind,
-};
+use api::heddle::api::v1alpha1::MonorepoNode;
 use wire::ProtocolError;
 
 use super::{HostedClient, helpers::hosted_to_protocol_error, operation_id::ClientOperationId};
@@ -959,50 +951,6 @@ impl HostedClient {
     }
 }
 
-/// Build a `GrantTargetRef` oneof from CLI-style optional path args.
-#[cfg(test)]
-/// Caller layer enforces that at most one of `namespace_path` /
-/// `repo_path` is set; this helper is just the wire-format adapter.
-fn build_target_ref(
-    namespace_path: Option<&str>,
-    repo_path: Option<&str>,
-) -> Result<Option<GrantTargetRef>, ProtocolError> {
-    match (
-        namespace_path.filter(|s| !s.is_empty()),
-        repo_path.filter(|s| !s.is_empty()),
-    ) {
-        (Some(ns), None) => Ok(Some(GrantTargetRef {
-            target: Some(GrantTargetKind::NamespacePath(ns.to_string())),
-        })),
-        (None, Some(rp)) => Ok(Some(GrantTargetRef {
-            target: Some(GrantTargetKind::RepoPath(
-                super::helpers::repository_ref(rp).expect("non-empty repository path"),
-            )),
-        })),
-        _ => Err(ProtocolError::InvalidState(
-            "exactly one of namespace_path or repo_path must be set".into(),
-        )),
-    }
-}
-
-/// Parse a CLI-supplied role name into the proto `HostedRole` enum.
-#[cfg(test)]
-fn parse_hosted_role_arg(
-    value: &str,
-) -> Result<api::heddle::api::v1alpha1::HostedRole, ProtocolError> {
-    use api::heddle::api::v1alpha1::HostedRole;
-    match value.trim().to_ascii_lowercase().as_str() {
-        "reader" => Ok(HostedRole::Reader),
-        "developer" => Ok(HostedRole::Developer),
-        "maintainer" => Ok(HostedRole::Maintainer),
-        "admin" => Ok(HostedRole::Admin),
-        "owner" => Ok(HostedRole::Owner),
-        other => Err(ProtocolError::InvalidState(format!(
-            "invalid role '{other}': expected reader|developer|maintainer|admin|owner"
-        ))),
-    }
-}
-
 fn native_spool_info(
     spool: api::heddle::api::v2alpha1::SpoolOverview,
 ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
@@ -1084,10 +1032,6 @@ fn native_protocol_error(error: impl std::fmt::Display) -> ProtocolError {
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsString, sync::MutexGuard};
-
-    use api::heddle::api::v1alpha1::{HostedRole, grant_target_ref::Target};
-
-    use super::*;
 
     struct IsolatedHeddleHome {
         _guard: MutexGuard<'static, ()>,
@@ -1372,41 +1316,6 @@ mod tests {
             assert_eq!(deletion.expected_version, vec![7; 32]);
             assert!(!deletion.client_operation_id.is_empty());
         }
-    }
-
-    #[test]
-    fn parse_hosted_role_arg_accepts_every_role_and_rejects_unknown() {
-        assert_eq!(parse_hosted_role_arg("reader").unwrap(), HostedRole::Reader);
-        assert_eq!(
-            parse_hosted_role_arg(" Developer ").unwrap(),
-            HostedRole::Developer
-        );
-        assert_eq!(
-            parse_hosted_role_arg("MAINTAINER").unwrap(),
-            HostedRole::Maintainer
-        );
-        assert_eq!(parse_hosted_role_arg("admin").unwrap(), HostedRole::Admin);
-        assert_eq!(parse_hosted_role_arg("owner").unwrap(), HostedRole::Owner);
-        let err = parse_hosted_role_arg("root").unwrap_err();
-        assert!(err.to_string().contains("invalid role"));
-    }
-
-    #[test]
-    fn build_target_ref_requires_exactly_one_path() {
-        let ns = build_target_ref(Some("acme"), None).unwrap().unwrap();
-        assert!(matches!(ns.target, Some(Target::NamespacePath(p)) if p == "acme"));
-
-        let repo = build_target_ref(None, Some("acme/widgets"))
-            .unwrap()
-            .unwrap();
-        assert!(matches!(repo.target, Some(Target::RepoPath(_))));
-
-        // Exactly one required: neither, both, or empty-only → error.
-        assert!(build_target_ref(None, None).is_err());
-        assert!(build_target_ref(Some("acme"), Some("acme/widgets")).is_err());
-        assert!(build_target_ref(Some(""), None).is_err());
-        assert!(build_target_ref(None, Some("")).is_err());
-        assert!(build_target_ref(Some(""), Some("")).is_err());
     }
 
     #[tokio::test]

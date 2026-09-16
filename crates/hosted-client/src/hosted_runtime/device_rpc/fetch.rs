@@ -80,7 +80,7 @@ impl DeviceRpc {
         &self,
         descriptor: &'static api::v2::MethodDescriptor,
         context: &CallContext,
-        mut writer: &mut transport::Writer,
+        writer: &mut transport::Writer,
         reader: &mut transport::Reader,
         budget: &mut super::super::hosted::claim_protocol::CallBudget,
     ) -> Result<()> {
@@ -166,7 +166,7 @@ impl DeviceRpc {
         send_frame(
             &self.home,
             &session,
-            &mut writer,
+            writer,
             fetch_server_frame::Body::Ready(ready),
             &mut charged,
             &mut changes,
@@ -177,7 +177,7 @@ impl DeviceRpc {
             send_frame(
                 &self.home,
                 &session,
-                &mut writer,
+                writer,
                 fetch_server_frame::Body::ThreadGenesis(record),
                 &mut charged,
                 &mut changes,
@@ -199,7 +199,7 @@ impl DeviceRpc {
             send_frame(
                 &self.home,
                 &session,
-                &mut writer,
+                writer,
                 fetch_server_frame::Body::Operations(ReplicationOperations {
                     boundary_acceptances: thread_api::boundary_acceptance::authority_evidence(
                         stored.authority_admission.as_ref(),
@@ -248,7 +248,7 @@ impl DeviceRpc {
                 send_frame(
                     &self.home,
                     &session,
-                    &mut writer,
+                    writer,
                     fetch_server_frame::Body::Pack(chunk),
                     &mut charged,
                     &mut changes,
@@ -262,7 +262,7 @@ impl DeviceRpc {
         send_frame(
             &self.home,
             &session,
-            &mut writer,
+            writer,
             fetch_server_frame::Body::Complete(FetchComplete {
                 revision: Some(RevisionRef {
                     spool: Some(SpoolRef {

@@ -69,24 +69,6 @@ impl ProviderWebSocketTransport {
         }
     }
 
-    pub(super) fn register_source(
-        &self,
-        provider_id: &str,
-        endpoint_id: &str,
-        direct_url: &str,
-        opaque_ticket: &str,
-    ) -> Result<EndpointAddr> {
-        validate_source(provider_id, direct_url, opaque_ticket)?;
-        let endpoint_id: EndpointId = endpoint_id.parse().map_err(|error| {
-            HostedError::InvalidDescriptor(format!("provider endpoint id: {error}"))
-        })?;
-        let remote = self.register_websocket(direct_url)?;
-        Ok(EndpointAddr::from_parts(
-            endpoint_id,
-            [TransportAddr::Custom(remote)],
-        ))
-    }
-
     /// Register only transport hints for one cryptographic v2 provider. The
     /// subsequent Iroh handshake and DescribeEndpoint response still have to
     /// prove this exact endpoint identity.
@@ -441,39 +423,6 @@ async fn run_lane(
     }
 }
 
-fn validate_source(provider_id: &str, direct_url: &str, opaque_ticket: &str) -> Result<()> {
-    if provider_id.is_empty() || opaque_ticket.is_empty() {
-        return Err(HostedError::InvalidDescriptor(
-            "provider source identity is empty".to_string(),
-        ));
-    }
-    let url = validate_websocket_route(direct_url)?;
-    if url.path() != "/direct" {
-        return Err(HostedError::InvalidDescriptor(
-            "provider direct URL is not a bare authenticated WSS route".to_string(),
-        ));
-    }
-    let mut provider_matches = false;
-    let mut ticket_matches = false;
-    for (name, value) in url.query_pairs() {
-        match name.as_ref() {
-            "provider" if !provider_matches && value == provider_id => provider_matches = true,
-            "ticket" if !ticket_matches && value == opaque_ticket => ticket_matches = true,
-            _ => {
-                return Err(HostedError::InvalidDescriptor(
-                    "provider direct URL has ambiguous query data".to_string(),
-                ));
-            }
-        }
-    }
-    if !provider_matches || !ticket_matches {
-        return Err(HostedError::InvalidDescriptor(
-            "provider direct URL does not match its source".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 fn validate_websocket_route(value: &str) -> Result<reqwest::Url> {
     let url = reqwest::Url::parse(value).map_err(|error| {
         HostedError::InvalidDescriptor(format!("provider WebSocket URL: {error}"))
@@ -509,25 +458,18 @@ mod tests {
     use iroh::endpoint::transports::CustomTransport as _;
 
     use super::{
-        ProviderWebSocketTransport, WEBSOCKET_TRANSPORT_ID, fresh_handle, validate_source,
+        ProviderWebSocketTransport, WEBSOCKET_TRANSPORT_ID, fresh_handle, validate_websocket_route,
     };
 
     #[test]
-    fn provider_url_requires_exact_provider_and_ticket_query() {
-        validate_source(
-            "provider-a",
-            "wss://iroh.example/direct?provider=provider-a&ticket=opaque",
-            "opaque",
-        )
-        .unwrap();
+    fn provider_websocket_url_requires_authenticated_wss() {
+        validate_websocket_route("wss://iroh.example/direct?ticket=opaque").unwrap();
 
         for invalid in [
-            "ws://iroh.example/direct?provider=provider-a&ticket=opaque",
-            "wss://iroh.example/other?provider=provider-a&ticket=opaque",
-            "wss://iroh.example/direct?provider=provider-a&ticket=opaque&ticket=other",
-            "wss://attacker@iroh.example/direct?provider=provider-a&ticket=opaque",
+            "ws://iroh.example/direct?ticket=opaque",
+            "wss://attacker@iroh.example/direct?ticket=opaque",
         ] {
-            assert!(validate_source("provider-a", invalid, "opaque").is_err());
+            assert!(validate_websocket_route(invalid).is_err());
         }
     }
 
@@ -535,13 +477,20 @@ mod tests {
     async fn provider_transport_binds_once_and_rejects_unregistered_routes() {
         let transport = ProviderWebSocketTransport::new(ClientConfig::default());
         assert!(format!("{transport:?}").contains("registered_provider_lanes: 0"));
+        let provider = EndpointRef {
+            public_key: vec![0; 8],
+            kind: EndpointKind::Provider as i32,
+        };
         assert!(
             transport
-                .register_source(
-                    "provider-a",
-                    "not-an-endpoint-id",
-                    "wss://iroh.example/direct?provider=provider-a&ticket=opaque",
-                    "opaque",
+                .register_routes(
+                    &provider,
+                    &[ProviderDialRoute {
+                        provider: Some(provider.clone()),
+                        address: Some(provider_dial_route::Address::WebsocketUrl(
+                            "wss://iroh.example/direct?ticket=opaque".to_string(),
+                        )),
+                    }],
                 )
                 .is_err()
         );
@@ -569,12 +518,19 @@ mod tests {
         ));
 
         let endpoint_id = iroh_base::SecretKey::generate().public();
+        let provider = EndpointRef {
+            public_key: endpoint_id.as_bytes().to_vec(),
+            kind: EndpointKind::Provider as i32,
+        };
         transport
-            .register_source(
-                "provider-a",
-                &endpoint_id.to_string(),
-                "wss://iroh.example/direct?provider=provider-a&ticket=opaque",
-                "opaque",
+            .register_routes(
+                &provider,
+                &[ProviderDialRoute {
+                    provider: Some(provider.clone()),
+                    address: Some(provider_dial_route::Address::WebsocketUrl(
+                        "wss://iroh.example/direct?ticket=opaque".to_string(),
+                    )),
+                }],
             )
             .unwrap();
         assert!(format!("{transport:?}").contains("registered_provider_lanes: 1"));

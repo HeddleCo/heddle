@@ -282,16 +282,16 @@ impl DeviceRpc {
                     let mut record = operation
                         .context_revision()?
                         .context("context candidate missing context")?;
-                    if let Some(discussion) = record.extracted_from {
-                        if !super::auth::discussion_visible(
+                    if let Some(discussion) = record.extracted_from
+                        && !super::auth::discussion_visible(
                             &repository,
                             &replica,
                             uuid::Uuid::parse_str(&session.principal)?,
                             session.agent_id.as_deref(),
                             discussion,
-                        )? {
-                            continue;
-                        }
+                        )?
+                    {
+                        continue;
                     }
                     if !selected(&record.id.to_string(), true) {
                         continue;
@@ -353,16 +353,16 @@ impl DeviceRpc {
                 }
                 3 => {
                     if let Some(mut context) = operation.context_revision()? {
-                        if let Some(discussion) = context.extracted_from {
-                            if !super::auth::discussion_visible(
+                        if let Some(discussion) = context.extracted_from
+                            && !super::auth::discussion_visible(
                                 &repository,
                                 &replica,
                                 uuid::Uuid::parse_str(&session.principal)?,
                                 session.agent_id.as_deref(),
                                 discussion,
-                            )? {
-                                continue;
-                            }
+                            )?
+                        {
+                            continue;
                         }
                         if !selected(&context.id.to_string(), true) {
                             continue;
@@ -566,10 +566,10 @@ fn collect_targets(
     out: &mut Vec<objects::object::source_target::SourceTargetReference>,
 ) {
     use objects::object::{AnnotationTag, CollaborationAnchor};
-    if let CollaborationAnchor::Source { source } = anchor {
-        if let Some(target) = &source.target {
-            out.push(target.clone());
-        }
+    if let CollaborationAnchor::Source { source } = anchor
+        && let Some(target) = &source.target
+    {
+        out.push(target.clone());
     }
     for tag in tags {
         match tag {

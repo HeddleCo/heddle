@@ -177,13 +177,13 @@ impl DeviceRpc {
             ensure!(matches!(mode, search_request::Mode::Unspecified | search_request::Mode::Lexical), "device supports lexical Search only");
             let selection = SearchSelection::parse(&request)?;
             let mut spools = selection.spools.clone();
-            if spools.is_empty() {
-                if let Some(catalog) = repo::device_catalog::store::Catalog::read(&self.home)? {
-                    for registered in catalog.registrations()? {
-                        if session.facts(Some(&registered.capability_path)).is_ok() {
-                            ensure!(spools.len() < 64, "authorized local Search discovery exceeds 64 Spools; select explicit Spools");
-                            spools.insert(registered.id);
-                        }
+            if spools.is_empty()
+                && let Some(catalog) = repo::device_catalog::store::Catalog::read(&self.home)?
+            {
+                for registered in catalog.registrations()? {
+                    if session.facts(Some(&registered.capability_path)).is_ok() {
+                        ensure!(spools.len() < 64, "authorized local Search discovery exceeds 64 Spools; select explicit Spools");
+                        spools.insert(registered.id);
                     }
                 }
             }
@@ -340,7 +340,9 @@ impl DeviceRpc {
                                     return Ok(());
                                 }
                                 let key = (spool.id, candidate.thread, candidate.revision);
-                                if !source_projections.contains_key(&key) {
+                                if let std::collections::btree_map::Entry::Vacant(e) =
+                                    source_projections.entry(key)
+                                {
                                     let admission = repo::thread_replication::ThreadReplica::open(
                                         &spool.heddle_dir, candidate.thread,
                                     ).ok().and_then(|replica| {
@@ -356,14 +358,16 @@ impl DeviceRpc {
                                     }
                                     match admission {
                                         Some(super::auth::SourceContentAdmission::Visible(proof)) => {
-                                            source_projections.insert(key, Some(proof));
+                                            e.insert(Some(proof));
                                         }
                                         Some(super::auth::SourceContentAdmission::Unavailable) => {
                                             content_ready = false;
                                             symbols_ready = false;
-                                            source_projections.insert(key, None);
+                                            e.insert(None);
                                         }
-                                        _ => { source_projections.insert(key, None); }
+                                        _ => {
+                                            e.insert(None);
+                                        }
                                     }
                                 }
                                 let Some(redactions) = source_projections.get(&key).and_then(Option::as_ref) else { return Ok(()); };
@@ -489,8 +493,10 @@ impl DeviceRpc {
                             if hit.kind == 2 {
                                 let (signed, _) = replica.operation(&hit.operation)?.context("indexed context operation absent")?;
                                 let mut context = signed.verify()?.context_revision()?.context("indexed context revision absent")?;
-                                if let Some(discussion) = context.extracted_from {
-                                    if !super::auth::discussion_visible(&repository, &replica, principal, facts.delegation_agent_id.as_deref(), discussion)? { continue; }
+                                if let Some(discussion) = context.extracted_from
+                                    && !super::auth::discussion_visible(&repository, &replica, principal, facts.delegation_agent_id.as_deref(), discussion)?
+                                {
+                                    continue;
                                 }
                                 if selection.annotations.as_ref().is_some_and(|query| !query.matches(&context.tags)) { continue; }
                                 let scope = objects::object::CollaborationScope { spool: spool.id, thread: Some(hit.thread) };
@@ -499,12 +505,14 @@ impl DeviceRpc {
                             }
                             let revision_hit = if let Some(revision) = hit.revision {
                                 let key = (spool.id, hit.thread, revision);
-                                if !source_projections.contains_key(&key) {
+                                if let std::collections::btree_map::Entry::Vacant(e) =
+                                    source_projections.entry(key)
+                                {
                                     let proof = super::auth::source_content_visibility(
                                         &repository, &replica, principal,
                                         facts.delegation_agent_id.as_deref(), revision,
                                     )?;
-                                    source_projections.insert(key, proof);
+                                    e.insert(proof);
                                 }
                                 let Some(redactions) = source_projections.get(&key).and_then(Option::as_ref) else { continue; };
                                 if matches!(hit.kind, 3 | 4) {
@@ -558,7 +566,7 @@ impl DeviceRpc {
                                     }),
                                     summary: hit.snippet,
                                     score: -hit.score,
-                                    domain: i32::from(hit.kind) + 1,
+                                    domain: hit.kind + 1,
                                     thread: Some(ThreadRef {
                                         spool: Some(SpoolRef { id: spool.id.to_string() }),
                                         id: Some(ThreadId { value: hit.thread.as_bytes().to_vec() }),
@@ -574,11 +582,9 @@ impl DeviceRpc {
                                             spool: Some(SpoolRef { id: spool.id.to_string() }),
                                             id: Some(ThreadId { value: hit.thread.as_bytes().to_vec() }),
                                         }),
-                                        ..Default::default()
                                     }),
                                     match_kind: if hit.kind == 5 { SearchMatchKind::HashExact as i32 } else if request.text.trim().is_empty() { SearchMatchKind::Structured as i32 } else { SearchMatchKind::Fulltext as i32 },
                                     symbol_name: (hit.kind == 4).then_some(hit.symbol_name),
-                                    ..Default::default()
                                 })),
                             });
                             visible += 1;

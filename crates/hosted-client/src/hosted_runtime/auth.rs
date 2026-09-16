@@ -1358,8 +1358,13 @@ async fn create_service_token_connected(
         bail!("issued service credential does not match the requested child, class or lifetime");
     }
     let token = verify_issued_service_biscuit(
-        &parent_raw, &issued.biscuit, &root_key, &child_key, expiry,
-        &scope, &delegation_id,
+        &parent_raw,
+        &issued.biscuit,
+        &root_key,
+        &child_key,
+        expiry,
+        &scope,
+        &delegation_id,
     )?;
     let subject = crate::hosted_runtime::device_flow::authenticated_subject(&token)
         .context("verifying issued service credential subject")?;
@@ -1537,6 +1542,7 @@ impl PreparedServiceToken {
         self.store(path)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check_binding(
         &self,
         server: &str,
@@ -1586,7 +1592,10 @@ fn verify_issued_service_biscuit(
     let boundary = chrono::DateTime::from_timestamp(expiry, 0)
         .context("issued service credential expiry outside supported range")?;
     heddleco_capability_verifier::service_scope::verify_service_child_ceiling(
-        &issued, scope, delegation_id, boundary,
+        &issued,
+        scope,
+        delegation_id,
+        boundary,
     )
     .context("verifying signed service scope ceiling")?;
     let parent_token = base64::engine::general_purpose::URL_SAFE.encode(parent_raw);
@@ -2141,24 +2150,53 @@ mod tests {
         let valid_raw = base64::engine::general_purpose::URL_SAFE
             .decode(&valid)
             .expect("child bytes");
-        verify_issued_service_biscuit(&parent_raw, &valid_raw, &root_key, &child_key, expiry, "", "test")
-            .expect("signed exact child accepted");
+        verify_issued_service_biscuit(
+            &parent_raw,
+            &valid_raw,
+            &root_key,
+            &child_key,
+            expiry,
+            "",
+            "test",
+        )
+        .expect("signed exact child accepted");
         let broadened = verify_issued_service_biscuit(
-            &parent_raw, &valid_raw, &root_key, &child_key, expiry, "thread:write", "test",
-        ).err().expect("time-only child must not masquerade as requested Thread scope");
+            &parent_raw,
+            &valid_raw,
+            &root_key,
+            &child_key,
+            expiry,
+            "thread:write",
+            "test",
+        )
+        .err()
+        .expect("time-only child must not masquerade as requested Thread scope");
         assert!(broadened.to_string().contains("scope ceiling"));
         let mut scoped = heddleco_capability_verifier::service_scope::service_attenuation(
-            "thread:write", "test",
+            "thread:write",
+            "test",
             chrono::DateTime::from_timestamp(expiry, 0).expect("expiry"),
-        ).expect("canonical scope").block().expect("scope block");
+        )
+        .expect("canonical scope")
+        .block()
+        .expect("scope block");
         scoped.facts.retain(|fact| fact.predicate.name != "agent");
-        let scoped_token = biscuit_verifier::key_delegation::append(&parent, child, transfer, scoped)
-            .expect("scoped child");
-        let scoped_raw = base64::engine::general_purpose::URL_SAFE.decode(&scoped_token)
+        let scoped_token =
+            biscuit_verifier::key_delegation::append(&parent, child, transfer, scoped)
+                .expect("scoped child");
+        let scoped_raw = base64::engine::general_purpose::URL_SAFE
+            .decode(&scoped_token)
             .expect("scoped bytes");
         verify_issued_service_biscuit(
-            &parent_raw, &scoped_raw, &root_key, &child_key, expiry, "thread:write", "test",
-        ).expect("signed exact Thread scope accepted");
+            &parent_raw,
+            &scoped_raw,
+            &root_key,
+            &child_key,
+            expiry,
+            "thread:write",
+            "test",
+        )
+        .expect("signed exact Thread scope accepted");
         let wrong_child = Ed25519Signer::generate().expect("different child");
         let wrong_child_error = verify_issued_service_biscuit(
             &parent_raw,
@@ -2241,9 +2279,16 @@ mod tests {
         let sibling_raw = base64::engine::general_purpose::URL_SAFE
             .decode(&sibling)
             .expect("sibling bytes");
-        let sibling_error =
-            verify_issued_service_biscuit(&parent_raw, &sibling_raw, &root_key, &child_key, expiry, "", "test")
-                .expect_err("sibling root token must fail");
+        let sibling_error = verify_issued_service_biscuit(
+            &parent_raw,
+            &sibling_raw,
+            &root_key,
+            &child_key,
+            expiry,
+            "",
+            "test",
+        )
+        .expect_err("sibling root token must fail");
         assert!(sibling_error.to_string().contains("discarded parent"));
     }
 

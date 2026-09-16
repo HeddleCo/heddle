@@ -11,7 +11,7 @@ use api::heddle::api::{
     v2alpha1::{
         self as contract, EndpointKind, EndpointRef, FetchOpen, ObservationMode,
         ObserveIdentityRequest, ObserveOptions, ObserveThreadsRequest, RevisionRef, SpoolRef,
-        StartThreadRequest, ThreadId, ThreadOverview, ThreadQuery, ThreadRef, TransferSelection,
+        StartThreadRequest, ThreadOverview, ThreadQuery, ThreadRef, TransferSelection,
         identity_event, revision_ref, thread_list_event, thread_query,
     },
 };
@@ -895,6 +895,7 @@ fn overview_thread_id_from_ref(reference: &ThreadRef) -> Result<ContentHash, Pro
     Ok(ContentHash::from_bytes(bytes))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn record_hosted_capture(
     repo: &Repository,
     replica: &ThreadReplica,

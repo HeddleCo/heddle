@@ -110,27 +110,17 @@ pub struct VerifiedEndpointDescriptor(EndpointDescriptor);
 
 impl VerifiedEndpointDescriptor {
     pub fn endpoint_addr(&self) -> Result<EndpointAddr> {
-        self.endpoint_addr_with_relays(true)
-    }
-
-    pub(super) fn direct_endpoint_addr(&self) -> Result<EndpointAddr> {
-        self.endpoint_addr_with_relays(false)
-    }
-
-    fn endpoint_addr_with_relays(&self, include_relays: bool) -> Result<EndpointAddr> {
         let endpoint_id: EndpointId = self
             .0
             .endpoint_id
             .parse()
             .map_err(|error| HostedError::InvalidDescriptor(format!("endpoint id: {error}")))?;
         let mut address = EndpointAddr::new(endpoint_id);
-        if include_relays {
-            for relay in &self.0.relay_urls {
-                let relay: RelayUrl = relay.parse().map_err(|error| {
-                    HostedError::InvalidDescriptor(format!("relay URL: {error}"))
-                })?;
-                address = address.with_relay_url(relay);
-            }
+        for relay in &self.0.relay_urls {
+            let relay: RelayUrl = relay
+                .parse()
+                .map_err(|error| HostedError::InvalidDescriptor(format!("relay URL: {error}")))?;
+            address = address.with_relay_url(relay);
         }
         for direct in &self.0.direct_addresses {
             let direct: SocketAddr = direct.parse().map_err(|error| {

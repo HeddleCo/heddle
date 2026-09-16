@@ -26,7 +26,6 @@ mod native_sync;
 #[cfg(test)]
 mod native_transport_tests;
 pub(crate) mod operation_id;
-mod provider_pull;
 mod provider_transport;
 mod resolver;
 mod session;
@@ -42,7 +41,6 @@ pub mod test_server;
 mod thread_identity;
 mod thread_review;
 pub use thread_review::ReviewSnapshot;
-mod thread_metadata;
 mod user;
 
 #[cfg(test)]
@@ -157,12 +155,6 @@ pub enum PullMaterialization {
     Lazy,
 }
 
-impl PullMaterialization {
-    pub(crate) fn allows_partial_fetch(self) -> bool {
-        matches!(self, Self::Lazy)
-    }
-}
-
 /// Quiet embeddable Iroh Adapter for one terminating Weft application endpoint.
 ///
 /// Domain operations return data and emit structured observations through
@@ -171,7 +163,6 @@ impl PullMaterialization {
 pub struct HostedClient {
     connection: Arc<HostedConnection>,
     context: CallContextFactory,
-    transport: helpers::HostedTransportPolicy,
     on_human_signature: Option<HumanSignatureCallback>,
     warnings: Arc<dyn WarningSink>,
     server_key: Option<String>,
@@ -183,7 +174,6 @@ impl std::fmt::Debug for HostedClient {
             .debug_struct("HostedClient")
             .field("connection", &self.connection)
             .field("context", &self.context)
-            .field("transport", &self.transport)
             .field(
                 "has_human_signature_callback",
                 &self.on_human_signature.is_some(),
@@ -299,7 +289,6 @@ impl HostedClient {
                 description,
             ),
             context,
-            transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
@@ -311,7 +300,6 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context: CallContextFactory::default(),
-            transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: None,
@@ -327,7 +315,6 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context,
-            transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
@@ -342,7 +329,6 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context,
-            transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: None,
@@ -531,19 +517,6 @@ impl HostedClient {
         Response: Message + Default,
     {
         let context = self.context.streaming(method, client_operation_id)?;
-        call::server_stream(self.connection.clone(), method, &context, request).await
-    }
-
-    pub(super) async fn call_long_lived_server_stream<Request, Response>(
-        &self,
-        method: &str,
-        request: &Request,
-    ) -> Result<ServerStream<Response>>
-    where
-        Request: Message,
-        Response: Message + Default,
-    {
-        let context = self.context.long_lived_streaming(method, "")?;
         call::server_stream(self.connection.clone(), method, &context, request).await
     }
 

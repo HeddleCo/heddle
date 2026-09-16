@@ -700,7 +700,7 @@ impl DeviceRpc {
         if let Some(parent) = view.genesis.parent {
             let parent_replica = ThreadReplica::open(repository.heddle_dir(), parent)?;
             if parent_replica.genesis()?.spool == view.genesis.spool
-                && super::auth::thread_visible(&repository, &parent_replica, principal, agent)?
+                && super::auth::thread_visible(repository, &parent_replica, principal, agent)?
             {
                 overview.relationships.push(ThreadRelationship {
                     thread: Some(ThreadRef {
