@@ -18,7 +18,6 @@ mod error;
 pub(crate) mod helpers;
 mod human;
 mod hydration;
-mod methods;
 mod native_hydration;
 #[cfg(test)]
 mod native_hydration_tests;
@@ -77,7 +76,6 @@ pub use error::HostedError;
 pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 pub use hydration::register_hosted_factory;
 use iroh::{Endpoint, EndpointAddr};
-pub use methods::HostedRoutes;
 use objects::{NoopWarnings, Warning, WarningSink};
 use prost::Message;
 pub use session::{HostedAuthMode, HostedSession};
@@ -243,10 +241,6 @@ impl HostedClient {
 
     pub(crate) fn claim_authority_token(&self) -> &[u8] {
         self.context.bearer_capability()
-    }
-
-    pub fn routes(&self) -> HostedRoutes<'_> {
-        HostedRoutes::new(self)
     }
 
     pub(crate) fn claim_proof_signer(&self) -> Option<&crypto::Ed25519Signer> {

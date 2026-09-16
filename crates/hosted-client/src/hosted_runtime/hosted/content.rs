@@ -143,6 +143,7 @@ impl HostedClient {
                 content,
                 tags,
                 client_operation_id,
+                None,
             )
             .await?;
         let _ = (response, PUT_CONTEXT);
@@ -220,6 +221,7 @@ impl HostedClient {
             content,
             tags,
             client_operation_id,
+            None,
         )
         .await?;
         Ok(ReviseContextResponse::default())
@@ -242,6 +244,9 @@ impl HostedClient {
     ) -> Result<SupersedeContextResponse, ProtocolError> {
         let (_, symbol) = scope_path_symbol(&scope);
         let new_id = uuid::Uuid::now_v7().to_string();
+        let superseded = uuid::Uuid::parse_str(_annotation_id.trim_start_matches("ann-"))
+            .or_else(|_| uuid::Uuid::parse_str(_annotation_id))
+            .ok();
         self.put_context_record(
             repo_path,
             None,
@@ -252,6 +257,7 @@ impl HostedClient {
             content,
             tags,
             client_operation_id,
+            superseded,
         )
         .await?;
         Ok(SupersedeContextResponse {

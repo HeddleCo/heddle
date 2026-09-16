@@ -2,9 +2,7 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use api::heddle::api::{
     v1alpha1::ProviderSource,
-    v2alpha1::{
-        DescribeEndpointResponse, EndpointKind, EndpointRef, ProviderDialRoute,
-    },
+    v2alpha1::{DescribeEndpointResponse, EndpointKind, EndpointRef, ProviderDialRoute},
 };
 use config::ClientConfig;
 use iroh::{

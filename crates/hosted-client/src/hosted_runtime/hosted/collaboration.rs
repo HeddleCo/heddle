@@ -13,8 +13,9 @@ use api::heddle::api::v2alpha1::{
 use objects::object::{
     AnnotationKind, Attribution, CollaborationActor, CollaborationAnchor as Anchor,
     CollaborationIdempotencyKey, CollaborationMetadata, CollaborationOperationBodyV1 as Body,
-    CollaborationResolution, CollaborationScope, DiscussionRecordId, DiscussionTurnV1, Principal,
-    StateId, VisibilityTier,
+    CollaborationOperationEnvelope, CollaborationResolution, CollaborationScope, ContextRevision,
+    DiscussionRecordId, DiscussionTurnV1, Principal, StateId, VisibilityTier,
+    thread_replication::ThreadOperationBody,
 };
 use thread_api::rpc;
 use wire::ProtocolError;
@@ -113,6 +114,110 @@ fn parse_discussion_id(value: &str) -> Result<DiscussionRecordId, ProtocolError>
             .ok_or_else(|| {
                 ProtocolError::InvalidState(format!("discussion id {value} is not a UUIDv7"))
             })
+    })
+}
+
+fn parse_context_id(value: &str) -> uuid::Uuid {
+    uuid::Uuid::parse_str(value.trim_start_matches("ann-"))
+        .or_else(|_| uuid::Uuid::parse_str(value))
+        .unwrap_or_else(|_| uuid::Uuid::now_v7())
+}
+
+/// Weft admits the request only when `anchor(request.anchor) == signed.anchor`.
+/// Symbol/Path/State project to `Source` on the wire, so the signed record must
+/// use that canonical form rather than the local Symbol/Path variant.
+fn canonical_anchor(
+    anchor: Anchor,
+    scope: &CollaborationScope,
+) -> Result<(Anchor, contract::CollaborationAnchor), ProtocolError> {
+    let wire = thread_api::collaboration::anchor_ref(&anchor, scope).map_err(native_error)?;
+    let canonical = thread_api::collaboration::anchor(&wire, scope).map_err(native_error)?;
+    Ok((canonical, wire))
+}
+
+fn decoded_discussion(
+    signed: &contract::SignedRecord,
+) -> Result<CollaborationOperationEnvelope, ProtocolError> {
+    let operation = thread_api::collaboration::verify(signed).map_err(native_error)?;
+    let ThreadOperationBody::Discussion(bytes) = operation.body else {
+        return Err(ProtocolError::InvalidState(
+            "signed collaboration is not a discussion".into(),
+        ));
+    };
+    Ok(CollaborationOperationEnvelope::decode(&bytes)
+        .map_err(native_error)?
+        .operation)
+}
+
+fn decoded_context(signed: &contract::SignedRecord) -> Result<ContextRevision, ProtocolError> {
+    let operation = thread_api::collaboration::verify(signed).map_err(native_error)?;
+    let ThreadOperationBody::Context(bytes) = operation.body else {
+        return Err(ProtocolError::InvalidState(
+            "signed collaboration is not a context revision".into(),
+        ));
+    };
+    ContextRevision::decode(&bytes).map_err(native_error)
+}
+
+fn open_request_from_signed(
+    signed: contract::SignedRecord,
+    client_operation_id: String,
+    spool: contract::SpoolRef,
+    scope: &CollaborationScope,
+) -> Result<OpenDiscussionRequest, ProtocolError> {
+    let record = decoded_discussion(&signed)?;
+    let Body::Open {
+        blocking,
+        title,
+        anchor,
+        visibility,
+        turn,
+        ..
+    } = record.body
+    else {
+        return Err(ProtocolError::InvalidState(
+            "signed collaboration is not Open".into(),
+        ));
+    };
+    let (audience, audience_label) = audience_of(&visibility)?;
+    Ok(OpenDiscussionRequest {
+        client_operation_id,
+        spool: Some(spool),
+        anchor: Some(thread_api::collaboration::anchor_ref(&anchor, scope).map_err(native_error)?),
+        title,
+        initial_body: turn.body,
+        blocking,
+        signed_operation: Some(signed),
+        audience,
+        audience_label,
+    })
+}
+
+fn context_draft_from_revision(
+    context: &ContextRevision,
+    spool: contract::SpoolRef,
+) -> Result<contract::ContextDraft, ProtocolError> {
+    let reference = |id: String| RecordRef {
+        spool: Some(spool.clone()),
+        id,
+    };
+    Ok(contract::ContextDraft {
+        r#ref: Some(reference(context.id.to_string())),
+        anchor: Some(
+            thread_api::collaboration::anchor_ref(&context.anchor, &context.metadata.scope)
+                .map_err(native_error)?,
+        ),
+        content: context.content.clone(),
+        tags: context
+            .tags
+            .iter()
+            .map(thread_api::collaboration::annotation_tag_ref)
+            .collect(),
+        supersedes: context.supersedes.map(|id| reference(id.to_string())),
+        extracted_from: context
+            .extracted_from
+            .as_ref()
+            .map(|id| reference(id.to_string())),
     })
 }
 
@@ -242,9 +347,15 @@ impl HostedClient {
     async fn collaboration_actor(
         &mut self,
     ) -> Result<(CollaborationActor, Attribution), ProtocolError> {
-        let (principal, _credential) = self.observe_current_identity().await?;
-        let principal_id = uuid::Uuid::parse_str(&principal.id).map_err(native_error)?;
-        let agent_id = None;
+        let (principal, credential) = self.observe_current_identity().await?;
+        let principal_id = uuid::Uuid::parse_str(&principal.account_id)
+            .or_else(|_| uuid::Uuid::parse_str(&principal.id))
+            .map_err(native_error)?;
+        let agent_id = if credential.acting_agent_id.is_empty() {
+            None
+        } else {
+            Some(credential.acting_agent_id)
+        };
         let name = if principal.handle.is_empty() {
             principal.display_name
         } else {
@@ -361,12 +472,14 @@ impl HostedClient {
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let discussion = parse_discussion_id(discussion_id)?;
         let tier = visibility_tier(visibility)?;
-        let (audience, audience_label) = audience_of(&tier)?;
-        let anchor = Anchor::Symbol {
-            state_id,
-            path: file.to_string(),
-            symbol: symbol.to_string(),
-        };
+        let (anchor, _) = canonical_anchor(
+            Anchor::Symbol {
+                state_id,
+                path: file.to_string(),
+                symbol: symbol.to_string(),
+            },
+            &scope,
+        )?;
         let signed = thread_api::collaboration::Command {
             discussion,
             operation_id: CollaborationIdempotencyKey::new(operation_id.as_str())
@@ -381,7 +494,7 @@ impl HostedClient {
             body: Body::Open {
                 blocking: false,
                 title: format!("{file}:{symbol}"),
-                anchor: anchor.clone(),
+                anchor,
                 visibility: tier,
                 turn: DiscussionTurnV1::new(body).map_err(native_error)?,
                 thread_ref: None,
@@ -389,20 +502,8 @@ impl HostedClient {
         }
         .sign(&[], signer)
         .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let request = OpenDiscussionRequest {
-            client_operation_id: operation_id.to_wire(),
-            spool: Some(spool.clone()),
-            anchor: Some(
-                thread_api::collaboration::anchor_ref(&anchor, &scope)
-                    .map_err(|error| ProtocolError::InvalidState(error.to_string()))?,
-            ),
-            title: format!("{file}:{symbol}"),
-            initial_body: body.to_string(),
-            signed_operation: Some(signed),
-            audience,
-            audience_label,
-            ..Default::default()
-        };
+        let request =
+            open_request_from_signed(signed, operation_id.to_wire(), spool.clone(), &scope)?;
         let remote = self.native().await.map_err(native_error)?;
         let response = remote
             .api
@@ -454,7 +555,17 @@ impl HostedClient {
             .ok_or(super::HostedError::SigningIdentityRequired)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let discussion = parse_discussion_id(discussion_id)?;
-        let context = objects::object::ContextRevision {
+        let (anchor, _) = canonical_anchor(
+            Anchor::Symbol {
+                state_id: current
+                    .opened_against_state
+                    .unwrap_or_else(|| StateId::from_bytes([0; 32])),
+                path: current.file.clone(),
+                symbol: current.symbol.clone(),
+            },
+            &scope,
+        )?;
+        let context = ContextRevision {
             version: 2,
             id: uuid::Uuid::now_v7(),
             parents: vec![],
@@ -463,13 +574,7 @@ impl HostedClient {
                 actor: actor.clone(),
                 mentions: vec![],
             },
-            anchor: Anchor::Symbol {
-                state_id: current
-                    .opened_against_state
-                    .unwrap_or_else(|| StateId::from_bytes([0; 32])),
-                path: current.file.clone(),
-                symbol: current.symbol.clone(),
-            },
+            anchor,
             content: content.to_string(),
             tags: tags.into_iter().map(Into::into).collect(),
             supersedes: None,
@@ -495,6 +600,17 @@ impl HostedClient {
         }
         .sign(&[], signer)
         .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let Body::Resolve {
+            resolution:
+                CollaborationResolution::IntoContext {
+                    context: signed_context,
+                },
+        } = decoded_discussion(&signed)?.body
+        else {
+            return Err(ProtocolError::InvalidState(
+                "signed resolve is not IntoContext".into(),
+            ));
+        };
         let request = ResolveDiscussionRequest {
             client_operation_id: operation_id.to_wire(),
             discussion: Some(RecordRef {
@@ -502,22 +618,10 @@ impl HostedClient {
                 id: discussion.to_string(),
             }),
             resolution: Some(resolve_discussion_request::Resolution::ExtractContext(
-                contract::ContextDraft {
-                    r#ref: Some(RecordRef {
-                        spool: Some(spool.clone()),
-                        id: context.id.to_string(),
-                    }),
-                    content: context.content,
-                    tags: context
-                        .tags
-                        .iter()
-                        .map(thread_api::collaboration::annotation_tag_ref)
-                        .collect(),
-                    ..Default::default()
-                },
+                context_draft_from_revision(&signed_context, spool.clone())?,
             )),
             signed_operation: Some(signed),
-            ..Default::default()
+            expected_version: Vec::new(),
         };
         let remote = self.native().await.map_err(native_error)?;
         let response = remote
@@ -575,12 +679,18 @@ impl HostedClient {
         }
         .sign(&[], signer)
         .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let Body::AppendTurn { turn } = decoded_discussion(&signed)?.body else {
+            return Err(ProtocolError::InvalidState(
+                "signed append is not a turn".into(),
+            ));
+        };
         let request = AppendDiscussionRequest {
             client_operation_id: operation_id.to_wire(),
             discussion: Some(reference.clone()),
-            body: body.to_string(),
+            body: turn.body,
             signed_operation: Some(signed),
-            ..Default::default()
+            causal_parents: Vec::new(),
+            mentions: Vec::new(),
         };
         let _ = current;
         let remote = self.native().await.map_err(native_error)?;
@@ -651,6 +761,7 @@ impl HostedClient {
         content: &str,
         tags: Vec<String>,
         client_operation_id: String,
+        supersedes: Option<uuid::Uuid>,
     ) -> Result<MutationResponse, ProtocolError> {
         let operation_id = ClientOperationId::caller_or_fresh(PUT_CONTEXT, client_operation_id);
         let (spool, _, scope) = self.collaboration_scope(repo_path, thread_ref).await?;
@@ -659,10 +770,8 @@ impl HostedClient {
             .claim_proof_signer()
             .ok_or(super::HostedError::SigningIdentityRequired)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let id = uuid::Uuid::parse_str(annotation_id.trim_start_matches("ann-"))
-            .or_else(|_| uuid::Uuid::parse_str(annotation_id))
-            .unwrap_or_else(|_| uuid::Uuid::now_v7());
-        let anchor = if path.is_empty() {
+        let id = parse_context_id(annotation_id);
+        let local_anchor = if path.is_empty() {
             match state_id {
                 Some(state_id) => Anchor::State { state_id },
                 None => Anchor::Repository,
@@ -679,7 +788,8 @@ impl HostedClient {
                 symbol: symbol.to_string(),
             }
         };
-        let context = objects::object::ContextRevision {
+        let (anchor, _) = canonical_anchor(local_anchor, &scope)?;
+        let context = ContextRevision {
             version: 2,
             id,
             parents: vec![],
@@ -688,36 +798,21 @@ impl HostedClient {
                 actor,
                 mentions: vec![],
             },
-            anchor: anchor.clone(),
+            anchor,
             content: content.to_string(),
             tags: tags.iter().cloned().map(Into::into).collect(),
-            supersedes: None,
+            supersedes,
             extracted_from: None,
             occurred_at_ms: chrono::Utc::now().timestamp_millis(),
         };
-        let signed = thread_api::collaboration::sign_context(context.clone(), &[], signer)
+        let signed = thread_api::collaboration::sign_context(context, &[], signer)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let record = decoded_context(&signed)?;
         let request = PutContextRequest {
             client_operation_id: operation_id.to_wire(),
-            context: Some(contract::ContextDraft {
-                r#ref: Some(RecordRef {
-                    spool: Some(spool),
-                    id: context.id.to_string(),
-                }),
-                anchor: Some(
-                    thread_api::collaboration::anchor_ref(&anchor, &scope)
-                        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?,
-                ),
-                content: context.content,
-                tags: context
-                    .tags
-                    .iter()
-                    .map(thread_api::collaboration::annotation_tag_ref)
-                    .collect(),
-                ..Default::default()
-            }),
+            context: Some(context_draft_from_revision(&record, spool)?),
             signed_operation: Some(signed),
-            ..Default::default()
+            expected_version: Vec::new(),
         };
         let remote = self.native().await.map_err(native_error)?;
         let response = remote
@@ -737,6 +832,9 @@ impl HostedClient {
 
 #[cfg(test)]
 mod tests {
+    use objects::object::ContentHash;
+    use uuid::Uuid;
+
     use super::*;
 
     #[test]
@@ -755,5 +853,349 @@ mod tests {
     fn discussion_id_accepts_disc_prefix_and_raw_uuidv7() {
         let id = DiscussionRecordId::generate();
         assert_eq!(parse_discussion_id(&id.to_string()).unwrap(), id);
+    }
+
+    fn proof_scope() -> CollaborationScope {
+        CollaborationScope {
+            spool: Uuid::from_u128(1),
+            thread: Some(ContentHash::from_bytes([2; 32])),
+        }
+    }
+
+    fn proof_metadata(scope: CollaborationScope) -> CollaborationMetadata {
+        CollaborationMetadata {
+            scope,
+            actor: CollaborationActor {
+                principal_id: Uuid::from_u128(3),
+                agent_id: None,
+            },
+            mentions: vec![],
+        }
+    }
+
+    fn proof_signer() -> crypto::Ed25519Signer {
+        crypto::Ed25519Signer::from_seed(&[7; 32]).expect("signer")
+    }
+
+    /// Weft `OpenDiscussion` field check, named so a mismatch prints the
+    /// exact request vs signed values instead of a boolean OR.
+    fn open_field_diffs(
+        request: &OpenDiscussionRequest,
+        signed: &contract::SignedRecord,
+        scope: &CollaborationScope,
+    ) -> Vec<String> {
+        let operation = thread_api::collaboration::verify(signed).expect("verify");
+        let ThreadOperationBody::Discussion(bytes) = &operation.body else {
+            panic!("expected discussion operation");
+        };
+        let record = CollaborationOperationEnvelope::decode(bytes)
+            .expect("decode")
+            .operation;
+        let Body::Open {
+            blocking,
+            title,
+            anchor,
+            visibility,
+            turn,
+            ..
+        } = &record.body
+        else {
+            panic!("expected Open");
+        };
+        let mut diffs = Vec::new();
+        if request.title != *title {
+            diffs.push(format!(
+                "title request={:?} signed={:?}",
+                request.title, title
+            ));
+        }
+        if request.initial_body != turn.body {
+            diffs.push(format!(
+                "initial_body request={:?} signed_turn.body={:?}",
+                request.initial_body, turn.body
+            ));
+        }
+        if request.blocking != *blocking {
+            diffs.push(format!(
+                "blocking request={} signed={}",
+                request.blocking, blocking
+            ));
+        }
+        let request_visibility =
+            thread_api::collaboration::visibility(request.audience, &request.audience_label)
+                .expect("audience");
+        if request_visibility != *visibility {
+            diffs.push(format!(
+                "audience/visibility request={request_visibility:?} signed={visibility:?}"
+            ));
+        }
+        let request_anchor = thread_api::collaboration::anchor(
+            request.anchor.as_ref().expect("anchor required"),
+            scope,
+        )
+        .expect("request anchor");
+        if request_anchor != *anchor {
+            diffs.push(format!(
+                "anchor request={request_anchor:?} signed={anchor:?}"
+            ));
+        }
+        diffs
+    }
+
+    fn context_field_diffs(
+        draft: &contract::ContextDraft,
+        signed: &contract::SignedRecord,
+        spool: &contract::SpoolRef,
+    ) -> Vec<String> {
+        let operation = thread_api::collaboration::verify(signed).expect("verify");
+        let ThreadOperationBody::Context(bytes) = &operation.body else {
+            panic!("expected context operation");
+        };
+        let record = ContextRevision::decode(bytes).expect("decode");
+        let reference = |id: String| RecordRef {
+            spool: Some(spool.clone()),
+            id,
+        };
+        let mut diffs = Vec::new();
+        if draft.r#ref.as_ref() != Some(&reference(record.id.to_string())) {
+            diffs.push(format!(
+                "ref request={:?} signed={}",
+                draft.r#ref, record.id
+            ));
+        }
+        if draft.content != record.content {
+            diffs.push(format!(
+                "content request={:?} signed={:?}",
+                draft.content, record.content
+            ));
+        }
+        let request_tags = thread_api::collaboration::annotation_tags(&draft.tags).expect("tags");
+        if request_tags != record.tags {
+            diffs.push(format!(
+                "tags request={request_tags:?} signed={:?}",
+                record.tags
+            ));
+        }
+        let signed_supersedes = record.supersedes.map(|id| reference(id.to_string()));
+        if draft.supersedes != signed_supersedes {
+            diffs.push(format!(
+                "supersedes request={:?} signed={:?}",
+                draft.supersedes, signed_supersedes
+            ));
+        }
+        let signed_extracted = record.extracted_from.map(|id| reference(id.to_string()));
+        if draft.extracted_from != signed_extracted {
+            diffs.push(format!(
+                "extracted_from request={:?} signed={:?}",
+                draft.extracted_from, signed_extracted
+            ));
+        }
+        let request_anchor = thread_api::collaboration::anchor(
+            draft.anchor.as_ref().expect("context anchor required"),
+            &record.metadata.scope,
+        )
+        .expect("request anchor");
+        if request_anchor != record.anchor {
+            diffs.push(format!(
+                "anchor request={request_anchor:?} signed={:?}",
+                record.anchor
+            ));
+        }
+        diffs
+    }
+
+    #[test]
+    fn parallel_open_reconstruction_diffs_only_on_symbol_vs_source_anchor() {
+        // Pre-fix construction: sign `Anchor::Symbol`, put `anchor_ref(Symbol)`
+        // (a Source) on the request. Title/body/blocking/audience already match.
+        let scope = proof_scope();
+        let file = "src/main.rs";
+        let symbol = "run";
+        let body = "please review";
+        let tier = VisibilityTier::Internal;
+        let (audience, audience_label) = audience_of(&tier).unwrap();
+        let anchor = Anchor::Symbol {
+            state_id: StateId::from_bytes([9; 32]),
+            path: file.to_string(),
+            symbol: symbol.to_string(),
+        };
+        let signed = thread_api::collaboration::Command {
+            discussion: DiscussionRecordId::generate(),
+            operation_id: CollaborationIdempotencyKey::new("op-open").unwrap(),
+            metadata: proof_metadata(scope.clone()),
+            author: Attribution::human(Principal::new("alice", "")),
+            occurred_at_ms: 1,
+            body: Body::Open {
+                blocking: false,
+                title: format!("{file}:{symbol}"),
+                anchor: anchor.clone(),
+                visibility: tier,
+                turn: DiscussionTurnV1::new(body).unwrap(),
+                thread_ref: None,
+            },
+        }
+        .sign(&[], &proof_signer())
+        .unwrap();
+        let request = OpenDiscussionRequest {
+            client_operation_id: "op-open".into(),
+            spool: Some(contract::SpoolRef {
+                id: scope.spool.to_string(),
+            }),
+            anchor: Some(thread_api::collaboration::anchor_ref(&anchor, &scope).unwrap()),
+            title: format!("{file}:{symbol}"),
+            initial_body: body.to_string(),
+            signed_operation: Some(signed.clone()),
+            audience,
+            audience_label,
+            ..Default::default()
+        };
+        let diffs = open_field_diffs(&request, &signed, &scope);
+        assert_eq!(diffs.len(), 1, "unexpected extra diffs: {diffs:?}");
+        assert!(
+            diffs[0].starts_with("anchor request=Source"),
+            "expected Symbol vs Source, got {diffs:?}"
+        );
+        assert!(
+            diffs[0].contains("signed=Symbol"),
+            "expected signed Symbol, got {diffs:?}"
+        );
+    }
+
+    #[test]
+    fn open_discussion_request_fields_match_signed_record() {
+        let scope = proof_scope();
+        let file = "src/main.rs";
+        let symbol = "run";
+        let body = "please review";
+        let (anchor, _) = canonical_anchor(
+            Anchor::Symbol {
+                state_id: StateId::from_bytes([9; 32]),
+                path: file.to_string(),
+                symbol: symbol.to_string(),
+            },
+            &scope,
+        )
+        .unwrap();
+        let signed = thread_api::collaboration::Command {
+            discussion: DiscussionRecordId::generate(),
+            operation_id: CollaborationIdempotencyKey::new("op-open").unwrap(),
+            metadata: proof_metadata(scope.clone()),
+            author: Attribution::human(Principal::new("alice", "")),
+            occurred_at_ms: 1,
+            body: Body::Open {
+                blocking: false,
+                title: format!("{file}:{symbol}"),
+                anchor,
+                visibility: VisibilityTier::Internal,
+                turn: DiscussionTurnV1::new(body).unwrap(),
+                thread_ref: None,
+            },
+        }
+        .sign(&[], &proof_signer())
+        .unwrap();
+        let request = open_request_from_signed(
+            signed.clone(),
+            "op-open".into(),
+            contract::SpoolRef {
+                id: scope.spool.to_string(),
+            },
+            &scope,
+        )
+        .unwrap();
+        let diffs = open_field_diffs(&request, &signed, &scope);
+        assert!(
+            diffs.is_empty(),
+            "OpenDiscussion fields differ from signed record: {diffs:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_context_reconstruction_drops_supersedes_and_symbol_anchor() {
+        let scope = proof_scope();
+        let superseded = Uuid::from_u128(11);
+        let context = ContextRevision {
+            version: 2,
+            id: Uuid::from_u128(9),
+            parents: vec![],
+            metadata: proof_metadata(scope.clone()),
+            anchor: Anchor::Symbol {
+                state_id: StateId::from_bytes([9; 32]),
+                path: "src/lib.rs".into(),
+                symbol: "entry".into(),
+            },
+            content: "the decision".into(),
+            tags: vec!["decision".into()],
+            supersedes: Some(superseded),
+            extracted_from: None,
+            occurred_at_ms: 1,
+        };
+        let signed =
+            thread_api::collaboration::sign_context(context.clone(), &[], &proof_signer()).unwrap();
+        let spool = contract::SpoolRef {
+            id: scope.spool.to_string(),
+        };
+        let draft = contract::ContextDraft {
+            r#ref: Some(RecordRef {
+                spool: Some(spool.clone()),
+                id: context.id.to_string(),
+            }),
+            anchor: Some(thread_api::collaboration::anchor_ref(&context.anchor, &scope).unwrap()),
+            content: context.content,
+            tags: context
+                .tags
+                .iter()
+                .map(thread_api::collaboration::annotation_tag_ref)
+                .collect(),
+            ..Default::default()
+        };
+        let diffs = context_field_diffs(&draft, &signed, &spool);
+        assert!(
+            diffs.iter().any(|diff| diff.starts_with("supersedes ")),
+            "expected supersedes drop, got {diffs:?}"
+        );
+        assert!(
+            diffs
+                .iter()
+                .any(|diff| diff.starts_with("anchor request=Source")),
+            "expected Symbol vs Source, got {diffs:?}"
+        );
+    }
+
+    #[test]
+    fn put_context_draft_fields_match_signed_revision() {
+        let scope = proof_scope();
+        let (anchor, _) = canonical_anchor(
+            Anchor::Symbol {
+                state_id: StateId::from_bytes([9; 32]),
+                path: "src/lib.rs".into(),
+                symbol: "entry".into(),
+            },
+            &scope,
+        )
+        .unwrap();
+        let context = ContextRevision {
+            version: 2,
+            id: Uuid::from_u128(9),
+            parents: vec![],
+            metadata: proof_metadata(scope.clone()),
+            anchor,
+            content: "the decision".into(),
+            tags: vec!["decision".into()],
+            supersedes: Some(Uuid::from_u128(11)),
+            extracted_from: None,
+            occurred_at_ms: 1,
+        };
+        let signed =
+            thread_api::collaboration::sign_context(context, &[], &proof_signer()).unwrap();
+        let spool = contract::SpoolRef {
+            id: scope.spool.to_string(),
+        };
+        let record = decoded_context(&signed).unwrap();
+        let draft = context_draft_from_revision(&record, spool.clone()).unwrap();
+        let diffs = context_field_diffs(&draft, &signed, &spool);
+        assert!(
+            diffs.is_empty(),
+            "context fields differ from signed revision: {diffs:?}"
+        );
     }
 }
