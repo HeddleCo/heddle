@@ -408,6 +408,7 @@ impl Repository {
         }
         match classify_attached_source(self, name, &state)? {
             AttachedSourceKind::Capture => {
+                self.admit_local_capture_parents(name, &state)?;
                 self.record_native_capture(name, state_id)?;
             }
             AttachedSourceKind::LocalIntegration {
@@ -564,6 +565,30 @@ impl Repository {
             ))),
         }
     }
+
+    /// Fast-forward land moves the target ref onto another Thread's tip without
+    /// a merge State. A later Capture of that tip needs those parents admitted
+    /// here first, or `record_native_capture` refuses the ancestry.
+    fn admit_local_capture_parents(&self, name: &str, state: &State) -> Result<()> {
+        let replica = self.native_thread(name)?;
+        let base = replica.genesis()?.base;
+        for parent in &state.parents {
+            if *parent == base {
+                continue;
+            }
+            if !replica.source_operation_page(*parent, None, 1)?.is_empty() {
+                continue;
+            }
+            self.record_native_source(name, *parent)?;
+            if replica.source_operation_page(*parent, None, 1)?.is_empty() {
+                return Err(Error::Invalid(format!(
+                    "capture parent {} has no admitted native operation",
+                    parent.to_string_full()
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 enum AttachedSourceKind {
@@ -584,12 +609,15 @@ fn classify_attached_source(
     let genesis = replica.genesis()?;
     let connection = replica.connect()?;
     let mut foreign: Option<(ContentHash, ContentHash, StateId)> = None;
+    let mut local_parent = false;
     for parent in &state.parents {
         if *parent == genesis.base {
+            local_parent = true;
             continue;
         }
         let local = replica.source_operation_page(*parent, None, 1)?;
         if !local.is_empty() {
+            local_parent = true;
             continue;
         }
         let mut query = connection.prepare(
@@ -637,13 +665,16 @@ fn classify_attached_source(
     }
     match foreign {
         None => Ok(AttachedSourceKind::Capture),
-        Some((source_thread, source_operation, source_revision)) => {
+        Some((source_thread, source_operation, source_revision))
+            if local_parent && state.parents.len() >= 2 =>
+        {
             Ok(AttachedSourceKind::LocalIntegration {
                 source_thread,
                 source_operation,
                 source_revision,
             })
         }
+        Some(_) => Ok(AttachedSourceKind::Capture),
     }
 }
 

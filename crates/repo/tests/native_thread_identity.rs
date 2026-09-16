@@ -1,7 +1,43 @@
+use std::sync::{Mutex, MutexGuard};
+
 use repo::Repository;
+
+static HOME: Mutex<()> = Mutex::new(());
+
+struct IsolatedHome {
+    _dir: tempfile::TempDir,
+    previous: Option<std::ffi::OsString>,
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl IsolatedHome {
+    fn new() -> Self {
+        let guard = HOME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("heddle home");
+        let previous = std::env::var_os("HEDDLE_HOME");
+        unsafe {
+            std::env::set_var("HEDDLE_HOME", dir.path());
+        }
+        Self {
+            _dir: dir,
+            previous,
+            _guard: guard,
+        }
+    }
+}
+
+impl Drop for IsolatedHome {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+        }
+    }
+}
 
 #[test]
 fn local_init_and_fork_keep_original_signed_thread_identity() {
+    let _home = IsolatedHome::new();
     let directory = tempfile::tempdir().expect("repository directory");
     let repository = Repository::init_default(directory.path()).expect("native init");
     repository.seed_default_thread().expect("main thread");
@@ -68,6 +104,7 @@ fn local_captures_keep_checkout_parentage_and_reuse_the_original_operation() {
         object::{Attribution, Principal, State, thread_replication::ThreadFacet},
         store::ObjectStore as _,
     };
+    let _home = IsolatedHome::new();
     let directory = tempfile::tempdir().expect("repository");
     let repository = Repository::init_default(directory.path()).expect("native init");
     let base = repository.head().expect("head").expect("base");
@@ -131,6 +168,7 @@ fn cross_thread_merge_records_local_integration_not_capture() {
         store::ObjectStore as _,
     };
     use refs::Head;
+    let _home = IsolatedHome::new();
     let directory = tempfile::tempdir().expect("repository");
     let repository = Repository::init_default(directory.path()).expect("native init");
     let base = repository.head().expect("head").expect("base");
@@ -231,9 +269,205 @@ fn cross_thread_merge_records_local_integration_not_capture() {
 }
 
 #[test]
+fn capture_after_fast_forward_land_is_a_capture() {
+    use objects::{
+        object::{Attribution, Principal, State, ThreadName, thread_replication::ThreadFacet},
+        store::ObjectStore as _,
+    };
+    use refs::Head;
+    let _home = IsolatedHome::new();
+    let directory = tempfile::tempdir().expect("repository");
+    let repository = Repository::init_default(directory.path()).expect("native init");
+    let base = repository.head().expect("head").expect("base");
+    let tree = repository
+        .store()
+        .get_state(&base)
+        .expect("base state")
+        .expect("state")
+        .tree;
+    let author = Attribution::human(Principal::new("Developer", "developer@example.test"));
+    let on_main = State::new_snapshot(tree, vec![base], author.clone()).with_intent("main work");
+    repository.store().put_state(&on_main).expect("main state");
+    repository
+        .record_native_capture("main", on_main.id())
+        .expect("record main");
+    repository
+        .set_thread_recorded(&ThreadName::new("main"), &on_main.id())
+        .expect("advance main");
+    repository
+        .write_head_recorded(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .expect("attach main");
+    repository
+        .create_native_thread("feature", on_main.id(), Some("main"), "fork")
+        .expect("feature");
+    let on_feature =
+        State::new_snapshot(tree, vec![on_main.id()], author.clone()).with_intent("feature work");
+    repository
+        .store()
+        .put_state(&on_feature)
+        .expect("feature state");
+    repository
+        .record_native_capture("feature", on_feature.id())
+        .expect("record feature");
+    repository
+        .set_thread_recorded(&ThreadName::new("main"), &on_feature.id())
+        .expect("fast-forward land");
+    repository
+        .write_head_recorded(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .expect("reattach main");
+    let after_land =
+        State::new_snapshot(tree, vec![on_feature.id()], author).with_intent("capture after land");
+    repository
+        .store()
+        .put_state(&after_land)
+        .expect("after-land state");
+    repository
+        .record_native_source("main", after_land.id())
+        .expect("capture of the land tip");
+    let replica = repository.native_thread("main").expect("main replica");
+    let recorded = replica
+        .source_operation_page(after_land.id(), None, 4)
+        .expect("recorded capture");
+    assert_eq!(recorded.len(), 1);
+    let (signed, _) = replica
+        .operation(&recorded[0])
+        .expect("load capture")
+        .expect("capture present");
+    let operation = signed.verify().expect("capture signature");
+    assert!(
+        operation.local_integration().expect("decode").is_none(),
+        "single-parent snapshot on the land result is a Capture"
+    );
+    assert_eq!(
+        operation
+            .source_state()
+            .expect("source")
+            .expect("capture state")
+            .id(),
+        after_land.id()
+    );
+    let facet = replica
+        .accepted_page(ThreadFacet::Source, None, 20)
+        .expect("source facet");
+    assert!(
+        facet.iter().any(|(id, signed)| {
+            *id == recorded[0]
+                && signed
+                    .verify()
+                    .expect("source op")
+                    .source_state()
+                    .expect("state")
+                    .is_some_and(|state| state.id() == after_land.id())
+                && signed
+                    .verify()
+                    .expect("source op")
+                    .local_integration()
+                    .expect("kind")
+                    .is_none()
+        }),
+        "land tip must be admitted as a Capture, not LocalIntegration"
+    );
+}
+
+#[test]
+fn capture_after_merge_land_is_a_capture() {
+    use objects::{
+        object::{Attribution, Principal, State, ThreadName},
+        store::ObjectStore as _,
+    };
+    use refs::Head;
+    let _home = IsolatedHome::new();
+    let directory = tempfile::tempdir().expect("repository");
+    let repository = Repository::init_default(directory.path()).expect("native init");
+    let base = repository.head().expect("head").expect("base");
+    let tree = repository
+        .store()
+        .get_state(&base)
+        .expect("base state")
+        .expect("state")
+        .tree;
+    let author = Attribution::human(Principal::new("Developer", "developer@example.test"));
+    let on_main = State::new_snapshot(tree, vec![base], author.clone()).with_intent("main work");
+    repository.store().put_state(&on_main).expect("main state");
+    repository
+        .record_native_capture("main", on_main.id())
+        .expect("record main");
+    repository
+        .set_thread_recorded(&ThreadName::new("main"), &on_main.id())
+        .expect("advance main");
+    repository
+        .write_head_recorded(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .expect("attach main");
+    repository
+        .create_native_thread("feature", on_main.id(), Some("main"), "fork")
+        .expect("feature");
+    let on_feature =
+        State::new_snapshot(tree, vec![on_main.id()], author.clone()).with_intent("feature work");
+    repository
+        .store()
+        .put_state(&on_feature)
+        .expect("feature state");
+    repository
+        .record_native_capture("feature", on_feature.id())
+        .expect("record feature");
+    let continued_main =
+        State::new_snapshot(tree, vec![on_main.id()], author.clone()).with_intent("more main");
+    repository
+        .store()
+        .put_state(&continued_main)
+        .expect("continued main");
+    repository
+        .record_native_capture("main", continued_main.id())
+        .expect("record continued main");
+    repository
+        .set_thread_recorded(&ThreadName::new("main"), &continued_main.id())
+        .expect("advance main past fork");
+    let merged = repository
+        .snapshot_merge_with_attribution(
+            &on_feature.id(),
+            Some("Land feature onto main".into()),
+            None,
+            author.clone(),
+            Some(on_main.id()),
+            false,
+        )
+        .expect("cross-thread merge snapshot");
+    let after_land =
+        State::new_snapshot(tree, vec![merged.id()], author).with_intent("capture after land");
+    repository
+        .store()
+        .put_state(&after_land)
+        .expect("after-land state");
+    repository
+        .record_native_source("main", after_land.id())
+        .expect("capture of the merge land tip");
+    let replica = repository.native_thread("main").expect("main replica");
+    let recorded = replica
+        .source_operation_page(after_land.id(), None, 4)
+        .expect("recorded capture");
+    assert_eq!(recorded.len(), 1);
+    let (signed, _) = replica
+        .operation(&recorded[0])
+        .expect("load capture")
+        .expect("capture present");
+    let operation = signed.verify().expect("capture signature");
+    assert!(
+        operation.local_integration().expect("decode").is_none(),
+        "single-parent snapshot on the merge land result is a Capture"
+    );
+}
+
+#[test]
 fn checkout_mutations_share_exclusive_leases_and_release_temporary_writers() {
     use objects::store::{WriterLeaseStatus, WriterLeaseStore};
     use repo::thread_replication::checkout::ThreadCheckout;
+    let _home = IsolatedHome::new();
     let directory = tempfile::tempdir().expect("repository");
     let source = directory.path().join("source");
     std::fs::create_dir(&source).expect("source directory");

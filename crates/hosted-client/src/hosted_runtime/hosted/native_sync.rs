@@ -11,26 +11,24 @@ use api::heddle::api::{
     v2alpha1::{
         self as contract, EndpointKind, EndpointRef, FetchOpen, ObservationMode,
         ObserveIdentityRequest, ObserveOptions, ObserveThreadsRequest, RevisionRef, SpoolRef,
-        StartThreadRequest, ThreadOverview, ThreadQuery, ThreadRef, TransferSelection,
-        identity_event, revision_ref, thread_list_event, thread_query,
+        ThreadOverview, ThreadQuery, ThreadRef, TransferSelection, identity_event, revision_ref,
+        thread_list_event, thread_query,
     },
 };
-use crypto::{
-    Signer as _,
-    thread_operation::{SignedGenesis, SignedOperation},
-};
+use crypto::{Signer as _, thread_operation::SignedOperation};
 use objects::{
     object::{
         CollaborationActor, ContentHash, StateId, ThreadName,
         thread_replication::{
-            AuthoredCapture, OPERATION_FORMAT, ThreadGenesis, ThreadOperation, ThreadOperationBody,
-            hosted_import::synthetic_initial_base,
+            AuthoredCapture, GenesisOwner, OPERATION_FORMAT, ThreadGenesis, ThreadOperation,
+            ThreadOperationBody, hosted_import::synthetic_initial_base,
         },
     },
     store::ObjectStore,
 };
 use repo::{Repository, SyncedThreadMetadata, ThreadManager, thread_replication::ThreadReplica};
 use thread_api::{
+    creation::ThreadCreation,
     publication::{PublicationOptions, PublicationOriginals, SourceBudget, SourcePack},
     rpc,
 };
@@ -274,42 +272,25 @@ impl HostedClient {
         local_state: StateId,
         client_operation_id: String,
     ) -> Result<(ThreadRef, Vec<u8>), ProtocolError> {
-        let spool = self.resolve_spool_ref(repo_path).await?;
-        let signer = self
-            .claim_proof_signer()
-            .ok_or(super::HostedError::SigningIdentityRequired)
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let creator = signer
-            .public_key()
-            .try_into()
-            .map_err(|_| ProtocolError::InvalidState("invalid publisher key".into()))?;
-        let (owner_id, creator_authority, _) = self.current_creator_authority().await?;
         let _ = local_state;
-        let base_state = synthetic_initial_base().map_err(native_error)?;
-        repo.store().put_state(&base_state)?;
-        let base = base_state.id();
-        let genesis = ThreadGenesis {
-            owner: objects::object::thread_replication::GenesisOwner::Account(owner_id),
-            version: 1,
-            spool: spool.id.clone(),
-            parent: None,
-            base,
-            name: name.into(),
-            intent: String::new(),
-            creator,
-            nonce: Uuid::now_v7().as_bytes().to_vec(),
-        };
-        let signed = thread_api::replication::opening::sign_genesis(&genesis, signer)
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let replica = repo.native_thread(name).map_err(replica_err)?;
+        let spool = self.resolve_spool_ref(repo_path).await?;
+        let creator_authority = native_start_creator_authority(&replica, || async {
+            self.current_creator_authority()
+                .await
+                .map(|(_, authority, _)| authority)
+        })
+        .await?;
+        let creation = start_request_from_native_replica(
+            &replica,
+            &spool,
+            client_operation_id,
+            creator_authority.clone(),
+        )?;
         let remote = self.native().await.map_err(native_error)?;
         let started = remote
             .api
-            .call::<rpc::ThreadServiceStartThread>(&StartThreadRequest {
-                creator_authority: creator_authority.clone(),
-                client_operation_id,
-                spool: Some(spool.clone()),
-                thread_genesis: Some(signed.clone()),
-            })
+            .call::<rpc::ThreadServiceStartThread>(creation.request())
             .await
             .map_err(native_client_error)?;
         let reference = started
@@ -317,21 +298,22 @@ impl HostedClient {
             .as_ref()
             .and_then(|overview| overview.r#ref.clone())
             .ok_or_else(|| ProtocolError::InvalidState("StartThread returned no Thread".into()))?;
-        let original = SignedGenesis {
-            canonical: signed.canonical_record,
-            signature: signed
-                .signatures
-                .first()
-                .map(|signature| signature.signature.clone())
-                .ok_or_else(|| ProtocolError::InvalidState("signed genesis missing".into()))?,
-        };
-        let replica = ThreadReplica::create_from_original_authority(
-            repo.heddle_dir(),
-            &original,
-            &creator_authority,
-        )
-        .map_err(replica_err)?;
-        replica.bind_local_name(name).map_err(replica_err)?;
+        let hosted_id = overview_thread_id_from_ref(&reference)?;
+        if hosted_id != replica.thread_id() {
+            return Err(ProtocolError::InvalidState(
+                "hosted Thread identity differs from local Thread".into(),
+            ));
+        }
+        if ThreadReplica::open(repo.heddle_dir(), hosted_id)
+            .map_err(replica_err)?
+            .thread_id()
+            != replica.thread_id()
+        {
+            return Err(ProtocolError::InvalidState(
+                "local replica of the hosted Thread is missing; StartThread must retain genesis"
+                    .into(),
+            ));
+        }
         Ok((reference, creator_authority))
     }
 
@@ -343,6 +325,7 @@ impl HostedClient {
         local_state: StateId,
         client_operation_id: String,
     ) -> Result<(ThreadRef, Vec<u8>), ProtocolError> {
+        let native = repo.native_thread(name).map_err(replica_err)?;
         if let Some(overview) = self
             .observe_thread_overviews(repo_path)
             .await?
@@ -350,13 +333,25 @@ impl HostedClient {
             .find(|overview| overview.name == name)
             && let Some(reference) = overview.r#ref
         {
-            let (_, creator_authority, _) = self.current_creator_authority().await?;
-            if let Ok(id) = overview_thread_id_from_ref(&reference)
-                && let Ok(replica) = ThreadReplica::open(repo.heddle_dir(), id)
-            {
-                let _ = replica.bind_local_name(name);
+            let hosted_id = overview_thread_id_from_ref(&reference)?;
+            if hosted_id == native.thread_id() {
+                let creator_authority = native_start_creator_authority(&native, || async {
+                    self.current_creator_authority()
+                        .await
+                        .map(|(_, authority, _)| authority)
+                })
+                .await?;
+                return Ok((reference, creator_authority));
             }
-            return Ok((reference, creator_authority));
+            // A previously minted parallel replica is migration-only. New
+            // publishes must not create one.
+            if ThreadReplica::open(repo.heddle_dir(), hosted_id).is_ok() {
+                let (_, creator_authority, _) = self.current_creator_authority().await?;
+                return Ok((reference, creator_authority));
+            }
+            return Err(ProtocolError::InvalidState(
+                "hosted Thread identity differs from local Thread".into(),
+            ));
         }
         self.start_hosted_thread(repo, repo_path, name, local_state, client_operation_id)
             .await
@@ -469,11 +464,18 @@ impl HostedClient {
             }
         };
         replica.bind_local_name(thread_name).map_err(replica_err)?;
+        let native = repo.native_thread(thread_name).map_err(replica_err)?;
+        let split_replica = replica.thread_id() != native.thread_id();
         if replica
             .source_operation_page(local_state, None, 1)
             .map_err(replica_err)?
             .is_empty()
         {
+            if !split_replica {
+                return Err(ProtocolError::InvalidState(
+                    "capture was not admitted on the local Thread".into(),
+                ));
+            }
             let (owner_id, _, agent_id) = self.current_creator_authority().await?;
             let spool = Uuid::parse_str(
                 &reference
@@ -885,6 +887,84 @@ impl HostedClient {
     }
 }
 
+fn start_request_from_native_replica(
+    replica: &ThreadReplica,
+    spool: &SpoolRef,
+    client_operation_id: String,
+    creator_authority: Vec<u8>,
+) -> Result<ThreadCreation, ProtocolError> {
+    let signed = replica.signed_genesis().map_err(replica_err)?;
+    let genesis = signed
+        .verify()
+        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+    if genesis.spool != spool.id {
+        return Err(ProtocolError::InvalidState(
+            "local Thread spool differs from hosted spool".into(),
+        ));
+    }
+    let local_id = genesis
+        .id()
+        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+    if local_id != replica.thread_id() {
+        return Err(ProtocolError::InvalidState(
+            "stored genesis differs from local Thread identity".into(),
+        ));
+    }
+    let record = replica
+        .genesis_record()
+        .map_err(replica_err)?
+        .genesis
+        .ok_or_else(|| {
+            ProtocolError::InvalidState("local Thread genesis record is missing".into())
+        })?;
+    let creation =
+        ThreadCreation::from_signed_with_authority(client_operation_id, record, creator_authority)
+            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+    let submitted =
+        creation.request().thread_genesis.as_ref().ok_or_else(|| {
+            ProtocolError::InvalidState("StartThread request has no genesis".into())
+        })?;
+    let submitted = ThreadGenesis::decode(&submitted.canonical_record)
+        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+    if submitted.parent != genesis.parent {
+        return Err(ProtocolError::InvalidState(
+            "StartThread would drop parent".into(),
+        ));
+    }
+    if submitted.nonce != genesis.nonce
+        || submitted.base != genesis.base
+        || submitted.name != genesis.name
+        || submitted.spool != genesis.spool
+    {
+        return Err(ProtocolError::InvalidState(
+            "StartThread must submit the existing local genesis".into(),
+        ));
+    }
+    let hosted_id = submitted
+        .id()
+        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+    if hosted_id != replica.thread_id() {
+        return Err(ProtocolError::InvalidState(
+            "hosted Thread identity differs from local Thread".into(),
+        ));
+    }
+    Ok(creation)
+}
+
+async fn native_start_creator_authority<F, Fut>(
+    replica: &ThreadReplica,
+    account_authority: F,
+) -> Result<Vec<u8>, ProtocolError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<u8>, ProtocolError>>,
+{
+    match replica.genesis().map_err(replica_err)?.owner {
+        GenesisOwner::LocalKey(_) => Ok(Vec::new()),
+        GenesisOwner::Account(_) => account_authority().await,
+    }
+}
+
 fn overview_thread_id_from_ref(reference: &ThreadRef) -> Result<ContentHash, ProtocolError> {
     let value = reference
         .id
@@ -1161,5 +1241,165 @@ mod tests {
                 1
             );
         }
+    }
+
+    static HOME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct IsolatedNative {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+        _home: tempfile::TempDir,
+        _dir: tempfile::TempDir,
+        repo: Repository,
+    }
+
+    impl Drop for IsolatedNative {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+                None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+            }
+        }
+    }
+
+    fn native_repo() -> IsolatedNative {
+        let guard = HOME.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = std::env::var_os("HEDDLE_HOME");
+        let home = tempfile::tempdir().expect("heddle home");
+        unsafe {
+            std::env::set_var("HEDDLE_HOME", home.path());
+        }
+        let dir = tempfile::tempdir().expect("workspace");
+        let repo = Repository::init_default(dir.path()).expect("native init");
+        repo.seed_default_thread().expect("main");
+        IsolatedNative {
+            _guard: guard,
+            previous,
+            _home: home,
+            _dir: dir,
+            repo,
+        }
+    }
+
+    #[test]
+    fn start_thread_submits_existing_native_genesis_without_inventing_identity() {
+        let isolated = native_repo();
+        let repo = &isolated.repo;
+        let main = repo.native_thread("main").expect("main");
+        let genesis = main.genesis().expect("genesis");
+        let nonce = genesis.nonce.clone();
+        let spool = SpoolRef {
+            id: genesis.spool.clone(),
+        };
+        let creation = start_request_from_native_replica(
+            &main,
+            &spool,
+            Uuid::now_v7().to_string(),
+            Vec::new(),
+        )
+        .expect("start request");
+        let request = creation.request();
+        assert!(
+            request.creator_authority.is_empty(),
+            "LocalKey genesis must not carry an account proof"
+        );
+        let submitted = ThreadGenesis::decode(
+            &request
+                .thread_genesis
+                .as_ref()
+                .expect("genesis")
+                .canonical_record,
+        )
+        .expect("decode");
+        assert_eq!(
+            submitted.nonce, nonce,
+            "StartThread must not invent a nonce"
+        );
+        assert_eq!(submitted.parent, genesis.parent);
+        assert_eq!(submitted.base, genesis.base);
+        assert_eq!(submitted.name, genesis.name);
+        assert_eq!(submitted.spool, genesis.spool);
+        assert_eq!(submitted.owner, genesis.owner);
+        assert_eq!(
+            submitted.id().expect("id"),
+            main.thread_id(),
+            "hosted id must equal local Thread id"
+        );
+        assert_eq!(
+            creation.reference().id.as_ref().expect("thread id").value,
+            main.thread_id().as_bytes()
+        );
+    }
+
+    #[test]
+    fn start_thread_preserves_child_parent_and_rejects_dropping_it() {
+        let isolated = native_repo();
+        let repo = &isolated.repo;
+        let main = repo.native_thread("main").expect("main");
+        let base = repo.head().expect("head").expect("base");
+        let child = repo
+            .create_native_thread("feature", base, Some("main"), "edit docs")
+            .expect("feature");
+        let genesis = child.genesis().expect("genesis");
+        assert_eq!(genesis.parent, Some(main.thread_id()));
+        let spool = SpoolRef {
+            id: genesis.spool.clone(),
+        };
+        let creation = start_request_from_native_replica(
+            &child,
+            &spool,
+            Uuid::now_v7().to_string(),
+            Vec::new(),
+        )
+        .expect("child start");
+        let submitted = ThreadGenesis::decode(
+            &creation
+                .request()
+                .thread_genesis
+                .as_ref()
+                .expect("genesis")
+                .canonical_record,
+        )
+        .expect("decode");
+        assert_eq!(submitted.parent, Some(main.thread_id()));
+        assert_eq!(submitted.nonce, genesis.nonce);
+        assert_eq!(submitted.id().expect("id"), child.thread_id());
+        let mismatch = SpoolRef {
+            id: Uuid::from_u128(99).to_string(),
+        };
+        let error = start_request_from_native_replica(
+            &child,
+            &mismatch,
+            Uuid::now_v7().to_string(),
+            Vec::new(),
+        )
+        .err()
+        .expect("spool mismatch");
+        assert!(
+            error.to_string().contains("spool"),
+            "fail closed on spool rewrite: {error}"
+        );
+    }
+
+    #[test]
+    fn start_thread_rejects_account_authority_on_local_key_genesis() {
+        let isolated = native_repo();
+        let repo = &isolated.repo;
+        let main = repo.native_thread("main").expect("main");
+        let spool = SpoolRef {
+            id: main.genesis().expect("genesis").spool,
+        };
+        let error = start_request_from_native_replica(
+            &main,
+            &spool,
+            Uuid::now_v7().to_string(),
+            vec![7; 32],
+        )
+        .err()
+        .expect("account proof on LocalKey");
+        assert!(
+            error.to_string().contains("local-key") || error.to_string().contains("explicit claim"),
+            "LocalKey StartThread must not rewrite owner to Account: {error}"
+        );
     }
 }
