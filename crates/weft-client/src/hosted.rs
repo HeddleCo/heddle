@@ -35,6 +35,7 @@ impl HostedClient {
             descriptor.endpoint_addr()?,
             options.credential.clone(),
             options.timeout,
+            options.tls_ca_certificate_pem.as_deref(),
         )
         .await
     }
@@ -45,6 +46,7 @@ impl HostedClient {
         address: EndpointAddr,
         credential: Credentials,
         timeout: Duration,
+        tls_ca_certificate_pem: Option<&str>,
     ) -> Result<Self> {
         if timeout.is_zero() {
             bail!("hosted progress timeout must be positive");
@@ -56,8 +58,11 @@ impl HostedClient {
             RelayMode::custom(relays)
         };
         heddle_perf_contract::record_network_client_initialization();
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .relay_mode(relay_mode)
+        let mut builder = Endpoint::builder(presets::Minimal).relay_mode(relay_mode);
+        if let Some(pem) = tls_ca_certificate_pem {
+            builder = builder.ca_tls_config(crate::relay_tls::ca_tls_config_from_pem(pem)?);
+        }
+        let endpoint = builder
             .bind()
             .await
             .context("bind hosted client endpoint")?;

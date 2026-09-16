@@ -20,6 +20,7 @@ crypto.workspace = true
 heddle-perf-contract.workspace = true
 iroh.workspace = true
 reqwest.workspace = true
+rustls.workspace = true
 thread-api = { workspace = true, features = ["iroh", "signing"] }
 tokio.workspace = true
 
@@ -27,4 +28,5 @@ tokio.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
 prost.workspace = true
+rcgen = "0.14.8"
 serde_json.workspace = true

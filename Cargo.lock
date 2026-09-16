@@ -8323,7 +8323,9 @@ dependencies = [
  "heddleco-iroh",
  "hex",
  "prost 0.14.1",
+ "rcgen",
  "reqwest",
+ "rustls",
  "serde_json",
  "tokio",
 ]

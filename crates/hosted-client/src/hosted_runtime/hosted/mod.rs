@@ -276,6 +276,7 @@ impl HostedClient {
             descriptor.endpoint_addr()?,
             credential,
             context.progress_timeout(),
+            config.tls_ca_certificate_pem.as_deref(),
         )
         .await
         .map_err(HostedError::transport)?;

@@ -7,6 +7,7 @@
 //! Admin RPCs that still live only on Weft (`weftctl`) are not shipped here.
 
 mod hosted;
+mod relay_tls;
 
 use std::{
     collections::HashMap,
@@ -36,6 +37,8 @@ pub struct ConnectionOptions<C = Credentials> {
     pub trusted_descriptors: DescriptorKeyring,
     pub credential: C,
     pub timeout: Duration,
+    /// Same PEM unary HTTPS already merged into reqwest (`HEDDLE_REMOTE_TLS_CA_CERT`).
+    pub tls_ca_certificate_pem: Option<String>,
 }
 
 /// Trust anchors come from the application, including key rotation policy.
