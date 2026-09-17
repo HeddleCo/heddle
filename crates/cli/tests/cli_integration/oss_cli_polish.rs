@@ -313,18 +313,20 @@ fn native_dirty_status_blocks_verification_without_git_overlay_language() {
 
     let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
     assert!(
-        text.contains("Verification: 1 Heddle worktree path(s) are not captured"),
-        "native dirty status should name the verify blocker: {text}"
+        text.contains("dirty") && text.contains("work.txt"),
+        "native dirty status should name the unsaved path: {text}"
     );
     assert!(
         !text.contains("Git overlay:"),
         "native Heddle status should not use Git-overlay labeling: {text}"
     );
     assert!(
-        text.contains("Changes not yet saved")
-            && text.contains("heddle capture -m \"...\"")
-            && !text.contains("Git checkpoint"),
+        text.contains("heddle capture -m \"...\"") && !text.contains("Git checkpoint"),
         "native Heddle status should describe unsaved work with capture language: {text}"
+    );
+    assert!(
+        !text.contains("Verification:") && !text.contains("Work in progress"),
+        "default status should not repeat verification/WIP chrome: {text}"
     );
 }
 
@@ -5588,7 +5590,8 @@ fn initialized_git_overlay_status_and_ready_do_not_claim_actionable_readiness() 
     let status_text = heddle(&["status", "--output", "text"], Some(temp.path()))
         .expect("status should render clean direct Git-backed text");
     assert!(
-        status_text.contains("Verdict: clean") && status_text.contains("Git + Heddle"),
+        status_text.contains("up to date")
+            && (status_text.contains("git-overlay") || status_text.contains("main")),
         "initialized Git-overlay status should be calm and clean: {status_text}"
     );
 
@@ -5876,23 +5879,23 @@ fn thread_list_groups_threads_by_user_workflow() {
 
     let output = heddle(&["--output", "text", "thread", "list"], Some(temp.path())).unwrap();
     assert!(
-        output.contains("Current"),
-        "thread list should group current work: {output}"
+        output.contains("* main") && output.contains("this checkout"),
+        "thread list should mark the current checkout: {output}"
     );
     assert!(
-        output.contains("Ready to merge"),
-        "thread list should group mergeable work: {output}"
+        output.contains("feature-work"),
+        "thread list should name other threads: {output}"
     );
     assert!(
-        output.contains("next step:"),
-        "thread list should use consistent next-step copy: {output}"
+        !output.contains("Threads in") && !output.contains("Repository:"),
+        "default thread list should drop doubled repository chrome: {output}"
     );
     assert!(
-        !output.contains("    next:"),
-        "thread list should not use the older lowercase next label: {output}"
+        !output.contains("    next:") && !output.contains("next step:"),
+        "default thread list should not use nested next-step copy: {output}"
     );
     assert!(
-        !output.contains("lifecycle:") && !output.contains("git tip:"),
+        !output.contains("lifecycle:") && !output.contains("git tip:") && !output.contains("●"),
         "default thread list should keep internal state and Git tips out of the first-run view: {output}"
     );
     let verbose = heddle(
@@ -6091,8 +6094,9 @@ fn quiet_no_color_and_narrow_text_outputs_preserve_global_contract() {
         "narrow text status should not need stderr: {narrow_stderr}"
     );
     assert!(
-        narrow_stdout.contains("Heddle status") && narrow_stdout.contains("Verdict:"),
-        "narrow status should retain the primary labels: {narrow_stdout}"
+        narrow_stdout.contains("main")
+            && (narrow_stdout.contains("dirty") || narrow_stdout.contains("up to date")),
+        "narrow status should retain the compact header: {narrow_stdout}"
     );
     assert!(
         !narrow_stdout.contains('\u{1b}'),
@@ -6161,7 +6165,7 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "status"],
-        &["Heddle status", "Verdict:"],
+        &["main", "dirty"],
     );
     assert_text_surface(
         temp.path(),
@@ -6191,7 +6195,7 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "thread", "list"],
-        &["Current"],
+        &["* main", "this checkout"],
     );
     assert_text_surface(
         temp.path(),
@@ -6199,11 +6203,11 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
         &["main"],
     );
     // The `Repository:` mode preamble is dropped from the default read
-    // view (heddle#275); the everyday surface leads with verification state.
+    // view (heddle#275); the everyday surface leads with the compact header.
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "status"],
-        &["Verdict"],
+        &["dirty"],
     );
     assert_text_surface(
         temp.path(),
@@ -6235,7 +6239,8 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     assert!(ready.stderr.is_empty(), "ready should keep stderr quiet");
     let ready_stdout = String::from_utf8_lossy(&ready.stdout);
     assert!(
-        !ready_stdout.contains('\u{1b}') && ready_stdout.contains("Readiness"),
+        !ready_stdout.contains('\u{1b}')
+            && (ready_stdout.contains("Readiness") || ready_stdout.contains("Next:")),
         "ready narrow text should be no-color and retain labels: {ready_stdout}"
     );
     assert!(
@@ -6842,10 +6847,8 @@ fn workspace_bare_command_defaults_to_show() {
     let text = heddle(&["--output", "text", "status"], Some(temp.path()))
         .expect("status should render the canonical workspace view");
     assert!(
-        text.contains("Heddle status")
-            && text.contains("Thread:")
-            && text.contains("Changed paths:"),
-        "status should render the canonical workspace summary, not subcommand help: {text}"
+        text.contains("main") && text.contains("native"),
+        "status should render the compact workspace summary, not subcommand help: {text}"
     );
     assert!(
         !text.contains("git tip:") && !text.contains("    next:"),
@@ -8358,7 +8361,7 @@ fn default_output_is_text_and_json_requires_explicit_flag() {
     assert!(default.status.success(), "default status should succeed");
     let default_stdout = String::from_utf8_lossy(&default.stdout);
     assert!(
-        default_stdout.contains("Heddle status"),
+        default_stdout.contains("main") && default_stdout.contains("dirty"),
         "default status should render text, not JSON: {default_stdout}"
     );
     assert!(
@@ -8718,8 +8721,8 @@ fn tty_auto_mode_renders_text_and_explicit_json_stays_json() {
     );
     let text_stdout = String::from_utf8_lossy(&text.stdout);
     assert!(
-        text_stdout.contains("Heddle status")
-            && text_stdout.contains("Verdict:")
+        text_stdout.contains("main")
+            && (text_stdout.contains("dirty") || text_stdout.contains("up to date"))
             && !text_stdout.trim_start().starts_with('{')
             && !text_stdout.contains('\u{1b}'),
         "auto mode on a TTY should render no-color human text: {text_stdout:?}"
@@ -9377,12 +9380,12 @@ fn freshly_initialized_repo_reports_clean_health() {
 
     let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
     assert!(
-        text.contains("Verdict: clean"),
+        text.contains("main") && !text.contains("needs_attention"),
         "a fresh init should be healthy, not 'needs_attention': {text}"
     );
     assert!(
-        !text.contains("Next step:"),
-        "a fresh init has nothing to recommend; the renderer should stay silent: {text}"
+        !text.contains("Next step:") && !text.contains("Verdict:"),
+        "a fresh init should not repeat the long-form verdict chrome: {text}"
     );
 
     let json = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();

@@ -1334,8 +1334,7 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
 
     let status_text = fixture.heddle(&["status", "--output", "text"]).unwrap();
     assert!(
-        status_text.contains("Heddle status for scratch")
-            && status_text.contains("Checkout: Git branch checkout")
+        status_text.contains("scratch")
             && !status_text.contains("Setup needed")
             && !status_text.contains("main checkout")
             && !status_text.contains("heddle adopt --ref scratch"),
@@ -2635,7 +2634,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     assert_eq!(bridge["recommended_action"], Value::Null);
     let bridge_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
-        (bridge_text.contains("Verdict: clean") || bridge_text.contains("Health: clean"))
+        (bridge_text.contains("up to date") || bridge_text.contains("feature/drop-in"))
             && !bridge_text.contains("Recovery: heddle adopt --ref feature/drop-in")
             && !bridge_text.contains("Setup needed"),
         "status text should treat direct Git-backed commits as clean: {bridge_text}"

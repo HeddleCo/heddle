@@ -33,7 +33,7 @@ use verbs::{
 };
 
 use super::{
-    action_line::print_command,
+    action_line::{format_next, print_command},
     next_action::{NextActionValidationContext, write_command_json},
     verification_health::repository_setup_guidance,
 };
@@ -723,15 +723,108 @@ fn render_materialized_advisory(output: &StatusOutput) {
 }
 
 fn render_long_status(output: &StatusOutput, verbose: bool) {
-    render_status_header(output);
-    render_status_operation(output);
-    render_status_thread(output, verbose);
-    render_status_details(output, verbose);
-    render_status_advice(output);
-    render_status_changes(output);
-    render_status_submodules(output);
-    render_status_parallel(output);
-    render_status_materialized(&output.materialized_threads, verbose);
+    if verbose {
+        render_status_header(output);
+        render_status_operation(output);
+        render_status_thread(output, verbose);
+        render_status_details(output, verbose);
+        render_status_advice(output);
+        render_status_changes(output);
+        render_status_submodules(output);
+        render_status_parallel(output);
+        render_status_materialized(&output.materialized_threads, verbose);
+        return;
+    }
+    print!("{}", format_compact_status(output));
+}
+
+fn format_compact_status(output: &StatusOutput) -> String {
+    let mut lines = Vec::new();
+    lines.push(compact_status_header(output));
+    if compact_status_is_dirty(output) {
+        let count = output.changed_path_count.max(compact_change_count(output));
+        let path_word = if count == 1 { "path" } else { "paths" };
+        lines.push(format!("dirty  {count} {path_word}"));
+        for path in &output.changes.modified {
+            lines.push(format!("  {}  {path}", style::warn("modified")));
+        }
+        for path in &output.changes.added {
+            lines.push(format!("  {}  {path}", style::accent("added")));
+        }
+        for path in &output.changes.deleted {
+            lines.push(format!("  {}  {path}", style::error("deleted")));
+        }
+    }
+    if let Some(operation) = &output.operation {
+        lines.push(format!(
+            "in progress  {} {}",
+            operation.kind, operation.state
+        ));
+    }
+    if let Some(next) = format_next(&output.recommended_action) {
+        if compact_status_is_dirty(output) || output.operation.is_some() {
+            lines.push(String::new());
+        }
+        lines.push(next);
+    }
+    lines.join("\n") + "\n"
+}
+
+fn compact_status_header(output: &StatusOutput) -> String {
+    let mut parts = Vec::new();
+    parts.push(style::bold(
+        output
+            .thread
+            .as_deref()
+            .or_else(|| output.current_state.as_ref().map(|_| "detached"))
+            .unwrap_or("repository"),
+    ));
+    parts.push(compact_capability_label(&output.repository_capability).to_string());
+    if let Some(remote) = output
+        .trust
+        .default_remote
+        .as_deref()
+        .filter(|remote| !remote.is_empty())
+    {
+        parts.push(remote.to_string());
+    }
+    if let Some(state) = output
+        .current_state
+        .as_deref()
+        .filter(|state| !state.is_empty())
+    {
+        parts.push(style::state_id(state));
+    }
+    if compact_status_is_up_to_date(output) {
+        parts.push("up to date".to_string());
+    }
+    parts.join("  ")
+}
+
+fn compact_capability_label(capability: &str) -> &str {
+    match capability {
+        "native-heddle" | "native" => "native",
+        other => other,
+    }
+}
+
+fn compact_status_is_dirty(output: &StatusOutput) -> bool {
+    has_status_changes(output)
+        || output.changed_path_count > 0
+        || matches!(
+            output.thread_health.as_str(),
+            "dirty_worktree" | "uncaptured"
+        )
+}
+
+fn compact_status_is_up_to_date(output: &StatusOutput) -> bool {
+    !compact_status_is_dirty(output)
+        && output.operation.is_none()
+        && output.recommended_action.trim().is_empty()
+}
+
+fn compact_change_count(output: &StatusOutput) -> usize {
+    output.changes.modified.len() + output.changes.added.len() + output.changes.deleted.len()
 }
 
 /// Long-form inventory of clonefile-backed materialized threads. The
@@ -1581,7 +1674,7 @@ mod tests {
 
     use super::{
         MaterializedThreadInfo, assess_materialized_threads, build_status_output,
-        render_status_materialized, status_workspace_label,
+        format_compact_status, render_status_materialized, status_workspace_label,
     };
 
     const AGENT_CONTEXT_STATUS_KEYS: &[&str] = &[
@@ -1600,6 +1693,20 @@ mod tests {
         "parent_thread",
         "task",
     ];
+
+    fn with_isolated_heddle_home<T>(f: impl FnOnce() -> T) -> T {
+        static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = TempDir::new().expect("heddle home");
+        let previous = std::env::var_os("HEDDLE_HOME");
+        unsafe { std::env::set_var("HEDDLE_HOME", home.path()) };
+        let result = f();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+        }
+        result
+    }
 
     fn status_cli(repo_dir: &std::path::Path) -> crate::cli::Cli {
         crate::cli::Cli::parse_from([
@@ -1896,5 +2003,112 @@ mod tests {
         let value = serde_json::to_value(&output).unwrap();
         assert!(value["recommended_action"].is_null());
         assert!(value["verification"]["recommended_action"].is_null());
+    }
+
+    #[test]
+    fn compact_status_text_lists_dirty_paths_without_repeating_wip() {
+        with_isolated_heddle_home(|| {
+            let repo_dir = TempDir::new().unwrap();
+            let repo = Repository::init_default(repo_dir.path()).unwrap();
+            fs::create_dir_all(repo_dir.path().join("src")).unwrap();
+            fs::write(repo_dir.path().join("src/lib.rs"), b"fn main() {}\n").unwrap();
+
+            let cli = status_cli(repo_dir.path());
+            let output = build_status_output(&cli, false).expect("build status output");
+            let text = format_compact_status(&output);
+
+            assert!(
+                text.contains("main") && text.contains("native"),
+                "compact header should name the thread and capability: {text}"
+            );
+            if let Some(state) = output.current_state.as_deref() {
+                assert!(
+                    text.contains(state),
+                    "compact header should use StatusOutput.current_state: {text}"
+                );
+            }
+            assert!(
+                text.contains("dirty  1 path")
+                    && text.contains("added")
+                    && text.contains("src/lib.rs"),
+                "compact dirty view should list the unsaved path: {text}"
+            );
+            assert!(
+                text.contains("Next:") && text.contains("heddle capture -m \"...\""),
+                "compact dirty view should keep the capture next action: {text}"
+            );
+            for leaked in [
+                "Heddle status",
+                "Verdict:",
+                "Work in progress",
+                "Repository:",
+                "Worktree",
+                "Identity:",
+                "Lifecycle:",
+                "why:",
+            ] {
+                assert!(
+                    !text.contains(leaked),
+                    "compact status must not repeat {leaked:?}: {text}"
+                );
+            }
+            let _ = repo;
+        });
+    }
+
+    #[test]
+    fn compact_status_text_is_one_line_when_clean() {
+        with_isolated_heddle_home(|| {
+            let repo_dir = TempDir::new().unwrap();
+            let repo = Repository::init_default(repo_dir.path()).unwrap();
+            fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
+            repo.snapshot(Some("seed".into()), None).unwrap();
+
+            let mut cfg = repo::remote::RemoteConfig::open(&repo).unwrap();
+            cfg.add(
+                "origin",
+                repo::remote::Remote {
+                    url: "https://127.0.0.1:8421/spool/x/repo".into(),
+                    insecure: false,
+                },
+            )
+            .unwrap();
+
+            let cli = status_cli(repo_dir.path());
+            let output = build_status_output(&cli, false).expect("build status output");
+            let text = format_compact_status(&output);
+            let body = text.trim();
+
+            assert!(
+                output.hosted_enabled,
+                "origin spool remote should set hosted_enabled on StatusOutput"
+            );
+            assert_eq!(
+                output.trust.default_remote.as_deref(),
+                Some("origin"),
+                "compact header should read StatusOutput.trust.default_remote"
+            );
+            assert!(
+                body.contains("main")
+                    && body.contains("native")
+                    && body.contains("origin")
+                    && body.contains("up to date"),
+                "clean compact status should be a single up-to-date header: {text}"
+            );
+            if let Some(state) = output.current_state.as_deref() {
+                assert!(
+                    body.contains(state),
+                    "header should include current_state: {text}"
+                );
+            }
+            assert!(
+                !body.contains('\n'),
+                "clean compact status should be one line: {text:?}"
+            );
+            assert!(
+                !body.contains("Next:"),
+                "clean compact status should omit Next when recommended_action is empty: {text}"
+            );
+        });
     }
 }
