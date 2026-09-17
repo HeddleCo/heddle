@@ -91,8 +91,6 @@ const SWEPT: &[&str] = &[
     "invite",
     "invite list",
     "discuss",
-    "discuss open",
-    "discuss turn",
     "discuss resolve",
     "discuss reopen",
     "discuss list",

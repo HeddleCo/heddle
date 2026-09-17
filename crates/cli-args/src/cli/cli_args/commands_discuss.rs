@@ -54,15 +54,6 @@ pub struct DiscussArgs {
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum DiscussCommands {
-    /// Open a discussion (hidden alias of `discuss --new`).
-    #[command(hide = true)]
-    Open(DiscussOpenArgs),
-    /// Append a turn (hidden alias of `discuss --id`).
-    #[command(hide = true)]
-    Turn(DiscussTurnArgs),
-    /// Removed: reply with `heddle discuss --id`.
-    #[command(hide = true)]
-    Append(DiscussAppendArgs),
     /// Resolve a discussion.
     Resolve(DiscussResolveArgs),
     /// Reopen a resolved discussion.
@@ -73,69 +64,6 @@ pub enum DiscussCommands {
     Show(DiscussShowArgs),
     /// Replay hosted discussion events after the local watermark, then go live.
     Wait(DiscussWaitArgs),
-}
-
-#[derive(Clone, Debug, Args)]
-pub struct DiscussOpenArgs {
-    /// Legacy positional file path (`discuss open FILE SYMBOL BODY`).
-    #[arg(value_name = "FILE")]
-    pub positional_file: Option<String>,
-    /// Legacy positional symbol.
-    #[arg(value_name = "SYMBOL")]
-    pub positional_symbol: Option<String>,
-    /// First turn of the discussion.
-    #[arg(value_name = "BODY")]
-    pub body: Option<String>,
-    /// Anchor file path.
-    #[arg(long)]
-    pub path: Option<String>,
-    /// Anchor symbol.
-    #[arg(long = "symbol")]
-    pub symbol: Option<String>,
-    /// Anchor line (1-indexed).
-    #[arg(long)]
-    pub line: Option<u32>,
-    /// Read the markdown body from a file.
-    #[arg(long = "file", value_name = "PATH")]
-    pub file: Option<PathBuf>,
-    /// First turn (named alternative to `<BODY>`).
-    #[arg(long = "body")]
-    pub body_flag: Option<String>,
-    /// Human-readable summary. Defaults to the first line of the first turn.
-    #[arg(long)]
-    pub title: Option<String>,
-    /// State the symbol anchor was observed against. Defaults to HEAD.
-    #[arg(long)]
-    pub state: Option<String>,
-    /// Visibility: `public` | `internal` | `team:NAME` | `restricted:LABEL` | `private:LABEL`.
-    #[arg(long)]
-    pub visibility: Option<String>,
-    /// Attach the discussion to a thread ref while keeping its symbol anchor.
-    #[arg(long, value_name = "REF")]
-    pub thread: Option<String>,
-}
-
-#[derive(Clone, Debug, Args)]
-pub struct DiscussTurnArgs {
-    /// Discussion id (short or full `disc-` id).
-    #[arg(value_name = "ID")]
-    pub discussion_id: String,
-    /// Turn body.
-    #[arg(value_name = "BODY")]
-    pub body: String,
-    /// Parent turn number (1-indexed). Defaults to the latest head.
-    #[arg(long)]
-    pub turn: Option<u32>,
-}
-
-#[derive(Clone, Debug, Args)]
-pub struct DiscussAppendArgs {
-    /// Discussion id, if the caller still passed one.
-    #[arg(value_name = "ID")]
-    pub discussion_id: Option<String>,
-    /// Turn body, if the caller still passed one.
-    #[arg(value_name = "BODY")]
-    pub body: Option<String>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -214,7 +142,7 @@ pub struct DiscussListArgs {
     #[arg(long)]
     pub state: Option<String>,
     /// Filter by anchored file path.
-    #[arg(long, alias = "file")]
+    #[arg(long)]
     pub path: Option<String>,
     /// Filter by anchored symbol. Requires `--path`.
     #[arg(long, requires = "path")]
@@ -348,21 +276,24 @@ mod tests {
     }
 
     #[test]
-    fn copy_open_argv_is_not_a_turn_parser() {
-        assert!(
-            Cli::try_parse_from(["heddle", "discuss", "turn", "src/auth.rs", "verify", "body",])
-                .is_err(),
-            "FILE SYMBOL BODY must not parse as discuss turn"
-        );
-        let turn = discuss(
-            Cli::try_parse_from(["heddle", "discuss", "turn", "disc-id", "body"]).expect("id argv"),
-        );
-        match turn.command {
-            Some(DiscussCommands::Turn(args)) => {
-                assert_eq!(args.discussion_id, "disc-id");
-                assert_eq!(args.body, "body");
-            }
-            _ => panic!("expected discuss turn"),
+    fn open_turn_and_append_are_not_commands() {
+        for argv in [
+            [
+                "heddle",
+                "discuss",
+                "open",
+                "src/lib.rs",
+                "greet",
+                "why greet?",
+            ]
+            .as_slice(),
+            ["heddle", "discuss", "turn", "disc-id", "body"].as_slice(),
+            ["heddle", "discuss", "append", "disc-id", "body"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(argv).is_err(),
+                "{argv:?} must not parse as a discuss subcommand"
+            );
         }
     }
 
@@ -438,45 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn append_parses_as_hidden_alias() {
-        let append = discuss(
-            Cli::try_parse_from(["heddle", "discuss", "append", "disc-id", "body"])
-                .expect("append still parses so the handler can hint --id"),
-        );
-        match append.command {
-            Some(DiscussCommands::Append(args)) => {
-                assert_eq!(args.discussion_id.as_deref(), Some("disc-id"));
-                assert_eq!(args.body.as_deref(), Some("body"));
-            }
-            _ => panic!("expected discuss append"),
-        }
-    }
-
-    #[test]
-    fn hidden_open_still_accepts_legacy_positionals() {
-        let opened = discuss(
-            Cli::try_parse_from([
-                "heddle",
-                "discuss",
-                "open",
-                "src/lib.rs",
-                "greet",
-                "why greet?",
-            ])
-            .expect("hidden open positionals"),
-        );
-        match opened.command {
-            Some(DiscussCommands::Open(args)) => {
-                assert_eq!(args.positional_file.as_deref(), Some("src/lib.rs"));
-                assert_eq!(args.positional_symbol.as_deref(), Some("greet"));
-                assert_eq!(args.body.as_deref(), Some("why greet?"));
-            }
-            _ => panic!("expected discuss open"),
-        }
-    }
-
-    #[test]
-    fn list_filters_by_path_not_file_body() {
+    fn list_filters_by_path() {
         let listed = discuss(
             Cli::try_parse_from(["heddle", "discuss", "list", "--path", "src/lib.rs"])
                 .expect("list --path"),
@@ -487,15 +380,9 @@ mod tests {
             }
             _ => panic!("expected discuss list"),
         }
-        let aliased = discuss(
-            Cli::try_parse_from(["heddle", "discuss", "list", "--file", "src/lib.rs"])
-                .expect("list --file alias"),
+        assert!(
+            Cli::try_parse_from(["heddle", "discuss", "list", "--file", "src/lib.rs"]).is_err(),
+            "list --file is not a path filter"
         );
-        match aliased.command {
-            Some(DiscussCommands::List(args)) => {
-                assert_eq!(args.path.as_deref(), Some("src/lib.rs"));
-            }
-            _ => panic!("expected discuss list"),
-        }
     }
 }

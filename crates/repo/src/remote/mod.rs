@@ -238,9 +238,23 @@ pub fn url_looks_like_hosted_remote(url: &str) -> bool {
 }
 
 fn hosted_url_has_spool_path(url: &str) -> bool {
+    if !url_is_network_or_hosted(url) {
+        return false;
+    }
     let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let path = rest.split_once('/').map(|(_, path)| path).unwrap_or("");
     path.split('/').any(|segment| segment == "spool")
+}
+
+/// Spool-path hosted detection only applies to network/hosted URLs:
+/// `http(s)://`, `heddle://`, or a scheme-less `host:port` Network target.
+/// `file://` and bare filesystem paths are local remotes.
+fn url_is_network_or_hosted(url: &str) -> bool {
+    match url.split_once("://") {
+        Some(("http" | "https" | "heddle", _)) => true,
+        Some(_) => false,
+        None => matches!(RemoteTarget::parse(url), Ok(RemoteTarget::Network { .. })),
+    }
 }
 
 /// Internal implementation of credential key extraction.
@@ -393,6 +407,12 @@ mod tests {
         ));
         assert!(!url_looks_like_hosted_remote(
             "https://github.com/org/repo.git"
+        ));
+        assert!(!url_looks_like_hosted_remote(
+            "file:///var/heddle/spool/acme/notes"
+        ));
+        assert!(!url_looks_like_hosted_remote(
+            "/var/heddle/spool/acme/notes"
         ));
         assert!(!url_looks_like_hosted_remote(""));
     }

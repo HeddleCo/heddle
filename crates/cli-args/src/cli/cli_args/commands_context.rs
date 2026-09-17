@@ -127,7 +127,7 @@ pub struct ContextSetArgs {
     pub message: Option<String>,
 
     /// Read annotation content from a markdown body file.
-    #[arg(long = "file", alias = "from-file", value_name = "PATH")]
+    #[arg(long = "file", value_name = "PATH")]
     pub file: Option<std::path::PathBuf>,
 }
 
@@ -215,7 +215,7 @@ pub struct ContextEditArgs {
     pub message: Option<String>,
 
     /// Read revision content from a markdown body file.
-    #[arg(long = "file", alias = "from-file", value_name = "PATH")]
+    #[arg(long = "file", value_name = "PATH")]
     pub file: Option<std::path::PathBuf>,
 }
 
@@ -248,7 +248,7 @@ pub struct ContextSupersedeArgs {
     pub message: Option<String>,
 
     /// Read replacement content from a markdown body file.
-    #[arg(long = "file", alias = "from-file", value_name = "PATH")]
+    #[arg(long = "file", value_name = "PATH")]
     pub file: Option<std::path::PathBuf>,
 }
 
@@ -401,24 +401,18 @@ mod tests {
             }
             _ => panic!("expected context set"),
         }
-        match Cli::try_parse_from([
-            "heddle",
-            "context",
-            "set",
-            "--path",
-            "src/auth.rs",
-            "--from-file",
-            "note.md",
-        ])
-        .expect("from-file alias")
-        .command
-        {
-            Commands::Context {
-                command: ContextCommands::Set(args),
-            } => {
-                assert_eq!(args.file.as_deref(), Some(std::path::Path::new("note.md")));
-            }
-            _ => panic!("expected context set"),
-        }
+        assert!(
+            Cli::try_parse_from([
+                "heddle",
+                "context",
+                "set",
+                "--path",
+                "src/auth.rs",
+                "--from-file",
+                "note.md",
+            ])
+            .is_err(),
+            "--from-file is not an alias of --file"
+        );
     }
 }

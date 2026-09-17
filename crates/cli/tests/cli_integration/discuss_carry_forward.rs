@@ -23,7 +23,8 @@ fn open(temp: &TempDir) -> Value {
     json(
         &heddle(
             &[
-                "--output", "json", "discuss", "open", "main.rs", "main", "review q",
+                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "main",
+                "review q",
             ],
             Some(temp.path()),
         )
@@ -63,7 +64,7 @@ fn append_writes_a_new_collaboration_operation() {
 
     let appended = json(
         &heddle(
-            &["--output", "json", "discuss", "turn", id, "second"],
+            &["--output", "json", "discuss", "--id", id, "second"],
             Some(temp.path()),
         )
         .unwrap(),

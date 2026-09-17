@@ -41,9 +41,8 @@ use super::{
 use crate::{
     cli::{
         cli_args::{
-            Cli, DiscussAppendArgs, DiscussArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
-            DiscussReopenArgs, DiscussResolveArgs, DiscussShowArgs, DiscussTurnArgs,
-            DiscussWaitArgs, ResolveModeArg,
+            Cli, DiscussArgs, DiscussCommands, DiscussListArgs, DiscussReopenArgs,
+            DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs, ResolveModeArg,
         },
         should_output_json,
     },
@@ -87,23 +86,11 @@ pub async fn run(cli: &Cli, args: &DiscussArgs) -> Result<()> {
                 "discuss wait"
             )));
         }
-        Some(DiscussCommands::Append(append_args)) => {
-            return Err(append_removed(append_args));
-        }
         _ => cli.open_repo().context("open Heddle repository")?,
     };
     let store = CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
     match &args.command {
         None => run_write(cli, &repo, &store, args),
-        Some(DiscussCommands::Open(open_args)) => {
-            hint_alias_next(cli, &open_alias_next(open_args));
-            run_open(cli, &repo, &store, open_args)
-        }
-        Some(DiscussCommands::Turn(turn_args)) => {
-            hint_alias_next(cli, &turn_alias_next(turn_args));
-            run_turn(cli, &repo, &store, turn_args)
-        }
-        Some(DiscussCommands::Append(_)) => unreachable!("append returns before opening the store"),
         Some(DiscussCommands::Resolve(resolve_args)) => {
             run_resolve(cli, &repo, &store, resolve_args)
         }
@@ -180,31 +167,6 @@ struct OpenSpec<'a> {
     state: Option<&'a str>,
     visibility: Option<&'a str>,
     thread: Option<&'a str>,
-}
-
-fn run_open(
-    cli: &Cli,
-    repo: &repo::Repository,
-    store: &CollaborationStore,
-    args: &DiscussOpenArgs,
-) -> Result<()> {
-    open_discussion(
-        cli,
-        repo,
-        store,
-        OpenSpec {
-            path: args.path.as_deref().or(args.positional_file.as_deref()),
-            symbol: args.symbol.as_deref().or(args.positional_symbol.as_deref()),
-            line: args.line,
-            body: args.body_flag.as_deref().or(args.body.as_deref()),
-            body_file: args.file.as_deref(),
-            title: args.title.as_deref(),
-            state: args.state.as_deref(),
-            visibility: args.visibility.as_deref(),
-            thread: args.thread.as_deref(),
-        },
-        &["discuss", "open"],
-    )
 }
 
 fn open_discussion(
@@ -288,24 +250,6 @@ fn open_anchor(
     }
 }
 
-fn run_turn(
-    cli: &Cli,
-    repo: &repo::Repository,
-    store: &CollaborationStore,
-    args: &DiscussTurnArgs,
-) -> Result<()> {
-    append_turn(
-        cli,
-        repo,
-        store,
-        &args.discussion_id,
-        Some(args.body.as_str()),
-        None,
-        args.turn,
-        &["discuss", "turn"],
-    )
-}
-
 fn append_turn(
     cli: &Cli,
     repo: &repo::Repository,
@@ -360,62 +304,6 @@ fn read_body(body: Option<&str>, file: Option<&Path>) -> Result<String> {
             "Pass a markdown body argument or `--file <path>`.",
             "heddle discuss --new --path src/lib.rs \"why greet?\"",
         ))),
-    }
-}
-
-fn append_removed(args: &DiscussAppendArgs) -> anyhow::Error {
-    let primary = match args.discussion_id.as_deref() {
-        Some(id) => format!("heddle discuss --id {id} \"second thought\""),
-        None => "heddle discuss --id disc-01a0afc6 \"second thought\"".to_string(),
-    };
-    anyhow!(RecoveryAdvice::invalid_usage(
-        "discuss_append_removed",
-        "`discuss append` is not a command",
-        "Reply with `heddle discuss --id <id> \"<body>\"`.",
-        primary,
-    ))
-}
-
-fn hint_alias_next(cli: &Cli, next: &str) {
-    if should_output_json(cli, None) {
-        return;
-    }
-    eprintln!("Next: {next}");
-}
-
-fn open_alias_next(args: &DiscussOpenArgs) -> String {
-    let mut command = String::from("heddle discuss --new");
-    if let Some(path) = args.path.as_deref().or(args.positional_file.as_deref()) {
-        command.push_str(" --path ");
-        command.push_str(path);
-    } else {
-        command.push_str(" --path <path>");
-    }
-    if let Some(symbol) = args.symbol.as_deref().or(args.positional_symbol.as_deref()) {
-        command.push_str(" --symbol ");
-        command.push_str(symbol);
-    }
-    if let Some(line) = args.line {
-        command.push_str(&format!(" --line {line}"));
-    }
-    if let Some(file) = args.file.as_deref() {
-        command.push_str(" --file ");
-        command.push_str(&file.display().to_string());
-    } else if let Some(body) = args.body_flag.as_deref().or(args.body.as_deref()) {
-        command.push_str(&format!(" {body:?}"));
-    } else {
-        command.push_str(" \"<body>\"");
-    }
-    command
-}
-
-fn turn_alias_next(args: &DiscussTurnArgs) -> String {
-    match args.turn {
-        Some(turn) => format!(
-            "heddle discuss --id {} --turn {turn} {:?}",
-            args.discussion_id, args.body
-        ),
-        None => format!("heddle discuss --id {} {:?}", args.discussion_id, args.body),
     }
 }
 

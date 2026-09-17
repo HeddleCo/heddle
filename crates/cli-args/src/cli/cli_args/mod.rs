@@ -63,9 +63,8 @@ pub use commands_context::ContextCommands;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 pub use commands_context::ContextReasonCommands;
 pub use commands_discuss::{
-    DiscussAppendArgs, DiscussArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
-    DiscussReopenArgs, DiscussResolveArgs, DiscussShowArgs, DiscussTurnArgs, DiscussWaitArgs,
-    ResolveModeArg,
+    DiscussArgs, DiscussCommands, DiscussListArgs, DiscussReopenArgs, DiscussResolveArgs,
+    DiscussShowArgs, DiscussWaitArgs, ResolveModeArg,
 };
 pub use commands_env::{EnvCommands, EnvCreateArgs, EnvListArgs, EnvRunArgs};
 #[cfg(feature = "git-overlay")]

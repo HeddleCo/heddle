@@ -7752,8 +7752,10 @@ fn discuss_resolve_by_edit_emits_resolved_state_json() {
         temp.path(),
         &[
             "discuss",
-            "open",
+            "--new",
+            "--path",
             "src/lib.rs",
+            "--symbol",
             "foo",
             "Please keep this rationale",
             "--state",
@@ -7762,7 +7764,7 @@ fn discuss_resolve_by_edit_emits_resolved_state_json() {
     );
     let discussion_id = opened["discussion"]["id"]
         .as_str()
-        .expect("discuss open should return an id")
+        .expect("discuss --new should return an id")
         .to_string();
     let resolved_state_id = opened["discussion"]["anchor"]["state_id"]
         .as_str()
@@ -7836,15 +7838,17 @@ fn discuss_resolve_into_annotation_creates_context_annotation() {
         temp.path(),
         &[
             "discuss",
-            "open",
+            "--new",
+            "--path",
             "src/lib.rs",
+            "--symbol",
             "foo",
             "Please preserve this invariant",
         ],
     );
     let discussion_id = opened["discussion"]["id"]
         .as_str()
-        .expect("discuss open should return an id");
+        .expect("discuss --new should return an id");
 
     let op_id = "11111111-1111-4111-8111-111111111111";
     let resolved = json_value(
@@ -8031,7 +8035,7 @@ fn discuss_write_path_file_body_short_id_and_turn() {
 }
 
 #[test]
-fn discuss_append_hints_id_not_open() {
+fn discuss_append_is_not_a_command() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
     let output = heddle_output(
@@ -8039,11 +8043,11 @@ fn discuss_append_hints_id_not_open() {
         Some(temp.path()),
     )
     .expect("invoke discuss append");
-    assert!(!output.status.success(), "append must refuse");
+    assert!(!output.status.success(), "append must be absent");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("discuss --id") && !stderr.contains("discuss open"),
-        "append must hint discuss --id, not open: {stderr}"
+        !stderr.contains("Next:"),
+        "removed discuss append must not print a migration hint: {stderr}"
     );
 }
 

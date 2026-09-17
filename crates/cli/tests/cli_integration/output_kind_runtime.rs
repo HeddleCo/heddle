@@ -531,7 +531,15 @@ fn discuss_open_show_append_emit_output_kind() {
     ];
 
     let open = heddle_json_with_env(
-        &["discuss", "open", "main.rs", "main", "first turn"],
+        &[
+            "discuss",
+            "--new",
+            "--path",
+            "main.rs",
+            "--symbol",
+            "main",
+            "first turn",
+        ],
         &temp,
         &env_principal,
     );
@@ -550,7 +558,7 @@ fn discuss_open_show_append_emit_output_kind() {
         .to_string();
 
     let append = heddle_json_with_env(
-        &["discuss", "turn", &discussion_id, "follow-up turn"],
+        &["discuss", "--id", &discussion_id, "follow-up turn"],
         &temp,
         &env_principal,
     );

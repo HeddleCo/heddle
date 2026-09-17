@@ -2089,29 +2089,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["discuss", "open"],
-        hidden(json_discriminators(
-            documented_schemas(compact_json(METADATA_MUTATION), &["discuss open"]),
-            &[json_discriminator(
-                Some("discuss open"),
-                "output_kind",
-                "discuss_open",
-            )],
-        )),
-    ),
-    entry(
-        &["discuss", "turn"],
-        hidden(json_discriminators(
-            documented_schemas(METADATA_MUTATION, &["discuss turn"]),
-            &[json_discriminator(
-                Some("discuss turn"),
-                "output_kind",
-                "discuss_turn",
-            )],
-        )),
-    ),
-    entry(&["discuss", "append"], hidden(READ_TEXT)),
-    entry(
         &["discuss", "resolve"],
         json_discriminators(
             documented_schemas(METADATA_MUTATION, &["discuss resolve"]),
@@ -4713,9 +4690,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Diff(_) => vec!["diff"],
         Commands::Discuss(args) => match &args.command {
             None => vec!["discuss"],
-            Some(DiscussCommands::Open(_)) => vec!["discuss", "open"],
-            Some(DiscussCommands::Turn(_)) => vec!["discuss", "turn"],
-            Some(DiscussCommands::Append(_)) => vec!["discuss", "append"],
             Some(DiscussCommands::Resolve(_)) => vec!["discuss", "resolve"],
             Some(DiscussCommands::Reopen(_)) => vec!["discuss", "reopen"],
             Some(DiscussCommands::List(_)) => vec!["discuss", "list"],

@@ -647,7 +647,7 @@ fn compact_ahead_suffix(entry: &ThreadSummary) -> Option<String> {
         .parent_thread
         .as_deref()
         .or(entry.target_thread.as_deref())?;
-    Some(format!("1 capture ahead of {parent}"))
+    Some(format!("ahead of {parent}"))
 }
 
 fn render_thread_sections(threads: &[ThreadSummary], verbose: bool) {
@@ -3014,7 +3014,8 @@ mod tests {
             text.contains("feature")
                 && text.contains("hs-abc")
                 && text.contains(".heddle/threads/feature/repo")
-                && text.contains("1 capture ahead of main"),
+                && text.contains("ahead of main")
+                && !text.contains("1 capture"),
             "ahead rows should name the parent: {text}"
         );
         assert!(

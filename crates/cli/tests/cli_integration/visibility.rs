@@ -503,8 +503,10 @@ fn owner_clone_of_private_spool_after_visibility_discuss_and_context() {
     heddle(
         &[
             "discuss",
-            "open",
+            "--new",
+            "--path",
             "note.rs",
+            "--symbol",
             "note",
             "keep this ax-only",
             "--visibility",
