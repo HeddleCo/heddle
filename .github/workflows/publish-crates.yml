@@ -110,6 +110,7 @@ env:
     heddle-cli-args
     heddle-cli-render
     heddle-cli-contract
+    weft-client
     heddle-hosted-client
     heddle-agent-relay
     heddle-cli

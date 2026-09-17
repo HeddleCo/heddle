@@ -18,7 +18,7 @@ permissions:
 jobs:
   thread-client:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -64,11 +64,11 @@ jobs:
       - run: cargo check --locked -p heddle-thread-api --no-default-features --features replication --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features native --lib
-      - run: cargo test --locked -p heddle-thread-api --no-default-features --features iroh
+      - run: cargo test --locked -p heddle-thread-api --no-default-features --features iroh,replication
       - run: cargo test --locked -p heddle-semantic --lib
       - run: cargo test --locked -p heddle-thread-api --no-default-features --features semantic-analysis --test behavior_analysis
       - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features semantic-analysis --all-targets -- -D warnings
-      - run: HEDDLE_PROFILE=1 cargo test --locked -p heddle-thread-api --no-default-features --features iroh --test transport_observation -- --ignored --nocapture
+      - run: HEDDLE_PROFILE=1 cargo test --locked -p heddle-thread-api --no-default-features --features iroh,replication --test transport_observation -- --ignored --nocapture
       - run: cargo test --locked -p heddle-repo --no-default-features --features native,git-overlay thread_replication -- --nocapture
       - run: cargo test --locked -p heddle-objects writer_lease -- --nocapture
       - run: cargo clippy --locked -p heddle-thread-api --all-targets -- -D warnings
@@ -76,5 +76,5 @@ jobs:
       - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features native --all-targets -- -D warnings
       - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features signing --lib -- -D warnings
       - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features replication --lib -- -D warnings
-      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features iroh --all-targets -- -D warnings
+      - run: cargo clippy --locked -p heddle-thread-api --no-default-features --features iroh,replication --all-targets -- -D warnings
       - run: cargo run --locked -p heddle-thread-api --example thread

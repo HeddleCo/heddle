@@ -141,6 +141,10 @@ name = "heddle-cli-contract"
 release = true
 
 [[package]]
+name = "weft-client"
+release = true
+
+[[package]]
 name = "heddle-hosted-client"
 release = true
 

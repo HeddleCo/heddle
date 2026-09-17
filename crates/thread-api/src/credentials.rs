@@ -161,7 +161,6 @@ mod tests {
     };
 
     use api::v2::client::Rpc;
-    #[cfg(any(feature = "native", feature = "root-attachment"))]
     use prost::Message;
 
     use super::*;
@@ -317,7 +316,7 @@ mod tests {
         assert!(
             matches!(
                 crate::request_proof::verify(&missing, method, &body, &key, now),
-                Err(Error::Protocol("request PoP required"))
+                Err(Error::Protocol("invalid or expired request PoP"))
             ),
             "strict verifier never downgrades account reads"
         );

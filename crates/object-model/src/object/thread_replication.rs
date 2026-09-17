@@ -111,6 +111,7 @@ pub enum Admission {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "canonical", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)] // wire codec; boxing would change MessagePack layout
 pub enum ThreadOperationBody {
     Capture(AuthoredCapture),
     Integration(Vec<u8>),

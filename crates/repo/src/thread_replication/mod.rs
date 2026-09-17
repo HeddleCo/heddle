@@ -833,6 +833,7 @@ impl ThreadReplica {
             None,
         )
     }
+    #[allow(clippy::too_many_arguments)]
     fn receive_inner(
         &self,
         signed: &SignedOperation,
@@ -853,10 +854,8 @@ impl ThreadReplica {
             self.require_authority_admission(signed, receipt)?;
         }
         authorize(&operation)?;
-        if defer_references {
-            if operation.source_result()?.is_none() {
-                return Err(Error::Invalid("source metadata operation required".into()));
-            }
+        if defer_references && operation.source_result()?.is_none() {
+            return Err(Error::Invalid("source metadata operation required".into()));
         }
         let defer_this = defer_references && operation.reference_proof(&self.genesis()?)?.is_some();
         if !defer_this {
@@ -873,16 +872,14 @@ impl ThreadReplica {
             authority_receipt,
             defer_this,
         )?;
-        if admission == Admission::Accepted {
-            if let Some((command, response)) = command {
-                if crate::device_operations::replay(&tx, command)
-                    .map_err(|error| Error::Invalid(error.to_string()))?
-                    .is_none()
-                {
-                    crate::device_operations::receipt(&tx, command, response)
-                        .map_err(|error| Error::Invalid(error.to_string()))?;
-                }
-            }
+        if admission == Admission::Accepted
+            && let Some((command, response)) = command
+            && crate::device_operations::replay(&tx, command)
+                .map_err(|error| Error::Invalid(error.to_string()))?
+                .is_none()
+        {
+            crate::device_operations::receipt(&tx, command, response)
+                .map_err(|error| Error::Invalid(error.to_string()))?;
         }
         tx.commit()?;
         self.notify_committed()?;
@@ -894,6 +891,7 @@ impl ThreadReplica {
         }
         Ok(admission)
     }
+    #[allow(clippy::too_many_arguments)]
     fn receive_in(
         &self,
         tx: &Transaction<'_>,
