@@ -545,6 +545,38 @@ mod tests {
             .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
             .expect("advice");
         assert_eq!(advice.kind, "grant_needs_human");
+        assert_eq!(advice.primary_command, "heddle claim");
+        assert_eq!(advice.recovery_commands, vec!["heddle claim".to_string()]);
+        assert!(
+            !advice.primary_command.contains("whoami"),
+            "unclaimed agents must not be sent to whoami: {}",
+            advice.primary_command
+        );
+        assert!(
+            advice.hint.contains("heddle claim"),
+            "hint must name the claim path: {}",
+            advice.hint
+        );
+    }
+
+    #[test]
+    fn grant_needs_human_next_envelope_points_at_claim() {
+        let advice = crate::cli::commands::RecoveryAdvice::grant_needs_human("spool/alice/notes");
+        assert_eq!(advice.kind, "grant_needs_human");
+        assert_eq!(advice.primary_command, "heddle claim");
+        assert_eq!(advice.recovery_commands, vec!["heddle claim".to_string()]);
+        assert!(
+            advice
+                .error
+                .contains("human verification required"),
+            "error must keep the human-verification why: {}",
+            advice.error
+        );
+        assert!(
+            !advice.recovery_commands.iter().any(|c| c.contains("whoami")),
+            "Next envelope must not suggest whoami: {:?}",
+            advice.recovery_commands
+        );
     }
 
     #[test]
