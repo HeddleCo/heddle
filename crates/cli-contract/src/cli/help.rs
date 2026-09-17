@@ -93,7 +93,7 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
     let _ = writeln!(out, "Save: heddle init -> {capture}");
     let _ = writeln!(
         out,
-        "Isolated work: heddle start <name> --path ../<name> -> {capture} -> heddle ready -> heddle land"
+        "Isolated work: heddle start <name> -> {capture} -> heddle ready -> heddle land"
     );
     let _ = writeln!(out);
     let _ = writeln!(
@@ -675,7 +675,7 @@ Everyday verbs:
     heddle status
     heddle diff
     heddle capture -m "..."
-    heddle start <name> --path ../<name>
+    heddle start <name>
     heddle ready
     heddle land
     heddle undo
@@ -789,10 +789,10 @@ identically. The mode only controls bytes-on-disk semantics.\n\
 \n\
 # Isolated checkout path\n\
 \n\
-- Use `heddle start <name> --path <dir>` when you want an isolated\n\
-  checkout. It creates the thread ref and materializes the checkout in\n\
-  one step. `--path` is required when workspace is omitted or `auto`; without it\n\
-  start refuses instead of hiding a checkout under `.heddle/threads/<name>/`.\n\
+- Use `heddle start <name>` for an isolated checkout at `./<name>`, or pass\n\
+  `--path <dir>` to place it elsewhere. It creates the thread ref and\n\
+  materializes the checkout in one step. Omitted `--path` always defaults to\n\
+  `./<name>` (not TTY-gated, and not hidden under `.heddle/threads/`).\n\
 - To stay on this checkout, use `heddle thread create <name>` then\n\
   `heddle thread switch <name>`.\n\
 - Advanced split form: `heddle thread create <name>` creates only the\n\
@@ -982,7 +982,7 @@ Save and synchronize ordinary work:
 
 Isolate risky work:
 
-    heddle start <name> --path ../<name>
+    heddle start <name>
     cd ../<name>
     heddle capture -m "..."
     heddle ready

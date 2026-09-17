@@ -73,7 +73,7 @@ ranked by `heddle help` order.
 | `heddle doctor schemas` | ro | y | - | Drift-check `docs/json-schemas.md` against the registered schemas |
 | `heddle abort` | mut | y | explicit_replay | Abort the active operation without remembering the specific subcommand |
 | `heddle discuss open` | mut | y | explicit_replay | Open a discussion anchored to a symbol |
-| `heddle discuss append` | mut | y | explicit_replay | Append a durable turn to a discussion |
+| `heddle discuss turn` | mut | y | explicit_replay | Append a durable turn to a discussion |
 | `heddle discuss resolve` | mut | y | explicit_replay | Resolve a discussion |
 | `heddle discuss reopen` | mut | y | explicit_replay | Reopen a resolved discussion |
 | `heddle discuss list` | ro | y | - | List repository discussions |

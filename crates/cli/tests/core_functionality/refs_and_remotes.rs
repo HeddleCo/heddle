@@ -171,19 +171,20 @@ fn test_start_creates_named_thread() {
 }
 
 #[test]
-fn test_start_without_path_refuses_hidden_checkout() {
+fn test_start_without_path_defaults_to_dot_slash_name() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
 
-    let err = heddle(&["start", "feature/search"], Some(temp.path()))
-        .expect_err("start without --path must refuse");
+    heddle_must_succeed(&["start", "feature/search"], temp.path());
     assert!(
-        err.contains("start without --path")
-            && err.contains(".heddle/threads/")
-            && err.contains("heddle start feature/search --path ../feature/search"),
-        "start without --path must name the hidden checkout and recovery: {err}"
+        temp.path()
+            .join("feature")
+            .join("search")
+            .join(".heddle")
+            .exists(),
+        "start without --path should materialize ./feature/search"
     );
     assert!(
         !temp.path().join(".heddle/threads").exists()
@@ -193,27 +194,28 @@ fn test_start_without_path_refuses_hidden_checkout() {
                 .read_dir()
                 .map(|entries| entries.count() == 0)
                 .unwrap_or(true),
-        "refusing start must not hide a checkout under .heddle/threads"
+        "default start must not hide a checkout under .heddle/threads"
     );
 }
 
 #[test]
-fn test_start_workspace_auto_without_path_refuses_hidden_checkout() {
+fn test_start_workspace_auto_without_path_defaults_to_dot_slash_name() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
 
-    let err = heddle(
+    heddle_must_succeed(
         &["start", "feature/search", "--workspace", "auto"],
-        Some(temp.path()),
-    )
-    .expect_err("start --workspace auto without --path must refuse");
+        temp.path(),
+    );
     assert!(
-        err.contains("start without --path")
-            && err.contains(".heddle/threads/")
-            && err.contains("heddle start feature/search --path ../feature/search"),
-        "start --workspace auto must name the hidden checkout and recovery: {err}"
+        temp.path()
+            .join("feature")
+            .join("search")
+            .join(".heddle")
+            .exists(),
+        "start --workspace auto without --path should materialize ./feature/search"
     );
     assert!(
         !temp.path().join(".heddle/threads").exists()
@@ -223,7 +225,7 @@ fn test_start_workspace_auto_without_path_refuses_hidden_checkout() {
                 .read_dir()
                 .map(|entries| entries.count() == 0)
                 .unwrap_or(true),
-        "refusing --workspace auto must not hide a checkout under .heddle/threads"
+        "auto workspace default must not hide a checkout under .heddle/threads"
     );
 }
 

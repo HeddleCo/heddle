@@ -89,7 +89,7 @@ const SWEPT: &[&str] = &[
     "visibility show",
     "visibility list",
     "discuss open",
-    "discuss append",
+    "discuss turn",
     "discuss resolve",
     "discuss reopen",
     "discuss list",

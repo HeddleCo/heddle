@@ -4221,7 +4221,7 @@ fn start_normalized_nested_path_inside_repo_is_refused() {
 }
 
 #[test]
-fn start_default_path_lands_under_heddle_threads() {
+fn start_default_path_lands_at_dot_slash_name() {
     let temp = TempDir::new().unwrap();
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "tracked\n").unwrap();
@@ -4239,14 +4239,15 @@ fn start_default_path_lands_under_heddle_threads() {
             .unwrap_or_else(|| {
                 panic!("{mode} start output should carry a checkout path: {started}")
             });
-        let needle = format!("/.heddle/threads/{name}");
+        let expected = temp.path().join(name);
         assert!(
-            path.contains(&needle),
-            "{mode} thread should default under .heddle/threads/<name> (got {path})"
+            path.contains(name) && !path.contains("/.heddle/threads/"),
+            "{mode} thread should default to ./<name> (got {path})"
         );
         assert!(
-            std::path::Path::new(path).join(".heddle").exists(),
-            "{mode} checkout should be materialized at {path}"
+            expected.join(".heddle").exists(),
+            "{mode} checkout should be materialized at {}: {started}",
+            expected.display()
         );
     }
 }
@@ -4259,7 +4260,13 @@ fn parent_status_ignores_default_thread_checkout_under_heddle() {
     git_commit_all_for_json_contract(temp.path(), "seed");
     initialize_direct_git_overlay_for_polish_tests(temp.path());
 
-    // A default `start` drops a full checkout under `.heddle/threads/<name>`.
+    // An explicit checkout under `.heddle/threads/<name>` must not pollute
+    // parent status. (Omitted `--path` now defaults to `./<name>`.)
+    let managed = temp
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("pollution-check");
     json_value(
         temp.path(),
         &[
@@ -4269,16 +4276,16 @@ fn parent_status_ignores_default_thread_checkout_under_heddle() {
             "pollution-check",
             "--workspace",
             "materialized",
+            "--path",
+            managed.to_str().unwrap(),
         ],
     );
     assert!(
-        temp.path()
-            .join(".heddle")
-            .join("threads")
-            .join("pollution-check")
+        managed
             .join(temp.path().file_name().unwrap())
             .join(".heddle")
-            .exists(),
+            .exists()
+            || managed.join(".heddle").exists(),
         "thread checkout should materialize under .heddle/threads/"
     );
 

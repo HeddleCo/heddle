@@ -678,15 +678,13 @@ pub enum WorkspaceModeArg {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle start feature/auth --path ../feature-auth  # create an isolated checkout
-  heddle start scratch --path ../scratch            # place the checkout explicitly
+  heddle start feature/auth                         # checkout at ./feature/auth
+  heddle start feature/auth --path ../feature-auth  # place the checkout explicitly
   heddle start fix-flake --path ../fix-flake --task 'fix CI flake'
 
-`--path` is required when workspace is omitted or `auto`. Without it, start
-refuses instead of hiding a checkout under `.heddle/threads/<name>/`.
-`--workspace auto` is the same default and still requires `--path`.
-Pass `--path ../<name>`, or an explicit `--workspace solid|materialized|virtualized`
-if you want the managed layout. To stay on this checkout, use
+When `--path` is omitted, start always uses `./<name>` (not TTY-gated, and not
+hidden under `.heddle/threads/`). Pass `--path` to choose a different directory.
+To stay on this checkout without an isolated tree, use
 `heddle thread create <name>` then `heddle thread switch <name>`.
 
 Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run Git-authority operations through Heddle from the parent Git-overlay repository.
@@ -704,13 +702,12 @@ pub struct ThreadStartArgs {
     #[arg(long)]
     pub from: Option<String>,
 
-    /// Filesystem path for the isolated checkout. Required so the checkout
-    /// is not hidden under `.heddle/threads/`.
+    /// Filesystem path for the isolated checkout. Defaults to `./<name>`.
     #[arg(long)]
     pub path: Option<std::path::PathBuf>,
 
-    /// Workspace mode for the thread. Omitted or `auto` requires `--path`
-    /// so the checkout is not hidden under `.heddle/threads/`.
+    /// Workspace mode for the thread. Omitted or `auto` still defaults the
+    /// checkout to `./<name>` when `--path` is omitted.
     #[arg(long, value_enum)]
     pub workspace: Option<WorkspaceModeArg>,
 

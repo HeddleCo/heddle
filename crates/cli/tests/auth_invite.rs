@@ -47,3 +47,16 @@ fn unknown_auth_subcommands_exit_usage_instead_of_showing_parent_help() {
         );
     }
 }
+
+#[test]
+fn invite_help_is_thin_alias_of_auth_invite() {
+    let output = heddle(&["invite", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Usage: heddle invite"));
+    assert!(
+        stdout.contains("--email") || stdout.contains("list"),
+        "top-level invite should mirror auth invite flags: {stdout}"
+    );
+}

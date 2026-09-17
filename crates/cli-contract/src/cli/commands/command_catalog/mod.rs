@@ -1494,6 +1494,34 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
+        &["invite"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(user_scoped(NETWORK_METADATA_MUTATION), &["invite", "auth invite"]),
+                &[json_discriminator(
+                    Some("invite"),
+                    "output_kind",
+                    "auth_invite",
+                )],
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &["invite", "list"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(user_scoped(READ_JSON), &["invite list", "auth invite list"]),
+                &[json_discriminator(
+                    Some("invite list"),
+                    "output_kind",
+                    "auth_invite_list",
+                )],
+            ),
+            "client",
+        ),
+    ),
+    entry(
         &["auth", "trust"],
         feature_gated(user_scoped(GROUP), "client"),
     ),
@@ -2047,13 +2075,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["discuss", "append"],
+        &["discuss", "turn"],
         json_discriminators(
-            documented_schemas(METADATA_MUTATION, &["discuss append"]),
+            documented_schemas(METADATA_MUTATION, &["discuss turn"]),
             &[json_discriminator(
-                Some("discuss append"),
+                Some("discuss turn"),
                 "output_kind",
-                "discuss_append",
+                "discuss_turn",
             )],
         ),
     ),
@@ -4659,7 +4687,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Diff(_) => vec!["diff"],
         Commands::Discuss { command } => match command {
             DiscussCommands::Open(_) => vec!["discuss", "open"],
-            DiscussCommands::Append(_) => vec!["discuss", "append"],
+            DiscussCommands::Turn(_) => vec!["discuss", "turn"],
             DiscussCommands::Resolve(_) => vec!["discuss", "resolve"],
             DiscussCommands::Reopen(_) => vec!["discuss", "reopen"],
             DiscussCommands::List(_) => vec!["discuss", "list"],
@@ -4758,6 +4786,10 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             RemoteCommands::Show { .. } => vec!["remote", "show"],
         },
         #[cfg(feature = "client")]
+        Commands::Invite { command, .. } => match command {
+            None => vec!["invite"],
+            Some(crate::cli::AuthInviteCommands::List) => vec!["invite", "list"],
+        },
         Commands::Auth { command } => match command {
             AuthCommands::Login { .. } => vec!["auth", "login"],
             AuthCommands::Logout { .. } => vec!["auth", "logout"],

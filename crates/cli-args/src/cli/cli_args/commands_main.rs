@@ -18,7 +18,7 @@ use super::{
     },
 };
 #[cfg(feature = "client")]
-use super::{AuthCommands, ClaimArgs, GrantCommands, PromoteArgs};
+use super::{AuthCommands, AuthInviteCommands, ClaimArgs, GrantCommands, PromoteArgs};
 
 #[derive(Clone, Debug, Args)]
 pub struct FsckArgs {
@@ -216,7 +216,7 @@ Examples:
 
     /// Open or resolve discussions anchored to symbols.
     ///
-    /// Open a discussion against a symbol; append turns;
+    /// Open a discussion against a symbol; add turns;
     /// resolve by edit or dismiss. Anchors
     /// travel across renames and cross-file moves on subsequent
     /// state mutations.
@@ -233,8 +233,8 @@ Scope:
 
 Examples:
   heddle discuss open src/auth.rs verify 'Should this reject expired tokens?'  # anchor a discussion
-  heddle discuss append <id> 'switched to argon2'          # add a turn
-  heddle discuss append src/auth.rs verify 'switched to argon2'  # same FILE SYMBOL as open
+  heddle discuss turn <id> 'switched to argon2'          # add a turn
+  heddle discuss turn src/auth.rs verify 'switched to argon2'  # same FILE SYMBOL as open
   heddle discuss resolve <id> --mode by-edit --state HEAD
 ")]
     Discuss {
@@ -392,6 +392,33 @@ secrets. `heddle visibility` embargoes a state and its descendants;
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
+    },
+
+    /// Create or list signup invites (thin alias of `auth invite`).
+    ///
+    /// Signup-only: this mints an account-creation code. It does not grant
+    /// another principal access to a spool. Use `heddle grant` to add a
+    /// collaborator.
+    #[cfg(feature = "client")]
+    #[command(args_conflicts_with_subcommands = true)]
+    #[command(after_help = "\
+Signup-only. `heddle invite` is the same as `heddle auth invite`.
+It does not grant spool access. Add a collaborator with:
+
+  heddle grant create --spool <path|url> --principal <handle> --role writer
+")]
+    Invite {
+        /// Bind the new invite to an email address.
+        #[arg(long)]
+        email: Option<String>,
+
+        /// Heddle server address. Omit to use the configured default
+        /// (`api.heddle.sh` when none is stored).
+        #[arg(long, global = true)]
+        server: Option<String>,
+
+        #[command(subcommand)]
+        command: Option<AuthInviteCommands>,
     },
 
     /// Grant a principal access to a hosted spool.

@@ -269,7 +269,7 @@ fn diff_help_explains_git_compatible_patch_headers() {
 }
 
 #[test]
-fn restore_story_is_documented_and_start_requires_path() {
+fn restore_story_is_documented_and_start_defaults_path() {
     let diff = heddle_help(&["diff", "--help"]);
     assert!(
         diff.contains("Heddle does not restore one file")
@@ -296,11 +296,10 @@ fn restore_story_is_documented_and_start_requires_path() {
 
     let start = heddle_help(&["start", "--help"]);
     assert!(
-        start.contains("`--path` is required")
-            && start.contains(".heddle/threads/")
-            && start.contains("`--workspace auto`")
+        start.contains("./<name>")
+            && !start.contains("`--path` is required")
             && start.contains("heddle thread create"),
-        "start help must say --path is required for omitted and auto workspace: {start}"
+        "start help must say omitted --path defaults to ./<name>: {start}"
     );
 
     let model = heddle_help(&["help", "model"]);

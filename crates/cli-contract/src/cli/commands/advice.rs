@@ -528,7 +528,7 @@ impl RecoveryAdvice {
             "discuss_resolve_missing_dismiss_reason",
             "--reason",
             "dismiss",
-            "heddle discuss resolve <id> --mode dismiss --reason \"...\"",
+            "heddle discuss resolve <id> --dismiss --reason \"...\"",
         )
     }
 

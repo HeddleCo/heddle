@@ -27,20 +27,18 @@ fn materialized_start_writes_base_state_files() {
 }
 
 #[test]
-fn top_level_start_without_path_refuses_hidden_checkout() {
+fn top_level_start_without_path_defaults_to_dot_slash_name() {
     let main = setup_repo("hello.txt", "world");
 
-    let err = heddle(
+    let started = heddle(
         &["--output", "json", "start", "feature/default-visible"],
         Some(main.path()),
     )
-    .expect_err("start without --path must refuse a hidden checkout");
+    .expect("start without --path should default to ./<name>");
+    let checkout = main.path().join("feature").join("default-visible");
     assert!(
-        err.contains("start without --path")
-            && err.contains(".heddle/threads/")
-            && err
-                .contains("heddle start feature/default-visible --path ../feature/default-visible"),
-        "start without --path must name the hidden checkout and the --path recovery: {err}"
+        checkout.join(".heddle").exists(),
+        "default checkout should materialize at ./feature/default-visible: {started}"
     );
     assert!(
         !main.path().join(".heddle/threads").join("feature").exists()
@@ -49,15 +47,15 @@ fn top_level_start_without_path_refuses_hidden_checkout() {
                 .join(".heddle/threads")
                 .join("default-visible")
                 .exists(),
-        "refusing start must not create a hidden checkout"
+        "default start must not hide a checkout under .heddle/threads"
     );
 }
 
 #[test]
-fn top_level_start_workspace_auto_without_path_refuses_hidden_checkout() {
+fn top_level_start_workspace_auto_without_path_defaults_to_dot_slash_name() {
     let main = setup_repo("hello.txt", "world");
 
-    let err = heddle(
+    let started = heddle(
         &[
             "--output",
             "json",
@@ -68,17 +66,16 @@ fn top_level_start_workspace_auto_without_path_refuses_hidden_checkout() {
         ],
         Some(main.path()),
     )
-    .expect_err("start --workspace auto without --path must refuse a hidden checkout");
+    .expect("start --workspace auto without --path should default to ./<name>");
+    let checkout = main.path().join("feature").join("search");
     assert!(
-        err.contains("start without --path")
-            && err.contains(".heddle/threads/")
-            && err.contains("heddle start feature/search --path ../feature/search"),
-        "start --workspace auto must name the hidden checkout and the --path recovery: {err}"
+        checkout.join(".heddle").exists(),
+        "auto workspace default checkout should materialize at ./feature/search: {started}"
     );
     assert!(
         !main.path().join(".heddle/threads").join("feature").exists()
             && !main.path().join(".heddle/threads").join("search").exists(),
-        "refusing --workspace auto must not create a hidden checkout"
+        "auto workspace default must not hide a checkout under .heddle/threads"
     );
 }
 

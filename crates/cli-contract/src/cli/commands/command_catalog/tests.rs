@@ -270,8 +270,8 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["discuss", "open", "src/lib.rs", "symbol", "body"],
     ),
     sample(
-        &["discuss", "append"],
-        &["discuss", "append", "discussion-1", "body"],
+        &["discuss", "turn"],
+        &["discuss", "turn", "discussion-1", "body"],
     ),
     sample(
         &["discuss", "resolve"],
@@ -1443,7 +1443,7 @@ fn sidecar_only_effect_sets_exclude_refs() {
         &["agent", "task", "update"],
         &["context", "reason", "git"],
         &["discuss", "open"],
-        &["discuss", "append"],
+        &["discuss", "turn"],
         &["discuss", "resolve"],
         &["discuss", "reopen"],
         &["review", "sign"],
@@ -1848,7 +1848,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "daemon stop",
             "diff",
             "discuss open",
-            "discuss append",
+            "discuss turn",
             "discuss resolve",
             "discuss reopen",
             "discuss list",
