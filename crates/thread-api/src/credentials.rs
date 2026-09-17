@@ -161,7 +161,6 @@ mod tests {
     };
 
     use api::v2::client::Rpc;
-    #[cfg(any(feature = "native", feature = "root-attachment"))]
     use prost::Message;
 
     use super::*;
