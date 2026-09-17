@@ -77,6 +77,15 @@ fn context_scope(symbol: &str) -> Option<AnnotationScope> {
     }
 }
 
+fn context_annotation_id(record: &ContextRecord) -> String {
+    record
+        .r#ref
+        .as_ref()
+        .map(|value| value.id.clone())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| context_revision_id(record))
+}
+
 fn annotation_from_record(record: &ContextRecord) -> ContextAnnotation {
     let symbol = match record
         .anchor
@@ -87,11 +96,7 @@ fn annotation_from_record(record: &ContextRecord) -> ContextAnnotation {
         _ => "",
     };
     ContextAnnotation {
-        id: record
-            .r#ref
-            .as_ref()
-            .map(|value| value.id.clone())
-            .unwrap_or_default(),
+        id: context_annotation_id(record),
         content: record.content.clone(),
         tags: context_tag_texts(&record.tags),
         attribution: record.principal_id.clone(),
@@ -160,11 +165,13 @@ impl HostedClient {
     ) -> Result<(Vec<AnnotatedFile>, Vec<StateContextEntry>), ProtocolError> {
         let spool = self.resolve_spool_ref(repo_path).await?;
         // Presence of AnnotationQuery selects context revisions only, so
-        // discussion/turn pages cannot starve the context list.
+        // discussion/turn pages cannot starve the context list. History must
+        // be included: without it, once-mode pages kind 0/1 and the query
+        // skips those, leaving an empty context list.
         let events = self
             .observe_collaboration_events(ObserveCollaborationRequest {
                 spool: Some(spool),
-                include_history: false,
+                include_history: true,
                 annotations: Some(AnnotationQuery::default()),
                 ..Default::default()
             })
@@ -189,14 +196,14 @@ impl HostedClient {
                 continue;
             }
             if path.is_empty() {
-                if let Some(state_id) = state {
-                    states.push(StateContextEntry {
-                        state_id: Some(api::heddle::api::v1alpha1::StateId {
-                            value: state_id.as_bytes().to_vec(),
-                        }),
-                        annotations: vec![annotation],
-                    });
-                }
+                // Keep repository-level / unparsed-revision records so pull can
+                // attach them against the cloned tip instead of dropping them.
+                states.push(StateContextEntry {
+                    state_id: state.map(|state_id| api::heddle::api::v1alpha1::StateId {
+                        value: state_id.as_bytes().to_vec(),
+                    }),
+                    annotations: vec![annotation],
+                });
             } else {
                 files.push(AnnotatedFile {
                     path,
@@ -398,5 +405,17 @@ mod tests {
         assert!(context_ids_match(id, id));
         assert!(context_ids_match(&format!("ann-{id}"), id));
         assert_eq!(context_record_id(&format!("ann-{id}")), id);
+    }
+
+    #[test]
+    fn empty_context_ref_adopts_causal_id() {
+        let causal = [9u8; 32];
+        let mapped = annotation_from_record(&ContextRecord {
+            causal_id: causal.to_vec(),
+            content: "body".into(),
+            ..Default::default()
+        });
+        assert_eq!(mapped.id, hex::encode(causal));
+        assert_eq!(mapped.content, "body");
     }
 }

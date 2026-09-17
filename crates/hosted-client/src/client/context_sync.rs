@@ -48,9 +48,10 @@
 //! `SetContext` mints the id server-side and does not return it. Before the RPC
 //! the mirror records a `pending_create_op` (write-ahead, persisted to disk) used
 //! as the `client_operation_id`, so a retry after a crash replays (weft dedup)
-//! instead of duplicating, and recovery re-adopts the already-created annotation
-//! by author+content among ids NOT already linked — closing the "could not
-//! recover minted id" wedge.
+//! instead of duplicating. After an Applied receipt the nonce is cleared and the
+//! server id is adopted even when Observe history is empty. A Dedup Conflict on
+//! that nonce is treated as replay success: observe and adopt, do not fail the
+//! push or mint a new nonce.
 //!
 //! ## Supersession chains through the mirror
 //!
@@ -74,7 +75,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use api::heddle::api::v1alpha1::{
     AnnotationScope as ProtoScope, ContextAnnotation, ContextAnnotationKind,
     ContextAnnotationStatus, LineRange, SymbolScope, annotation_scope::Scope,
@@ -360,7 +361,7 @@ pub async fn push_context(
         .map(|attribution| attribution.to_string());
     let username = client.authenticated_username();
 
-    let server_ann_ids: HashSet<String> = list_server_annotations(client, repo_path)
+    let server_ann_ids: HashSet<String> = list_server_annotations(client, repo_path, Some(head_id))
         .await?
         .into_iter()
         .map(|annotation| annotation.id)
@@ -471,6 +472,9 @@ async fn push_one(
         )
         .await?;
 
+        // Applied (or Dedup Conflict treated as replay) always clears the
+        // nonce. Leaving it pending after success replays the same id with a
+        // new signed body and weft Dedup Conflicts.
         {
             let entry = get_or_create_entry(mirror, repo_path, &annotation.annotation_id);
             entry.server_id = sid.clone();
@@ -519,8 +523,8 @@ async fn create_on_server(
         .context("annotation has no revisions")?;
     let (path, target_state_id) = target_operands(target);
 
-    let server_id = if let Some(superseded) = superseded_server {
-        let response = client
+    let put = if let Some(superseded) = superseded_server {
+        client
             .supersede_context(
                 repo_path,
                 superseded,
@@ -539,12 +543,11 @@ async fn create_on_server(
                 op_id.to_string(),
             )
             .await
-            .with_context(|| format!("supersede hosted annotation {superseded}"))?;
-        response.new_annotation_id
+            .map(|response| response.new_annotation_id)
     } else {
-        // Client-sovereign id: propose our local `ann-` id and take the server's
+        // Client-sovereign id: propose our local id and take the server's
         // authoritative echo from the response — no author+content recovery.
-        let response = client
+        client
             .set_context(
                 repo_path,
                 &path,
@@ -559,18 +562,75 @@ async fn create_on_server(
                 annotation.annotation_id.as_str(),
             )
             .await
-            .with_context(|| format!("set hosted context for {}", annotation.annotation_id))?;
-        if response.annotation_id.trim().is_empty() {
-            bail!(
-                "weft did not return an annotation id for {}",
-                annotation.annotation_id
-            );
-        }
-        response.annotation_id
+            .map(|response| response.annotation_id)
     };
 
-    let first_server_rev = first_server_revision_id(client, repo_path, &server_id).await?;
+    let server_id = match put {
+        Ok(id) if !id.trim().is_empty() => id,
+        Ok(_) => annotation.annotation_id.clone(),
+        Err(error) if is_operation_id_conflict(&error) => {
+            return adopt_created_annotation(client, repo_path, annotation).await;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                if let Some(superseded) = superseded_server {
+                    format!("supersede hosted annotation {superseded}")
+                } else {
+                    format!("set hosted context for {}", annotation.annotation_id)
+                }
+            });
+        }
+    };
+
+    // Applied receipt is enough to adopt. Empty Observe history must not
+    // keep the nonce pending — retry would reuse it for a new signed body.
+    let first_server_rev = first_server_revision_id(client, repo_path, &server_id)
+        .await?
+        .unwrap_or_else(|| first.revision_id.clone());
     Ok((server_id, first_server_rev))
+}
+
+fn is_operation_id_conflict(error: &wire::ProtocolError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("names another command")
+        || text.contains("names a different command")
+        || text.contains("reused with a different request")
+        || text.contains("operation_id_reused")
+}
+
+/// Dedup Conflict for this create nonce means PutContext already applied.
+/// Observe and adopt rather than failing the push or minting a new nonce.
+async fn adopt_created_annotation(
+    client: &mut HostedClient,
+    repo_path: &str,
+    annotation: &Annotation,
+) -> Result<(String, String)> {
+    let proposed = annotation.annotation_id.clone();
+    let local_rev = annotation
+        .revisions
+        .first()
+        .map(|revision| revision.revision_id.clone())
+        .unwrap_or_else(|| proposed.clone());
+    if let Ok(Some(revision_id)) = first_server_revision_id(client, repo_path, &proposed).await {
+        return Ok((proposed, revision_id));
+    }
+    let listed = list_server_annotations(client, repo_path, None)
+        .await
+        .unwrap_or_default();
+    if let Some(found) = listed
+        .into_iter()
+        .find(|candidate| annotation_ids_match(&candidate.id, &proposed))
+    {
+        let revision_id = first_server_revision_id(client, repo_path, &found.id)
+            .await?
+            .unwrap_or_else(|| local_rev.clone());
+        return Ok((found.id, revision_id));
+    }
+    Ok((proposed, local_rev))
+}
+
+fn annotation_ids_match(left: &str, right: &str) -> bool {
+    left == right || left.trim_start_matches("ann-") == right.trim_start_matches("ann-")
 }
 
 /// Forward local revisions the server does not yet hold. Returns the count
@@ -684,17 +744,18 @@ async fn sync_revisions_push(
 }
 
 /// Oldest server revision id for an annotation (the create revision).
+/// `None` when ObserveCollaboration history is empty — callers adopt the
+/// local create revision rather than failing a completed PutContext.
 async fn first_server_revision_id(
     client: &mut HostedClient,
     repo_path: &str,
     server_id: &str,
-) -> Result<String> {
-    let revisions = fetch_history(client, repo_path, server_id).await?;
-    revisions
+) -> Result<Option<String>> {
+    Ok(fetch_history(client, repo_path, server_id)
+        .await?
         .into_iter()
         .next()
-        .map(|revision| revision.revision_id)
-        .context("hosted annotation has no revisions")
+        .map(|revision| revision.revision_id))
 }
 
 // =========================================================================
@@ -735,7 +796,8 @@ pub async fn pull_context(
     let heddle_dir = repo.heddle_dir().to_path_buf();
     let mut mirror = load_mirror(&heddle_dir)?;
     let mut changed = 0usize;
-    if let Some(entries) = bootstrap {
+    // v2 Fetch is source-only: Some([]) is not "no annotations".
+    if let Some(entries) = bootstrap.filter(|entries| !entries.is_empty()) {
         for (target, blob) in entries {
             for annotation in &blob.annotations {
                 if annotation.status == AnnotationStatus::Superseded {
@@ -767,7 +829,7 @@ pub async fn pull_context(
         return Ok(changed);
     }
 
-    let server = list_server_targets(client, repo_path).await?;
+    let server = list_server_targets(client, repo_path, Some(head_id)).await?;
     for (target, annotation) in server {
         let result = pull_one_rpc(
             repo,
@@ -817,7 +879,13 @@ async fn pull_one_rpc(
     username: Option<&str>,
     mirror: &mut HostedContextMirror,
 ) -> Result<bool> {
-    let server_revs = fetch_history(client, repo_path, &server.id).await?;
+    let mut server_revs = fetch_history(client, repo_path, &server.id).await?;
+    if server_revs.is_empty() {
+        // Observe list already carried the current revision (eee6d552
+        // mapping). Empty GetContextHistory must not attach a shell that
+        // `context list` then hides.
+        server_revs.push(annotation_revision_from_list(server));
+    }
     let annotation = Annotation {
         annotation_id: server.id.clone(),
         scope: scope_from_proto(server.scope.as_ref()),
@@ -1046,11 +1114,25 @@ fn reconcile_ok(
 // Server enumeration
 // =========================================================================
 
+fn annotation_revision_from_list(server: &ContextAnnotation) -> AnnotationRevision {
+    AnnotationRevision {
+        revision_id: server.id.clone(),
+        kind: kind_from_proto(server.kind),
+        content: server.content.clone(),
+        tags: server.tags.clone(),
+        attribution: server.attribution.clone(),
+        created_at: 0,
+        source_hash: None,
+        created_at_state: None,
+    }
+}
+
 async fn list_server_annotations(
     client: &mut HostedClient,
     repo_path: &str,
+    fallback_state: Option<StateId>,
 ) -> Result<Vec<ContextAnnotation>> {
-    Ok(list_server_targets(client, repo_path)
+    Ok(list_server_targets(client, repo_path, fallback_state)
         .await?
         .into_iter()
         .map(|(_, annotation)| annotation)
@@ -1060,6 +1142,7 @@ async fn list_server_annotations(
 async fn list_server_targets(
     client: &mut HostedClient,
     repo_path: &str,
+    fallback_state: Option<StateId>,
 ) -> Result<Vec<(ContextTarget, ContextAnnotation)>> {
     let (files, states) = client
         .list_context(repo_path, None, None, None)
@@ -1075,7 +1158,7 @@ async fn list_server_targets(
         }
     }
     for state in states {
-        let Some(state_id) = state_id_from_proto(state.state_id.as_ref()) else {
+        let Some(state_id) = state_id_from_proto(state.state_id.as_ref()).or(fallback_state) else {
             continue;
         };
         let target = ContextTarget::state(state_id);
@@ -1447,6 +1530,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clone_empty_bootstrap_observes_and_materializes_context() {
+        use api::heddle::api::v1alpha1::{AnnotatedFile, ContextAnnotation};
+
+        use crate::hosted_runtime::hosted::test_server::{ContextFixture, start_with_context};
+
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        let tree_id = repo
+            .store()
+            .put_tree(&objects::object::Tree::new())
+            .unwrap();
+        let state = State::new_snapshot(
+            tree_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        repo.store().put_state(&state).unwrap();
+        let against = state.id();
+        assert_eq!(
+            repo.head().unwrap(),
+            None,
+            "clone has not published HEAD yet"
+        );
+
+        let annotation_id = "server-context-from-observe".to_string();
+        let fixture = ContextFixture {
+            files: vec![AnnotatedFile {
+                path: "lib.rs".to_string(),
+                annotations: vec![ContextAnnotation {
+                    id: annotation_id.clone(),
+                    status: ContextAnnotationStatus::Active as i32,
+                    kind: ContextAnnotationKind::Invariant as i32,
+                    content: "preserve this contract".to_string(),
+                    attribution: "reviewer <>".to_string(),
+                    ..ContextAnnotation::default()
+                }],
+            }],
+            ..ContextFixture::default()
+        };
+        let (mut client, server, fixture) = start_with_context(fixture).await;
+
+        let empty: &[(ContextTarget, ContextBlob)] = &[];
+        let changed = pull_context(
+            &repo,
+            &mut client,
+            "acme/widgets",
+            Some(empty),
+            Some(against),
+        )
+        .await
+        .unwrap();
+        let observed = *fixture.list_requests.lock().unwrap();
+        assert!(
+            observed >= 1,
+            "empty v2 bootstrap must ObserveCollaboration, not treat Some([]) as no annotations"
+        );
+        assert_eq!(
+            changed, 1,
+            "ObserveCollaboration returned a revision; pull_one_annotation must attach it (got {changed}, observed={observed})"
+        );
+
+        let stored_state = repo.store().get_state(&against).unwrap().unwrap();
+        let root = context_root_for_state(&repo, &stored_state)
+            .unwrap()
+            .expect("Observe returned context but no Context attachment was written");
+        let target = ContextTarget::file("lib.rs").unwrap();
+        let blob = repo.get_context_blob(&root, &target).unwrap().unwrap();
+        assert_eq!(blob.annotations.len(), 1);
+        assert_eq!(blob.annotations[0].annotation_id, annotation_id);
+        assert_eq!(
+            blob.annotations[0].revisions[0].content,
+            "preserve this contract"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn bootstrap_pull_materializes_context_once_and_persists_the_mirror() {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
@@ -1492,20 +1654,21 @@ mod tests {
         server.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn push_context_persists_its_create_nonce_when_id_recovery_fails() {
+    fn seed_local_context_annotation(content: &str) -> (TempDir, Repository, Annotation) {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
-        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
-        let state = repo
-            .snapshot_with_attribution(
-                Some("seed".to_string()),
-                None,
-                Attribution::human(Principal::new("Test", "test@example.com")),
-            )
-            .unwrap()
-            .id();
-        let head_state = repo.store().get_state(&state).unwrap().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        let tree_id = repo
+            .store()
+            .put_tree(&objects::object::Tree::new())
+            .unwrap();
+        let state = State::new_snapshot(
+            tree_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        repo.store().put_state(&state).unwrap();
+        repo.goto(&state.id()).unwrap();
+        let head_state = repo.store().get_state(&state.id()).unwrap().unwrap();
         let target = ContextTarget::file("lib.rs").unwrap();
         let user_config = config::UserConfig::load_default().unwrap_or_default();
         let self_attribution = crate::attribution::resolve_attribution(&repo, &user_config)
@@ -1514,7 +1677,7 @@ mod tests {
         let annotation = Annotation::new(
             AnnotationScope::File,
             AnnotationKind::Constraint,
-            "do not remove".to_string(),
+            content.to_string(),
             vec![],
             self_attribution,
             1_700_000_000,
@@ -1522,29 +1685,128 @@ mod tests {
             None,
         );
         let root = repo
-            .set_context_blob(None, &target, &ContextBlob::new(vec![annotation]))
+            .set_context_blob(None, &target, &ContextBlob::new(vec![annotation.clone()]))
             .unwrap();
         put_context_attachment(&repo, &head_state, Some(root)).unwrap();
+        (temp, repo, annotation)
+    }
+
+    #[tokio::test]
+    async fn push_context_clears_create_nonce_after_applied_when_history_is_empty() {
+        let (_temp, repo, annotation) = seed_local_context_annotation("do not remove");
         let (client, server) = crate::hosted_runtime::hosted::test_server::start().await;
         let warnings = std::sync::Arc::new(objects::CollectingWarnings::default());
         let mut client = client.with_warning_sink(warnings.clone());
 
+        let pushed = push_context(&repo, &mut client, "acme/widgets")
+            .await
+            .unwrap();
+        assert_eq!(
+            pushed, 1,
+            "Applied PutContext must adopt even when Observe history is empty"
+        );
+        let mirror = load_mirror(repo.heddle_dir()).unwrap();
+        let entry = &mirror.repos["acme/widgets"].annotations[0];
+        assert!(
+            entry.pending_create_op.is_none(),
+            "pending nonce must clear after Applied so a retry cannot Dedup Conflict"
+        );
+        assert_eq!(entry.server_id, annotation.annotation_id);
+        assert!(
+            warnings.warnings().is_empty(),
+            "empty history after Applied is not a push failure: {:?}",
+            warnings.warnings()
+        );
+
+        // Second push with no new collab must not replay PutContext.
         assert_eq!(
             push_context(&repo, &mut client, "acme/widgets")
                 .await
                 .unwrap(),
-            0,
-            "the fixture deliberately omits the server-minted annotation id"
+            0
         );
-        let mirror = load_mirror(repo.heddle_dir()).unwrap();
-        assert!(
-            mirror.repos["acme/widgets"].annotations[0]
-                .pending_create_op
-                .is_some()
-        );
-        assert_eq!(warnings.warnings()[0].kind, "hosted_context_sync_failed");
+        assert!(warnings.warnings().is_empty());
 
         client.close().await;
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn push_context_adopts_on_dedup_conflict_for_pending_nonce() {
+        use api::heddle::api::v1alpha1::ContextRevision;
+
+        use crate::hosted_runtime::hosted::test_server::{ContextFixture, start_with_context};
+
+        let (_temp, repo, annotation) = seed_local_context_annotation("do not remove");
+        let annotation_id = annotation.annotation_id.clone();
+        let fixture = ContextFixture {
+            histories: std::collections::HashMap::from([(
+                annotation_id.clone(),
+                vec![ContextRevision {
+                    revision_id: "server-context-revision".to_string(),
+                    kind: ContextAnnotationKind::Constraint as i32,
+                    content: "do not remove".to_string(),
+                    attribution: "test <>".to_string(),
+                    ..ContextRevision::default()
+                }],
+            )]),
+            put_conflict: true,
+            ..ContextFixture::default()
+        };
+        let warnings = std::sync::Arc::new(objects::CollectingWarnings::default());
+        let (client, server, fixture) = start_with_context(fixture).await;
+        let mut client = client.with_warning_sink(warnings.clone());
+
+        let pushed = push_context(&repo, &mut client, "acme/widgets")
+            .await
+            .unwrap();
+        assert_eq!(
+            pushed, 1,
+            "Dedup Conflict for this nonce must observe and adopt, not fail the push"
+        );
+        assert!(
+            *fixture.put_requests.lock().unwrap() >= 1,
+            "PutContext must have been attempted"
+        );
+        assert!(
+            *fixture.list_requests.lock().unwrap() >= 1
+                || !fixture.history_requests.lock().unwrap().is_empty(),
+            "conflict-as-adopt must ObserveCollaboration"
+        );
+        let mirror = load_mirror(repo.heddle_dir()).unwrap();
+        let entry = &mirror.repos["acme/widgets"].annotations[0];
+        assert!(
+            entry.pending_create_op.is_none(),
+            "conflict-as-adopt must clear the pending nonce"
+        );
+        assert_eq!(entry.server_id, annotation_id);
+        assert!(
+            warnings.warnings().is_empty(),
+            "Dedup Conflict for this nonce is replay success, not a warning: {:?}",
+            warnings.warnings()
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn operation_id_conflict_matches_weft_dedup_wording() {
+        assert!(is_operation_id_conflict(
+            &wire::ProtocolError::InvalidState("operation ID names another command".into())
+        ));
+        assert!(is_operation_id_conflict(
+            &wire::ProtocolError::InvalidState("operation ID names a different command".into())
+        ));
+        assert!(is_operation_id_conflict(
+            &wire::ProtocolError::RemoteFailure {
+                code: wire::RemoteFailureCode::FailedPrecondition,
+                message: "client_operation_id reused with a different request body".into(),
+                details: Vec::new(),
+            }
+        ));
+        assert!(!is_operation_id_conflict(
+            &wire::ProtocolError::InvalidState("hosted annotation has no revisions".into())
+        ));
     }
 }

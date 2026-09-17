@@ -89,6 +89,9 @@ pub(crate) struct ContextFixture {
     pub histories: HashMap<String, Vec<ContextRevision>>,
     pub list_requests: Arc<Mutex<usize>>,
     pub history_requests: Arc<Mutex<Vec<String>>>,
+    /// When true, PutContext returns Dedup Conflict for the create nonce.
+    pub put_conflict: bool,
+    pub put_requests: Arc<Mutex<usize>>,
 }
 
 pub async fn start() -> (HostedClient, JoinHandle<()>) {
@@ -514,7 +517,14 @@ async fn serve_call(
                 )
                 .await;
             } else if method == "/heddle.api.v2alpha1.CollaborationService/PutContext" {
-                serve_put_context(&mut send, &mut recv, &mut request, server_key).await;
+                serve_put_context(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    context.clone(),
+                )
+                .await;
             } else if method == "/heddle.api.v2alpha1.IdentityService/CreateSignupInvitation" {
                 serve_native_create_signup_invitation(
                     &mut send,
@@ -1801,12 +1811,30 @@ async fn serve_put_context(
     recv: &mut iroh::endpoint::RecvStream,
     request: &mut Vec<u8>,
     server_key: Vec<u8>,
+    context: Option<ContextFixture>,
 ) {
     read_request_body(recv, request).await;
     let body = decode_request_frame(request)
         .ok()
         .and_then(|frame| v2::PutContextRequest::decode(frame.body).ok())
         .unwrap_or_default();
+    if let Some(fixture) = &context {
+        *fixture
+            .put_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) += 1;
+        if fixture.put_conflict {
+            let failure = CallFailure {
+                code: CallFailureCode::FailedPrecondition as i32,
+                message: "operation ID names another command".to_string(),
+                error: None,
+            };
+            send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
+                .await
+                .unwrap();
+            return;
+        }
+    }
     write_native_grant_receipt(send, server_key, body.client_operation_id).await;
 }
 

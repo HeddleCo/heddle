@@ -33,8 +33,9 @@ pub struct ResolvedPullBootstrapMetadata {
     /// Packed or inline bootstrap discussions. `None` means the server
     /// advertised `discussions_from_pack` and this client cannot consume the
     /// attachment (missing, wrong kind, or version skew) — callers pass that
-    /// to `pull_discussions` so it ListByState-falls-back instead of treating
-    /// an empty vec as "no discussions".
+    /// to `pull_discussions` so it ObserveCollaboration-falls-back instead of
+    /// treating an empty vec as "no discussions". v2 source-only bootstrap is
+    /// an empty inline fold; pull treats that empty slice the same way.
     pub discussions: Option<Vec<Discussion>>,
     /// Human-facing reason when [`Self::discussions`] is `None` because the
     /// packed attachment was unconsumable. Absent on the inline-bootstrap path
@@ -69,7 +70,7 @@ impl PullBootstrapMetadata {
                 PackedDiscussions::Ready(discussions) => (Some(discussions), None),
                 PackedDiscussions::Unconsumable(reason) => {
                     let warning = format!(
-                        "pull bootstrap advertised packed discussions but this client cannot consume them ({reason}); falling back to ListByState"
+                        "pull bootstrap advertised packed discussions but this client cannot consume them ({reason}); falling back to ObserveCollaboration"
                     );
                     (None, Some(warning))
                 }
@@ -82,7 +83,7 @@ impl PullBootstrapMetadata {
                 PackedContext::Ready(context) => (Some(context), None),
                 PackedContext::Unconsumable(reason) => {
                     let warning = format!(
-                        "pull bootstrap advertised packed context but this client cannot consume it ({reason}); falling back to ListContext"
+                        "pull bootstrap advertised packed context but this client cannot consume it ({reason}); falling back to ObserveCollaboration"
                     );
                     (None, Some(warning))
                 }
@@ -893,11 +894,14 @@ mod pull_bootstrap_tests {
             .expect("missing packed context must not clone-kill");
         assert!(
             resolved.context.is_none(),
-            "None means ListContext, not an empty inline set"
+            "None means ObserveCollaboration, not an empty inline set"
         );
         let warning = resolved.context_pack_fallback.expect("warned fallback");
         assert!(warning.contains("the attachment is missing"), "{warning}");
-        assert!(warning.contains("falling back to ListContext"), "{warning}");
+        assert!(
+            warning.contains("falling back to ObserveCollaboration"),
+            "{warning}"
+        );
     }
 
     #[test]
@@ -939,11 +943,14 @@ mod pull_bootstrap_tests {
             .expect("missing packed discussions must not clone-kill");
         assert!(
             resolved.discussions.is_none(),
-            "None means ListByState, not an empty inline set"
+            "None means ObserveCollaboration, not an empty inline set"
         );
         let warning = resolved.discussions_pack_fallback.expect("warned fallback");
         assert!(warning.contains("the attachment is missing"), "{warning}");
-        assert!(warning.contains("falling back to ListByState"), "{warning}");
+        assert!(
+            warning.contains("falling back to ObserveCollaboration"),
+            "{warning}"
+        );
         assert!(
             !warning.contains(
                 "pull bootstrap advertised packed discussions but the attachment is missing"
@@ -984,7 +991,10 @@ mod pull_bootstrap_tests {
             .expect("version skew must not clone-kill");
         assert!(resolved.discussions.is_none());
         let warning = resolved.discussions_pack_fallback.expect("warned fallback");
-        assert!(warning.contains("falling back to ListByState"), "{warning}");
+        assert!(
+            warning.contains("falling back to ObserveCollaboration"),
+            "{warning}"
+        );
         assert!(
             warning.contains("unsupported blob version")
                 || warning.contains("blob encoding is not this client's DiscussionsBlob v1"),

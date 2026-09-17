@@ -11,11 +11,11 @@
 //!   caller-authenticated `OpenDiscussion` / `AppendTurn` RPCs (enforce-mode
 //!   signed). #549 rejects attachments in the pack, so they cannot ride it.
 //! * **Pull/clone (read path):** after a successful clone/pull, consume the
-//!   pull bootstrap's discussions when present, falling back to `ListByState`
-//!   for older servers and when the server advertised `discussions_from_pack`
-//!   but this client cannot consume the attachment (missing / wrong kind /
-//!   version skew). Live discussions are not a pack snapshot. Materialize
-//!   unseen turns into the local op-log.
+//!   pull bootstrap's discussions when that snapshot is non-empty. v2 Fetch
+//!   is source-only (`encode_empty_pull_bootstrap`), so an empty inline fold
+//!   is not "no discussions" — fall through to `ObserveCollaboration` (same
+//!   event mapping as push). Packed-unconsumable bootstrap is also `None`.
+//!   Materialize unseen turns into the local op-log.
 //!
 //! ## Turn identity
 //!
@@ -656,13 +656,13 @@ pub async fn pull_discussions(
     pull_discussions_filtered(repo, client, repo_path, bootstrap, against, None).await
 }
 
-/// Wait `--thread` bootstrap: same ListByState RPC, then keep only discussions
-/// whose `thread_ref` matches the paired name or whose wire `thread_id`
-/// matches the stable id.
+/// Wait `--thread` bootstrap: same ObserveCollaboration list, then keep only
+/// discussions whose `thread_ref` matches the paired name or whose wire
+/// `thread_id` matches the stable id.
 ///
-/// `ListDiscussionsByStateRequest` has no thread fields (heddle-api 0.23.0).
-/// Do not call `ListByThreadRef` — that would be a second list RPC.
-/// Pull-fold `Some(discussions)` stays repo-wide: clone/pull must not shrink.
+/// Do not call a second list RPC. Pull-fold `Some(discussions)` stays
+/// repo-wide: clone/pull must not shrink. An empty slice is treated as
+/// missing (v2 source-only bootstrap) and Observes.
 pub async fn pull_discussions_for_thread(
     repo: &Repository,
     client: &mut HostedClient,
@@ -760,7 +760,9 @@ async fn listed_hosted_discussions(
 
     // Pull-fold attachments are clone/pull's repo-wide snapshot. Never shrink
     // that set for wait `--thread` — wait's filtered path always passes None.
-    let hosted = match bootstrap {
+    // v2 Fetch does not fold discussions: Some([]) is not "the server has
+    // none", it is a source-only header, so ObserveCollaboration.
+    let mut hosted = match bootstrap.filter(|discussions| !discussions.is_empty()) {
         Some(discussions) => discussions
             .iter()
             .cloned()
@@ -770,7 +772,7 @@ async fn listed_hosted_discussions(
             let listed = client
                 .list_discussions_by_state(repo_path, state.change_id, "all")
                 .await
-                .context("list hosted discussions")?;
+                .context("observe hosted discussions")?;
             match thread_filter {
                 Some((thread, thread_id)) => listed
                     .into_iter()
@@ -782,6 +784,18 @@ async fn listed_hosted_discussions(
             }
         }
     };
+    // Once-mode list can return discussion records without Turn events.
+    // pull_one skips empty Open shells, so hydrate from a per-discussion
+    // ObserveCollaboration (not v1 GetDiscussion) before materializing.
+    for discussion in &mut hosted {
+        if discussion.turns.is_empty() && !discussion.id.is_empty() {
+            if let Ok(full) = client.get_discussion(repo_path, &discussion.id, None).await
+                && !full.turns.is_empty()
+            {
+                *discussion = full;
+            }
+        }
+    }
     Ok(Some((state_id, hosted)))
 }
 
@@ -1963,6 +1977,84 @@ mod tests {
 
         let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
         assert_eq!(store.materialize().unwrap().discussions.len(), 1);
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn clone_empty_bootstrap_observes_and_materializes_discussions() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        let tree = Tree::new();
+        let tree_id = repo.store().put_tree(&tree).unwrap();
+        let state = State::new_snapshot(
+            tree_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        repo.store().put_state(&state).unwrap();
+        let against = state.id();
+        assert_eq!(
+            repo.head().unwrap(),
+            None,
+            "clone has not published HEAD yet"
+        );
+
+        let discussion_id = DiscussionRecordId::generate().to_string();
+        let proto = ProtoDiscussion {
+            id: discussion_id.clone(),
+            anchor: Some(PathSymbolRef {
+                file: "lib.rs".to_string(),
+                symbol: "run".to_string(),
+            }),
+            visibility: "internal".to_string(),
+            turns: vec![ProtoTurn {
+                author_name: "Reviewer".to_string(),
+                author_email: "reviewer@example.com".to_string(),
+                body: "keep this invariant".to_string(),
+                turn_id: "turn-open".to_string(),
+                turn_seq: 1,
+                posted_at: Some(prost_types::Timestamp {
+                    seconds: 1_700_000_001,
+                    nanos: 0,
+                }),
+                ..ProtoTurn::default()
+            }],
+            ..ProtoDiscussion::default()
+        };
+        let mut fixture = CollaborationFixture::default();
+        fixture.list.push(proto.clone());
+        fixture.discussions.insert(discussion_id.clone(), proto);
+        let (mut client, server, fixture) =
+            crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+        let empty: &[Discussion] = &[];
+        let changed = pull_discussions(
+            &repo,
+            &mut client,
+            "acme/widgets",
+            Some(empty),
+            Some(against),
+        )
+        .await
+        .unwrap();
+        let observed = *fixture.list_requests.lock().unwrap();
+        assert!(
+            observed >= 1,
+            "empty v2 bootstrap must ObserveCollaboration, not treat Some([]) as no discussions"
+        );
+        assert_eq!(
+            changed, 1,
+            "ObserveCollaboration returned a discussion; pull_one must materialize it (got {changed}, observed={observed})"
+        );
+
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        let local_id: DiscussionRecordId = discussion_id.parse().unwrap();
+        assert!(
+            store.materialize_discussion(&local_id).unwrap().is_some(),
+            "clone discuss list is empty after Observe returned a discussion: pull_one did not adopt"
+        );
 
         client.close().await;
         server.await.unwrap();

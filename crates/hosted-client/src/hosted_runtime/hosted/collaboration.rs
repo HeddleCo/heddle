@@ -1020,7 +1020,8 @@ impl HostedClient {
         .await
     }
 
-    /// List hosted discussions on this spool. `status` is `open` | `resolved` | `all` | `orphaned`.
+    /// List hosted discussions on this spool via ObserveCollaboration.
+    /// `status` is `open` | `resolved` | `all` | `orphaned`.
     pub async fn list_discussions_by_state(
         &mut self,
         repo_path: &str,
