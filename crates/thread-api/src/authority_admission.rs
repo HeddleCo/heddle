@@ -208,7 +208,7 @@ mod tests {
             spool: trust.spool,
             spool_genesis: trust.spool_genesis,
             thread: operation.thread,
-            subject: objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(operation.id().expect("ID")),
+            subject: heddle_object_model::object::thread_authority_admission::OriginalAuthoritySubject::Operation(operation.id().expect("ID")),
             actor: control.actor,
             publisher: operation.publisher,
             authority_digest: control.authority_digest,
@@ -252,7 +252,7 @@ mod tests {
         let mut mutations = Vec::new();
         let mut changed = value.clone();
         changed.subject =
-            objects::object::thread_authority_admission::OriginalAuthoritySubject::Operation(
+            heddle_object_model::object::thread_authority_admission::OriginalAuthoritySubject::Operation(
                 ContentHash::from_bytes([47; 32]),
             );
         mutations.push(changed);
