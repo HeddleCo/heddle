@@ -296,10 +296,10 @@ fn restore_story_is_documented_and_start_defaults_path() {
 
     let start = heddle_help(&["start", "--help"]);
     assert!(
-        start.contains("./<name>")
+        start.contains(".heddle/threads/")
             && !start.contains("`--path` is required")
             && start.contains("heddle thread create"),
-        "start help must say omitted --path defaults to ./<name>: {start}"
+        "start help must say omitted --path defaults under .heddle/threads/: {start}"
     );
 
     let model = heddle_help(&["help", "model"]);

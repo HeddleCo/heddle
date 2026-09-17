@@ -399,6 +399,7 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle context set --path <path> --scope file -m \"...\"",
     "heddle agent provenance begin",
     "heddle start <name> --path <empty-path>",
+    "heddle start <name>",
     "heddle start <name> --path ../<name>",
     "heddle agent presence show <session>",
     "heddle agent presence complete --session <session>",
@@ -504,6 +505,12 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         "heddle start <name> --path <empty-path>",
         &["heddle", "start", "<name>", "--path", "<empty-path>"],
         &["name", "path"],
+        true,
+    ),
+    (
+        "heddle start <name>",
+        &["heddle", "start", "<name>"],
+        &["name"],
         true,
     ),
     (

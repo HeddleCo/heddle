@@ -27,32 +27,37 @@ fn materialized_start_writes_base_state_files() {
 }
 
 #[test]
-fn top_level_start_without_path_defaults_to_dot_slash_name() {
+fn top_level_start_without_path_defaults_under_heddle_threads() {
     let main = setup_repo("hello.txt", "world");
 
     let started = heddle(
-        &["--output", "json", "start", "feature/default-visible"],
+        &["--output", "json", "start", "feature/default-managed"],
         Some(main.path()),
     )
-    .expect("start without --path should default to ./<name>");
-    let checkout = main.path().join("feature").join("default-visible");
+    .expect("start without --path should default under .heddle/threads/");
+    let leaf = main.path().file_name().unwrap();
+    let checkout = main
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("feature%2Fdefault-managed")
+        .join(leaf);
     assert!(
         checkout.join(".heddle").exists(),
-        "default checkout should materialize at ./feature/default-visible: {started}"
+        "default checkout should materialize under .heddle/threads/: {started}"
     );
     assert!(
-        !main.path().join(".heddle/threads").join("feature").exists()
-            && !main
-                .path()
-                .join(".heddle/threads")
-                .join("default-visible")
-                .exists(),
-        "default start must not hide a checkout under .heddle/threads"
+        !main
+            .path()
+            .join("feature")
+            .join("default-managed")
+            .exists(),
+        "default start must not land at ./feature/default-managed"
     );
 }
 
 #[test]
-fn top_level_start_workspace_auto_without_path_defaults_to_dot_slash_name() {
+fn top_level_start_workspace_auto_without_path_defaults_under_heddle_threads() {
     let main = setup_repo("hello.txt", "world");
 
     let started = heddle(
@@ -66,16 +71,21 @@ fn top_level_start_workspace_auto_without_path_defaults_to_dot_slash_name() {
         ],
         Some(main.path()),
     )
-    .expect("start --workspace auto without --path should default to ./<name>");
-    let checkout = main.path().join("feature").join("search");
+    .expect("start --workspace auto without --path should default under .heddle/threads/");
+    let leaf = main.path().file_name().unwrap();
+    let checkout = main
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("feature%2Fsearch")
+        .join(leaf);
     assert!(
         checkout.join(".heddle").exists(),
-        "auto workspace default checkout should materialize at ./feature/search: {started}"
+        "auto workspace default checkout should materialize under .heddle/threads/: {started}"
     );
     assert!(
-        !main.path().join(".heddle/threads").join("feature").exists()
-            && !main.path().join(".heddle/threads").join("search").exists(),
-        "auto workspace default must not hide a checkout under .heddle/threads"
+        !main.path().join("feature").join("search").exists(),
+        "auto workspace default must not land at ./feature/search"
     );
 }
 

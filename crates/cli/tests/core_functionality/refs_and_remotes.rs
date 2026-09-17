@@ -171,35 +171,33 @@ fn test_start_creates_named_thread() {
 }
 
 #[test]
-fn test_start_without_path_defaults_to_dot_slash_name() {
+fn test_start_without_path_defaults_under_heddle_threads() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
     heddle_must_succeed(&["capture", "-m", "Initial"], temp.path());
 
     heddle_must_succeed(&["start", "feature/search"], temp.path());
+    let leaf = temp.path().file_name().unwrap();
+    let checkout = temp
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("feature%2Fsearch")
+        .join(leaf);
     assert!(
-        temp.path()
-            .join("feature")
-            .join("search")
-            .join(".heddle")
-            .exists(),
-        "start without --path should materialize ./feature/search"
+        checkout.join(".heddle").exists(),
+        "start without --path should materialize under .heddle/threads/: {}",
+        checkout.display()
     );
     assert!(
-        !temp.path().join(".heddle/threads").exists()
-            || temp
-                .path()
-                .join(".heddle/threads")
-                .read_dir()
-                .map(|entries| entries.count() == 0)
-                .unwrap_or(true),
-        "default start must not hide a checkout under .heddle/threads"
+        !temp.path().join("feature").join("search").exists(),
+        "default start must not land at ./feature/search"
     );
 }
 
 #[test]
-fn test_start_workspace_auto_without_path_defaults_to_dot_slash_name() {
+fn test_start_workspace_auto_without_path_defaults_under_heddle_threads() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
@@ -209,23 +207,21 @@ fn test_start_workspace_auto_without_path_defaults_to_dot_slash_name() {
         &["start", "feature/search", "--workspace", "auto"],
         temp.path(),
     );
+    let leaf = temp.path().file_name().unwrap();
+    let checkout = temp
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("feature%2Fsearch")
+        .join(leaf);
     assert!(
-        temp.path()
-            .join("feature")
-            .join("search")
-            .join(".heddle")
-            .exists(),
-        "start --workspace auto without --path should materialize ./feature/search"
+        checkout.join(".heddle").exists(),
+        "start --workspace auto without --path should materialize under .heddle/threads/: {}",
+        checkout.display()
     );
     assert!(
-        !temp.path().join(".heddle/threads").exists()
-            || temp
-                .path()
-                .join(".heddle/threads")
-                .read_dir()
-                .map(|entries| entries.count() == 0)
-                .unwrap_or(true),
-        "auto workspace default must not hide a checkout under .heddle/threads"
+        !temp.path().join("feature").join("search").exists(),
+        "auto workspace default must not land at ./feature/search"
     );
 }
 

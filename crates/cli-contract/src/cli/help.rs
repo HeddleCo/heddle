@@ -789,10 +789,10 @@ identically. The mode only controls bytes-on-disk semantics.\n\
 \n\
 # Isolated checkout path\n\
 \n\
-- Use `heddle start <name>` for an isolated checkout at `./<name>`, or pass\n\
-  `--path <dir>` to place it elsewhere. It creates the thread ref and\n\
-  materializes the checkout in one step. Omitted `--path` always defaults to\n\
-  `./<name>` (not TTY-gated, and not hidden under `.heddle/threads/`).\n\
+- Use `heddle start <name>` for an isolated checkout under\n\
+  `.heddle/threads/<name>/…`, or pass `--path <dir>` to place it elsewhere.\n\
+  It creates the thread ref and materializes the checkout in one step.\n\
+  Omitted `--path` always defaults under `.heddle/threads/` (not TTY-gated).\n\
 - To stay on this checkout, use `heddle thread create <name>` then\n\
   `heddle thread switch <name>`.\n\
 - Advanced split form: `heddle thread create <name>` creates only the\n\
@@ -982,13 +982,13 @@ Save and synchronize ordinary work:
 
 Isolate risky work:
 
-    heddle start <name>
-    cd ../<name>
-    heddle capture -m "..."
+    heddle start <name>                       # checkout under .heddle/threads/
+    heddle capture -m "..."                   # inside that checkout
     heddle ready
-    cd -
-    heddle land --thread <name>
+    heddle land --thread <name>               # from the parent repo
     heddle push
+
+Or place the checkout explicitly: `heddle start <name> --path ../<name>`.
 
 Recover or prove state:
 

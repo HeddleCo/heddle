@@ -678,12 +678,13 @@ pub enum WorkspaceModeArg {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle start feature/auth                         # checkout at ./feature/auth
+  heddle start feature/auth                         # checkout under .heddle/threads/
   heddle start feature/auth --path ../feature-auth  # place the checkout explicitly
   heddle start fix-flake --path ../fix-flake --task 'fix CI flake'
 
-When `--path` is omitted, start always uses `./<name>` (not TTY-gated, and not
-hidden under `.heddle/threads/`). Pass `--path` to choose a different directory.
+When `--path` is omitted, start always uses `.heddle/threads/<name>/…` (not
+TTY-gated; the managed layout under the repo). Pass `--path` to choose a
+different directory.
 To stay on this checkout without an isolated tree, use
 `heddle thread create <name>` then `heddle thread switch <name>`.
 
@@ -702,12 +703,12 @@ pub struct ThreadStartArgs {
     #[arg(long)]
     pub from: Option<String>,
 
-    /// Filesystem path for the isolated checkout. Defaults to `./<name>`.
+    /// Filesystem path for the isolated checkout. Defaults under `.heddle/threads/`.
     #[arg(long)]
     pub path: Option<std::path::PathBuf>,
 
     /// Workspace mode for the thread. Omitted or `auto` still defaults the
-    /// checkout to `./<name>` when `--path` is omitted.
+    /// checkout under `.heddle/threads/` when `--path` is omitted.
     #[arg(long, value_enum)]
     pub workspace: Option<WorkspaceModeArg>,
 
