@@ -317,7 +317,7 @@ mod tests {
         assert!(
             matches!(
                 crate::request_proof::verify(&missing, method, &body, &key, now),
-                Err(Error::Protocol("request PoP required"))
+                Err(Error::Protocol("invalid or expired request PoP"))
             ),
             "strict verifier never downgrades account reads"
         );
