@@ -75,16 +75,16 @@ tempfile.workspace = true
 
 [[example]]
 name = "thread"
-required-features = ["iroh"]
+required-features = ["iroh", "replication"]
 
 [[example]]
 name = "multiplex"
-required-features = ["iroh"]
+required-features = ["iroh", "replication"]
 
 [[test]]
 name = "thread_workflow"
-required-features = ["iroh"]
+required-features = ["iroh", "replication"]
 
 [[test]]
 name = "transport_observation"
-required-features = ["iroh"]
+required-features = ["iroh", "replication"]
