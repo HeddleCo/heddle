@@ -66,6 +66,7 @@ pub fn verify_resolution_account_authority(
 }
 
 impl ThreadReplica {
+    #[allow(clippy::type_complexity)]
     pub fn ownership_resolution_admission(
         &self,
     ) -> Result<Option<crypto::thread_authority_admission::SignedAuthorityAdmission>> {

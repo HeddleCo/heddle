@@ -101,6 +101,7 @@ pub enum SourceSelection {
 /// projects and evaluates typed tags on each exact signed context revision
 /// after its authorization check.
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn search_native(
     directory: &std::path::Path,
     text: &str,
@@ -116,6 +117,7 @@ pub(crate) fn search_native(
 /// Search with query-local exact source targets admitted by signed Thread and
 /// source checks. Candidate path leaf chains are anti-joined with denied
 /// commitments before ORDER BY/LIMIT, so hidden rows cannot consume page slots.
+#[allow(clippy::too_many_arguments)]
 pub fn search_native_admitted(
     directory: &std::path::Path,
     text: &str,
@@ -129,6 +131,7 @@ pub fn search_native_admitted(
     search_native_inner(directory, text, after_operation, limit, kinds, annotations, source, Some(admitted))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn search_native_inner(
     directory: &std::path::Path,
     text: &str,
@@ -336,8 +339,7 @@ fn search_native_inner(
             score,
             revision: revision
                 .map(|value| {
-                    super::hash(&value)
-                        .map(|hash| objects::object::StateId::from_content_hash(hash))
+                    super::hash(&value).map(objects::object::StateId::from_content_hash)
                 })
                 .transpose()?,
             path,
