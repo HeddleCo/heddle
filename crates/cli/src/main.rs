@@ -17,6 +17,8 @@ use cli::cli::commands::cmd_semantic;
 use cli::cli::commands::{
     cmd_grant, cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami, cmd_promote,
 };
+#[cfg(feature = "client")]
+use cli::cli::AuthCommands;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     BridgeCommands, BridgeGitCommands,
@@ -686,6 +688,23 @@ async fn async_main() -> Result<()> {
         Commands::Auth { command } => cmd_hosted_auth(&cli, command.clone()).await,
 
         #[cfg(feature = "client")]
+        Commands::Invite {
+            email,
+            server,
+            command,
+        } => {
+            cmd_hosted_auth(
+                &cli,
+                AuthCommands::Invite {
+                    email: email.clone(),
+                    server: server.clone(),
+                    command: command.clone(),
+                },
+            )
+            .await
+        }
+
+        #[cfg(feature = "client")]
         Commands::Claim(args) => cmd_hosted_claim(args.clone()).await,
 
         #[cfg(feature = "client")]
@@ -701,13 +720,13 @@ async fn async_main() -> Result<()> {
             ContextCommands::Set(args) => {
                 cmd_context_set(
                     &cli,
-                    args.target.path.clone(),
+                    args.resolved_path().map(str::to_owned),
                     args.target.state.clone(),
                     args.scope.clone(),
                     args.kind.clone(),
                     args.tag.clone(),
                     args.message.clone(),
-                    args.file.clone(),
+                    args.from_file.clone(),
                 )
                 .await
             }
@@ -751,7 +770,7 @@ async fn async_main() -> Result<()> {
                     args.kind.clone(),
                     args.tag.clone(),
                     args.message.clone(),
-                    args.file.clone(),
+                    args.from_file.clone(),
                 )
                 .await
             }
@@ -765,7 +784,7 @@ async fn async_main() -> Result<()> {
                     args.kind.clone(),
                     args.tag.clone(),
                     args.message.clone(),
-                    args.file.clone(),
+                    args.from_file.clone(),
                 )
                 .await
             }

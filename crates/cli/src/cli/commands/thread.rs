@@ -102,9 +102,6 @@ pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
     // Pure option preflight (name + path isolation flags) before materialization.
     let start_plan = plan_thread_start(&thread_start_options_from_args(&args))
         .map_err(|ThreadPlanError::InvalidName(err)| anyhow!(thread_name_invalid_advice(&err)))?;
-    if start_would_hide_checkout(&args) {
-        return Err(anyhow!(start_requires_explicit_path_advice(&args.name)));
-    }
     if start_plan.requires_clean_worktree {
         ensure_worktree_clean(&repo, "start thread")?;
     }
@@ -850,6 +847,7 @@ pub(crate) fn thread_name_invalid_advice(err: &ThreadIdError) -> RecoveryAdvice 
 }
 
 /// Refuse a user-facing `start` that would hide the checkout under `.heddle/threads/`.
+#[allow(dead_code)] // retained for recovery/docs; start defaults under .heddle/threads/
 pub(crate) fn start_requires_explicit_path_advice(name: &str) -> RecoveryAdvice {
     let primary = format!("heddle start {name} --path ../{name}");
     RecoveryAdvice::invalid_usage(
@@ -956,9 +954,11 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             style::warn("note"),
         );
     }
-    // Pure path layout: explicit `--path` for solid/materialized, managed
-    // default otherwise. Virtualized always uses the managed layout so a
-    // user-named directory is never shadowed by a kernel mount.
+    // Pure path layout: omitted `--path` always defaults to the managed
+    // checkout under `.heddle/threads/<encoded>/<repo-name>` (not TTY-gated).
+    // Virtualized mounts must stay on that layout so a user-named directory is
+    // never shadowed by a kernel mount; solid/materialized share it so the
+    // omission default is one layout. Explicit `--path` still wins.
     let path_plan = plan_checkout_path(
         &thread_mode,
         args.path.clone(),
@@ -1530,6 +1530,7 @@ fn requested_workspace(args: &ThreadStartArgs) -> WorkspaceModeArg {
 
 /// Omitted workspace and `--workspace auto` are the same default: without
 /// `--path` they hide the checkout under `.heddle/threads/`.
+#[allow(dead_code)] // start defaults under .heddle/threads/ instead of refusing
 fn start_would_hide_checkout(args: &ThreadStartArgs) -> bool {
     args.path.is_none() && matches!(requested_workspace(args), WorkspaceModeArg::Auto)
 }
@@ -2687,6 +2688,7 @@ fn non_empty_action(action: &str) -> Option<String> {
 /// *sibling* of the checkout rather than a stray file inside it, while making
 /// the managed path read like the original repository instead of generic
 /// `root`.
+
 fn default_thread_checkout_path(repo: &Repository, name: &str) -> PathBuf {
     repo.managed_checkout_path(name)
 }

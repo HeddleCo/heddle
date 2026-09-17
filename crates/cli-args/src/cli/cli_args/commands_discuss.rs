@@ -7,8 +7,8 @@ use clap::{ArgGroup, Args, Subcommand};
 pub enum DiscussCommands {
     /// Open a discussion anchored to a symbol.
     Open(DiscussOpenArgs),
-    /// Append a durable turn to a discussion.
-    Append(DiscussAppendArgs),
+    /// Add a durable turn to a discussion.
+    Turn(DiscussTurnArgs),
     /// Resolve a discussion.
     Resolve(DiscussResolveArgs),
     /// Reopen a resolved discussion.
@@ -90,7 +90,7 @@ pub struct DiscussOpenArgs {
 }
 
 #[derive(Clone, Debug, Args)]
-pub struct DiscussAppendArgs {
+pub struct DiscussTurnArgs {
     /// Discussion id, or FILE when copying `discuss open` argv.
     #[arg(value_name = "ID|FILE")]
     pub discussion_id: String,
@@ -106,7 +106,7 @@ pub struct DiscussAppendArgs {
 #[command(group(
     ArgGroup::new("resolution")
         .required(true)
-        .args(["mode", "into_annotation"])
+        .args(["mode", "into_annotation", "dismiss", "by_edit"])
 ))]
 pub struct DiscussResolveArgs {
     /// Discussion id, or FILE when copying `discuss open` argv.
@@ -118,14 +118,20 @@ pub struct DiscussResolveArgs {
     /// Resolution kind: `by-edit` or `dismiss`.
     #[arg(long, value_enum)]
     pub mode: Option<ResolveModeArg>,
+    /// Shorthand for `--mode dismiss`. Still requires `--reason`.
+    #[arg(long, conflicts_with_all = ["mode", "by_edit", "into_annotation"])]
+    pub dismiss: bool,
+    /// Shorthand for `--mode by-edit`.
+    #[arg(long = "by-edit", conflicts_with_all = ["mode", "dismiss", "into_annotation"])]
+    pub by_edit: bool,
     /// Resolve by creating a real context annotation (`context set`) and linking it.
     #[arg(long, requires = "body")]
     pub into_annotation: bool,
     /// For `by-edit`: state containing the edit (defaults to HEAD).
-    #[arg(long, requires = "mode")]
+    #[arg(long)]
     pub state: Option<String>,
     /// For `dismiss`: non-empty reason.
-    #[arg(long, requires = "mode")]
+    #[arg(long)]
     pub reason: Option<String>,
     /// For `--into-annotation`: annotation content.
     #[arg(long, requires = "into_annotation")]
@@ -140,6 +146,19 @@ pub struct DiscussResolveArgs {
     /// For `--into-annotation`: annotation tag (can be repeated).
     #[arg(long, requires = "into_annotation")]
     pub tag: Vec<String>,
+}
+
+impl DiscussResolveArgs {
+    /// Effective `--mode`, including `--dismiss` / `--by-edit` shorthands.
+    pub fn resolved_mode(&self) -> Option<ResolveModeArg> {
+        if self.dismiss {
+            Some(ResolveModeArg::Dismiss)
+        } else if self.by_edit {
+            Some(ResolveModeArg::ByEdit)
+        } else {
+            self.mode.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -202,27 +221,27 @@ pub struct DiscussWaitArgs {
 mod tests {
     use clap::Parser;
 
-    use crate::cli::{Cli, Commands, DiscussCommands};
+    use crate::cli::{Cli, Commands, DiscussCommands, ResolveModeArg};
 
     #[test]
-    fn append_accepts_id_or_open_argv() {
-        match Cli::try_parse_from(["heddle", "discuss", "append", "disc-id", "body"])
+    fn turn_accepts_id_or_open_argv() {
+        match Cli::try_parse_from(["heddle", "discuss", "turn", "disc-id", "body"])
             .expect("id argv")
             .command
         {
             Commands::Discuss {
-                command: DiscussCommands::Append(args),
+                command: DiscussCommands::Turn(args),
             } => {
                 assert_eq!(args.discussion_id, "disc-id");
                 assert_eq!(args.body, "body");
                 assert!(args.open_body.is_none());
             }
-            _ => panic!("expected discuss append"),
+            _ => panic!("expected discuss turn"),
         }
         match Cli::try_parse_from([
             "heddle",
             "discuss",
-            "append",
+            "turn",
             "src/auth.rs",
             "verify",
             "body",
@@ -231,13 +250,13 @@ mod tests {
         .command
         {
             Commands::Discuss {
-                command: DiscussCommands::Append(args),
+                command: DiscussCommands::Turn(args),
             } => {
                 assert_eq!(args.discussion_id, "src/auth.rs");
                 assert_eq!(args.body, "verify");
                 assert_eq!(args.open_body.as_deref(), Some("body"));
             }
-            _ => panic!("expected discuss append"),
+            _ => panic!("expected discuss turn"),
         }
     }
 
@@ -278,4 +297,46 @@ mod tests {
             _ => panic!("expected discuss resolve"),
         }
     }
+
+    #[test]
+    fn resolve_dismiss_and_by_edit_shorthands_set_mode() {
+        match Cli::try_parse_from([
+            "heddle",
+            "discuss",
+            "resolve",
+            "disc-id",
+            "--dismiss",
+            "--reason",
+            "done",
+        ])
+        .expect("dismiss shorthand")
+        .command
+        {
+            Commands::Discuss {
+                command: DiscussCommands::Resolve(args),
+            } => {
+                assert!(matches!(args.resolved_mode(), Some(ResolveModeArg::Dismiss)));
+                assert_eq!(args.reason.as_deref(), Some("done"));
+            }
+            _ => panic!("expected discuss resolve"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "discuss",
+            "resolve",
+            "disc-id",
+            "--by-edit",
+        ])
+        .expect("by-edit shorthand")
+        .command
+        {
+            Commands::Discuss {
+                command: DiscussCommands::Resolve(args),
+            } => {
+                assert!(matches!(args.resolved_mode(), Some(ResolveModeArg::ByEdit)));
+            }
+            _ => panic!("expected discuss resolve"),
+        }
+    }
+
 }

@@ -99,6 +99,10 @@ pub struct ContextReasonGitArgs {
 /// Arguments for `heddle context set`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextSetArgs {
+    /// File path to annotate (alternative to `--path`).
+    #[arg(value_name = "PATH", conflicts_with_all = ["path", "state"])]
+    pub path_positional: Option<String>,
+
     #[command(flatten)]
     pub target: ContextTargetArgs,
 
@@ -118,13 +122,22 @@ pub struct ContextSetArgs {
     #[arg(long)]
     pub tag: Vec<String>,
 
-    /// Annotation content (inline).
-    #[arg(short = 'm', long)]
+    /// Annotation content (inline). `--body` is an alias of `--message`/`-m`.
+    #[arg(short = 'm', long, visible_alias = "body")]
     pub message: Option<String>,
 
     /// Read annotation content from a file.
-    #[arg(long)]
-    pub file: Option<std::path::PathBuf>,
+    #[arg(long = "from-file", value_name = "PATH")]
+    pub from_file: Option<std::path::PathBuf>,
+}
+
+impl ContextSetArgs {
+    /// Effective file path from positional PATH or `--path`.
+    pub fn resolved_path(&self) -> Option<&str> {
+        self.path_positional
+            .as_deref()
+            .or(self.target.path.as_deref())
+    }
 }
 
 /// Arguments for `heddle context get`.
@@ -197,13 +210,13 @@ pub struct ContextEditArgs {
     #[arg(long)]
     pub tag: Vec<String>,
 
-    /// New revision content (inline).
-    #[arg(short = 'm', long)]
+    /// New revision content (inline). `--body` is an alias of `--message`/`-m`.
+    #[arg(short = 'm', long, visible_alias = "body")]
     pub message: Option<String>,
 
     /// Read revision content from a file.
-    #[arg(long)]
-    pub file: Option<std::path::PathBuf>,
+    #[arg(long = "from-file", value_name = "PATH")]
+    pub from_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, clap::Args)]
@@ -230,13 +243,13 @@ pub struct ContextSupersedeArgs {
     #[arg(long)]
     pub tag: Vec<String>,
 
-    /// Replacement annotation content (inline).
-    #[arg(short = 'm', long)]
+    /// Replacement annotation content (inline). `--body` is an alias of `--message`/`-m`.
+    #[arg(short = 'm', long, visible_alias = "body")]
     pub message: Option<String>,
 
     /// Read replacement content from a file.
-    #[arg(long)]
-    pub file: Option<std::path::PathBuf>,
+    #[arg(long = "from-file", value_name = "PATH")]
+    pub from_file: Option<std::path::PathBuf>,
 }
 
 /// Arguments for `heddle context rm`.
@@ -345,5 +358,55 @@ mod tests {
             }
             _ => panic!("expected context edit"),
         }
+    }
+
+    #[test]
+    fn context_set_accepts_positional_path_body_alias_and_from_file() {
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "set",
+            "src/auth.rs",
+            "--body",
+            "keep timing constant",
+        ])
+        .expect("positional path + body")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Set(args),
+            } => {
+                assert_eq!(args.resolved_path(), Some("src/auth.rs"));
+                assert_eq!(args.message.as_deref(), Some("keep timing constant"));
+            }
+            _ => panic!("expected context set"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "set",
+            "--path",
+            "src/auth.rs",
+            "--from-file",
+            "note.md",
+        ])
+        .expect("from-file")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Set(args),
+            } => {
+                assert_eq!(args.resolved_path(), Some("src/auth.rs"));
+                assert_eq!(
+                    args.from_file.as_deref(),
+                    Some(std::path::Path::new("note.md"))
+                );
+            }
+            _ => panic!("expected context set"),
+        }
+        assert!(
+            Cli::try_parse_from(["heddle", "context", "set", "--file", "note.md"]).is_err(),
+            "old --file content flag must not parse"
+        );
     }
 }

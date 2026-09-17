@@ -40,7 +40,7 @@ use super::{
 use crate::{
     cli::{
         cli_args::{
-            Cli, DiscussAppendArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
+            Cli, DiscussTurnArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
             DiscussReopenArgs, DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs,
             ResolveModeArg,
         },
@@ -89,7 +89,7 @@ pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
     let store = CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
     match command {
         DiscussCommands::Open(args) => run_open(cli, &repo, &store, args),
-        DiscussCommands::Append(args) => run_append(cli, &repo, &store, args),
+        DiscussCommands::Turn(args) => run_turn(cli, &repo, &store, args),
         DiscussCommands::Resolve(args) => run_resolve(cli, &repo, &store, args),
         DiscussCommands::Reopen(args) => run_reopen(cli, &repo, &store, args),
         DiscussCommands::List(args) => run_list(cli, &repo, &store, args),
@@ -171,11 +171,11 @@ fn open_inputs(args: &DiscussOpenArgs) -> Result<(&str, &str, &str)> {
     }
 }
 
-fn run_append(
+fn run_turn(
     cli: &Cli,
     repo: &repo::Repository,
     store: &CollaborationStore,
-    args: &DiscussAppendArgs,
+    args: &DiscussTurnArgs,
 ) -> Result<()> {
     let (discussion_id, body) = match args.open_body.as_deref() {
         Some(body) => (
@@ -189,7 +189,7 @@ fn run_append(
         repo,
         store,
         &discussion_id,
-        "discuss_append",
+        "discuss_turn",
         CollaborationOperationBodyV1::AppendTurn {
             turn: DiscussionTurnV1::new(body)?,
         },
@@ -204,7 +204,7 @@ fn run_resolve(
 ) -> Result<()> {
     let discussion_id =
         resolve_discussion_locator(store, &args.discussion_id, args.symbol.as_deref())?;
-    let resolution = match (args.mode.as_ref(), args.into_annotation) {
+    let resolution = match (args.resolved_mode(), args.into_annotation) {
         (Some(ResolveModeArg::ByEdit), false) => CollaborationResolution::AddressedByState {
             state_id: resolve_state(repo, args.state.as_deref())?,
         },
@@ -219,9 +219,12 @@ fn run_resolve(
         },
         (None, true) => resolve_into_context_annotation(repo, store, args, &discussion_id)?,
         _ => {
-            return Err(anyhow!(
-                "discuss resolve requires exactly one of --mode or --into-annotation"
-            ));
+            return Err(anyhow!(RecoveryAdvice::invalid_usage(
+                "discuss_resolve_mode_required",
+                "discuss resolve needs a resolution mode",
+                "Pass `--dismiss --reason ...`, `--by-edit`, `--mode dismiss|by-edit`, or `--into-annotation`.",
+                "heddle discuss resolve <id> --dismiss --reason ...",
+            )));
         }
     };
     write_descendant(
@@ -644,7 +647,7 @@ fn emit_write(
     if should_output_json(cli, None) {
         let emitting = match output_kind {
             "discuss_open" => &["discuss", "open"][..],
-            "discuss_append" => &["discuss", "append"][..],
+            "discuss_turn" => &["discuss", "turn"][..],
             "discuss_resolve" => &["discuss", "resolve"][..],
             "discuss_reopen" => &["discuss", "reopen"][..],
             _ => &["discuss"][..],

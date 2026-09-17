@@ -63,7 +63,7 @@ fn append_writes_a_new_collaboration_operation() {
 
     let appended = json(
         &heddle(
-            &["--output", "json", "discuss", "append", id, "second"],
+            &["--output", "json", "discuss", "turn", id, "second"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -86,7 +86,7 @@ fn append_and_show_accept_open_argv() {
                 "--output",
                 "json",
                 "discuss",
-                "append",
+                "turn",
                 "main.rs",
                 "main",
                 "from open argv",

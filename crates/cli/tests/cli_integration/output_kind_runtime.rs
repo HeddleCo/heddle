@@ -550,11 +550,11 @@ fn discuss_open_show_append_emit_output_kind() {
         .to_string();
 
     let append = heddle_json_with_env(
-        &["discuss", "append", &discussion_id, "follow-up turn"],
+        &["discuss", "turn", &discussion_id, "follow-up turn"],
         &temp,
         &env_principal,
     );
-    assert_output_kind(&append, "discuss_append");
+    assert_output_kind(&append, "discuss_turn");
     assert_eq!(
         append["discussion"]["id"].as_str(),
         Some(discussion_id.as_str())

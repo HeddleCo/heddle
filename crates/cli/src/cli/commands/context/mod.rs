@@ -137,8 +137,8 @@ pub(crate) fn read_annotation_content(
         (None, Some(path)) => Ok(std::fs::read_to_string(&path)?),
         (None, None) => Err(anyhow!(RecoveryAdvice::invalid_usage(
             "context_content_required",
-            "Provide annotation content with -m or --file",
-            "Pass `-m <text>` or `--file <path>` with annotation content.",
+            "Provide annotation content with -m/--body or --from-file",
+            "Pass `-m`/`--body <text>` or `--from-file <path>` with annotation content.",
             "heddle context set --path <path> -m \"...\"",
         ))),
     }

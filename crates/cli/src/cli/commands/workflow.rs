@@ -2171,89 +2171,118 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
             _ => style::working_marker(),
         };
         println!("{marker} {}", output.operator.message);
-        println!("  {}", style::field("thread", &style::bold(&output.thread)));
-        if output.integrated {
-            println!("  {}", style::field("landed", "on parent"));
-        } else {
-            if !output.performed_steps.is_empty() {
-                println!(
-                    "  {}",
-                    style::field(
-                        "completed",
-                        &output
-                            .performed_steps
-                            .iter()
-                            .map(|step| land_text_step(step))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                );
-            }
-            if !output.skipped_steps.is_empty() {
-                println!(
-                    "  {}",
-                    style::field(
-                        "not performed",
-                        &output
-                            .skipped_steps
-                            .iter()
-                            .map(|step| land_text_step(step))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                );
-            }
-        }
-        if output.captured {
-            println!("  {}", style::field("captured", "yes"));
-        }
-        if output.synced {
-            println!("  {}", style::field("refreshed", "yes"));
-        }
-        if output.checkpointed {
-            println!("  {}", style::field("saved", "local Git commit recorded"));
-        }
-        if !output.siblings_restacked.is_empty() {
-            println!(
-                "  {}",
-                style::field("siblings restacked", &output.siblings_restacked.join(", "))
-            );
-        }
-        for blocker in &output.operator.blockers {
-            println!("  blocker: {}", style::warn(blocker));
-        }
-        for warning in &output.operator.warnings {
-            println!("  warning: {}", style::warn(warning));
-        }
-        println!(
-            "Workspace: {}",
-            if output.trust.verified {
-                style::accent("verified")
-            } else {
-                style::warn(&output.trust.status)
-            }
-        );
-        if let Some(next) = output
-            .operator
-            .recommended_action
-            .as_ref()
-            .or(output.operator.next_action.as_ref())
-        {
-            print_next(next);
-        } else if output.operator.status == "blocked" {
-            println!();
-            if output
-                .blocker_details
-                .iter()
-                .any(|detail| detail.code == LandBlockerCode::ThreadStateBlocked)
+        let blocked = output.operator.status == "blocked";
+        let verbose = cli.verbose > 0;
+        if blocked && !verbose {
+            // Conflict/blocked ready→land: one human line + Next; jargon under -v/JSON.
+            if let Some(next) = output
+                .operator
+                .recommended_action
+                .as_ref()
+                .or(output.operator.next_action.as_ref())
             {
-                println!(
-                    "No automatic recovery command is available: sync is already current and cannot change the recorded blocked thread state."
-                );
+                print_next(next);
             } else {
+                println!();
+                if output
+                    .blocker_details
+                    .iter()
+                    .any(|detail| detail.code == LandBlockerCode::ThreadStateBlocked)
+                {
+                    println!(
+                        "No automatic recovery command is available: sync is already current and cannot change the recorded blocked thread state."
+                    );
+                } else {
+                    println!(
+                        "No automatic recovery command is available for the blocking condition above."
+                    );
+                }
+            }
+        } else {
+            println!("  {}", style::field("thread", &style::bold(&output.thread)));
+            if output.integrated {
+                println!("  {}", style::field("landed", "on parent"));
+            } else {
+                if !output.performed_steps.is_empty() {
+                    println!(
+                        "  {}",
+                        style::field(
+                            "completed",
+                            &output
+                                .performed_steps
+                                .iter()
+                                .map(|step| land_text_step(step))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    );
+                }
+                if !output.skipped_steps.is_empty() {
+                    println!(
+                        "  {}",
+                        style::field(
+                            "not performed",
+                            &output
+                                .skipped_steps
+                                .iter()
+                                .map(|step| land_text_step(step))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    );
+                }
+            }
+            if output.captured {
+                println!("  {}", style::field("captured", "yes"));
+            }
+            if output.synced {
+                println!("  {}", style::field("refreshed", "yes"));
+            }
+            if output.checkpointed {
+                println!("  {}", style::field("saved", "local Git commit recorded"));
+            }
+            if !output.siblings_restacked.is_empty() {
                 println!(
-                    "No automatic recovery command is available for the blocking condition above."
+                    "  {}",
+                    style::field("siblings restacked", &output.siblings_restacked.join(", "))
                 );
+            }
+            for blocker in &output.operator.blockers {
+                println!("  blocker: {}", style::warn(blocker));
+            }
+            for warning in &output.operator.warnings {
+                println!("  warning: {}", style::warn(warning));
+            }
+            println!(
+                "Workspace: {}",
+                if output.trust.verified {
+                    style::accent("verified")
+                } else {
+                    style::warn(&output.trust.status)
+                }
+            );
+            if let Some(next) = output
+                .operator
+                .recommended_action
+                .as_ref()
+                .or(output.operator.next_action.as_ref())
+            {
+                print_next(next);
+            } else if blocked {
+                println!();
+                if output
+                    .blocker_details
+                    .iter()
+                    .any(|detail| detail.code == LandBlockerCode::ThreadStateBlocked)
+                {
+                    println!(
+                        "No automatic recovery command is available: sync is already current and cannot change the recorded blocked thread state."
+                    );
+                } else {
+                    println!(
+                        "No automatic recovery command is available for the blocking condition above."
+                    );
+                }
             }
         }
     }

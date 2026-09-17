@@ -528,7 +528,7 @@ impl RecoveryAdvice {
             "discuss_resolve_missing_dismiss_reason",
             "--reason",
             "dismiss",
-            "heddle discuss resolve <id> --mode dismiss --reason \"...\"",
+            "heddle discuss resolve <id> --dismiss --reason \"...\"",
         )
     }
 
@@ -1287,12 +1287,12 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "grant_needs_human",
             format!("Cannot manage grants on '{spool}': human verification required"),
-            "This grant change needs current human verification. Use an owner-authorized session and retry.",
+            "This invite-born account still needs a human claim/passkey before grant writes. Run `heddle claim`, then retry.",
             "the server demanded human verification for this grant write",
             "no collaborator grant was created or removed",
             "hosted grants and local checkouts were left unchanged",
-            "heddle whoami".to_string(),
-            vec!["heddle whoami".to_string()],
+            "heddle claim".to_string(),
+            vec!["heddle claim".to_string()],
         )
     }
 

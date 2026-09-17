@@ -513,6 +513,7 @@ fn write_ready_output(cli: &Cli, repo: &Repository, output: &ReadyOutput) -> Res
         output,
         should_output_json(cli, Some(repo.config())),
         output_is_compact(cli),
+        cli.verbose > 0,
         NextActionValidationContext::new(&["ready"], repo.capability()),
     )
 }
@@ -522,6 +523,7 @@ fn write_ready_output_without_repo(cli: &Cli, output: &ReadyOutput) -> Result<()
         output,
         should_output_json(cli, None),
         output_is_compact(cli),
+        cli.verbose > 0,
         NextActionValidationContext::without_repo(&["ready"]),
     )
 }
@@ -541,12 +543,14 @@ fn write_ready_output_inner(
     output: &ReadyOutput,
     json: bool,
     compact: bool,
+    verbose: bool,
     context: NextActionValidationContext<'_>,
 ) -> Result<()> {
     if json {
         write_command_json(output, compact, context)?;
     } else {
         let missing_intent = ready_blocked_by_missing_intent(output);
+        let blocked = output.operator.status == "blocked";
         if !missing_intent {
             let marker = if output.operator.status == "completed" {
                 style::ok_marker()
@@ -555,7 +559,15 @@ fn write_ready_output_inner(
             };
             println!("{marker} {}", output.operator.message);
         }
-        if !output.trust.verified && !missing_intent {
+        if blocked && !verbose {
+            // Conflict/blocked ready→land: one human line + Next; jargon under -v/JSON.
+            if let Some(recommended_action) =
+                non_empty_action(output.operator.recommended_action.as_deref())
+            {
+                println!();
+                print_next(recommended_action);
+            }
+        } else if !output.trust.verified && !missing_intent {
             write_trust_blocked_setup(output.operator.recommended_action.as_deref());
         } else {
             write_preview_report(output, output.operator.recommended_action.as_deref());

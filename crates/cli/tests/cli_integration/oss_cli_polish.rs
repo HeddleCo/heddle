@@ -35,7 +35,7 @@ fn git_overlay_guide_is_concise_and_actionable() {
         "guide should name concrete recovery states instead of vague Git/Heddle disagreement: {help}"
     );
     assert!(
-        help.contains("heddle start <name> --path ../<name>"),
+        help.contains("heddle start <name>"),
         "guide should teach isolated threads with the real start argument name: {help}"
     );
     assert!(
@@ -4228,6 +4228,7 @@ fn start_default_path_lands_under_heddle_threads() {
     git_commit_all_for_json_contract(temp.path(), "seed");
     initialize_direct_git_overlay_for_polish_tests(temp.path());
 
+    let leaf = temp.path().file_name().unwrap();
     for (mode, name) in [("solid", "solid-thread"), ("materialized", "mat-thread")] {
         let started = json_value(
             temp.path(),
@@ -4239,14 +4240,20 @@ fn start_default_path_lands_under_heddle_threads() {
             .unwrap_or_else(|| {
                 panic!("{mode} start output should carry a checkout path: {started}")
             });
-        let needle = format!("/.heddle/threads/{name}");
+        let expected = temp
+            .path()
+            .join(".heddle")
+            .join("threads")
+            .join(name)
+            .join(leaf);
         assert!(
-            path.contains(&needle),
-            "{mode} thread should default under .heddle/threads/<name> (got {path})"
+            path.contains("/.heddle/threads/") && path.contains(name),
+            "{mode} thread should default under .heddle/threads/ (got {path})"
         );
         assert!(
-            std::path::Path::new(path).join(".heddle").exists(),
-            "{mode} checkout should be materialized at {path}"
+            expected.join(".heddle").exists(),
+            "{mode} checkout should be materialized at {}: {started}",
+            expected.display()
         );
     }
 }
@@ -4259,7 +4266,13 @@ fn parent_status_ignores_default_thread_checkout_under_heddle() {
     git_commit_all_for_json_contract(temp.path(), "seed");
     initialize_direct_git_overlay_for_polish_tests(temp.path());
 
-    // A default `start` drops a full checkout under `.heddle/threads/<name>`.
+    // An explicit checkout under `.heddle/threads/<name>` must not pollute
+    // parent status. (Omitted `--path` also defaults under `.heddle/threads/`.)
+    let managed = temp
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("pollution-check");
     json_value(
         temp.path(),
         &[
@@ -4269,16 +4282,16 @@ fn parent_status_ignores_default_thread_checkout_under_heddle() {
             "pollution-check",
             "--workspace",
             "materialized",
+            "--path",
+            managed.to_str().unwrap(),
         ],
     );
     assert!(
-        temp.path()
-            .join(".heddle")
-            .join("threads")
-            .join("pollution-check")
+        managed
             .join(temp.path().file_name().unwrap())
             .join(".heddle")
-            .exists(),
+            .exists()
+            || managed.join(".heddle").exists(),
         "thread checkout should materialize under .heddle/threads/"
     );
 
@@ -6412,7 +6425,7 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         stdout.contains("Save: heddle init -> heddle capture -m \"...\"")
             && !stdout.contains("-> heddle commit ->")
             && stdout
-                .contains("Isolated work: heddle start <name> --path ../<name> -> heddle capture -m \"...\" -> heddle ready -> heddle land"),
+                .contains("Isolated work: heddle start <name> -> heddle capture -m \"...\" -> heddle ready -> heddle land"),
         "default help should teach native capture-as-save, not overlay commit: {stdout}"
     );
     assert!(
