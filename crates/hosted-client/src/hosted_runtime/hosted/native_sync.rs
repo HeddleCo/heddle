@@ -368,21 +368,46 @@ impl HostedClient {
     ) -> Result<(PushComplete, PushProfile), ProtocolError> {
         let _ = force;
         let started = Instant::now();
-        let publish_id = operation_id(PUBLISH, client_operation_id.clone());
-        let start_id = operation_id(START, String::new());
-        let (reference, creator_authority) = self
-            .ensure_hosted_thread(repo, repo_path, target_thread, local_state, start_id)
-            .await?;
-        let receipt = self
-            .publish_local_state(
-                repo,
-                &reference,
-                target_thread,
-                local_state,
-                &creator_authority,
-                publish_id,
-            )
-            .await?;
+        let start_set = hosted_start_replicas(repo, target_thread)?;
+        let mut receipt = None;
+        for name in &start_set.names {
+            let state = named_replica_state(repo, name, target_thread, local_state)?;
+            let start_id = operation_id(START, String::new());
+            let (reference, creator_authority) = self
+                .ensure_hosted_thread(repo, repo_path, name, state, start_id)
+                .await?;
+            let publish_child_source =
+                name != target_thread && replica_has_admitted_source(repo, name, state)?;
+            if name != target_thread
+                && !start_set.ancestors_of_target.contains(name)
+                && !publish_child_source
+            {
+                continue;
+            }
+            let publish_id = if name == target_thread {
+                operation_id(PUBLISH, client_operation_id.clone())
+            } else {
+                operation_id(PUBLISH, String::new())
+            };
+            let published = self
+                .publish_local_state(
+                    repo,
+                    &reference,
+                    name,
+                    state,
+                    &creator_authority,
+                    publish_id,
+                )
+                .await?;
+            if name == target_thread {
+                receipt = Some(published);
+            }
+        }
+        let receipt = receipt.ok_or_else(|| {
+            ProtocolError::InvalidState(format!(
+                "hosted push did not publish local Thread {target_thread:?}"
+            ))
+        })?;
         let new_state = state_from_revision(receipt.revision.as_ref());
         Ok((
             PushComplete {
@@ -666,6 +691,13 @@ impl HostedClient {
         let complete = self
             .fetch_hosted_thread(&repo, repo_path, &track, Some(&track), None)
             .await?;
+        for entry in &advertised.refs {
+            if !entry.is_user_thread() || entry.name == track {
+                continue;
+            }
+            self.fetch_hosted_thread(&repo, repo_path, &entry.name, Some(&entry.name), None)
+                .await?;
+        }
         Ok((complete, repo))
     }
 
@@ -885,6 +917,124 @@ impl HostedClient {
             "v2 Weft has no UpdateRef; source publication is SyncService/PublishContent".into(),
         ))
     }
+}
+
+struct HostedStartSet {
+    names: Vec<String>,
+    ancestors_of_target: std::collections::BTreeSet<String>,
+}
+
+/// Local named replicas on the target Thread's native spool, parents first.
+/// Always includes the current Thread and any Thread whose `genesis.parent`
+/// is the current Thread.
+fn hosted_start_replicas(
+    repo: &Repository,
+    target_thread: &str,
+) -> Result<HostedStartSet, ProtocolError> {
+    let target = repo.native_thread(target_thread).map_err(replica_err)?;
+    let spool = target.genesis().map_err(replica_err)?.spool;
+    let mut selected = Vec::new();
+    for (name, replica) in repo.list_native_threads().map_err(replica_err)? {
+        let genesis = replica.genesis().map_err(replica_err)?;
+        if genesis.spool != spool {
+            continue;
+        }
+        selected.push((name, replica.thread_id(), genesis.parent));
+    }
+    if !selected.iter().any(|(name, _, _)| name == target_thread) {
+        return Err(ProtocolError::InvalidState(format!(
+            "Thread {target_thread:?} has no native identity"
+        )));
+    }
+    let mut ancestors_of_target = std::collections::BTreeSet::new();
+    let mut parent = selected
+        .iter()
+        .find(|(name, _, _)| name == target_thread)
+        .and_then(|(_, _, parent)| *parent);
+    let mut guard = 0usize;
+    while let Some(id) = parent {
+        guard += 1;
+        if guard > 128 {
+            return Err(ProtocolError::InvalidState(
+                "local Thread parent chain exceeds bound".into(),
+            ));
+        }
+        let Some((name, _, next)) = selected.iter().find(|(_, thread, _)| *thread == id) else {
+            break;
+        };
+        ancestors_of_target.insert(name.clone());
+        parent = *next;
+    }
+    let names = parent_first_names(selected)?;
+    if !names.iter().any(|name| name == target_thread) {
+        return Err(ProtocolError::InvalidState(format!(
+            "Thread {target_thread:?} has no native identity"
+        )));
+    }
+    Ok(HostedStartSet {
+        names,
+        ancestors_of_target,
+    })
+}
+
+fn parent_first_names(
+    mut selected: Vec<(String, ContentHash, Option<ContentHash>)>,
+) -> Result<Vec<String>, ProtocolError> {
+    let mut ordered = Vec::with_capacity(selected.len());
+    while !selected.is_empty() {
+        let Some(index) = selected.iter().position(|(_, _, parent)| {
+            parent.is_none_or(|parent| !selected.iter().any(|(_, other, _)| *other == parent))
+        }) else {
+            return Err(ProtocolError::InvalidState(
+                "local Thread parent cycle".into(),
+            ));
+        };
+        ordered.push(selected.remove(index).0);
+    }
+    Ok(ordered)
+}
+
+fn named_replica_state(
+    repo: &Repository,
+    name: &str,
+    target_thread: &str,
+    local_state: StateId,
+) -> Result<StateId, ProtocolError> {
+    if name == target_thread {
+        return Ok(local_state);
+    }
+    if let Some(state) = repo
+        .refs()
+        .get_thread(&ThreadName::new(name))
+        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?
+    {
+        return Ok(state);
+    }
+    let replica = repo.native_thread(name).map_err(replica_err)?;
+    let replica_id = replica.thread_id();
+    for (_, child) in repo.list_native_threads().map_err(replica_err)? {
+        let genesis = child.genesis().map_err(replica_err)?;
+        if genesis.parent == Some(replica_id) {
+            return Ok(genesis.base);
+        }
+    }
+    replica
+        .genesis()
+        .map(|genesis| genesis.base)
+        .map_err(replica_err)
+}
+
+fn replica_has_admitted_source(
+    repo: &Repository,
+    name: &str,
+    state: StateId,
+) -> Result<bool, ProtocolError> {
+    Ok(!repo
+        .native_thread(name)
+        .map_err(replica_err)?
+        .source_operation_page(state, None, 1)
+        .map_err(replica_err)?
+        .is_empty())
 }
 
 fn start_request_from_native_replica(
@@ -1400,6 +1550,55 @@ mod tests {
         assert!(
             error.to_string().contains("local-key") || error.to_string().contains("explicit claim"),
             "LocalKey StartThread must not rewrite owner to Account: {error}"
+        );
+    }
+
+    #[test]
+    fn hosted_push_starts_same_spool_child_after_parent() {
+        let isolated = native_repo();
+        let repo = &isolated.repo;
+        let main = repo.native_thread("main").expect("main");
+        let base = repo.head().expect("head").expect("base");
+        let child = repo
+            .create_native_thread("feature", base, Some("main"), "edit docs")
+            .expect("feature");
+        assert_eq!(
+            child.genesis().expect("genesis").parent,
+            Some(main.thread_id())
+        );
+        let from_main = hosted_start_replicas(repo, "main").expect("from main");
+        assert_eq!(
+            from_main
+                .names
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["main", "feature"]
+        );
+        assert!(from_main.ancestors_of_target.is_empty());
+        let from_feature = hosted_start_replicas(repo, "feature").expect("from feature");
+        assert_eq!(
+            from_feature
+                .names
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["main", "feature"]
+        );
+        assert_eq!(
+            from_feature
+                .ancestors_of_target
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["main"]
+        );
+        let listed = repo.list_native_threads().expect("named replicas");
+        assert_eq!(listed.len(), 2);
+        assert!(
+            listed.iter().any(
+                |(name, replica)| name == "feature" && replica.thread_id() == child.thread_id()
+            )
         );
     }
 }

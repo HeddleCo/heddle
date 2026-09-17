@@ -28,6 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Hosted push StartThreads every local named replica on the same native
+  spool (parents before children) so a child `genesis.parent` reaches weft
+  when pushing the parent. Clone fetches every advertised Thread. Fail
+  closed if the hosted Thread id differs from the local signed genesis or
+  StartThread would drop `parent`.
 - Side-channel `heddle-pull-refs-v1` removed. Clone bootstrap refs are
   heddle-api `RefEntry` from `PullReady.refs` (ListRefs when that field is
   empty). The old hex-msgpack fold fails closed. Pins heddle-api 0.28.0

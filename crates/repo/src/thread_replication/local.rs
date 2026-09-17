@@ -198,6 +198,41 @@ impl Repository {
             id.ok_or_else(|| Error::Invalid(format!("Thread {name:?} has no native identity")))?;
         ThreadReplica::open(self.heddle_dir(), super::hash(&id)?)
     }
+
+    /// Named local replicas. Lookup never creates a Thread or invents a signature.
+    pub fn list_native_threads(&self) -> Result<Vec<(String, ThreadReplica)>> {
+        let path = self.heddle_dir().join(crate::local_metadata::DATABASE_NAME);
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let connection = rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        let table_exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='local_thread_names')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !table_exists {
+            return Ok(Vec::new());
+        }
+        let mut statement =
+            connection.prepare("SELECT name, thread FROM local_thread_names ORDER BY name")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })?;
+        let mut named = Vec::new();
+        for row in rows {
+            let (name, id) = row?;
+            named.push((
+                name,
+                ThreadReplica::open(self.heddle_dir(), super::hash(&id)?)?,
+            ));
+        }
+        Ok(named)
+    }
+
     /// Persist the creator's genesis before checkout work begins. Repeating exact
     /// creation reuses the original signature even after device key rotation.
     pub fn create_native_thread(
