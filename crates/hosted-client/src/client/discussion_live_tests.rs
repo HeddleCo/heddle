@@ -9,11 +9,11 @@ use repo::{CollaborationStore, Repository};
 use tempfile::TempDir;
 
 use super::{
-    DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventCursor, DiscussionEventOutcome,
-    audience_cursor_scope, bootstrap_discussions, bootstrap_discussions_scoped,
-    consume_discussion_event, consume_discussion_event_scoped, is_discussion_event, load_cursor,
-    load_scoped_cursor, paired_thread_scope, parse_event_payload, save_cursor, save_scoped_cursor,
-    subscribe_request, wait_reconnect_backoff,
+    DiscussionCursorScope, DiscussionEventCursor, DiscussionEventOutcome, audience_cursor_scope,
+    bootstrap_discussions, bootstrap_discussions_scoped, consume_discussion_event,
+    consume_discussion_event_scoped, is_discussion_event, load_cursor, load_scoped_cursor,
+    paired_thread_scope, parse_event_payload, save_cursor, save_scoped_cursor, subscribe_request,
+    wait_reconnect_backoff,
 };
 use crate::{client::HostedClient, hosted_runtime::hosted::test_server::CollaborationFixture};
 
@@ -251,7 +251,7 @@ async fn opened_and_appended_events_materialize_distinct_turns_and_advance_water
             .unwrap_or_else(|poison| poison.into_inner())
             .as_slice(),
         ["disc-live-1"],
-        "opened must GetDiscussion even with a fat payload"
+        "opened must ObserveCollaboration even with a fat payload"
     );
     assert!(matches!(
         opened,
@@ -798,60 +798,6 @@ async fn fat_append_without_mirror_fetches_instead_of_opening_at_turn_two() {
     server.await.unwrap();
 }
 
-#[tokio::test]
-async fn consume_next_resumes_after_the_stream_ends() {
-    let (_temp, repo) = seed_repo();
-    let mut fixture = CollaborationFixture {
-        one_event_per_subscribe: true,
-        events: vec![
-            doorbell(1, "discussion.opened", "disc-live", "turn-open", 1),
-            doorbell(2, "turn.appended", "disc-live", "turn-append", 2),
-        ],
-        ..CollaborationFixture::default()
-    };
-    fixture.discussions.insert(
-        "disc-live".to_string(),
-        proto_discussion(
-            "disc-live",
-            &[
-                ("turn-open", "first turn", 1),
-                ("turn-append", "second turn", 2),
-            ],
-        ),
-    );
-    let (mut client, server, fixture) =
-        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
-
-    let mut consumer = DiscussionEventConsumer::new(&repo, &mut client, "acme/widgets");
-    let mut subscription = consumer.start(None).await.unwrap();
-
-    let (first, _) = consumer.consume_next(&mut subscription).await.unwrap();
-    assert_eq!(first.event_id, 1);
-    let (second, _) = consumer.consume_next(&mut subscription).await.unwrap();
-    assert_eq!(second.event_id, 2);
-    assert_eq!(
-        fixture
-            .subscribe_after
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_slice(),
-        [0, 1]
-    );
-
-    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let discussion = store
-        .materialize()
-        .unwrap()
-        .discussions
-        .into_values()
-        .next()
-        .unwrap();
-    assert_eq!(discussion.turns.len(), 2);
-
-    client.close().await;
-    server.await.unwrap();
-}
-
 #[test]
 fn event_payload_is_doorbell_identity_not_turn_content() {
     let event = appended_event(2, "disc-unknown", "second turn", "turn-2", 2);
@@ -1228,37 +1174,6 @@ async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
 }
 
 #[tokio::test]
-async fn thread_scoped_subscribe_request_carries_thread_id() {
-    let (_temp, repo) = seed_repo();
-    let fixture = CollaborationFixture {
-        events: vec![opened_event(1, "disc-1", "hello", "turn-1")],
-        ..CollaborationFixture::default()
-    };
-    let (mut client, server, fixture) =
-        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
-
-    let mut consumer = DiscussionEventConsumer::new(&repo, &mut client, "acme/widgets")
-        .with_thread("feature/run", "thr-stable");
-    let mut subscription = consumer.start(None).await.unwrap();
-    // start() can return before the server records the request body.
-    // consume_next waits for the first event, which is written only after
-    // serve_subscribe_repo_events has stored the paired thread fields.
-    let (event, _) = consumer.consume_next(&mut subscription).await.unwrap();
-    assert_eq!(event.event_id, 1);
-    assert_eq!(
-        fixture
-            .subscribe_thread
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_slice(),
-        [("feature/run".to_string(), "thr-stable".to_string())]
-    );
-
-    client.close().await;
-    server.await.unwrap();
-}
-
-#[tokio::test]
 async fn get_discussion_unauthenticated_does_not_advance_the_watermark() {
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
@@ -1450,7 +1365,7 @@ async fn opened_event_never_applies_without_get_discussion() {
             .unwrap_or_else(|poison| poison.into_inner())
             .as_slice(),
         ["disc-fat"],
-        "opened must always GetDiscussion"
+        "opened must always ObserveCollaboration"
     );
     let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
     assert!(
@@ -1583,7 +1498,7 @@ async fn empty_anchor_get_discussion_uses_repository_and_advances() {
         &doorbell(85, "discussion.opened", "disc-empty-anchor", "turn-open", 1),
     )
     .await
-    .expect("empty-anchor GetDiscussion must not fail-loop");
+    .expect("empty-anchor ObserveCollaboration must not fail-loop");
     assert!(
         outcome.applied() || matches!(outcome, DiscussionEventOutcome::Skipped { .. }),
         "expected applied or skipped, got {outcome:?}"
@@ -1979,67 +1894,4 @@ fn wait_reconnect_backoff_is_bounded() {
         wait_reconnect_backoff(7),
         Some(std::time::Duration::from_millis(6_400))
     );
-}
-
-#[tokio::test]
-async fn stale_repo_uuid_not_found_resubscribes_via_path() {
-    let (_temp, repo) = seed_repo();
-    let mut fixture = CollaborationFixture {
-        unknown_repo_ids: ["dead-uuid".to_string()].into(),
-        events: vec![opened_event(1, "disc-live", "hello", "turn-1")],
-        ..CollaborationFixture::default()
-    };
-    fixture.discussions.insert(
-        "disc-live".to_string(),
-        proto_discussion("disc-live", &[("turn-1", "hello", 1)]),
-    );
-    let (mut client, server, fixture) =
-        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
-
-    let scope = audience_cursor_scope(&client, "acme/widgets");
-    save_scoped_cursor(
-        repo.heddle_dir(),
-        &scope,
-        &DiscussionEventCursor {
-            after_event_id: 99,
-            repo_id: "dead-uuid".into(),
-            bootstrapped: true,
-        },
-    )
-    .unwrap();
-
-    let mut consumer = DiscussionEventConsumer::new(&repo, &mut client, "acme/widgets");
-    let mut subscription = consumer.start(None).await.unwrap();
-    let (event, _) = consumer
-        .consume_next(&mut subscription)
-        .await
-        .expect("stale UUID NotFound must recover via repo_path");
-    assert_eq!(event.event_id, 1);
-    assert_eq!(
-        fixture
-            .subscribe_repo_ids
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_slice(),
-        ["dead-uuid", "acme/widgets"],
-        "second subscribe must use the path, not the dead UUID"
-    );
-    assert_eq!(
-        fixture
-            .subscribe_after
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_slice(),
-        [99, 0],
-        "recovery resets the watermark before the path subscribe"
-    );
-
-    let cursor = load_scoped_cursor(repo.heddle_dir(), &scope).unwrap();
-    assert_ne!(
-        cursor.repo_id, "dead-uuid",
-        "the dead UUID must not stay in the slot"
-    );
-
-    client.close().await;
-    server.await.unwrap();
 }

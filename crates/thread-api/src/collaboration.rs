@@ -6,11 +6,14 @@ use std::collections::BTreeSet;
 
 use crypto::{Signer, thread_operation::SignedOperation};
 use heddle_object_model::object::{
-    Attribution, CollaborationIdempotencyKey, CollaborationMetadata, CollaborationOperationBodyV1,
-    CollaborationOperationEnvelope, ContentHash, ContextRevision, DiscussionRecordId,
+    Attribution, CollabOpId, CollaborationIdempotencyKey, CollaborationMetadata,
+    CollaborationOperationBodyV1, CollaborationOperationEnvelope, ContentHash, ContextRevision,
+    DiscussionRecordId,
     thread_replication::{OPERATION_FORMAT, ThreadOperation, ThreadOperationBody},
 };
-pub use references::{anchor, anchor_ref, audience, mention, mention_ref, source_target_ref, visibility};
+pub use references::{
+    anchor, anchor_ref, audience, mention, mention_ref, source_target_ref, visibility,
+};
 pub use tags::{
     annotation_query, annotation_source, annotation_source_ref, annotation_tag, annotation_tag_ref,
     annotation_tags, annotation_value, annotation_value_ref,
@@ -108,6 +111,44 @@ impl Command {
             }
             inner.insert(decoded.operation_id);
         }
+        self.sign_frontier(thread, outer, inner, signer)
+    }
+
+    /// Sign after observing discussion heads by original operation id.
+    ///
+    /// Hosted ObserveCollaboration returns turn/open op ids, not the original
+    /// signed records. Root commands still use an empty parent slice.
+    pub fn sign_parent_ids(
+        self,
+        parent_ids: &[ContentHash],
+        signer: &impl Signer,
+    ) -> Result<SignedRecord, Error> {
+        if parent_ids.len() > 128 {
+            return Err(Error::Protocol(
+                "collaboration has more than 128 causal parents",
+            ));
+        }
+        let thread = self.metadata.scope.thread.ok_or(Error::Protocol(
+            "Thread command requires native Thread scope",
+        ))?;
+        let mut outer = BTreeSet::new();
+        let mut inner = BTreeSet::new();
+        for id in parent_ids {
+            if !outer.insert(*id) {
+                return Err(Error::Protocol("duplicate collaboration causal parent"));
+            }
+            inner.insert(CollabOpId::from_bytes(*id.as_bytes()));
+        }
+        self.sign_frontier(thread, outer, inner, signer)
+    }
+
+    fn sign_frontier(
+        self,
+        thread: ContentHash,
+        outer: BTreeSet<ContentHash>,
+        inner: BTreeSet<CollabOpId>,
+        signer: &impl Signer,
+    ) -> Result<SignedRecord, Error> {
         let mut body = self.body;
         if let CollaborationOperationBodyV1::Resolve {
             resolution:
@@ -156,7 +197,7 @@ impl Command {
 /// Append an immutable context revision. Original signed parent records bind
 /// the same stable record and scope; concurrent revisions remain separate heads.
 pub fn sign_context(
-    mut context: ContextRevision,
+    context: ContextRevision,
     parents: &[SignedRecord],
     signer: &impl Signer,
 ) -> Result<SignedRecord, Error> {
@@ -193,6 +234,43 @@ pub fn sign_context(
             return Err(Error::Protocol("duplicate context causal parent"));
         }
     }
+    sign_context_ids(context, thread, ids, signer)
+}
+
+/// Sign a context revision after observing current heads by original
+/// operation id. First PutContext stays parentless; supersede/edit parents
+/// the observed causal heads.
+pub fn sign_context_parent_ids(
+    context: ContextRevision,
+    parent_ids: &[ContentHash],
+    signer: &impl Signer,
+) -> Result<SignedRecord, Error> {
+    if parent_ids.len() > 128 {
+        return Err(Error::Protocol("context has more than 128 causal parents"));
+    }
+    let thread = context.metadata.scope.thread.ok_or(Error::Protocol(
+        "Thread context requires native Thread scope",
+    ))?;
+    if parent_ids.is_empty() && context.extracted_from.is_some() {
+        return Err(Error::Protocol(
+            "context extraction requires a signed discussion resolution",
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    for id in parent_ids {
+        if !ids.insert(*id) {
+            return Err(Error::Protocol("duplicate context causal parent"));
+        }
+    }
+    sign_context_ids(context, thread, ids, signer)
+}
+
+fn sign_context_ids(
+    mut context: ContextRevision,
+    thread: ContentHash,
+    ids: BTreeSet<ContentHash>,
+    signer: &impl Signer,
+) -> Result<SignedRecord, Error> {
     context.parents = ids.iter().copied().collect();
     let operation = ThreadOperation {
         version: 1,
@@ -317,6 +395,39 @@ mod tests {
         assert!(
             command(discussion, append("duplicate parent"))
                 .sign(&[root.clone(), root], &signer)
+                .is_err()
+        );
+    }
+    #[test]
+    fn observed_parent_ids_are_sorted_unique_and_required_for_append() {
+        let signer = Ed25519Signer::from_seed(&[7; 32]).expect("signer");
+        let discussion = DiscussionRecordId::generate();
+        let root = command(
+            discussion,
+            CollaborationOperationBodyV1::Open {
+                blocking: false,
+                title: "Review".into(),
+                anchor: CollaborationAnchor::Repository,
+                visibility: VisibilityTier::Private {
+                    scope_label: "owner".into(),
+                },
+                turn: DiscussionTurnV1::new("Review this Thread").expect("turn"),
+                thread_ref: None,
+            },
+        )
+        .sign(&[], &signer)
+        .expect("root");
+        let root_id = operation_id(&root).expect("root ID");
+        let appended = command(discussion, append("follow-up"))
+            .sign_parent_ids(&[root_id], &signer)
+            .expect("append");
+        assert_eq!(
+            verify(&appended).expect("verified").parents,
+            BTreeSet::from([root_id])
+        );
+        assert!(
+            command(discussion, append("no parent"))
+                .sign_parent_ids(&[], &signer)
                 .is_err()
         );
     }

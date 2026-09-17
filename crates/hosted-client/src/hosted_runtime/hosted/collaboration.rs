@@ -4,6 +4,8 @@
 //! Write path: signed original operations via `OpenDiscussion`, `AppendTurn`,
 //! `ResolveDiscussion`. Read path: `ObserveCollaboration`.
 
+use std::collections::BTreeSet;
+
 use api::heddle::api::v2alpha1::{
     self as contract, AppendDiscussionRequest, Audience, CollaborationAnchor, MutationResponse,
     ObservationMode, ObserveCollaborationRequest, ObserveOptions, OpenDiscussionRequest,
@@ -13,8 +15,8 @@ use api::heddle::api::v2alpha1::{
 use objects::object::{
     AnnotationKind, Attribution, CollaborationActor, CollaborationAnchor as Anchor,
     CollaborationIdempotencyKey, CollaborationMetadata, CollaborationOperationBodyV1 as Body,
-    CollaborationOperationEnvelope, CollaborationResolution, CollaborationScope, ContextRevision,
-    DiscussionRecordId, DiscussionTurnV1, Principal, StateId, VisibilityTier,
+    CollaborationOperationEnvelope, CollaborationResolution, CollaborationScope, ContentHash,
+    ContextRevision, DiscussionRecordId, DiscussionTurnV1, Principal, StateId, VisibilityTier,
     thread_replication::ThreadOperationBody,
 };
 use thread_api::rpc;
@@ -41,6 +43,8 @@ pub struct HostedDiscussionTurn {
     pub turn_id: String,
     /// Per-discussion monotonic sequence. Zero means "not minted".
     pub turn_seq: u64,
+    /// Original turn/open operation id (32-byte causal hash). Empty when absent.
+    pub causal_id: Vec<u8>,
 }
 
 /// Hosted resolution decoded from the collaboration wire.
@@ -60,7 +64,7 @@ pub enum HostedResolution {
 }
 
 /// A hosted discussion decoded into the shape the CLI-side sync bridge consumes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct HostedDiscussion {
     pub id: String,
     pub file: String,
@@ -72,6 +76,11 @@ pub struct HostedDiscussion {
     pub turns: Vec<HostedDiscussionTurn>,
     pub resolution: HostedResolution,
     pub kind: i32,
+    /// Current discussion heads (turn/open op ids). Empty for a freshly decoded
+    /// bootstrap snapshot that has no hosted causal graph.
+    pub causal_heads: Vec<Vec<u8>>,
+    /// Opaque collaboration view version used as `expected_version` on resolve.
+    pub version: Vec<u8>,
 }
 
 fn native_error(error: impl std::fmt::Display) -> ProtocolError {
@@ -157,6 +166,82 @@ fn parse_context_id(value: &str) -> uuid::Uuid {
     uuid::Uuid::parse_str(value.trim_start_matches("ann-"))
         .or_else(|_| uuid::Uuid::parse_str(value))
         .unwrap_or_else(|_| uuid::Uuid::now_v7())
+}
+
+fn causal_hashes(
+    ids: impl IntoIterator<Item = Vec<u8>>,
+) -> Result<Vec<ContentHash>, ProtocolError> {
+    let mut unique = std::collections::BTreeSet::new();
+    for id in ids {
+        if id.is_empty() {
+            continue;
+        }
+        let bytes: [u8; 32] = id.as_slice().try_into().map_err(|_| {
+            ProtocolError::InvalidState("causal parent must contain 32 bytes".into())
+        })?;
+        unique.insert(ContentHash::from_bytes(bytes));
+    }
+    Ok(unique.into_iter().collect())
+}
+
+fn discussion_parent_ids(discussion: &HostedDiscussion) -> Result<Vec<ContentHash>, ProtocolError> {
+    let heads = causal_hashes(discussion.causal_heads.iter().cloned())?;
+    if !heads.is_empty() {
+        return Ok(heads);
+    }
+    causal_hashes(
+        discussion
+            .turns
+            .iter()
+            .filter(|turn| !turn.causal_id.is_empty())
+            .map(|turn| turn.causal_id.clone()),
+    )
+}
+
+/// ObserveCollaboration `causal_heads` / turn `causal_id` are outer Thread
+/// operation ids. Envelope parents must be the inner CollabOpId of those
+/// originals, so append/resolve sign the observed signed records.
+fn parent_scope(record: &contract::SignedRecord) -> Result<CollaborationScope, ProtocolError> {
+    let operation = thread_api::collaboration::verify(record).map_err(native_error)?;
+    let ThreadOperationBody::Discussion(bytes) = operation.body else {
+        return Err(ProtocolError::InvalidState(
+            "discussion parent is not a collaboration operation".into(),
+        ));
+    };
+    CollaborationOperationEnvelope::decode(&bytes)
+        .map_err(native_error)?
+        .operation
+        .metadata
+        .map(|metadata| metadata.scope)
+        .ok_or_else(|| {
+            ProtocolError::InvalidState("discussion parent has no collaboration scope".into())
+        })
+}
+
+fn signed_head_records(
+    operations: &[contract::SignedRecord],
+    heads: &[ContentHash],
+) -> Result<Vec<contract::SignedRecord>, ProtocolError> {
+    let wanted: BTreeSet<ContentHash> = heads.iter().copied().collect();
+    let mut found = BTreeSet::new();
+    let mut matched = Vec::new();
+    for record in operations {
+        let operation = thread_api::collaboration::verify(record).map_err(native_error)?;
+        let id = operation.id().map_err(native_error)?;
+        if wanted.contains(&id) && found.insert(id) {
+            matched.push(record.clone());
+        }
+    }
+    if found != wanted {
+        return Err(ProtocolError::InvalidState(
+            "observed discussion heads are missing original signed operations".into(),
+        ));
+    }
+    Ok(matched)
+}
+
+fn parent_bytes(ids: &[ContentHash]) -> Vec<Vec<u8>> {
+    ids.iter().map(|id| id.as_bytes().to_vec()).collect()
 }
 
 /// Weft admits the request only when `anchor(request.anchor) == signed.anchor`.
@@ -305,6 +390,28 @@ fn visibility_label(record: &contract::DiscussionRecord) -> String {
     }
 }
 
+fn hosted_thread_fields(record: &contract::DiscussionRecord) -> (Option<String>, Option<String>) {
+    let title = record.title.trim();
+    if title.is_empty() || title.contains(':') {
+        return (None, None);
+    }
+    match title.split_once('\x1f') {
+        Some((thread_ref, thread_id)) => (
+            Some(thread_ref.to_string()).filter(|value| !value.is_empty()),
+            Some(thread_id.to_string()).filter(|value| !value.is_empty()),
+        ),
+        None => (Some(title.to_string()), None),
+    }
+}
+
+fn hosted_thread_ref(record: &contract::DiscussionRecord) -> Option<String> {
+    hosted_thread_fields(record).0
+}
+
+fn hosted_thread_id(record: &contract::DiscussionRecord) -> Option<String> {
+    hosted_thread_fields(record).1
+}
+
 fn hosted_from_record(
     record: &contract::DiscussionRecord,
     turns: Vec<HostedDiscussionTurn>,
@@ -320,7 +427,7 @@ fn hosted_from_record(
             }
         }
         (Some(discussion_record::Status::Resolved), None) => HostedResolution::Dismissed {
-            reason: String::new(),
+            reason: record.title.clone(),
         },
         _ => HostedResolution::Open,
     };
@@ -334,11 +441,13 @@ fn hosted_from_record(
         symbol,
         opened_against_state,
         visibility: visibility_label(record),
-        thread_ref: None,
-        thread_id: None,
+        thread_ref: hosted_thread_ref(record),
+        thread_id: hosted_thread_id(record),
         turns,
         resolution,
         kind: 0,
+        causal_heads: record.causal_heads.clone(),
+        version: record.version.clone(),
     }
 }
 
@@ -445,13 +554,49 @@ impl HostedClient {
         Ok(payloads)
     }
 
+    fn state_anchor(state_id: Option<StateId>) -> Vec<contract::CollaborationAnchor> {
+        let Some(state_id) = state_id else {
+            return Vec::new();
+        };
+        vec![contract::CollaborationAnchor {
+            target: Some(collaboration_anchor::Target::Source(
+                contract::SourceAnchor {
+                    revision: Some(contract::RevisionRef {
+                        revision: Some(revision_ref::Revision::State(
+                            api::heddle::api::v1alpha1::StateId {
+                                value: state_id.as_bytes().to_vec(),
+                            },
+                        )),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )),
+        }]
+    }
+
     async fn observe_discussion(
         &self,
         spool: contract::SpoolRef,
         discussion: RecordRef,
     ) -> Result<HostedDiscussion, ProtocolError> {
-        let discussions = self
-            .observe_discussions(spool, Some(discussion), Vec::new())
+        self.observe_discussion_at(spool, discussion, None).await
+    }
+
+    async fn observe_discussion_at(
+        &self,
+        spool: contract::SpoolRef,
+        discussion: RecordRef,
+        state_id: Option<StateId>,
+    ) -> Result<HostedDiscussion, ProtocolError> {
+        let (discussions, _) = self
+            .observe_discussions(
+                spool,
+                Some(discussion),
+                Vec::new(),
+                Self::state_anchor(state_id),
+                false,
+            )
             .await?;
         discussions.into_iter().next().ok_or_else(|| {
             ProtocolError::ObjectNotFound(
@@ -460,32 +605,54 @@ impl HostedClient {
         })
     }
 
+    async fn observe_discussion_heads(
+        &self,
+        spool: contract::SpoolRef,
+        discussion: RecordRef,
+    ) -> Result<(HostedDiscussion, Vec<contract::SignedRecord>), ProtocolError> {
+        let (discussions, operations) = self
+            .observe_discussions(spool, Some(discussion), Vec::new(), Vec::new(), true)
+            .await?;
+        let hosted = discussions.into_iter().next().ok_or_else(|| {
+            ProtocolError::ObjectNotFound(
+                "discussion is not in the hosted collaboration view".into(),
+            )
+        })?;
+        Ok((hosted, operations))
+    }
+
     async fn observe_discussions(
         &self,
         spool: contract::SpoolRef,
         discussion: Option<RecordRef>,
         statuses: Vec<i32>,
-    ) -> Result<Vec<HostedDiscussion>, ProtocolError> {
+        anchors: Vec<contract::CollaborationAnchor>,
+        include_operations: bool,
+    ) -> Result<(Vec<HostedDiscussion>, Vec<contract::SignedRecord>), ProtocolError> {
         let events = self
             .observe_collaboration_events(ObserveCollaborationRequest {
                 spool: Some(spool),
                 discussions: discussion.into_iter().collect(),
                 statuses,
                 include_history: true,
+                include_operations,
+                anchors,
                 observe: Some(once_observe()),
                 ..Default::default()
             })
             .await?;
         let mut records = Vec::new();
         let mut turns: Vec<contract::DiscussionTurn> = Vec::new();
+        let mut operations = Vec::new();
         for change in events {
             match change {
                 collaboration_event::Payload::Discussion(record) => records.push(record),
                 collaboration_event::Payload::Turn(turn) => turns.push(turn),
+                collaboration_event::Payload::Operation(operation) => operations.push(operation),
                 _ => {}
             }
         }
-        Ok(records
+        let discussions = records
             .into_iter()
             .map(|record| {
                 let id = record.r#ref.as_ref().map(|value| value.id.as_str());
@@ -514,11 +681,50 @@ impl HostedClient {
                         posted_at_secs: turn.created_at.map(|ts| ts.seconds).unwrap_or(0),
                         turn_id: turn.r#ref.map(|value| value.id).unwrap_or_default(),
                         turn_seq: (index as u64).saturating_add(1),
+                        causal_id: turn.causal_id,
                     })
                     .collect();
                 hosted_from_record(&record, hosted_turns)
             })
-            .collect())
+            .collect();
+        Ok((discussions, operations))
+    }
+
+    async fn observe_context_heads(
+        &self,
+        spool: contract::SpoolRef,
+        annotation_id: &str,
+    ) -> Result<(Vec<ContentHash>, Vec<u8>), ProtocolError> {
+        let id = annotation_id.trim_start_matches("ann-").to_string();
+        let events = self
+            .observe_collaboration_events(ObserveCollaborationRequest {
+                spool: Some(spool.clone()),
+                contexts: vec![RecordRef {
+                    spool: Some(spool),
+                    id: id.clone(),
+                }],
+                include_history: true,
+                observe: Some(once_observe()),
+                ..Default::default()
+            })
+            .await?;
+        let Some(record) = events.into_iter().rev().find_map(|change| match change {
+            collaboration_event::Payload::Context(record)
+                if record.r#ref.as_ref().is_some_and(|reference| {
+                    reference.id == id || reference.id == annotation_id
+                }) =>
+            {
+                Some(record)
+            }
+            _ => None,
+        }) else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let mut heads = causal_hashes(record.causal_heads)?;
+        if heads.is_empty() && record.causal_id.len() == 32 {
+            heads = causal_hashes(std::iter::once(record.causal_id))?;
+        }
+        Ok((heads, record.version))
     }
 
     /// Open a hosted discussion anchored at `state_id`, seeded with `body`.
@@ -611,9 +817,9 @@ impl HostedClient {
     ) -> Result<HostedDiscussion, ProtocolError> {
         let _ = kind;
         let operation_id = ClientOperationId::caller_or_fresh(RESOLVE, client_operation_id);
-        let (spool, _, scope) = self.collaboration_scope(repo_path, None).await?;
-        let current = self
-            .observe_discussion(
+        let (spool, _, _) = self.collaboration_scope(repo_path, None).await?;
+        let (current, operations) = self
+            .observe_discussion_heads(
                 spool.clone(),
                 RecordRef {
                     spool: Some(spool.clone()),
@@ -627,6 +833,14 @@ impl HostedClient {
             .ok_or(super::HostedError::SigningIdentityRequired)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let discussion = parse_discussion_id(discussion_id)?;
+        let parents = discussion_parent_ids(&current)?;
+        if parents.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "non-root collaboration operation requires a parent".into(),
+            ));
+        }
+        let parent_records = signed_head_records(&operations, &parents)?;
+        let scope = parent_scope(&parent_records[0])?;
         let (anchor, _) = canonical_anchor(
             Anchor::Symbol {
                 state_id: current
@@ -670,7 +884,7 @@ impl HostedClient {
                 },
             },
         }
-        .sign(&[], signer)
+        .sign(&parent_records, signer)
         .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let Body::Resolve {
             resolution:
@@ -693,7 +907,7 @@ impl HostedClient {
                 context_draft_from_revision(&signed_context, spool.clone())?,
             )),
             signed_operation: Some(signed),
-            expected_version: Vec::new(),
+            expected_version: current.version.clone(),
         };
         let remote = self.native().await.map_err(native_error)?;
         let response = remote
@@ -720,14 +934,22 @@ impl HostedClient {
         client_operation_id: String,
     ) -> Result<HostedDiscussion, ProtocolError> {
         let operation_id = ClientOperationId::caller_or_fresh(APPEND, client_operation_id);
-        let (spool, _, scope) = self.collaboration_scope(repo_path, None).await?;
+        let (spool, _, _) = self.collaboration_scope(repo_path, None).await?;
         let reference = RecordRef {
             spool: Some(spool.clone()),
             id: discussion_id.to_string(),
         };
-        let current = self
-            .observe_discussion(spool.clone(), reference.clone())
+        let (current, operations) = self
+            .observe_discussion_heads(spool.clone(), reference.clone())
             .await?;
+        let parents = discussion_parent_ids(&current)?;
+        if parents.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "non-root collaboration operation requires a parent".into(),
+            ));
+        }
+        let parent_records = signed_head_records(&operations, &parents)?;
+        let scope = parent_scope(&parent_records[0])?;
         let (actor, author) = self.collaboration_actor().await?;
         let signer = self
             .claim_proof_signer()
@@ -749,7 +971,7 @@ impl HostedClient {
                 turn: DiscussionTurnV1::new(body).map_err(native_error)?,
             },
         }
-        .sign(&[], signer)
+        .sign(&parent_records, signer)
         .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let Body::AppendTurn { turn } = decoded_discussion(&signed)?.body else {
             return Err(ProtocolError::InvalidState(
@@ -761,10 +983,9 @@ impl HostedClient {
             discussion: Some(reference.clone()),
             body: turn.body,
             signed_operation: Some(signed),
-            causal_parents: Vec::new(),
+            causal_parents: parent_bytes(&parents),
             mentions: Vec::new(),
         };
-        let _ = current;
         let remote = self.native().await.map_err(native_error)?;
         let response = remote
             .api
@@ -785,15 +1006,16 @@ impl HostedClient {
         &mut self,
         repo_path: &str,
         discussion_id: &str,
-        _state_id: Option<StateId>,
+        state_id: Option<StateId>,
     ) -> Result<HostedDiscussion, ProtocolError> {
         let spool = self.resolve_spool_ref(repo_path).await?;
-        self.observe_discussion(
+        self.observe_discussion_at(
             spool.clone(),
             RecordRef {
                 spool: Some(spool),
                 id: discussion_id.to_string(),
             },
+            state_id,
         )
         .await
     }
@@ -817,7 +1039,10 @@ impl HostedClient {
                 )));
             }
         };
-        self.observe_discussions(spool, None, statuses).await
+        let (discussions, _) = self
+            .observe_discussions(spool, None, statuses, Vec::new(), false)
+            .await?;
+        Ok(discussions)
     }
 
     /// Publish a context annotation via v2 `PutContext`.
@@ -861,6 +1086,9 @@ impl HostedClient {
             }
         };
         let (anchor, _) = canonical_anchor(local_anchor, &scope)?;
+        let (parent_ids, expected_version) = self
+            .observe_context_heads(spool.clone(), annotation_id)
+            .await?;
         let context = ContextRevision {
             version: 2,
             id,
@@ -877,14 +1105,15 @@ impl HostedClient {
             extracted_from: None,
             occurred_at_ms: chrono::Utc::now().timestamp_millis(),
         };
-        let signed = thread_api::collaboration::sign_context(context, &[], signer)
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let signed =
+            thread_api::collaboration::sign_context_parent_ids(context, &parent_ids, signer)
+                .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let record = decoded_context(&signed)?;
         let request = PutContextRequest {
             client_operation_id: operation_id.to_wire(),
             context: Some(context_draft_from_revision(&record, spool)?),
             signed_operation: Some(signed),
-            expected_version: Vec::new(),
+            expected_version,
         };
         let remote = self.native().await.map_err(native_error)?;
         let response = remote
@@ -927,6 +1156,45 @@ mod tests {
         assert_eq!(parse_discussion_id(&id.to_string()).unwrap(), id);
         let raw = id.to_string().trim_start_matches("disc-").to_string();
         assert!(discussion_ids_match(&id.to_string(), &raw));
+    }
+
+    #[test]
+    fn discussion_parent_ids_are_sorted_unique_heads() {
+        let discussion = HostedDiscussion {
+            causal_heads: vec![vec![2; 32], vec![1; 32], vec![2; 32], vec![]],
+            turns: vec![HostedDiscussionTurn {
+                causal_id: vec![9; 32],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            discussion_parent_ids(&discussion).unwrap(),
+            vec![
+                ContentHash::from_bytes([1; 32]),
+                ContentHash::from_bytes([2; 32])
+            ]
+        );
+        let from_turns = HostedDiscussion {
+            turns: vec![
+                HostedDiscussionTurn {
+                    causal_id: vec![4; 32],
+                    ..Default::default()
+                },
+                HostedDiscussionTurn {
+                    causal_id: vec![3; 32],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            discussion_parent_ids(&from_turns).unwrap(),
+            vec![
+                ContentHash::from_bytes([3; 32]),
+                ContentHash::from_bytes([4; 32])
+            ]
+        );
     }
 
     #[test]

@@ -52,7 +52,7 @@ impl ClientOperationId {
                 "{method} requires a non-empty client operation ID"
             )));
         }
-        Ok(Self(value))
+        Ok(Self(scoped_to_method(&path, &value)))
     }
 
     pub(crate) fn to_wire(&self) -> String {
@@ -71,4 +71,42 @@ fn operation_id_required(path: &str) -> Option<bool> {
             api::v2::method_descriptor(path)
                 .map(|descriptor| descriptor.client_operation_id_required)
         })
+}
+
+/// Derive a per-method UUID so one CLI `--op-id` can drive Open, PutContext,
+/// and Publish without weft `DedupOutcome::Conflict`. Retries of the same
+/// method still collide on the same derived id.
+fn scoped_to_method(method: &str, caller: &str) -> String {
+    match uuid::Uuid::parse_str(caller.trim()) {
+        Ok(caller) => uuid::Uuid::new_v5(&caller, method.as_bytes()).to_string(),
+        Err(_) => uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_OID,
+            format!("{method}\0{caller}").as_bytes(),
+        )
+        .to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OPEN: &str = "heddle.api.v2alpha1.CollaborationService/OpenDiscussion";
+    const PUT_CONTEXT: &str = "heddle.api.v2alpha1.CollaborationService/PutContext";
+    const PUBLISH: &str = "heddle.api.v2alpha1.SyncService/PublishContent";
+
+    #[test]
+    fn caller_uuid_is_scoped_per_method_and_stable_for_retries() {
+        let caller = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef).to_string();
+        let open = ClientOperationId::caller_or_fresh(OPEN, caller.clone());
+        let again = ClientOperationId::caller_or_fresh(OPEN, caller.clone());
+        let context = ClientOperationId::caller_or_fresh(PUT_CONTEXT, caller.clone());
+        let publish = ClientOperationId::caller_or_fresh(PUBLISH, caller);
+        assert_eq!(open, again);
+        assert_ne!(open.as_str(), context.as_str());
+        assert_ne!(open.as_str(), publish.as_str());
+        assert_ne!(context.as_str(), publish.as_str());
+        assert!(uuid::Uuid::parse_str(open.as_str()).is_ok());
+        assert!(uuid::Uuid::parse_str(context.as_str()).is_ok());
+    }
 }

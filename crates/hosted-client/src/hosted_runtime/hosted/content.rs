@@ -260,7 +260,6 @@ impl HostedClient {
                     id: id.clone(),
                 }],
                 include_history: true,
-                annotations: Some(AnnotationQuery::default()),
                 ..Default::default()
             })
             .await?;

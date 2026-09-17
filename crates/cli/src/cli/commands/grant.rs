@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle grant` — create, list, and delete spool collaborator grants.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result, anyhow};
 use api::heddle::api::v2alpha1::{GrantRecord, ResourceRole};
 use heddle_cli_contract::cli::commands::wire::auth::{
@@ -17,12 +19,13 @@ use super::{
     next_action::{NextActionValidationContext, write_full_command_json},
 };
 use crate::{
+    Repository,
     cli::{
         Cli, CliContext, GrantCommands, GrantCreateArgs, GrantDeleteArgs, GrantListArgs,
         should_output_json, style,
     },
     config::UserConfig,
-    remote::RemoteTarget,
+    remote::{RemoteTarget, resolve_remote_with_key},
 };
 
 pub async fn cmd_grant(cli: &Cli, command: GrantCommands) -> Result<()> {
@@ -34,7 +37,7 @@ pub async fn cmd_grant(cli: &Cli, command: GrantCommands) -> Result<()> {
 }
 
 async fn cmd_grant_create(cli: &Cli, args: GrantCreateArgs) -> Result<()> {
-    let (server, spool) = resolve_grant_spool(&args.spool, args.server.as_deref())?;
+    let (server, spool) = resolve_grant_spool(cli, &args.spool, args.server.as_deref())?;
     let mut session = hosted_connect(&server).await?;
     let result = create_connected(
         cli,
@@ -50,7 +53,7 @@ async fn cmd_grant_create(cli: &Cli, args: GrantCreateArgs) -> Result<()> {
 }
 
 async fn cmd_grant_list(cli: &Cli, args: GrantListArgs) -> Result<()> {
-    let (server, spool) = resolve_grant_spool(&args.spool, args.server.as_deref())?;
+    let (server, spool) = resolve_grant_spool(cli, &args.spool, args.server.as_deref())?;
     let mut session = hosted_connect(&server).await?;
     let result = list_connected(cli, &mut session, &server, &spool).await;
     session.close().await;
@@ -58,7 +61,7 @@ async fn cmd_grant_list(cli: &Cli, args: GrantListArgs) -> Result<()> {
 }
 
 async fn cmd_grant_delete(cli: &Cli, args: GrantDeleteArgs) -> Result<()> {
-    let (server, spool) = resolve_grant_spool(&args.spool, args.server.as_deref())?;
+    let (server, spool) = resolve_grant_spool(cli, &args.spool, args.server.as_deref())?;
     let mut session = hosted_connect(&server).await?;
     let result = delete_connected(cli, &mut session, &server, &spool, &args.id).await;
     session.close().await;
@@ -225,7 +228,28 @@ fn grant_row(grant: &GrantRecord, spool: &str) -> Result<GrantRowOutput> {
     })
 }
 
-fn resolve_grant_spool(spool: &str, server: Option<&str>) -> Result<(String, String)> {
+fn grant_repo_start(cli: &Cli) -> Option<PathBuf> {
+    cli.repo_path()
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+}
+
+fn resolve_remote_spool(start: &Path, name: &str) -> Option<(String, String)> {
+    let repo = Repository::open(start).ok()?;
+    let (target, _) = resolve_remote_with_key(&repo, Some(name)).ok()?;
+    match target {
+        RemoteTarget::Network {
+            authority,
+            repo_path: Some(repo_path),
+        } => {
+            let full_path = canonicalize_spool_path(&repo_path).ok()?;
+            Some((authority, full_path))
+        }
+        _ => None,
+    }
+}
+
+fn resolve_grant_spool(cli: &Cli, spool: &str, server: Option<&str>) -> Result<(String, String)> {
     if spool.starts_with("https://") {
         match RemoteTarget::parse(spool) {
             Ok(RemoteTarget::Network {
@@ -239,6 +263,18 @@ fn resolve_grant_spool(spool: &str, server: Option<&str>) -> Result<(String, Str
                 return Err(anyhow!(RecoveryAdvice::grant_spool_required()));
             }
         }
+    }
+    if !spool.contains('/')
+        && let Some(start) = grant_repo_start(cli)
+        && let Some((authority, full_path)) = resolve_remote_spool(&start, spool)
+    {
+        let server = match server {
+            Some(server) => {
+                resolve_server(Some(server)).context("resolve hosted server for grant")?
+            }
+            None => authority,
+        };
+        return Ok((server, full_path));
     }
     let server = resolve_server(server).context("resolve hosted server for grant")?;
     let full_path = canonicalize_spool_path(spool).map_err(anyhow::Error::new)?;
@@ -298,7 +334,22 @@ mod tests {
         create_connected, delete_connected, grant_row, is_human_verification_required,
         list_grant_rows, map_grant_error, resolve_grant_spool,
     };
-    use crate::cli::Cli;
+    use crate::{
+        Repository,
+        cli::Cli,
+        remote::{Remote, RemoteConfig},
+    };
+
+    fn grant_cli() -> Cli {
+        Cli::parse_from([
+            "heddle",
+            "--quiet",
+            "grant",
+            "list",
+            "--spool",
+            "spool/me/notes",
+        ])
+    }
 
     struct IsolatedHeddleHome {
         _guard: MutexGuard<'static, ()>,
@@ -383,7 +434,9 @@ mod tests {
 
     #[test]
     fn url_target_takes_host_and_canonical_path() {
+        let cli = grant_cli();
         let (server, path) = resolve_grant_spool(
+            &cli,
             "https://api.preview.heddle.sh/willow-ibis-8e7264/notes",
             None,
         )
@@ -394,7 +447,8 @@ mod tests {
 
     #[test]
     fn hosted_url_without_spool_path_is_typed_usage() {
-        let err = resolve_grant_spool("https://api.preview.heddle.sh/", None)
+        let cli = grant_cli();
+        let err = resolve_grant_spool(&cli, "https://api.preview.heddle.sh/", None)
             .expect_err("URL without a spool path");
         let advice = err
             .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
@@ -404,11 +458,44 @@ mod tests {
 
     #[test]
     fn canonical_spool_path_is_not_a_hostname() {
-        let (server, path) =
-            resolve_grant_spool("spool/pine-yak-87fa33/repo", Some("api.preview.heddle.sh"))
-                .expect("canonical path");
+        let cli = grant_cli();
+        let (server, path) = resolve_grant_spool(
+            &cli,
+            "spool/pine-yak-87fa33/repo",
+            Some("api.preview.heddle.sh"),
+        )
+        .expect("canonical path");
         assert_eq!(server, "api.preview.heddle.sh");
         assert_eq!(path, "spool/pine-yak-87fa33/repo");
+    }
+
+    #[test]
+    fn remote_name_resolves_to_the_hosted_spool_path() {
+        let temp = tempfile::TempDir::new().expect("repo");
+        let repo = Repository::init_default(temp.path()).expect("init");
+        RemoteConfig::open(&repo)
+            .expect("open remotes")
+            .add(
+                "origin",
+                Remote {
+                    url: "https://127.0.0.1:8421/willow-ibis-8e7264/notes".into(),
+                    insecure: false,
+                },
+            )
+            .expect("add origin");
+        let cli = Cli::parse_from([
+            "heddle",
+            "--quiet",
+            "--repo",
+            temp.path().to_str().expect("utf-8 repo path"),
+            "grant",
+            "list",
+            "--spool",
+            "origin",
+        ]);
+        let (server, path) = resolve_grant_spool(&cli, "origin", None).expect("resolve origin");
+        assert_eq!(server, "127.0.0.1:8421");
+        assert_eq!(path, "spool/willow-ibis-8e7264/notes");
     }
 
     #[test]

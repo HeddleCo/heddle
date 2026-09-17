@@ -11,8 +11,8 @@
 //!    that ListByState snapshot by `thread_ref` / wire `thread_id` before
 //!    apply; clone/pull pull-fold stays repo-wide.
 //! 2. Subscribe from the persisted client watermark (`after_event_id`).
-//! 3. Treat every live event as a doorbell. `GetDiscussion` is the authorized
-//!    snapshot; event JSON never supplies discussion or turn contents.
+//! 3. Treat every live event as a doorbell. `ObserveCollaboration` is the
+//!    authorized snapshot; event JSON never supplies discussion or turn contents.
 //! 4. Persist the watermark after apply, skip, or ignore — not after apply Err.
 //!
 //! Fail-closed on visibility: the server already filters emission by audience.
@@ -516,7 +516,7 @@ struct EventPayload {
 
 fn parse_event_payload(event: &RepoEvent) -> EventPayload {
     // Doorbell identity only. Opened/resolved never reconstruct a
-    // HostedDiscussion from this JSON — GetDiscussion is the snapshot.
+    // HostedDiscussion from this JSON — ObserveCollaboration is the snapshot.
     let value = if event.payload_json.trim().is_empty() {
         serde_json::Value::Object(serde_json::Map::new())
     } else {

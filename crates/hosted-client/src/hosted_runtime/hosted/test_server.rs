@@ -20,14 +20,13 @@ use api::{
             GetContextHistoryPageEnd, GetContextHistoryRequest, GetContextHistoryResponse,
             GetDiscussionRequest, HostedSpool, ListContextPageEnd, ListContextRequest,
             ListContextResponse, ListDiscussionsByStateRequest, ListDiscussionsPageEnd,
-            ListDiscussionsResponse, ListRefsPageEnd, ListRefsResponse, ListThreadsPageEnd,
-            ListThreadsResponse, PackChunk, PackStreamKind, PullComplete, PullReady,
-            PullServerFrame, PushClientFrame, PushComplete, PushReady, PushRequest,
-            PushServerFrame, RepoEvent, SignedSpoolOwnerGenesis, StateContextEntry, StateId,
-            SubscribeRepoEventsRequest, TransferCheckpoint, TransportMode,
-            get_context_history_response, list_context_response, list_discussions_response,
-            list_refs_response, list_threads_response, pull_server_frame, push_client_frame,
-            push_server_frame,
+            ListDiscussionsResponse, ListRefsPageEnd, ListRefsResponse, PackChunk, PackStreamKind,
+            PathSymbolRef, PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete,
+            PushReady, PushRequest, PushServerFrame, RepoEvent, SignedSpoolOwnerGenesis,
+            StateContextEntry, StateId, SubscribeRepoEventsRequest, TransferCheckpoint,
+            TransportMode, discussion_resolution, get_context_history_response,
+            list_context_response, list_discussions_response, list_refs_response,
+            pull_server_frame, push_client_frame, push_server_frame,
         },
         v2alpha1 as v2,
     },
@@ -46,11 +45,7 @@ const OWNER_GENESIS_FIXTURE_HEX: &str = "0a380a102222222222222222222222222222222
 const GET_BLOB_METHOD: &str = "/heddle.api.v2alpha1.ContentService/ReadContent";
 const CREATE_SPOOL_METHOD: &str = "/heddle.api.v2alpha1.SpoolService/CreateSpool";
 const DELETE_SPOOL_METHOD: &str = "/heddle.api.v2alpha1.SpoolService/DeleteSpool";
-const GET_DISCUSSION_METHOD: &str = "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
-const LIST_BY_STATE_METHOD: &str = "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
-const LIST_CONTEXT_METHOD: &str = "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
-const GET_CONTEXT_HISTORY_METHOD: &str = "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
-const SUBSCRIBE_REPO_EVENTS_METHOD: &str =
+const OBSERVE_COLLABORATION_METHOD: &str =
     "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
 
 #[derive(Default)]
@@ -70,14 +65,20 @@ pub(crate) struct CollaborationFixture {
     pub discussions: HashMap<String, Discussion>,
     pub list: Vec<Discussion>,
     pub hidden: HashMap<String, CallFailureCode>,
+    #[allow(dead_code)]
     pub events: Vec<RepoEvent>,
+    #[allow(dead_code)]
     pub one_event_per_subscribe: bool,
+    #[allow(dead_code)]
     pub unknown_repo_ids: HashSet<String>,
     pub get_requests: Arc<Mutex<Vec<String>>>,
     pub get_request_state_ids: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
     pub list_requests: Arc<Mutex<usize>>,
+    #[allow(dead_code)]
     pub subscribe_after: Arc<Mutex<Vec<i64>>>,
+    #[allow(dead_code)]
     pub subscribe_repo_ids: Arc<Mutex<Vec<String>>>,
+    #[allow(dead_code)]
     pub subscribe_thread: Arc<Mutex<Vec<(String, String)>>>,
 }
 
@@ -266,6 +267,8 @@ async fn start_inner(
         ..Default::default()
     };
     let grants = Arc::new(Mutex::new(Vec::<v2::GrantRecord>::new()));
+    let live_discussions = Arc::new(Mutex::new(HashMap::<String, Discussion>::new()));
+    let live_operations = Arc::new(Mutex::new(HashMap::<String, Vec<v2::SignedRecord>>::new()));
     let server_task = tokio::spawn(async move {
         let connection = server
             .accept()
@@ -287,6 +290,8 @@ async fn start_inner(
                 server_key.clone(),
                 owner.clone(),
                 Arc::clone(&grants),
+                Arc::clone(&live_discussions),
+                Arc::clone(&live_operations),
             ));
         }
         server.close().await;
@@ -321,6 +326,8 @@ async fn serve_call(
     server_key: Vec<u8>,
     owner: v2::OwnerState,
     grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
+    live_discussions: Arc<Mutex<HashMap<String, Discussion>>>,
+    live_operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 ) {
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
@@ -357,12 +364,18 @@ async fn serve_call(
                         "/heddle.api.v2alpha1.SpoolService/PutGrant".into(),
                         "/heddle.api.v2alpha1.SpoolService/RevokeGrant".into(),
                         "/heddle.api.v2alpha1.ThreadService/ObserveThread".into(),
+                        "/heddle.api.v2alpha1.ThreadService/ObserveThreads".into(),
                         "/heddle.api.v2alpha1.ThreadService/RecordReview".into(),
                         "/heddle.api.v2alpha1.IdentityService/ObserveIdentity".into(),
                         "/heddle.api.v2alpha1.IdentityService/CreateSignupInvitation".into(),
                         "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace".into(),
                         "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership".into(),
                         "/heddle.api.v2alpha1.SpoolService/CreateSpool".into(),
+                        "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration".into(),
+                        "/heddle.api.v2alpha1.CollaborationService/OpenDiscussion".into(),
+                        "/heddle.api.v2alpha1.CollaborationService/AppendTurn".into(),
+                        "/heddle.api.v2alpha1.CollaborationService/ResolveDiscussion".into(),
+                        "/heddle.api.v2alpha1.CollaborationService/PutContext".into(),
                     ],
                     default_read_budget: Some(v2::ReadBudget {
                         max_items: 64,
@@ -470,6 +483,38 @@ async fn serve_call(
             } else if method == "/heddle.api.v2alpha1.SpoolService/CreateSpool" {
                 serve_native_create_spool(&mut send, &mut recv, &mut request, server_key, owner)
                     .await;
+            } else if method == "/heddle.api.v2alpha1.CollaborationService/OpenDiscussion" {
+                serve_open_discussion(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    live_discussions,
+                    live_operations,
+                )
+                .await;
+            } else if method == "/heddle.api.v2alpha1.CollaborationService/AppendTurn" {
+                serve_append_turn(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    live_discussions,
+                    live_operations,
+                )
+                .await;
+            } else if method == "/heddle.api.v2alpha1.CollaborationService/ResolveDiscussion" {
+                serve_resolve_discussion(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    live_discussions,
+                    live_operations,
+                )
+                .await;
+            } else if method == "/heddle.api.v2alpha1.CollaborationService/PutContext" {
+                serve_put_context(&mut send, &mut recv, &mut request, server_key).await;
             } else if method == "/heddle.api.v2alpha1.IdentityService/CreateSignupInvitation" {
                 serve_native_create_signup_invitation(
                     &mut send,
@@ -484,14 +529,6 @@ async fn serve_call(
                 serve_delete_spool(&mut send, &mut recv, &mut request, spool_mutations).await;
             } else if method == GET_BLOB_METHOD && !blobs.contents.is_empty() {
                 serve_get_blob(&mut send, &mut recv, &mut request, blobs).await;
-            } else if method == GET_DISCUSSION_METHOD {
-                if let Some(collaboration) = collaboration {
-                    serve_get_discussion(&mut send, &mut recv, &mut request, collaboration).await;
-                } else {
-                    send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
-                        .await
-                        .unwrap();
-                }
             } else {
                 send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
                     .await
@@ -517,41 +554,20 @@ async fn serve_call(
                 serve_native_workspace_observation(&mut send, server_key).await;
             } else if method == "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership" {
                 serve_native_owner_observation(&mut send, server_key, owner).await;
-            } else if method == LIST_CONTEXT_METHOD {
-                if let Some(context) = context {
-                    serve_list_context(&mut send, &mut recv, &mut request, context).await;
-                } else {
-                    let body = terminal_page(&method);
-                    send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-                        .await
-                        .unwrap();
-                }
-            } else if method == GET_CONTEXT_HISTORY_METHOD {
-                if let Some(context) = context {
-                    serve_get_context_history(&mut send, &mut recv, &mut request, context).await;
-                } else {
-                    let body = terminal_page(&method);
-                    send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-                        .await
-                        .unwrap();
-                }
-            } else if method == LIST_BY_STATE_METHOD {
-                if let Some(collaboration) = collaboration {
-                    serve_list_by_state(&mut send, &mut recv, &mut request, collaboration).await;
-                } else {
-                    let body = terminal_page(&method);
-                    send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-                        .await
-                        .unwrap();
-                }
-            } else if method == SUBSCRIBE_REPO_EVENTS_METHOD {
-                if let Some(collaboration) = collaboration {
-                    serve_subscribe_repo_events(&mut send, &mut recv, &mut request, collaboration)
-                        .await;
-                } else {
-                    send.finish().unwrap();
-                    return;
-                }
+            } else if method == "/heddle.api.v2alpha1.ThreadService/ObserveThreads" {
+                serve_observe_threads(&mut send, server_key.clone()).await;
+            } else if method == OBSERVE_COLLABORATION_METHOD {
+                serve_observe_collaboration(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key.clone(),
+                    collaboration,
+                    context,
+                    live_discussions,
+                    live_operations,
+                )
+                .await;
             } else {
                 let body = terminal_page(&method);
                 send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
@@ -1557,6 +1573,766 @@ async fn serve_push(
     send.finish().unwrap();
 }
 
+async fn serve_observe_threads(send: &mut iroh::endpoint::SendStream, server_key: Vec<u8>) {
+    let spool = v2::SpoolRef {
+        id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+    };
+    let overviews = ["main", "refs/heads/feature/run"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| v2::ThreadOverview {
+            name: name.into(),
+            r#ref: Some(v2::ThreadRef {
+                spool: Some(spool.clone()),
+                id: Some(v2::ThreadId {
+                    value: vec![if index == 0 { 4 } else { 3 }; 32],
+                }),
+            }),
+            ..Default::default()
+        });
+    let payloads = overviews
+        .map(v2::thread_list_event::Payload::Thread)
+        .collect();
+    write_thread_list_observation(send, server_key, payloads).await;
+}
+
+async fn write_thread_list_observation(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+    payloads: Vec<v2::thread_list_event::Payload>,
+) {
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let mut sequence = 1u64;
+    let open = v2::ThreadListEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                source: Some(source),
+                binding_digest: vec![9; 32],
+                accepted_budget: Some(budget),
+                ..Default::default()
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&open.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+    for payload in payloads {
+        sequence += 1;
+        let event = v2::ThreadListEvent {
+            frame: Some(v2::StreamFrame {
+                sequence,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(payload),
+        };
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+    sequence += 1;
+    let checkpoint = v2::ThreadListEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                cursor: vec![1],
+                snapshot_complete: true,
+                page: Some(v2::PageInfo {
+                    exhausted: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&checkpoint.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+    sequence += 1;
+    let complete = v2::ThreadListEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Complete(v2::StreamComplete {
+                cursor: vec![1],
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&complete.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+fn remember_signed_operation(
+    operations: &Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+    discussion_id: &str,
+    signed: Option<v2::SignedRecord>,
+) {
+    let Some(signed) = signed.filter(|record| !record.canonical_record.is_empty()) else {
+        return;
+    };
+    operations
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .entry(discussion_id.to_string())
+        .or_default()
+        .push(signed);
+}
+
+fn signed_operation_id(record: &v2::SignedRecord) -> Option<Vec<u8>> {
+    thread_api::collaboration::verify(record)
+        .ok()
+        .and_then(|operation| operation.id().ok())
+        .map(|id| id.as_bytes().to_vec())
+}
+
+async fn serve_open_discussion(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    live: Arc<Mutex<HashMap<String, Discussion>>>,
+    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::OpenDiscussionRequest::decode(frame.body).ok())
+        .unwrap_or_default();
+    if let Some(discussion) = discussion_from_open(&body) {
+        remember_signed_operation(&operations, &discussion.id, body.signed_operation.clone());
+        live.lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(discussion.id.clone(), discussion);
+    }
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+async fn serve_append_turn(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    live: Arc<Mutex<HashMap<String, Discussion>>>,
+    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::AppendDiscussionRequest::decode(frame.body).ok())
+        .unwrap_or_default();
+    if let Some(id) = body
+        .discussion
+        .as_ref()
+        .map(|reference| reference.id.clone())
+    {
+        remember_signed_operation(&operations, &id, body.signed_operation.clone());
+        let mut live = live.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(discussion) = live.get_mut(&id) {
+            let seq = discussion.turns.len() as u64 + 1;
+            discussion
+                .turns
+                .push(api::heddle::api::v1alpha1::DiscussionTurn {
+                    body: body.body.clone(),
+                    turn_id: format!("turn-{seq}"),
+                    turn_seq: seq,
+                    ..Default::default()
+                });
+        }
+    }
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+async fn serve_resolve_discussion(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    live: Arc<Mutex<HashMap<String, Discussion>>>,
+    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ResolveDiscussionRequest::decode(frame.body).ok())
+        .unwrap_or_default();
+    if let Some(id) = body
+        .discussion
+        .as_ref()
+        .map(|reference| reference.id.clone())
+    {
+        let mut live = live.lock().unwrap_or_else(|poison| poison.into_inner());
+        remember_signed_operation(&operations, &id, body.signed_operation.clone());
+        if let Some(discussion) = live.get_mut(&id) {
+            discussion.resolution = Some(api::heddle::api::v1alpha1::DiscussionResolution {
+                state: Some(discussion_resolution::State::Dismissed(
+                    discussion_resolution::Dismissed {
+                        reason: "resolved".into(),
+                    },
+                )),
+            });
+        }
+    }
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+async fn serve_put_context(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::PutContextRequest::decode(frame.body).ok())
+        .unwrap_or_default();
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+fn discussion_from_open(request: &v2::OpenDiscussionRequest) -> Option<Discussion> {
+    let signed = request.signed_operation.as_ref()?;
+    if signed.canonical_record.is_empty() {
+        return None;
+    }
+    let operation = thread_api::collaboration::verify(signed).ok().or_else(|| {
+        objects::object::thread_replication::ThreadOperation::decode(&signed.canonical_record).ok()
+    })?;
+    let objects::object::thread_replication::ThreadOperationBody::Discussion(bytes) =
+        operation.body
+    else {
+        return None;
+    };
+    let record = objects::object::CollaborationOperationEnvelope::decode(&bytes)
+        .ok()?
+        .operation;
+    let objects::object::CollaborationOperationBodyV1::Open {
+        title: _,
+        anchor,
+        visibility,
+        turn,
+        thread_ref,
+        ..
+    } = record.body
+    else {
+        return None;
+    };
+    let (file, symbol) = request
+        .anchor
+        .as_ref()
+        .and_then(|anchor| match &anchor.target {
+            Some(v2::collaboration_anchor::Target::Source(source)) => {
+                Some((source.path.clone(), source.symbol_id.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| match anchor {
+            objects::object::CollaborationAnchor::Symbol { path, symbol, .. } => (path, symbol),
+            objects::object::CollaborationAnchor::Path { path, .. } => (path, String::new()),
+            objects::object::CollaborationAnchor::Source { source } => {
+                (source.path, source.symbol_id)
+            }
+            _ => (String::new(), String::new()),
+        });
+    Some(Discussion {
+        id: record.discussion_id.to_string(),
+        anchor: Some(PathSymbolRef { file, symbol }),
+        visibility: match visibility {
+            objects::object::VisibilityTier::Public => "public".into(),
+            objects::object::VisibilityTier::Private { .. } => "private".into(),
+            _ => "internal".into(),
+        },
+        thread_ref: thread_ref.unwrap_or_default(),
+        turns: vec![api::heddle::api::v1alpha1::DiscussionTurn {
+            body: turn.body,
+            turn_id: "turn-open".into(),
+            turn_seq: 1,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+}
+
+async fn serve_observe_collaboration(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    collaboration: Option<CollaborationFixture>,
+    context: Option<ContextFixture>,
+    live: Arc<Mutex<HashMap<String, Discussion>>>,
+    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveCollaborationRequest::decode(frame.body).ok())
+        .unwrap_or_default();
+    if let Some(code) = discussion_failure(&body, collaboration.as_ref()) {
+        let failure = CallFailure {
+            code: code as i32,
+            message: "discussion is not visible".to_string(),
+            error: None,
+        };
+        send.write_chunk(Bytes::from(encode_stream_failure(&failure).unwrap()))
+            .await
+            .unwrap();
+        return;
+    }
+    let payloads = observe_payloads(
+        &body,
+        collaboration.as_ref(),
+        context.as_ref(),
+        &live,
+        &operations,
+    );
+    write_collaboration_observation(send, server_key, payloads).await;
+}
+
+fn discussion_failure(
+    request: &v2::ObserveCollaborationRequest,
+    fixture: Option<&CollaborationFixture>,
+) -> Option<CallFailureCode> {
+    let fixture = fixture?;
+    request.discussions.iter().find_map(|reference| {
+        match fixture.hidden.get(&reference.id).copied() {
+            Some(
+                code @ (CallFailureCode::Unauthenticated
+                | CallFailureCode::Internal
+                | CallFailureCode::Unavailable),
+            ) => Some(code),
+            _ => None,
+        }
+    })
+}
+
+fn observe_payloads(
+    request: &v2::ObserveCollaborationRequest,
+    collaboration: Option<&CollaborationFixture>,
+    context: Option<&ContextFixture>,
+    live: &Arc<Mutex<HashMap<String, Discussion>>>,
+    operations: &Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+) -> Vec<v2::collaboration_event::Payload> {
+    if !request.discussions.is_empty() {
+        if let Some(fixture) = collaboration {
+            record_get_requests(fixture, request);
+        }
+        let live = live.lock().unwrap_or_else(|poison| poison.into_inner());
+        let operations = operations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        return request
+            .discussions
+            .iter()
+            .filter_map(|reference| {
+                collaboration
+                    .and_then(|fixture| fixture.discussions.get(&reference.id))
+                    .cloned()
+                    .or_else(|| live.get(&reference.id).cloned())
+                    .map(|discussion| {
+                        (
+                            discussion,
+                            operations.get(&reference.id).cloned().unwrap_or_default(),
+                        )
+                    })
+            })
+            .flat_map(|(discussion, signed)| discussion_payloads(&discussion, &signed))
+            .collect();
+    }
+    if !request.contexts.is_empty() {
+        if let Some(fixture) = context {
+            fixture
+                .history_requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .extend(
+                    request
+                        .contexts
+                        .iter()
+                        .map(|reference| reference.id.clone()),
+                );
+            return request
+                .contexts
+                .iter()
+                .flat_map(|reference| context_history_payloads(fixture, &reference.id))
+                .collect();
+        }
+        return Vec::new();
+    }
+    if request.annotations.is_some() {
+        if let Some(fixture) = context {
+            *fixture
+                .list_requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) += 1;
+            return context_list_payloads(fixture);
+        }
+        return Vec::new();
+    }
+    let live = live.lock().unwrap_or_else(|poison| poison.into_inner());
+    let operations = operations
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(fixture) = collaboration {
+        *fixture
+            .list_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) += 1;
+        let mut rows = fixture.list.clone();
+        rows.extend(live.values().cloned());
+        return rows
+            .iter()
+            .flat_map(|discussion| {
+                let signed = operations.get(&discussion.id).cloned().unwrap_or_default();
+                discussion_payloads(discussion, &signed)
+            })
+            .collect();
+    }
+    live.iter()
+        .flat_map(|(id, discussion)| {
+            let signed = operations.get(id).cloned().unwrap_or_default();
+            discussion_payloads(discussion, &signed)
+        })
+        .collect()
+}
+
+fn record_get_requests(fixture: &CollaborationFixture, request: &v2::ObserveCollaborationRequest) {
+    let mut gets = fixture
+        .get_requests
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let mut states = fixture
+        .get_request_state_ids
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let state = request.anchors.iter().find_map(anchor_state_bytes);
+    for reference in &request.discussions {
+        gets.push(reference.id.clone());
+        states.push(state.clone());
+    }
+}
+
+fn anchor_state_bytes(anchor: &v2::CollaborationAnchor) -> Option<Vec<u8>> {
+    match anchor.target.as_ref() {
+        Some(v2::collaboration_anchor::Target::Source(source)) => match source
+            .revision
+            .as_ref()
+            .and_then(|revision| revision.revision.as_ref())
+        {
+            Some(v2::revision_ref::Revision::State(id)) => Some(id.value.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn discussion_title(discussion: &Discussion) -> String {
+    if !discussion.thread_id.is_empty() {
+        format!("{}\x1f{}", discussion.thread_ref, discussion.thread_id)
+    } else if !discussion.thread_ref.is_empty() {
+        discussion.thread_ref.clone()
+    } else {
+        dismiss_reason(discussion).unwrap_or_default()
+    }
+}
+
+fn dismiss_reason(discussion: &Discussion) -> Option<String> {
+    match discussion
+        .resolution
+        .as_ref()
+        .and_then(|resolution| resolution.state.as_ref())
+    {
+        Some(discussion_resolution::State::Dismissed(dismissed)) => Some(dismissed.reason.clone()),
+        _ => None,
+    }
+}
+
+fn discussion_payloads(
+    discussion: &Discussion,
+    operations: &[v2::SignedRecord],
+) -> Vec<v2::collaboration_event::Payload> {
+    let id = discussion.id.clone();
+    let (path, symbol) = discussion
+        .anchor
+        .as_ref()
+        .map(|anchor| (anchor.file.clone(), anchor.symbol.clone()))
+        .unwrap_or_default();
+    let status = if discussion.resolution.is_some() {
+        v2::discussion_record::Status::Resolved as i32
+    } else {
+        v2::discussion_record::Status::Open as i32
+    };
+    let audience = match discussion.visibility.as_str() {
+        "public" => v2::Audience::Public as i32,
+        "private" => v2::Audience::Private as i32,
+        _ => v2::Audience::Unspecified as i32,
+    };
+    let signed_ids: Vec<Vec<u8>> = operations.iter().filter_map(signed_operation_id).collect();
+    let turn_causal_ids: Vec<Vec<u8>> = if signed_ids.len() == discussion.turns.len() {
+        signed_ids
+    } else {
+        discussion
+            .turns
+            .iter()
+            .map(|turn| {
+                objects::object::ContentHash::compute(format!("{id}:{}", turn.turn_id).as_bytes())
+                    .as_bytes()
+                    .to_vec()
+            })
+            .collect()
+    };
+    let causal_heads = turn_causal_ids.last().cloned().into_iter().collect();
+    let mut payloads = vec![v2::collaboration_event::Payload::Discussion(
+        v2::DiscussionRecord {
+            r#ref: Some(v2::RecordRef {
+                id: id.clone(),
+                spool: None,
+            }),
+            version: objects::object::ContentHash::compute(id.as_bytes())
+                .as_bytes()
+                .to_vec(),
+            anchor: Some(source_anchor(path, symbol)),
+            title: discussion_title(discussion),
+            status,
+            turn_count: discussion.turns.len() as u64,
+            audience,
+            audience_label: discussion.visibility.clone(),
+            causal_heads,
+            ..Default::default()
+        },
+    )];
+    for (turn, causal_id) in discussion.turns.iter().zip(turn_causal_ids) {
+        payloads.push(v2::collaboration_event::Payload::Turn(v2::DiscussionTurn {
+            r#ref: Some(v2::RecordRef {
+                id: turn.turn_id.clone(),
+                spool: None,
+            }),
+            discussion: Some(v2::RecordRef {
+                id: id.clone(),
+                spool: None,
+            }),
+            body: turn.body.clone(),
+            principal_id: turn.author_name.clone(),
+            created_at: turn.posted_at,
+            causal_id,
+            ..Default::default()
+        }));
+    }
+    payloads.extend(
+        operations
+            .iter()
+            .cloned()
+            .map(v2::collaboration_event::Payload::Operation),
+    );
+    payloads
+}
+
+fn source_anchor(path: String, symbol: String) -> v2::CollaborationAnchor {
+    v2::CollaborationAnchor {
+        target: Some(v2::collaboration_anchor::Target::Source(v2::SourceAnchor {
+            path,
+            symbol_id: symbol,
+            ..Default::default()
+        })),
+    }
+}
+
+fn context_list_payloads(fixture: &ContextFixture) -> Vec<v2::collaboration_event::Payload> {
+    let mut payloads = Vec::new();
+    for file in &fixture.files {
+        for annotation in &file.annotations {
+            payloads.push(v2::collaboration_event::Payload::Context(
+                v2::ContextRecord {
+                    r#ref: Some(v2::RecordRef {
+                        id: annotation.id.clone(),
+                        spool: None,
+                    }),
+                    content: annotation.content.clone(),
+                    principal_id: annotation.attribution.clone(),
+                    tags: annotation
+                        .tags
+                        .iter()
+                        .map(|tag| v2::AnnotationTag {
+                            tag: Some(v2::annotation_tag::Tag::Text(tag.clone())),
+                        })
+                        .collect(),
+                    anchor: Some(source_anchor(file.path.clone(), String::new())),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+    for state in &fixture.states {
+        let path_state = state.state_id.as_ref().map(|id| id.value.clone());
+        for annotation in &state.annotations {
+            let mut record = v2::ContextRecord {
+                r#ref: Some(v2::RecordRef {
+                    id: annotation.id.clone(),
+                    spool: None,
+                }),
+                content: annotation.content.clone(),
+                principal_id: annotation.attribution.clone(),
+                ..Default::default()
+            };
+            if let Some(value) = &path_state {
+                record.anchor = Some(v2::CollaborationAnchor {
+                    target: Some(v2::collaboration_anchor::Target::Source(v2::SourceAnchor {
+                        revision: Some(v2::RevisionRef {
+                            revision: Some(v2::revision_ref::Revision::State(
+                                api::heddle::api::v1alpha1::StateId {
+                                    value: value.clone(),
+                                },
+                            )),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })),
+                });
+            }
+            payloads.push(v2::collaboration_event::Payload::Context(record));
+        }
+    }
+    payloads
+}
+
+fn context_history_payloads(
+    fixture: &ContextFixture,
+    annotation_id: &str,
+) -> Vec<v2::collaboration_event::Payload> {
+    fixture
+        .histories
+        .get(annotation_id)
+        .into_iter()
+        .flatten()
+        .map(|revision| {
+            v2::collaboration_event::Payload::Context(v2::ContextRecord {
+                r#ref: Some(v2::RecordRef {
+                    id: annotation_id.to_string(),
+                    spool: None,
+                }),
+                content: revision.content.clone(),
+                principal_id: revision.attribution.clone(),
+                causal_id: revision.revision_id.as_bytes().to_vec(),
+                tags: revision
+                    .tags
+                    .iter()
+                    .map(|tag| v2::AnnotationTag {
+                        tag: Some(v2::annotation_tag::Tag::Text(tag.clone())),
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+async fn write_collaboration_observation(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+    payloads: Vec<v2::collaboration_event::Payload>,
+) {
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let mut sequence = 1u64;
+    let open = v2::CollaborationEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                source: Some(source),
+                binding_digest: vec![9; 32],
+                accepted_budget: Some(budget),
+                ..Default::default()
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&open.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+    for payload in payloads {
+        sequence += 1;
+        let event = v2::CollaborationEvent {
+            frame: Some(v2::StreamFrame {
+                sequence,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(payload),
+        };
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+    sequence += 1;
+    let checkpoint = v2::CollaborationEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                cursor: vec![1],
+                snapshot_complete: true,
+                page: Some(v2::PageInfo {
+                    exhausted: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&checkpoint.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+    sequence += 1;
+    let complete = v2::CollaborationEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Complete(v2::StreamComplete {
+                cursor: vec![1],
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&complete.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
 fn terminal_page(method: &str) -> Vec<u8> {
     match method {
         "/heddle.api.v2alpha1.ThreadService/ObserveThreads" => ListRefsResponse {
@@ -1564,38 +2340,6 @@ fn terminal_page(method: &str) -> Vec<u8> {
                 next_page_token: String::new(),
                 ..ListRefsPageEnd::default()
             })),
-        }
-        .encode_to_vec(),
-        "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration" => ListContextResponse {
-            frame: Some(list_context_response::Frame::PageEnd(ListContextPageEnd {
-                next_page_token: String::new(),
-                ..ListContextPageEnd::default()
-            })),
-            states: Vec::new(),
-        }
-        .encode_to_vec(),
-        "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration" => GetContextHistoryResponse {
-            frame: Some(get_context_history_response::Frame::PageEnd(
-                GetContextHistoryPageEnd {
-                    next_page_token: String::new(),
-                    ..GetContextHistoryPageEnd::default()
-                },
-            )),
-        }
-        .encode_to_vec(),
-        "/heddle.api.v2alpha1.ThreadService/ObserveThreads" => ListThreadsResponse {
-            frame: Some(list_threads_response::Frame::PageEnd(ListThreadsPageEnd {
-                next_page_token: String::new(),
-                ..ListThreadsPageEnd::default()
-            })),
-        }
-        .encode_to_vec(),
-        "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration" => ListDiscussionsResponse {
-            frame: Some(list_discussions_response::Frame::PageEnd(
-                ListDiscussionsPageEnd {
-                    next_page_token: String::new(),
-                },
-            )),
         }
         .encode_to_vec(),
         _ => Vec::new(),
@@ -1768,6 +2512,7 @@ async fn read_request_body(recv: &mut iroh::endpoint::RecvStream, request: &mut 
     }
 }
 
+#[allow(dead_code)]
 async fn serve_list_context(
     send: &mut iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
@@ -1805,6 +2550,7 @@ async fn serve_list_context(
         .unwrap();
 }
 
+#[allow(dead_code)]
 async fn serve_get_context_history(
     send: &mut iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
@@ -1847,6 +2593,7 @@ async fn serve_get_context_history(
         .unwrap();
 }
 
+#[allow(dead_code)]
 async fn serve_get_discussion(
     send: &mut iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
@@ -1901,6 +2648,7 @@ async fn serve_get_discussion(
     .unwrap();
 }
 
+#[allow(dead_code)]
 async fn serve_list_by_state(
     send: &mut iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
@@ -1939,6 +2687,7 @@ async fn serve_list_by_state(
         .unwrap();
 }
 
+#[allow(dead_code)]
 async fn serve_subscribe_repo_events(
     send: &mut iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,

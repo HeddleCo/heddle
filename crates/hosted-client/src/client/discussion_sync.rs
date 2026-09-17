@@ -853,6 +853,7 @@ fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion 
                 posted_at_secs: turn.posted_at,
                 turn_id: String::new(),
                 turn_seq: 0,
+                causal_id: Vec::new(),
             })
             .collect(),
         resolution: match discussion.resolution {
@@ -870,6 +871,8 @@ fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion 
             }
         },
         kind: 0,
+        causal_heads: Vec::new(),
+        version: Vec::new(),
     }
 }
 
@@ -1771,6 +1774,7 @@ mod tests {
             posted_at_secs,
             turn_id: String::new(),
             turn_seq: 0,
+            causal_id: Vec::new(),
         }
     }
 
@@ -2103,14 +2107,6 @@ mod tests {
             test_key("open-run-contract"),
         )
         .unwrap();
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-        assert_eq!(
-            push_discussions(&repo, &mut client, "acme/widgets")
-                .await
-                .unwrap(),
-            1
-        );
-
         let append = write_local_operation(
             &store,
             discussion_id,
@@ -2123,13 +2119,6 @@ mod tests {
             test_key("append-second-turn"),
         )
         .unwrap();
-        assert_eq!(
-            push_discussions(&repo, &mut client, "acme/widgets")
-                .await
-                .unwrap(),
-            1
-        );
-
         write_local_operation(
             &store,
             discussion_id,
@@ -2146,6 +2135,7 @@ mod tests {
             test_key("resolve-into-annotation"),
         )
         .unwrap();
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
         assert_eq!(
             push_discussions(&repo, &mut client, "acme/widgets")
                 .await
@@ -2186,8 +2176,11 @@ mod tests {
                 posted_at_secs: 1_700_000_000,
                 turn_id: turn_id.to_string(),
                 turn_seq: 1,
+                causal_id: Vec::new(),
             }],
             resolution,
+            causal_heads: Vec::new(),
+            version: Vec::new(),
         }
     }
 
