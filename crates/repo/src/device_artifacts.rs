@@ -416,7 +416,10 @@ mod tests {
         );
         std::fs::write(store.path(&reference.id).expect("path"), b"altered report")
             .expect("same-size mutation");
-        let error = store.read(reference, 105).err().expect("integrity failure");
+        let error = match store.read(reference, 105) {
+            Err(error) => error,
+            Ok(_) => panic!("integrity failure"),
+        };
         assert!(
             error.to_string().contains("digest"),
             "precise byte integrity failure: {error}"

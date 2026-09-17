@@ -270,33 +270,57 @@ pub(super) async fn partial_roundtrip(
         .record_native_capture("device-test", private.id())
         .expect("private original capture");
     let floor_thread = repository
-        .create_native_thread("signed-floor-test", replica.genesis().expect("genesis").base, None, "Signed floor")
+        .create_native_thread(
+            "signed-floor-test",
+            replica.genesis().expect("genesis").base,
+            None,
+            "Signed floor",
+        )
         .expect("independent signed-floor Thread");
     let floor_state = State::new_snapshot(
         tree.hash(),
         vec![floor_thread.genesis().expect("floor genesis").base],
         Attribution::human(Principal::new("Owner", "owner@test")),
-    ).with_intent("signed floor without retained local sidecar");
-    repository.store().put_state(&floor_state).expect("floor state");
-    repository.put_state_visibility(StateVisibility {
-        state: floor_state.id(),
-        tier: VisibilityTier::Internal,
-        embargo_until: None,
-        declarer: repository.get_principal().expect("local declarer"),
-        declared_at: chrono::Utc::now(),
-        signature: None,
-        supersedes: None,
-    }).expect("authored Internal floor");
-    repository.record_native_capture("signed-floor-test", floor_state.id())
+    )
+    .with_intent("signed floor without retained local sidecar");
+    repository
+        .store()
+        .put_state(&floor_state)
+        .expect("floor state");
+    repository
+        .put_state_visibility(StateVisibility {
+            state: floor_state.id(),
+            tier: VisibilityTier::Internal,
+            embargo_until: None,
+            declarer: repository.get_principal().expect("local declarer"),
+            declared_at: chrono::Utc::now(),
+            signature: None,
+            supersedes: None,
+        })
+        .expect("authored Internal floor");
+    repository
+        .record_native_capture("signed-floor-test", floor_state.id())
         .expect("signed original with Internal floor");
-    repository.restore_state_visibility_sidecar(&floor_state.id(), None)
+    repository
+        .restore_state_visibility_sidecar(&floor_state.id(), None)
         .expect("simulate metadata-only imported original without a local sidecar");
-    assert_eq!(repository.effective_visibility_tier(&floor_state.id()).expect("local tier"), VisibilityTier::Public);
+    assert_eq!(
+        repository
+            .effective_visibility_tier(&floor_state.id())
+            .expect("local tier"),
+        VisibilityTier::Public
+    );
     let accountable = uuid::Uuid::parse_str(&owner.owner.as_ref().expect("owner account").id)
         .expect("owner UUID");
     assert_eq!(
-        super::auth::source_visibility_floor(repository, &floor_thread, accountable, None, floor_state.id())
-            .expect("verified signed floor"),
+        super::auth::source_visibility_floor(
+            repository,
+            &floor_thread,
+            accountable,
+            None,
+            floor_state.id()
+        )
+        .expect("verified signed floor"),
         Some(VisibilityTier::Internal),
         "original signed visibility must survive a missing imported local sidecar"
     );
@@ -330,7 +354,7 @@ pub(super) async fn partial_roundtrip(
         .fetch_content(open(&genesis, private.id()), Default::default())
         .await
         .err()
-        .expect("whole-state private source unavailable");
+        .unwrap_or_else(|| panic!("whole-state private source unavailable"));
     assert_fetch_not_found(withheld);
     let mut observed = remote
         .observe::<thread_api::rpc::ThreadServiceObserveThread>(
@@ -559,7 +583,7 @@ pub(super) async fn initial_base_roundtrip(
         )
         .await
         .err()
-        .expect("arbitrary hash cannot claim the system seed");
+        .unwrap_or_else(|| panic!("arbitrary hash cannot claim the system seed"));
     assert_fetch_not_found(unknown);
 }
 fn assert_fetch_not_found(error: thread_api::fetch::Error) {
@@ -841,7 +865,8 @@ async fn transfer(
             &format!("spool/{}", genesis.spool),
             now,
         )
-        .expect_err("explicitly revoked binding cannot install source");
+        .err()
+        .unwrap_or_else(|| panic!("explicitly revoked binding cannot install source"));
     assert!(
         error
             .to_string()

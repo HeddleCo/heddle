@@ -99,7 +99,7 @@ fn thread_authority_preserves_original_publisher_account_and_agent() {
     assert!(
         proof::verify(&bytes, context(&owner, &[8; 32]), |_| false)
             .err()
-            .expect("publisher bound")
+            .unwrap_or_else(|| panic!("publisher bound"))
             .to_string()
             .contains("publisher")
     );
@@ -108,7 +108,7 @@ fn thread_authority_preserves_original_publisher_account_and_agent() {
     assert!(
         proof::verify(&bytes, wrong, |_| false)
             .err()
-            .expect("account bound")
+            .unwrap_or_else(|| panic!("account bound"))
             .to_string()
             .contains("account authority")
     );
@@ -116,7 +116,7 @@ fn thread_authority_preserves_original_publisher_account_and_agent() {
     assert!(
         proof::verify(&bytes, context(&owner, &publisher), |_| false)
             .err()
-            .expect("agent cannot become human")
+            .unwrap_or_else(|| panic!("agent cannot become human"))
             .to_string()
             .contains("agent attribution")
     );
@@ -138,7 +138,7 @@ fn thread_authority_checks_actual_time_method_and_resource() {
     assert!(
         proof::verify(&bytes, expired, |_| false)
             .err()
-            .expect("actual admission expiry")
+            .unwrap_or_else(|| panic!("actual admission expiry"))
             .to_string()
             .contains("original Thread authorization")
     );
@@ -147,7 +147,7 @@ fn thread_authority_checks_actual_time_method_and_resource() {
     assert!(
         proof::verify(&bytes, method, |_| false)
             .err()
-            .expect("exact method")
+            .unwrap_or_else(|| panic!("exact method"))
             .to_string()
             .contains("original Thread authorization")
     );
@@ -156,7 +156,7 @@ fn thread_authority_checks_actual_time_method_and_resource() {
     assert!(
         proof::verify(&bytes, resource, |_| false)
             .err()
-            .expect("exact resource")
+            .unwrap_or_else(|| panic!("exact resource"))
             .to_string()
             .contains("original Thread authorization")
     );
@@ -181,7 +181,7 @@ fn thread_authority_typed_revocations_and_bounds_are_enforced() {
     assert!(
         proof::verify(&trailing, context(&owner, &publisher), |_| false)
             .err()
-            .expect("unknown noncanonical field")
+            .unwrap_or_else(|| panic!("unknown noncanonical field"))
             .to_string()
             .contains("noncanonical")
     );
@@ -205,7 +205,7 @@ fn thread_authority_requires_current_independent_mint_attachment() {
     assert!(
         proof::verify(&bytes, later, |_| false)
             .err()
-            .expect("mint attachment expires before token")
+            .unwrap_or_else(|| panic!("mint attachment expires before token"))
             .to_string()
             .contains("not currently valid")
     );
@@ -224,7 +224,7 @@ fn thread_authority_requires_current_independent_mint_attachment() {
     assert!(
         proof::verify(&bytes, context(&different, &publisher), |_| false)
             .err()
-            .expect("proof cannot introduce own trust")
+            .unwrap_or_else(|| panic!("proof cannot introduce own trust"))
             .to_string()
             .contains("independently admitted")
     );
@@ -361,7 +361,7 @@ fn thread_authority_checks_session_and_stored_credential_revocations() {
             |revocation| matches!(revocation, Revocation::Credential(id) if id == revoked_id),
         )
         .err()
-        .expect("exact credential identity must be revoked");
+        .unwrap_or_else(|| panic!("exact credential identity must be revoked"));
         assert!(
             error
                 .to_string()
@@ -528,7 +528,7 @@ fn boundary_acceptance_preserves_subject_attenuation_and_rejects_asserted_select
         |_| false,
     )
     .err()
-    .expect("credential cannot claim different request selectors");
+    .unwrap_or_else(|| panic!("credential cannot claim different request selectors"));
     assert!(
         error.to_string().contains("reserved boundary acceptance"),
         "{error}"

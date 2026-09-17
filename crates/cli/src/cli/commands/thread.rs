@@ -2762,7 +2762,6 @@ fn non_empty_action(action: &str) -> Option<String> {
 /// *sibling* of the checkout rather than a stray file inside it, while making
 /// the managed path read like the original repository instead of generic
 /// `root`.
-
 fn default_thread_checkout_path(repo: &Repository, name: &str) -> PathBuf {
     repo.managed_checkout_path(name)
 }

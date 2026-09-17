@@ -788,12 +788,12 @@ async fn listed_hosted_discussions(
     // pull_one skips empty Open shells, so hydrate from a per-discussion
     // ObserveCollaboration (not v1 GetDiscussion) before materializing.
     for discussion in &mut hosted {
-        if discussion.turns.is_empty() && !discussion.id.is_empty() {
-            if let Ok(full) = client.get_discussion(repo_path, &discussion.id, None).await
-                && !full.turns.is_empty()
-            {
-                *discussion = full;
-            }
+        if discussion.turns.is_empty()
+            && !discussion.id.is_empty()
+            && let Ok(full) = client.get_discussion(repo_path, &discussion.id, None).await
+            && !full.turns.is_empty()
+        {
+            *discussion = full;
         }
     }
     Ok(Some((state_id, hosted)))

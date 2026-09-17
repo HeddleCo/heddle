@@ -369,7 +369,7 @@ mod tests {
         assert!(
             verify_pairing_authority(owner.clone(), &binding, None, 100)
                 .err()
-                .expect("wrong account")
+                .unwrap_or_else(|| panic!("wrong account"))
                 .to_string()
                 .contains("approving account")
         );
@@ -389,7 +389,8 @@ mod tests {
             std::future::pending::<std::result::Result<(), std::io::Error>>(),
         )
         .await
-        .expect_err("stalled stream expires");
+        .err()
+        .unwrap_or_else(|| panic!("stalled stream expires"));
         assert!(
             error
                 .to_string()
@@ -490,7 +491,8 @@ mod tests {
         issued.proof_public_key = endpoint.public_key().to_vec();
         assert!(
             verify_response(&subject, &binding, &attachment, changed, "pairing-op")
-                .expect_err("changed proof key")
+                .err()
+                .unwrap_or_else(|| panic!("changed proof key"))
                 .to_string()
                 .contains("changed subject")
         );
@@ -507,7 +509,8 @@ mod tests {
         issued.subject = "unrelated-subject".into();
         assert!(
             verify_response(&subject, &binding, &attachment, changed, "pairing-op")
-                .expect_err("response subject must match verified Biscuit")
+                .err()
+                .unwrap_or_else(|| panic!("response subject must match verified Biscuit"))
                 .to_string()
                 .contains("credential subject")
         );
@@ -525,7 +528,8 @@ mod tests {
             .id = "different-session".into();
         assert!(
             verify_response(&subject, &binding, &attachment, changed, "pairing-op")
-                .expect_err("changed parent session")
+                .err()
+                .unwrap_or_else(|| panic!("changed parent session"))
                 .to_string()
                 .contains("original parent session")
         );

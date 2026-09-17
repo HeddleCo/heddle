@@ -1982,7 +1982,8 @@ mod tests {
             seconds: past.timestamp(),
             nanos: 0,
         }))
-        .expect_err("expired server expiry must fail closed");
+        .err()
+        .unwrap_or_else(|| panic!("expired server expiry must fail closed"));
         assert!(error.to_string().contains("expired credential"));
         assert!(credential_expiry(None).expect("omitted expiry").is_none());
     }
@@ -2084,7 +2085,7 @@ mod tests {
         }
         let oversized = PreparedServiceToken::load(&pending)
             .err()
-            .expect("oversized preparation must fail");
+            .unwrap_or_else(|| panic!("oversized preparation must fail"));
         assert!(
             oversized
                 .to_string()
@@ -2097,7 +2098,7 @@ mod tests {
                 .expect("public mode");
             let public = PreparedServiceToken::load(&pending)
                 .err()
-                .expect("public preparation must fail");
+                .unwrap_or_else(|| panic!("public preparation must fail"));
             assert!(public.to_string().contains("group/other-accessible"));
         }
     }
@@ -2160,7 +2161,7 @@ mod tests {
             "test",
         )
         .expect("signed exact child accepted");
-        let broadened = verify_issued_service_biscuit(
+        let broadened = match verify_issued_service_biscuit(
             &parent_raw,
             &valid_raw,
             &root_key,
@@ -2168,9 +2169,10 @@ mod tests {
             expiry,
             "thread:write",
             "test",
-        )
-        .err()
-        .expect("time-only child must not masquerade as requested Thread scope");
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("time-only child must not masquerade as requested Thread scope"),
+        };
         assert!(broadened.to_string().contains("scope ceiling"));
         let mut scoped = heddleco_capability_verifier::service_scope::service_attenuation(
             "thread:write",
@@ -2207,7 +2209,8 @@ mod tests {
             "",
             "test",
         )
-        .expect_err("wrong child must fail");
+        .err()
+        .unwrap_or_else(|| panic!("wrong child must fail"));
         assert!(wrong_child_error.to_string().contains("requested child"));
         let wrong_root = KeyPair::new();
         let wrong_root_error = verify_issued_service_biscuit(
@@ -2219,7 +2222,8 @@ mod tests {
             "",
             "test",
         )
-        .expect_err("wrong root must fail");
+        .err()
+        .unwrap_or_else(|| panic!("wrong root must fail"));
         assert!(wrong_root_error.to_string().contains("signature"));
         let unbounded =
             biscuit_verifier::key_delegation::append(&parent, child, transfer, BlockBuilder::new())
@@ -2236,7 +2240,8 @@ mod tests {
             "",
             "test",
         )
-        .expect_err("missing child expiry must fail");
+        .err()
+        .unwrap_or_else(|| panic!("missing child expiry must fail"));
         assert!(unbounded_error.to_string().contains("scope ceiling"));
         let sibling_parent = Biscuit::builder()
             .fact(r#"user("alice")"#)
@@ -2288,7 +2293,8 @@ mod tests {
             "",
             "test",
         )
-        .expect_err("sibling root token must fail");
+        .err()
+        .unwrap_or_else(|| panic!("sibling root token must fail"));
         assert!(sibling_error.to_string().contains("discarded parent"));
     }
 
@@ -2387,7 +2393,9 @@ mod tests {
                 }
             }
 
-            let error = result.expect_err("explicit trust must control replacement");
+            let error = result
+                .err()
+                .unwrap_or_else(|| panic!("explicit trust must control replacement"));
             assert!(
                 error
                     .to_string()
@@ -2623,7 +2631,8 @@ mod tests {
                 None,
                 None,
             )
-            .expect_err("subagent scope widening must be rejected");
+            .err()
+            .unwrap_or_else(|| panic!("subagent scope widening must be rejected"));
             assert!(error.to_string().contains("would widen"));
         });
     }
@@ -2692,7 +2701,8 @@ mod tests {
                 None,
                 Some(&out),
             )
-            .expect_err("an existing credential file must not be overwritten");
+            .err()
+            .unwrap_or_else(|| panic!("an existing credential file must not be overwritten"));
             assert!(error.to_string().contains("already exists"));
         });
     }
@@ -2819,21 +2829,24 @@ mod tests {
     #[test]
     fn runner_requires_concrete_spool_scopes() {
         let missing = validate_runner_scopes(Some(AgentTemplate::Runner), &[])
-            .expect_err("an unscoped runner must be rejected");
+            .err()
+            .unwrap_or_else(|| panic!("an unscoped runner must be rejected"));
         assert!(missing.to_string().contains("requires at least one"));
 
         let wrong_kind = validate_runner_scopes(
             Some(AgentTemplate::Runner),
             &[("repo".to_string(), "org/acme".to_string())],
         )
-        .expect_err("a repo-scoped runner must be rejected");
+        .err()
+        .unwrap_or_else(|| panic!("a repo-scoped runner must be rejected"));
         assert!(wrong_kind.to_string().contains("is not a spool"));
 
         let wildcard = validate_runner_scopes(
             Some(AgentTemplate::Runner),
             &[("spool".to_string(), "*".to_string())],
         )
-        .expect_err("a wildcard runner must be rejected");
+        .err()
+        .unwrap_or_else(|| panic!("a wildcard runner must be rejected"));
         assert!(wildcard.to_string().contains("concrete spool path"));
 
         validate_runner_scopes(
@@ -2894,7 +2907,8 @@ mod tests {
             Some(AgentTemplate::Reviewer),
             vec!["PublishContent".to_string()],
         )
-        .expect_err("a template cannot be widened by --allow");
+        .err()
+        .unwrap_or_else(|| panic!("a template cannot be widened by --allow"));
         assert!(error.to_string().contains("outside"));
     }
 
@@ -2937,7 +2951,8 @@ mod tests {
             |_| Ok(()),
         )
         .await
-        .expect_err("a missing credential file must fail");
+        .err()
+        .unwrap_or_else(|| panic!("a missing credential file must fail"));
         assert!(error.to_string().contains("opening credential file"));
     }
 

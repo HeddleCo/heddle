@@ -34,16 +34,6 @@ impl TestResponse {
         }
     }
 
-    #[allow(dead_code)]
-    pub(super) fn protobuf(body: impl Into<Vec<u8>>) -> Self {
-        Self {
-            status: 200,
-            content_type: Some("application/protobuf"),
-            location: None,
-            body: body.into(),
-        }
-    }
-
     pub(super) fn status(status: u16) -> Self {
         Self {
             status,

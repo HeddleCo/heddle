@@ -586,6 +586,34 @@ fn collect_targets(
         }
     }
 }
+fn anchor_matches(request: &ObserveCollaborationRequest, anchor: &CollaborationAnchor) -> bool {
+    request.anchors.is_empty() || request.anchors.iter().any(|selected|selected==anchor || matches!((&selected.target,&anchor.target),(Some(collaboration_anchor::Target::Spool(a)),Some(collaboration_anchor::Target::Source(b))) if b.thread.as_ref().and_then(|thread|thread.spool.as_ref())==Some(a)) || matches!((&selected.target,&anchor.target),(Some(collaboration_anchor::Target::Spool(a)),Some(collaboration_anchor::Target::Thread(b))) if b.spool.as_ref()==Some(a)) || matches!((&selected.target,&anchor.target),(Some(collaboration_anchor::Target::Thread(a)),Some(collaboration_anchor::Target::Source(b))) if b.thread.as_ref()==Some(a)))
+}
+fn encode(position: &Position, binding: &[u8]) -> Vec<u8> {
+    [
+        binding,
+        position.kind.to_be_bytes().as_slice(),
+        position.thread.as_bytes(),
+        position.operation.as_bytes(),
+    ]
+    .concat()
+}
+fn decode(bytes: &[u8], binding: &[u8]) -> Result<Option<Position>> {
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    ensure!(
+        bytes.len() == binding.len() + 68 && bytes[..binding.len()] == *binding,
+        "collaboration page token differs from query or authority"
+    );
+    let bytes = &bytes[binding.len()..];
+    Ok(Some(Position {
+        kind: i32::from_be_bytes(bytes[..4].try_into()?),
+        thread: ContentHash::from_bytes(bytes[4..36].try_into()?),
+        operation: ContentHash::from_bytes(bytes[36..].try_into()?),
+    }))
+}
+
 #[cfg(test)]
 mod source_target_tests {
     use objects::object::{
@@ -620,31 +648,4 @@ mod source_target_tests {
         assert_eq!(targets, vec![reference]);
         assert_eq!(anchor, original);
     }
-}
-fn anchor_matches(request: &ObserveCollaborationRequest, anchor: &CollaborationAnchor) -> bool {
-    request.anchors.is_empty() || request.anchors.iter().any(|selected|selected==anchor || matches!((&selected.target,&anchor.target),(Some(collaboration_anchor::Target::Spool(a)),Some(collaboration_anchor::Target::Source(b))) if b.thread.as_ref().and_then(|thread|thread.spool.as_ref())==Some(a)) || matches!((&selected.target,&anchor.target),(Some(collaboration_anchor::Target::Spool(a)),Some(collaboration_anchor::Target::Thread(b))) if b.spool.as_ref()==Some(a)) || matches!((&selected.target,&anchor.target),(Some(collaboration_anchor::Target::Thread(a)),Some(collaboration_anchor::Target::Source(b))) if b.thread.as_ref()==Some(a)))
-}
-fn encode(position: &Position, binding: &[u8]) -> Vec<u8> {
-    [
-        binding,
-        position.kind.to_be_bytes().as_slice(),
-        position.thread.as_bytes(),
-        position.operation.as_bytes(),
-    ]
-    .concat()
-}
-fn decode(bytes: &[u8], binding: &[u8]) -> Result<Option<Position>> {
-    if bytes.is_empty() {
-        return Ok(None);
-    }
-    ensure!(
-        bytes.len() == binding.len() + 68 && bytes[..binding.len()] == *binding,
-        "collaboration page token differs from query or authority"
-    );
-    let bytes = &bytes[binding.len()..];
-    Ok(Some(Position {
-        kind: i32::from_be_bytes(bytes[..4].try_into()?),
-        thread: ContentHash::from_bytes(bytes[4..36].try_into()?),
-        operation: ContentHash::from_bytes(bytes[36..].try_into()?),
-    }))
 }

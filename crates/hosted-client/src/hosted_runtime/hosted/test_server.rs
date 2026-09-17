@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     net::Ipv4Addr,
     sync::{Arc, Mutex},
 };
@@ -15,24 +15,17 @@ use api::{
     },
     heddle::api::{
         v1alpha1::{
-            AnnotatedFile, BlobResponse, CallFailure, CallFailureCode, ContextRevision,
-            CreateSpoolRequest, DeleteSpoolRequest, Discussion, GetBlobRequest,
-            GetContextHistoryPageEnd, GetContextHistoryRequest, GetContextHistoryResponse,
-            GetDiscussionRequest, HostedSpool, ListContextPageEnd, ListContextRequest,
-            ListContextResponse, ListDiscussionsByStateRequest, ListDiscussionsPageEnd,
-            ListDiscussionsResponse, ListRefsPageEnd, ListRefsResponse, PackChunk, PackStreamKind,
-            PathSymbolRef, PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete,
-            PushReady, PushRequest, PushServerFrame, RepoEvent, SignedSpoolOwnerGenesis,
-            StateContextEntry, StateId, SubscribeRepoEventsRequest, TransferCheckpoint,
-            TransportMode, discussion_resolution, get_context_history_response,
-            list_context_response, list_discussions_response, list_refs_response,
+            AnnotatedFile, CallFailure, CallFailureCode, ContextRevision, Discussion,
+            ListRefsPageEnd, ListRefsResponse, PackChunk, PackStreamKind, PathSymbolRef,
+            PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete, PushReady,
+            PushRequest, PushServerFrame, SignedSpoolOwnerGenesis, StateContextEntry, StateId,
+            TransferCheckpoint, TransportMode, discussion_resolution, list_refs_response,
             pull_server_frame, push_client_frame, push_server_frame,
         },
         v2alpha1 as v2,
     },
     method_descriptor,
 };
-use base64::Engine as _;
 use bytes::Bytes;
 use crypto::Ed25519Signer;
 use iroh::{Endpoint, RelayMode, endpoint::presets};
@@ -42,16 +35,12 @@ use tokio::task::JoinHandle;
 use super::{CallContextFactory, HostedClient};
 
 const OWNER_GENESIS_FIXTURE_HEX: &str = "0a380a10222222222222222222222222222222221224080112208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c12640a20def88318e44a809464c1022f22230567bae6805d17b1ccfc2bebe5326232c58a1240bfe677c0b6fec8d28e379f584f36dee7258d834222f9b75f61dc75b7db2d836d76d4fb6eaf9e7f561925b2e6882b51eadaf3ec77c565f5b638ad0febfc8cd304";
-const GET_BLOB_METHOD: &str = "/heddle.api.v2alpha1.ContentService/ReadContent";
-const CREATE_SPOOL_METHOD: &str = "/heddle.api.v2alpha1.SpoolService/CreateSpool";
-const DELETE_SPOOL_METHOD: &str = "/heddle.api.v2alpha1.SpoolService/DeleteSpool";
 const OBSERVE_COLLABORATION_METHOD: &str =
     "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
 
 #[derive(Default)]
 pub(crate) struct SpoolMutationCapture {
     pub native_updates: Vec<v2::ReviseSpoolRequest>,
-    pub deletes: Vec<DeleteSpoolRequest>,
     pub native_deletes: Vec<v2::DeleteSpoolRequest>,
 }
 
@@ -65,21 +54,9 @@ pub(crate) struct CollaborationFixture {
     pub discussions: HashMap<String, Discussion>,
     pub list: Vec<Discussion>,
     pub hidden: HashMap<String, CallFailureCode>,
-    #[allow(dead_code)]
-    pub events: Vec<RepoEvent>,
-    #[allow(dead_code)]
-    pub one_event_per_subscribe: bool,
-    #[allow(dead_code)]
-    pub unknown_repo_ids: HashSet<String>,
     pub get_requests: Arc<Mutex<Vec<String>>>,
     pub get_request_state_ids: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
     pub list_requests: Arc<Mutex<usize>>,
-    #[allow(dead_code)]
-    pub subscribe_after: Arc<Mutex<Vec<i64>>>,
-    #[allow(dead_code)]
-    pub subscribe_repo_ids: Arc<Mutex<Vec<String>>>,
-    #[allow(dead_code)]
-    pub subscribe_thread: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 #[derive(Clone, Default)]
@@ -95,97 +72,61 @@ pub(crate) struct ContextFixture {
 }
 
 pub async fn start() -> (HostedClient, JoinHandle<()>) {
-    start_inner(None, BlobFixture::default(), None, None, None, None, None).await
+    start_inner(None, None, None, None, None, None).await
 }
 
+#[cfg(test)]
 pub(crate) async fn start_with_collaboration(
     fixture: CollaborationFixture,
 ) -> (HostedClient, JoinHandle<()>, CollaborationFixture) {
     let fixture_clone = fixture.clone();
-    let (client, server) = start_inner(
-        None,
-        BlobFixture::default(),
-        None,
-        None,
-        None,
-        None,
-        Some(fixture),
-    )
-    .await;
+    let (client, server) = start_inner(None, None, None, None, None, Some(fixture)).await;
     (client, server, fixture_clone)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_with_context(
     fixture: ContextFixture,
 ) -> (HostedClient, JoinHandle<()>, ContextFixture) {
     let fixture_clone = fixture.clone();
-    let (client, server) = start_inner(
-        None,
-        BlobFixture::default(),
-        None,
-        None,
-        None,
-        Some(fixture),
-        None,
-    )
-    .await;
+    let (client, server) = start_inner(None, None, None, None, Some(fixture), None).await;
     (client, server, fixture_clone)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_recording_push()
 -> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<PushRequest>>>) {
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let (client, server) = start_inner(
-        None,
-        BlobFixture::default(),
-        None,
-        None,
-        Some(Arc::clone(&captured)),
-        None,
-        None,
-    )
-    .await;
+    let (client, server) =
+        start_inner(None, None, None, Some(Arc::clone(&captured)), None, None).await;
     (client, server, captured)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_recording_create_spool() -> (
     HostedClient,
     JoinHandle<()>,
-    Arc<Mutex<Vec<CreateSpoolRequest>>>,
+    Arc<Mutex<Vec<v2::CreateSpoolRequest>>>,
 ) {
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let (client, server) = start_inner(
-        None,
-        BlobFixture::default(),
-        Some(Arc::clone(&captured)),
-        None,
-        None,
-        None,
-        None,
-    )
-    .await;
+    let (client, server) =
+        start_inner(None, Some(Arc::clone(&captured)), None, None, None, None).await;
     (client, server, captured)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_recording_spool_mutations() -> (
     HostedClient,
     JoinHandle<()>,
     Arc<Mutex<SpoolMutationCapture>>,
 ) {
     let captured = Arc::new(Mutex::new(SpoolMutationCapture::default()));
-    let (client, server) = start_inner(
-        None,
-        BlobFixture::default(),
-        None,
-        Some(Arc::clone(&captured)),
-        None,
-        None,
-        None,
-    )
-    .await;
+    let (client, server) =
+        start_inner(None, None, Some(Arc::clone(&captured)), None, None, None).await;
     (client, server, captured)
 }
 
+#[cfg(test)]
 pub(crate) async fn start_with_remote_state(
     remote_state: StateId,
 ) -> (HostedClient, JoinHandle<()>) {
@@ -194,7 +135,6 @@ pub(crate) async fn start_with_remote_state(
             remote_state,
             pack: None,
         }),
-        BlobFixture::default(),
         None,
         None,
         None,
@@ -204,6 +144,7 @@ pub(crate) async fn start_with_remote_state(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn start_with_pull_pack(
     remote_state: StateId,
     pack_data: Vec<u8>,
@@ -214,7 +155,6 @@ pub(crate) async fn start_with_pull_pack(
             remote_state,
             pack: Some((pack_data, index_data)),
         }),
-        BlobFixture::default(),
         None,
         None,
         None,
@@ -230,16 +170,24 @@ struct PullFixture {
     pack: Option<(Vec<u8>, Vec<u8>)>,
 }
 
-#[derive(Clone, Default)]
-struct BlobFixture {
-    contents: HashMap<String, Vec<u8>>,
-    requested: Arc<Mutex<Vec<String>>>,
+#[derive(Clone)]
+struct TestServerState {
+    pull: Option<PullFixture>,
+    create_spool: Option<Arc<Mutex<Vec<v2::CreateSpoolRequest>>>>,
+    spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
+    push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
+    context: Option<ContextFixture>,
+    collaboration: Option<CollaborationFixture>,
+    server_key: Vec<u8>,
+    owner: v2::OwnerState,
+    grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
+    live_discussions: Arc<Mutex<HashMap<String, Discussion>>>,
+    live_operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 }
 
 async fn start_inner(
     pull: Option<PullFixture>,
-    blobs: BlobFixture,
-    create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
+    create_spool: Option<Arc<Mutex<Vec<v2::CreateSpoolRequest>>>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
     context: Option<ContextFixture>,
@@ -269,9 +217,19 @@ async fn start_inner(
         version: verified.state_hash().to_vec(),
         ..Default::default()
     };
-    let grants = Arc::new(Mutex::new(Vec::<v2::GrantRecord>::new()));
-    let live_discussions = Arc::new(Mutex::new(HashMap::<String, Discussion>::new()));
-    let live_operations = Arc::new(Mutex::new(HashMap::<String, Vec<v2::SignedRecord>>::new()));
+    let state = TestServerState {
+        pull,
+        create_spool,
+        spool_mutations,
+        push_requests,
+        context,
+        collaboration,
+        server_key,
+        owner,
+        grants: Arc::new(Mutex::new(Vec::<v2::GrantRecord>::new())),
+        live_discussions: Arc::new(Mutex::new(HashMap::<String, Discussion>::new())),
+        live_operations: Arc::new(Mutex::new(HashMap::<String, Vec<v2::SignedRecord>>::new())),
+    };
     let server_task = tokio::spawn(async move {
         let connection = server
             .accept()
@@ -280,22 +238,7 @@ async fn start_inner(
             .await
             .unwrap();
         while let Ok((send, recv)) = connection.accept_bi().await {
-            tokio::spawn(serve_call(
-                send,
-                recv,
-                pull.clone(),
-                blobs.clone(),
-                create_spool.clone(),
-                spool_mutations.clone(),
-                push_requests.clone(),
-                context.clone(),
-                collaboration.clone(),
-                server_key.clone(),
-                owner.clone(),
-                Arc::clone(&grants),
-                Arc::clone(&live_discussions),
-                Arc::clone(&live_operations),
-            ));
+            tokio::spawn(serve_call(send, recv, state.clone()));
         }
         server.close().await;
     });
@@ -315,23 +258,24 @@ async fn start_inner(
     (client, server_task)
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn serve_call(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
-    pull: Option<PullFixture>,
-    blobs: BlobFixture,
-    create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
-    spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
-    push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
-    context: Option<ContextFixture>,
-    collaboration: Option<CollaborationFixture>,
-    server_key: Vec<u8>,
-    owner: v2::OwnerState,
-    grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
-    live_discussions: Arc<Mutex<HashMap<String, Discussion>>>,
-    live_operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+    state: TestServerState,
 ) {
+    let TestServerState {
+        pull,
+        create_spool,
+        spool_mutations,
+        push_requests,
+        context,
+        collaboration,
+        server_key,
+        owner,
+        grants,
+        live_discussions,
+        live_operations,
+    } = state;
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
         let chunk = recv
@@ -444,10 +388,7 @@ async fn serve_call(
                         ..Default::default()
                     });
                 }
-                let response = v2::ResolveResourcesResponse {
-                    results,
-                    ..Default::default()
-                };
+                let response = v2::ResolveResourcesResponse { results };
                 send.write_chunk(Bytes::from(
                     encode_success_response(&response.encode_to_vec()).unwrap(),
                 ))
@@ -484,8 +425,15 @@ async fn serve_call(
             } else if method == "/heddle.api.v2alpha1.ThreadService/RecordReview" {
                 serve_native_record_review(&mut send, &mut recv, &mut request, server_key).await;
             } else if method == "/heddle.api.v2alpha1.SpoolService/CreateSpool" {
-                serve_native_create_spool(&mut send, &mut recv, &mut request, server_key, owner)
-                    .await;
+                serve_native_create_spool(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    owner,
+                    create_spool,
+                )
+                .await;
             } else if method == "/heddle.api.v2alpha1.CollaborationService/OpenDiscussion" {
                 serve_open_discussion(
                     &mut send,
@@ -533,12 +481,6 @@ async fn serve_call(
                     server_key,
                 )
                 .await;
-            } else if method == CREATE_SPOOL_METHOD {
-                serve_create_spool(&mut send, &mut recv, &mut request, create_spool).await;
-            } else if method == DELETE_SPOOL_METHOD {
-                serve_delete_spool(&mut send, &mut recv, &mut request, spool_mutations).await;
-            } else if method == GET_BLOB_METHOD && !blobs.contents.is_empty() {
-                serve_get_blob(&mut send, &mut recv, &mut request, blobs).await;
             } else {
                 send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
                     .await
@@ -572,10 +514,12 @@ async fn serve_call(
                     &mut recv,
                     &mut request,
                     server_key.clone(),
-                    collaboration,
-                    context,
-                    live_discussions,
-                    live_operations,
+                    ObserveCollaborationLive {
+                        collaboration,
+                        context,
+                        discussions: live_discussions,
+                        operations: live_operations,
+                    },
                 )
                 .await;
             } else {
@@ -783,6 +727,7 @@ async fn serve_native_create_spool(
     request: &mut Vec<u8>,
     server_key: Vec<u8>,
     owner: v2::OwnerState,
+    captured: Option<Arc<Mutex<Vec<v2::CreateSpoolRequest>>>>,
 ) {
     while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
         request.extend_from_slice(&chunk);
@@ -791,6 +736,12 @@ async fn serve_native_create_spool(
         .ok()
         .and_then(|frame| v2::CreateSpoolRequest::decode(frame.body).ok())
         .expect("native create Spool request");
+    if let Some(captured) = captured {
+        captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(body.clone());
+    }
     let genesis = match body.ownership.expect("creation ownership") {
         v2::create_spool_request::Ownership::OwnerGenesis(genesis) => genesis,
         v2::create_spool_request::Ownership::CustodialSpool(_) => {
@@ -1901,22 +1852,26 @@ fn discussion_from_open(request: &v2::OpenDiscussionRequest) -> Option<Discussio
     })
 }
 
+struct ObserveCollaborationLive {
+    collaboration: Option<CollaborationFixture>,
+    context: Option<ContextFixture>,
+    discussions: Arc<Mutex<HashMap<String, Discussion>>>,
+    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+}
+
 async fn serve_observe_collaboration(
     send: &mut iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
     request: &mut Vec<u8>,
     server_key: Vec<u8>,
-    collaboration: Option<CollaborationFixture>,
-    context: Option<ContextFixture>,
-    live: Arc<Mutex<HashMap<String, Discussion>>>,
-    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+    live: ObserveCollaborationLive,
 ) {
     read_request_body(recv, request).await;
     let body = decode_request_frame(request)
         .ok()
         .and_then(|frame| v2::ObserveCollaborationRequest::decode(frame.body).ok())
         .unwrap_or_default();
-    if let Some(code) = discussion_failure(&body, collaboration.as_ref()) {
+    if let Some(code) = discussion_failure(&body, live.collaboration.as_ref()) {
         let failure = CallFailure {
             code: code as i32,
             message: "discussion is not visible".to_string(),
@@ -1929,10 +1884,10 @@ async fn serve_observe_collaboration(
     }
     let payloads = observe_payloads(
         &body,
-        collaboration.as_ref(),
-        context.as_ref(),
-        &live,
-        &operations,
+        live.collaboration.as_ref(),
+        live.context.as_ref(),
+        &live.discussions,
+        &live.operations,
     );
     write_collaboration_observation(send, server_key, payloads).await;
 }
@@ -2433,356 +2388,9 @@ fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
     }
 }
 
-async fn serve_create_spool(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    captured: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
-) {
-    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
-        request.extend_from_slice(&chunk);
-    }
-    let body = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| CreateSpoolRequest::decode(frame.body).ok());
-    if let (Some(captured), Some(body)) = (captured.as_ref(), body.as_ref()) {
-        captured
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .push(body.clone());
-    }
-    let response = match body {
-        Some(request) => HostedSpool {
-            full_path: format!("{}/{}", request.parent_path, request.slug),
-            kind: if request.is_repo {
-                "project".to_string()
-            } else {
-                "namespace".to_string()
-            },
-            is_repo: request.is_repo,
-            display_name: request.display_name.unwrap_or_default(),
-            ..HostedSpool::default()
-        },
-        None => HostedSpool::default(),
-    };
-    send.write_chunk(Bytes::from(
-        encode_success_response(&response.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
-async fn serve_delete_spool(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    captured: Option<Arc<Mutex<SpoolMutationCapture>>>,
-) {
-    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
-        request.extend_from_slice(&chunk);
-    }
-    let body = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| DeleteSpoolRequest::decode(frame.body).ok());
-    if let (Some(captured), Some(body)) = (captured.as_ref(), body) {
-        captured
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .deletes
-            .push(body);
-    }
-    send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
-        .await
-        .unwrap();
-}
-
-async fn serve_get_blob(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    blobs: BlobFixture,
-) {
-    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
-        request.extend_from_slice(&chunk);
-    }
-    let path = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| GetBlobRequest::decode(frame.body).ok())
-        .map(|body| body.path)
-        .unwrap_or_default();
-    blobs
-        .requested
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(path.clone());
-    let content = blobs.contents.get(&path).cloned().unwrap_or_default();
-    let is_binary = std::str::from_utf8(&content).is_err();
-    let encoded = if is_binary {
-        base64::engine::general_purpose::STANDARD.encode(&content)
-    } else {
-        String::from_utf8(content).unwrap_or_default()
-    };
-    let response = BlobResponse {
-        content: encoded,
-        is_binary,
-        ..Default::default()
-    };
-    send.write_chunk(Bytes::from(
-        encode_success_response(&response.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
 async fn read_request_body(recv: &mut iroh::endpoint::RecvStream, request: &mut Vec<u8>) {
     while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
         request.extend_from_slice(&chunk);
-    }
-}
-
-#[allow(dead_code)]
-async fn serve_list_context(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    fixture: ContextFixture,
-) {
-    read_request_body(recv, request).await;
-    let _ = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| ListContextRequest::decode(frame.body).ok());
-    *fixture
-        .list_requests
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) += 1;
-    for file in &fixture.files {
-        let body = ListContextResponse {
-            frame: Some(list_context_response::Frame::Item(file.clone())),
-            states: Vec::new(),
-        }
-        .encode_to_vec();
-        send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-            .await
-            .unwrap();
-    }
-    let end = ListContextResponse {
-        frame: Some(list_context_response::Frame::PageEnd(ListContextPageEnd {
-            next_page_token: String::new(),
-            ..ListContextPageEnd::default()
-        })),
-        states: fixture.states.clone(),
-    }
-    .encode_to_vec();
-    send.write_chunk(Bytes::from(encode_stream_message(&end).unwrap()))
-        .await
-        .unwrap();
-}
-
-#[allow(dead_code)]
-async fn serve_get_context_history(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    fixture: ContextFixture,
-) {
-    read_request_body(recv, request).await;
-    let annotation_id = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| GetContextHistoryRequest::decode(frame.body).ok())
-        .map(|body| body.annotation_id)
-        .unwrap_or_default();
-    fixture
-        .history_requests
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(annotation_id.clone());
-    if let Some(revisions) = fixture.histories.get(&annotation_id) {
-        for revision in revisions {
-            let body = GetContextHistoryResponse {
-                frame: Some(get_context_history_response::Frame::Item(revision.clone())),
-            }
-            .encode_to_vec();
-            send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-                .await
-                .unwrap();
-        }
-    }
-    let end = GetContextHistoryResponse {
-        frame: Some(get_context_history_response::Frame::PageEnd(
-            GetContextHistoryPageEnd {
-                next_page_token: String::new(),
-                ..GetContextHistoryPageEnd::default()
-            },
-        )),
-    }
-    .encode_to_vec();
-    send.write_chunk(Bytes::from(encode_stream_message(&end).unwrap()))
-        .await
-        .unwrap();
-}
-
-#[allow(dead_code)]
-async fn serve_get_discussion(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    fixture: CollaborationFixture,
-) {
-    read_request_body(recv, request).await;
-    let request = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| GetDiscussionRequest::decode(frame.body).ok());
-    let discussion_id = request
-        .as_ref()
-        .map(|body| body.discussion_id.clone())
-        .unwrap_or_default();
-    let state_id = request.and_then(|body| body.state_id.map(|state| state.value));
-    fixture
-        .get_requests
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(discussion_id.clone());
-    fixture
-        .get_request_state_ids
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(state_id);
-    if let Some(code) = fixture.hidden.get(&discussion_id).copied() {
-        let failure = CallFailure {
-            code: code as i32,
-            message: "discussion is not visible".to_string(),
-            error: None,
-        };
-        send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
-            .await
-            .unwrap();
-        return;
-    }
-    let Some(discussion) = fixture.discussions.get(&discussion_id) else {
-        let failure = CallFailure {
-            code: CallFailureCode::NotFound as i32,
-            message: format!("discussion {discussion_id} not found"),
-            error: None,
-        };
-        send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
-            .await
-            .unwrap();
-        return;
-    };
-    send.write_chunk(Bytes::from(
-        encode_success_response(&discussion.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
-#[allow(dead_code)]
-async fn serve_list_by_state(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    fixture: CollaborationFixture,
-) {
-    read_request_body(recv, request).await;
-    let _ = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| ListDiscussionsByStateRequest::decode(frame.body).ok());
-    *fixture
-        .list_requests
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) += 1;
-    for discussion in &fixture.list {
-        let body = ListDiscussionsResponse {
-            frame: Some(list_discussions_response::Frame::Item(Box::new(
-                discussion.clone(),
-            ))),
-        }
-        .encode_to_vec();
-        send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-            .await
-            .unwrap();
-    }
-    let end = ListDiscussionsResponse {
-        frame: Some(list_discussions_response::Frame::PageEnd(
-            ListDiscussionsPageEnd {
-                next_page_token: String::new(),
-            },
-        )),
-    }
-    .encode_to_vec();
-    send.write_chunk(Bytes::from(encode_stream_message(&end).unwrap()))
-        .await
-        .unwrap();
-}
-
-#[allow(dead_code)]
-async fn serve_subscribe_repo_events(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    fixture: CollaborationFixture,
-) {
-    read_request_body(recv, request).await;
-    let subscribe = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| SubscribeRepoEventsRequest::decode(frame.body).ok());
-    let after_event_id = subscribe
-        .as_ref()
-        .map(|body| body.after_event_id)
-        .unwrap_or(0);
-    let repo_id = subscribe
-        .as_ref()
-        .map(|body| body.repo_id.clone())
-        .unwrap_or_default();
-    let thread_scope = subscribe
-        .map(|body| (body.thread, body.thread_id))
-        .unwrap_or_default();
-    fixture
-        .subscribe_after
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(after_event_id);
-    fixture
-        .subscribe_repo_ids
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(repo_id.clone());
-    fixture
-        .subscribe_thread
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(thread_scope);
-    if fixture.unknown_repo_ids.contains(&repo_id) {
-        let failure = CallFailure {
-            code: CallFailureCode::NotFound as i32,
-            message: format!("repository {repo_id} not found"),
-            error: None,
-        };
-        send.write_chunk(Bytes::from(encode_stream_failure(&failure).unwrap()))
-            .await
-            .unwrap();
-        return;
-    }
-    let mut matching = fixture
-        .events
-        .into_iter()
-        .filter(|event| event.event_id > after_event_id);
-    if fixture.one_event_per_subscribe {
-        if let Some(event) = matching.next() {
-            send.write_chunk(Bytes::from(
-                encode_stream_message(&event.encode_to_vec()).unwrap(),
-            ))
-            .await
-            .unwrap();
-        }
-    } else {
-        for event in matching {
-            send.write_chunk(Bytes::from(
-                encode_stream_message(&event.encode_to_vec()).unwrap(),
-            ))
-            .await
-            .unwrap();
-        }
     }
 }
 

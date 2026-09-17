@@ -71,7 +71,13 @@ fn revision_state(revision: &wire::RevisionRef) -> Result<StateId> {
     Ok(StateId::from_bytes(bytes))
 }
 
-fn comparison(snapshot: &ReviewSnapshot) -> Result<(StateId, StateId, ContentHash)> {
+struct ReviewComparison {
+    source: StateId,
+    base: StateId,
+    policy: ContentHash,
+}
+
+fn comparison(snapshot: &ReviewSnapshot) -> Result<ReviewComparison> {
     let value = snapshot.comparison.as_ref().context(
         "current review comparison is unavailable; publish one accepted source head, then retry",
     )?;
@@ -95,11 +101,11 @@ fn comparison(snapshot: &ReviewSnapshot) -> Result<(StateId, StateId, ContentHas
         value.policy_version == snapshot.overview.review_policy_version,
         "review policy changed during observation; retry"
     );
-    Ok((
-        revision_state(source)?,
-        revision_state(base)?,
-        ContentHash::from_bytes(bytes),
-    ))
+    Ok(ReviewComparison {
+        source: revision_state(source)?,
+        base: revision_state(base)?,
+        policy: ContentHash::from_bytes(bytes),
+    })
 }
 
 fn current_author(spool: &wire::SpoolRef) -> Result<(Ed25519Signer, SourceAuthor)> {
@@ -123,13 +129,16 @@ fn current_author(spool: &wire::SpoolRef) -> Result<(Ed25519Signer, SourceAuthor
 fn sign_decision(
     snapshot: &ReviewSnapshot,
     kind: ReviewKind,
-    source: StateId,
-    base: StateId,
-    policy: ContentHash,
+    comparison: ReviewComparison,
     explanation: String,
     revokes: Option<uuid::Uuid>,
     operation_id: uuid::Uuid,
 ) -> Result<wire::RecordReviewRequest> {
+    let ReviewComparison {
+        source,
+        base,
+        policy,
+    } = comparison;
     let spool = snapshot
         .overview
         .r#ref
@@ -352,13 +361,10 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
                 snapshot.endpoint_key == endpoint,
                 "hosted endpoint changed during review preparation"
             );
-            let (source, base, policy) = comparison(&snapshot)?;
             let prepared = sign_decision(
                 &snapshot,
                 ReviewKind::Approval,
-                source,
-                base,
-                policy,
+                comparison(&snapshot)?,
                 args.note.unwrap_or_default(),
                 None,
                 id,
@@ -535,9 +541,13 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
             let prepared = sign_decision(
                 &snapshot,
                 ReviewKind::Revocation,
-                revision_state(prior.source.as_ref().context("approval source absent")?)?,
-                revision_state(prior.target.as_ref().context("approval base absent")?)?,
-                ContentHash::from_bytes(policy),
+                ReviewComparison {
+                    source: revision_state(
+                        prior.source.as_ref().context("approval source absent")?,
+                    )?,
+                    base: revision_state(prior.target.as_ref().context("approval base absent")?)?,
+                    policy: ContentHash::from_bytes(policy),
+                },
                 String::new(),
                 Some(id),
                 operation,

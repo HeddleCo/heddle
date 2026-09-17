@@ -94,7 +94,7 @@ fn incomplete_or_duplicate_frontier_never_produces_a_signature() {
             &signer
         )
         .err()
-        .expect("parent/version mismatch")
+        .unwrap_or_else(|| panic!("parent/version mismatch"))
         .to_string()
         .contains("exact parents")
     );
@@ -112,7 +112,7 @@ fn incomplete_or_duplicate_frontier_never_produces_a_signature() {
             &signer
         )
         .err()
-        .expect("not observed")
+        .unwrap_or_else(|| panic!("not observed"))
         .to_string()
         .contains("observe")
     );

@@ -281,7 +281,7 @@ pub(super) async fn denied_spool_stream_is_typed(
         .next_commit()
         .await
         .err()
-        .expect("unauthorized stream is denied");
+        .unwrap_or_else(|| panic!("unauthorized stream is denied"));
     match error {
         thread_api::observation::Error::Client(api::v2::client::ClientError::Transport(
             thread_api::transport::Error::Remote(failure),

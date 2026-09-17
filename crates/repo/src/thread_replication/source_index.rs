@@ -258,7 +258,8 @@ mod tests {
         assert!(
             replica
                 .source_ancestry(selected, 1, 16 * 1024 * 1024)
-                .expect_err("record bound")
+                .err()
+                .unwrap_or_else(|| panic!("record bound"))
                 .to_string()
                 .contains("exceeds transfer budget")
         );
@@ -276,7 +277,8 @@ mod tests {
         assert!(
             replica
                 .source_ancestry(selected, 2, bytes - 1)
-                .expect_err("byte bound")
+                .err()
+                .unwrap_or_else(|| panic!("byte bound"))
                 .to_string()
                 .contains("exceeds transfer budget")
         );
@@ -547,7 +549,7 @@ mod tests {
             replica
                 .projection()
                 .err()
-                .expect("bounded frontier")
+                .unwrap_or_else(|| panic!("bounded frontier"))
                 .to_string()
                 .contains("source frontier exceeds")
         );

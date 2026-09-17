@@ -189,7 +189,8 @@ fn browser_produced_delegated_creation_passes_rust_admission() {
     let without_check = SignedSpoolOwnerGenesis::decode(without_check.as_slice())
         .expect("well-formed and signed negative browser record");
     let refusal = admit_fresh_spool_creation(&without_check, &owner, now)
-        .expect_err("a delegated chain without the exact final check must fail");
+        .err()
+        .unwrap_or_else(|| panic!("a delegated chain without the exact final check must fail"));
     assert!(
         refusal
             .to_string()
@@ -213,7 +214,8 @@ fn delegated_creation_uses_exact_sealed_permission_and_actual_current_time() {
         .expect("expiry does not erase structural evidence");
     assert!(
         admit_fresh_spool_creation(&signed, &current, NOW + 101)
-            .expect_err("claimed old timestamp is not admission")
+            .err()
+            .unwrap_or_else(|| panic!("claimed old timestamp is not admission"))
             .to_string()
             .contains("creation capability")
     );
@@ -222,7 +224,7 @@ fn delegated_creation_uses_exact_sealed_permission_and_actual_current_time() {
     assert!(
         validate_spool_creation_structure(&other, NOW)
             .err()
-            .expect("different spool rejected")
+            .unwrap_or_else(|| panic!("different spool rejected"))
             .to_string()
             .contains("another genesis")
     );
@@ -230,7 +232,7 @@ fn delegated_creation_uses_exact_sealed_permission_and_actual_current_time() {
     assert!(
         validate_spool_creation_structure(&unsealed, NOW)
             .err()
-            .expect("private attenuation key must not be public")
+            .unwrap_or_else(|| panic!("private attenuation key must not be public"))
             .to_string()
             .contains("must be sealed")
     );
@@ -243,7 +245,8 @@ fn independent_mint_root_requires_current_owner_certificate() {
         .expect("owner-associated independent mint root");
     assert!(
         admit_fresh_spool_creation(&signed, &current, NOW + 51)
-            .expect_err("owner certificate expiry")
+            .err()
+            .unwrap_or_else(|| panic!("owner certificate expiry"))
             .to_string()
             .contains("not currently valid")
     );
@@ -286,7 +289,8 @@ fn retired_owner_state_cannot_admit_a_new_delegated_creation() {
         .expect("original proof remains structural evidence");
     assert!(
         admit_fresh_spool_creation(&signed, &rotated, NOW)
-            .expect_err("retired state cannot newly admit")
+            .err()
+            .unwrap_or_else(|| panic!("retired state cannot newly admit"))
             .to_string()
             .contains("actual current owner state")
     );

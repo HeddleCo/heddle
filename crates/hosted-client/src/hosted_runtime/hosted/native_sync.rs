@@ -1353,7 +1353,8 @@ mod tests {
             &signer,
             None,
         )
-        .expect_err("merge capture without parents");
+        .err()
+        .unwrap_or_else(|| panic!("merge capture without parents"));
         let tip_only = tip_only.to_string();
         assert!(
             tip_only.contains("Rejected")
@@ -1524,7 +1525,7 @@ mod tests {
             Vec::new(),
         )
         .err()
-        .expect("spool mismatch");
+        .unwrap_or_else(|| panic!("spool mismatch"));
         assert!(
             error.to_string().contains("spool"),
             "fail closed on spool rewrite: {error}"
@@ -1546,7 +1547,7 @@ mod tests {
             vec![7; 32],
         )
         .err()
-        .expect("account proof on LocalKey");
+        .unwrap_or_else(|| panic!("account proof on LocalKey"));
         assert!(
             error.to_string().contains("local-key") || error.to_string().contains("explicit claim"),
             "LocalKey StartThread must not rewrite owner to Account: {error}"

@@ -807,7 +807,7 @@ fn source_staging_retains_signed_claim_cutoff_beyond_selected_revision() {
             assert!(
                 result
                     .err()
-                    .expect("cutoff closure required")
+                    .unwrap_or_else(|| panic!("cutoff closure required"))
                     .to_string()
                     .contains("ownership claim cutoff source proof absent or foreign"),
                 "claim must not install with missing cutoff evidence"

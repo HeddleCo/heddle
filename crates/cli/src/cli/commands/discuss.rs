@@ -138,9 +138,7 @@ fn run_write(
             &["discuss"],
         ),
         (false, Some(id)) => append_turn(
-            cli,
-            repo,
-            store,
+            &DiscussWrite { cli, repo, store },
             id,
             args.body.as_deref(),
             args.file.as_deref(),
@@ -155,6 +153,12 @@ fn run_write(
         ))),
         (true, Some(_)) => unreachable!("clap rejects --new with --id"),
     }
+}
+
+struct DiscussWrite<'a> {
+    cli: &'a Cli,
+    repo: &'a repo::Repository,
+    store: &'a CollaborationStore,
 }
 
 struct OpenSpec<'a> {
@@ -251,9 +255,7 @@ fn open_anchor(
 }
 
 fn append_turn(
-    cli: &Cli,
-    repo: &repo::Repository,
-    store: &CollaborationStore,
+    write: &DiscussWrite<'_>,
     raw_id: &str,
     body: Option<&str>,
     body_file: Option<&Path>,
@@ -262,9 +264,7 @@ fn append_turn(
 ) -> Result<()> {
     let body = read_body(body, body_file)?;
     write_descendant(
-        cli,
-        repo,
-        store,
+        write,
         raw_id,
         "discuss_turn",
         emitting,
@@ -340,9 +340,7 @@ fn run_resolve(
         }
     };
     write_descendant(
-        cli,
-        repo,
-        store,
+        &DiscussWrite { cli, repo, store },
         &args.discussion_id,
         "discuss_resolve",
         &["discuss", "resolve"],
@@ -442,9 +440,7 @@ fn run_reopen(
     args: &DiscussReopenArgs,
 ) -> Result<()> {
     write_descendant(
-        cli,
-        repo,
-        store,
+        &DiscussWrite { cli, repo, store },
         &args.discussion_id,
         "discuss_reopen",
         &["discuss", "reopen"],
@@ -456,17 +452,16 @@ fn run_reopen(
 }
 
 fn write_descendant(
-    cli: &Cli,
-    repo: &repo::Repository,
-    store: &CollaborationStore,
+    write: &DiscussWrite<'_>,
     raw_id: &str,
     output_kind: &'static str,
     emitting: &[&str],
     parent_turn: Option<u32>,
     body: CollaborationOperationBodyV1,
 ) -> Result<()> {
-    let discussion_id = resolve_discussion_id(store, raw_id)?;
-    let discussion = store
+    let discussion_id = resolve_discussion_id(write.store, raw_id)?;
+    let discussion = write
+        .store
         .materialize_discussion(&discussion_id)?
         .ok_or_else(|| {
             anyhow!(RecoveryAdvice::discussion_not_found(
@@ -477,13 +472,20 @@ fn write_descendant(
     let operation = CollaborationOperationEnvelope::new(
         discussion_id,
         parents,
-        idempotency_key(cli)?,
-        repo.get_attribution()?,
+        idempotency_key(write.cli)?,
+        write.repo.get_attribution()?,
         now_ms(),
         body,
     )?;
-    let outcome = store.write_operation(&operation)?;
-    emit_write(cli, output_kind, emitting, store, discussion_id, outcome)
+    let outcome = write.store.write_operation(&operation)?;
+    emit_write(
+        write.cli,
+        output_kind,
+        emitting,
+        write.store,
+        discussion_id,
+        outcome,
+    )
 }
 
 fn parent_operation_ids(

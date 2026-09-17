@@ -615,7 +615,7 @@ fn flat_tree_revert_cannot_replace_its_epoch_anchor_with_a_delta() {
         .put_tree_serialized(&reverted.data, anchor_id)
         .expect("revert write");
     drop(store);
-    let reopened = FsStore::new(&temp.path().join(".heddle"));
+    let reopened = FsStore::new(temp.path().join(".heddle"));
     assert_eq!(
         reopened.get_tree(&anchor_id).expect("original anchor"),
         Some(anchor)

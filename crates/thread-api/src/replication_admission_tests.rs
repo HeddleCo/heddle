@@ -163,7 +163,7 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
             .handle(Frame::Operations(duplicate))
             .await
             .err()
-            .expect("duplicate testimony rejected before storage")
+            .unwrap_or_else(|| panic!("duplicate testimony rejected before storage"))
             .to_string()
             .contains("duplicate authority admission sidecar")
     );
@@ -175,7 +175,7 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
             .handle(Frame::Operations(extra))
             .await
             .err()
-            .expect("unmatched testimony rejected before storage")
+            .unwrap_or_else(|| panic!("unmatched testimony rejected before storage"))
             .to_string()
             .contains("unmatched authority admission sidecar")
     );
@@ -187,7 +187,7 @@ async fn original_authority_sidecars_relay_exactly_and_reject_duplicate_unmatche
             .handle(Frame::Operations(no_proof))
             .await
             .err()
-            .expect("valid signature alone cannot admit foreign account")
+            .unwrap_or_else(|| panic!("valid signature alone cannot admit foreign account"))
             .to_string()
             .contains("independently enrolled account authority")
     );

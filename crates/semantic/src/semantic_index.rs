@@ -280,7 +280,7 @@ mod tests {
         let error =
             extract_semantic_file_bounded(source.as_bytes(), Language::Rust, &execution_budget())
                 .err()
-                .expect("dense AST must fail before allocating owned facts");
+                .unwrap_or_else(|| panic!("dense AST must fail before allocating owned facts"));
         assert!(
             matches!(error, ExtractionBudgetError::Exceeded("AST node count")),
             "{error}"
@@ -298,7 +298,7 @@ mod tests {
         let error =
             extract_semantic_file_bounded(source.as_bytes(), Language::Rust, &execution_budget())
                 .err()
-                .expect("nested AST must fail before allocating owned facts");
+                .unwrap_or_else(|| panic!("nested AST must fail before allocating owned facts"));
         assert!(
             matches!(error, ExtractionBudgetError::Exceeded("AST depth")),
             "{error}"

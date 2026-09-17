@@ -168,7 +168,7 @@ fn boundary_genesis_receipt_requires_evidence_and_survives_reopen() {
             &trust
         )
         .err()
-        .expect("missing evidence")
+        .unwrap_or_else(|| panic!("missing evidence"))
         .to_string()
         .contains("basis evidence")
     );
@@ -295,7 +295,8 @@ fn boundary_source_receipt_is_atomic_and_relayable_without_original_authority() 
     assert!(
         replica
             .receive_with_authority_admission(&original, &receipt, repository.store(), |_| Ok(()))
-            .expect_err("no self enrolled executor")
+            .err()
+            .unwrap_or_else(|| panic!("no self enrolled executor"))
             .to_string()
             .contains("independently pinned")
     );
@@ -305,7 +306,8 @@ fn boundary_source_receipt_is_atomic_and_relayable_without_original_authority() 
     assert!(
         replica
             .receive_with_authority_admission(&original, &missing, repository.store(), |_| Ok(()))
-            .expect_err("missing evidence")
+            .err()
+            .unwrap_or_else(|| panic!("missing evidence"))
             .to_string()
             .contains("basis evidence")
     );
@@ -322,7 +324,8 @@ fn boundary_source_receipt_is_atomic_and_relayable_without_original_authority() 
     assert!(
         replica
             .receive_with_authority_admission(&original, &receipt, repository.store(), |_| Ok(()))
-            .expect_err("rollback")
+            .err()
+            .unwrap_or_else(|| panic!("rollback"))
             .to_string()
             .contains("boundary transaction rollback")
     );

@@ -1348,9 +1348,12 @@ mod tests {
             .unwrap_or_else(|poison| poison.into_inner())
             .pop()
             .expect("CreateSpool reached the server");
-        let signed = request
-            .owner_genesis
-            .expect("CreateSpool must send SignedSpoolOwnerGenesis");
+        let signed = match request.ownership {
+            Some(api::heddle::api::v2alpha1::create_spool_request::Ownership::OwnerGenesis(
+                signed,
+            )) => signed,
+            other => panic!("CreateSpool must send SignedSpoolOwnerGenesis, got {other:?}"),
+        };
         let genesis = signed.genesis.expect("signed genesis payload");
         let spool_uuid: [u8; 16] = genesis
             .spool_uuid

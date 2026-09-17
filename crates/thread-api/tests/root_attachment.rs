@@ -373,7 +373,7 @@ fn attached_endpoint_rejects_different_credential_account() {
         DateTime::<Utc>::from_timestamp(NOW + 1, 0).expect("clock"),
     )
     .err()
-    .expect("root trust cannot relabel credential account");
+    .unwrap_or_else(|| panic!("root trust cannot relabel credential account"));
     assert!(
         error.to_string().contains("credential subject or lifetime"),
         "{error}"
