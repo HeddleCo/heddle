@@ -7,6 +7,10 @@ pub(crate) fn print_next(action: &str) {
     print_bold_action("Next", action, 0);
 }
 
+pub(crate) fn format_next(action: &str) -> Option<String> {
+    format_bold_action("Next", action, 0)
+}
+
 pub(crate) fn print_next_step(action: &str) {
     print_bold_action("Next step", action, 0);
 }

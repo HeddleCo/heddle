@@ -390,6 +390,17 @@ impl Repository {
                 .namespace
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty())
+            || self.remotes_include_hosted()
+    }
+
+    fn remotes_include_hosted(&self) -> bool {
+        crate::remote::RemoteConfig::open(self)
+            .map(|cfg| {
+                cfg.list()
+                    .iter()
+                    .any(|(_, remote)| crate::remote::url_looks_like_hosted_remote(&remote.url))
+            })
+            .unwrap_or(false)
     }
 
     pub fn current_lane(&self) -> Result<Option<String>> {

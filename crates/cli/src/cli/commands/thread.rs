@@ -490,7 +490,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         )?;
     } else if output.threads.is_empty() && output.available_git_refs.is_empty() {
         println!("No threads");
-    } else {
+    } else if cli.verbose > 0 {
         println!(
             "{} {} {}",
             style::bold("Threads"),
@@ -525,8 +525,13 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
                 print_optional(&hint.recommended_command);
             }
         }
-        render_thread_sections(&output.threads, cli.verbose > 0);
-        render_available_git_refs(&output.available_git_refs, cli.verbose > 0);
+        render_thread_sections(&output.threads, true);
+        render_available_git_refs(&output.available_git_refs, true);
+    } else {
+        if !output.threads.is_empty() {
+            print!("{}", format_compact_thread_list(&output.threads));
+        }
+        render_available_git_refs(&output.available_git_refs, false);
     }
     let render_ms = render_start.elapsed().as_millis();
 
@@ -575,6 +580,75 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
 
 type ThreadSectionPredicate = fn(&ThreadSummary) -> bool;
 type ThreadSection = (&'static str, ThreadSectionPredicate);
+
+fn format_compact_thread_list(threads: &[ThreadSummary]) -> String {
+    let name_width = threads
+        .iter()
+        .map(|thread| thread.name.len())
+        .max()
+        .unwrap_or(0);
+    let mut rows = Vec::new();
+    for thread in threads.iter().filter(|thread| thread.is_current) {
+        rows.push(format_compact_thread_row(thread, name_width));
+    }
+    for thread in threads.iter().filter(|thread| !thread.is_current) {
+        rows.push(format_compact_thread_row(thread, name_width));
+    }
+    if rows.is_empty() {
+        return String::new();
+    }
+    rows.join("\n") + "\n"
+}
+
+fn format_compact_thread_row(entry: &ThreadSummary, name_width: usize) -> String {
+    let marker = if entry.is_current { "*" } else { " " };
+    let name = format!("{:<name_width$}", entry.name);
+    let mut cols = vec![format!("{marker} {name}")];
+    if let Some(state) = entry
+        .current_state
+        .as_deref()
+        .filter(|state| !state.is_empty())
+    {
+        cols.push(style::state_id(state));
+    }
+    if let Some(location) = compact_thread_location(entry) {
+        cols.push(location);
+    }
+    if let Some(ahead) = compact_ahead_suffix(entry) {
+        cols.push(ahead);
+    }
+    cols.join("  ")
+}
+
+fn compact_thread_location(entry: &ThreadSummary) -> Option<String> {
+    if entry.is_current {
+        return Some("this checkout".to_string());
+    }
+    entry
+        .path
+        .as_deref()
+        .or(entry.execution_path.as_deref())
+        .filter(|path| !path.trim().is_empty())
+        .map(compact_checkout_path)
+}
+
+fn compact_checkout_path(path: &str) -> String {
+    if let Some(index) = path.find(".heddle/threads/") {
+        return path[index..].to_string();
+    }
+    path.to_string()
+}
+
+fn compact_ahead_suffix(entry: &ThreadSummary) -> Option<String> {
+    if entry.coordination_status != CoordinationStatus::Ahead {
+        return None;
+    }
+    let parent = entry
+        .parent_thread
+        .as_deref()
+        .or(entry.target_thread.as_deref())?;
+    Some(format!("1 capture ahead of {parent}"))
+}
 
 fn render_thread_sections(threads: &[ThreadSummary], verbose: bool) {
     let sections: [ThreadSection; 5] = [
@@ -2819,6 +2893,135 @@ pub(crate) fn find_active_thread_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compact_thread_entry(
+        name: &str,
+        state: &str,
+        is_current: bool,
+        path: Option<&str>,
+        parent: Option<&str>,
+        ahead: bool,
+    ) -> ThreadSummary {
+        ThreadSummary {
+            name: name.into(),
+            operation: None,
+            remote_tracking: None,
+            base_state: parent.map(|_| "hs-parent".into()),
+            base_root: None,
+            current_state: Some(state.into()),
+            path: path.map(str::to_string),
+            execution_path: path.map(str::to_string),
+            session_id: None,
+            heddle_session_id: None,
+            actor: None,
+            harness: None,
+            thinking_level: None,
+            native_actor_key: None,
+            native_parent_actor_key: None,
+            probe_source: None,
+            probe_confidence: None,
+            usage_summary: None,
+            last_progress_at: None,
+            last_activity_at: None,
+            report_flush_state: None,
+            attach_reason: None,
+            thread_mode: Some(ThreadMode::Materialized),
+            thread_state: Some(ThreadState::Active),
+            freshness: Some(ThreadFreshness::Current),
+            visibility: "attached checkout".into(),
+            target_thread: parent.map(str::to_string),
+            parent_thread: parent.map(str::to_string),
+            child_threads: vec![],
+            sibling_threads: vec![],
+            stack_depth: 0,
+            stale_from_parent: false,
+            task: None,
+            task_assignment_id: None,
+            task_summary: None,
+            changed_paths: vec![],
+            promotion_suggested: false,
+            impact_categories: vec![],
+            heavy_impact_paths: vec![],
+            verification_summary: Default::default(),
+            confidence_summary: Default::default(),
+            integration_policy_result: Default::default(),
+            coordination_status: if ahead {
+                CoordinationStatus::Ahead
+            } else {
+                CoordinationStatus::Clean
+            },
+            is_current,
+            is_isolated: path.is_some() && !is_current,
+            thread_health: "clean".into(),
+            blockers: vec![],
+            recommended_action: String::new(),
+            recommended_action_template: None,
+            git_branch_tip: None,
+            history_imported: true,
+            auto: false,
+            shared_target_dir: None,
+        }
+    }
+
+    #[test]
+    fn compact_thread_list_marks_current_and_omits_this_checkout_path() {
+        let text = format_compact_thread_list(&[
+            compact_thread_entry("main", "hs-r98tkewc", true, Some("/tmp/repo"), None, false),
+            compact_thread_entry(
+                "feature",
+                "hs-r98tkewc",
+                false,
+                Some("/tmp/repo/.heddle/threads/feature/repo"),
+                None,
+                false,
+            ),
+        ]);
+        assert!(
+            text.contains("* main")
+                && text.contains("hs-r98tkewc")
+                && text.contains("this checkout"),
+            "current row should mark * and this checkout: {text}"
+        );
+        assert!(
+            text.contains("feature") && text.contains(".heddle/threads/feature/repo"),
+            "other threads should show a cd path when it is not this checkout: {text}"
+        );
+        for leaked in [
+            "Threads in",
+            "Repository:",
+            "no dedicated checkout",
+            "●",
+            "sync: current",
+        ] {
+            assert!(
+                !text.contains(leaked),
+                "compact thread list must not include {leaked:?}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_thread_list_reports_ahead_of_parent() {
+        let text = format_compact_thread_list(&[compact_thread_entry(
+            "feature",
+            "hs-abc",
+            false,
+            Some("/tmp/repo/.heddle/threads/feature/repo"),
+            Some("main"),
+            true,
+        )]);
+        assert!(
+            text.contains("feature")
+                && text.contains("hs-abc")
+                && text.contains(".heddle/threads/feature/repo")
+                && text.contains("1 capture ahead of main"),
+            "ahead rows should name the parent: {text}"
+        );
+        assert!(
+            !text.contains("* "),
+            "non-current rows must not use *: {text}"
+        );
+    }
 
     #[test]
     fn thread_workspace_label_pairs_modes_without_main() {

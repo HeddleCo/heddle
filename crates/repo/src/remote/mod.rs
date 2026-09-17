@@ -226,6 +226,23 @@ pub fn credential_key_from_remote_url(url: &str) -> Option<String> {
     credential_key_from_url(url)
 }
 
+/// True when `url` is a hosted spool (`/spool/` path segment) or a saved
+/// weft network remote (HTTPS/network heddle target, not a Git URL).
+pub fn url_looks_like_hosted_remote(url: &str) -> bool {
+    let url = url.trim();
+    if url.is_empty() {
+        return false;
+    }
+    hosted_url_has_spool_path(url)
+        || matches!(RemoteTarget::parse(url), Ok(RemoteTarget::Network { .. }))
+}
+
+fn hosted_url_has_spool_path(url: &str) -> bool {
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let path = rest.split_once('/').map(|(_, path)| path).unwrap_or("");
+    path.split('/').any(|segment| segment == "spool")
+}
+
 /// Internal implementation of credential key extraction.
 fn credential_key_from_url(url: &str) -> Option<String> {
     // Strip known scheme prefixes.
@@ -364,5 +381,84 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn spool_path_url_looks_like_hosted_remote() {
+        assert!(url_looks_like_hosted_remote(
+            "https://127.0.0.1:8421/spool/x/repo"
+        ));
+        assert!(url_looks_like_hosted_remote(
+            "https://api.heddle.sh/spool/acme/notes"
+        ));
+        assert!(!url_looks_like_hosted_remote(
+            "https://github.com/org/repo.git"
+        ));
+        assert!(!url_looks_like_hosted_remote(""));
+    }
+
+    fn with_isolated_heddle_home<T>(f: impl FnOnce() -> T) -> T {
+        static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = unique_temp_dir("heddle-home-hosted-enabled");
+        fs::create_dir_all(&home).expect("create heddle home");
+        let previous = std::env::var_os("HEDDLE_HOME");
+        unsafe { std::env::set_var("HEDDLE_HOME", &home) };
+        let result = f();
+        match previous {
+            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+        }
+        let _ = fs::remove_dir_all(home);
+        result
+    }
+
+    #[test]
+    fn hosted_enabled_is_true_for_origin_spool_remote() {
+        with_isolated_heddle_home(|| {
+            let temp = unique_temp_dir("heddle-hosted-enabled-spool");
+            fs::create_dir_all(&temp).expect("create temp dir");
+            let repo = Repository::init_default(&temp).expect("init repo");
+            assert!(
+                !repo.hosted_enabled(),
+                "no remotes and empty hosted config must be false"
+            );
+
+            let mut cfg = RemoteConfig::open(&repo).expect("open remotes");
+            cfg.add(
+                "origin",
+                Remote {
+                    url: "https://127.0.0.1:8421/spool/x/repo".to_string(),
+                    insecure: false,
+                },
+            )
+            .expect("add origin spool remote");
+
+            assert!(
+                repo.hosted_enabled(),
+                "a saved origin spool remote must enable hosted"
+            );
+
+            let _ = fs::remove_dir_all(temp);
+        });
+    }
+
+    #[test]
+    fn hosted_enabled_is_false_without_remotes_or_hosted_config() {
+        with_isolated_heddle_home(|| {
+            let temp = unique_temp_dir("heddle-hosted-enabled-empty");
+            fs::create_dir_all(&temp).expect("create temp dir");
+            let repo = Repository::init_default(&temp).expect("init repo");
+            assert!(repo.config().hosted.upstream_url.is_none());
+            assert!(repo.config().hosted.namespace.is_none());
+            assert!(
+                RemoteConfig::open(&repo)
+                    .expect("open remotes")
+                    .list()
+                    .is_empty()
+            );
+            assert!(!repo.hosted_enabled());
+            let _ = fs::remove_dir_all(temp);
+        });
     }
 }
