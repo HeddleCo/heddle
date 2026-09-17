@@ -30,7 +30,8 @@ jobs:
       - name: Keep signing and verification dependencies narrow
         run: python3 ../../.github/check_leaf_dependencies.py
       - name: Verify publish inventory and dependency order
-        run: ../../scripts/check-publish-pipeline.sh
+        working-directory: .
+        run: scripts/check-publish-pipeline.sh
       - name: Clippy
         run: cargo clippy --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- -D warnings
       - name: Public crate documentation
