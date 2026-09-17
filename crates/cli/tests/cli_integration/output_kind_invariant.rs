@@ -88,6 +88,9 @@ const SWEPT: &[&str] = &[
     "visibility promote",
     "visibility show",
     "visibility list",
+    "invite",
+    "invite list",
+    "discuss",
     "discuss open",
     "discuss turn",
     "discuss resolve",
@@ -95,6 +98,9 @@ const SWEPT: &[&str] = &[
     "discuss list",
     "discuss show",
     "discuss wait",
+    "thread ownership status",
+    "thread ownership claim",
+    "thread ownership resolve",
     "context set",
     "context get",
     "context list",
@@ -262,6 +268,12 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // they emit the delegate's kind.
         "agent capture" => Some("capture"),
         "agent ready" => Some("ready"),
+        "discuss" => Some("discuss_open"),
+        "invite" => Some("auth_invite"),
+        "invite list" => Some("auth_invite_list"),
+        "thread ownership status" | "thread ownership claim" | "thread ownership resolve" => {
+            Some("thread_ownership")
+        }
         "start" => Some("thread_start"),
         // The garbage-collection wrapper emits its inner tool's kind.
         "maintenance gc" => Some("gc"),

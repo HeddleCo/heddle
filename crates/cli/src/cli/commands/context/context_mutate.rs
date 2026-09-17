@@ -42,8 +42,8 @@ fn content_source_advice(err: ContextContentPlanError) -> RecoveryAdvice {
     match err {
         ContextContentPlanError::Required => RecoveryAdvice::invalid_usage(
             err.kind(),
-            "Provide annotation content with -m/--body or --from-file",
-            "Pass `-m`/`--body <text>` or `--from-file <path>` with annotation content.",
+            "Provide annotation content with -m/--body or --file",
+            "Pass `-m`/`--body <text>` or `--file <path>` with annotation content.",
             "heddle context set --path <path> -m \"...\"",
         ),
     }

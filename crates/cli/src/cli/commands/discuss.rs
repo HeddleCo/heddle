@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle discuss` — append-only local collaboration.
 
-use std::time::SystemTime;
+use std::{fs, path::Path, time::SystemTime};
 
 use anyhow::{Context, Result, anyhow};
 // The discussion wire payloads live in cli-contract so the schema registry
@@ -15,8 +15,9 @@ use objects::{
     object::{
         AnnotationKind, AnnotationScope, CollabOpId, CollaborationAnchor,
         CollaborationAnchorStatus, CollaborationIdempotencyKey, CollaborationOperationBodyV1,
-        CollaborationOperationEnvelope, CollaborationResolution, ContextTarget, DiscussionRecordId,
-        DiscussionTurnV1, MaterializedDiscussion, StateId, VisibilityTier,
+        CollaborationOperationEnvelope, CollaborationResolution, CollaborationRevision,
+        CollaborationSourceAnchor, ContextTarget, DiscussionRecordId, DiscussionTurnV1,
+        MaterializedDiscussion, StateId, VisibilityTier,
     },
 };
 use repo::{
@@ -40,61 +41,76 @@ use super::{
 use crate::{
     cli::{
         cli_args::{
-            Cli, DiscussTurnArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
-            DiscussReopenArgs, DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs,
-            ResolveModeArg,
+            Cli, DiscussAppendArgs, DiscussArgs, DiscussCommands, DiscussListArgs, DiscussOpenArgs,
+            DiscussReopenArgs, DiscussResolveArgs, DiscussShowArgs, DiscussTurnArgs,
+            DiscussWaitArgs, ResolveModeArg,
         },
         should_output_json,
     },
     config::UserConfig,
 };
 
-pub async fn run(cli: &Cli, command: &DiscussCommands) -> Result<()> {
+pub async fn run(cli: &Cli, args: &DiscussArgs) -> Result<()> {
     // Read-only subcommands must not bootstrap a store just to report it
     // empty — that side effect is what made `heddle status` claim
     // `Repository: Git + Heddle` in a clone that never had one (heddle#1145).
     // Mutating subcommands still bootstrap: overlay discussions are allowed,
     // they are just local, and `emit_locality_notice_once` says so.
-    let repo = match command {
-        DiscussCommands::List(_) | DiscussCommands::Show(_) => match open_annotation_store(cli)? {
-            AnnotationStore::Present(repo) => *repo,
-            AnnotationStore::Absent(absent) => {
-                let output_kind = match command {
-                    DiscussCommands::Show(_) => "discuss_show",
-                    _ => "discuss_list",
-                };
-                let with_items = matches!(command, DiscussCommands::List(_));
-                return report_absent_store(
-                    cli,
-                    AnnotationSurface::Discuss,
-                    output_kind,
-                    with_items,
-                    &absent,
-                );
+    let repo = match &args.command {
+        Some(DiscussCommands::List(_) | DiscussCommands::Show(_)) => {
+            match open_annotation_store(cli)? {
+                AnnotationStore::Present(repo) => *repo,
+                AnnotationStore::Absent(absent) => {
+                    let output_kind = match &args.command {
+                        Some(DiscussCommands::Show(_)) => "discuss_show",
+                        _ => "discuss_list",
+                    };
+                    let with_items = matches!(args.command, Some(DiscussCommands::List(_)));
+                    return report_absent_store(
+                        cli,
+                        AnnotationSurface::Discuss,
+                        output_kind,
+                        with_items,
+                        &absent,
+                    );
+                }
             }
-        },
+        }
         #[cfg(feature = "client")]
-        DiscussCommands::Wait(args) => {
+        Some(DiscussCommands::Wait(wait_args)) => {
             let repo = cli.open_repo().context("open Heddle repository")?;
-            return run_wait(cli, &repo, args).await;
+            return run_wait(cli, &repo, wait_args).await;
         }
         #[cfg(not(feature = "client"))]
-        DiscussCommands::Wait(_) => {
+        Some(DiscussCommands::Wait(_)) => {
             return Err(anyhow!(RecoveryAdvice::network_feature_unavailable(
                 "discuss wait"
             )));
         }
+        Some(DiscussCommands::Append(append_args)) => {
+            return Err(append_removed(append_args));
+        }
         _ => cli.open_repo().context("open Heddle repository")?,
     };
     let store = CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
-    match command {
-        DiscussCommands::Open(args) => run_open(cli, &repo, &store, args),
-        DiscussCommands::Turn(args) => run_turn(cli, &repo, &store, args),
-        DiscussCommands::Resolve(args) => run_resolve(cli, &repo, &store, args),
-        DiscussCommands::Reopen(args) => run_reopen(cli, &repo, &store, args),
-        DiscussCommands::List(args) => run_list(cli, &repo, &store, args),
-        DiscussCommands::Show(args) => run_show(cli, &store, args),
-        DiscussCommands::Wait(_) => unreachable!("wait returns before opening the store"),
+    match &args.command {
+        None => run_write(cli, &repo, &store, args),
+        Some(DiscussCommands::Open(open_args)) => {
+            hint_alias_next(cli, &open_alias_next(open_args));
+            run_open(cli, &repo, &store, open_args)
+        }
+        Some(DiscussCommands::Turn(turn_args)) => {
+            hint_alias_next(cli, &turn_alias_next(turn_args));
+            run_turn(cli, &repo, &store, turn_args)
+        }
+        Some(DiscussCommands::Append(_)) => unreachable!("append returns before opening the store"),
+        Some(DiscussCommands::Resolve(resolve_args)) => {
+            run_resolve(cli, &repo, &store, resolve_args)
+        }
+        Some(DiscussCommands::Reopen(reopen_args)) => run_reopen(cli, &repo, &store, reopen_args),
+        Some(DiscussCommands::List(list_args)) => run_list(cli, &repo, &store, list_args),
+        Some(DiscussCommands::Show(show_args)) => run_show(cli, &store, show_args),
+        Some(DiscussCommands::Wait(_)) => unreachable!("wait returns before opening the store"),
     }
 }
 
@@ -110,21 +126,111 @@ impl CompactProjection for DiscussionWriteOutput {
     }
 }
 
+fn run_write(
+    cli: &Cli,
+    repo: &repo::Repository,
+    store: &CollaborationStore,
+    args: &DiscussArgs,
+) -> Result<()> {
+    match (args.new, args.id.as_deref()) {
+        (true, None) => open_discussion(
+            cli,
+            repo,
+            store,
+            OpenSpec {
+                path: args.path.as_deref(),
+                symbol: args.symbol.as_deref(),
+                line: args.line,
+                body: args.body.as_deref(),
+                body_file: args.file.as_deref(),
+                title: args.title.as_deref(),
+                state: args.state.as_deref(),
+                visibility: args.visibility.as_deref(),
+                thread: args.thread.as_deref(),
+            },
+            &["discuss"],
+        ),
+        (false, Some(id)) => append_turn(
+            cli,
+            repo,
+            store,
+            id,
+            args.body.as_deref(),
+            args.file.as_deref(),
+            args.turn,
+            &["discuss"],
+        ),
+        (false, None) => Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "discuss_write_selector_required",
+            "discuss needs --new or --id",
+            "Open with `heddle discuss --new --path <path> …` or reply with `heddle discuss --id <id> …`.",
+            "heddle discuss --new --path src/lib.rs --symbol greet \"why greet?\"",
+        ))),
+        (true, Some(_)) => unreachable!("clap rejects --new with --id"),
+    }
+}
+
+struct OpenSpec<'a> {
+    path: Option<&'a str>,
+    symbol: Option<&'a str>,
+    line: Option<u32>,
+    body: Option<&'a str>,
+    body_file: Option<&'a Path>,
+    title: Option<&'a str>,
+    state: Option<&'a str>,
+    visibility: Option<&'a str>,
+    thread: Option<&'a str>,
+}
+
 fn run_open(
     cli: &Cli,
     repo: &repo::Repository,
     store: &CollaborationStore,
     args: &DiscussOpenArgs,
 ) -> Result<()> {
-    let (file, symbol, body) = open_inputs(args)?;
-    let state_id = resolve_open_state(repo, args.state.as_deref())?;
-    let title = args
+    open_discussion(
+        cli,
+        repo,
+        store,
+        OpenSpec {
+            path: args.path.as_deref().or(args.positional_file.as_deref()),
+            symbol: args.symbol.as_deref().or(args.positional_symbol.as_deref()),
+            line: args.line,
+            body: args.body_flag.as_deref().or(args.body.as_deref()),
+            body_file: args.file.as_deref(),
+            title: args.title.as_deref(),
+            state: args.state.as_deref(),
+            visibility: args.visibility.as_deref(),
+            thread: args.thread.as_deref(),
+        },
+        &["discuss", "open"],
+    )
+}
+
+fn open_discussion(
+    cli: &Cli,
+    repo: &repo::Repository,
+    store: &CollaborationStore,
+    spec: OpenSpec<'_>,
+    emitting: &[&str],
+) -> Result<()> {
+    let path = spec.path.map(str::trim).filter(|value| !value.is_empty());
+    let Some(path) = path else {
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "discuss_path_required",
+            "discuss --new requires --path",
+            "Pass `--path <file>` (and optionally `--symbol` / `--line`) to anchor the discussion.",
+            "heddle discuss --new --path src/lib.rs --symbol greet \"why greet?\"",
+        )));
+    };
+    let body = read_body(spec.body, spec.body_file)?;
+    let state_id = resolve_open_state(repo, spec.state)?;
+    let title = spec
         .title
-        .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .or_else(|| body.lines().map(str::trim).find(|line| !line.is_empty()))
-        .unwrap_or(symbol)
+        .unwrap_or(spec.symbol.unwrap_or(path))
         .to_string();
     let discussion_id = DiscussionRecordId::generate();
     let operation = CollaborationOperationEnvelope::new(
@@ -136,38 +242,49 @@ fn run_open(
         CollaborationOperationBodyV1::Open {
             blocking: false,
             title,
-            anchor: CollaborationAnchor::Symbol {
-                state_id,
-                path: file.to_string(),
-                symbol: symbol.to_string(),
-            },
+            anchor: open_anchor(state_id, path, spec.symbol, spec.line)?,
             visibility: parse_visibility(
-                args.visibility.as_deref(),
+                spec.visibility,
                 repo.resolve_capture_default_visibility(),
             )?,
             turn: DiscussionTurnV1::new(body)?,
-            thread_ref: args.thread.clone(),
+            thread_ref: spec.thread.map(str::to_owned),
         },
     )?;
     let outcome = store.write_operation(&operation)?;
     emit_locality_notice_once(repo, AnnotationSurface::Discuss);
-    emit_write(cli, "discuss_open", store, discussion_id, outcome)
+    emit_write(cli, "discuss_open", emitting, store, discussion_id, outcome)
 }
 
-fn open_inputs(args: &DiscussOpenArgs) -> Result<(&str, &str, &str)> {
-    match (
-        args.file.as_deref(),
-        args.symbol.as_deref(),
-        args.body.as_deref(),
-        args.file_flag.as_deref(),
-        args.symbol_flag.as_deref(),
-        args.body_flag.as_deref(),
-    ) {
-        (Some(file), Some(symbol), Some(body), None, None, None)
-        | (None, None, None, Some(file), Some(symbol), Some(body)) => Ok((file, symbol, body)),
-        _ => Err(anyhow!(
-            "discuss open requires either <FILE> <SYMBOL> <BODY> or --file <FILE> --symbol <SYMBOL> --body <BODY>"
-        )),
+fn open_anchor(
+    state_id: StateId,
+    path: &str,
+    symbol: Option<&str>,
+    line: Option<u32>,
+) -> Result<CollaborationAnchor> {
+    let symbol = symbol.map(str::trim).filter(|value| !value.is_empty());
+    if let Some(line) = line {
+        return Ok(CollaborationAnchor::Source {
+            source: CollaborationSourceAnchor {
+                revision: CollaborationRevision::State { state_id },
+                path: path.to_string(),
+                symbol_id: symbol.unwrap_or_default().to_string(),
+                start_line: Some(line),
+                end_line: Some(line),
+                target: None,
+            },
+        });
+    }
+    match symbol {
+        Some(symbol) => Ok(CollaborationAnchor::Symbol {
+            state_id,
+            path: path.to_string(),
+            symbol: symbol.to_string(),
+        }),
+        None => Ok(CollaborationAnchor::Path {
+            state_id,
+            path: path.to_string(),
+        }),
     }
 }
 
@@ -177,23 +294,129 @@ fn run_turn(
     store: &CollaborationStore,
     args: &DiscussTurnArgs,
 ) -> Result<()> {
-    let (discussion_id, body) = match args.open_body.as_deref() {
-        Some(body) => (
-            lookup_discussion_id(store, &args.discussion_id, &args.body)?,
-            body.to_string(),
-        ),
-        None => (args.discussion_id.clone(), args.body.clone()),
-    };
+    append_turn(
+        cli,
+        repo,
+        store,
+        &args.discussion_id,
+        Some(args.body.as_str()),
+        None,
+        args.turn,
+        &["discuss", "turn"],
+    )
+}
+
+fn append_turn(
+    cli: &Cli,
+    repo: &repo::Repository,
+    store: &CollaborationStore,
+    raw_id: &str,
+    body: Option<&str>,
+    body_file: Option<&Path>,
+    turn: Option<u32>,
+    emitting: &[&str],
+) -> Result<()> {
+    let body = read_body(body, body_file)?;
     write_descendant(
         cli,
         repo,
         store,
-        &discussion_id,
+        raw_id,
         "discuss_turn",
+        emitting,
+        turn,
         CollaborationOperationBodyV1::AppendTurn {
             turn: DiscussionTurnV1::new(body)?,
         },
     )
+}
+
+fn read_body(body: Option<&str>, file: Option<&Path>) -> Result<String> {
+    match (body.map(str::trim).filter(|value| !value.is_empty()), file) {
+        (Some(body), None) => Ok(body.to_string()),
+        (None, Some(path)) => {
+            let contents = fs::read_to_string(path)
+                .with_context(|| format!("read discussion body from {}", path.display()))?;
+            let trimmed = contents.trim();
+            if trimmed.is_empty() {
+                return Err(anyhow!(RecoveryAdvice::invalid_usage(
+                    "discuss_body_required",
+                    "discussion body must not be empty",
+                    "Pass a non-empty markdown body or `--file` pointing at a non-empty file.",
+                    "heddle discuss --new --path src/lib.rs --file why.md",
+                )));
+            }
+            Ok(trimmed.to_string())
+        }
+        (Some(_), Some(_)) => Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "discuss_body_conflict",
+            "pass the body as an argument or `--file`, not both",
+            "Use a positional markdown body or `--file <path>`.",
+            "heddle discuss --new --path src/lib.rs --file why.md",
+        ))),
+        (None, None) => Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "discuss_body_required",
+            "discussion body is required",
+            "Pass a markdown body argument or `--file <path>`.",
+            "heddle discuss --new --path src/lib.rs \"why greet?\"",
+        ))),
+    }
+}
+
+fn append_removed(args: &DiscussAppendArgs) -> anyhow::Error {
+    let primary = match args.discussion_id.as_deref() {
+        Some(id) => format!("heddle discuss --id {id} \"second thought\""),
+        None => "heddle discuss --id disc-01a0afc6 \"second thought\"".to_string(),
+    };
+    anyhow!(RecoveryAdvice::invalid_usage(
+        "discuss_append_removed",
+        "`discuss append` is not a command",
+        "Reply with `heddle discuss --id <id> \"<body>\"`.",
+        primary,
+    ))
+}
+
+fn hint_alias_next(cli: &Cli, next: &str) {
+    if should_output_json(cli, None) {
+        return;
+    }
+    eprintln!("Next: {next}");
+}
+
+fn open_alias_next(args: &DiscussOpenArgs) -> String {
+    let mut command = String::from("heddle discuss --new");
+    if let Some(path) = args.path.as_deref().or(args.positional_file.as_deref()) {
+        command.push_str(" --path ");
+        command.push_str(path);
+    } else {
+        command.push_str(" --path <path>");
+    }
+    if let Some(symbol) = args.symbol.as_deref().or(args.positional_symbol.as_deref()) {
+        command.push_str(" --symbol ");
+        command.push_str(symbol);
+    }
+    if let Some(line) = args.line {
+        command.push_str(&format!(" --line {line}"));
+    }
+    if let Some(file) = args.file.as_deref() {
+        command.push_str(" --file ");
+        command.push_str(&file.display().to_string());
+    } else if let Some(body) = args.body_flag.as_deref().or(args.body.as_deref()) {
+        command.push_str(&format!(" {body:?}"));
+    } else {
+        command.push_str(" \"<body>\"");
+    }
+    command
+}
+
+fn turn_alias_next(args: &DiscussTurnArgs) -> String {
+    match args.turn {
+        Some(turn) => format!(
+            "heddle discuss --id {} --turn {turn} {:?}",
+            args.discussion_id, args.body
+        ),
+        None => format!("heddle discuss --id {} {:?}", args.discussion_id, args.body),
+    }
 }
 
 fn run_resolve(
@@ -202,8 +425,6 @@ fn run_resolve(
     store: &CollaborationStore,
     args: &DiscussResolveArgs,
 ) -> Result<()> {
-    let discussion_id =
-        resolve_discussion_locator(store, &args.discussion_id, args.symbol.as_deref())?;
     let resolution = match (args.resolved_mode(), args.into_annotation) {
         (Some(ResolveModeArg::ByEdit), false) => CollaborationResolution::AddressedByState {
             state_id: resolve_state(repo, args.state.as_deref())?,
@@ -217,13 +438,16 @@ fn run_resolve(
                 .ok_or_else(|| anyhow!(RecoveryAdvice::discuss_resolve_missing_dismiss_reason()))?
                 .to_string(),
         },
-        (None, true) => resolve_into_context_annotation(repo, store, args, &discussion_id)?,
+        (None, true) => {
+            let discussion_id = resolve_discussion_id(store, &args.discussion_id)?.to_string();
+            resolve_into_context_annotation(repo, store, args, discussion_id.as_str())?
+        }
         _ => {
             return Err(anyhow!(RecoveryAdvice::invalid_usage(
                 "discuss_resolve_mode_required",
                 "discuss resolve needs a resolution mode",
                 "Pass `--dismiss --reason ...`, `--by-edit`, `--mode dismiss|by-edit`, or `--into-annotation`.",
-                "heddle discuss resolve <id> --dismiss --reason ...",
+                "heddle discuss resolve disc-01a0afc6 --dismiss --reason done",
             )));
         }
     };
@@ -231,8 +455,10 @@ fn run_resolve(
         cli,
         repo,
         store,
-        &discussion_id,
+        &args.discussion_id,
         "discuss_resolve",
+        &["discuss", "resolve"],
+        None,
         CollaborationOperationBodyV1::Resolve { resolution },
     )
 }
@@ -333,6 +559,8 @@ fn run_reopen(
         store,
         &args.discussion_id,
         "discuss_reopen",
+        &["discuss", "reopen"],
+        None,
         CollaborationOperationBodyV1::Reopen {
             reason: args.reason.clone(),
         },
@@ -345,9 +573,11 @@ fn write_descendant(
     store: &CollaborationStore,
     raw_id: &str,
     output_kind: &'static str,
+    emitting: &[&str],
+    parent_turn: Option<u32>,
     body: CollaborationOperationBodyV1,
 ) -> Result<()> {
-    let discussion_id = parse_discussion_id(raw_id)?;
+    let discussion_id = resolve_discussion_id(store, raw_id)?;
     let discussion = store
         .materialize_discussion(&discussion_id)?
         .ok_or_else(|| {
@@ -355,16 +585,48 @@ fn write_descendant(
                 &discussion_id.to_string()
             ))
         })?;
+    let parents = parent_operation_ids(&discussion, parent_turn)?;
     let operation = CollaborationOperationEnvelope::new(
         discussion_id,
-        discussion.heads.iter().copied().collect(),
+        parents,
         idempotency_key(cli)?,
         repo.get_attribution()?,
         now_ms(),
         body,
     )?;
     let outcome = store.write_operation(&operation)?;
-    emit_write(cli, output_kind, store, discussion_id, outcome)
+    emit_write(cli, output_kind, emitting, store, discussion_id, outcome)
+}
+
+fn parent_operation_ids(
+    discussion: &MaterializedDiscussion,
+    parent_turn: Option<u32>,
+) -> Result<Vec<CollabOpId>> {
+    let Some(turn) = parent_turn else {
+        return Ok(discussion.heads.iter().copied().collect());
+    };
+    if turn == 0 {
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "discuss_turn_invalid",
+            "--turn is 1-indexed and must be at least 1",
+            "Pass `--turn N` using the turn number from `heddle discuss show`.",
+            "heddle discuss --id disc-01a0afc6 --turn 1 \"reply\"",
+        )));
+    }
+    let index = usize::try_from(turn).unwrap_or(usize::MAX) - 1;
+    match discussion.turns.get(index) {
+        Some((operation_id, _)) => Ok(vec![*operation_id]),
+        None => Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "discuss_turn_invalid",
+            format!(
+                "discussion {} has {} turn(s); --turn {turn} is out of range",
+                discussion.discussion_id.to_string_short(),
+                discussion.turns.len()
+            ),
+            "Pass `--turn N` using a turn number from `heddle discuss show`, or omit it to reply to the latest head.",
+            "heddle discuss list",
+        ))),
+    }
 }
 
 fn run_list(
@@ -373,8 +635,8 @@ fn run_list(
     store: &CollaborationStore,
     args: &DiscussListArgs,
 ) -> Result<()> {
-    if args.symbol.is_some() && args.file.is_none() {
-        return Err(anyhow!("discuss list --symbol requires --file"));
+    if args.symbol.is_some() && args.path.is_none() {
+        return Err(anyhow!("discuss list --symbol requires --path"));
     }
     if !matches!(
         args.status.as_str(),
@@ -609,11 +871,7 @@ fn emit_wait_line(cli: &Cli, line: DiscussWaitLineOutput) -> Result<()> {
 }
 
 fn run_show(cli: &Cli, store: &CollaborationStore, args: &DiscussShowArgs) -> Result<()> {
-    let discussion_id = parse_discussion_id(&resolve_discussion_locator(
-        store,
-        &args.discussion_id,
-        args.symbol.as_deref(),
-    )?)?;
+    let discussion_id = resolve_discussion_id(store, &args.discussion_id)?;
     let discussion = store
         .materialize_discussion(&discussion_id)?
         .ok_or_else(|| {
@@ -631,6 +889,7 @@ fn run_show(cli: &Cli, store: &CollaborationStore, args: &DiscussShowArgs) -> Re
 fn emit_write(
     cli: &Cli,
     output_kind: &'static str,
+    emitting: &[&str],
     store: &CollaborationStore,
     discussion_id: DiscussionRecordId,
     outcome: CollaborationWriteOutcome,
@@ -645,21 +904,29 @@ fn emit_write(
         discussion: to_view(store, &discussion)?,
     };
     if should_output_json(cli, None) {
-        let emitting = match output_kind {
-            "discuss_open" => &["discuss", "open"][..],
-            "discuss_turn" => &["discuss", "turn"][..],
-            "discuss_resolve" => &["discuss", "resolve"][..],
-            "discuss_reopen" => &["discuss", "reopen"][..],
-            _ => &["discuss"][..],
-        };
         write_projected_command_json(cli, &output, emitting)?;
     } else {
         println!(
-            "{} {} ({})",
-            output.discussion.status, output.discussion.id, output.operation_id
+            "{} {}  {}",
+            write_verb(output_kind),
+            discussion_id.to_string_short(),
+            anchor_label(&output.discussion.anchor)
         );
+        if cli.verbose > 0 {
+            println!("{}", output.operation_id);
+        }
     }
     Ok(())
+}
+
+fn write_verb(output_kind: &str) -> &'static str {
+    match output_kind {
+        "discuss_open" => "opened",
+        "discuss_turn" => "appended",
+        "discuss_resolve" => "resolved",
+        "discuss_reopen" => "reopened",
+        _ => "wrote",
+    }
 }
 
 fn emit_show(cli: &Cli, output: &DiscussionShowOutput) -> Result<()> {
@@ -766,7 +1033,7 @@ fn matches_filters(
     };
     status_matches
         && state.is_none_or(|state| anchor_state(&discussion.anchor) == Some(state))
-        && args.file.as_ref().is_none_or(|path| {
+        && args.path.as_ref().is_none_or(|path| {
             anchor_path(&discussion.anchor).is_some_and(|candidate| candidate == path)
         })
         && args.symbol.as_ref().is_none_or(|symbol| {
@@ -780,57 +1047,34 @@ fn parse_discussion_id(value: &str) -> Result<DiscussionRecordId> {
         .map_err(|error| anyhow!("invalid discussion id {value:?}: {error}"))
 }
 
-fn resolve_discussion_locator(
-    store: &CollaborationStore,
-    discussion_id: &str,
-    symbol: Option<&str>,
-) -> Result<String> {
-    match symbol {
-        Some(symbol) => lookup_discussion_id(store, discussion_id, symbol),
-        None => Ok(discussion_id.to_string()),
+fn resolve_discussion_id(store: &CollaborationStore, value: &str) -> Result<DiscussionRecordId> {
+    if let Ok(id) = value.parse() {
+        return Ok(id);
     }
-}
-
-fn lookup_discussion_id(store: &CollaborationStore, file: &str, symbol: &str) -> Result<String> {
     let materialized = store.materialize()?;
     let mut matches: Vec<_> = materialized
         .discussions
-        .into_values()
-        .filter(|discussion| {
-            matches!(
-                &discussion.anchor,
-                CollaborationAnchor::Symbol {
-                    path,
-                    symbol: candidate,
-                    ..
-                } if path == file && candidate == symbol
-            )
+        .into_keys()
+        .filter(|id| {
+            let full = id.to_string();
+            full == value || full.starts_with(value) || id.to_string_short() == value
         })
         .collect();
-    matches.sort_by_key(|discussion| discussion.discussion_id.to_string());
+    matches.sort();
     match matches.as_slice() {
-        [one] => Ok(one.discussion_id.to_string()),
-        [] => Err(anyhow!(RecoveryAdvice::discussion_not_found(&format!(
-            "{file}:{symbol}"
-        )))),
+        [one] => Ok(*one),
+        [] => Err(anyhow!(RecoveryAdvice::discussion_not_found(value))),
         many => {
-            let open: Vec<_> = many
-                .iter()
-                .filter(|discussion| discussion.resolution.is_none())
-                .collect();
-            if let [one] = open.as_slice() {
-                return Ok(one.discussion_id.to_string());
-            }
             let ids = many
                 .iter()
-                .map(|discussion| discussion.discussion_id.to_string())
+                .map(DiscussionRecordId::to_string_short)
                 .collect::<Vec<_>>()
                 .join(", ");
             Err(anyhow!(RecoveryAdvice::invalid_usage(
-                "discuss_anchor_ambiguous",
-                format!("multiple discussions match {file}:{symbol}: {ids}"),
-                "Pass the discussion id from `heddle discuss list` instead of FILE SYMBOL.",
-                "heddle discuss list --file <file> --symbol <symbol>",
+                "discuss_id_ambiguous",
+                format!("multiple discussions match {value:?}: {ids}"),
+                "Pass a longer `disc-` prefix or the full id from `heddle discuss list`.",
+                "heddle discuss list",
             )))
         }
     }

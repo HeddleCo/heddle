@@ -7806,12 +7806,11 @@ fn discuss_open_named_flags_records_thread_ref() {
         temp.path(),
         &[
             "discuss",
-            "open",
-            "--file",
+            "--new",
+            "--path",
             "src/lib.rs",
             "--symbol",
             "foo",
-            "--body",
             "Keep the thread context attached",
             "--thread",
             "refs/heads/feature/foo",
@@ -7936,6 +7935,112 @@ fn discuss_resolve_into_annotation_creates_context_annotation() {
         ids,
         vec![annotation_id],
         "replaying resolve --into-annotation must not mint a second context row: {after}"
+    );
+}
+
+#[test]
+fn discuss_write_path_file_body_short_id_and_turn() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "fn greet() {}\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("why.md"), "why greet?\n").unwrap();
+
+    let opened = json_value(
+        temp.path(),
+        &[
+            "discuss",
+            "--new",
+            "--path",
+            "src/lib.rs",
+            "--file",
+            "why.md",
+        ],
+    );
+    assert_eq!(opened["output_kind"], "discuss_open");
+    assert_eq!(opened["discussion"]["anchor"]["path"], "src/lib.rs");
+    assert_eq!(opened["discussion"]["turns"][0]["body"], "why greet?");
+    let full_id = opened["discussion"]["id"]
+        .as_str()
+        .expect("full disc- id")
+        .to_string();
+    assert!(full_id.starts_with("disc-") && full_id.len() > "disc-".len() + 8);
+    let short = format!("disc-{}", &full_id.trim_start_matches("disc-")[..8]);
+    assert!(
+        opened["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("co-"))
+    );
+
+    let text = heddle(
+        &[
+            "discuss",
+            "--new",
+            "--path",
+            "src/lib.rs",
+            "--symbol",
+            "greet",
+            "why greet?",
+        ],
+        Some(temp.path()),
+    )
+    .expect("text discuss --new");
+    assert!(
+        text.contains("opened disc-") && text.contains("src/lib.rs:greet"),
+        "text write should print short id and anchor: {text}"
+    );
+    assert!(
+        !text.contains("co-"),
+        "text default should omit the co- operation id: {text}"
+    );
+
+    let verbose = heddle(
+        &["-v", "discuss", "--id", &full_id, "second thought"],
+        Some(temp.path()),
+    )
+    .expect("verbose discuss --id");
+    assert!(
+        verbose.contains("appended disc-") && verbose.contains("co-"),
+        "-v should print the co- line: {verbose}"
+    );
+    assert!(
+        verbose.contains(&short),
+        "text write should still name the short disc- id: {verbose}"
+    );
+
+    let replied = json_value(
+        temp.path(),
+        &[
+            "discuss",
+            "--id",
+            &full_id,
+            "--turn",
+            "1",
+            "reply to that turn",
+        ],
+    );
+    assert_eq!(replied["output_kind"], "discuss_turn");
+    assert_eq!(
+        replied["discussion"]["turns"].as_array().map(Vec::len),
+        Some(3)
+    );
+}
+
+#[test]
+fn discuss_append_hints_id_not_open() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let output = heddle_output(
+        &["discuss", "append", "disc-01a0afc6", "later"],
+        Some(temp.path()),
+    )
+    .expect("invoke discuss append");
+    assert!(!output.status.success(), "append must refuse");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("discuss --id") && !stderr.contains("discuss open"),
+        "append must hint discuss --id, not open: {stderr}"
     );
 }
 

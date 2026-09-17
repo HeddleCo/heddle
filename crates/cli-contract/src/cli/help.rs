@@ -919,21 +919,25 @@ Tick budget: at most 3 signals per state by default. Priority:\n\
 invariant_adjacency > self_flagged_uncertainty > pattern_deviation >\n\
 novelty > test_reachability.\n";
 
-const DISCUSS_TOPIC: &str = "`heddle discuss open | append | resolve | reopen | list | show | wait`\n\
+const DISCUSS_TOPIC: &str = "`heddle discuss --new | --id | resolve | reopen | list | show | wait`\n\
 \n\
 Scope: native Heddle only. Discussions are stored in `.heddle` and travel over\n\
 `heddle push` / `heddle pull` to a Heddle remote. They are deliberately not\n\
 projected into Git — not into `refs/notes/*`, not into a tracked file — so\n\
 `git push` and `git clone` do not carry them. In Git Overlay mode discussions\n\
-still work; they are local to that working copy, and `heddle discuss open`\n\
+still work; they are local to that working copy, and `heddle discuss --new`\n\
 says so once. A clone with no `.heddle` reports that no store is present\n\
 rather than reporting zero discussions.\n\
 \n\
 Discussions are stable records in the repository collaboration log. Turns,\n\
 resolutions, and reopenings append immutable operations; concurrent turns\n\
-converge without rewriting source history. Symbol anchors record the state,\n\
-file, and symbol where the discussion began:\n\
+converge without rewriting source history. `--path` / `--symbol` / `--line`\n\
+record the state, file, and selector where the discussion began:\n\
 \n\
+- `discuss --new --path <file> --symbol <sym> \"<body>\"`  open a discussion.\n\
+- `discuss --new --path <file> --file <markdown>`         body from a file.\n\
+- `discuss --id <id> \"<body>\"`                           reply; parent = latest.\n\
+- `discuss --id <id> --turn N \"<body>\"`                  reply to that turn.\n\
 - `resolve <id> --mode by-edit`          with `--state` (defaults to HEAD).\n\
   Records that a subsequent edit addressed the discussion.\n\
 - `resolve <id> --mode dismiss`          requires non-empty `--reason`.\n\
@@ -941,9 +945,8 @@ file, and symbol where the discussion began:\n\
   annotation; `--kind` defaults to rationale and `--tag` is repeatable.\n\
 - `reopen <id> --reason <text>`          compensates a prior resolution.\n\
 \n\
-`open` accepts either `<file> <symbol> <body>` or the equivalent named\n\
-`--file`, `--symbol`, and `--body` flags. `--thread <ref>` additionally attaches\n\
-the symbol-anchored discussion to a thread; it does not replace the anchor.\n\
+`--file` is always a markdown body file. `--thread <ref>` additionally attaches\n\
+the discussion to a thread; it does not replace the anchor.\n\
 \n\
 Visibility: `--visibility public|internal|team:NAME|restricted:LABEL|private:LABEL`.\n\
 Empty visibility uses the configured discussion visibility policy.\n\

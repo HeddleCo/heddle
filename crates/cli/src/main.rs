@@ -9,6 +9,8 @@ use std::{
 
 use anyhow::Result;
 use clap::{Arg, ArgAction, CommandFactory, Parser, error::ErrorKind};
+#[cfg(feature = "client")]
+use cli::cli::AuthCommands;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 use cli::cli::commands::cmd_context_reason_git;
 #[cfg(feature = "semantic")]
@@ -17,8 +19,6 @@ use cli::cli::commands::cmd_semantic;
 use cli::cli::commands::{
     cmd_grant, cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami, cmd_promote,
 };
-#[cfg(feature = "client")]
-use cli::cli::AuthCommands;
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
     BridgeCommands, BridgeGitCommands,
@@ -726,7 +726,7 @@ async fn async_main() -> Result<()> {
                     args.kind.clone(),
                     args.tag.clone(),
                     args.message.clone(),
-                    args.from_file.clone(),
+                    args.file.clone(),
                 )
                 .await
             }
@@ -770,7 +770,7 @@ async fn async_main() -> Result<()> {
                     args.kind.clone(),
                     args.tag.clone(),
                     args.message.clone(),
-                    args.from_file.clone(),
+                    args.file.clone(),
                 )
                 .await
             }
@@ -784,7 +784,7 @@ async fn async_main() -> Result<()> {
                     args.kind.clone(),
                     args.tag.clone(),
                     args.message.clone(),
-                    args.from_file.clone(),
+                    args.file.clone(),
                 )
                 .await
             }
@@ -847,7 +847,7 @@ async fn async_main() -> Result<()> {
 
         Commands::Agent { command } => cmd_agent(&cli, command).await,
 
-        Commands::Discuss { command } => cmd_discuss(&cli, command).await,
+        Commands::Discuss(args) => cmd_discuss(&cli, args).await,
 
         Commands::Query(args) => cmd_query(&cli, args).await,
 

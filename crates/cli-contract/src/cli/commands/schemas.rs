@@ -151,7 +151,7 @@ schema_registry! {
     (&["review sign"], ReviewSignOutput),
     (&["review next"], ReviewNextOutput),
     (&["review health"], ReviewHealthOutput),
-    (&["discuss open", "discuss turn", "discuss resolve", "discuss reopen"], DiscussionWriteOutput),
+    (&["discuss", "discuss --new", "discuss --id", "discuss open", "discuss turn", "discuss resolve", "discuss reopen"], DiscussionWriteOutput),
     (&["discuss show"], DiscussionShowOutput),
     (&["discuss list"], DiscussionListOutput),
     (&["discuss wait"], DiscussWaitLineOutput),
@@ -1482,6 +1482,9 @@ mod tests {
         for verb in [
             "maintenance fsck",
             "resolve",
+            "discuss",
+            "discuss --new",
+            "discuss --id",
             "discuss open",
             "discuss turn",
             "discuss resolve",

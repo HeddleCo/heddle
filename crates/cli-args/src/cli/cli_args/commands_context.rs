@@ -126,9 +126,9 @@ pub struct ContextSetArgs {
     #[arg(short = 'm', long, visible_alias = "body")]
     pub message: Option<String>,
 
-    /// Read annotation content from a file.
-    #[arg(long = "from-file", value_name = "PATH")]
-    pub from_file: Option<std::path::PathBuf>,
+    /// Read annotation content from a markdown body file.
+    #[arg(long = "file", alias = "from-file", value_name = "PATH")]
+    pub file: Option<std::path::PathBuf>,
 }
 
 impl ContextSetArgs {
@@ -214,9 +214,9 @@ pub struct ContextEditArgs {
     #[arg(short = 'm', long, visible_alias = "body")]
     pub message: Option<String>,
 
-    /// Read revision content from a file.
-    #[arg(long = "from-file", value_name = "PATH")]
-    pub from_file: Option<std::path::PathBuf>,
+    /// Read revision content from a markdown body file.
+    #[arg(long = "file", alias = "from-file", value_name = "PATH")]
+    pub file: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, clap::Args)]
@@ -247,9 +247,9 @@ pub struct ContextSupersedeArgs {
     #[arg(short = 'm', long, visible_alias = "body")]
     pub message: Option<String>,
 
-    /// Read replacement content from a file.
-    #[arg(long = "from-file", value_name = "PATH")]
-    pub from_file: Option<std::path::PathBuf>,
+    /// Read replacement content from a markdown body file.
+    #[arg(long = "file", alias = "from-file", value_name = "PATH")]
+    pub file: Option<std::path::PathBuf>,
 }
 
 /// Arguments for `heddle context rm`.
@@ -361,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn context_set_accepts_positional_path_body_alias_and_from_file() {
+    fn context_set_accepts_positional_path_body_alias_and_file() {
         match Cli::try_parse_from([
             "heddle",
             "context",
@@ -387,26 +387,38 @@ mod tests {
             "set",
             "--path",
             "src/auth.rs",
-            "--from-file",
+            "--file",
             "note.md",
         ])
-        .expect("from-file")
+        .expect("file body")
         .command
         {
             Commands::Context {
                 command: ContextCommands::Set(args),
             } => {
                 assert_eq!(args.resolved_path(), Some("src/auth.rs"));
-                assert_eq!(
-                    args.from_file.as_deref(),
-                    Some(std::path::Path::new("note.md"))
-                );
+                assert_eq!(args.file.as_deref(), Some(std::path::Path::new("note.md")));
             }
             _ => panic!("expected context set"),
         }
-        assert!(
-            Cli::try_parse_from(["heddle", "context", "set", "--file", "note.md"]).is_err(),
-            "old --file content flag must not parse"
-        );
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "set",
+            "--path",
+            "src/auth.rs",
+            "--from-file",
+            "note.md",
+        ])
+        .expect("from-file alias")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Set(args),
+            } => {
+                assert_eq!(args.file.as_deref(), Some(std::path::Path::new("note.md")));
+            }
+            _ => panic!("expected context set"),
+        }
     }
 }

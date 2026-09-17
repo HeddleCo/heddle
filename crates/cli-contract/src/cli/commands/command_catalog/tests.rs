@@ -135,6 +135,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     #[cfg(feature = "client")]
     sample(&["auth", "invite", "list"], &["auth", "invite", "list"]),
     #[cfg(feature = "client")]
+    sample(&["invite"], &["invite", "--email", "alice@example.com"]),
+    #[cfg(feature = "client")]
+    sample(&["invite", "list"], &["invite", "list"]),
+    #[cfg(feature = "client")]
     sample(
         &["auth", "trust", "show"],
         &["auth", "trust", "show", "--server", "api.heddle.test"],
@@ -175,7 +179,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "auth",
             "create-service-token",
             "github-ci-main",
-            "--namespace",
+            "--scope",
             "heddle/platform",
         ],
     ),
@@ -196,7 +200,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "--principal",
             "alice",
             "--role",
-            "contributor",
+            "writer",
         ],
     ),
     #[cfg(feature = "client")]
@@ -266,6 +270,18 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["netd", "stop"], &["netd", "stop"]),
     sample(&["diff"], &["diff"]),
     sample(
+        &["discuss"],
+        &[
+            "discuss",
+            "--new",
+            "--path",
+            "src/lib.rs",
+            "--symbol",
+            "symbol",
+            "body",
+        ],
+    ),
+    sample(
         &["discuss", "open"],
         &["discuss", "open", "src/lib.rs", "symbol", "body"],
     ),
@@ -273,6 +289,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["discuss", "turn"],
         &["discuss", "turn", "discussion-1", "body"],
     ),
+    sample(&["discuss", "append"], &["discuss", "append"]),
     sample(
         &["discuss", "resolve"],
         &["discuss", "resolve", "discussion-1", "--mode", "dismiss"],
@@ -473,6 +490,22 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["thread", "absorb"], &["thread", "absorb", "feature"]),
     sample(&["thread", "resolve"], &["thread", "resolve", "feature"]),
+    sample(
+        &["thread", "ownership", "status"],
+        &["thread", "ownership", "status"],
+    ),
+    sample(
+        &["thread", "ownership", "claim"],
+        &["thread", "ownership", "claim"],
+    ),
+    sample(
+        &["thread", "ownership", "resolve"],
+        &["thread", "ownership", "resolve", "--claim", "claim-1"],
+    ),
+    sample(
+        &["thread", "readiness"],
+        &["thread", "readiness", "feature", "main"],
+    ),
     sample(&["thread", "promote"], &["thread", "promote", "feature"]),
     sample(&["thread", "drop"], &["thread", "drop", "feature"]),
     sample(
@@ -1047,6 +1080,7 @@ fn json_compact_runtime_contract_is_projection_or_rejection() {
         "context set".to_string(),
         "continue".to_string(),
         "diff".to_string(),
+        "discuss".to_string(),
         "discuss open".to_string(),
         "land".to_string(),
         "log".to_string(),
@@ -1442,6 +1476,7 @@ fn sidecar_only_effect_sets_exclude_refs() {
         &["agent", "task", "create"],
         &["agent", "task", "update"],
         &["context", "reason", "git"],
+        &["discuss"][..],
         &["discuss", "open"],
         &["discuss", "turn"],
         &["discuss", "resolve"],
@@ -1806,6 +1841,8 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "auth status",
             "auth invite",
             "auth invite list",
+            "invite",
+            "invite list",
             // heddle#1130: descriptor-trust inspection and explicit
             // compare-and-swap replacement emit stable trust records.
             "auth trust show",
@@ -1847,6 +1884,8 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "netd stop",
             "daemon stop",
             "diff",
+            "discuss",
+            "discuss",
             "discuss open",
             "discuss turn",
             "discuss resolve",
@@ -1911,6 +1950,9 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "thread rename",
             "thread refresh",
             "thread resolve",
+            "thread ownership status",
+            "thread ownership claim",
+            "thread ownership resolve",
             "thread promote",
             "thread drop",
             "thread revoke-approval",
@@ -2524,6 +2566,8 @@ fn feature_gated_command_roots_are_catalog_owned() {
     // listed here.
     assert_eq!(
         feature_gated_command_roots(),
-        &["auth", "ci", "claim", "grant", "promote", "whoami"]
+        &[
+            "auth", "ci", "claim", "grant", "invite", "promote", "whoami"
+        ]
     );
 }

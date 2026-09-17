@@ -1504,7 +1504,10 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["invite"],
         feature_gated(
             json_discriminators(
-                documented_schemas(user_scoped(NETWORK_METADATA_MUTATION), &["invite", "auth invite"]),
+                documented_schemas(
+                    user_scoped(NETWORK_METADATA_MUTATION),
+                    &["invite", "auth invite"],
+                ),
                 &[json_discriminator(
                     Some("invite"),
                     "output_kind",
@@ -2069,29 +2072,45 @@ const CONTRACTS: &[CommandContractEntry] = &[
             20,
         ),
     ),
-    entry(&["discuss"], front_door(GROUP, 170)),
+    entry(
+        &["discuss"],
+        front_door(
+            json_discriminators(
+                documented_schemas(
+                    compact_json(METADATA_MUTATION),
+                    &["discuss", "discuss --new", "discuss --id"],
+                ),
+                &[
+                    json_discriminator(Some("discuss"), "output_kind", "discuss_open"),
+                    json_discriminator(Some("discuss --id"), "output_kind", "discuss_turn"),
+                ],
+            ),
+            170,
+        ),
+    ),
     entry(
         &["discuss", "open"],
-        json_discriminators(
+        hidden(json_discriminators(
             documented_schemas(compact_json(METADATA_MUTATION), &["discuss open"]),
             &[json_discriminator(
                 Some("discuss open"),
                 "output_kind",
                 "discuss_open",
             )],
-        ),
+        )),
     ),
     entry(
         &["discuss", "turn"],
-        json_discriminators(
+        hidden(json_discriminators(
             documented_schemas(METADATA_MUTATION, &["discuss turn"]),
             &[json_discriminator(
                 Some("discuss turn"),
                 "output_kind",
                 "discuss_turn",
             )],
-        ),
+        )),
     ),
+    entry(&["discuss", "append"], hidden(READ_TEXT)),
     entry(
         &["discuss", "resolve"],
         json_discriminators(
@@ -4692,14 +4711,16 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
         Commands::Diff(_) => vec!["diff"],
-        Commands::Discuss { command } => match command {
-            DiscussCommands::Open(_) => vec!["discuss", "open"],
-            DiscussCommands::Turn(_) => vec!["discuss", "turn"],
-            DiscussCommands::Resolve(_) => vec!["discuss", "resolve"],
-            DiscussCommands::Reopen(_) => vec!["discuss", "reopen"],
-            DiscussCommands::List(_) => vec!["discuss", "list"],
-            DiscussCommands::Show(_) => vec!["discuss", "show"],
-            DiscussCommands::Wait(_) => vec!["discuss", "wait"],
+        Commands::Discuss(args) => match &args.command {
+            None => vec!["discuss"],
+            Some(DiscussCommands::Open(_)) => vec!["discuss", "open"],
+            Some(DiscussCommands::Turn(_)) => vec!["discuss", "turn"],
+            Some(DiscussCommands::Append(_)) => vec!["discuss", "append"],
+            Some(DiscussCommands::Resolve(_)) => vec!["discuss", "resolve"],
+            Some(DiscussCommands::Reopen(_)) => vec!["discuss", "reopen"],
+            Some(DiscussCommands::List(_)) => vec!["discuss", "list"],
+            Some(DiscussCommands::Show(_)) => vec!["discuss", "show"],
+            Some(DiscussCommands::Wait(_)) => vec!["discuss", "wait"],
         },
         Commands::Query(_) => vec!["query"],
         Commands::Review { command } => match command {

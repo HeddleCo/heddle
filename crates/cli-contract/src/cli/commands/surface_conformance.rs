@@ -70,6 +70,7 @@ pub const APPROVED_NON_EVERYDAY_ROOT_COMMANDS: &[&str] = &[
     "hook",
     "netd",
     "grant",
+    "invite",
     "promote",
     "revert",
     "semantic",

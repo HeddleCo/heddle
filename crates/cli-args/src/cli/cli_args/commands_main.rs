@@ -8,7 +8,7 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, EnvCommands, HookCommands,
+    AgentCommands, CompletionSubject, ContextCommands, DiscussArgs, EnvCommands, HookCommands,
     IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
     ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
@@ -214,12 +214,12 @@ Examples:
     /// Show what changed in the worktree, a thread, or two states.
     Diff(DiffArgs),
 
-    /// Open or resolve discussions anchored to symbols.
+    /// Open or resolve discussions anchored to code.
     ///
-    /// Open a discussion against a symbol; add turns;
-    /// resolve by edit or dismiss. Anchors
-    /// travel across renames and cross-file moves on subsequent
-    /// state mutations.
+    /// `--new` opens a discussion; `--id` replies (parent = latest, or
+    /// `--turn N`). `--path` / `--symbol` / `--line` are the anchor;
+    /// `--file` is a markdown body file. Resolve, reopen, list, show,
+    /// and wait stay subcommands.
     ///
     /// Native Heddle only. Discussions live in `.heddle` and travel
     /// over `heddle push` / `heddle pull` to a Heddle remote. They are
@@ -232,15 +232,13 @@ Scope:
   Git Overlay repository arrives with no discussions and no Heddle store.
 
 Examples:
-  heddle discuss open src/auth.rs verify 'Should this reject expired tokens?'  # anchor a discussion
-  heddle discuss turn <id> 'switched to argon2'          # add a turn
-  heddle discuss turn src/auth.rs verify 'switched to argon2'  # same FILE SYMBOL as open
-  heddle discuss resolve <id> --mode by-edit --state HEAD
+  heddle discuss --new --path src/lib.rs --symbol greet \"why greet?\"
+  heddle discuss --new --path src/lib.rs --file why.md
+  heddle discuss --id disc-01a0afc6 \"second thought\"
+  heddle discuss --id disc-01a0afc6 --turn 2 \"reply to that turn\"
+  heddle discuss resolve <id> --by-edit --state HEAD
 ")]
-    Discuss {
-        #[command(subcommand)]
-        command: DiscussCommands,
-    },
+    Discuss(DiscussArgs),
 
     /// Structured query over the operation log. Filter by
     /// actor, time window, signal kind, symbol, thread, verbs. Returns

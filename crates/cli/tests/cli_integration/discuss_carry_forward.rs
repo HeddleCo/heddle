@@ -77,19 +77,20 @@ fn append_writes_a_new_collaboration_operation() {
 }
 
 #[test]
-fn append_and_show_accept_open_argv() {
+fn reply_and_show_accept_short_id() {
     let temp = setup();
-    open(&temp);
+    let opened = open(&temp);
+    let full_id = opened["discussion"]["id"].as_str().unwrap();
+    let short = format!("disc-{}", &full_id.trim_start_matches("disc-")[..8]);
     let appended = json(
         &heddle(
             &[
                 "--output",
                 "json",
                 "discuss",
-                "turn",
-                "main.rs",
-                "main",
-                "from open argv",
+                "--id",
+                &short,
+                "from short id",
             ],
             Some(temp.path()),
         )
@@ -97,16 +98,17 @@ fn append_and_show_accept_open_argv() {
     );
     assert_eq!(
         appended["discussion"]["turns"][1]["body"].as_str(),
-        Some("from open argv")
+        Some("from short id")
     );
     let shown = json(
         &heddle(
-            &["--output", "json", "discuss", "show", "main.rs", "main"],
+            &["--output", "json", "discuss", "show", &short],
             Some(temp.path()),
         )
         .unwrap(),
     );
     assert_eq!(shown["discussion"]["turns"].as_array().unwrap().len(), 2);
+    assert_eq!(shown["discussion"]["id"].as_str(), Some(full_id));
 }
 
 #[test]
