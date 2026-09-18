@@ -26,11 +26,32 @@ pub(super) struct NativeProviderConsent<'a> {
     client: EndpointRef,
 }
 
+/// Select provider-preferred Fetch only when the opening carries usable dial
+/// routes. Empty or invalid routes leave the existing direct opening unchanged.
+pub(super) fn preferred_fetch_open(
+    mut open: FetchOpen,
+    routes: Vec<ProviderDialRoute>,
+) -> FetchOpen {
+    if validate_routes(&routes).is_ok() {
+        open.delivery = fetch_open::Delivery::ProviderPreferred as i32;
+        open.routes = routes;
+    }
+    open
+}
+
+fn direct_fetch_open(open: &FetchOpen) -> FetchOpen {
+    let mut open = open.clone();
+    open.delivery = fetch_open::Delivery::Direct as i32;
+    open.routes.clear();
+    open
+}
+
 impl HostedClient {
     /// Download one exact native source, using provider delivery only when the
     /// authenticated Fetch admission selects it. Provider routes remain hints:
     /// every selected endpoint is proved by Iroh and DescribeEndpoint before a
-    /// ticketed range is read.
+    /// ticketed range is read. Provider-preferred means preferred with fallback:
+    /// missing routes or a failed negotiation still complete over direct Fetch.
     pub async fn fetch_native_source(
         &self,
         open: FetchOpen,
@@ -39,8 +60,15 @@ impl HostedClient {
     ) -> anyhow::Result<StagedSource> {
         let delivery = fetch_open::Delivery::try_from(open.delivery)
             .map_err(|_| FetchError::Invalid("unsupported Fetch delivery"))?;
-        if delivery != fetch_open::Delivery::ProviderPreferred {
-            let remote = self.native().await?;
+        let remote = self.native().await?;
+        if delivery != fetch_open::Delivery::ProviderPreferred
+            || validate_routes(&open.routes).is_err()
+        {
+            let open = if delivery == fetch_open::Delivery::ProviderPreferred {
+                direct_fetch_open(&open)
+            } else {
+                open
+            };
             return Ok(remote
                 .fetch_content(open, limits)
                 .await?
@@ -48,18 +76,41 @@ impl HostedClient {
                 .await?);
         }
 
-        validate_routes(&open.routes)?;
         let routes = open.routes.clone();
-        let remote = self.native().await?;
+        match self
+            .fetch_preferred_source(&remote, open.clone(), limits, scratch, &routes)
+            .await
+        {
+            Ok(staged) => Ok(staged),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "preferred provider Fetch failed; using direct source transfer"
+                );
+                Ok(remote
+                    .fetch_content(direct_fetch_open(&open), limits)
+                    .await?
+                    .stage(scratch)
+                    .await?)
+            }
+        }
+    }
+
+    async fn fetch_preferred_source(
+        &self,
+        remote: &Remote<IrohTransport<Credentials>>,
+        open: FetchOpen,
+        limits: Limits,
+        scratch: &Path,
+        routes: &[ProviderDialRoute],
+    ) -> anyhow::Result<StagedSource> {
         match remote.begin_provider_fetch(open, limits).await? {
             ProviderFetch::Direct(download) => Ok((*download).stage(scratch).await?),
             ProviderFetch::Provider(download) => {
                 let signer = self.provider_consent()?;
                 let mut session = (*download).negotiate(&signer).await?;
                 session.receive_inline(scratch).await?;
-                let providers = self
-                    .native_provider_remotes(session.plan(), &routes)
-                    .await?;
+                let providers = self.native_provider_remotes(session.plan(), routes).await?;
                 session.receive_provider_ranges(&providers).await?;
                 Ok(session.complete(scratch).await?)
             }
@@ -187,23 +238,26 @@ fn provider_key(provider: &EndpointRef) -> std::result::Result<[u8; 32], FetchEr
 #[cfg(test)]
 mod tests {
     use api::heddle::api::v2alpha1::{
-        EndpointKind, EndpointRef, ProviderDialRoute, provider_dial_route,
+        EndpointKind, EndpointRef, FetchOpen, ProviderDialRoute, fetch_open, provider_dial_route,
     };
 
-    use super::{MAX_PROVIDER_ROUTES, validate_routes};
+    use super::{MAX_PROVIDER_ROUTES, preferred_fetch_open, validate_routes};
 
-    #[test]
-    fn provider_route_validation_reuses_the_fetch_contract() {
-        let provider = EndpointRef {
-            public_key: vec![7; 32],
-            kind: EndpointKind::Provider as i32,
-        };
-        let route = ProviderDialRoute {
-            provider: Some(provider.clone()),
+    fn valid_route() -> ProviderDialRoute {
+        ProviderDialRoute {
+            provider: Some(EndpointRef {
+                public_key: vec![7; 32],
+                kind: EndpointKind::Provider as i32,
+            }),
             address: Some(provider_dial_route::Address::RelayUrl(
                 "https://relay.example/".to_string(),
             )),
-        };
+        }
+    }
+
+    #[test]
+    fn provider_route_validation_reuses_the_fetch_contract() {
+        let route = valid_route();
         validate_routes(std::slice::from_ref(&route)).expect("valid provider Fetch route");
 
         let mut missing_address = route.clone();
@@ -213,9 +267,28 @@ mod tests {
         let mut wrong_kind = route.clone();
         wrong_kind.provider = Some(EndpointRef {
             kind: EndpointKind::Device as i32,
-            ..provider
+            public_key: vec![7; 32],
         });
         assert!(validate_routes(&[wrong_kind]).is_err());
+        assert!(validate_routes(&[]).is_err());
         assert!(validate_routes(&vec![route; MAX_PROVIDER_ROUTES + 1]).is_err());
+    }
+
+    #[test]
+    fn preferred_fetch_open_selects_provider_only_when_routes_are_usable() {
+        let open = FetchOpen::default();
+        let without_routes = preferred_fetch_open(open.clone(), Vec::new());
+        assert_ne!(
+            without_routes.delivery,
+            fetch_open::Delivery::ProviderPreferred as i32
+        );
+        assert!(without_routes.routes.is_empty());
+
+        let with_routes = preferred_fetch_open(open, vec![valid_route()]);
+        assert_eq!(
+            with_routes.delivery,
+            fetch_open::Delivery::ProviderPreferred as i32
+        );
+        assert_eq!(with_routes.routes.len(), 1);
     }
 }

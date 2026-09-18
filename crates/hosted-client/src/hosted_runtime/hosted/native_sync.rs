@@ -3,7 +3,9 @@
 //!
 //! Request and pack construction matches local device publication/fetch:
 //! `SourcePack::prepare_with_references` plus `Remote::publish_content` /
-//! `Remote::fetch_content`. No v1 RepoSyncService frames.
+//! `HostedClient::fetch_native_source`. Provider-preferred Fetch is selected
+//! only when usable dial routes are present; otherwise the direct path runs.
+//! No v1 RepoSyncService frames.
 use std::time::Instant;
 
 use api::heddle::api::{
@@ -38,6 +40,7 @@ use wire::{ProtocolError, PullComplete, PushComplete, RefEntry};
 use super::{
     HostedClient, HostedRefEntry, PullBootstrapRefs, PullMaterialization,
     helpers::native_client_error,
+    native_provider::preferred_fetch_open,
     persist_advertised_thread_identity,
     sync::{PullProfile, PushProfile, encode_empty_pull_bootstrap},
 };
@@ -766,7 +769,6 @@ impl HostedClient {
             .r#ref
             .clone()
             .ok_or_else(|| ProtocolError::InvalidState("observed Thread has no identity".into()))?;
-        let remote = self.native().await.map_err(native_error)?;
         let revision = match target_state {
             Some(state) => Some(revision_ref(&spool, state)),
             None => overview.source_heads.into_iter().next(),
@@ -776,24 +778,27 @@ impl HostedClient {
                 "Fetch requires a started Thread with a published source revision".into(),
             ));
         }
-        let open = FetchOpen {
-            thread: Some(reference.clone()),
-            revision: revision.clone(),
-            selection: Some(TransferSelection {
-                facets: vec![contract::SharedFacet::Source as i32],
+        // ProviderDialRoute is a client hint on FetchOpen. Weft matches those
+        // hints against configured shards; DescribeEndpoint and ThreadOverview
+        // currently do not advertise them, so clone stays on direct Fetch until
+        // a caller supplies usable routes here.
+        let open = preferred_fetch_open(
+            FetchOpen {
+                thread: Some(reference.clone()),
+                revision: revision.clone(),
+                selection: Some(TransferSelection {
+                    facets: vec![contract::SharedFacet::Source as i32],
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let download = remote
-            .fetch_content(open, thread_api::fetch::Limits::default())
-            .await
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+            },
+            Vec::new(),
+        );
         let scratch = repo.heddle_dir().join("source-transfers");
         objects::fs_atomic::create_private_dir_all(&scratch)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let staged = download
-            .stage(&scratch)
+        let staged = self
+            .fetch_native_source(open, thread_api::fetch::Limits::default(), &scratch)
             .await
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let now = chrono::Utc::now().timestamp();

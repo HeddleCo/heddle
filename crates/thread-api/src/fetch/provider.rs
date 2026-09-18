@@ -761,20 +761,29 @@ mod tests {
         collections::VecDeque,
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
     use api::{
         heddle::api::v2alpha1::{
             Coverage, DescribeEndpointResponse, EndpointKind, FetchComplete, ObjectAddress,
-            PackChunk, ProviderAssemblyRecord, ProviderDialRoute, provider_dial_route,
+            PackChunk, ProviderAssemblyRecord, ProviderDialRoute, ProviderExtent,
+            ProviderExtentEvent, ProviderInlineChunk, ProviderInlineSource, ProviderOffer,
+            ProviderOfferExtent, ProviderPhysicalRange, ProviderPlan, ProviderPlanChallenge,
+            ProviderRangeChunk, ProviderRangeSource, ProviderReadTicket, ReadProviderExtentRequest,
+            SharedFacet, ThreadRef, TransferCheckpoint, TransferObject, provider_assembly_record,
+            provider_dial_route, provider_extent_event,
+        },
+        provider_v2::{
+            provider_assembly_digest, provider_extent_set_digest, provider_record_set_commitment,
         },
         v2::{
             MethodDescriptor,
             client::{Client, Rpc, RpcTransport},
         },
     };
+    use crypto::{Ed25519Signer, Signer};
     use prost::Message;
 
     use super::*;
@@ -1023,5 +1032,419 @@ mod tests {
             .expect("fixture digest")
             .digest = blake3::hash(body).as_bytes().to_vec();
         verify_record(&writer, 0, &record).expect("exact record becomes verified");
+    }
+
+    struct ConsentWriter;
+    impl MessageWriter for ConsentWriter {
+        type Error = transport::Error;
+        async fn send(&mut self, _: Vec<u8>) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        async fn finish(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn abort(&mut self) {}
+    }
+
+    struct IssuerPeer {
+        frames: Vec<Vec<u8>>,
+    }
+    impl RpcTransport for IssuerPeer {
+        type Error = transport::Error;
+        type Reader = Reader;
+        type Writer = ConsentWriter;
+        async fn unary(
+            &self,
+            _: &'static MethodDescriptor,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>, Self::Error> {
+            Err(transport::Error::Protocol("unused"))
+        }
+        async fn observe(
+            &self,
+            _: &'static MethodDescriptor,
+            _: Vec<u8>,
+        ) -> Result<Reader, Self::Error> {
+            Err(transport::Error::Protocol("unused"))
+        }
+        async fn exchange(
+            &self,
+            _: &'static MethodDescriptor,
+            opening: Vec<u8>,
+        ) -> Result<(ConsentWriter, Reader), Self::Error> {
+            let frame = FetchClientFrame::decode(opening.as_slice())
+                .map_err(|_| transport::Error::Protocol("bad opening"))?;
+            assert!(
+                matches!(
+                    frame.body,
+                    Some(fetch_client_frame::Body::Open(FetchOpen {
+                        delivery,
+                        ref routes,
+                        ..
+                    })) if delivery == fetch_open::Delivery::ProviderPreferred as i32
+                        && !routes.is_empty()
+                ),
+                "provider branch must open Fetch with ProviderPreferred routes"
+            );
+            Ok((ConsentWriter, Reader(self.frames.clone().into())))
+        }
+    }
+
+    struct ProviderPeer {
+        frames: Vec<Vec<u8>>,
+        range_reads: Arc<AtomicUsize>,
+    }
+    impl RpcTransport for ProviderPeer {
+        type Error = transport::Error;
+        type Reader = Reader;
+        type Writer = ConsentWriter;
+        async fn unary(
+            &self,
+            _: &'static MethodDescriptor,
+            _: Vec<u8>,
+        ) -> Result<Vec<u8>, Self::Error> {
+            Err(transport::Error::Protocol("unused"))
+        }
+        async fn observe(
+            &self,
+            method: &'static MethodDescriptor,
+            opening: Vec<u8>,
+        ) -> Result<Reader, Self::Error> {
+            assert_eq!(method.path, rpc::SyncServiceReadProviderExtent::METHOD.path);
+            let _ = ReadProviderExtentRequest::decode(opening.as_slice())
+                .map_err(|_| transport::Error::Protocol("bad provider extent request"))?;
+            self.range_reads.fetch_add(1, Ordering::SeqCst);
+            Ok(Reader(self.frames.clone().into()))
+        }
+        async fn exchange(
+            &self,
+            _: &'static MethodDescriptor,
+            _: Vec<u8>,
+        ) -> Result<(ConsentWriter, Reader), Self::Error> {
+            Err(transport::Error::Protocol("unused"))
+        }
+    }
+
+    struct TestConsent {
+        signer: Ed25519Signer,
+        subject: String,
+        client: EndpointRef,
+    }
+    impl ProviderConsentSigner for TestConsent {
+        fn verified_subject(&self) -> Result<String, Error> {
+            Ok(self.subject.clone())
+        }
+        fn client_endpoint(&self) -> Result<EndpointRef, Error> {
+            Ok(self.client.clone())
+        }
+        fn public_key(&self) -> &[u8] {
+            self.signer.public_key()
+        }
+        fn sign(&self, canonical: &[u8]) -> Result<Vec<u8>, Error> {
+            self.signer
+                .sign(canonical)
+                .map_err(|error| Error::Preparation(error.to_string()))
+        }
+    }
+
+    fn offer_from(plan: &ProviderPlan) -> ProviderOffer {
+        ProviderOffer {
+            extent_set_digest: plan.extent_set_digest.clone(),
+            extents: plan
+                .extents
+                .iter()
+                .map(|extent| {
+                    let ticket = extent.ticket.as_ref().expect("fixture ticket");
+                    ProviderOfferExtent {
+                        provider: extent.provider.clone(),
+                        range: extent.range.clone(),
+                        spool: ticket.spool.clone(),
+                        facet: ticket.facet,
+                        audience: ticket.audience.clone(),
+                        content_root: ticket.content_root.clone(),
+                    }
+                })
+                .collect(),
+            challenge: plan.challenge.clone(),
+            assembly_digest: plan.assembly_digest.clone(),
+            pack_header: plan.pack_header.clone(),
+            output_pack_length: plan.output_pack_length,
+            records: plan.records.clone(),
+        }
+    }
+
+    fn mixed_plan(
+        thread: ThreadRef,
+        revision: api::heddle::api::v2alpha1::RevisionRef,
+        issuer: EndpointRef,
+        client: EndpointRef,
+        provider: EndpointRef,
+        provider_bytes: &[u8],
+        inline_bytes: &[u8],
+    ) -> ProviderPlan {
+        let spool = thread.spool.clone().expect("thread spool");
+        let expiry = prost_types::Timestamp {
+            seconds: i64::MAX / 2,
+            nanos: 0,
+        };
+        let object = |digest: [u8; 32], size: u64| TransferObject {
+            address: Some(ObjectAddress {
+                algorithm: "blake3".into(),
+                digest: digest.to_vec(),
+            }),
+            kind: "blob".into(),
+            facet: SharedFacet::Source as i32,
+            size,
+            availability: Coverage::Complete as i32,
+        };
+        let records = vec![
+            ProviderAssemblyRecord {
+                object: Some(object([8; 32], provider_bytes.len() as u64)),
+                encoded_length: provider_bytes.len() as u64,
+                encoded_digest: Some(ObjectAddress {
+                    algorithm: "blake3".into(),
+                    digest: blake3::hash(provider_bytes).as_bytes().to_vec(),
+                }),
+                output_offset: 16,
+                source: Some(provider_assembly_record::Source::Provider(
+                    ProviderRangeSource {
+                        extent_index: 0,
+                        source_offset: 0,
+                    },
+                )),
+            },
+            ProviderAssemblyRecord {
+                object: Some(object([10; 32], inline_bytes.len() as u64)),
+                encoded_length: inline_bytes.len() as u64,
+                encoded_digest: Some(ObjectAddress {
+                    algorithm: "blake3".into(),
+                    digest: blake3::hash(inline_bytes).as_bytes().to_vec(),
+                }),
+                output_offset: 16 + provider_bytes.len() as u64,
+                source: Some(provider_assembly_record::Source::Inline(
+                    ProviderInlineSource {},
+                )),
+            },
+        ];
+        let mut range = ProviderPhysicalRange {
+            pack_id: vec![5; 32],
+            object_etag: "etag-1".into(),
+            offset: 128,
+            length: provider_bytes.len() as u64,
+            record_set_commitment: vec![],
+        };
+        range.record_set_commitment = provider_record_set_commitment(&range, &records, 0)
+            .expect("tiled provider range")
+            .to_vec();
+        let ticket = ProviderReadTicket {
+            attenuated_capability: vec![99],
+            extent_set_digest: vec![],
+            spool: Some(spool.clone()),
+            facet: SharedFacet::Source as i32,
+            audience: "Public".into(),
+            content_root: vec![6; 32],
+            pack_id: range.pack_id.clone(),
+            object_etag: range.object_etag.clone(),
+            offset: range.offset,
+            length: range.length,
+            provider: Some(provider.clone()),
+            client: Some(client.clone()),
+            assembly_digest: vec![],
+            expires_at: Some(expiry),
+            record_set_commitment: range.record_set_commitment.clone(),
+        };
+        let mut header = b"LMPK".to_vec();
+        header.extend_from_slice(&4_u32.to_be_bytes());
+        header.extend_from_slice(&2_u64.to_be_bytes());
+        let mut plan = ProviderPlan {
+            extent_set_digest: vec![],
+            extents: vec![ProviderExtent {
+                provider: Some(provider),
+                ticket: Some(ticket),
+                range: Some(range),
+            }],
+            challenge: Some(ProviderPlanChallenge {
+                nonce: vec![7; 16],
+                thread: Some(thread),
+                revision: Some(revision),
+                issuer: Some(issuer),
+                client: Some(client),
+                expires_at: Some(expiry),
+                extent_set_digest: vec![],
+                assembly_digest: vec![],
+            }),
+            assembly_digest: vec![],
+            pack_header: header,
+            output_pack_length: 16 + provider_bytes.len() as u64 + inline_bytes.len() as u64 + 32,
+            records,
+        };
+        let set = provider_extent_set_digest(&plan).expect("extent set");
+        plan.extent_set_digest = set.to_vec();
+        plan.challenge
+            .as_mut()
+            .expect("challenge")
+            .extent_set_digest = set.to_vec();
+        plan.extents[0]
+            .ticket
+            .as_mut()
+            .expect("ticket")
+            .extent_set_digest = set.to_vec();
+        let assembly = provider_assembly_digest(&plan).expect("assembly");
+        plan.assembly_digest = assembly.to_vec();
+        plan.challenge.as_mut().expect("challenge").assembly_digest = assembly.to_vec();
+        plan.extents[0]
+            .ticket
+            .as_mut()
+            .expect("ticket")
+            .assembly_digest = assembly.to_vec();
+        plan
+    }
+
+    #[tokio::test]
+    async fn preferred_provider_fetch_negotiates_consent_and_rehashes_provider_ranges() {
+        let (mut open, mut ready, issuer, _) = super::super::tests::fixture();
+        let provider = EndpointRef {
+            public_key: vec![9; 32],
+            kind: EndpointKind::Provider as i32,
+        };
+        let client = EndpointRef {
+            public_key: vec![3; 32],
+            kind: EndpointKind::Device as i32,
+        };
+        let provider_bytes = b"provrec!".as_slice();
+        let inline_bytes = b"inlinrec".as_slice();
+        open.delivery = fetch_open::Delivery::ProviderPreferred as i32;
+        open.routes = vec![ProviderDialRoute {
+            provider: Some(provider.clone()),
+            address: Some(provider_dial_route::Address::RelayUrl(
+                "https://relay.example/".to_string(),
+            )),
+        }];
+        let plan = mixed_plan(
+            open.thread.clone().expect("thread"),
+            open.revision.clone().expect("revision"),
+            issuer.clone(),
+            client.clone(),
+            provider.clone(),
+            provider_bytes,
+            inline_bytes,
+        );
+        let offer = offer_from(&plan);
+        ready.packs.clear();
+        ready.full_closure_available = true;
+        let mut checkpoint = ready.checkpoint.clone().expect("fixture checkpoint");
+        checkpoint.plan_digest = offer.assembly_digest.clone();
+        ready.checkpoint = Some(checkpoint.clone());
+
+        let issuer_frames = vec![
+            FetchServerFrame {
+                body: Some(fetch_server_frame::Body::Ready(ready)),
+            }
+            .encode_to_vec(),
+            FetchServerFrame {
+                body: Some(fetch_server_frame::Body::ProviderOffer(offer)),
+            }
+            .encode_to_vec(),
+            FetchServerFrame {
+                body: Some(fetch_server_frame::Body::ProviderPlan(plan.clone())),
+            }
+            .encode_to_vec(),
+            FetchServerFrame {
+                body: Some(fetch_server_frame::Body::ProviderInline(
+                    ProviderInlineChunk {
+                        assembly_digest: plan.assembly_digest.clone(),
+                        record_index: 1,
+                        offset: 0,
+                        data: inline_bytes.to_vec(),
+                    },
+                )),
+            }
+            .encode_to_vec(),
+        ];
+        let range = plan.extents[0].range.clone().expect("range");
+        let provider_frames = vec![
+            ProviderExtentEvent {
+                body: Some(provider_extent_event::Body::Ready(range.clone())),
+            }
+            .encode_to_vec(),
+            ProviderExtentEvent {
+                body: Some(provider_extent_event::Body::Chunk(ProviderRangeChunk {
+                    offset: 0,
+                    data: provider_bytes.to_vec(),
+                })),
+            }
+            .encode_to_vec(),
+            ProviderExtentEvent {
+                body: Some(provider_extent_event::Body::Complete(TransferCheckpoint {
+                    committed_bytes: range.length,
+                    ..Default::default()
+                })),
+            }
+            .encode_to_vec(),
+        ];
+        let range_reads = Arc::new(AtomicUsize::new(0));
+        let issuer_remote = Remote {
+            api: Client::new(
+                IssuerPeer {
+                    frames: issuer_frames,
+                },
+                [rpc::SyncServiceFetch::METHOD.path.into()],
+            ),
+            description: DescribeEndpointResponse {
+                endpoint: Some(issuer),
+                ..Default::default()
+            },
+        };
+        let provider_remote = Remote {
+            api: Client::new(
+                ProviderPeer {
+                    frames: provider_frames,
+                    range_reads: Arc::clone(&range_reads),
+                },
+                [rpc::SyncServiceReadProviderExtent::METHOD.path.into()],
+            ),
+            description: DescribeEndpointResponse {
+                endpoint: Some(provider),
+                ..Default::default()
+            },
+        };
+        let signer = TestConsent {
+            signer: Ed25519Signer::from_seed(&[61; 32]).expect("consent key"),
+            subject: "provider-reader".into(),
+            client,
+        };
+
+        let ProviderFetch::Provider(download) = issuer_remote
+            .begin_provider_fetch(open, Limits::default())
+            .await
+            .expect("provider Ready without direct packs")
+        else {
+            panic!("expected provider branch, not direct fallback");
+        };
+        let mut session = download
+            .negotiate(&signer)
+            .await
+            .expect("negotiate offer, consent, ProviderPlan");
+        assert!(
+            session.plan().records.iter().any(|record| matches!(
+                record.source,
+                Some(provider_assembly_record::Source::Provider(_))
+            )),
+            "admitted plan must contain provider-sourced records"
+        );
+        let scratch = tempfile::tempdir().expect("provider scratch");
+        session
+            .receive_inline(scratch.path())
+            .await
+            .expect("inline records");
+        session
+            .receive_provider_ranges(std::slice::from_ref(&provider_remote))
+            .await
+            .expect("provider ranges");
+        let reads = range_reads.load(Ordering::SeqCst);
+        assert_eq!(
+            reads, 1,
+            "records came via receive_provider_ranges (ReadProviderExtent observe count={reads})"
+        );
     }
 }
