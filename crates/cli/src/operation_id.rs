@@ -121,10 +121,14 @@ pub fn run_local_idempotency_if_requested(
         let repo = cli.open_repo()?;
         let bootstrap_scope = bootstrap_op_id_scope_for_root(repo.root().to_path_buf())?;
         let bootstrap_conflict = {
-            let bootstrap_store =
-                OperationDedupStore::open_bootstrap(bootstrap_op_id_store_dir(&bootstrap_scope))
-                    .context("open bootstrap op-id dedup store")?;
-            bootstrap_store.metadata_for(op_id, command_name)?
+            match OperationDedupStore::open_bootstrap_existing(bootstrap_op_id_store_dir(
+                &bootstrap_scope,
+            ))
+            .context("open bootstrap op-id dedup store")?
+            {
+                Some(bootstrap_store) => bootstrap_store.metadata_for(op_id, command_name)?,
+                None => None,
+            }
         };
         if let Some(existing) = bootstrap_conflict {
             return Err(anyhow!(RecoveryAdvice::op_id_conflict(
