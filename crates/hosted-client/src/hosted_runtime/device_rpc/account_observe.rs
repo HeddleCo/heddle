@@ -499,6 +499,7 @@ impl DeviceRpc {
                 SpoolSection::Context => ("context", Coverage::Unavailable, None),
                 SpoolSection::Operations => ("operations", Coverage::Unavailable, None),
                 SpoolSection::SupportAccess => ("support_access", Coverage::Unavailable, None),
+                SpoolSection::SignedPolicy => ("signed_policy", Coverage::Unavailable, None),
             };
             exhausted &= page.as_ref().is_none_or(|p| p.exhausted);
             rows.push((
