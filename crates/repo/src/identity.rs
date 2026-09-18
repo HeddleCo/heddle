@@ -25,6 +25,8 @@
 //! so it needs neither the private key nor any registry.
 
 pub mod source_author;
+#[cfg(test)]
+mod test_isolation;
 
 use std::path::{Path, PathBuf};
 
@@ -69,14 +71,24 @@ pub struct DeviceIdentity {
 /// `./.heddle`. Mirrors the credential store location so the device identity
 /// sits beside `credentials.toml`. `HEDDLE_HOME` exists primarily as a test
 /// and power-user override; production resolves to `$HOME/.heddle`.
+///
+/// Unit tests (`cfg(test)`) ignore the process-global env and use a per-test
+/// tempdir so the device catalog cannot leak across the suite (heddle#1766).
 pub fn heddle_home_dir() -> PathBuf {
-    if let Some(explicit) = heddle_home_override() {
-        return explicit;
+    #[cfg(test)]
+    {
+        test_isolation::heddle_home_dir()
     }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".heddle")
+    #[cfg(not(test))]
+    {
+        if let Some(explicit) = heddle_home_override() {
+            return explicit;
+        }
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".heddle")
+    }
 }
 
 /// Explicit non-empty `HEDDLE_HOME` override, when configured.

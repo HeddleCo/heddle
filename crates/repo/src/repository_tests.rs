@@ -1166,9 +1166,14 @@ fn native_admission_before_ref_publish_survives_a_crash_between_them() {
         crashed.is_err(),
         "the checkpoint must crash after native admission"
     );
+    // Read the canonical ref file. `Repository::head` reconciles the oplog and
+    // would materialize the reconstructible snapshot, which is the publish step
+    // this crash window is supposed to have skipped.
     assert_eq!(
-        repo.head().unwrap(),
-        Some(baseline.id()),
+        fs::read_to_string(temp_dir.path().join(".heddle/refs/threads/main"))
+            .unwrap()
+            .trim(),
+        baseline.id().to_string_full(),
         "the ref must not have moved before the crash"
     );
     let orphaned = main.view().unwrap().source_heads;
@@ -2477,6 +2482,9 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
 
     let repo = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
+    // Overlay bootstrap does not seed a native Thread; captures still need one
+    // to sign source operations. Keep the git-overlay HEAD untouched.
+    repo.seed_default_thread().unwrap();
 
     fs::write(temp_dir.path().join("a.txt"), "version 1").unwrap();
     let state1 = repo.snapshot(Some("v1".to_string()), None).unwrap();
