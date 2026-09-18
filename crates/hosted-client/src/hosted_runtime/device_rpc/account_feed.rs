@@ -84,7 +84,7 @@ impl AccountFeed {
             if watched.contains(&spool.heddle_dir) {
                 continue;
             }
-            if watched.len() >= repo::device_catalog::store::MAX_SPOOLS {
+            if watched.len() >= repo::device_catalog::store::PAGE_LIMIT {
                 bail!("device account watch inventory exceeds bound");
             }
             if spool.heddle_dir.try_exists()? {

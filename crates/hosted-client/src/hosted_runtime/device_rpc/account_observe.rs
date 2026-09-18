@@ -533,7 +533,7 @@ impl DeviceRpc {
         loop {
             let page = catalog.spools(
                 &after,
-                repo::device_catalog::store::MAX_SPOOLS,
+                repo::device_catalog::store::PAGE_LIMIT,
                 repo::device_catalog::store::MAX_PAGE_BYTES,
             )?;
             let last = page
@@ -553,7 +553,7 @@ impl DeviceRpc {
                     .as_ref()
                     .map(|reference| reference.id.clone())
                     .context("local Spool list row has no identity")?;
-                if !seen.insert(id) || spools.len() >= repo::device_catalog::store::MAX_SPOOLS {
+                if !seen.insert(id) || spools.len() >= repo::device_catalog::store::PAGE_LIMIT {
                     bail!("local Spool list contains duplicates or exceeds bound");
                 }
                 spools.push(listed);

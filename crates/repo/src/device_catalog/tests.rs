@@ -395,3 +395,63 @@ fn catalog_mount_traversal_rejects_more_than_1024_distinct_descendants() {
             .contains("traversal bound")
     );
 }
+
+#[test]
+fn catalog_registers_more_than_page_limit_spools_and_pages_them() {
+    let home = tempfile::tempdir().expect("home");
+    let mut catalog = Catalog::open(home.path()).expect("catalog");
+    let count = store::PAGE_LIMIT + 1;
+    let account = uuid::Uuid::new_v4().to_string();
+    catalog
+        .mutate::<wire::SpoolOverview>(
+            &account,
+            "fixture-over-page-limit",
+            &uuid::Uuid::new_v4().to_string(),
+            b"over-page-limit",
+            |tx| {
+                for _ in 0..count {
+                    let id = uuid::Uuid::now_v7();
+                    let registration = DeviceSpool {
+                        id,
+                        root: home.path().join(id.to_string()),
+                        heddle_dir: home.path().join(id.to_string()).join(".heddle"),
+                        capability_path: id.to_string(),
+                    };
+                    let overview = wire::SpoolOverview {
+                        name: "Local work".into(),
+                        slug: id.to_string(),
+                        settings: Some(wire::SpoolSettings::default()),
+                        ..Default::default()
+                    };
+                    store::insert_spool_in(tx, &registration, &overview)?;
+                }
+                Ok(wire::SpoolOverview::default())
+            },
+        )
+        .expect("catalog accepts more than one page of Spools");
+    let mut after = String::new();
+    let mut seen = 0usize;
+    loop {
+        let page = catalog
+            .spools(&after, store::PAGE_LIMIT, store::MAX_PAGE_BYTES)
+            .expect("catalog page");
+        assert!(
+            page.records.len() <= store::PAGE_LIMIT,
+            "page returned {} records, over PAGE_LIMIT {}",
+            page.records.len(),
+            store::PAGE_LIMIT
+        );
+        seen += page.records.len();
+        if !page.has_more {
+            break;
+        }
+        after = page
+            .records
+            .last()
+            .expect("page progress")
+            .registration
+            .id
+            .to_string();
+    }
+    assert_eq!(seen, count);
+}

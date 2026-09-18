@@ -8,7 +8,8 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 
 use super::DeviceSpool;
 
-pub const MAX_SPOOLS: usize = 4096;
+/// Per-page / per-stream listing bound. Not a total catalog capacity.
+pub const PAGE_LIMIT: usize = 4096;
 pub const MAX_RECORD_BYTES: usize = 256 * 1024;
 pub const MAX_PAGE_BYTES: usize = 4 * 1024 * 1024;
 const SCHEMA: &str = "
@@ -131,8 +132,8 @@ impl Catalog {
         self.registration_inventory(true)
     }
     fn registration_inventory(&self, include_deleted: bool) -> Result<Vec<DeviceSpool>> {
-        let mut statement=self.connection.prepare("SELECT CASE WHEN length(registration)<=16384 THEN registration END FROM spools WHERE deleted=0 OR ?1 ORDER BY id LIMIT 4097")?;
-        let mut rows = statement.query([include_deleted])?;
+        let mut statement=self.connection.prepare("SELECT CASE WHEN length(registration)<=16384 THEN registration END FROM spools WHERE deleted=0 OR ?1 ORDER BY id LIMIT ?2")?;
+        let mut rows = statement.query(params![include_deleted, i64::try_from(PAGE_LIMIT + 1)?])?;
         let mut result = Vec::new();
         let mut bytes = 0usize;
         while let Some(row) = rows.next()? {
@@ -142,7 +143,7 @@ impl Catalog {
             bytes = bytes
                 .checked_add(encoded.len())
                 .context("catalog byte overflow")?;
-            if result.len() >= MAX_SPOOLS || bytes > MAX_PAGE_BYTES {
+            if result.len() >= PAGE_LIMIT || bytes > MAX_PAGE_BYTES {
                 bail!("device registration inventory exceeds bound");
             }
             result.push(serde_json::from_slice(&encoded)?);
@@ -153,7 +154,7 @@ impl Catalog {
         spool_in(&self.connection, id)
     }
     pub fn spools(&self, after: &str, limit: usize, max_bytes: usize) -> Result<Page<SpoolRecord>> {
-        if limit == 0 || limit > MAX_SPOOLS || max_bytes == 0 || max_bytes > MAX_PAGE_BYTES {
+        if limit == 0 || limit > PAGE_LIMIT || max_bytes == 0 || max_bytes > MAX_PAGE_BYTES {
             bail!("invalid catalog page budget")
         }
         if !after.is_empty() {
@@ -289,12 +290,6 @@ pub fn insert_spool_in(
         || registration.capability_path.len() > 4096
     {
         bail!("invalid local Spool registration");
-    }
-    let count: i64 = tx.query_row("SELECT count(*) FROM spools WHERE deleted=0", [], |row| {
-        row.get(0)
-    })?;
-    if usize::try_from(count)? >= MAX_SPOOLS {
-        bail!("device catalog Spool capacity exceeded")
     }
     let registration_bytes = serde_json::to_vec(registration)?;
     if registration_bytes.len() > 16 * 1024 {
