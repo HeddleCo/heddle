@@ -775,7 +775,19 @@ impl Repository {
             if decoded_bytes > 16 * 1024 * 1024 {
                 return Ok(unresolved(id));
             }
-            stack.extend(state.parents.iter().copied());
+            // A present shallow ancestor is the graft edge of a depth-limited
+            // clone. Missing parents past that edge are not an unresolved
+            // embargo on the query root. A missing parent of the query root
+            // itself still withholds (shallow cannot invent that ancestry).
+            for parent in &state.parents {
+                if id != *state_id
+                    && self.is_shallow(&id)
+                    && self.store().get_state(parent)?.is_none()
+                {
+                    continue;
+                }
+                stack.push(*parent);
+            }
         }
         Ok(None)
     }

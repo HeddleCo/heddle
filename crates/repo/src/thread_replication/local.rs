@@ -427,11 +427,18 @@ impl Repository {
     }
 
     /// Record a capture or local integration on a named native Thread.
-    /// Missing or damaged native identity fails before publishing a checkout ref.
+    /// Missing native identity is created here — capture owns genesis when
+    /// overlay init or pull left an attached thread unsigned. Damaged mapping
+    /// still fails before publishing a checkout ref.
     /// Cross-thread merge snapshots record LocalIntegration, never a Capture
     /// whose parents include another Thread's revision.
     pub fn record_native_source(&self, name: &str, state_id: StateId) -> Result<()> {
-        self.native_thread(name)?;
+        if let Err(error) = self.native_thread(name) {
+            if !is_missing_native_identity(&error) {
+                return Err(error);
+            }
+            self.create_native_thread(name, state_id, None, "")?;
+        }
         let state = self
             .store()
             .get_state(&state_id)?
@@ -472,12 +479,16 @@ impl Repository {
             return Ok(());
         };
         let name = thread.to_string();
-        let replica = self.native_thread(&name).map_err(|error| {
-            HeddleError::NativeSourceSignerUnavailable {
-                thread: name.clone(),
-                reason: error.to_string(),
+        let replica = match self.native_thread(&name) {
+            Ok(replica) => replica,
+            Err(error) if is_missing_native_identity(&error) => return Ok(()),
+            Err(error) => {
+                return Err(HeddleError::NativeSourceSignerUnavailable {
+                    thread: name,
+                    reason: error.to_string(),
+                });
             }
-        })?;
+        };
         self.native_thread_signer(&replica)
             .map(|_| ())
             .map_err(|error| HeddleError::NativeSourceSignerUnavailable {
@@ -635,6 +646,10 @@ enum AttachedSourceKind {
     },
 }
 
+fn is_missing_native_identity(error: &Error) -> bool {
+    matches!(error, Error::Invalid(message) if message.contains("has no native identity"))
+}
+
 fn classify_attached_source(
     repo: &Repository,
     name: &str,
@@ -674,10 +689,16 @@ fn classify_attached_source(
         let mut unique = by_thread.into_iter();
         match (unique.next(), unique.next()) {
             (None, _) => {
-                return Err(Error::Invalid(format!(
-                    "capture parent {} has no admitted native operation",
-                    parent.to_string_full()
-                )));
+                // Pull/FF can land a foreign tip before this Thread has an
+                // admitted op for it. `admit_local_capture_parents` records
+                // that ancestry; classify must not refuse first.
+                if repo.store().get_state(parent)?.is_none() {
+                    return Err(Error::Invalid(format!(
+                        "capture parent {} has no admitted native operation",
+                        parent.to_string_full()
+                    )));
+                }
+                local_parent = true;
             }
             (Some((source_thread, source_operation)), None) => {
                 let candidate = (source_thread, source_operation, *parent);
