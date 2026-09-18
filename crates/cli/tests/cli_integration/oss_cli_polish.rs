@@ -435,11 +435,27 @@ fn first_status_before_capture_names_default_identity() {
     assert!(output.status.success(), "status should succeed");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(
-        text.contains("Identity:")
-            && text.contains("first capture")
-            && text.contains("Unknown <unknown@example.com>")
-            && text.contains("HEDDLE_PRINCIPAL_NAME"),
-        "first-run status should make default attribution explicit before capture: {text}"
+        text.contains("main")
+            && text.contains("native")
+            && text.contains("heddle capture -m \"...\""),
+        "compact first-run status should name the thread and the capture next step: {text}"
+    );
+    assert!(
+        !text.contains("Identity:") && !text.contains("Heddle status"),
+        "compact first-run status should not repeat long-form identity chrome: {text}"
+    );
+
+    let verbose =
+        heddle_output_without_principal_env(&["-v", "status", "--output", "text"], temp.path())
+            .expect("verbose status output");
+    assert!(verbose.status.success(), "verbose status should succeed");
+    let verbose_text = String::from_utf8_lossy(&verbose.stdout);
+    assert!(
+        verbose_text.contains("Identity:")
+            && verbose_text.contains("first capture")
+            && verbose_text.contains("Unknown <unknown@example.com>")
+            && verbose_text.contains("HEDDLE_PRINCIPAL_NAME"),
+        "verbose first-run status should make default attribution explicit before capture: {verbose_text}"
     );
 }
 
@@ -532,13 +548,23 @@ fn git_overlay_isolated_checkout_status_and_verify_identify_parent_context() {
     let status_text =
         heddle(&["status", "--output", "text"], Some(&checkout)).expect("status text");
     assert!(
-        status_text.contains("Repository: Git + Heddle isolated checkout")
-            && status_text.contains(&format!("Parent repo: {parent_repo}"))
-            && status_text
+        status_text.contains("feature/git-overlay-child")
+            && status_text.contains("native")
+            && status_text.contains("up to date")
+            && !status_text.contains("Repository: native-heddle")
+            && !status_text.contains("Repository: Git + Heddle isolated checkout"),
+        "compact status should name the isolated thread without long-form repository chrome: {status_text}"
+    );
+    let status_verbose = heddle(&["-v", "status", "--output", "text"], Some(&checkout))
+        .expect("verbose status text");
+    assert!(
+        status_verbose.contains("Repository: Git + Heddle isolated checkout")
+            && status_verbose.contains(&format!("Parent repo: {parent_repo}"))
+            && status_verbose
                 .contains("Git checkout: no .git here; raw Git commands belong in the parent repo")
-            && status_text.contains("Target thread: main")
-            && !status_text.contains("Repository: native-heddle"),
-        "status text should surface managed Git-overlay child context: {status_text}"
+            && status_verbose.contains("Target thread: main")
+            && !status_verbose.contains("Repository: native-heddle"),
+        "verbose status should surface managed Git-overlay child context: {status_verbose}"
     );
 
     let verify = json_value(&checkout, &["verify", "--output", "json"]);
@@ -4274,7 +4300,8 @@ fn parent_status_ignores_default_thread_checkout_under_heddle() {
         .path()
         .join(".heddle")
         .join("threads")
-        .join("pollution-check");
+        .join("pollution-check")
+        .join(temp.path().file_name().unwrap());
     json_value(
         temp.path(),
         &[
@@ -4289,12 +4316,8 @@ fn parent_status_ignores_default_thread_checkout_under_heddle() {
         ],
     );
     assert!(
-        managed
-            .join(temp.path().file_name().unwrap())
-            .join(".heddle")
-            .exists()
-            || managed.join(".heddle").exists(),
-        "thread checkout should materialize under .heddle/threads/"
+        managed.join(".heddle").exists(),
+        "thread checkout should materialize under .heddle/threads/<name>/<repo-name>"
     );
 
     // Git itself must not see the checkout — `.heddle/` lives in
@@ -10035,8 +10058,14 @@ fn read_commands_gate_repository_preamble_on_verbose() {
             .unwrap_or_else(|e| panic!("{label} default text should render: {e}"));
         if label == "status" {
             assert!(
-                default_text.contains("Repository:"),
-                "status text should retain repository context: {default_text}"
+                default_text.contains("main")
+                    && (default_text.contains("git-overlay")
+                        || default_text.contains("up to date")),
+                "status default text should retain the compact header: {default_text}"
+            );
+            assert!(
+                !default_text.contains("Repository:"),
+                "status default text should drop the mode preamble: {default_text}"
             );
         } else {
             assert!(

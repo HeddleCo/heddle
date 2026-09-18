@@ -122,9 +122,26 @@ fn tree_path_order(
     let mut group_indices = HashMap::<String, usize>::new();
     let mut groups = Vec::<Vec<ContentHash>>::new();
     for state_id in state_order {
+        let tree = states[state_id].tree;
+        if !allowed.contains(&tree) {
+            // V4 salted trees are packed natively, not as NPK1 columns.
+            // Compact order only walks the V3 snapshot; a V4 root must not
+            // abort the whole repack as "outside snapshot".
+            match ObjectStore::get_tree(store, &tree).map_err(BuildError::from)? {
+                Some(loaded) if loaded.scheme() == crate::object::TreeScheme::V4Salted => {
+                    continue;
+                }
+                _ => {
+                    return Err(HeddleError::InvalidObject(format!(
+                        "state references tree outside repack snapshot: {tree}"
+                    ))
+                    .into());
+                }
+            }
+        }
         visit_tree(
             store,
-            states[state_id].tree,
+            tree,
             &allowed,
             &mut seen,
             &mut group_indices,

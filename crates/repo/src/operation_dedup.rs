@@ -322,7 +322,7 @@ impl OperationDedupStore {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
         }
-        let mut connection = Connection::open(path).map_err(database_error)?;
+        let mut connection = Connection::open(&path).map_err(database_error)?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(database_error)?;
@@ -335,26 +335,40 @@ impl OperationDedupStore {
         connection
             .execute_batch("PRAGMA synchronous=FULL;")
             .map_err(database_error)?;
-        let tx = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(database_error)?;
-        let version: i64 = tx
+        let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(database_error)?;
         match version {
-            0 => {
-                initialize_schema(&tx).map_err(database_error)?;
-                tx.pragma_update(None, "user_version", 1)
-                    .map_err(database_error)?;
-            }
             1 => {}
+            0 => {
+                let _initialization = objects::lock::RepoLock::at(
+                    directory.join("operation-receipts.initialize.lock"),
+                )
+                .write()
+                .map_err(|error| database_error(error.to_string()))?;
+                let version: i64 = connection
+                    .query_row("PRAGMA user_version", [], |row| row.get(0))
+                    .map_err(database_error)?;
+                if version == 0 {
+                    let tx = connection
+                        .transaction_with_behavior(TransactionBehavior::Immediate)
+                        .map_err(database_error)?;
+                    initialize_schema(&tx).map_err(database_error)?;
+                    tx.pragma_update(None, "user_version", 1)
+                        .map_err(database_error)?;
+                    tx.commit().map_err(database_error)?;
+                } else if version != 1 {
+                    return Err(database_error(format!(
+                        "unsupported bootstrap schema {version}"
+                    )));
+                }
+            }
             other => {
                 return Err(database_error(format!(
                     "unsupported bootstrap schema {other}"
                 )));
             }
         }
-        tx.commit().map_err(database_error)?;
         Ok(Self {
             change_marker: None,
             namespace: String::new(),
