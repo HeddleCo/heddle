@@ -37,9 +37,9 @@ use objects::{
 use oplog::{OpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
 
 use crate::{
-    namespace_policy::{resolve_default_visibility, VisibilityResolutionContext},
+    namespace_policy::{VisibilityResolutionContext, resolve_default_visibility},
     repository::Repository,
-    visibility::{visible, AudienceTier},
+    visibility::{AudienceTier, visible},
 };
 
 /// Scope label used when ancestry cannot be established from source metadata.
@@ -905,9 +905,9 @@ impl Repository {
         let _own_lock = if lock_held {
             None
         } else {
-            Some(self.locker().write().with_context(|| {
-                "acquire repo write lock for capture-time default visibility binding"
-            })?)
+            Some(self.locker().write().with_context(
+                || "acquire repo write lock for capture-time default visibility binding",
+            )?)
         };
         let mut record = StateVisibility {
             state: *state,
@@ -1309,9 +1309,10 @@ mod tests {
         let signed = StateVisibilityBlob::new(vec![record]).encode().unwrap();
         repo.accept_wire_state_visibility(state, &signed)
             .expect("pinned owner must be able to land their own Private sidecar");
-        assert!(repo
-            .has_visibility_for_state(&state)
-            .expect("owner visibility persisted"));
+        assert!(
+            repo.has_visibility_for_state(&state)
+                .expect("owner visibility persisted")
+        );
         assert_eq!(
             repo.embargo_membership_label()
                 .expect("membership")
@@ -1689,11 +1690,12 @@ mod tests {
             "a state with no record must be public-by-absence (has_visibility_for_state == false)"
         );
         // And its sidecar load is an empty blob, never an error.
-        assert!(repo
-            .get_state_visibility_for_state(&no_record)
-            .expect("read record-free state")
-            .records
-            .is_empty());
+        assert!(
+            repo.get_state_visibility_for_state(&no_record)
+                .expect("read record-free state")
+                .records
+                .is_empty()
+        );
     }
 
     #[test]

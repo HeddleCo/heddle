@@ -1,6 +1,6 @@
 //! One bounded merge over local per-Spool list indexes; exact views remain native.
 use anyhow::{Context, Result, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use repo::{
     device_catalog::DeviceSpool,
     thread_replication::{ThreadReplica, listing},

@@ -8,7 +8,7 @@ use super::{GenesisOwner, SourceAuthor, ThreadGenesis, bounded, invalid};
 use crate::{error::Result, object::ContentHash};
 
 pub const FORMAT: &str = "heddle-thread-ownership-claim-v1";
-pub const METHOD: &str = "/heddle.api.v2alpha1.ThreadService/ClaimThreadOwnership";
+pub const METHOD: &str = "/heddle.api.v1alpha2.ThreadService/ClaimThreadOwnership";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

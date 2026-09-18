@@ -8,8 +8,8 @@ use std::{
 
 use api::{
     heddle::api::{
-        v1alpha1::{CallContext, CallFailure, CallFailureCode},
-        v2alpha1::*,
+        common::{CallContext, CallFailure, CallFailureCode},
+        v1alpha2::*,
     },
     v2::client::Rpc as _,
 };

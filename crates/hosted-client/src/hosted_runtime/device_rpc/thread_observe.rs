@@ -1,6 +1,6 @@
 //! Exact private Thread composition; every requested section reports coverage.
 use anyhow::{Context, Result, bail, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use objects::object::{
     ContentHash,
     thread_replication::{
@@ -62,12 +62,19 @@ impl DeviceRpc {
         }
         self.observe_view(
             session,
-            "/heddle.api.v2alpha1.ThreadService/ObserveThread",
+            "/heddle.api.v1alpha2.ThreadService/ObserveThread",
             &query.encode_to_vec(),
             request.observe.clone().unwrap_or_default(),
             send,
             |budget, binding| self.thread_snapshot(session, &replica, &request, budget, binding),
-            || self.thread_observation_version(session, &replica, &request.sections, request.landing_target.as_ref()),
+            || {
+                self.thread_observation_version(
+                    session,
+                    &replica,
+                    &request.sections,
+                    request.landing_target.as_ref(),
+                )
+            },
         )
         .await
     }
@@ -79,7 +86,13 @@ impl DeviceRpc {
         landing_target: Option<&ThreadRef>,
     ) -> Result<Vec<u8>> {
         let repository = repo::Repository::open(&session.spool.root)?;
-        self.thread_observation_version_with_repository(&repository, session, replica, sections, landing_target)
+        self.thread_observation_version_with_repository(
+            &repository,
+            session,
+            replica,
+            sections,
+            landing_target,
+        )
     }
     fn thread_observation_version_with_repository(
         &self,
@@ -233,7 +246,10 @@ impl DeviceRpc {
         let mut overview = self.thread_overview_with_repository(&repository, session, replica)?;
         if let Some(target_ref) = request.landing_target.as_ref() {
             let target_id = checkout::thread(session, Some(target_ref))?;
-            ensure!(target_id != replica.thread_id(), "landing needs a distinct target Thread");
+            ensure!(
+                target_id != replica.thread_id(),
+                "landing needs a distinct target Thread"
+            );
             let target = ThreadReplica::open(&session.spool.heddle_dir, target_id)?;
             session.authorize_thread(&repository, &target)?;
             let selected_source =
@@ -252,7 +268,7 @@ impl DeviceRpc {
                     ConflictLabels::DEFAULT,
                 )? {
                     ThreeWayMergeOutcome::Conflicted { .. } => ReviewReadiness::Blocked,
-                    _ if session.permits("/heddle.api.v2alpha1.ThreadService/LandThread") => {
+                    _ if session.permits("/heddle.api.v1alpha2.ThreadService/LandThread") => {
                         ReviewReadiness::Eligible
                     }
                     _ => ReviewReadiness::Blocked,
@@ -592,7 +608,7 @@ impl DeviceRpc {
                                 events.push((
                                     format!("review:{id}"),
                                     event(thread_event::Payload::Review(
-                                        api::heddle::api::v2alpha1::ReviewRecord {
+                                        api::heddle::api::v1alpha2::ReviewRecord {
                                             decision: Some(
                                                 prepared
                                                     .record_review()?
@@ -775,7 +791,13 @@ impl DeviceRpc {
         }
         // Reopen here: a policy or owner change during composition must reset
         // this snapshot, even though its initial projections shared one handle.
-        if self.thread_observation_version(session, replica, &request.sections, request.landing_target.as_ref())? != generation {
+        if self.thread_observation_version(
+            session,
+            replica,
+            &request.sections,
+            request.landing_target.as_ref(),
+        )? != generation
+        {
             return Err(super::stream::SnapshotChanged.into());
         }
         events.insert(

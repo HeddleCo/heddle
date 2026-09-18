@@ -1,7 +1,7 @@
 //! Exercise the real native endpoint without any hosted service.
 use std::{net::Ipv4Addr, sync::Arc};
 
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use crypto::Ed25519Signer;
 use iroh::{Endpoint, RelayMode, endpoint::presets, protocol::Router};
 

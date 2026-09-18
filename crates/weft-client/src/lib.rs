@@ -20,7 +20,7 @@ use api::{
     descriptor_trust::{
         EndpointDescriptorSetDocument, parse_endpoint_descriptor_set, trusted_live_entries,
     },
-    heddle::api::v1alpha1::EndpointDescriptor,
+    heddle::api::common::EndpointDescriptor,
 };
 pub use hosted::HostedClient;
 use iroh::{EndpointAddr, EndpointId, RelayUrl};
@@ -242,7 +242,7 @@ mod tests {
             AttestedEndpointDescriptorEntry, EndpointDescriptorSetDocument, SET_VERSION,
             ephemeral_attestation_bytes, parse_endpoint_descriptor_set,
         },
-        heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
+        heddle::api::common::{EndpointDescriptor, SignedEndpointDescriptor},
         signing,
     };
     use ed25519_dalek::{Signer, SigningKey};

@@ -326,7 +326,6 @@ impl JsonSchema for OperatorCommandEnvelope<'_> {
 mod tests {
     use verbs::schema_keys::schema_property_keys;
 
-
     use super::*;
 
     /// Every field the hand-written serializer can emit must be declared on

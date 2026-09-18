@@ -743,7 +743,7 @@ fn api_v2_operation_and_genesis_vectors_match() {
         "f37d8edea82fdda544f8c338d34f3433512231421a0a39771d5cf33b454318bebd7011d7e192e6b548618f9f3aae4835c092af3f8a9a074206ff51046409fb0e"
     );
     // The public verifier accepts the same generated type as v2 RPC callers.
-    let genesis = heddle_api::heddle::api::v2alpha1::SignedSpoolOwnerGenesis::decode(
+    let genesis = heddle_api::heddle::api::v1alpha2::SignedSpoolOwnerGenesis::decode(
         genesis.encode_to_vec().as_slice(),
     )
     .expect("v2 portable genesis");
@@ -836,10 +836,10 @@ fn browser_paper_recovery_transition_matches_rust_owner_verifier() {
     ))
     .expect("browser fixture JSON");
     let field = |name: &str| -> Vec<u8> {
-        hex::decode(fixture[name].as_str().expect("hex fixture field"))
-            .expect("hex fixture bytes")
+        hex::decode(fixture[name].as_str().expect("hex fixture field")).expect("hex fixture bytes")
     };
-    let root = SignedOwnerRoot::decode(field("owner_root_hex").as_slice()).expect("owner root wire");
+    let root =
+        SignedOwnerRoot::decode(field("owner_root_hex").as_slice()).expect("owner root wire");
     let transition = SignedOwnerKeyTransition::decode(field("signed_transition_hex").as_slice())
         .expect("transition wire");
     let state = verify_owner_root(&root).expect("browser owner root is valid");
@@ -849,20 +849,31 @@ fn browser_paper_recovery_transition_matches_rust_owner_verifier() {
         .expect("eligible timestamp")
         .parse()
         .expect("numeric eligible timestamp");
-    let pending_since = eligible_at - i64::try_from(effective_recovery_window(state.recovery_policy()))
-        .expect("bounded recovery window");
+    let pending_since = eligible_at
+        - i64::try_from(effective_recovery_window(state.recovery_policy()))
+            .expect("bounded recovery window");
     verify_transition_timelock(&state, &transition, pending_since)
         .expect("browser paper recovery meets signed window");
     apply_transition_with_timelock(&state, &transition, eligible_at, pending_since, limits())
         .expect("browser paper recovery is admitted by Rust");
-    assert!(apply_transition_with_timelock(
-        &state, &transition, eligible_at - 1, pending_since, limits()
-    ).is_err(), "recovery must not activate before the signed time");
+    assert!(
+        apply_transition_with_timelock(
+            &state,
+            &transition,
+            eligible_at - 1,
+            pending_since,
+            limits()
+        )
+        .is_err(),
+        "recovery must not activate before the signed time"
+    );
     let mut changed = transition.clone();
     changed.authorizations[0].signature[0] ^= 1;
-    assert!(apply_transition_with_timelock(
-        &state, &changed, eligible_at, pending_since, limits()
-    ).is_err(), "changed paper signature must not authorize recovery");
+    assert!(
+        apply_transition_with_timelock(&state, &changed, eligible_at, pending_since, limits())
+            .is_err(),
+        "changed paper signature must not authorize recovery"
+    );
 }
 
 fn recovery_policy_transition(

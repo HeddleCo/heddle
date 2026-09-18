@@ -21,12 +21,19 @@ fn account_thread_genesis_matches_browser_fixture() {
         nonce: vec![7; 16],
     };
     let signed = SignedGenesis::sign(&genesis, &signer).expect("creator signed canonical record");
-    assert_eq!(signed.verify().expect("independent Rust signature verifier"), genesis);
+    assert_eq!(
+        signed
+            .verify()
+            .expect("independent Rust signature verifier"),
+        genesis
+    );
     let expected = include_str!("fixtures/thread-genesis-browser-v1.txt");
     let actual = format!(
         "canonical={}\nsignature={}\nkey={}\nid={}\nbase={}\n",
-        hex::encode(&signed.canonical), hex::encode(&signed.signature),
-        hex::encode(signer.public_key()), hex::encode(genesis.id().expect("identity").as_bytes()),
+        hex::encode(&signed.canonical),
+        hex::encode(&signed.signature),
+        hex::encode(signer.public_key()),
+        hex::encode(genesis.id().expect("identity").as_bytes()),
         hex::encode(seed.id().as_bytes()),
     );
     assert_eq!(actual, expected, "browser and Rust must share exact bytes");

@@ -28,7 +28,7 @@ pub fn register(home: &Path, repository: &crate::Repository, id: uuid::Uuid) -> 
         heddle_dir: repository.heddle_dir().canonicalize()?,
         capability_path: id.to_string(),
     };
-    let overview = api::heddle::api::v2alpha1::SpoolOverview {
+    let overview = api::heddle::api::v1alpha2::SpoolOverview {
         name: repository
             .root()
             .file_name()
@@ -36,10 +36,10 @@ pub fn register(home: &Path, repository: &crate::Repository, id: uuid::Uuid) -> 
             .unwrap_or("Local Spool")
             .to_owned(),
         slug: id.to_string(),
-        audience: api::heddle::api::v2alpha1::Audience::Private as i32,
-        settings: Some(api::heddle::api::v2alpha1::SpoolSettings {
-            audience: api::heddle::api::v2alpha1::Audience::Private as i32,
-            default_state_audience: api::heddle::api::v2alpha1::Audience::Private as i32,
+        audience: api::heddle::api::v1alpha2::Audience::Private as i32,
+        settings: Some(api::heddle::api::v1alpha2::SpoolSettings {
+            audience: api::heddle::api::v1alpha2::Audience::Private as i32,
+            default_state_audience: api::heddle::api::v1alpha2::Audience::Private as i32,
             allow_child_creation: true,
             ..Default::default()
         }),

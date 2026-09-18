@@ -4,7 +4,7 @@
 use std::fs;
 
 use anyhow::{Context, Result};
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey, OwnerState,
     PurgeOperationSigningBody, PurgeSidecarIdentity, SidecarAuthorization, SignedSpoolOwnerGenesis,
     SpoolOwnerGenesis,

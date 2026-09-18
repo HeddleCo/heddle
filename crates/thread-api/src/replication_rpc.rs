@@ -271,7 +271,7 @@ impl Peer {
             Ok(value) => value,
             Err(error) => {
                 writer
-                    .fail(&api::heddle::api::v1alpha1::CallFailure {
+                    .fail(&api::heddle::api::common::CallFailure {
                         code: 7,
                         message: error.to_string(),
                         ..Default::default()

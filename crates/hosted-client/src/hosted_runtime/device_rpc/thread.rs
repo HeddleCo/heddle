@@ -2,7 +2,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use objects::{
     object::thread_replication::{
         Admission, OPERATION_FORMAT, ThreadOperationBody,
@@ -596,7 +596,7 @@ impl DeviceRpc {
                 .iter()
                 .find(|p| p.property == kind as i32)
                 .context("action property frontier")?;
-            let method = format!("/heddle.api.v2alpha1.ThreadService/{suffix}");
+            let method = format!("/heddle.api.v1alpha2.ThreadService/{suffix}");
             overview.actions.push(ActionAvailability {
                 authorized: permits(&method),
                 method,
@@ -621,7 +621,7 @@ impl DeviceRpc {
             "ReopenDiscussion",
             "PutContext",
         ] {
-            let method = format!("/heddle.api.v2alpha1.CollaborationService/{suffix}");
+            let method = format!("/heddle.api.v1alpha2.CollaborationService/{suffix}");
             overview.actions.push(ActionAvailability {
                 authorized: permits(&method),
                 method,
@@ -633,7 +633,7 @@ impl DeviceRpc {
                 ..Default::default()
             });
         }
-        let method = "/heddle.api.v2alpha1.ThreadService/RecordReview";
+        let method = "/heddle.api.v1alpha2.ThreadService/RecordReview";
         overview.actions.push(ActionAvailability {
             method: method.into(),
             endpoint: Some(self.endpoint()),
@@ -653,7 +653,7 @@ impl DeviceRpc {
             }],
             ..Default::default()
         });
-        let landing_method = "/heddle.api.v2alpha1.ThreadService/LandThread";
+        let landing_method = "/heddle.api.v1alpha2.ThreadService/LandThread";
         overview.actions.push(ActionAvailability {
             method: landing_method.into(),
             endpoint: Some(self.endpoint()),
@@ -675,7 +675,7 @@ impl DeviceRpc {
             }],
             ..Default::default()
         });
-        let stack_method = "/heddle.api.v2alpha1.ThreadService/LandStack";
+        let stack_method = "/heddle.api.v1alpha2.ThreadService/LandStack";
         overview.actions.push(ActionAvailability {
             method: stack_method.into(),
             endpoint: Some(self.endpoint()),
@@ -805,7 +805,7 @@ pub(super) fn revision(reference: &ThreadRef, state: objects::object::StateId) -
     RevisionRef {
         spool: reference.spool.clone(),
         revision: Some(revision_ref::Revision::State(
-            api::heddle::api::v1alpha1::StateId {
+            api::heddle::api::common::StateId {
                 value: state.as_bytes().to_vec(),
             },
         )),

@@ -111,7 +111,7 @@ fn only_exact_portable_empty_seed_stages_without_source_operation() {
         value: genesis.id().expect("Thread ID").as_bytes().to_vec(),
     });
     ready.current.as_mut().expect("revision").revision = Some(revision_ref::Revision::State(
-        api::heddle::api::v1alpha1::StateId {
+        api::heddle::api::common::StateId {
             value: seed.id().as_bytes().to_vec(),
         },
     ));
@@ -144,7 +144,7 @@ fn only_exact_portable_empty_seed_stages_without_source_operation() {
         Attribution::human(Principal::new("Heddle", "init@heddle")),
     );
     wrong.current.as_mut().expect("revision").revision = Some(revision_ref::Revision::State(
-        api::heddle::api::v1alpha1::StateId {
+        api::heddle::api::common::StateId {
             value: random.id().as_bytes().to_vec(),
         },
     ));
@@ -251,7 +251,7 @@ fn fixture(
         Attribution::human(Principal::new("author", "author@example.test")),
     );
     ready.current.as_mut().expect("revision").revision = Some(revision_ref::Revision::State(
-        api::heddle::api::v1alpha1::StateId {
+        api::heddle::api::common::StateId {
             value: state.id().as_bytes().to_vec(),
         },
     ));
@@ -444,7 +444,7 @@ fn integrated_fixture(
         body: ThreadOperationBody::LocalIntegration(receipt.encode().expect("receipt")),
     };
     ready.current.as_mut().expect("revision").revision = Some(revision_ref::Revision::State(
-        api::heddle::api::v1alpha1::StateId {
+        api::heddle::api::common::StateId {
             value: result.id().as_bytes().to_vec(),
         },
     ));

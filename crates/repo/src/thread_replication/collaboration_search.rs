@@ -111,7 +111,16 @@ pub(crate) fn search_native(
     annotations: Option<&objects::object::AnnotationQuery>,
     source: SourceSelection,
 ) -> Result<NativeBatch> {
-    search_native_inner(directory, text, after_operation, limit, kinds, annotations, source, None)
+    search_native_inner(
+        directory,
+        text,
+        after_operation,
+        limit,
+        kinds,
+        annotations,
+        source,
+        None,
+    )
 }
 
 /// Search with query-local exact source targets admitted by signed Thread and
@@ -128,7 +137,16 @@ pub fn search_native_admitted(
     source: SourceSelection,
     admitted: &[AdmittedSourceTarget],
 ) -> Result<NativeBatch> {
-    search_native_inner(directory, text, after_operation, limit, kinds, annotations, source, Some(admitted))
+    search_native_inner(
+        directory,
+        text,
+        after_operation,
+        limit,
+        kinds,
+        annotations,
+        source,
+        Some(admitted),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -161,12 +179,23 @@ fn search_native_inner(
     connection.execute_batch("CREATE TEMP TABLE admitted_source_targets(thread BLOB NOT NULL,revision BLOB NOT NULL,PRIMARY KEY(thread,revision)) WITHOUT ROWID;
         CREATE TEMP TABLE denied_source_leaves(thread BLOB NOT NULL,revision BLOB NOT NULL,leaf BLOB NOT NULL,PRIMARY KEY(thread,revision,leaf)) WITHOUT ROWID")?;
     if let Some(admitted) = admitted {
-        let mut insert = connection.prepare("INSERT OR IGNORE INTO admitted_source_targets(thread,revision) VALUES(?1,?2)")?;
-        let mut deny = connection.prepare("INSERT OR IGNORE INTO denied_source_leaves(thread,revision,leaf) VALUES(?1,?2,?3)")?;
+        let mut insert = connection.prepare(
+            "INSERT OR IGNORE INTO admitted_source_targets(thread,revision) VALUES(?1,?2)",
+        )?;
+        let mut deny = connection.prepare(
+            "INSERT OR IGNORE INTO denied_source_leaves(thread,revision,leaf) VALUES(?1,?2,?3)",
+        )?;
         for item in admitted {
-            insert.execute(rusqlite::params![item.thread.as_bytes(),item.revision.as_bytes()])?;
+            insert.execute(rusqlite::params![
+                item.thread.as_bytes(),
+                item.revision.as_bytes()
+            ])?;
             for leaf in &item.denied_leaves {
-                deny.execute(rusqlite::params![item.thread.as_bytes(),item.revision.as_bytes(),leaf.as_bytes()])?;
+                deny.execute(rusqlite::params![
+                    item.thread.as_bytes(),
+                    item.revision.as_bytes(),
+                    leaf.as_bytes()
+                ])?;
             }
         }
     }
@@ -338,9 +367,7 @@ fn search_native_inner(
             snippet: summary,
             score,
             revision: revision
-                .map(|value| {
-                    super::hash(&value).map(objects::object::StateId::from_content_hash)
-                })
+                .map(|value| super::hash(&value).map(objects::object::StateId::from_content_hash))
                 .transpose()?,
             path,
             symbol_id,

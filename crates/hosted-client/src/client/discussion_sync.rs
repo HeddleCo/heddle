@@ -1233,7 +1233,7 @@ fn is_pushed_annotation_echo(
 }
 
 fn hosted_open_anchor(discussion: &HostedDiscussion, head_state: StateId) -> CollaborationAnchor {
-    use api::heddle::api::v1alpha1::DiscussionKind;
+    use crate::legacy_v1::DiscussionKind;
 
     let kind = DiscussionKind::try_from(discussion.kind).unwrap_or(DiscussionKind::Unspecified);
     let has_symbol = !discussion.file.is_empty() && !discussion.symbol.is_empty();
@@ -1732,10 +1732,10 @@ fn parse_visibility_token(token: &str) -> VisibilityTier {
 
 #[cfg(test)]
 mod tests {
-    use api::heddle::api::v1alpha1::{
+    use crate::legacy_v1::{
         Discussion as ProtoDiscussion, DiscussionTurn as ProtoTurn, PathSymbolRef, RepoEvent,
-        StateId as ProtoStateId,
     };
+    use api::heddle::api::common::StateId as ProtoStateId;
     use objects::object::{
         AnnotationKind, Attribution, CollaborationAnchor, CollaborationIdempotencyKey,
         CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
@@ -2019,7 +2019,6 @@ mod tests {
                     seconds: 1_700_000_001,
                     nanos: 0,
                 }),
-                ..ProtoTurn::default()
             }],
             ..ProtoDiscussion::default()
         };
@@ -3726,7 +3725,6 @@ mod tests {
                         seconds: 1_700_000_042,
                         nanos: 0,
                     }),
-                    ..ProtoTurn::default()
                 }],
                 ..ProtoDiscussion::default()
             },

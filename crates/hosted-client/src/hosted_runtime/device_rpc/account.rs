@@ -3,8 +3,8 @@ use std::sync::{Arc, Weak};
 
 use anyhow::{Context, Result};
 use api::heddle::api::{
-    v1alpha1::{CallContext, CallFailureCode},
-    v2alpha1::*,
+    common::{CallContext, CallFailureCode},
+    v1alpha2::*,
 };
 use prost::Message;
 
@@ -12,23 +12,23 @@ use super::{
     DeviceRpc, account_auth, account_feed::AccountFeed, failure, stream::ObservationAuthority,
 };
 pub(super) const METHODS: &[&str] = &[
-    "/heddle.api.v2alpha1.SearchService/Search",
-    "/heddle.api.v2alpha1.OperationService/ObserveOperations",
-    "/heddle.api.v2alpha1.EvidenceService/VerifyEvidence",
-    "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace",
-    "/heddle.api.v2alpha1.WorkspaceService/ResolveResources",
-    "/heddle.api.v2alpha1.WorkspaceService/SetBookmark",
-    "/heddle.api.v2alpha1.SpoolService/ObserveSpool",
-    "/heddle.api.v2alpha1.SpoolService/ListSpools",
-    "/heddle.api.v2alpha1.SpoolService/CreateSpool",
-    "/heddle.api.v2alpha1.SpoolService/ReviseSpool",
-    "/heddle.api.v2alpha1.SpoolService/DeleteSpool",
-    "/heddle.api.v2alpha1.SpoolService/SetSpoolMount",
-    "/heddle.api.v2alpha1.SpoolService/RemoveSpoolMount",
-    "/heddle.api.v2alpha1.IdentityService/ObserveIdentity",
-    "/heddle.api.v2alpha1.IdentityService/IntrospectCredential",
-    "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership",
-    "/heddle.api.v2alpha1.ThreadService/ObserveThreads",
+    "/heddle.api.v1alpha2.SearchService/Search",
+    "/heddle.api.v1alpha2.OperationService/ObserveOperations",
+    "/heddle.api.v1alpha2.EvidenceService/VerifyEvidence",
+    "/heddle.api.v1alpha2.WorkspaceService/ObserveWorkspace",
+    "/heddle.api.v1alpha2.WorkspaceService/ResolveResources",
+    "/heddle.api.v1alpha2.WorkspaceService/SetBookmark",
+    "/heddle.api.v1alpha2.SpoolService/ObserveSpool",
+    "/heddle.api.v1alpha2.SpoolService/ListSpools",
+    "/heddle.api.v1alpha2.SpoolService/CreateSpool",
+    "/heddle.api.v1alpha2.SpoolService/ReviseSpool",
+    "/heddle.api.v1alpha2.SpoolService/DeleteSpool",
+    "/heddle.api.v1alpha2.SpoolService/SetSpoolMount",
+    "/heddle.api.v1alpha2.SpoolService/RemoveSpoolMount",
+    "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
+    "/heddle.api.v1alpha2.IdentityService/IntrospectCredential",
+    "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership",
+    "/heddle.api.v1alpha2.ThreadService/ObserveThreads",
 ];
 impl DeviceRpc {
     pub(super) fn account_feed(&self) -> Result<Arc<AccountFeed>> {

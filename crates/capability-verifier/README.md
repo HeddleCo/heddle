@@ -20,7 +20,7 @@ access; owner authority continues to use the purge-only rules below.
 ## Contract
 
 Version 0.20 consumes `heddle-api = "0.31.0-alpha.1"`. Public proof types come
-from `heddle.api.v2alpha1`; the durable signing formats keep their own versions.
+from `heddle.api.v1alpha2`; the durable signing formats keep their own versions.
 The verifier implements the purge-only owner contract:
 
 - `verify_spool_owner_genesis` verifies the owner signature over

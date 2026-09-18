@@ -2,7 +2,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
-use api::heddle::api::v2alpha1::{OperationRecord, operation_record::State};
+use api::heddle::api::v1alpha2::{OperationRecord, operation_record::State};
 use objects::object::{ContentHash, OperationId};
 use prost::Message;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -190,7 +190,7 @@ pub fn transition(
     key: ContentHash,
     executor: &str,
     next: State,
-    failure: Option<api::heddle::api::v1alpha1::CallFailure>,
+    failure: Option<api::heddle::api::common::CallFailure>,
 ) -> Result<OperationRecord> {
     let mut connection = crate::local_metadata::open(directory)?;
     let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -295,7 +295,7 @@ pub fn recover_if_dead(
     if !executor_is_dead(executor)? {
         return Ok(false);
     }
-    let failure=api::heddle::api::v1alpha1::CallFailure{code:api::heddle::api::v1alpha1::CallFailureCode::Unavailable as i32,message:"Native executor stopped before acknowledging completion; inspect retained results before retrying".into(),..Default::default()};
+    let failure=api::heddle::api::common::CallFailure{code:api::heddle::api::common::CallFailureCode::Unavailable as i32,message:"Native executor stopped before acknowledging completion; inspect retained results before retrying".into(),..Default::default()};
     transition(
         directory,
         namespace,
@@ -309,7 +309,7 @@ pub fn recover_if_dead(
 
 #[cfg(test)]
 mod tests {
-    use api::heddle::api::v2alpha1::{RecordRef, SpoolRef};
+    use api::heddle::api::v1alpha2::{RecordRef, SpoolRef};
 
     use super::*;
     #[test]

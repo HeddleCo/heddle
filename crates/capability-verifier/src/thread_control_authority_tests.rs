@@ -1,7 +1,7 @@
 use super::*;
 use crate::thread_control_authority::{self as proof, Context, Revocation};
 
-const METHOD: &str = "/heddle.api.v2alpha1.ThreadService/RenameThread";
+const METHOD: &str = "/heddle.api.v1alpha2.ThreadService/RenameThread";
 fn fixture(agent: bool) -> (Vec<u8>, VerifiedOwnerState, [u8; 32]) {
     fixture_mint(agent, false)
 }
@@ -143,7 +143,7 @@ fn thread_authority_checks_actual_time_method_and_resource() {
             .contains("original Thread authorization")
     );
     let mut method = context(&owner, &publisher);
-    method.method = "/heddle.api.v2alpha1.ThreadService/ReviseIntent";
+    method.method = "/heddle.api.v1alpha2.ThreadService/ReviseIntent";
     assert!(
         proof::verify(&bytes, method, |_| false)
             .err()
@@ -333,11 +333,11 @@ fn evidence_original_authority_requires_its_exact_evidence_method() {
     for (operation, method) in [
         (
             "RecordEvidence",
-            "/heddle.api.v2alpha1.EvidenceService/RecordEvidence",
+            "/heddle.api.v1alpha2.EvidenceService/RecordEvidence",
         ),
         (
             "AcknowledgeCheck",
-            "/heddle.api.v2alpha1.EvidenceService/AcknowledgeCheck",
+            "/heddle.api.v1alpha2.EvidenceService/AcknowledgeCheck",
         ),
     ] {
         let (bytes, owner, publisher) = fixture_mint_method(false, false, operation);
@@ -413,7 +413,7 @@ fn boundary_revoked_expired_original_is_provenance_only_and_acceptor_must_be_cur
     let (old, owner, old_key) = fixture_mint_method(true, true, "PublishContent");
     let mut old_context = context(&owner, &old_key);
     old_context.agent_id = Some("original-session");
-    old_context.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    old_context.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
     old_context.now = NOW + 200;
     let inspected = inspect_original_identity(&old, old_context, |_| true)
         .expect("expired revoked signatures remain provenance");
@@ -434,7 +434,7 @@ fn boundary_revoked_expired_original_is_provenance_only_and_acceptor_must_be_cur
     );
     let mut expired = context(&owner, &old_key);
     expired.agent_id = Some("original-session");
-    expired.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    expired.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
     expired.now = NOW + 200;
     assert!(
         proof::verify(&old, expired, |_| true).is_err(),
@@ -445,7 +445,7 @@ fn boundary_revoked_expired_original_is_provenance_only_and_acceptor_must_be_cur
     let subject = [22; 32];
     let mut fresh_context = context(&current, &key);
     fresh_context.now = NOW + 200;
-    fresh_context.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    fresh_context.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
     let accepting = verify_accepting_authority(
         &fresh,
         fresh_context,
@@ -464,7 +464,7 @@ fn boundary_revoked_expired_original_is_provenance_only_and_acceptor_must_be_cur
     assert_ne!(accepting.publisher, inspected.publisher);
     for revoked in ["accepting-session", "accepting-credential"] {
         let mut current_context = context(&current, &key);
-        current_context.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+        current_context.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
         current_context.now = NOW + 200;
         assert!(
             verify_accepting_authority(
@@ -495,7 +495,7 @@ fn boundary_acceptance_preserves_subject_attenuation_and_rejects_asserted_select
     let clauses = format!("check if {selector};");
     let (proof, current, key) = boundary_acceptor(&clauses);
     let mut ctx = context(&current, &key);
-    ctx.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    ctx.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
     verify_accepting_authority(
         &proof,
         ctx,
@@ -505,7 +505,7 @@ fn boundary_acceptance_preserves_subject_attenuation_and_rejects_asserted_select
     )
     .expect("exact original permitted");
     let mut ctx = context(&current, &key);
-    ctx.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    ctx.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
     assert!(
         verify_accepting_authority(
             &proof,
@@ -519,7 +519,7 @@ fn boundary_acceptance_preserves_subject_attenuation_and_rejects_asserted_select
     );
     let (forged, current, key) = boundary_acceptor(&format!("{selector}; {clauses}"));
     let mut ctx = context(&current, &key);
-    ctx.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    ctx.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
     let error = verify_accepting_authority(
         &forged,
         ctx,
@@ -539,7 +539,7 @@ fn boundary_current_delegate_is_not_replaced_by_an_owner_role_shortcut() {
     let (bytes, owner, key) = fixture_mint_method(true, false, "PublishContent");
     let mut ctx = context(&owner, &key);
     ctx.agent_id = Some("original-session");
-    ctx.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    ctx.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
     let author = crate::boundary_authority::verify_accepting_authority(
         &bytes,
         ctx,
@@ -551,7 +551,7 @@ fn boundary_current_delegate_is_not_replaced_by_an_owner_role_shortcut() {
     assert_eq!(author.agent_id.as_deref(), Some("original-session"));
     let mut ctx = context(&owner, &key);
     ctx.agent_id = Some("original-session");
-    ctx.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+    ctx.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
     let mut scope = boundary_scope(&[21; 32], &[22; 32], &[23; 32]);
     scope.account = &[24; 16];
     assert!(
@@ -637,7 +637,7 @@ fn boundary_historical_identity_survives_rotation_and_recovery_without_issuance_
 #[test]
 fn boundary_genesis_derives_original_agent_without_weakening_signed_actor_checks() {
     use crate::boundary_authority::{inspect_original_genesis_identity, inspect_original_identity};
-    let method = "/heddle.api.v2alpha1.ThreadService/StartThread";
+    let method = "/heddle.api.v1alpha2.ThreadService/StartThread";
     let (bytes, owner, publisher) = fixture_mint_method(true, false, "StartThread");
     let ctx = || {
         let mut value = context(&owner, &publisher);
@@ -697,7 +697,7 @@ fn boundary_original_device_revocation_is_observed_while_acceptor_still_requires
     );
     let ctx = || {
         let mut value = context(&owner, &publisher);
-        value.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+        value.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
         value.agent_id = Some("original-session");
         value.now = NOW + 200;
         value
@@ -738,7 +738,7 @@ fn boundary_original_device_revocation_is_observed_while_acceptor_still_requires
     let current_ctx = || {
         let mut value = context(&current, &key);
         value.now = NOW + 200;
-        value.method = "/heddle.api.v2alpha1.SyncService/PublishContent";
+        value.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
         value
     };
     verify_accepting_authority(

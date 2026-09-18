@@ -113,7 +113,7 @@ fn fixture(local: bool) -> (PublishContentClientFrame, PublicationOriginals, Sta
                 revision: Some(RevisionRef {
                     spool: thread.spool.clone(),
                     revision: Some(revision_ref::Revision::State(
-                        api::heddle::api::v1alpha1::StateId {
+                        api::heddle::api::common::StateId {
                             value: state.id().as_bytes().to_vec(),
                         },
                     )),

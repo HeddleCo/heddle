@@ -101,7 +101,11 @@ fn build_session(user_config: &UserConfig) -> anyhow::Result<HostedSession> {
 fn whoami_context(session: &HostedSession) -> SignedCallContext {
     CallContextFactory::from_client_config(session.client_config())
         .expect("session config must be a valid call context")
-        .unary("/heddle.api.v2alpha1.IdentityService/ObserveIdentity", &[], "")
+        .unary(
+            "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
+            &[],
+            "",
+        )
         .expect("build WhoAmI context")
 }
 

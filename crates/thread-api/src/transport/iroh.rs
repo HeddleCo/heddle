@@ -6,7 +6,7 @@ use std::time::Duration;
 use ::iroh::endpoint::{Connection, RecvStream, SendStream};
 use api::{
     framing,
-    heddle::api::v1alpha1::CallFailure,
+    heddle::api::common::CallFailure,
     v2::{
         MethodDescriptor,
         client::{MessageReader, MessageWriter, RpcTransport},

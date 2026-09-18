@@ -9,8 +9,8 @@
 use std::time::Instant;
 
 use api::heddle::api::{
-    v1alpha1::{PullReady, StateId as ApiStateId},
-    v2alpha1::{
+    common::StateId as ApiStateId,
+    v1alpha2::{
         self as contract, EndpointKind, EndpointRef, FetchOpen, ObservationMode,
         ObserveIdentityRequest, ObserveOptions, ObserveThreadsRequest, RevisionRef, SpoolRef,
         ThreadOverview, ThreadQuery, ThreadRef, TransferSelection, identity_event, revision_ref,
@@ -45,8 +45,8 @@ use super::{
     sync::{PullProfile, PushProfile, encode_empty_pull_bootstrap},
 };
 
-const PUBLISH: &str = "heddle.api.v2alpha1.SyncService/PublishContent";
-const START: &str = "heddle.api.v2alpha1.ThreadService/StartThread";
+const PUBLISH: &str = "heddle.api.v1alpha2.SyncService/PublishContent";
+const START: &str = "heddle.api.v1alpha2.ThreadService/StartThread";
 const SOURCE_OBJECTS: usize = 100_000;
 const SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 const ANCESTRY_RECORDS: usize = 10_000;
@@ -670,7 +670,7 @@ impl HostedClient {
         initialize: F,
     ) -> Result<(PullComplete, Repository), ProtocolError>
     where
-        F: FnOnce(&PullReady, &PullBootstrapRefs) -> Result<Repository, ProtocolError>,
+        F: FnOnce(&PullBootstrapRefs) -> Result<Repository, ProtocolError>,
     {
         let advertised = self.advertised_pull_refs(repo_path).await?;
         if advertised.refs.is_empty() {
@@ -690,7 +690,7 @@ impl HostedClient {
                 "Thread '{track}' is not published on this spool"
             )));
         }
-        let repo = initialize(&PullReady::default(), &advertised)?;
+        let repo = initialize(&advertised)?;
         let complete = self
             .fetch_hosted_thread(&repo, repo_path, &track, Some(&track), None)
             .await?;

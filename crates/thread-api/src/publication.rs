@@ -596,7 +596,7 @@ mod tests {
         let remote = Remote {
             api: api::v2::client::Client::new(
                 Peer { wrong_receipt },
-                ["/heddle.api.v2alpha1.SyncService/PublishContent".into()],
+                ["/heddle.api.v1alpha2.SyncService/PublishContent".into()],
             ),
             description: DescribeEndpointResponse {
                 endpoint: Some(endpoint.clone()),
@@ -841,7 +841,7 @@ mod tests {
             Some(RevisionRef {
                 spool: thread.spool,
                 revision: Some(revision_ref::Revision::State(
-                    api::heddle::api::v1alpha1::StateId {
+                    api::heddle::api::common::StateId {
                         value: state.id().as_bytes().to_vec()
                     }
                 ))

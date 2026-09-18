@@ -1,4 +1,4 @@
-use api::heddle::api::v2alpha1 as wire;
+use api::heddle::api::v1alpha2 as wire;
 use prost::Message;
 use store::{Catalog, SpoolRecord};
 

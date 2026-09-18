@@ -6,7 +6,7 @@
 use std::{io::Read, path::Path};
 
 use api::{
-    heddle::api::v2alpha1::{
+    heddle::api::v1alpha2::{
         EndpointRef, FetchClientFrame, FetchOpen, FetchServerFrame, ProviderConsent, ProviderOffer,
         ProviderPlan, ProviderPlanChallenge, ReadProviderExtentRequest, RecordSignature,
         SignedRecord, fetch_client_frame, fetch_open, fetch_server_frame, provider_assembly_record,
@@ -384,7 +384,7 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
         if bytes != self.plan.output_pack_length {
             return Err(Error::Invalid("provider output length differs from plan"));
         }
-        let result = api::heddle::api::v2alpha1::ProviderResult {
+        let result = api::heddle::api::v1alpha2::ProviderResult {
             extent_set_digest: self.plan.extent_set_digest.clone(),
             assembly_digest: self.plan.assembly_digest.clone(),
             verified_range_commitments: self
@@ -399,7 +399,7 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
                         .ok_or(Error::Invalid("provider range absent"))
                 })
                 .collect::<Result<Vec<_>, _>>()?,
-            assembled_pack: Some(api::heddle::api::v2alpha1::ObjectAddress {
+            assembled_pack: Some(api::heddle::api::v1alpha2::ObjectAddress {
                 algorithm: "blake3".into(),
                 digest: digest.as_bytes().to_vec(),
             }),
@@ -429,7 +429,7 @@ impl<W: MessageWriter<Error = transport::Error>, R: MessageReader<Error = transp
             .as_ref()
             .ok_or(Error::Invalid("provider final checkpoint absent"))?;
         if complete.revision != self.state.ready.current
-            || complete.closure != api::heddle::api::v2alpha1::Coverage::Complete as i32
+            || complete.closure != api::heddle::api::v1alpha2::Coverage::Complete as i32
             || !complete.missing.is_empty()
             || final_checkpoint.transfer_id != initial.transfer_id
             || final_checkpoint.plan_digest != initial.plan_digest
@@ -449,7 +449,7 @@ async fn write_chunk(
     index: usize,
     offset: u64,
     data: Vec<u8>,
-    record: api::heddle::api::v2alpha1::ProviderAssemblyRecord,
+    record: api::heddle::api::v1alpha2::ProviderAssemblyRecord,
     finished: bool,
 ) -> Result<(), Error> {
     tokio::task::spawn_blocking(move || {
@@ -468,7 +468,7 @@ async fn write_chunk(
 fn verify_record(
     writer: &wire::ProviderPackWriter,
     index: usize,
-    record: &api::heddle::api::v2alpha1::ProviderAssemblyRecord,
+    record: &api::heddle::api::v1alpha2::ProviderAssemblyRecord,
 ) -> Result<(), Error> {
     let mut hasher = blake3::Hasher::new();
     writer
@@ -766,7 +766,7 @@ mod tests {
     };
 
     use api::{
-        heddle::api::v2alpha1::{
+        heddle::api::v1alpha2::{
             Coverage, DescribeEndpointResponse, EndpointKind, FetchComplete, ObjectAddress,
             PackChunk, ProviderAssemblyRecord, ProviderDialRoute, ProviderExtent,
             ProviderExtentEvent, ProviderInlineChunk, ProviderInlineSource, ProviderOffer,
@@ -1175,7 +1175,7 @@ mod tests {
 
     fn mixed_plan(
         thread: ThreadRef,
-        revision: api::heddle::api::v2alpha1::RevisionRef,
+        revision: api::heddle::api::v1alpha2::RevisionRef,
         issuer: EndpointRef,
         client: EndpointRef,
         provider: EndpointRef,

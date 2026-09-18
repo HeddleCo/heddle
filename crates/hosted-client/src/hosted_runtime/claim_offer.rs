@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::{CallFailure, CallFailureCode};
+use api::heddle::api::common::{CallFailure, CallFailureCode};
 use config::UserConfig;
 
 use super::{

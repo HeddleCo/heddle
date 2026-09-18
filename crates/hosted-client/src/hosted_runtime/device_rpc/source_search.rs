@@ -1,6 +1,9 @@
 //! Device-owned source Search extraction. Only the explicit analysis worker
 //! invokes this; finite Search reads the persisted projection without parsing.
-use std::{collections::BTreeMap, time::{Duration, Instant}};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, ensure};
 use objects::{
@@ -28,9 +31,17 @@ fn index_source(
         .store()
         .get_state(&state)?
         .context("source Search state absent")?;
-    ensure!(source.id() == state, "source Search State identity mismatch");
+    ensure!(
+        source.id() == state,
+        "source Search State identity mismatch"
+    );
     let mut documents = Vec::new();
-    let mut pending = vec![(String::new(), source.tree, 0usize, Vec::<ContentHash>::new())];
+    let mut pending = vec![(
+        String::new(),
+        source.tree,
+        0usize,
+        Vec::<ContentHash>::new(),
+    )];
     let mut path_leaves = BTreeMap::<String, Vec<ContentHash>>::new();
     let mut work = 0usize;
     let mut bytes = 0usize;
@@ -58,7 +69,10 @@ fn index_source(
             ensure!(path.len() <= 4096, "source Search path bound exceeded");
             let mut leaf_chain = parent_leaves.clone();
             if tree.scheme() == objects::object::TreeScheme::V4Salted {
-                leaf_chain.push(tree.v4_leaf_hash_at(index).context("salted source leaf absent")?);
+                leaf_chain.push(
+                    tree.v4_leaf_hash_at(index)
+                        .context("salted source leaf absent")?,
+                );
             }
             if let Some(child) = entry.tree_hash() {
                 pending.push((path, child, depth + 1, leaf_chain));
@@ -68,7 +82,10 @@ fn index_source(
                     content_ready = false;
                     continue;
                 };
-                ensure!(blob.hash() == blob_hash, "source Search blob identity mismatch");
+                ensure!(
+                    blob.hash() == blob_hash,
+                    "source Search blob identity mismatch"
+                );
                 if blob.content().len() > 65536 {
                     content_ready = false;
                     continue;
@@ -102,7 +119,7 @@ fn index_source(
             repository,
             state,
             &objects::object::EntryRedactions::default(),
-            &api::heddle::api::v2alpha1::ObserveAnalysisRequest::default(),
+            &api::heddle::api::v1alpha2::ObserveAnalysisRequest::default(),
             &mut complete,
         )?;
         symbols_ready = complete;

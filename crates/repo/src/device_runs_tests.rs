@@ -1,4 +1,4 @@
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     DecideRunPermissionRequest, RecordRef, SpoolRef, control_run_request::Action,
     operation_record::State,
 };
@@ -194,7 +194,7 @@ fn timeline_is_immutable_and_shares_bounded_filtered_pagination() {
 
 #[test]
 fn pending_permission_is_observable_versioned_closed_and_expiring() {
-    use api::heddle::api::v2alpha1::RunPermission;
+    use api::heddle::api::v1alpha2::RunPermission;
     let (_directory, store, run) = fixture();
     let mut permission = RunPermission {
         id: "exact-intent".into(),

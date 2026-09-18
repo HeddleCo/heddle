@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     AuthorizationSignature, AuthorizationVerificationKey, OwnerKeyBindingKind, OwnerKeyTransition,
     OwnerKeyTransitionKind, RecoveryGuardian, RecoveryGuardianKind, RecoveryPolicy,
     SignedOwnerRoot,
@@ -413,7 +413,7 @@ fn proposed_claim_binds_entire_transition_and_browser_registration_key() {
     let policy = paper_policy(&g1, &g2);
     let (key, proof, guardians) =
         browser_claim_proofs(&root, &human, &policy, &[g1, g2], NOW + 1, [8; 32]);
-    let proposed = api::heddle::api::v2alpha1::SignedOwnerKeyTransition {
+    let proposed = api::heddle::api::v1alpha2::SignedOwnerKeyTransition {
         transition: Some(
             crate::claim_deferred_human_transition(&root, key, policy, NOW + 1, [8; 32])
                 .expect("body"),
@@ -462,7 +462,7 @@ fn proposed_claim_binds_entire_transition_and_browser_registration_key() {
 
 #[test]
 fn spool_genesis_requires_current_authority_and_verifiable_history() {
-    use api::heddle::api::v2alpha1::{OwnerState, PrincipalRef};
+    use api::heddle::api::v1alpha2::{OwnerState, PrincipalRef};
     let old = crypto::Ed25519Signer::generate().expect("original authority");
     let current = crypto::Ed25519Signer::generate().expect("current authority");
     let root = sign_claimable_deferred_human_root(&old, ACCOUNT, [7; 32], NOW).expect("root");
@@ -552,12 +552,12 @@ fn spool_genesis_requires_current_authority_and_verifiable_history() {
     );
     let initial = verify_owner_root(owner.root.as_ref().expect("root")).expect("root");
     let mut observation = owner.clone();
-    observation.resource_keyring = Some(api::heddle::api::v2alpha1::CloneAuthorizationKeyring {
+    observation.resource_keyring = Some(api::heddle::api::v1alpha2::CloneAuthorizationKeyring {
         format_version: 1,
         spool_uuid: spool.as_bytes().to_vec(),
         canonical_spool_path_segments: vec!["test".into()],
-        pin: Some(api::heddle::api::v2alpha1::CloneOwnerPin {
-            kind: api::heddle::api::v2alpha1::CloneOwnerPinKind::CloneTofu as i32,
+        pin: Some(api::heddle::api::v1alpha2::CloneOwnerPin {
+            kind: api::heddle::api::v1alpha2::CloneOwnerPinKind::CloneTofu as i32,
             expected_owner_id: initial.owner_id().to_vec(),
             first_seen_unix_seconds: NOW,
         }),

@@ -4,7 +4,7 @@ use std::{net::Ipv4Addr, time::Duration};
 
 use api::{
     framing::{encode_stream_failure, encode_stream_message},
-    heddle::api::v1alpha1::{CallFailure, CallFailureCode},
+    heddle::api::common::{CallFailure, CallFailureCode},
 };
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 use prost::Message as _;

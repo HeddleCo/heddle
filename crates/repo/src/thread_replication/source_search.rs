@@ -48,67 +48,77 @@ impl SourceSearchReader {
         selected_threads: Option<&[ContentHash]>,
         mut visit: impl FnMut(IndexedSourceTarget) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
-    let connection = &self.connection;
-    connection.execute_batch("CREATE TEMP TABLE IF NOT EXISTS selected_source_threads(thread BLOB PRIMARY KEY) WITHOUT ROWID;
+        let connection = &self.connection;
+        connection.execute_batch("CREATE TEMP TABLE IF NOT EXISTS selected_source_threads(thread BLOB PRIMARY KEY) WITHOUT ROWID;
         DELETE FROM selected_source_threads")?;
-    if let Some(threads) = selected_threads {
-        let mut insert = connection.prepare("INSERT OR IGNORE INTO selected_source_threads(thread) VALUES(?1)")?;
-        for thread in threads {
-            insert.execute([thread.as_bytes().as_slice()])?;
+        if let Some(threads) = selected_threads {
+            let mut insert = connection
+                .prepare("INSERT OR IGNORE INTO selected_source_threads(thread) VALUES(?1)")?;
+            for thread in threads {
+                insert.execute([thread.as_bytes().as_slice()])?;
+            }
         }
-    }
-    let mut after: Option<IndexedSourceTarget> = None;
-    loop {
-        let page = {
-            let selected_join = if selected_threads.is_some() {
-                "JOIN selected_source_threads selected ON selected.thread=o.thread"
-            } else {
-                ""
-            };
-            let query = format!(
-                "SELECT DISTINCT o.thread,o.source_revision FROM operations o {selected_join}
+        let mut after: Option<IndexedSourceTarget> = None;
+        loop {
+            let page = {
+                let selected_join = if selected_threads.is_some() {
+                    "JOIN selected_source_threads selected ON selected.thread=o.thread"
+                } else {
+                    ""
+                };
+                let query = format!(
+                    "SELECT DISTINCT o.thread,o.source_revision FROM operations o {selected_join}
                  WHERE o.status=1 AND o.facet=1 AND o.source_revision IS NOT NULL
                    AND (?1 OR EXISTS(SELECT 1 FROM thread_source_head_revisions h
                     WHERE h.thread=o.thread AND h.revision=o.source_revision))
                    AND (?2 IS NULL OR o.source_revision=?2)
                    AND (?3 IS NULL OR (o.thread,o.source_revision)>(?3,?4))
                  ORDER BY o.thread,o.source_revision LIMIT 256",
-            );
-            let mut statement = connection.prepare(&query)?;
-            let exact = match source {
-                super::collaboration_search::SourceSelection::Exact(id) => Some(id),
-                _ => None,
-            };
-            let rows = statement.query_map(
-                params![
-                    matches!(source, super::collaboration_search::SourceSelection::Retained | super::collaboration_search::SourceSelection::Exact(_)),
-                    exact.as_ref().map(StateId::as_bytes),
-                    after.as_ref().map(|value| value.thread.as_bytes().as_slice()),
-                    after.as_ref().map(|value| value.revision.as_bytes().as_slice()),
-                ],
-                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
-            )?;
-            rows.map(|row| {
-                let (thread, revision) = row?;
-                Ok(IndexedSourceTarget {
-                    thread: super::hash(&thread)?,
-                    revision: StateId::from_bytes(*super::hash(&revision)?.as_bytes()),
+                );
+                let mut statement = connection.prepare(&query)?;
+                let exact = match source {
+                    super::collaboration_search::SourceSelection::Exact(id) => Some(id),
+                    _ => None,
+                };
+                let rows = statement.query_map(
+                    params![
+                        matches!(
+                            source,
+                            super::collaboration_search::SourceSelection::Retained
+                                | super::collaboration_search::SourceSelection::Exact(_)
+                        ),
+                        exact.as_ref().map(StateId::as_bytes),
+                        after
+                            .as_ref()
+                            .map(|value| value.thread.as_bytes().as_slice()),
+                        after
+                            .as_ref()
+                            .map(|value| value.revision.as_bytes().as_slice()),
+                    ],
+                    |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?)),
+                )?;
+                rows.map(|row| {
+                    let (thread, revision) = row?;
+                    Ok(IndexedSourceTarget {
+                        thread: super::hash(&thread)?,
+                        revision: StateId::from_bytes(*super::hash(&revision)?.as_bytes()),
+                    })
                 })
-            }).collect::<Result<Vec<_>>>()?
-        };
-        if page.is_empty() {
-            return Ok(());
-        }
-        let more = page.len() == 256;
-        after = page.last().cloned();
-        for candidate in page {
-            visit(candidate)?;
-        }
-        if !more {
-            return Ok(());
+                .collect::<Result<Vec<_>>>()?
+            };
+            if page.is_empty() {
+                return Ok(());
+            }
+            let more = page.len() == 256;
+            after = page.last().cloned();
+            for candidate in page {
+                visit(candidate)?;
+            }
+            if !more {
+                return Ok(());
+            }
         }
     }
-}
 
     /// Check current extractor completion for one previously admitted source.
     pub fn readiness_for_authorized_target(
@@ -116,8 +126,8 @@ impl SourceSearchReader {
         thread: ContentHash,
         revision: StateId,
     ) -> Result<SourceIndexReadiness> {
-    let connection = &self.connection;
-    let (content, symbols): (i64, i64) = connection.query_row(
+        let connection = &self.connection;
+        let (content, symbols): (i64, i64) = connection.query_row(
         "SELECT COALESCE(MIN(CASE WHEN r.extractor_version=3 AND r.revision=o.source_revision
             AND r.content_ready=1 AND counts.content_count=(
                 SELECT count(*) FROM source_search_candidates c WHERE c.operation=o.id AND c.kind=3)
@@ -141,11 +151,11 @@ impl SourceSearchReader {
         params![thread.as_bytes(), revision.as_bytes()],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    Ok(SourceIndexReadiness {
-        content: content == 1,
-        symbols: symbols == 1,
-    })
-}
+        Ok(SourceIndexReadiness {
+            content: content == 1,
+            symbols: symbols == 1,
+        })
+    }
 }
 
 pub(super) const SCHEMA: &str = "
@@ -351,7 +361,14 @@ pub fn publish(
         let rowid = transaction.last_insert_rowid();
         transaction.execute(
             "INSERT INTO source_search_candidate_proofs(candidate,leaf_count) VALUES(?1,?2)",
-            params![candidate.as_bytes(), document.leaf_chain.iter().collect::<std::collections::HashSet<_>>().len() as i64],
+            params![
+                candidate.as_bytes(),
+                document
+                    .leaf_chain
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len() as i64
+            ],
         )?;
         transaction.execute(
             "INSERT INTO source_search_fts(rowid,text) VALUES(?1,?2)",
@@ -415,23 +432,33 @@ mod tests {
         let mut visited = 0;
         let canceled = reader.visit_indexed_targets(
             super::super::collaboration_search::SourceSelection::Retained,
-            Some(&[thread]), |_| {
+            Some(&[thread]),
+            |_| {
                 visited += 1;
                 anyhow::bail!("request canceled")
-            });
+            },
+        );
         assert!(canceled.is_err());
         assert_eq!(visited, 1, "cancellation stops before another target proof");
         let mut resumed = 0;
-        reader.visit_indexed_targets(
-            super::super::collaboration_search::SourceSelection::Retained,
-            Some(&[thread]), |_| { resumed += 1; Ok(()) })
+        reader
+            .visit_indexed_targets(
+                super::super::collaboration_search::SourceSelection::Retained,
+                Some(&[thread]),
+                |_| {
+                    resumed += 1;
+                    Ok(())
+                },
+            )
             .expect("reader reusable after canceled visit");
         assert_eq!(resumed, 2);
     }
 
     #[test]
     fn admitted_paths_filter_hidden_matches_before_page_limit() {
-        use super::super::collaboration_search::{AdmittedSourceTarget, SourceSelection, search_native_admitted};
+        use super::super::collaboration_search::{
+            AdmittedSourceTarget, SourceSelection, search_native_admitted,
+        };
         let root = tempfile::tempdir().expect("temporary metadata");
         let directory = root.path().join(".heddle");
         std::fs::create_dir(&directory).expect("metadata directory");
@@ -449,53 +476,134 @@ mod tests {
             start_line: None,
             end_line: None,
             text: "alpha".into(),
-            leaf_chain: if path == "hidden.rs" { vec![ContentHash::from_bytes([9; 32])] } else { vec![ContentHash::from_bytes([8; 32])] },
+            leaf_chain: if path == "hidden.rs" {
+                vec![ContentHash::from_bytes([9; 32])]
+            } else {
+                vec![ContentHash::from_bytes([8; 32])]
+            },
         };
-        publish(&directory, thread, operation, revision,
-            &[document("hidden.rs"), document("visible.rs")], true, false)
-            .expect("indexed source");
+        publish(
+            &directory,
+            thread,
+            operation,
+            revision,
+            &[document("hidden.rs"), document("visible.rs")],
+            true,
+            false,
+        )
+        .expect("indexed source");
         let mut indexed = Vec::new();
         let reader = SourceSearchReader::open(&directory).expect("source reader");
-        reader.visit_indexed_targets(SourceSelection::Retained, Some(&[thread]), |target| {
-            indexed.push(target);
-            Ok(())
-        }).expect("indexed targets");
+        reader
+            .visit_indexed_targets(SourceSelection::Retained, Some(&[thread]), |target| {
+                indexed.push(target);
+                Ok(())
+            })
+            .expect("indexed targets");
         assert_eq!(indexed.len(), 1);
         let mut unrelated = Vec::new();
-        reader.visit_indexed_targets(SourceSelection::Retained,
-            Some(&[ContentHash::from_bytes([7;32])]), |target| {
-                unrelated.push(target);
-                Ok(())
-            }).expect("selected unrelated Thread");
-        assert!(unrelated.is_empty(), "Thread selector constrains target discovery in SQL");
+        reader
+            .visit_indexed_targets(
+                SourceSelection::Retained,
+                Some(&[ContentHash::from_bytes([7; 32])]),
+                |target| {
+                    unrelated.push(target);
+                    Ok(())
+                },
+            )
+            .expect("selected unrelated Thread");
+        assert!(
+            unrelated.is_empty(),
+            "Thread selector constrains target discovery in SQL"
+        );
         let admitted = vec![super::super::collaboration_search::AdmittedSourceTarget {
-            thread, revision, denied_leaves: vec![ContentHash::from_bytes([9;32])],
+            thread,
+            revision,
+            denied_leaves: vec![ContentHash::from_bytes([9; 32])],
         }];
-        let page = search_native_admitted(&directory, "alpha", None, 1, &[3], None,
-            SourceSelection::Retained, &admitted).expect("first page");
+        let page = search_native_admitted(
+            &directory,
+            "alpha",
+            None,
+            1,
+            &[3],
+            None,
+            SourceSelection::Retained,
+            &admitted,
+        )
+        .expect("first page");
         assert_eq!(page.scanned, 1);
         assert_eq!(page.hits[0].path, "visible.rs");
-        let next = search_native_admitted(&directory, "alpha", Some(page.hits[0].cursor), 1,
-            &[3], None, SourceSelection::Retained, &admitted).expect("next page");
+        let next = search_native_admitted(
+            &directory,
+            "alpha",
+            Some(page.hits[0].cursor),
+            1,
+            &[3],
+            None,
+            SourceSelection::Retained,
+            &admitted,
+        )
+        .expect("next page");
         assert!(next.hits.is_empty());
-        let hidden_only = search_native_admitted(&directory, "alpha", None, 1, &[3], None,
-            SourceSelection::Retained, &[]).expect("hidden-only page");
+        let hidden_only = search_native_admitted(
+            &directory,
+            "alpha",
+            None,
+            1,
+            &[3],
+            None,
+            SourceSelection::Retained,
+            &[],
+        )
+        .expect("hidden-only page");
         assert!(hidden_only.hits.is_empty());
         assert_eq!(hidden_only.scanned, 0);
         connection.execute("DELETE FROM source_search_candidate_leaves WHERE candidate=(SELECT candidate FROM source_search_candidates WHERE path='visible.rs')", [])
             .expect("drop one indexed proof leaf");
-        assert!(!reader.readiness_for_authorized_target(thread, revision)
-            .expect("incomplete leaf readiness").content,
-            "a broken leaf chain must make the authorized source pending");
-        let incomplete = search_native_admitted(&directory, "alpha", None, 1, &[3], None,
-            SourceSelection::Retained, &admitted).expect("incomplete proof query");
-        assert!(incomplete.hits.is_empty(), "missing leaf index cannot admit a path");
+        assert!(
+            !reader
+                .readiness_for_authorized_target(thread, revision)
+                .expect("incomplete leaf readiness")
+                .content,
+            "a broken leaf chain must make the authorized source pending"
+        );
+        let incomplete = search_native_admitted(
+            &directory,
+            "alpha",
+            None,
+            1,
+            &[3],
+            None,
+            SourceSelection::Retained,
+            &admitted,
+        )
+        .expect("incomplete proof query");
+        assert!(
+            incomplete.hits.is_empty(),
+            "missing leaf index cannot admit a path"
+        );
         connection.execute("DELETE FROM source_search_candidate_proofs WHERE candidate=(SELECT candidate FROM source_search_candidates WHERE path='hidden.rs')", [])
             .expect("drop path proof marker");
-        let no_marker = search_native_admitted(&directory, "alpha", None, 1, &[3], None,
-            SourceSelection::Retained, &[AdmittedSourceTarget { thread, revision, denied_leaves: Vec::new() }])
-            .expect("missing proof marker query");
-        assert!(no_marker.hits.is_empty(), "missing path proof cannot enter a page");
+        let no_marker = search_native_admitted(
+            &directory,
+            "alpha",
+            None,
+            1,
+            &[3],
+            None,
+            SourceSelection::Retained,
+            &[AdmittedSourceTarget {
+                thread,
+                revision,
+                denied_leaves: Vec::new(),
+            }],
+        )
+        .expect("missing proof marker query");
+        assert!(
+            no_marker.hits.is_empty(),
+            "missing path proof cannot enter a page"
+        );
     }
 
     #[test]
@@ -518,12 +626,26 @@ mod tests {
             .expect("admit");
         let reader = SourceSearchReader::open(&directory).expect("accepted target reader");
         let mut accepted = Vec::new();
-        reader.visit_indexed_targets(super::super::collaboration_search::SourceSelection::Retained,
-            Some(&[thread]), |target| { accepted.push(target); Ok(()) })
+        reader
+            .visit_indexed_targets(
+                super::super::collaboration_search::SourceSelection::Retained,
+                Some(&[thread]),
+                |target| {
+                    accepted.push(target);
+                    Ok(())
+                },
+            )
             .expect("unindexed accepted target");
         assert_eq!(accepted, vec![IndexedSourceTarget { thread, revision }]);
-        assert_eq!(reader.readiness_for_authorized_target(thread, revision).expect("unindexed readiness"),
-            SourceIndexReadiness { content: false, symbols: false });
+        assert_eq!(
+            reader
+                .readiness_for_authorized_target(thread, revision)
+                .expect("unindexed readiness"),
+            SourceIndexReadiness {
+                content: false,
+                symbols: false
+            }
+        );
         assert_eq!(
             due(&directory, 10, 1).expect("due"),
             vec![QueuedOriginal {
@@ -544,18 +666,40 @@ mod tests {
         );
         publish(&directory, thread, operation, revision, &[], true, false)
             .expect("content indexed");
-        assert_eq!(reader.readiness_for_authorized_target(thread, revision).expect("zero-document readiness"),
-            SourceIndexReadiness { content: true, symbols: false });
+        assert_eq!(
+            reader
+                .readiness_for_authorized_target(thread, revision)
+                .expect("zero-document readiness"),
+            SourceIndexReadiness {
+                content: true,
+                symbols: false
+            }
+        );
         assert!(due(&directory, 21, 1).expect("queue drained").is_empty());
         assert_eq!(next_due(&directory).expect("next"), None);
         assert!(due(&directory, 21, 33).is_err());
-        connection.execute("UPDATE source_search_ready SET extractor_version=1 WHERE operation=?1",
-            [operation.as_bytes().as_slice()]).expect("old path-only projection");
-        connection.execute_batch(SCHEMA).expect("upgrade source projection");
-        assert_eq!(due(&directory, 21, 1).expect("old projection requeued").len(), 1);
+        connection
+            .execute(
+                "UPDATE source_search_ready SET extractor_version=1 WHERE operation=?1",
+                [operation.as_bytes().as_slice()],
+            )
+            .expect("old path-only projection");
+        connection
+            .execute_batch(SCHEMA)
+            .expect("upgrade source projection");
+        assert_eq!(
+            due(&directory, 21, 1)
+                .expect("old projection requeued")
+                .len(),
+            1
+        );
         publish(&directory, thread, operation, revision, &[], true, false)
             .expect("leaf-aware projection rebuilt");
-        assert!(due(&directory, 21, 1).expect("upgraded queue drained").is_empty());
+        assert!(
+            due(&directory, 21, 1)
+                .expect("upgraded queue drained")
+                .is_empty()
+        );
         connection
             .execute("DELETE FROM source_search_ready", [])
             .expect("legacy projection absent");

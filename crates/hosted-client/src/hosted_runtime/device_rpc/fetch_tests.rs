@@ -206,7 +206,7 @@ pub(super) async fn partial_roundtrip(
                             id: observed_spool.clone(),
                         }),
                         revision: Some(revision_ref::Revision::State(
-                            api::heddle::api::v1alpha1::StateId {
+                            api::heddle::api::common::StateId {
                                 value: state.id().as_bytes().to_vec(),
                             },
                         )),
@@ -228,7 +228,7 @@ pub(super) async fn partial_roundtrip(
             if matches!(&value.change, Some(source_target_resolution_event::Change::Upsert(resolution))
                 if resolution.status == source_target_resolution::Status::Resolved as i32
                     && resolution.computed_for.as_ref().and_then(|v|v.revision.as_ref())
-                        == Some(&revision_ref::Revision::State(api::heddle::api::v1alpha1::StateId {
+                        == Some(&revision_ref::Revision::State(api::heddle::api::common::StateId {
                             value: state.id().as_bytes().to_vec(),
                         }))
                     && resolution.location.as_ref().is_some_and(|location|location.path == "visible.txt"))
@@ -391,7 +391,7 @@ pub(super) async fn partial_roundtrip(
     assert_eq!(
         overview.source_heads[0].revision.as_ref(),
         Some(&revision_ref::Revision::State(
-            api::heddle::api::v1alpha1::StateId {
+            api::heddle::api::common::StateId {
                 value: state.id().as_bytes().to_vec()
             }
         ))
@@ -591,7 +591,7 @@ fn assert_fetch_not_found(error: thread_api::fetch::Error) {
         matches!(&error,
             thread_api::fetch::Error::Client(api::v2::client::ClientError::Transport(
                 thread_api::transport::Error::Remote(failure)
-            )) if failure.code == api::heddle::api::v1alpha1::CallFailureCode::NotFound as i32
+            )) if failure.code == api::heddle::api::common::CallFailureCode::NotFound as i32
                 && failure.message == "selected source unavailable"
         ),
         "missing and withheld source use the same typed public failure: {error}"
@@ -940,7 +940,7 @@ fn open(genesis: &ThreadGenesis, state: objects::object::StateId) -> FetchOpen {
         revision: Some(RevisionRef {
             spool: Some(spool),
             revision: Some(revision_ref::Revision::State(
-                api::heddle::api::v1alpha1::StateId {
+                api::heddle::api::common::StateId {
                     value: state.as_bytes().to_vec(),
                 },
             )),

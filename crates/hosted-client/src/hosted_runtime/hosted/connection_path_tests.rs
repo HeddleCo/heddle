@@ -6,7 +6,7 @@ use std::{
 
 use api::{
     framing::{ResponseFrame, decode_response_frame, encode_request_frame},
-    heddle::api::v1alpha1::{CallContext, CallFailureCode},
+    heddle::api::common::{CallContext, CallFailureCode},
 };
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 

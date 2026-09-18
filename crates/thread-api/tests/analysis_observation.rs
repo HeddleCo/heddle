@@ -48,7 +48,7 @@ impl RpcTransport for Transport {
     ) -> Result<Self::Reader, Self::Error> {
         assert_eq!(
             method.path,
-            "/heddle.api.v2alpha1.AnalysisService/ObserveAnalysis"
+            "/heddle.api.v1alpha2.AnalysisService/ObserveAnalysis"
         );
         Ok(Reader(self.0.iter().map(Message::encode_to_vec).collect()))
     }
@@ -77,7 +77,7 @@ fn remote(events: Vec<AnalysisEvent>) -> Remote<Transport> {
     Remote {
         api: Client::new(
             Transport(events),
-            ["/heddle.api.v2alpha1.AnalysisService/ObserveAnalysis".into()],
+            ["/heddle.api.v1alpha2.AnalysisService/ObserveAnalysis".into()],
         ),
         description: DescribeEndpointResponse {
             endpoint: Some(endpoint()),

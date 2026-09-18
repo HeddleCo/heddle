@@ -6,7 +6,7 @@ use api::{
         MAX_CONTROL_BODY, ResponseFrame, StreamFrame, decode_response_frame, decode_stream_frame,
         encode_request_frame, encode_request_prelude, encode_stream_message_into,
     },
-    heddle::api::v1alpha1::CallContext,
+    heddle::api::common::CallContext,
     method_descriptor,
 };
 use bytes::{Bytes, BytesMut};
@@ -447,7 +447,7 @@ fn require_shape(method: &str, expected: StreamingShape) -> Result<()> {
 mod tests {
     use std::{net::Ipv4Addr, sync::Arc, time::Duration};
 
-    use api::heddle::api::v1alpha1::PushServerFrame;
+    use crate::legacy_v1::PushServerFrame;
     use iroh::{Endpoint, RelayMode, endpoint::presets};
     use tokio::sync::oneshot;
 

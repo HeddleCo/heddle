@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail, ensure};
-use api::heddle::api::{v1alpha1 as shared, v2alpha1::*};
+use api::heddle::api::{common as shared, v1alpha2::*};
 use iroh::endpoint::SendStream;
 use objects::{
     object::{ContentHash, State, TreeEntry, TreeEntryTarget},

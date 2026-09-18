@@ -143,13 +143,13 @@ impl ThreadControl {
     /// Exact mutation whose original authority must be checked at admission.
     pub fn authorization_method(&self) -> &'static str {
         match self.control {
-            Control::Name(_) => "/heddle.api.v2alpha1.ThreadService/RenameThread",
-            Control::Intent(_) => "/heddle.api.v2alpha1.ThreadService/ReviseIntent",
-            Control::Lifecycle(_) => "/heddle.api.v2alpha1.ThreadService/ChangeLifecycle",
-            Control::Sharing(_) => "/heddle.api.v2alpha1.ThreadService/SetSharingPolicy",
-            Control::Audience(_) => "/heddle.api.v2alpha1.ThreadService/SetAudiencePolicy",
-            Control::Retention(_) => "/heddle.api.v2alpha1.ThreadService/SetRetentionPolicy",
-            Control::Review(_) => "/heddle.api.v2alpha1.ThreadService/RecordReview",
+            Control::Name(_) => "/heddle.api.v1alpha2.ThreadService/RenameThread",
+            Control::Intent(_) => "/heddle.api.v1alpha2.ThreadService/ReviseIntent",
+            Control::Lifecycle(_) => "/heddle.api.v1alpha2.ThreadService/ChangeLifecycle",
+            Control::Sharing(_) => "/heddle.api.v1alpha2.ThreadService/SetSharingPolicy",
+            Control::Audience(_) => "/heddle.api.v1alpha2.ThreadService/SetAudiencePolicy",
+            Control::Retention(_) => "/heddle.api.v1alpha2.ThreadService/SetRetentionPolicy",
+            Control::Review(_) => "/heddle.api.v1alpha2.ThreadService/RecordReview",
         }
     }
     pub fn property(&self) -> Property {

@@ -541,7 +541,7 @@ pub fn completion_receipt(id: ContentHash, admission: Admission) -> ReplicationR
 fn rejection(id: ContentHash, message: String) -> ReplicationRejection {
     ReplicationRejection {
         operation_id: id.as_bytes().to_vec(),
-        failure: Some(api::heddle::api::v1alpha1::CallFailure {
+        failure: Some(api::heddle::api::common::CallFailure {
             code: 9,
             message,
             ..Default::default()

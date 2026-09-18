@@ -2,7 +2,7 @@
 //! schema method never makes an endpoint implementation appear automatically.
 use std::collections::BTreeSet;
 
-use api::heddle::api::v1alpha1::DeploymentTarget;
+use api::heddle::api::common::DeploymentTarget;
 
 #[test]
 fn all_device_deployment_methods_have_real_production_handlers() {
@@ -23,9 +23,9 @@ fn all_device_deployment_methods_have_real_production_handlers() {
         .iter()
         .copied()
         .chain([
-            "/heddle.api.v2alpha1.EndpointService/DescribeEndpoint",
-            "/heddle.api.v2alpha1.OwnerAuthorizationService/PrepareAccountClaim",
-            "/heddle.api.v2alpha1.OwnerAuthorizationService/SignAccountClaim",
+            "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint",
+            "/heddle.api.v1alpha2.OwnerAuthorizationService/PrepareAccountClaim",
+            "/heddle.api.v1alpha2.OwnerAuthorizationService/SignAccountClaim",
         ])
         .collect::<BTreeSet<_>>();
     let missing = expected.difference(&actual).copied().collect::<Vec<_>>();

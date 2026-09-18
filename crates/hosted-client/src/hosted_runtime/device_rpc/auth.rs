@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use api::{heddle::api::v1alpha1::CallContext, v2::MethodDescriptor};
+use api::{heddle::api::common::CallContext, v2::MethodDescriptor};
 use biscuit_verifier::{BiscuitFacts, PublicKey};
 use chrono::Utc;
 use objects::store::ObjectStore;

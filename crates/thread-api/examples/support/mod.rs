@@ -14,7 +14,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use api::{
     framing,
-    heddle::api::v1alpha1::{CallContext, RequestProof},
+    heddle::api::common::{CallContext, RequestProof},
     v2::{MethodDescriptor, client::Rpc},
 };
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
@@ -194,7 +194,7 @@ impl Peer {
                 public_key: server.id().as_bytes().to_vec(),
                 kind: EndpointKind::Weft as i32,
             }),
-            supported_packages: vec!["heddle.api.v2alpha1".into()],
+            supported_packages: vec!["heddle.api.v1alpha2".into()],
             implemented_methods: vec![
                 rpc::EndpointServiceDescribeEndpoint::METHOD.path.into(),
                 rpc::ThreadServiceObserveThread::METHOD.path.into(),

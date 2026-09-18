@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::{v1alpha1::CallFailureCode, v2alpha1::*};
+use api::heddle::api::{common::CallFailureCode, v1alpha2::*};
 use iroh::endpoint::SendStream;
 use prost::Message;
 
@@ -350,9 +350,9 @@ impl DeviceRpc {
                         // are not queued behind every observer on this worker.
                         tokio::task::yield_now().await;
                         session.check_current(&self.home)?;
-                        let can_skip = method == "/heddle.api.v2alpha1.ThreadService/ObserveThread"
-                            && api::heddle::api::v2alpha1::ObserveThreadRequest::decode(normalized_query)?
-                                .sections.iter().all(|section| *section == api::heddle::api::v2alpha1::ThreadSection::Overview as i32);
+                        let can_skip = method == "/heddle.api.v1alpha2.ThreadService/ObserveThread"
+                            && api::heddle::api::v1alpha2::ObserveThreadRequest::decode(normalized_query)?
+                                .sections.iter().all(|section| *section == api::heddle::api::v1alpha2::ThreadSection::Overview as i32);
                         if !can_skip || current_version()? != revision { break; }
                         // A sibling Thread's mutation does not rebuild this view.
                     },

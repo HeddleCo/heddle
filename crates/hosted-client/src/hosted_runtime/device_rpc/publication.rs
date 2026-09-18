@@ -4,7 +4,7 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
 use api::{
-    heddle::api::{v1alpha1::CallContext, v2alpha1::*},
+    heddle::api::{common::CallContext, v1alpha2::*},
     v2::client::{MessageReader, MessageWriter},
 };
 use iroh::endpoint::{RecvStream, SendStream};
@@ -20,7 +20,7 @@ use tokio::io::AsyncWriteExt;
 use super::{DeviceRpc, auth, checkout};
 const FRAME: usize = 256 * 1024;
 const BYTES: u64 = 256 * 1024 * 1024;
-const METHOD: &str = "/heddle.api.v2alpha1.SyncService/PublishContent";
+const METHOD: &str = "/heddle.api.v1alpha2.SyncService/PublishContent";
 impl DeviceRpc {
     pub(super) async fn serve_publication_stream(
         &self,

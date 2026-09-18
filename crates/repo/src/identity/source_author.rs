@@ -133,8 +133,8 @@ mod tests {
         let binding =
             crate::sign_custodial_owner_binding(&signer, &root, [6; 32]).expect("binding");
         let verified = heddleco_capability_verifier::verify_owner_root(&root).expect("owner");
-        let owner = api::heddle::api::v2alpha1::OwnerState {
-            owner: Some(api::heddle::api::v2alpha1::PrincipalRef {
+        let owner = api::heddle::api::v1alpha2::OwnerState {
+            owner: Some(api::heddle::api::v1alpha2::PrincipalRef {
                 id: uuid::Uuid::from_bytes([9; 16]).to_string(),
             }),
             root: Some(root),
@@ -168,7 +168,7 @@ mod tests {
         };
         assert_eq!(actor.principal_id, account);
         assert_eq!(actor.agent_id, None);
-        let proof = api::heddle::api::v2alpha1::ThreadControlAuthority::decode(envelope.as_slice())
+        let proof = api::heddle::api::v1alpha2::ThreadControlAuthority::decode(envelope.as_slice())
             .expect("portable envelope");
         let sealed = biscuit_auth::Biscuit::from(&proof.sealed_biscuit, pair.public())
             .expect("sealed signature");

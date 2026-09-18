@@ -3,13 +3,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::legacy_v1::StreamOpeningProof;
 use api::{
     heddle::api::{
-        v1alpha1::{
-            BearerProof, CallContext, HumanVerification, RepositoryRef, RequestProof,
-            StreamOpeningProof, TraceContext, repository_ref,
+        common::{
+            BearerProof, CallContext, HumanVerification, RepositoryRef, RequestProof, TraceContext,
+            repository_ref,
         },
-        v2alpha1::SignedSpoolOwnerGenesis,
+        v1alpha2::SignedSpoolOwnerGenesis,
     },
     signing,
 };
@@ -140,7 +141,7 @@ impl CallContextFactory {
     pub(crate) fn mint_spool_owner_genesis(
         &self,
         spool_uuid: uuid::Uuid,
-        owner: &api::heddle::api::v2alpha1::OwnerState,
+        owner: &api::heddle::api::v1alpha2::OwnerState,
     ) -> Result<SignedSpoolOwnerGenesis> {
         let signer = self
             .signer
@@ -159,7 +160,7 @@ impl CallContextFactory {
     pub(crate) fn mint_spool_creation(
         &self,
         intent: repo::SpoolCreationIntent,
-        owner: &api::heddle::api::v2alpha1::OwnerState,
+        owner: &api::heddle::api::v1alpha2::OwnerState,
     ) -> Result<SignedSpoolOwnerGenesis> {
         let signer = self
             .signer
@@ -176,7 +177,7 @@ impl CallContextFactory {
         let attachment = self
             .mint_root_attachment
             .as_deref()
-            .map(api::heddle::api::v2alpha1::SignedMintRootAttachment::decode)
+            .map(api::heddle::api::v1alpha2::SignedMintRootAttachment::decode)
             .transpose()
             .map_err(|error| HostedError::Framing(error.to_string()))?;
         repo::sign_delegated_spool_creation(signer, intent, owner, token, attachment, now)
@@ -530,7 +531,7 @@ mod tests {
     #[test]
     fn tracing_off_omits_hosted_trace_context() {
         let context = CallContextFactory::default()
-            .streaming("/heddle.api.v2alpha1.SyncService/Fetch", "off")
+            .streaming("/heddle.api.v1alpha2.SyncService/Fetch", "off")
             .unwrap();
         assert!(context.trace.is_none());
     }
@@ -551,7 +552,7 @@ mod tests {
                 let span_context = span.context();
                 let expected = span_context.span().span_context().clone();
                 let context = CallContextFactory::default()
-                    .streaming("/heddle.api.v2alpha1.SyncService/Fetch", "propagation")
+                    .streaming("/heddle.api.v1alpha2.SyncService/Fetch", "propagation")
                     .unwrap();
                 let trace = context.trace.as_ref().expect("active trace is propagated");
                 let parts = trace.traceparent.split('-').collect::<Vec<_>>();
@@ -562,7 +563,7 @@ mod tests {
                 assert!(trace.baggage.is_empty());
 
                 let frame = api::framing::encode_request_prelude(
-                    "/heddle.api.v2alpha1.SyncService/Fetch",
+                    "/heddle.api.v1alpha2.SyncService/Fetch",
                     &context,
                 )
                 .unwrap();
@@ -599,7 +600,7 @@ mod tests {
         let signed = CallContextFactory::from_client_config(&config)
             .unwrap()
             .unary(
-                "/heddle.api.v2alpha1.IdentityService/ObserveIdentity",
+                "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
                 &[],
                 "",
             )
@@ -608,7 +609,7 @@ mod tests {
         let proof = signed.context.request_proof.unwrap();
         let canonical = signing::unary_bytes(
             &proof.signing_identity,
-            "/heddle.api.v2alpha1.IdentityService/ObserveIdentity",
+            "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
             proof.timestamp_millis,
             &proof.nonce,
             &[],
@@ -621,7 +622,7 @@ mod tests {
             "token",
             &bearer.timestamp_seconds.to_string(),
             "POST",
-            "/heddle.api.v2alpha1.IdentityService/ObserveIdentity",
+            "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
             &hex::encode(&bearer.nonce),
             &bearer.signature,
         )
@@ -648,7 +649,7 @@ mod tests {
         let context = credentials
             .context(
                 method,
-                &api::heddle::api::v2alpha1::ReadProviderExtentRequest::default().encode_to_vec(),
+                &api::heddle::api::v1alpha2::ReadProviderExtentRequest::default().encode_to_vec(),
             )
             .await
             .expect("provider request context");
@@ -676,7 +677,7 @@ mod tests {
         let proof = CallContextFactory::from_client_config(&config)
             .unwrap()
             .stream_opening_proof(
-                "/heddle.api.v2alpha1.SyncService/Fetch",
+                "/heddle.api.v1alpha2.SyncService/Fetch",
                 "stream-1",
                 repository,
                 "cursor-1",
@@ -686,7 +687,7 @@ mod tests {
         let canonical = signing::stream_open_bytes(
             "principal:alice",
             "stream-1",
-            "/heddle.api.v2alpha1.SyncService/Fetch",
+            "/heddle.api.v1alpha2.SyncService/Fetch",
             "acme/widgets",
             "cursor-1",
             b"capability",
@@ -700,7 +701,7 @@ mod tests {
         let error = CallContextFactory::default()
             .mint_spool_owner_genesis(
                 uuid::Uuid::now_v7(),
-                &api::heddle::api::v2alpha1::OwnerState::default(),
+                &api::heddle::api::v1alpha2::OwnerState::default(),
             )
             .expect_err("CreateSpool must not invent a throwaway owner key");
         assert!(matches!(error, HostedError::SigningIdentityRequired));
@@ -722,7 +723,7 @@ mod tests {
         let request = b"device-enrollment";
         let signed = factory
             .unary(
-                "/heddle.api.v2alpha1.IdentityService/BeginPairing",
+                "/heddle.api.v1alpha2.IdentityService/BeginPairing",
                 request,
                 "",
             )
@@ -732,7 +733,7 @@ mod tests {
         assert_eq!(proof.signing_identity, identity);
         let canonical = signing::unary_bytes(
             &proof.signing_identity,
-            "/heddle.api.v2alpha1.IdentityService/BeginPairing",
+            "/heddle.api.v1alpha2.IdentityService/BeginPairing",
             proof.timestamp_millis,
             &proof.nonce,
             request,
@@ -754,7 +755,7 @@ mod tests {
         assert_eq!(enrollment.signing_identity(), Some(expected.as_str()));
         let signed = enrollment
             .unary(
-                "/heddle.api.v2alpha1.IdentityService/ObserveIdentity",
+                "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
                 b"claim",
                 "op-1",
             )
@@ -808,7 +809,7 @@ mod tests {
     }
     #[test]
     fn spool_creation_binds_delegated_parent_path_name_and_original_owner() {
-        use api::heddle::api::v2alpha1 as v2;
+        use api::heddle::api::v1alpha2 as v2;
         let owner = Ed25519Signer::from_seed(&[83; 32]).expect("owner");
         let agent = Ed25519Signer::from_seed(&[84; 32]).expect("agent");
         let account = uuid::Uuid::new_v4();

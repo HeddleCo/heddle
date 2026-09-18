@@ -272,13 +272,7 @@ impl ThreadReplica {
         source_thread: ContentHash,
         source_operation: ContentHash,
     ) -> Result<Capture> {
-        self.prepare_integration_with_prepared(
-            repo,
-            state,
-            source_thread,
-            source_operation,
-            &[],
-        )
+        self.prepare_integration_with_prepared(repo, state, source_thread, source_operation, &[])
     }
     /// Ordered local stack members on one target carry the exact prior
     /// prepared reference closure while their operations remain uncommitted.

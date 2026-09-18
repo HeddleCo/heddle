@@ -1,6 +1,6 @@
 //! Local claimable roots and native ownership bootstrap.
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     BootstrapOwnershipRequest, PrincipalRef, SignedOwnerRoot, mutation_receipt,
 };
 use crypto::{Ed25519Signer, Signer as _};

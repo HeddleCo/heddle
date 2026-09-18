@@ -1,5 +1,5 @@
 //! Exact native review snapshot and signed mutation transport.
-use api::heddle::api::v2alpha1 as contract;
+use api::heddle::api::v1alpha2 as contract;
 use thread_api::rpc;
 use wire::ProtocolError;
 

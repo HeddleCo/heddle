@@ -1,5 +1,5 @@
 //! Exact-revision hydration uses the same bounded source stream as Tapestry.
-use api::heddle::api::{v1alpha1::StateId as ProtoStateId, v2alpha1 as contract};
+use api::heddle::api::{common::StateId as ProtoStateId, v1alpha2 as contract};
 use objects::{
     object::{Blob, ContentHash, StateId},
     store::ObjectStore,
@@ -21,7 +21,12 @@ impl HostedClient {
         path: &str,
     ) -> Result<Blob, ProtocolError> {
         let blob = self
-            .read_native_blob(spool_address, thread, revision, BlobSource::Path(path.into()))
+            .read_native_blob(
+                spool_address,
+                thread,
+                revision,
+                BlobSource::Path(path.into()),
+            )
             .await?;
         repo.store().put_blob(&blob)?;
         repo.clear_missing_blob(&blob.hash())?;

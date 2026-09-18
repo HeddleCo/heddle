@@ -89,14 +89,14 @@ mod tests {
     const PINNED_PROOF_TS: &str = "1700000000";
     const PINNED_METHOD: &str = "POST";
     // Hosted-client bearer PoP signs the live RPC path (`CallContextFactory::bearer_proof`).
-    const PINNED_PATH: &str = "/heddle.api.v2alpha1.IdentityService/ObserveIdentity";
+    const PINNED_PATH: &str = "/heddle.api.v1alpha2.IdentityService/ObserveIdentity";
     const PINNED_NONCE: &str = "nøñce";
     const PINNED_CANONICAL: &str = concat!(
         "heddle-bearer-pop-v2\n",
         "token=6:tok-é\n",
         "proof_ts=10:1700000000\n",
         "method=4:POST\n",
-        "path=52:/heddle.api.v2alpha1.IdentityService/ObserveIdentity\n",
+        "path=52:/heddle.api.v1alpha2.IdentityService/ObserveIdentity\n",
         "nonce=7:nøñce\n",
     );
 

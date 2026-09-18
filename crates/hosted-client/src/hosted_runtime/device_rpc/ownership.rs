@@ -1,7 +1,7 @@
 //! An explicit owned-device command may co-sign only a fully bound Thread claim,
 //! after verifying the account acceptor and the current original local owner.
 use anyhow::{Context, Result, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use objects::object::{
     OperationId,
     thread_replication::{ThreadFacet, ownership_claim::METHOD},

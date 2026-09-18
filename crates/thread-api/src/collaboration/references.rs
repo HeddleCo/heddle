@@ -153,7 +153,7 @@ pub fn mention_ref(value: &Mention) -> EntityRef {
         Mention::State { spool, state } => Entity::Revision(RevisionRef {
             spool: wire_spool(*spool),
             revision: Some(revision_ref::Revision::State(
-                api::heddle::api::v1alpha1::StateId {
+                api::heddle::api::common::StateId {
                     value: state.as_bytes().to_vec(),
                 },
             )),
@@ -315,7 +315,7 @@ pub fn source_target_ref(
                     spool: wire_spool(scope.spool),
                     revision: Some(match revision {
                         CollaborationRevision::State { state_id } => {
-                            revision_ref::Revision::State(api::heddle::api::v1alpha1::StateId {
+                            revision_ref::Revision::State(api::heddle::api::common::StateId {
                                 value: state_id.as_bytes().to_vec(),
                             })
                         }
@@ -484,7 +484,7 @@ pub fn anchor_ref(
                 spool: wire_spool(scope.spool),
                 revision: Some(match &source.revision {
                     Revision::State { state_id } => {
-                        revision_ref::Revision::State(api::heddle::api::v1alpha1::StateId {
+                        revision_ref::Revision::State(api::heddle::api::common::StateId {
                             value: state_id.as_bytes().to_vec(),
                         })
                     }
@@ -506,7 +506,7 @@ pub fn anchor_ref(
             revision: Some(RevisionRef {
                 spool: wire_spool(scope.spool),
                 revision: Some(revision_ref::Revision::State(
-                    api::heddle::api::v1alpha1::StateId {
+                    api::heddle::api::common::StateId {
                         value: state_id.as_bytes().to_vec(),
                     },
                 )),

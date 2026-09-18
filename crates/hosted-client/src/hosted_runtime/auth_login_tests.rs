@@ -343,8 +343,8 @@ async fn remint_uses_claim_state_and_uploads_owner_root_at_enrollment() {
     assert_eq!(
         *calls.lock().unwrap_or_else(|poison| poison.into_inner()),
         [
-            "/heddle.api.v2alpha1.EndpointService/DescribeEndpoint",
-            "/heddle.api.v2alpha1.OwnerAuthorizationService/BootstrapOwnership"
+            "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint",
+            "/heddle.api.v1alpha2.OwnerAuthorizationService/BootstrapOwnership"
         ],
         "remint must install the owner root during enrollment"
     );
@@ -352,7 +352,7 @@ async fn remint_uses_claim_state_and_uploads_owner_root_at_enrollment() {
 
 #[test]
 fn provisioned_agent_retains_registered_session_and_rejects_changed_key() {
-    use api::heddle::api::v2alpha1 as v2;
+    use api::heddle::api::v1alpha2 as v2;
     let _home = IsolatedHome::new();
     let server = "api.native-agent.test";
     let response = provision_response_for_test(
@@ -406,7 +406,7 @@ fn provisioned_agent_retains_registered_session_and_rejects_changed_key() {
 
 #[test]
 fn provisioning_reuse_recovers_the_original_owner_root_after_local_state_loss() {
-    use api::heddle::api::v2alpha1 as v2;
+    use api::heddle::api::v1alpha2 as v2;
     let _home = IsolatedHome::new();
     let server = "api.native-reuse.test";
     let mut response = provision_response_for_test(

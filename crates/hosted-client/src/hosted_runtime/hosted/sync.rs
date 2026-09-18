@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use api::heddle::api::v1alpha1::{PullReady, RefEntry as ProtoRefEntry};
+use crate::legacy_v1::{PullReady, RefEntry as ProtoRefEntry};
 use objects::{
     object::{
         AnnotationStatus, ContextBlob, ContextTarget, Discussion, DiscussionError, DiscussionsBlob,
@@ -502,9 +502,8 @@ pub enum ExpectedRemoteHead {
 
 #[cfg(test)]
 mod pull_bootstrap_tests {
-    use api::heddle::api::v1alpha1::{
-        PullReady, RefEntry as ProtoRefEntry, StateId as ProtoStateId, TransferCheckpoint,
-    };
+    use crate::legacy_v1::{PullReady, RefEntry as ProtoRefEntry, TransferCheckpoint};
+    use api::heddle::api::common::StateId as ProtoStateId;
     use chrono::Utc;
     use objects::{
         object::{
@@ -1164,17 +1163,17 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn hosted_ref_from_api_requires_32_byte_state_id() {
-        let entry = api::heddle::api::v1alpha1::RefEntry {
+        let entry = crate::legacy_v1::RefEntry {
             name: "main".to_string(),
-            state_id: Some(api::heddle::api::v1alpha1::StateId { value: vec![0; 8] }),
+            state_id: Some(api::heddle::api::common::StateId { value: vec![0; 8] }),
             is_thread: true,
             revision_address: String::new(),
             thread_id: String::new(),
         };
         assert!(hosted_ref_from_api(&entry).is_err());
-        let ok = api::heddle::api::v1alpha1::RefEntry {
+        let ok = crate::legacy_v1::RefEntry {
             name: "main".to_string(),
-            state_id: Some(api::heddle::api::v1alpha1::StateId { value: vec![0; 32] }),
+            state_id: Some(api::heddle::api::common::StateId { value: vec![0; 32] }),
             is_thread: true,
             revision_address: String::new(),
             thread_id: String::new(),
@@ -1400,7 +1399,7 @@ mod native_exchange_tests {
                 Some("main"),
                 Some(1),
                 PullMaterialization::Lazy,
-                |_, _| Repository::init_default(clone.path()).map_err(ProtocolError::from),
+                |_| Repository::init_default(clone.path()).map_err(ProtocolError::from),
             )
             .await
             .unwrap();
@@ -1416,7 +1415,7 @@ mod native_exchange_tests {
     async fn compact_pull_of_a_complete_local_state_publishes_no_synthetic_objects() {
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
-        let remote_state = api::heddle::api::v1alpha1::StateId {
+        let remote_state = api::heddle::api::common::StateId {
             value: state.as_bytes().to_vec(),
         };
         let (mut client, server) =
@@ -1436,7 +1435,7 @@ mod native_exchange_tests {
     async fn complete_local_state_exercises_each_public_pull_mode_without_refetching() {
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
-        let remote_state = api::heddle::api::v1alpha1::StateId {
+        let remote_state = api::heddle::api::common::StateId {
             value: state.as_bytes().to_vec(),
         };
         let (mut client, server) =
@@ -1509,7 +1508,7 @@ mod native_exchange_tests {
         let (repo, state) = repository(&source);
         let objects = wire::enumerate_state_closure(repo.store(), state).unwrap();
         let pack = wire::build_native_pack(repo.store(), &objects).unwrap();
-        let remote_state = api::heddle::api::v1alpha1::StateId {
+        let remote_state = api::heddle::api::common::StateId {
             value: state.as_bytes().to_vec(),
         };
         let (mut client, server) =
@@ -1527,7 +1526,7 @@ mod native_exchange_tests {
                 Some("main"),
                 None,
                 PullMaterialization::Full,
-                |_, _| Repository::init_default(clone.path()).map_err(ProtocolError::from),
+                |_| Repository::init_default(clone.path()).map_err(ProtocolError::from),
             )
             .await
             .unwrap();

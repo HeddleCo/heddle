@@ -104,7 +104,7 @@ pub(super) async fn roundtrip(
         repo::thread_replication::collaboration::Command {
             namespace: "rollback-fixture".into(),
             id,
-            method: "/heddle.api.v2alpha1.CollaborationService/OpenDiscussion",
+            method: "/heddle.api.v1alpha2.CollaborationService/OpenDiscussion",
             request_hash: [0; 32],
             record: record.clone(),
             precondition: repo::thread_replication::collaboration::Precondition::New,

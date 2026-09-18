@@ -95,7 +95,7 @@ pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
 
         HookCommands::Events { event } => {
             // Print the static local event catalog. Hook events are private
-            // Heddle behavior, not part of the shared v1alpha1 API.
+            // Heddle behavior, not part of the shared public API.
             let catalog: &[(&str, &str)] = &[
                 (
                     "pre_capture",

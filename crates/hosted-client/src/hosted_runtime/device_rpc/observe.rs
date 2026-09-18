@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::{v1alpha1::CallFailureCode, v2alpha1::*};
+use api::heddle::api::{common::CallFailureCode, v1alpha2::*};
 use iroh::endpoint::SendStream;
 use prost::Message;
 
@@ -655,7 +655,7 @@ impl DeviceRpc {
                             run.r#ref.as_ref().context("Run reference absent")?,
                             chrono::Utc::now().timestamp(),
                         )?;
-                        let method = "/heddle.api.v2alpha1.RunService/ControlRun";
+                        let method = "/heddle.api.v1alpha2.RunService/ControlRun";
                         run.actions = if run.supported_controls.is_empty() {
                             Vec::new()
                         } else {

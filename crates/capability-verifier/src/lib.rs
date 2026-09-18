@@ -51,7 +51,7 @@ pub use transfer::{
 
 /// Generated public wire types used by this verifier.
 pub mod wire {
-    pub use heddle_api::heddle::api::v2alpha1::*;
+    pub use heddle_api::heddle::api::v1alpha2::*;
 }
 
 /// The exact API contract version used by this release line.

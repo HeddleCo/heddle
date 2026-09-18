@@ -1,6 +1,6 @@
 //! Resolve local stable identities without crossing the hosted boundary.
 use anyhow::{Context, Result, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use objects::object::ContentHash;
 use prost::Message;
 
@@ -48,14 +48,13 @@ impl DeviceRpc {
                             let available = match reference.entity.as_ref() {
                                 Some(entity_ref::Entity::Spool(_)) => true,
                                 Some(entity_ref::Entity::Thread(thread)) => {
-                                    let id = thread
-                                        .id
-                                        .as_ref()
-                                        .context("Thread identity required")?;
+                                    let id =
+                                        thread.id.as_ref().context("Thread identity required")?;
                                     let hash = ContentHash::from_bytes(
-                                        id.value.as_slice().try_into().context(
-                                            "Thread identity must contain32bytes",
-                                        )?,
+                                        id.value
+                                            .as_slice()
+                                            .try_into()
+                                            .context("Thread identity must contain32bytes")?,
                                     );
                                     if let Ok(replica) =
                                         repo::thread_replication::ThreadReplica::open(
@@ -63,12 +62,10 @@ impl DeviceRpc {
                                             hash,
                                         )
                                     {
-                                        let facts = session.facts(Some(
-                                            &record.registration.capability_path,
-                                        ))?;
-                                        let repository = repo::Repository::open(
-                                            &record.registration.root,
-                                        )?;
+                                        let facts = session
+                                            .facts(Some(&record.registration.capability_path))?;
+                                        let repository =
+                                            repo::Repository::open(&record.registration.root)?;
                                         super::auth::thread_visible(
                                             &repository,
                                             &replica,

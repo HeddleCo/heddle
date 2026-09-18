@@ -1015,7 +1015,10 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
         .receive(&newer, repository.store(), |_| Ok(()))
         .expect("newer independent draft");
     assert_eq!(
-        source.view().expect("source after newer draft").source_heads,
+        source
+            .view()
+            .expect("source after newer draft")
+            .source_heads,
         BTreeSet::from([state_id(&newer)]),
         "the selected reviewed source is deliberately historical"
     );
@@ -1086,7 +1089,7 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
     let command = crate::device_operations::Command {
         namespace: "local-landing-test",
         id: command_id,
-        method: "/heddle.api.v2alpha1.ThreadService/LandThread",
+        method: "/heddle.api.v1alpha2.ThreadService/LandThread",
         request_hash,
     };
     assert!(
@@ -1095,11 +1098,21 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
             .expect("fresh command")
             .is_none()
     );
-    let canonical = signed.verify().expect("original operation").encode().expect("canonical");
+    let canonical = signed
+        .verify()
+        .expect("original operation")
+        .encode()
+        .expect("canonical");
     let response = b"stable landing receipt";
     assert_eq!(
         target
-            .prepare_local_landing(command.namespace, &command_id.to_string(), &request_hash, &canonical, response)
+            .prepare_local_landing(
+                command.namespace,
+                &command_id.to_string(),
+                &request_hash,
+                &canonical,
+                response
+            )
             .expect("prepared before admission"),
         (canonical.clone(), response.to_vec())
     );
@@ -1110,7 +1123,10 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
         .expect("later candidate")
         .encode()
         .expect("later bytes");
-    assert_ne!(later_candidate, canonical, "retry can construct new local bytes");
+    assert_ne!(
+        later_candidate, canonical,
+        "retry can construct new local bytes"
+    );
     assert_eq!(
         target
             .prepare_local_landing(
@@ -1147,8 +1163,14 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
             )
         });
         assert_eq!(
-            first.join().expect("first preparer thread").expect("first preparation"),
-            second.join().expect("second preparer thread").expect("second preparation"),
+            first
+                .join()
+                .expect("first preparer thread")
+                .expect("first preparation"),
+            second
+                .join()
+                .expect("second preparer thread")
+                .expect("second preparation"),
             "concurrent retries select the same immutable signed operation"
         );
     });
@@ -1172,7 +1194,7 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
     let stack_command = crate::device_operations::Command {
         namespace: "local-stack-test",
         id: stack_id,
-        method: "/heddle.api.v2alpha1.ThreadService/LandStack",
+        method: "/heddle.api.v1alpha2.ThreadService/LandStack",
         request_hash: [6; 32],
     };
     assert!(
@@ -1231,8 +1253,8 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
         publisher: first_ordered.device,
         body: ThreadOperationBody::LocalIntegration(first_ordered.encode().expect("first receipt")),
     };
-    let first_ordered_signed = SignedOperation::sign(&first_ordered_operation, &signer)
-        .expect("first ordered operation");
+    let first_ordered_signed =
+        SignedOperation::sign(&first_ordered_operation, &signer).expect("first ordered operation");
     let mut second_result = State::new_merge(
         Tree::new().hash(),
         vec![result.id(), source_state],
@@ -1240,10 +1262,12 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
     );
     second_result.intent = Some("second stack member".into());
     let mut ordered = first_ordered.clone();
-    ordered.expected_target_frontier = BTreeSet::from([
-        first_ordered_operation.id().expect("first ID"),
-    ]);
-    ordered.result = second_result.encode_current_msgpack().expect("second state").into();
+    ordered.expected_target_frontier =
+        BTreeSet::from([first_ordered_operation.id().expect("first ID")]);
+    ordered.result = second_result
+        .encode_current_msgpack()
+        .expect("second state")
+        .into();
     ordered.executed_at_ms += 10;
     let second_ordered_operation = ThreadOperation {
         version: 1,
@@ -1256,19 +1280,26 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
     let ordered_command = crate::device_operations::Command {
         namespace: "ordered-stack-test",
         id: ordered_id,
-        method: "/heddle.api.v2alpha1.ThreadService/LandStack",
+        method: "/heddle.api.v1alpha2.ThreadService/LandStack",
         request_hash: [5; 32],
     };
     ordered_target
         .receive_local_stack_cas_command(
-            &[first_ordered_signed, SignedOperation::sign(&second_ordered_operation, &signer).expect("second ordered operation")],
+            &[
+                first_ordered_signed,
+                SignedOperation::sign(&second_ordered_operation, &signer)
+                    .expect("second ordered operation"),
+            ],
             repository.store(),
             &ordered_command,
             b"ordered receipt",
         )
         .expect("ordered members commit together");
     assert!(
-        ordered_target.accepted_source_revision(second_result.id()).expect("second result").is_some(),
+        ordered_target
+            .accepted_source_revision(second_result.id())
+            .expect("second result")
+            .is_some(),
         "second stack member sees the first frontier inside one transaction"
     );
     assert_eq!(
@@ -1278,7 +1309,13 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
     );
     assert_eq!(
         target
-            .receive_local_integration_cas_command(&signed, repository.store(), |_| Ok(()), &command, response)
+            .receive_local_integration_cas_command(
+                &signed,
+                repository.store(),
+                |_| Ok(()),
+                &command,
+                response
+            )
             .expect("landing"),
         Admission::Accepted
     );
@@ -1295,7 +1332,13 @@ fn local_integration_requires_original_source_frontier_cas_and_preserves_private
     );
     assert_eq!(
         target
-            .receive_local_integration_cas_command(&signed, repository.store(), |_| Ok(()), &command, response)
+            .receive_local_integration_cas_command(
+                &signed,
+                repository.store(),
+                |_| Ok(()),
+                &command,
+                response
+            )
             .expect("exact retry"),
         Admission::Accepted
     );

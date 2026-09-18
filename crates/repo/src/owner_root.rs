@@ -8,7 +8,7 @@
 //! and must not mint a replacement human sequence-0.
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey,
     OwnerKeyBinding, OwnerKeyBindingKind, OwnerKeyTransition, OwnerKeyTransitionKind, OwnerRoot,
     RecoveryPolicy, SignedOwnerKeyTransition, SignedOwnerRoot, SignedSpoolOwnerGenesis,
@@ -86,7 +86,7 @@ pub fn sign_custodial_owner_root(
     account_uuid: [u8; 16],
     nonce: [u8; 32],
 ) -> Result<SignedOwnerRoot> {
-    use api::heddle::api::v2alpha1::{RecoveryGuardian, RecoveryGuardianKind};
+    use api::heddle::api::v1alpha2::{RecoveryGuardian, RecoveryGuardianKind};
     if authority.public_key() == recovery.public_key() {
         bail!("custodial recovery requires a dedicated account guardian key");
     }
@@ -581,7 +581,7 @@ fn verification_key(encoder: &mut Encoder, key: &AuthorizationVerificationKey) -
 
 fn guardian(
     encoder: &mut Encoder,
-    guardian: &api::heddle::api::v2alpha1::RecoveryGuardian,
+    guardian: &api::heddle::api::v1alpha2::RecoveryGuardian,
 ) -> Result<()> {
     encoder.i32(guardian.kind);
     let key = guardian
@@ -715,7 +715,7 @@ pub fn owner_key_transition_body(transition: &OwnerKeyTransition) -> Result<Vec<
 pub fn sign_current_spool_owner_genesis(
     signer: &impl Signer,
     spool_uuid: uuid::Uuid,
-    observed: &api::heddle::api::v2alpha1::OwnerState,
+    observed: &api::heddle::api::v1alpha2::OwnerState,
     now_unix_seconds: i64,
 ) -> Result<SignedSpoolOwnerGenesis> {
     if spool_uuid.is_nil() {
@@ -734,7 +734,7 @@ pub fn sign_current_spool_owner_genesis(
 }
 
 fn verify_observed_owner(
-    observed: &api::heddle::api::v2alpha1::OwnerState,
+    observed: &api::heddle::api::v1alpha2::OwnerState,
     now_unix_seconds: i64,
 ) -> Result<heddleco_capability_verifier::VerifiedOwnerState> {
     let owner = observed
@@ -800,7 +800,7 @@ pub(crate) fn owner_observation_cache_entries() -> Result<usize> {
 /// Memoize only identical pure verifier inputs. Current revocations, resource
 /// scope and request caveats remain separate uncached admission checks.
 pub fn verify_account_owner_observation(
-    observed: &api::heddle::api::v2alpha1::OwnerState,
+    observed: &api::heddle::api::v1alpha2::OwnerState,
     now_unix_seconds: i64,
 ) -> Result<heddleco_capability_verifier::VerifiedOwnerState> {
     use prost::Message as _;
@@ -840,7 +840,7 @@ pub fn verify_account_owner_observation(
 }
 
 fn verify_account_owner_observation_uncached(
-    observed: &api::heddle::api::v2alpha1::OwnerState,
+    observed: &api::heddle::api::v1alpha2::OwnerState,
     now_unix_seconds: i64,
 ) -> Result<heddleco_capability_verifier::VerifiedOwnerState> {
     let current = verify_observed_owner(observed, now_unix_seconds)?;
@@ -870,7 +870,7 @@ fn verify_account_owner_observation_uncached(
 /// host observation alone cannot establish or replace an owner root.
 pub fn verify_spool_owner_observation(
     genesis: &SignedSpoolOwnerGenesis,
-    observed: &api::heddle::api::v2alpha1::OwnerState,
+    observed: &api::heddle::api::v1alpha2::OwnerState,
     spool_uuid: uuid::Uuid,
     now_unix_seconds: i64,
 ) -> Result<heddleco_capability_verifier::VerifiedCloneKeyring> {

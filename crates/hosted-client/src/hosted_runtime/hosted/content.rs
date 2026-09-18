@@ -1,21 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
-use api::heddle::api::{
-    v1alpha1::{
-        AnnotatedFile, AnnotationScope, ContextAnnotation, ContextAnnotationKind, ContextRevision,
-        ListContextSuggestionsResponse, ReviseContextResponse, SetContextResponse,
-        StateContextEntry, SupersedeContextResponse, SymbolScope, annotation_scope,
-    },
-    v2alpha1::{
-        AnnotationQuery, ContextRecord, ObserveCollaborationRequest, RecordRef, annotation_tag,
-        collaboration_anchor, collaboration_event, revision_ref,
-    },
+use crate::legacy_v1::{
+    AnnotatedFile, AnnotationScope, ContextAnnotation, ContextAnnotationKind, ContextRevision,
+    ListContextSuggestionsResponse, ReviseContextResponse, SetContextResponse, StateContextEntry,
+    SupersedeContextResponse, SymbolScope, annotation_scope,
+};
+use api::heddle::api::v1alpha2::{
+    AnnotationQuery, ContextRecord, ObserveCollaborationRequest, RecordRef, annotation_tag,
+    collaboration_anchor, collaboration_event, revision_ref,
 };
 use objects::object::StateId;
 use wire::ProtocolError;
 
 use super::HostedClient;
 
-const PUT_CONTEXT: &str = "heddle.api.v2alpha1.CollaborationService/PutContext";
+const PUT_CONTEXT: &str = "heddle.api.v1alpha2.CollaborationService/PutContext";
 
 fn parse_state(value: Option<&str>) -> Option<StateId> {
     value.and_then(|value| StateId::parse(value).ok())
@@ -52,7 +50,7 @@ fn context_revision_id(record: &ContextRecord) -> String {
     }
 }
 
-fn context_tag_texts(tags: &[api::heddle::api::v2alpha1::AnnotationTag]) -> Vec<String> {
+fn context_tag_texts(tags: &[api::heddle::api::v1alpha2::AnnotationTag]) -> Vec<String> {
     tags.iter()
         .filter_map(|tag| match tag.tag.as_ref() {
             Some(annotation_tag::Tag::Text(text)) => Some(text.clone()),
@@ -65,7 +63,7 @@ fn context_tag_texts(tags: &[api::heddle::api::v2alpha1::AnnotationTag]) -> Vec<
 fn context_scope(symbol: &str) -> Option<AnnotationScope> {
     if symbol.is_empty() {
         Some(AnnotationScope {
-            scope: Some(annotation_scope::Scope::File(Default::default())),
+            scope: Some(annotation_scope::Scope::File(true)),
         })
     } else {
         Some(AnnotationScope {
@@ -103,9 +101,9 @@ fn annotation_from_record(record: &ContextRecord) -> ContextAnnotation {
         revision_count: 1,
         scope: context_scope(symbol),
         status: if record.superseded {
-            api::heddle::api::v1alpha1::ContextAnnotationStatus::Superseded as i32
+            crate::legacy_v1::ContextAnnotationStatus::Superseded as i32
         } else {
-            api::heddle::api::v1alpha1::ContextAnnotationStatus::Active as i32
+            crate::legacy_v1::ContextAnnotationStatus::Active as i32
         },
         supersedes_annotation_id: record.supersedes.as_ref().map(|value| value.id.clone()),
         ..Default::default()
@@ -199,7 +197,7 @@ impl HostedClient {
                 // Keep repository-level / unparsed-revision records so pull can
                 // attach them against the cloned tip instead of dropping them.
                 states.push(StateContextEntry {
-                    state_id: state.map(|state_id| api::heddle::api::v1alpha1::StateId {
+                    state_id: state.map(|state_id| api::heddle::api::common::StateId {
                         value: state_id.as_bytes().to_vec(),
                     }),
                     annotations: vec![annotation],
@@ -365,7 +363,7 @@ impl HostedClient {
 
 #[cfg(test)]
 mod tests {
-    use api::heddle::api::v2alpha1::AnnotationTag;
+    use api::heddle::api::v1alpha2::AnnotationTag;
 
     use super::*;
 
