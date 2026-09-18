@@ -27,6 +27,7 @@ pub mod observation;
 pub mod pairing;
 #[cfg(any(feature = "native", feature = "replication", feature = "iroh"))]
 pub mod publication;
+mod reopen;
 #[cfg(feature = "replication")]
 pub mod replication;
 #[cfg(all(feature = "native", feature = "iroh"))]
@@ -47,6 +48,7 @@ pub use api::{
     v2::{client::Rpc, rpc},
 };
 use contract::{DescribeEndpointRequest, DescribeEndpointResponse, EndpointKind, ThreadRef};
+pub use reopen::is_reopen_retryable;
 use transport::Error;
 
 /// One authenticated source. A combined Thread retains one source per endpoint;
@@ -103,6 +105,7 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
         M::Request: observation::ObservationRequest,
         M::Response: observation::ObservedEvent,
     {
+        use crate::reopen::ReopenRetryable as _;
         use observation::ObservationRequest as _;
         let budget = observation::budget(&self.description)?;
         let options = request.options_mut();
@@ -116,8 +119,39 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
         if let Some(resume) = &resume {
             request.options_mut().after_cursor = resume.cursor.clone();
         }
-        let messages = self.api.observe::<M>(&request).await?;
-        observation::Observation::new(messages, &self.description, budget, resume, query)
+        let mut attempt = 0;
+        loop {
+            let messages = match self.api.observe::<M>(&request).await {
+                Ok(messages) => messages,
+                Err(error)
+                    if reopen::client_error_is_reopen_retryable(&error)
+                        && attempt + 1 < reopen::ATTEMPTS =>
+                {
+                    attempt += 1;
+                    reopen::backoff(attempt).await;
+                    continue;
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let mut observation = observation::Observation::new(
+                messages,
+                &self.description,
+                budget,
+                resume.clone(),
+                query.clone(),
+            )?;
+            match observation.consume_open().await {
+                Ok(()) => return Ok(observation),
+                Err(error) if error.is_reopen_retryable() && attempt + 1 < reopen::ATTEMPTS => {
+                    attempt += 1;
+                    reopen::backoff(attempt).await;
+                }
+                Err(error) => {
+                    observation.prime_error(error);
+                    return Ok(observation);
+                }
+            }
+        }
     }
 
     /// Source-backed analysis uses the same committed view protocol as identity,

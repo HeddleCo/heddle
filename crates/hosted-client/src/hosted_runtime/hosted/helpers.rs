@@ -667,6 +667,27 @@ mod tests {
     }
 
     #[test]
+    fn reopen_retryable_classifier_matches_weft_v2_signals() {
+        use api::heddle::api::v1alpha1::CallFailureCode;
+        let aborted = |message: &str| CallFailure {
+            code: CallFailureCode::Aborted as i32,
+            message: message.into(),
+            error: None,
+        };
+        assert!(thread_api::is_reopen_retryable(&aborted(
+            "material authority changed; reopen exact selection"
+        )));
+        assert!(thread_api::is_reopen_retryable(&aborted(
+            "authorization changed"
+        )));
+        assert!(!thread_api::is_reopen_retryable(&CallFailure {
+            code: CallFailureCode::PermissionDenied as i32,
+            message: "hidden".into(),
+            error: None,
+        }));
+    }
+
+    #[test]
     fn parse_proto_state_id_requires_32_bytes() {
         let state = StateId::from_bytes([0x55; 32]);
         let proto = ProtoStateId {

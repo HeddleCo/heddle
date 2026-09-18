@@ -30,7 +30,9 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
         if thread.spool != revision.spool
             || thread.id.as_ref().is_none_or(|id| id.value.len() != 32)
         {
-            return Err(Error::Invalid("content Thread differs from exact revision scope"));
+            return Err(Error::Invalid(
+                "content Thread differs from exact revision scope",
+            ));
         }
         let budget = observation::budget(&self.description)?;
         if sources.is_empty() || sources.len() > budget.max_items as usize {
@@ -43,6 +45,19 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
                 _ => return Err(Error::Invalid("invalid blob source")),
             }
         }
+        crate::reopen::retry(|| {
+            self.read_blobs_once(thread.clone(), revision.clone(), sources.clone(), budget)
+        })
+        .await
+    }
+
+    async fn read_blobs_once(
+        &self,
+        thread: ThreadRef,
+        revision: RevisionRef,
+        sources: Vec<BlobSource>,
+        budget: ReadBudget,
+    ) -> Result<Vec<Blob>, Error> {
         let selections = sources
             .iter()
             .enumerate()

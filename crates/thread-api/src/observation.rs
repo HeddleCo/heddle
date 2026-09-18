@@ -5,7 +5,7 @@ use api::v2::{
     client::{ClientError, MessageReader, Messages},
 };
 
-use crate::{contract::*, transport};
+use crate::{contract::*, reopen::ReopenRetryable, transport};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -19,6 +19,15 @@ pub enum Error {
     Interrupted,
     #[error("observation reset ({0}); start a replacement snapshot")]
     Reset(i32),
+}
+
+impl ReopenRetryable for Error {
+    fn is_reopen_retryable(&self) -> bool {
+        match self {
+            Error::Client(error) => crate::reopen::client_error_is_reopen_retryable(error),
+            _ => false,
+        }
+    }
 }
 
 /// Store this atomically with the view changed by its committed batch. A resume
@@ -262,6 +271,7 @@ pub struct Observation<R: MessageReader<Error = transport::Error>, E: ObservedEv
     pending_bytes: u64,
     snapshot: bool,
     done: bool,
+    primed_error: Option<Error>,
 }
 
 impl<R: MessageReader<Error = transport::Error>, E: ObservedEvent> Observation<R, E> {
@@ -298,7 +308,75 @@ impl<R: MessageReader<Error = transport::Error>, E: ObservedEvent> Observation<R
             pending_bytes: 0,
             snapshot: true,
             done: false,
+            primed_error: None,
         })
+    }
+
+    pub(crate) fn prime_error(&mut self, error: Error) {
+        self.primed_error = Some(error);
+    }
+
+    /// Admit the stream Open (or surface a terminal opening failure) so a
+    /// retryable authority-change can reopen a fresh exact selection.
+    pub(crate) async fn consume_open(&mut self) -> Result<(), Error> {
+        if self.state.is_some() || self.done {
+            return Ok(());
+        }
+        let event = self.messages.next().await?.ok_or(Error::Interrupted)?;
+        let size = prost::Message::encoded_len(&event) as u64;
+        if size > u64::from(self.accepted.max_frame_bytes) {
+            return Err(Error::Invalid("frame budget exceeded"));
+        }
+        let frame = event.frame().ok_or(Error::Invalid("missing frame"))?;
+        if let Some(stream_frame::Body::Reset(reset)) = &frame.body {
+            if frame.sequence != 1 || event.has_payload() {
+                return Err(Error::Invalid("malformed initial reset"));
+            }
+            return Err(Error::Reset(reset.reason));
+        }
+        let Some(stream_frame::Body::Open(open)) = &frame.body else {
+            return Err(Error::Invalid("missing Open"));
+        };
+        if open.source.as_ref() != Some(&self.source) {
+            return Err(Error::Invalid("stream source mismatch"));
+        }
+        let binding: [u8; 32] = open
+            .binding_digest
+            .as_slice()
+            .try_into()
+            .map_err(|_| Error::Invalid("invalid binding"))?;
+        let accepted = open
+            .accepted_budget
+            .ok_or(Error::Invalid("missing accepted budget"))?;
+        if accepted.max_items == 0
+            || accepted.max_items > self.requested.max_items
+            || accepted.max_frame_bytes == 0
+            || accepted.max_frame_bytes > self.requested.max_frame_bytes
+            || accepted.max_snapshot_bytes == 0
+            || accepted.max_snapshot_bytes > self.requested.max_snapshot_bytes
+        {
+            return Err(Error::Invalid("server widened or omitted the read budget"));
+        }
+        self.accepted = accepted;
+        self.binding = Some(binding);
+        self.state = Some(ObservationState::new(
+            self.resume.as_ref().map(|r| r.binding).unwrap_or(binding),
+            self.resume
+                .as_ref()
+                .map(|r| r.cursor.clone())
+                .unwrap_or_default(),
+        ));
+        let state = self
+            .state
+            .as_mut()
+            .ok_or(Error::Invalid("missing observation state"))?;
+        match state.accept(frame, event.has_payload())? {
+            ObservationAction::BeginSnapshot => self.snapshot = true,
+            ObservationAction::Resumed => self.snapshot = false,
+            ObservationAction::Heartbeat => {}
+            _ => return Err(Error::Invalid("unexpected opening frame")),
+        }
+        Ok(())
     }
 
     pub fn cancel(&mut self) {
@@ -316,6 +394,9 @@ impl<R: MessageReader<Error = transport::Error>, E: ObservedEvent> Observation<R
     }
 
     async fn next_inner(&mut self) -> Result<Option<CommittedBatch<E::Payload>>, Error> {
+        if let Some(error) = self.primed_error.take() {
+            return Err(error);
+        }
         if self.done {
             return Ok(None);
         }

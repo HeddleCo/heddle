@@ -34,6 +34,16 @@ pub enum Error {
     Invalid(&'static str),
 }
 
+impl crate::reopen::ReopenRetryable for Error {
+    fn is_reopen_retryable(&self) -> bool {
+        match self {
+            Error::Client(error) => crate::reopen::client_error_is_reopen_retryable(error),
+            Error::Transport(error) => crate::reopen::error_is_reopen_retryable(error),
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Limits {
     pub max_artifact_bytes: u64,
@@ -110,6 +120,14 @@ impl<T: RpcTransport<Error = transport::Error>> Remote<T> {
                 "a fresh download requires an empty transfer checkpoint",
             ));
         }
+        crate::reopen::retry(|| self.fetch_content_once(open.clone(), limits)).await
+    }
+
+    async fn fetch_content_once(
+        &self,
+        open: FetchOpen,
+        limits: Limits,
+    ) -> Result<Download<T::Reader>, Error> {
         let (sender, mut messages) = self
             .api
             .exchange::<rpc::SyncServiceFetch>(&FetchClientFrame {
