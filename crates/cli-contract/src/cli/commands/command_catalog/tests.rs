@@ -499,25 +499,19 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["thread", "promote"], &["thread", "promote", "feature"]),
     sample(&["thread", "drop"], &["thread", "drop", "feature"]),
-    sample(
-        &["thread", "approve"],
-        &["thread", "approve", "source", "target"],
-    ),
+    sample(&["thread", "approve"], &["thread", "approve", "feature"]),
     sample(
         &["thread", "approvals"],
-        &["thread", "approvals", "source", "target"],
+        &["thread", "approvals", "feature"],
     ),
     sample(
         &["thread", "revoke-approval"],
         &[
             "thread",
             "revoke-approval",
+            "feature",
             "00000000-0000-0000-0000-000000000000",
         ],
-    ),
-    sample(
-        &["thread", "check-merge"],
-        &["thread", "check-merge", "source", "target"],
     ),
     sample(&["thread", "cleanup"], &["thread", "cleanup", "--merged"]),
     sample(&["thread", "marker", "list"], &["thread", "marker", "list"]),
