@@ -19,7 +19,7 @@ mod fixture {
         HOSTED_ALPN_V1,
         descriptor_trust::ephemeral_attestation_bytes,
         framing::{decode_request_prelude, encode_stream_failure},
-        heddle::api::v1alpha1::{
+        heddle::api::common::{
             CallFailure, CallFailureCode, EndpointDescriptor, SignedEndpointDescriptor,
         },
         signing::endpoint_descriptor_bytes,
@@ -199,7 +199,7 @@ mod fixture {
 
     #[test]
     fn authenticated_clone_starts_with_folded_pull_instead_of_list_refs() {
-        const PULL: &str = "/heddle.api.v2alpha1.SyncService/Fetch";
+        const PULL: &str = "/heddle.api.v1alpha2.SyncService/Fetch";
 
         let temp = TempDir::new().expect("create folded clone fixture root");
         let (ephemeral_secret, endpoint_id, direct_address, iroh_thread) =

@@ -50,7 +50,7 @@ mod descriptor_trust_conformance;
 
 use std::sync::Arc;
 
-use api::heddle::api::v1alpha1::CallContext;
+use api::heddle::api::common::CallContext;
 pub use bootstrap::{
     DescriptorKeyring, VerifiedEndpointDescriptor, fetch_descriptor_key_document,
     fetch_ephemeral_descriptor_set,
@@ -213,7 +213,7 @@ impl HostedClient {
                 let remote = thread_api::Remote::discover(
                     transport()?,
                     *self.connection.connection.remote_id().as_bytes(),
-                    api::heddle::api::v2alpha1::EndpointKind::Weft,
+                    api::heddle::api::v1alpha2::EndpointKind::Weft,
                 )
                 .await?;
                 Ok::<_, anyhow::Error>(remote.description)
@@ -467,7 +467,7 @@ impl HostedClient {
         match call::unary_encoded(&self.connection, method, &signed.context, encoded).await {
             Ok(response) => Ok(response),
             Err(HostedError::Call {
-                code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
+                code: api::heddle::api::common::CallFailureCode::Unauthenticated,
                 message,
                 error: Some(error),
             }) if api::human_verification_challenge(&error).is_some() => {
@@ -477,7 +477,7 @@ impl HostedClient {
                     .canonical()
                     .ok_or(HostedError::SigningIdentityRequired)?;
                 let callback = self.on_human_signature.as_ref().ok_or(HostedError::Call {
-                    code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
+                    code: api::heddle::api::common::CallFailureCode::Unauthenticated,
                     message,
                     error: Some(error),
                 })?;
@@ -489,13 +489,13 @@ impl HostedClient {
                     action_url: (!challenge.action_url.is_empty()).then_some(challenge.action_url),
                 })
                 .map_err(|error| HostedError::Call {
-                    code: api::heddle::api::v1alpha1::CallFailureCode::PermissionDenied,
+                    code: api::heddle::api::common::CallFailureCode::PermissionDenied,
                     message: error.to_string(),
                     error: None,
                 })?;
                 let context = signed.with_human_verification(
                     assertion.signature,
-                    api::heddle::api::v1alpha1::HumanVerification {
+                    api::heddle::api::common::HumanVerification {
                         client_data_json: assertion.client_data_json,
                         authenticator_data: assertion.authenticator_data,
                         user_handle: assertion.user_handle.unwrap_or_default(),

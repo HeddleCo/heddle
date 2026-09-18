@@ -12,19 +12,19 @@ use crate::{contract::*, replication::opening::FRAME_LIMIT, transport};
 // capacity and coexistence of an old/new singular value during duplicate merge.
 // Payload byte/string copies are additionally covered by the base reservation.
 const OPAQUE_NODE_SIZES: &[usize] = &[
-    size_of::<api::heddle::api::v1alpha1::CallFailure>(),
-    size_of::<api::heddle::api::v1alpha1::ErrorDetail>(),
-    size_of::<api::heddle::api::v1alpha1::RetryAdvice>(),
-    size_of::<api::heddle::api::v1alpha1::ConflictDetail>(),
-    size_of::<api::heddle::api::v1alpha1::CursorFailure>(),
-    size_of::<api::heddle::api::v1alpha1::CapabilityRequirement>(),
-    size_of::<api::heddle::api::v1alpha1::PolicyDenial>(),
-    size_of::<api::heddle::api::v1alpha1::UnknownDetail>(),
-    size_of::<api::heddle::api::v1alpha1::AmbiguousChangeIdDetail>(),
-    size_of::<api::heddle::api::v1alpha1::SignupFailure>(),
-    size_of::<api::heddle::api::v1alpha1::StreamFailure>(),
-    size_of::<api::heddle::api::v1alpha1::HumanVerificationChallenge>(),
-    size_of::<api::heddle::api::v1alpha1::OAuthLinkChallenge>(),
+    size_of::<api::heddle::api::common::CallFailure>(),
+    size_of::<api::heddle::api::common::ErrorDetail>(),
+    size_of::<api::heddle::api::common::RetryAdvice>(),
+    size_of::<api::heddle::api::common::ConflictDetail>(),
+    size_of::<api::heddle::api::common::CursorFailure>(),
+    size_of::<api::heddle::api::common::CapabilityRequirement>(),
+    size_of::<api::heddle::api::common::PolicyDenial>(),
+    size_of::<api::heddle::api::common::UnknownDetail>(),
+    size_of::<api::heddle::api::common::AmbiguousChangeIdDetail>(),
+    size_of::<api::heddle::api::common::SignupFailure>(),
+    size_of::<api::heddle::api::common::StreamFailure>(),
+    size_of::<api::heddle::api::common::HumanVerificationChallenge>(),
+    size_of::<api::heddle::api::common::OAuthLinkChallenge>(),
     size_of::<TransferObject>(),
     size_of::<ObjectAddress>(),
     size_of::<String>(),
@@ -359,7 +359,7 @@ mod tests {
     }
     #[test]
     fn protobuf_shape_preserves_legal_receipt_details_and_accounts_nested_layouts() {
-        use api::heddle::api::v1alpha1::{
+        use api::heddle::api::common::{
             CallFailure, CapabilityRequirement, ErrorDetail, error_detail::Context,
         };
         let failure = CallFailure {

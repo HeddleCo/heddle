@@ -109,7 +109,7 @@ pub fn annotation_source_ref(
                 spool: spool.clone(),
                 revision: Some(match &value.source.revision {
                     model::CollaborationRevision::State { state_id } => {
-                        api::revision_ref::Revision::State(::api::heddle::api::v1alpha1::StateId {
+                        api::revision_ref::Revision::State(::api::heddle::api::common::StateId {
                             value: state_id.as_bytes().to_vec(),
                         })
                     }

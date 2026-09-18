@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use api::heddle::api::{v1alpha1::CallFailureCode, v2alpha1::*};
+use api::heddle::api::{common::CallFailureCode, v1alpha2::*};
 use iroh::endpoint::SendStream;
 use objects::store::ObjectStore;
 use prost::Message;
@@ -532,7 +532,7 @@ impl DeviceRpc {
                                 Some(RevisionRef {
                                     spool: Some(SpoolRef { id: spool.id.to_string() }),
                                     revision: Some(revision_ref::Revision::State(
-                                        api::heddle::api::v1alpha1::StateId { value: revision.as_bytes().to_vec() }
+                                        api::heddle::api::common::StateId { value: revision.as_bytes().to_vec() }
                                     )),
                                 })
                             } else { None };

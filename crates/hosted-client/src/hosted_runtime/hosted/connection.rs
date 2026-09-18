@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     DescribeEndpointResponse, EndpointKind, EndpointRef, ProviderDialRoute,
 };
 use config::ClientConfig;
@@ -25,7 +25,7 @@ pub(super) struct HostedConnection {
     pub(super) endpoint: Endpoint,
     pub(super) connection: iroh::endpoint::Connection,
     pub(super) native_description:
-        tokio::sync::OnceCell<api::heddle::api::v2alpha1::DescribeEndpointResponse>,
+        tokio::sync::OnceCell<api::heddle::api::v1alpha2::DescribeEndpointResponse>,
     provider_transport: Option<ProviderWebSocketTransport>,
     provider_connections:
         Mutex<HashMap<EndpointId, Arc<Mutex<Option<iroh::endpoint::Connection>>>>>,
@@ -181,7 +181,7 @@ impl Drop for HostedConnection {
 mod tests {
     use std::{net::Ipv4Addr, sync::Arc, time::Duration};
 
-    use api::heddle::api::v2alpha1::{EndpointKind, EndpointRef};
+    use api::heddle::api::v1alpha2::{EndpointKind, EndpointRef};
     use iroh::{Endpoint, RelayMode, endpoint::presets};
     use tokio::sync::Mutex;
 

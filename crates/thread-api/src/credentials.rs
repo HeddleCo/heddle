@@ -2,7 +2,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use api::{
-    heddle::api::v1alpha1::{CallContext, RequestProof},
+    heddle::api::common::{CallContext, RequestProof},
     v2::MethodDescriptor,
 };
 use crypto::{Ed25519Signer, Signer};
@@ -50,7 +50,7 @@ impl Credentials {
         signer: std::sync::Arc<Ed25519Signer>,
         authority: &[u8],
     ) -> Result<Self, Error> {
-        use api::heddle::api::v2alpha1::ThreadControlAuthority;
+        use api::heddle::api::v1alpha2::ThreadControlAuthority;
         if authority.is_empty() || authority.len() > 64 * 1024 {
             return Err(Error::Protocol("owned-device authority proof bound"));
         }
@@ -270,7 +270,7 @@ mod tests {
         let method = crate::rpc::WorkspaceServiceObserveCatalog::METHOD;
         assert_eq!(
             method.signing_tier,
-            api::heddle::api::v1alpha1::SigningTier::ProofIfAuthenticated
+            api::heddle::api::common::SigningTier::ProofIfAuthenticated
         );
         let mut request = crate::contract::ObserveCatalogRequest::default();
         crate::observation::ObservationRequest::options_mut(&mut request).mode =

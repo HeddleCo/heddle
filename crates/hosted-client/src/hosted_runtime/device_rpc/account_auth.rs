@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use api::{heddle::api::v1alpha1::CallContext, v2::MethodDescriptor};
+use api::{heddle::api::common::CallContext, v2::MethodDescriptor};
 use biscuit_verifier::{BiscuitFacts, InspectedCredential, PublicKey};
 use chrono::Utc;
 

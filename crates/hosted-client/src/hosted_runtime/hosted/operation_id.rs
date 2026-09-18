@@ -91,9 +91,9 @@ fn scoped_to_method(method: &str, caller: &str) -> String {
 mod tests {
     use super::*;
 
-    const OPEN: &str = "heddle.api.v2alpha1.CollaborationService/OpenDiscussion";
-    const PUT_CONTEXT: &str = "heddle.api.v2alpha1.CollaborationService/PutContext";
-    const PUBLISH: &str = "heddle.api.v2alpha1.SyncService/PublishContent";
+    const OPEN: &str = "heddle.api.v1alpha2.CollaborationService/OpenDiscussion";
+    const PUT_CONTEXT: &str = "heddle.api.v1alpha2.CollaborationService/PutContext";
+    const PUBLISH: &str = "heddle.api.v1alpha2.SyncService/PublishContent";
 
     #[test]
     fn caller_uuid_is_scoped_per_method_and_stable_for_retries() {

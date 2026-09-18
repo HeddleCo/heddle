@@ -1,13 +1,13 @@
 //! Native immutable check admission reuses the canonical evidence and capability engines.
 use anyhow::{Context, Result, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use objects::object::{ContentHash, OperationId};
 use prost::Message;
 use thread_api::evidence::{self as codec, CheckAuthor, CheckEvidence};
 
 use super::{DeviceRpc, account_auth::AccountSession, auth::Session, checkout};
-const RECORD: &str = "/heddle.api.v2alpha1.EvidenceService/RecordEvidence";
-const ACK: &str = "/heddle.api.v2alpha1.EvidenceService/AcknowledgeCheck";
+const RECORD: &str = "/heddle.api.v1alpha2.EvidenceService/RecordEvidence";
+const ACK: &str = "/heddle.api.v1alpha2.EvidenceService/AcknowledgeCheck";
 
 impl DeviceRpc {
     pub(super) fn evidence_command(
@@ -38,7 +38,7 @@ impl DeviceRpc {
                 && repo::device_evidence::get(&session.spool.heddle_dir, 1, value.id)?.is_none()
             {
                 ensure!(
-                    session.permits("/heddle.api.v2alpha1.ContentService/ReadArtifact"),
+                    session.permits("/heddle.api.v1alpha2.ContentService/ReadArtifact"),
                     "referencing retained artifacts requires artifact read capability"
                 );
                 let artifacts =

@@ -2,7 +2,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result, bail, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use objects::object::{
     CollaborationAnchorStatus, CollaborationOperationBodyV1 as Body,
     CollaborationOperationEnvelope, CollaborationResolution, CollaborationScope, ContentHash,
@@ -48,7 +48,7 @@ impl DeviceRpc {
         }
         self.observe_view(
             session,
-            "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration",
+            "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration",
             &query.encode_to_vec(),
             request.observe.clone().unwrap_or_default(),
             send,

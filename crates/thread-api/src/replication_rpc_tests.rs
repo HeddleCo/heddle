@@ -358,7 +358,7 @@ async fn call_context_carries_the_serialized_biscuit_returned_by_credential_cere
     use crate::transport::Authorize;
     let root = KeyPair::new();
     let credential = credential(&root);
-    let method = api::v2::method_descriptor("/heddle.api.v2alpha1.SyncService/ReplicateThread")
+    let method = api::v2::method_descriptor("/heddle.api.v1alpha2.SyncService/ReplicateThread")
         .expect("replication descriptor");
     let context = credential
         .context(method, &[])

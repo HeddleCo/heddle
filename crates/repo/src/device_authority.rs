@@ -5,7 +5,7 @@
 use std::{io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1::{OwnerState, SignedMintRootAttachment};
+use api::heddle::api::v1alpha2::{OwnerState, SignedMintRootAttachment};
 use objects::{fs_atomic, lock::RepoLock};
 use prost::Message;
 
@@ -300,7 +300,7 @@ impl DeviceAuthority {
         if proof.len() > 64 * 1024 {
             bail!("device authority proof exceeds 64KiB");
         }
-        let envelope = api::heddle::api::v2alpha1::ThreadControlAuthority::decode(proof)?;
+        let envelope = api::heddle::api::v1alpha2::ThreadControlAuthority::decode(proof)?;
         if envelope.format != 1
             || envelope.encode_to_vec() != proof
             || envelope.mint_root_public_key != root_key.as_slice()
@@ -413,7 +413,7 @@ mod tests {
         let state = heddleco_capability_verifier::verify_owner_root(&root).expect("verify");
         (
             OwnerState {
-                owner: Some(api::heddle::api::v2alpha1::PrincipalRef {
+                owner: Some(api::heddle::api::v1alpha2::PrincipalRef {
                     id: uuid::Uuid::from_bytes([9; 16]).to_string(),
                 }),
                 root: Some(root),
@@ -604,7 +604,7 @@ mod tests {
     }
     #[test]
     fn paired_independent_device_survives_rotation_but_backdated_enrollment_does_not() {
-        use api::heddle::api::v2alpha1::{
+        use api::heddle::api::v1alpha2::{
             OwnerKeyTransition, OwnerKeyTransitionKind, SignedOwnerKeyTransition,
         };
         let home = tempfile::tempdir().expect("home");
@@ -701,7 +701,7 @@ mod tests {
         .expect(
             "retained device can prepare a new local proof after rotation without recertification",
         );
-        let envelope = api::heddle::api::v2alpha1::ThreadControlAuthority::decode(proof.as_slice())
+        let envelope = api::heddle::api::v1alpha2::ThreadControlAuthority::decode(proof.as_slice())
             .expect("portable proof");
         assert_eq!(envelope.mint_root_attachment, Some(certificate.clone()));
         assert_eq!(

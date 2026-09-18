@@ -10,7 +10,7 @@ use api::{
     descriptor_trust::{
         AttestedEndpointDescriptorEntry, EndpointDescriptorSetDocument, ephemeral_attestation_bytes,
     },
-    heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
+    heddle::api::common::{EndpointDescriptor, SignedEndpointDescriptor},
     signing::endpoint_descriptor_bytes,
 };
 use crypto::{Ed25519Signer, Signer};

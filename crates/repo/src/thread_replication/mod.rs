@@ -320,7 +320,7 @@ impl ThreadReplica {
         Ok(signed)
     }
 
-    pub fn genesis_record(&self) -> Result<api::heddle::api::v2alpha1::ThreadGenesisRecord> {
+    pub fn genesis_record(&self) -> Result<api::heddle::api::v1alpha2::ThreadGenesisRecord> {
         let (canonical, signature, creator_authority, admission, admission_signature): GenesisRecordRow =
             self.connect()?.query_row(
                 "SELECT genesis,genesis_signature,creator_authority,genesis_admission,genesis_admission_signature FROM threads WHERE id=?1",
@@ -337,7 +337,7 @@ impl ThreadReplica {
                 "stored genesis differs from Thread identity".into(),
             ));
         }
-        use api::heddle::api::v2alpha1 as wire;
+        use api::heddle::api::v1alpha2 as wire;
         let mut boundary_acceptances = BTreeMap::new();
         let admission = match (admission, admission_signature) {
             (None, None) => None,

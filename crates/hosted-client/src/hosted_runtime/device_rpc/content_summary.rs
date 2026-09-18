@@ -1,5 +1,5 @@
 //! Shared pure mapping of one exact native State.
-use api::heddle::api::v1alpha1 as shared;
+use api::heddle::api::common as shared;
 use objects::object::State;
 
 pub(super) fn summary(

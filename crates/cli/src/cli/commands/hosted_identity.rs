@@ -1108,7 +1108,7 @@ mod tests {
             authentication_methods: vec!["passkey".into()],
             agent_provider: Some("codex".into()),
             agent_model: Some("gpt".into()),
-            available_actions: vec!["/heddle.api.v2alpha1.ThreadService/RecordReview".into()],
+            available_actions: vec!["/heddle.api.v1alpha2.ThreadService/RecordReview".into()],
         }
     }
 
@@ -1156,7 +1156,7 @@ mod tests {
             "Credential:    agent:reviewer-1 (agent)",
             "Session:       session-1",
             "Account root:  self-rooted",
-            "Method hints:  /heddle.api.v2alpha1.ThreadService/RecordReview",
+            "Method hints:  /heddle.api.v1alpha2.ThreadService/RecordReview",
             "Spools:        spool/acme, spool/acme/notes",
             "Scopes:        repo:heddle/heddle",
             "Op ceiling:    Pull, Push",

@@ -1,6 +1,6 @@
 //! Original-signed collaboration commands; delivery identity is independently checked.
 use anyhow::{Context, Result, bail, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use objects::object::{
     CollaborationOperationBodyV1 as Body, CollaborationOperationEnvelope,
     CollaborationResolution as Resolution, ContextRevision,

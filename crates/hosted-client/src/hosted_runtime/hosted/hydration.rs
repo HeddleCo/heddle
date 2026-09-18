@@ -402,13 +402,12 @@ async fn hydrate_with_rpc_timeout(
     hash: ContentHash,
     timeout: Duration,
 ) -> Result<usize, ProtocolError> {
-    match tokio::time::timeout(
-        timeout,
-        async {
-            let thread = client.resolve_thread_ref(repo_path, remote_thread).await?;
-            client.hydrate_blob(repo, repo_path, thread, target_state, hash).await
-        },
-    )
+    match tokio::time::timeout(timeout, async {
+        let thread = client.resolve_thread_ref(repo_path, remote_thread).await?;
+        client
+            .hydrate_blob(repo, repo_path, thread, target_state, hash)
+            .await
+    })
     .await
     {
         Ok(result) => result,

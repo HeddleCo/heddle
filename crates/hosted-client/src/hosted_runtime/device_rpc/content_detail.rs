@@ -2,7 +2,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, ensure};
-use api::heddle::api::{v1alpha1 as shared, v2alpha1::*};
+use api::heddle::api::{common as shared, v1alpha2::*};
 use objects::{
     object::{ContentHash, State, Tree, TreeEntry},
     store::ObjectStore,

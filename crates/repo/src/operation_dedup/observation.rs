@@ -12,7 +12,7 @@ pub struct Receipt {
     pub request_hash: [u8; 32],
     pub created_at: i64,
     pub pending: bool,
-    pub execution: Option<api::heddle::api::v2alpha1::OperationRecord>,
+    pub execution: Option<api::heddle::api::v1alpha2::OperationRecord>,
     pub executor: Option<String>,
 }
 impl Receipt {
@@ -119,7 +119,7 @@ pub fn page(
             executor,
             execution: execution
                 .map(|bytes| {
-                    api::heddle::api::v2alpha1::OperationRecord::decode(bytes.as_slice())
+                    api::heddle::api::v1alpha2::OperationRecord::decode(bytes.as_slice())
                         .map_err(database_error)
                 })
                 .transpose()?,

@@ -53,7 +53,7 @@ pub(super) async fn roundtrip(
             id: spool.to_string(),
         }),
         revision: Some(revision_ref::Revision::State(
-            api::heddle::api::v1alpha1::StateId {
+            api::heddle::api::common::StateId {
                 value: state.id().as_bytes().to_vec(),
             },
         )),
@@ -510,7 +510,7 @@ pub(super) async fn roundtrip(
                     id: spool.to_string(),
                 }),
                 revision: Some(revision_ref::Revision::State(
-                    api::heddle::api::v1alpha1::StateId {
+                    api::heddle::api::common::StateId {
                         value: state.id().as_bytes().to_vec(),
                     },
                 )),
@@ -601,7 +601,7 @@ pub(super) async fn roundtrip(
                 id: spool.to_string(),
             }),
             revision: Some(revision_ref::Revision::State(
-                api::heddle::api::v1alpha1::StateId {
+                api::heddle::api::common::StateId {
                     value: state.id().as_bytes().to_vec(),
                 },
             )),

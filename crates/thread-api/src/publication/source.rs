@@ -289,7 +289,7 @@ impl<T: RpcTransport<Error = transport::Error>> Thread<'_, T> {
                     revision: Some(RevisionRef {
                         spool: self.reference.spool.clone(),
                         revision: Some(revision_ref::Revision::State(
-                            api::heddle::api::v1alpha1::StateId {
+                            api::heddle::api::common::StateId {
                                 value: source.revision.as_bytes().to_vec(),
                             },
                         )),

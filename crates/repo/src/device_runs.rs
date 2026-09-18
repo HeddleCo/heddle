@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     ControlRunRequest, PutRunPolicyRequest, RunPolicy, RunRecord, TimelineRecord,
 };
 use prost::Message;
@@ -260,7 +260,7 @@ impl RunStore {
         Ok(output)
     }
     pub fn enqueue_control(&self, request: &ControlRunRequest, principal: &str) -> Result<()> {
-        use api::heddle::api::v2alpha1::control_run_request::Action;
+        use api::heddle::api::v1alpha2::control_run_request::Action;
         valid_id(&request.client_operation_id)?;
         let reference = request.run.as_ref().context("run required")?;
         if principal.is_empty()

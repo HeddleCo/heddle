@@ -185,7 +185,7 @@ fn now_unix_millis() -> Result<i64> {
 mod tests {
     use api::{
         descriptor_trust::{EntryReject, VerifiedEndpoint},
-        heddle::api::v1alpha1::EndpointDescriptor,
+        heddle::api::common::EndpointDescriptor,
     };
 
     use super::{

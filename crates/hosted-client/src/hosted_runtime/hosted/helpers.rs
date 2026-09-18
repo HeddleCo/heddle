@@ -1,11 +1,11 @@
-use api::heddle::api::v1alpha1::StateId as ProtoStateId;
+use api::heddle::api::common::StateId as ProtoStateId;
 use objects::object::StateId;
 use wire::ProtocolError;
 
 use super::HostedError;
 
 pub(super) fn hosted_to_protocol_error(error: HostedError) -> ProtocolError {
-    use api::heddle::api::v1alpha1::CallFailureCode;
+    use api::heddle::api::common::CallFailureCode;
     match error {
         HostedError::Call {
             code,
@@ -60,14 +60,14 @@ pub(super) fn native_client_error(
                 Ok(detail) => detail,
                 Err(error) => return ProtocolError::Serialization(error.to_string()),
             };
-            let code = api::heddle::api::v1alpha1::CallFailureCode::try_from(failure.code)
-                .unwrap_or(api::heddle::api::v1alpha1::CallFailureCode::Unknown);
+            let code = api::heddle::api::common::CallFailureCode::try_from(failure.code)
+                .unwrap_or(api::heddle::api::common::CallFailureCode::Unknown);
             if detail.is_none() {
                 match code {
-                    api::heddle::api::v1alpha1::CallFailureCode::AlreadyExists => {
+                    api::heddle::api::common::CallFailureCode::AlreadyExists => {
                         return ProtocolError::AlreadyExists(failure.message);
                     }
-                    api::heddle::api::v1alpha1::CallFailureCode::NotFound => {
+                    api::heddle::api::common::CallFailureCode::NotFound => {
                         return ProtocolError::ObjectNotFound(failure.message);
                     }
                     _ => {}
@@ -97,10 +97,8 @@ pub(super) fn native_client_error(
     }
 }
 
-fn remote_failure_code(
-    code: api::heddle::api::v1alpha1::CallFailureCode,
-) -> wire::RemoteFailureCode {
-    use api::heddle::api::v1alpha1::CallFailureCode as Api;
+fn remote_failure_code(code: api::heddle::api::common::CallFailureCode) -> wire::RemoteFailureCode {
+    use api::heddle::api::common::CallFailureCode as Api;
     use wire::RemoteFailureCode as Wire;
     match code {
         Api::Unspecified => Wire::Unspecified,
@@ -130,8 +128,8 @@ fn remote_duration(value: prost_types::Duration) -> wire::RemoteDuration {
     }
 }
 
-fn remote_cursor(value: api::heddle::api::v1alpha1::CursorFailure) -> wire::RemoteCursorFailure {
-    use api::heddle::api::v1alpha1::cursor_failure::Reason as Api;
+fn remote_cursor(value: api::heddle::api::common::CursorFailure) -> wire::RemoteCursorFailure {
+    use api::heddle::api::common::cursor_failure::Reason as Api;
     use wire::RemoteCursorReason as Wire;
     let reason = match value.reason() {
         Api::Unspecified => Wire::Unspecified,
@@ -149,9 +147,9 @@ fn remote_cursor(value: api::heddle::api::v1alpha1::CursorFailure) -> wire::Remo
 }
 
 fn remote_failure_detail(
-    detail: api::heddle::api::v1alpha1::ErrorDetail,
+    detail: api::heddle::api::common::ErrorDetail,
 ) -> wire::RemoteFailureDetail {
-    use api::heddle::api::v1alpha1::error_detail::Context;
+    use api::heddle::api::common::error_detail::Context;
     use prost::Message as _;
 
     let encoded = detail.encode_to_vec();
@@ -182,16 +180,16 @@ fn remote_failure_detail(
         | Some(Context::AmbiguousChangeId(_))
         | Some(Context::Signup(_))
         | None => wire::RemoteFailureDetail::Unknown {
-            type_url: "type.googleapis.com/heddle.api.v1alpha1.ErrorDetail".to_string(),
+            type_url: "type.googleapis.com/heddle.api.common.ErrorDetail".to_string(),
             value: encoded,
         },
     }
 }
 
 fn remote_stream_failure(
-    value: api::heddle::api::v1alpha1::StreamFailure,
+    value: api::heddle::api::common::StreamFailure,
 ) -> wire::RemoteFailureDetail {
-    use api::heddle::api::v1alpha1::{CallFailureCode, error_detail::Context};
+    use api::heddle::api::common::{CallFailureCode, error_detail::Context};
 
     let (retry_after, cursor) = match value.error.and_then(|detail| detail.context) {
         Some(Context::Retry(retry)) => (retry.retry_after.map(remote_duration), None),
@@ -224,7 +222,7 @@ pub(super) fn parse_proto_state_id(
 
 #[cfg(test)]
 mod tests {
-    use api::heddle::api::v1alpha1::{
+    use api::heddle::api::common::{
         CallFailure, CallFailureCode, StateId as ProtoStateId, StreamFailure,
     };
 
@@ -233,7 +231,7 @@ mod tests {
     #[test]
     fn native_auth_failure_maps_without_transport_status_types() {
         let error = hosted_to_protocol_error(HostedError::Call {
-            code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
+            code: api::heddle::api::common::CallFailureCode::Unauthenticated,
             message: "invalid proof".to_string(),
             error: None,
         });
@@ -248,10 +246,10 @@ mod tests {
 
     #[test]
     fn native_call_failure_preserves_typed_error_detail() {
-        use api::heddle::api::v1alpha1::{ConflictDetail, ErrorDetail, ErrorReason, error_detail};
+        use api::heddle::api::common::{ConflictDetail, ErrorDetail, ErrorReason, error_detail};
 
         let error = hosted_to_protocol_error(HostedError::Call {
-            code: api::heddle::api::v1alpha1::CallFailureCode::AlreadyExists,
+            code: api::heddle::api::common::CallFailureCode::AlreadyExists,
             message: "ref changed".to_string(),
             error: Some(Box::new(ErrorDetail {
                 reason: ErrorReason::VersionConflict as i32,
@@ -278,7 +276,7 @@ mod tests {
 
     #[test]
     fn hosted_to_protocol_error_maps_call_codes_without_detail() {
-        use api::heddle::api::v1alpha1::CallFailureCode;
+        use api::heddle::api::common::CallFailureCode;
 
         assert!(matches!(
             hosted_to_protocol_error(HostedError::Call {
@@ -355,7 +353,7 @@ mod tests {
 
     #[test]
     fn remote_failure_detail_maps_every_context_variant() {
-        use api::heddle::api::v1alpha1::{
+        use api::heddle::api::common::{
             CapabilityRequirement, ConflictDetail, CursorFailure, ErrorDetail, ErrorReason,
             PolicyDenial, RetryAdvice, error_detail,
         };
@@ -454,7 +452,7 @@ mod tests {
 
     #[test]
     fn every_known_failure_detail_arm_survives_heddles_wire_path() {
-        use api::heddle::api::v1alpha1::{
+        use api::heddle::api::common::{
             CapabilityRequirement, ConflictDetail, CursorFailure, ErrorDetail, ErrorReason,
             PolicyDenial, RetryAdvice, UnknownDetail, cursor_failure, error_detail,
         };
@@ -550,7 +548,7 @@ mod tests {
             error: None,
         };
         let unknown = failure(error_detail::Context::Unknown(UnknownDetail {
-            type_url: "type.googleapis.com/heddle.api.v1alpha1.StreamFailure".to_string(),
+            type_url: "type.googleapis.com/heddle.api.common.StreamFailure".to_string(),
             value: future_arm.encode_to_vec(),
         }));
         let details = decoded_failure_details(&unknown);
@@ -560,7 +558,7 @@ mod tests {
         assert_eq!(details.len(), 1);
         assert_eq!(
             type_url,
-            "type.googleapis.com/heddle.api.v1alpha1.StreamFailure"
+            "type.googleapis.com/heddle.api.common.StreamFailure"
         );
         assert_eq!(
             &StreamFailure::decode(value.as_slice()).expect("recovered typed payload"),
@@ -572,7 +570,7 @@ mod tests {
     fn stream_failure_round_trips_with_nested_resume_hints() {
         use api::{
             framing::{StreamFrame, decode_stream_frame, encode_stream_failure},
-            heddle::api::v1alpha1::{
+            heddle::api::common::{
                 CursorFailure, ErrorDetail, ErrorReason, RetryAdvice, cursor_failure, error_detail,
             },
         };
@@ -668,7 +666,7 @@ mod tests {
 
     #[test]
     fn reopen_retryable_classifier_matches_weft_v2_signals() {
-        use api::heddle::api::v1alpha1::CallFailureCode;
+        use api::heddle::api::common::CallFailureCode;
         let aborted = |message: &str| CallFailure {
             code: CallFailureCode::Aborted as i32,
             message: message.into(),

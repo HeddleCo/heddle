@@ -1,7 +1,7 @@
 //! Locally verified identity projections. Hosted-only administration is explicit
 //! unavailable coverage; reading this device never contacts the hosted account.
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 
 use super::{DeviceRpc, account_auth::AccountSession};
 

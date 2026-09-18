@@ -26,11 +26,11 @@ pub enum BoundarySubjectKind {
 impl BoundarySubjectKind {
     fn method(self) -> &'static str {
         match self {
-            Self::Source => "/heddle.api.v2alpha1.SyncService/PublishContent",
-            Self::AccountGenesis => "/heddle.api.v2alpha1.ThreadService/StartThread",
-            Self::OwnershipClaim => "/heddle.api.v2alpha1.ThreadService/ClaimThreadOwnership",
+            Self::Source => "/heddle.api.v1alpha2.SyncService/PublishContent",
+            Self::AccountGenesis => "/heddle.api.v1alpha2.ThreadService/StartThread",
+            Self::OwnershipClaim => "/heddle.api.v1alpha2.ThreadService/ClaimThreadOwnership",
             Self::OwnershipResolution => {
-                "/heddle.api.v2alpha1.ThreadService/ResolveOwnershipConflict"
+                "/heddle.api.v1alpha2.ThreadService/ResolveOwnershipConflict"
             }
         }
     }

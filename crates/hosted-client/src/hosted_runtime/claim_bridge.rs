@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use api::heddle::api::v1alpha1::{CallFailure, CallFailureCode};
+use api::heddle::api::common::{CallFailure, CallFailureCode};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use iroh::{Endpoint, protocol::Router};
 use serde::{Deserialize, Serialize};

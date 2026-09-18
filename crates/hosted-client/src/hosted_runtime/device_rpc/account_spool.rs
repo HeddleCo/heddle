@@ -1,6 +1,6 @@
 //! Local catalog mutations share exact durable receipts and transaction fences.
 use anyhow::{Context, Result, bail, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use prost::Message;
 use repo::device_catalog::{
     DeviceSpool, mutations,

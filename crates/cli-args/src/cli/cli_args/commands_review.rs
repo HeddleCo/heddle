@@ -75,12 +75,11 @@ impl SignKindArg {
         }
     }
 
-    pub fn as_proto(&self) -> api::heddle::api::v1alpha1::ReviewKind {
-        use api::heddle::api::v1alpha1::ReviewKind;
+    pub fn as_proto(&self) -> objects::object::ReviewKind {
         match self {
-            Self::Read => ReviewKind::Read,
-            Self::AgentPreview => ReviewKind::AgentPreview,
-            Self::AgentCoReview => ReviewKind::AgentCoReview,
+            Self::Read => objects::object::ReviewKind::Read,
+            Self::AgentPreview => objects::object::ReviewKind::AgentPreview,
+            Self::AgentCoReview => objects::object::ReviewKind::AgentCoReview,
         }
     }
 }

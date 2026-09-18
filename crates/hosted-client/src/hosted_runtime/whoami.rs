@@ -7,7 +7,7 @@
 //! only reads; it never attaches a credential.
 
 use anyhow::{Context, Result};
-use api::heddle::api::v2alpha1::{CredentialKind, RootingTier};
+use api::heddle::api::v1alpha2::{CredentialKind, RootingTier};
 use biscuit_auth::builder::{BlockBuilder, Term};
 use config::UserConfig;
 use crypto::Ed25519Signer;
@@ -263,8 +263,8 @@ fn listed_spool_path(path_segments: &[String]) -> Option<String> {
 }
 
 fn project_current_identity(
-    principal: api::heddle::api::v2alpha1::PrincipalRecord,
-    credential: api::heddle::api::v2alpha1::CurrentCredentialRecord,
+    principal: api::heddle::api::v1alpha2::PrincipalRecord,
+    credential: api::heddle::api::v1alpha2::CurrentCredentialRecord,
 ) -> Result<WhoamiIdentity> {
     let kind = match CredentialKind::try_from(credential.kind).ok() {
         Some(CredentialKind::Device) => "device",
@@ -391,7 +391,7 @@ fn biscuit_string_literals(fragment: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use api::heddle::api::v2alpha1::{
+    use api::heddle::api::v1alpha2::{
         ActionAvailability, CurrentCredentialRecord, EntityRef, PrincipalRecord, RecordRef,
     };
     use objects::object::Principal;

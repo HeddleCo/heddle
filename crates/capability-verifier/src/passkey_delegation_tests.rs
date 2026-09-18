@@ -148,8 +148,15 @@ fn temporary_passkey_thread_landing_is_exact_method_and_spool_bound() {
             }
         };
     }
-    proof::verify(&bytes, context!("/heddle.api.v2alpha1.ThreadService/LandThread", "acme/project"), |_| false)
-        .expect("exact passkey Thread landing");
+    proof::verify(
+        &bytes,
+        context!(
+            "/heddle.api.v1alpha2.ThreadService/LandThread",
+            "acme/project"
+        ),
+        |_| false,
+    )
+    .expect("exact passkey Thread landing");
     let stack_token = Biscuit::builder()
         .code(format!(
             "user(\"11111111-1111-1111-1111-111111111111\"); session(\"passkey-stack\"); device_pop_key(\"{}\"); check if operation(\"LandStack\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};",
@@ -169,12 +176,56 @@ fn temporary_passkey_thread_landing_is_exact_method_and_spool_bound() {
         &stack_token,
     )
     .expect("portable stack authority");
-    proof::verify(&stack_bytes, context!("/heddle.api.v2alpha1.ThreadService/LandStack", "acme/project"), |_| false)
-        .expect("exact passkey Thread stack landing");
-    assert!(proof::verify(&stack_bytes, context!("/heddle.api.v2alpha1.ThreadService/LandThread", "acme/project"), |_| false).is_err());
-    assert!(proof::verify(&stack_bytes, context!("/heddle.api.v2alpha1.ThreadService/LandStack", "acme/other"), |_| false).is_err());
-    assert!(proof::verify(&bytes, context!("/heddle.api.v2alpha1.ThreadService/RecordReview", "acme/project"), |_| false).is_err());
-    assert!(proof::verify(&bytes, context!("/heddle.api.v2alpha1.ThreadService/LandThread", "acme/other"), |_| false).is_err());
+    proof::verify(
+        &stack_bytes,
+        context!(
+            "/heddle.api.v1alpha2.ThreadService/LandStack",
+            "acme/project"
+        ),
+        |_| false,
+    )
+    .expect("exact passkey Thread stack landing");
+    assert!(
+        proof::verify(
+            &stack_bytes,
+            context!(
+                "/heddle.api.v1alpha2.ThreadService/LandThread",
+                "acme/project"
+            ),
+            |_| false
+        )
+        .is_err()
+    );
+    assert!(
+        proof::verify(
+            &stack_bytes,
+            context!("/heddle.api.v1alpha2.ThreadService/LandStack", "acme/other"),
+            |_| false
+        )
+        .is_err()
+    );
+    assert!(
+        proof::verify(
+            &bytes,
+            context!(
+                "/heddle.api.v1alpha2.ThreadService/RecordReview",
+                "acme/project"
+            ),
+            |_| false
+        )
+        .is_err()
+    );
+    assert!(
+        proof::verify(
+            &bytes,
+            context!(
+                "/heddle.api.v1alpha2.ThreadService/LandThread",
+                "acme/other"
+            ),
+            |_| false
+        )
+        .is_err()
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
@@ -220,7 +271,7 @@ fn expired_revoked_passkey_work_keeps_provenance_without_current_authority() {
         account_uuid: &OWNER_UUID,
         publisher: &publisher,
         agent_id: None,
-        method: "/heddle.api.v2alpha1.SyncService/PublishContent",
+        method: "/heddle.api.v1alpha2.SyncService/PublishContent",
         spool_path: "acme/project",
         now,
     };

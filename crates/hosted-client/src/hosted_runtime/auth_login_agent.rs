@@ -1,7 +1,7 @@
 //! Node-key remint and invite-create for `heddle auth login`.
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     self as v2, ProvisionAccountRequest, ProvisionAccountResponse, SignedOwnerRoot,
 };
 use config::UserConfig;
@@ -561,7 +561,7 @@ pub(crate) mod test_support {
 
     use api::{
         framing::{decode_request_frame, encode_success_response},
-        heddle::api::v2alpha1::*,
+        heddle::api::v1alpha2::*,
     };
     use bytes::Bytes;
     use crypto::Ed25519Signer;
@@ -571,8 +571,8 @@ pub(crate) mod test_support {
 
     use crate::hosted_runtime::hosted::{CallContextFactory, HostedClient};
 
-    const DESCRIBE: &str = "/heddle.api.v2alpha1.EndpointService/DescribeEndpoint";
-    const BOOTSTRAP: &str = "/heddle.api.v2alpha1.OwnerAuthorizationService/BootstrapOwnership";
+    const DESCRIBE: &str = "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint";
+    const BOOTSTRAP: &str = "/heddle.api.v1alpha2.OwnerAuthorizationService/BootstrapOwnership";
 
     pub(crate) async fn start_recording_client() -> (
         HostedClient,
@@ -620,7 +620,7 @@ pub(crate) mod test_support {
                             public_key: server_key.clone(),
                             kind: EndpointKind::Weft as i32,
                         }),
-                        supported_packages: vec!["heddle.api.v2alpha1".into()],
+                        supported_packages: vec!["heddle.api.v1alpha2".into()],
                         implemented_methods: vec![DESCRIBE.into(), BOOTSTRAP.into()],
                         ..Default::default()
                     }

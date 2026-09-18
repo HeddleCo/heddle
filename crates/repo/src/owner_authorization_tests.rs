@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     PurgeOperationSigningBody, SidecarAuthorization, SignedSpoolOwnerGenesis,
 };
 use crypto::Signer;
@@ -44,14 +44,14 @@ fn pinned_repository() -> (TempDir, Repository, ConformanceFixture) {
         .expect("account");
     let state_hash =
         hex::decode(&valid.current_owner_state_hash_hex).expect("authoritative fixture state");
-    let observed = api::heddle::api::v2alpha1::OwnerState {
-        owner: Some(api::heddle::api::v2alpha1::PrincipalRef {
+    let observed = api::heddle::api::v1alpha2::OwnerState {
+        owner: Some(api::heddle::api::v1alpha2::PrincipalRef {
             id: account.to_string(),
         }),
         root: Some(root.clone()),
         accepted_transitions: bundle.owner_state_chain.clone(),
         version: state_hash.clone(),
-        resource_keyring: Some(api::heddle::api::v2alpha1::CloneAuthorizationKeyring {
+        resource_keyring: Some(api::heddle::api::v1alpha2::CloneAuthorizationKeyring {
             format_version: 1,
             spool_uuid: genesis
                 .genesis
@@ -60,8 +60,8 @@ fn pinned_repository() -> (TempDir, Repository, ConformanceFixture) {
                 .spool_uuid
                 .clone(),
             canonical_spool_path_segments: valid.spool_path_segments.clone(),
-            pin: Some(api::heddle::api::v2alpha1::CloneOwnerPin {
-                kind: api::heddle::api::v2alpha1::CloneOwnerPinKind::CloneTofu as i32,
+            pin: Some(api::heddle::api::v1alpha2::CloneOwnerPin {
+                kind: api::heddle::api::v1alpha2::CloneOwnerPinKind::CloneTofu as i32,
                 expected_owner_id: initial.owner_id().to_vec(),
                 first_seen_unix_seconds: valid.now_unix_seconds,
             }),

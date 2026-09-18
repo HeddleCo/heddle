@@ -238,7 +238,6 @@ impl JsonSchema for ReadyOutput {
 mod tests {
     use verbs::schema_keys::schema_property_keys;
 
-
     use super::*;
 
     /// Every field the hand-written serializer emits must be declared on the

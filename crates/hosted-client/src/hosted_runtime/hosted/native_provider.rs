@@ -4,7 +4,7 @@
 
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     EndpointKind, EndpointRef, FetchOpen, ProviderDialRoute, ProviderPlan, fetch_open,
 };
 use crypto::Signer as _;
@@ -237,7 +237,7 @@ fn provider_key(provider: &EndpointRef) -> std::result::Result<[u8; 32], FetchEr
 
 #[cfg(test)]
 mod tests {
-    use api::heddle::api::v2alpha1::{
+    use api::heddle::api::v1alpha2::{
         EndpointKind, EndpointRef, FetchOpen, ProviderDialRoute, fetch_open, provider_dial_route,
     };
 

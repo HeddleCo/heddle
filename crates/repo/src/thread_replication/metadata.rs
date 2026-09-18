@@ -59,7 +59,7 @@ pub fn prepare_control_authority(
         )
     };
     heddleco_capability_verifier::thread_control_authority::encode(
-        &api::heddle::api::v2alpha1::OwnerHistory {
+        &api::heddle::api::v1alpha2::OwnerHistory {
             root: authority.owner.root.clone(),
             accepted_transitions: authority.owner.accepted_transitions.clone(),
             state_hash: authority.owner.version.clone(),

@@ -538,7 +538,7 @@ pub struct AuthorizedExtent {
 #[cfg(feature = "native-provider")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeAuthorizedExtent {
-    pub range: heddle_api::heddle::api::v2alpha1::ProviderPhysicalRange,
+    pub range: heddle_api::heddle::api::v1alpha2::ProviderPhysicalRange,
     pub subject: String,
     pub audience: EdgeAudience,
     /// Proof key resolved from the verified Biscuit, not from the Iroh peer.
@@ -727,14 +727,14 @@ pub fn authorize_native_provider_extent(
     grant_envelope_b64: Option<&str>,
     trust_list: &[PublicKey],
     trusted_presence_signers: &[PublicKey],
-    retained_plan: &heddle_api::heddle::api::v2alpha1::ProviderPlan,
-    request: &heddle_api::heddle::api::v2alpha1::ReadProviderExtentRequest,
+    retained_plan: &heddle_api::heddle::api::v1alpha2::ProviderPlan,
+    request: &heddle_api::heddle::api::v1alpha2::ReadProviderExtentRequest,
     authenticated_client: &[u8; 32],
     serving_provider: &[u8; 32],
     selected_content_root: &[u8; 32],
     now: DateTime<Utc>,
 ) -> Result<NativeAuthorizedExtent> {
-    use heddle_api::heddle::api::v2alpha1::SharedFacet;
+    use heddle_api::heddle::api::v1alpha2::SharedFacet;
 
     heddle_api::provider_v2::validate_provider_plan(retained_plan)
         .map_err(|error| EdgeError::Invalid(error.to_string()))?;

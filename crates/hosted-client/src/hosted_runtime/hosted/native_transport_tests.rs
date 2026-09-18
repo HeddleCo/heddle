@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use api::{
     framing::{decode_request_frame, encode_stream_message, encode_success_response},
-    heddle::api::v2alpha1 as v2,
+    heddle::api::v1alpha2 as v2,
 };
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 use prost::Message;
@@ -38,15 +38,15 @@ async fn native_client_accepts_source_frames_above_legacy_control_limit() {
             .expect("discovery request");
         assert_eq!(
             decode_request_frame(&request).expect("request").method,
-            "/heddle.api.v2alpha1.EndpointService/DescribeEndpoint"
+            "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint"
         );
         let description = v2::DescribeEndpointResponse {
             endpoint: Some(v2::EndpointRef {
                 kind: v2::EndpointKind::Weft as i32,
                 public_key: key,
             }),
-            supported_packages: vec!["heddle.api.v2alpha1".into()],
-            implemented_methods: vec!["/heddle.api.v2alpha1.ContentService/ReadContent".into()],
+            supported_packages: vec!["heddle.api.v1alpha2".into()],
+            implemented_methods: vec!["/heddle.api.v1alpha2.ContentService/ReadContent".into()],
             ..Default::default()
         };
         send.write_all(
@@ -62,7 +62,7 @@ async fn native_client_accepts_source_frames_above_legacy_control_limit() {
             .expect("content request");
         assert_eq!(
             decode_request_frame(&request).expect("request").method,
-            "/heddle.api.v2alpha1.ContentService/ReadContent"
+            "/heddle.api.v1alpha2.ContentService/ReadContent"
         );
         let event = v2::ContentEvent {
             payload: Some(v2::content_event::Payload::Blob(v2::BlobChunk {

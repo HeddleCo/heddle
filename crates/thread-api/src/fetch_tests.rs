@@ -70,7 +70,7 @@ pub(super) fn fixture() -> (FetchOpen, TransferReady, EndpointRef, [Vec<u8>; 2])
     let revision = RevisionRef {
         spool: thread.spool.clone(),
         revision: Some(revision_ref::Revision::State(
-            api::heddle::api::v1alpha1::StateId {
+            api::heddle::api::common::StateId {
                 value: [31; 32].to_vec(),
             },
         )),

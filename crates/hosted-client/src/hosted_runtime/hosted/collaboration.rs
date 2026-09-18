@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     self as contract, AppendDiscussionRequest, Audience, CollaborationAnchor, MutationResponse,
     ObservationMode, ObserveCollaborationRequest, ObserveOptions, OpenDiscussionRequest,
     PageRequest, PutContextRequest, RecordRef, ResolveDiscussionRequest, collaboration_anchor,
@@ -27,10 +27,10 @@ use super::{
     user::require_applied_receipt,
 };
 
-const OPEN: &str = "heddle.api.v2alpha1.CollaborationService/OpenDiscussion";
-const APPEND: &str = "heddle.api.v2alpha1.CollaborationService/AppendTurn";
-const RESOLVE: &str = "heddle.api.v2alpha1.CollaborationService/ResolveDiscussion";
-const PUT_CONTEXT: &str = "heddle.api.v2alpha1.CollaborationService/PutContext";
+const OPEN: &str = "heddle.api.v1alpha2.CollaborationService/OpenDiscussion";
+const APPEND: &str = "heddle.api.v1alpha2.CollaborationService/AppendTurn";
+const RESOLVE: &str = "heddle.api.v1alpha2.CollaborationService/ResolveDiscussion";
+const PUT_CONTEXT: &str = "heddle.api.v1alpha2.CollaborationService/PutContext";
 
 /// One turn of a hosted discussion, decoded from the wire.
 #[derive(Debug, Clone, Default)]
@@ -563,7 +563,7 @@ impl HostedClient {
                 contract::SourceAnchor {
                     revision: Some(contract::RevisionRef {
                         revision: Some(revision_ref::Revision::State(
-                            api::heddle::api::v1alpha1::StateId {
+                            api::heddle::api::common::StateId {
                                 value: state_id.as_bytes().to_vec(),
                             },
                         )),

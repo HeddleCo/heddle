@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use api::{
-    heddle::api::v1alpha1::CallContext,
+    heddle::api::common::CallContext,
     v2::{
         client::{Client, Rpc},
         rpc,

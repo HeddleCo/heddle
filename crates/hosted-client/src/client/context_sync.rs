@@ -75,11 +75,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result};
-use api::heddle::api::v1alpha1::{
+use crate::legacy_v1::{
     AnnotationScope as ProtoScope, ContextAnnotation, ContextAnnotationKind,
     ContextAnnotationStatus, LineRange, SymbolScope, annotation_scope::Scope,
 };
+use anyhow::{Context, Result};
 use objects::{
     fs_atomic::write_file_atomic,
     object::{
@@ -315,7 +315,7 @@ fn content_hash_from_bytes(bytes: &Option<Vec<u8>>) -> Option<ContentHash> {
         .map(ContentHash::from_bytes)
 }
 
-fn state_id_from_proto(id: Option<&api::heddle::api::v1alpha1::StateId>) -> Option<StateId> {
+fn state_id_from_proto(id: Option<&api::heddle::api::common::StateId>) -> Option<StateId> {
     id.and_then(|value| StateId::try_from_slice(&value.value).ok())
 }
 
@@ -1421,7 +1421,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_context_pack_fallback_uses_against_before_head_is_published() {
-        use api::heddle::api::v1alpha1::{AnnotatedFile, ContextAnnotation, ContextRevision};
+        use crate::legacy_v1::{AnnotatedFile, ContextAnnotation, ContextRevision};
 
         use crate::hosted_runtime::hosted::{
             PullBootstrapMetadata,
@@ -1531,7 +1531,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_empty_bootstrap_observes_and_materializes_context() {
-        use api::heddle::api::v1alpha1::{AnnotatedFile, ContextAnnotation};
+        use crate::legacy_v1::{AnnotatedFile, ContextAnnotation};
 
         use crate::hosted_runtime::hosted::test_server::{ContextFixture, start_with_context};
 
@@ -1733,7 +1733,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_context_adopts_on_dedup_conflict_for_pending_nonce() {
-        use api::heddle::api::v1alpha1::ContextRevision;
+        use crate::legacy_v1::ContextRevision;
 
         use crate::hosted_runtime::hosted::test_server::{ContextFixture, start_with_context};
 

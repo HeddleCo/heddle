@@ -1,5 +1,5 @@
 //! Pending harness intents and decisions share the run's observed revision.
-use api::heddle::api::v2alpha1::{DecideRunPermissionRequest, RunPermission};
+use api::heddle::api::v1alpha2::{DecideRunPermissionRequest, RunPermission};
 
 use super::*;
 impl RunStore {

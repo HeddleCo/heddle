@@ -45,15 +45,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use api::heddle::api::v1alpha1::{
-    PathSymbolRef, ReviewKind as ProtoReviewKind, ReviewScope as ProtoReviewScope, review_scope,
-};
 use objects::{
     fs_atomic::write_file_atomic,
-    object::{
-        ReviewKind, ReviewScope, ReviewSignature, ReviewSignaturesBlob, StateAttachmentBody,
-        StateId,
-    },
+    object::{ReviewSignature, ReviewSignaturesBlob, StateAttachmentBody, StateId},
     store::ObjectStore,
 };
 use repo::{HistoryQuery, Repository, StateAttachmentKind};
@@ -110,30 +104,6 @@ fn save_mirror(heddle_dir: &Path, mirror: &HostedReviewMirror) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(mirror).context("encode hosted review mirror map")?;
     write_file_atomic(&path, &bytes).context("write hosted review mirror map")?;
     Ok(())
-}
-
-fn kind_to_proto(kind: ReviewKind) -> ProtoReviewKind {
-    match kind {
-        ReviewKind::Read => ProtoReviewKind::Read,
-        ReviewKind::AgentPreview => ProtoReviewKind::AgentPreview,
-        ReviewKind::AgentCoReview => ProtoReviewKind::AgentCoReview,
-    }
-}
-
-fn scope_to_proto(scope: &ReviewScope) -> ProtoReviewScope {
-    let inner = match scope {
-        ReviewScope::WholeChange => review_scope::Scope::WholeChange(review_scope::WholeChange {}),
-        ReviewScope::Symbols(symbols) => review_scope::Scope::Symbols(review_scope::SymbolList {
-            symbols: symbols
-                .iter()
-                .map(|anchor| PathSymbolRef {
-                    file: anchor.file.clone(),
-                    symbol: anchor.symbol.clone(),
-                })
-                .collect(),
-        }),
-    };
-    ProtoReviewScope { scope: Some(inner) }
 }
 
 /// Whether a hosted rejection is permanent (won't succeed on retry) vs transient
@@ -298,8 +268,8 @@ async fn forward_signature(
         .sign_state(
             repo_path,
             state_id,
-            kind_to_proto(signature.kind),
-            scope_to_proto(&signature.scope),
+            signature.kind,
+            signature.scope.clone(),
             signature.justification.as_deref().unwrap_or_default(),
             &signature.algorithm,
             public_key,
@@ -334,34 +304,10 @@ fn sign_op_id(repo_path: &str, state_id: &StateId, signature_hex: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use objects::object::{Attribution, Blob, Principal, StateAttachment, SymbolAnchor};
+    use objects::object::{Attribution, Blob, Principal, ReviewKind, ReviewScope, StateAttachment};
     use tempfile::TempDir;
 
     use super::*;
-
-    #[test]
-    fn whole_change_scope_maps_to_proto() {
-        let proto = scope_to_proto(&ReviewScope::WholeChange);
-        assert!(matches!(
-            proto.scope,
-            Some(review_scope::Scope::WholeChange(_))
-        ));
-    }
-
-    #[test]
-    fn symbol_scope_maps_to_proto() {
-        let proto = scope_to_proto(&ReviewScope::Symbols(vec![SymbolAnchor::new(
-            "a.rs", "foo",
-        )]));
-        match proto.scope {
-            Some(review_scope::Scope::Symbols(list)) => {
-                assert_eq!(list.symbols.len(), 1);
-                assert_eq!(list.symbols[0].file, "a.rs");
-                assert_eq!(list.symbols[0].symbol, "foo");
-            }
-            other => panic!("expected symbols scope, got {other:?}"),
-        }
-    }
 
     #[test]
     fn synced_key_is_state_scoped() {
@@ -369,19 +315,6 @@ mod tests {
         let b = StateId::from_bytes([2; 32]);
         assert_ne!(synced_key(&a, "abad1dea"), synced_key(&b, "abad1dea"));
         assert_eq!(synced_key(&a, "abad1dea"), synced_key(&a, "abad1dea"));
-    }
-
-    #[test]
-    fn kind_maps_to_proto() {
-        assert_eq!(kind_to_proto(ReviewKind::Read), ProtoReviewKind::Read);
-        assert_eq!(
-            kind_to_proto(ReviewKind::AgentPreview),
-            ProtoReviewKind::AgentPreview
-        );
-        assert_eq!(
-            kind_to_proto(ReviewKind::AgentCoReview),
-            ProtoReviewKind::AgentCoReview
-        );
     }
 
     // A bad-signature / key-not-owned rejection is permanent (stops retrying);

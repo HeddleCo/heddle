@@ -123,8 +123,8 @@ pub fn verify_genesis_with_retained_mint_roots(
 ) -> Result<VerifiedAuthor> {
     if !matches!(
         context.method,
-        "/heddle.api.v2alpha1.ThreadService/StartThread"
-            | "/heddle.api.v2alpha1.IntegrationService/ImportSource"
+        "/heddle.api.v1alpha2.ThreadService/StartThread"
+            | "/heddle.api.v1alpha2.IntegrationService/ImportSource"
     ) {
         return Err(invalid(
             "genesis authority requires an exact creation method",
@@ -147,22 +147,22 @@ pub(super) fn verify_original(
     let envelope = decode_envelope(bytes)?;
     if !matches!(
         context.method,
-        "/heddle.api.v2alpha1.ThreadService/RenameThread"
-            | "/heddle.api.v2alpha1.ThreadService/ReviseIntent"
-            | "/heddle.api.v2alpha1.ThreadService/ChangeLifecycle"
-            | "/heddle.api.v2alpha1.ThreadService/SetSharingPolicy"
-            | "/heddle.api.v2alpha1.ThreadService/SetAudiencePolicy"
-            | "/heddle.api.v2alpha1.ThreadService/SetRetentionPolicy"
-            | "/heddle.api.v2alpha1.ThreadService/StartThread"
-            | "/heddle.api.v2alpha1.IntegrationService/ImportSource"
-            | "/heddle.api.v2alpha1.SyncService/PublishContent"
-            | "/heddle.api.v2alpha1.ThreadService/ClaimThreadOwnership"
-            | "/heddle.api.v2alpha1.ThreadService/ResolveOwnershipConflict"
-            | "/heddle.api.v2alpha1.ThreadService/RecordReview"
-            | "/heddle.api.v2alpha1.ThreadService/LandThread"
-            | "/heddle.api.v2alpha1.ThreadService/LandStack"
-            | "/heddle.api.v2alpha1.EvidenceService/RecordEvidence"
-            | "/heddle.api.v2alpha1.EvidenceService/AcknowledgeCheck"
+        "/heddle.api.v1alpha2.ThreadService/RenameThread"
+            | "/heddle.api.v1alpha2.ThreadService/ReviseIntent"
+            | "/heddle.api.v1alpha2.ThreadService/ChangeLifecycle"
+            | "/heddle.api.v1alpha2.ThreadService/SetSharingPolicy"
+            | "/heddle.api.v1alpha2.ThreadService/SetAudiencePolicy"
+            | "/heddle.api.v1alpha2.ThreadService/SetRetentionPolicy"
+            | "/heddle.api.v1alpha2.ThreadService/StartThread"
+            | "/heddle.api.v1alpha2.IntegrationService/ImportSource"
+            | "/heddle.api.v1alpha2.SyncService/PublishContent"
+            | "/heddle.api.v1alpha2.ThreadService/ClaimThreadOwnership"
+            | "/heddle.api.v1alpha2.ThreadService/ResolveOwnershipConflict"
+            | "/heddle.api.v1alpha2.ThreadService/RecordReview"
+            | "/heddle.api.v1alpha2.ThreadService/LandThread"
+            | "/heddle.api.v1alpha2.ThreadService/LandStack"
+            | "/heddle.api.v1alpha2.EvidenceService/RecordEvidence"
+            | "/heddle.api.v1alpha2.EvidenceService/AcknowledgeCheck"
     ) || context.spool_path.is_empty()
         || context.spool_path.len() > 4096
     {

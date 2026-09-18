@@ -14,15 +14,9 @@ use api::{
         encode_success_response,
     },
     heddle::api::{
-        v1alpha1::{
-            AnnotatedFile, CallFailure, CallFailureCode, ContextRevision, Discussion,
-            ListRefsPageEnd, ListRefsResponse, PackChunk, PackStreamKind, PathSymbolRef,
-            PullComplete, PullReady, PullServerFrame, PushClientFrame, PushComplete, PushReady,
-            PushRequest, PushServerFrame, SignedSpoolOwnerGenesis, StateContextEntry, StateId,
-            TransferCheckpoint, TransportMode, discussion_resolution, list_refs_response,
-            pull_server_frame, push_client_frame, push_server_frame,
-        },
-        v2alpha1 as v2,
+        common::{CallFailure, CallFailureCode, StateId},
+        v1alpha2 as v2,
+        v1alpha2::SignedSpoolOwnerGenesis,
     },
     method_descriptor,
 };
@@ -33,10 +27,17 @@ use prost::Message;
 use tokio::task::JoinHandle;
 
 use super::{CallContextFactory, HostedClient};
+use crate::legacy_v1::{
+    AnnotatedFile, ContextRevision, Discussion, DiscussionResolution, DiscussionTurn,
+    ListRefsPageEnd, ListRefsResponse, PackChunk, PackStreamKind, PathSymbolRef, PullComplete,
+    PullReady, PullServerFrame, PushClientFrame, PushComplete, PushReady, PushRequest,
+    PushServerFrame, StateContextEntry, TransferCheckpoint, TransportMode, discussion_resolution,
+    list_refs_response, pull_server_frame, push_client_frame, push_server_frame,
+};
 
 const OWNER_GENESIS_FIXTURE_HEX: &str = "0a380a10222222222222222222222222222222221224080112208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c12640a20def88318e44a809464c1022f22230567bae6805d17b1ccfc2bebe5326232c58a1240bfe677c0b6fec8d28e379f584f36dee7258d834222f9b75f61dc75b7db2d836d76d4fb6eaf9e7f561925b2e6882b51eadaf3ec77c565f5b638ad0febfc8cd304";
 const OBSERVE_COLLABORATION_METHOD: &str =
-    "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration";
+    "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration";
 
 #[derive(Default)]
 pub(crate) struct SpoolMutationCapture {
@@ -294,35 +295,35 @@ async fn serve_call(
         .expect("registered hosted method");
     match streaming {
         StreamingShape::Unary | StreamingShape::ClientStreaming => {
-            if method == "/heddle.api.v2alpha1.EndpointService/DescribeEndpoint" {
+            if method == "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint" {
                 let response = v2::DescribeEndpointResponse {
                     endpoint: Some(v2::EndpointRef {
                         kind: v2::EndpointKind::Weft as i32,
                         public_key: server_key.clone(),
                     }),
-                    supported_packages: vec!["heddle.api.v2alpha1".into()],
+                    supported_packages: vec!["heddle.api.v1alpha2".into()],
                     implemented_methods: vec![
-                        "/heddle.api.v2alpha1.WorkspaceService/ResolveResources".into(),
-                        "/heddle.api.v2alpha1.SpoolService/ObserveSpool".into(),
-                        "/heddle.api.v2alpha1.SpoolService/ListSpools".into(),
-                        "/heddle.api.v2alpha1.SpoolService/DeleteSpool".into(),
-                        "/heddle.api.v2alpha1.SpoolService/ReviseSpool".into(),
-                        "/heddle.api.v2alpha1.SpoolService/PromoteSpool".into(),
-                        "/heddle.api.v2alpha1.SpoolService/PutGrant".into(),
-                        "/heddle.api.v2alpha1.SpoolService/RevokeGrant".into(),
-                        "/heddle.api.v2alpha1.ThreadService/ObserveThread".into(),
-                        "/heddle.api.v2alpha1.ThreadService/ObserveThreads".into(),
-                        "/heddle.api.v2alpha1.ThreadService/RecordReview".into(),
-                        "/heddle.api.v2alpha1.IdentityService/ObserveIdentity".into(),
-                        "/heddle.api.v2alpha1.IdentityService/CreateSignupInvitation".into(),
-                        "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace".into(),
-                        "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership".into(),
-                        "/heddle.api.v2alpha1.SpoolService/CreateSpool".into(),
-                        "/heddle.api.v2alpha1.CollaborationService/ObserveCollaboration".into(),
-                        "/heddle.api.v2alpha1.CollaborationService/OpenDiscussion".into(),
-                        "/heddle.api.v2alpha1.CollaborationService/AppendTurn".into(),
-                        "/heddle.api.v2alpha1.CollaborationService/ResolveDiscussion".into(),
-                        "/heddle.api.v2alpha1.CollaborationService/PutContext".into(),
+                        "/heddle.api.v1alpha2.WorkspaceService/ResolveResources".into(),
+                        "/heddle.api.v1alpha2.SpoolService/ObserveSpool".into(),
+                        "/heddle.api.v1alpha2.SpoolService/ListSpools".into(),
+                        "/heddle.api.v1alpha2.SpoolService/DeleteSpool".into(),
+                        "/heddle.api.v1alpha2.SpoolService/ReviseSpool".into(),
+                        "/heddle.api.v1alpha2.SpoolService/PromoteSpool".into(),
+                        "/heddle.api.v1alpha2.SpoolService/PutGrant".into(),
+                        "/heddle.api.v1alpha2.SpoolService/RevokeGrant".into(),
+                        "/heddle.api.v1alpha2.ThreadService/ObserveThread".into(),
+                        "/heddle.api.v1alpha2.ThreadService/ObserveThreads".into(),
+                        "/heddle.api.v1alpha2.ThreadService/RecordReview".into(),
+                        "/heddle.api.v1alpha2.IdentityService/ObserveIdentity".into(),
+                        "/heddle.api.v1alpha2.IdentityService/CreateSignupInvitation".into(),
+                        "/heddle.api.v1alpha2.WorkspaceService/ObserveWorkspace".into(),
+                        "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership".into(),
+                        "/heddle.api.v1alpha2.SpoolService/CreateSpool".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/OpenDiscussion".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/AppendTurn".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/ResolveDiscussion".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/PutContext".into(),
                     ],
                     default_read_budget: Some(v2::ReadBudget {
                         max_items: 64,
@@ -337,7 +338,7 @@ async fn serve_call(
                 ))
                 .await
                 .unwrap();
-            } else if method == "/heddle.api.v2alpha1.WorkspaceService/ResolveResources" {
+            } else if method == "/heddle.api.v1alpha2.WorkspaceService/ResolveResources" {
                 while let Ok(Some(chunk)) =
                     recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await
                 {
@@ -394,9 +395,9 @@ async fn serve_call(
                 ))
                 .await
                 .unwrap();
-            } else if method == "/heddle.api.v2alpha1.SpoolService/ListSpools" {
+            } else if method == "/heddle.api.v1alpha2.SpoolService/ListSpools" {
                 serve_native_list_spools(&mut send, &mut recv, &mut request).await;
-            } else if method == "/heddle.api.v2alpha1.SpoolService/DeleteSpool" {
+            } else if method == "/heddle.api.v1alpha2.SpoolService/DeleteSpool" {
                 serve_native_delete_spool(
                     &mut send,
                     &mut recv,
@@ -405,7 +406,7 @@ async fn serve_call(
                     server_key,
                 )
                 .await;
-            } else if method == "/heddle.api.v2alpha1.SpoolService/ReviseSpool" {
+            } else if method == "/heddle.api.v1alpha2.SpoolService/ReviseSpool" {
                 serve_native_revise_spool(
                     &mut send,
                     &mut recv,
@@ -414,17 +415,17 @@ async fn serve_call(
                     server_key,
                 )
                 .await;
-            } else if method == "/heddle.api.v2alpha1.SpoolService/PromoteSpool" {
+            } else if method == "/heddle.api.v1alpha2.SpoolService/PromoteSpool" {
                 serve_native_promote_spool(&mut send, &mut recv, &mut request, server_key).await;
-            } else if method == "/heddle.api.v2alpha1.SpoolService/PutGrant" {
+            } else if method == "/heddle.api.v1alpha2.SpoolService/PutGrant" {
                 serve_native_put_grant(&mut send, &mut recv, &mut request, server_key, grants)
                     .await;
-            } else if method == "/heddle.api.v2alpha1.SpoolService/RevokeGrant" {
+            } else if method == "/heddle.api.v1alpha2.SpoolService/RevokeGrant" {
                 serve_native_revoke_grant(&mut send, &mut recv, &mut request, server_key, grants)
                     .await;
-            } else if method == "/heddle.api.v2alpha1.ThreadService/RecordReview" {
+            } else if method == "/heddle.api.v1alpha2.ThreadService/RecordReview" {
                 serve_native_record_review(&mut send, &mut recv, &mut request, server_key).await;
-            } else if method == "/heddle.api.v2alpha1.SpoolService/CreateSpool" {
+            } else if method == "/heddle.api.v1alpha2.SpoolService/CreateSpool" {
                 serve_native_create_spool(
                     &mut send,
                     &mut recv,
@@ -434,7 +435,7 @@ async fn serve_call(
                     create_spool,
                 )
                 .await;
-            } else if method == "/heddle.api.v2alpha1.CollaborationService/OpenDiscussion" {
+            } else if method == "/heddle.api.v1alpha2.CollaborationService/OpenDiscussion" {
                 serve_open_discussion(
                     &mut send,
                     &mut recv,
@@ -444,7 +445,7 @@ async fn serve_call(
                     live_operations,
                 )
                 .await;
-            } else if method == "/heddle.api.v2alpha1.CollaborationService/AppendTurn" {
+            } else if method == "/heddle.api.v1alpha2.CollaborationService/AppendTurn" {
                 serve_append_turn(
                     &mut send,
                     &mut recv,
@@ -454,7 +455,7 @@ async fn serve_call(
                     live_operations,
                 )
                 .await;
-            } else if method == "/heddle.api.v2alpha1.CollaborationService/ResolveDiscussion" {
+            } else if method == "/heddle.api.v1alpha2.CollaborationService/ResolveDiscussion" {
                 serve_resolve_discussion(
                     &mut send,
                     &mut recv,
@@ -464,7 +465,7 @@ async fn serve_call(
                     live_operations,
                 )
                 .await;
-            } else if method == "/heddle.api.v2alpha1.CollaborationService/PutContext" {
+            } else if method == "/heddle.api.v1alpha2.CollaborationService/PutContext" {
                 serve_put_context(
                     &mut send,
                     &mut recv,
@@ -473,7 +474,7 @@ async fn serve_call(
                     context.clone(),
                 )
                 .await;
-            } else if method == "/heddle.api.v2alpha1.IdentityService/CreateSignupInvitation" {
+            } else if method == "/heddle.api.v1alpha2.IdentityService/CreateSignupInvitation" {
                 serve_native_create_signup_invitation(
                     &mut send,
                     &mut recv,
@@ -488,9 +489,9 @@ async fn serve_call(
             }
         }
         StreamingShape::ServerStreaming => {
-            if method == "/heddle.api.v2alpha1.ThreadService/ObserveThread" {
+            if method == "/heddle.api.v1alpha2.ThreadService/ObserveThread" {
                 serve_native_thread_review(&mut send, &mut recv, &mut request, server_key).await;
-            } else if method == "/heddle.api.v2alpha1.SpoolService/ObserveSpool" {
+            } else if method == "/heddle.api.v1alpha2.SpoolService/ObserveSpool" {
                 serve_native_spool_observation(
                     &mut send,
                     &mut recv,
@@ -499,14 +500,14 @@ async fn serve_call(
                     grants,
                 )
                 .await;
-            } else if method == "/heddle.api.v2alpha1.IdentityService/ObserveIdentity" {
+            } else if method == "/heddle.api.v1alpha2.IdentityService/ObserveIdentity" {
                 serve_native_identity_observation(&mut send, &mut recv, &mut request, server_key)
                     .await;
-            } else if method == "/heddle.api.v2alpha1.WorkspaceService/ObserveWorkspace" {
+            } else if method == "/heddle.api.v1alpha2.WorkspaceService/ObserveWorkspace" {
                 serve_native_workspace_observation(&mut send, server_key).await;
-            } else if method == "/heddle.api.v2alpha1.OwnerAuthorizationService/ObserveOwnership" {
+            } else if method == "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership" {
                 serve_native_owner_observation(&mut send, server_key, owner).await;
-            } else if method == "/heddle.api.v2alpha1.ThreadService/ObserveThreads" {
+            } else if method == "/heddle.api.v1alpha2.ThreadService/ObserveThreads" {
                 serve_observe_threads(&mut send, server_key.clone()).await;
             } else if method == OBSERVE_COLLABORATION_METHOD {
                 serve_observe_collaboration(
@@ -530,7 +531,7 @@ async fn serve_call(
             }
         }
         StreamingShape::Bidirectional => {
-            if method == "/heddle.api.v2alpha1.SyncService/PublishContent" {
+            if method == "/heddle.api.v1alpha2.SyncService/PublishContent" {
                 serve_push(send, recv, request.split_off(prelude_len), push_requests).await;
                 return;
             }
@@ -1011,7 +1012,7 @@ async fn serve_native_thread_review(
     let revision = v2::RevisionRef {
         spool: thread.spool.clone(),
         revision: Some(v2::revision_ref::Revision::State(
-            api::heddle::api::v1alpha1::StateId { value: vec![5; 32] },
+            api::heddle::api::common::StateId { value: vec![5; 32] },
         )),
     };
     let data = |sequence, payload| v2::ThreadEvent {
@@ -1507,7 +1508,6 @@ async fn serve_push(
     let ready = PushServerFrame {
         frame: Some(push_server_frame::Frame::Ready(PushReady {
             want_objects: advertised,
-            ..PushReady::default()
         })),
     }
     .encode_to_vec();
@@ -1524,7 +1524,6 @@ async fn serve_push(
         frame: Some(push_server_frame::Frame::Complete(PushComplete {
             success: false,
             error: "test rejection".to_string(),
-            ..PushComplete::default()
         })),
     }
     .encode_to_vec();
@@ -1711,14 +1710,12 @@ async fn serve_append_turn(
         let mut live = live.lock().unwrap_or_else(|poison| poison.into_inner());
         if let Some(discussion) = live.get_mut(&id) {
             let seq = discussion.turns.len() as u64 + 1;
-            discussion
-                .turns
-                .push(api::heddle::api::v1alpha1::DiscussionTurn {
-                    body: body.body.clone(),
-                    turn_id: format!("turn-{seq}"),
-                    turn_seq: seq,
-                    ..Default::default()
-                });
+            discussion.turns.push(DiscussionTurn {
+                body: body.body.clone(),
+                turn_id: format!("turn-{seq}"),
+                turn_seq: seq,
+                ..Default::default()
+            });
         }
     }
     write_native_grant_receipt(send, server_key, body.client_operation_id).await;
@@ -1745,7 +1742,7 @@ async fn serve_resolve_discussion(
         let mut live = live.lock().unwrap_or_else(|poison| poison.into_inner());
         remember_signed_operation(&operations, &id, body.signed_operation.clone());
         if let Some(discussion) = live.get_mut(&id) {
-            discussion.resolution = Some(api::heddle::api::v1alpha1::DiscussionResolution {
+            discussion.resolution = Some(DiscussionResolution {
                 state: Some(discussion_resolution::State::Dismissed(
                     discussion_resolution::Dismissed {
                         reason: "resolved".into(),
@@ -1842,7 +1839,7 @@ fn discussion_from_open(request: &v2::OpenDiscussionRequest) -> Option<Discussio
             _ => "internal".into(),
         },
         thread_ref: thread_ref.unwrap_or_default(),
-        turns: vec![api::heddle::api::v1alpha1::DiscussionTurn {
+        turns: vec![DiscussionTurn {
             body: turn.body,
             turn_id: "turn-open".into(),
             turn_seq: 1,
@@ -2182,7 +2179,7 @@ fn context_list_payloads(fixture: &ContextFixture) -> Vec<v2::collaboration_even
                     target: Some(v2::collaboration_anchor::Target::Source(v2::SourceAnchor {
                         revision: Some(v2::RevisionRef {
                             revision: Some(v2::revision_ref::Revision::State(
-                                api::heddle::api::v1alpha1::StateId {
+                                api::heddle::api::common::StateId {
                                     value: value.clone(),
                                 },
                             )),
@@ -2318,10 +2315,9 @@ async fn write_collaboration_observation(
 
 fn terminal_page(method: &str) -> Vec<u8> {
     match method {
-        "/heddle.api.v2alpha1.ThreadService/ObserveThreads" => ListRefsResponse {
+        "/heddle.api.v1alpha2.ThreadService/ObserveThreads" => ListRefsResponse {
             frame: Some(list_refs_response::Frame::PageEnd(ListRefsPageEnd {
                 next_page_token: String::new(),
-                ..ListRefsPageEnd::default()
             })),
         }
         .encode_to_vec(),
@@ -2332,7 +2328,7 @@ fn terminal_page(method: &str) -> Vec<u8> {
 fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
     let pull_succeeds = pull.is_some();
     match method {
-        "/heddle.api.v2alpha1.SyncService/PublishContent" => vec![
+        "/heddle.api.v1alpha2.SyncService/PublishContent" => vec![
             PushServerFrame {
                 frame: Some(push_server_frame::Frame::Ready(PushReady::default())),
             }
@@ -2341,12 +2337,11 @@ fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
                 frame: Some(push_server_frame::Frame::Complete(PushComplete {
                     success: false,
                     error: "test rejection".to_string(),
-                    ..PushComplete::default()
                 })),
             }
             .encode_to_vec(),
         ],
-        "/heddle.api.v2alpha1.SyncService/Fetch" => {
+        "/heddle.api.v1alpha2.SyncService/Fetch" => {
             let remote_state = pull.as_ref().map(|fixture| fixture.remote_state.clone());
             let has_pack = pull.as_ref().is_some_and(|fixture| fixture.pack.is_some());
             let mut responses = vec![
@@ -2377,7 +2372,6 @@ fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
                         } else {
                             "test rejection".to_string()
                         },
-                        ..PullComplete::default()
                     })),
                 }
                 .encode_to_vec(),

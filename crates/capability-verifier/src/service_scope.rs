@@ -299,7 +299,7 @@ pub fn service_attenuation(
         heddle_api::v2::ALL_METHODS
             .iter()
             .filter(|method| {
-                use heddle_api::heddle::api::v1alpha1::{AuthorizationRole as Role, RpcEffect};
+                use heddle_api::heddle::api::common::{AuthorizationRole as Role, RpcEffect};
                 let read = method.effect == RpcEffect::ReadOnly;
                 admin
                     || (allows(Capability::SpoolRead) && read)

@@ -1,7 +1,7 @@
 //! Device-side producer for portable delegated creation. The caller supplies
 //! the existing credential; this module never mints an independent bearer.
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use crypto::Signer;
 use heddleco_capability_verifier::creation;
 // Device callers share the same verification boundary as portable producers.

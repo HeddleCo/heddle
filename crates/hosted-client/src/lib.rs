@@ -10,6 +10,8 @@ pub mod attribution;
 pub mod client;
 #[cfg(feature = "client")]
 pub mod hosted_runtime;
+#[cfg(feature = "client")]
+pub mod legacy_v1;
 pub mod network;
 
 /// Register factories needed to reopen CLI-owned lazy hosted repositories.

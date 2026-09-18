@@ -1,6 +1,6 @@
 //! Compare-and-swap catalog edits used inside the caller's receipt transaction.
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1 as wire;
+use api::heddle::api::v1alpha2 as wire;
 use prost::Message;
 use rusqlite::{OptionalExtension, Transaction, params};
 

@@ -39,7 +39,7 @@ pub fn project(record: &wire::SignedRecord) -> Result<wire::EvidenceRecord, Erro
         revision: Some(wire::RevisionRef {
             spool: Some(spool),
             revision: Some(wire::revision_ref::Revision::State(
-                api::heddle::api::v1alpha1::StateId {
+                api::heddle::api::common::StateId {
                     value: value.revision.as_bytes().to_vec(),
                 },
             )),
@@ -139,7 +139,7 @@ pub fn project_acknowledgement(
         revision: Some(wire::RevisionRef {
             spool: Some(spool),
             revision: Some(wire::revision_ref::Revision::State(
-                api::heddle::api::v1alpha1::StateId {
+                api::heddle::api::common::StateId {
                     value: value.revision.as_bytes().to_vec(),
                 },
             )),

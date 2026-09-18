@@ -87,19 +87,19 @@ pub(super) fn matched(
 }
 pub(super) fn wire(
     evidence: &SignedBoundaryAcceptance,
-) -> Result<api::heddle::api::v2alpha1::SignedRecord> {
+) -> Result<api::heddle::api::v1alpha2::SignedRecord> {
     let value = evidence.verify_signature()?;
-    Ok(api::heddle::api::v2alpha1::SignedRecord {
+    Ok(api::heddle::api::v1alpha2::SignedRecord {
         format: FORMAT.into(),
         canonical_record: evidence.canonical.clone(),
-        signatures: vec![api::heddle::api::v2alpha1::RecordSignature {
+        signatures: vec![api::heddle::api::v1alpha2::RecordSignature {
             public_key: value.accepting_publisher.to_vec(),
             signature: evidence.signature.clone(),
         }],
     })
 }
 pub(super) fn add_wire(
-    output: &mut std::collections::BTreeMap<ContentHash, api::heddle::api::v2alpha1::SignedRecord>,
+    output: &mut std::collections::BTreeMap<ContentHash, api::heddle::api::v1alpha2::SignedRecord>,
     evidence: Option<&SignedBoundaryAcceptance>,
 ) -> Result<()> {
     if let Some(evidence) = evidence {

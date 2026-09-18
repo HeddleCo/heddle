@@ -169,7 +169,7 @@ async fn expire_store(directory: PathBuf, spool: uuid::Uuid) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use api::heddle::api::v2alpha1::*;
+    use api::heddle::api::v1alpha2::*;
 
     use super::*;
 

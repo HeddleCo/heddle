@@ -11,7 +11,7 @@ use super::{GenesisOwner, SourceAuthor, ThreadGenesis, bounded, invalid};
 use crate::{error::Result, object::ContentHash};
 
 pub const FORMAT: &str = "heddle-thread-ownership-resolution-v1";
-pub const METHOD: &str = "/heddle.api.v2alpha1.ThreadService/ResolveOwnershipConflict";
+pub const METHOD: &str = "/heddle.api.v1alpha2.ThreadService/ResolveOwnershipConflict";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

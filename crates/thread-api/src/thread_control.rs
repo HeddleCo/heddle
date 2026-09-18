@@ -300,7 +300,7 @@ impl PreparedControl {
         wire::RevisionRef {
             spool: self.thread.spool.clone(),
             revision: Some(wire::revision_ref::Revision::State(
-                api::heddle::api::v1alpha1::StateId {
+                api::heddle::api::common::StateId {
                     value: state.as_bytes().to_vec(),
                 },
             )),

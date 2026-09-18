@@ -6,8 +6,7 @@
 //! attachments. `heddle review sync` replays locally-recorded review signatures
 //! through the active `SignState` production route.
 
-use api::heddle::api::v1alpha1::{ReviewKind, ReviewScope, SignStateResponse};
-use objects::object::StateId;
+use objects::object::{ReviewKind, ReviewScope, StateId};
 use wire::ProtocolError;
 
 use super::HostedClient;
@@ -27,7 +26,7 @@ impl HostedClient {
         signature: Vec<u8>,
         signed_at_unix: i64,
         client_operation_id: String,
-    ) -> Result<SignStateResponse, ProtocolError> {
+    ) -> Result<(), ProtocolError> {
         let snapshot = self.observe_review(repo_path, "main").await?;
         let _ = (
             state_id,

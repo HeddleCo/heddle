@@ -1,4 +1,4 @@
-use api::heddle::api::v1alpha1::MonorepoNode;
+use verbs::clone_plan::MonorepoNodeFacts;
 use wire::ProtocolError;
 
 use super::{HostedClient, helpers::hosted_to_protocol_error, operation_id::ClientOperationId};
@@ -11,12 +11,12 @@ impl HostedClient {
         &mut self,
     ) -> Result<
         (
-            api::heddle::api::v2alpha1::PrincipalRecord,
-            api::heddle::api::v2alpha1::CurrentCredentialRecord,
+            api::heddle::api::v1alpha2::PrincipalRecord,
+            api::heddle::api::v1alpha2::CurrentCredentialRecord,
         ),
         ProtocolError,
     > {
-        use api::heddle::api::v2alpha1 as contract;
+        use api::heddle::api::v1alpha2 as contract;
         let remote = self.native().await.map_err(native_protocol_error)?;
         let mut observation = remote
             .observe::<thread_api::rpc::IdentityServiceObserveIdentity>(
@@ -80,8 +80,8 @@ impl HostedClient {
 
     pub async fn create_signup_invite(
         &mut self,
-        request: api::heddle::api::v2alpha1::CreateSignupInvitationRequest,
-    ) -> Result<api::heddle::api::v2alpha1::CreateSignupInvitationResponse, ProtocolError> {
+        request: api::heddle::api::v1alpha2::CreateSignupInvitationRequest,
+    ) -> Result<api::heddle::api::v1alpha2::CreateSignupInvitationResponse, ProtocolError> {
         let remote = self.native().await.map_err(native_protocol_error)?;
         let response = remote
             .api
@@ -99,7 +99,7 @@ impl HostedClient {
 
     pub async fn list_signup_invitations(
         &mut self,
-    ) -> Result<(Vec<api::heddle::api::v2alpha1::SignupInvitation>, u32), ProtocolError> {
+    ) -> Result<(Vec<api::heddle::api::v1alpha2::SignupInvitation>, u32), ProtocolError> {
         self.signup_invitation_view(false).await
     }
 
@@ -112,8 +112,8 @@ impl HostedClient {
     async fn signup_invitation_view(
         &mut self,
         only_quota: bool,
-    ) -> Result<(Vec<api::heddle::api::v2alpha1::SignupInvitation>, u32), ProtocolError> {
-        use api::heddle::api::v2alpha1 as contract;
+    ) -> Result<(Vec<api::heddle::api::v1alpha2::SignupInvitation>, u32), ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
         let remote = self.native().await.map_err(native_protocol_error)?;
         let mut records = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
@@ -217,7 +217,7 @@ impl HostedClient {
     }
 
     pub async fn get_current_user_spool(&mut self) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        use api::heddle::api::v2alpha1 as contract;
+        use api::heddle::api::v1alpha2 as contract;
         let remote = self.native().await.map_err(native_protocol_error)?;
         let mut observation = remote
             .observe::<thread_api::rpc::IdentityServiceObserveIdentity>(
@@ -304,13 +304,13 @@ impl HostedClient {
         full_path: &str,
         client_operation_id: &str,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        use api::heddle::api::v2alpha1 as contract;
+        use api::heddle::api::v1alpha2 as contract;
         let current = self.native_spool_overview(full_path).await?;
         let operation_id = if client_operation_id.is_empty() {
-            ClientOperationId::fresh("heddle.api.v2alpha1.SpoolService/PromoteSpool")
+            ClientOperationId::fresh("heddle.api.v1alpha2.SpoolService/PromoteSpool")
         } else {
             ClientOperationId::for_required_method(
-                "heddle.api.v2alpha1.SpoolService/PromoteSpool",
+                "heddle.api.v1alpha2.SpoolService/PromoteSpool",
                 client_operation_id.to_owned(),
             )?
         };
@@ -355,8 +355,8 @@ impl HostedClient {
     pub async fn list_spools(
         &mut self,
         repos_only: bool,
-    ) -> Result<Vec<api::heddle::api::v2alpha1::ListedSpool>, ProtocolError> {
-        use api::heddle::api::v2alpha1 as contract;
+    ) -> Result<Vec<api::heddle::api::v1alpha2::ListedSpool>, ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
         let remote = self.native().await.map_err(native_protocol_error)?;
         let response = remote
             .api
@@ -419,13 +419,13 @@ impl HostedClient {
         display_name: Option<String>,
         spool_uuid: uuid::Uuid,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        use api::heddle::api::v2alpha1 as contract;
+        use api::heddle::api::v1alpha2 as contract;
         let parent = if parent_path.is_empty() {
             None
         } else {
             Some(self.resolve_spool_ref(parent_path).await?)
         };
-        let operation_id = ClientOperationId::fresh("heddle.api.v2alpha1.SpoolService/CreateSpool");
+        let operation_id = ClientOperationId::fresh("heddle.api.v1alpha2.SpoolService/CreateSpool");
         let owner = self.current_owner_state().await?;
         let genesis = self
             .context
@@ -526,9 +526,9 @@ impl HostedClient {
         new_slug: Option<&str>,
         display_name: Option<Option<String>>,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        use api::heddle::api::v2alpha1 as contract;
+        use api::heddle::api::v1alpha2 as contract;
         let current = self.native_spool_overview(full_path).await?;
-        let operation_id = ClientOperationId::fresh("heddle.api.v2alpha1.SpoolService/ReviseSpool");
+        let operation_id = ClientOperationId::fresh("heddle.api.v1alpha2.SpoolService/ReviseSpool");
         let request = contract::ReviseSpoolRequest {
             client_operation_id: operation_id.to_wire(),
             spool: current.r#ref.clone(),
@@ -587,8 +587,8 @@ impl HostedClient {
 
     pub async fn delete_spool(&mut self, full_path: &str) -> Result<(), ProtocolError> {
         let overview = self.native_spool_overview(full_path).await?;
-        let operation_id = ClientOperationId::fresh("heddle.api.v2alpha1.SpoolService/DeleteSpool");
-        let request = api::heddle::api::v2alpha1::DeleteSpoolRequest {
+        let operation_id = ClientOperationId::fresh("heddle.api.v1alpha2.SpoolService/DeleteSpool");
+        let request = api::heddle::api::v1alpha2::DeleteSpoolRequest {
             client_operation_id: operation_id.to_wire(),
             spool: overview.r#ref,
             expected_version: overview.version,
@@ -606,7 +606,7 @@ impl HostedClient {
             || receipt.endpoint != remote.description.endpoint
             || !matches!(
                 receipt.outcome,
-                Some(api::heddle::api::v2alpha1::mutation_receipt::Outcome::Applied(_))
+                Some(api::heddle::api::v1alpha2::mutation_receipt::Outcome::Applied(_))
             )
         {
             return Err(ProtocolError::InvalidState(
@@ -648,12 +648,12 @@ impl HostedClient {
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
         client_operation_id: String,
-    ) -> Result<api::heddle::api::v2alpha1::GrantRecord, ProtocolError> {
-        use api::heddle::api::v2alpha1 as contract;
+    ) -> Result<api::heddle::api::v1alpha2::GrantRecord, ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
         let address = grant_spool_address(namespace_path, repo_path)?;
         let spool = self.resolve_spool_ref(address).await?;
         let principal_id = self.resolve_principal_id(subject, &spool).await?;
-        let method = "heddle.api.v2alpha1.SpoolService/PutGrant";
+        let method = "heddle.api.v1alpha2.SpoolService/PutGrant";
         let operation_id = if client_operation_id.is_empty() {
             ClientOperationId::fresh(method)
         } else {
@@ -696,8 +696,8 @@ impl HostedClient {
     pub async fn list_grants(
         &mut self,
         resource: Option<&str>,
-    ) -> Result<Vec<api::heddle::api::v2alpha1::GrantRecord>, ProtocolError> {
-        use api::heddle::api::v2alpha1 as contract;
+    ) -> Result<Vec<api::heddle::api::v1alpha2::GrantRecord>, ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
         let address = resource.ok_or_else(|| {
             ProtocolError::InvalidState("grant list requires a Spool address".into())
         })?;
@@ -790,8 +790,8 @@ impl HostedClient {
         role: &str,
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
-    ) -> Result<api::heddle::api::v2alpha1::GrantRecord, ProtocolError> {
-        use api::heddle::api::v2alpha1 as contract;
+    ) -> Result<api::heddle::api::v1alpha2::GrantRecord, ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
         let address = grant_spool_address(namespace_path, repo_path)?;
         let spool = self.resolve_spool_ref(address).await?;
         let principal_id = self.resolve_principal_id(subject, &spool).await?;
@@ -810,7 +810,7 @@ impl HostedClient {
         }
         let expected_version = grant.version.clone();
         grant.role = native_grant_role(role)? as i32;
-        let method = "heddle.api.v2alpha1.SpoolService/PutGrant";
+        let method = "heddle.api.v1alpha2.SpoolService/PutGrant";
         let request = contract::PutGrantRequest {
             client_operation_id: ClientOperationId::fresh(method).to_wire(),
             grant: Some(grant.clone()),
@@ -838,7 +838,7 @@ impl HostedClient {
         repo_path: Option<&str>,
         client_operation_id: String,
     ) -> Result<(), ProtocolError> {
-        use api::heddle::api::v2alpha1 as contract;
+        use api::heddle::api::v1alpha2 as contract;
         let address = grant_spool_address(namespace_path, repo_path)?;
         let spool = self.resolve_spool_ref(address).await?;
         let grant_id = uuid::Uuid::parse_str(grant_id)
@@ -857,7 +857,7 @@ impl HostedClient {
             .ok_or_else(|| {
                 ProtocolError::ObjectNotFound("grant ID is not visible on this Spool".into())
             })?;
-        let method = "heddle.api.v2alpha1.SpoolService/RevokeGrant";
+        let method = "heddle.api.v1alpha2.SpoolService/RevokeGrant";
         let operation_id = if client_operation_id.is_empty() {
             ClientOperationId::fresh(method)
         } else {
@@ -889,24 +889,24 @@ impl HostedClient {
     /// Recursively resolve the monorepo rooted at `root_path` into the caller's
     /// coherent visible slice (per-child visibility, cycle guard, depth bound).
     /// `max_depth` is an optional recursion bound (server clamps to
-    /// `MONOREPO_MAX_DEPTH`). Returns the root `MonorepoNode` — the whole tree
-    /// the monorepo-clone planner walks.
+    /// `MONOREPO_MAX_DEPTH`). Returns the root facts the monorepo-clone planner walks.
     pub async fn resolve_monorepo(
         &mut self,
         root_path: &str,
         _max_depth: Option<u32>,
-    ) -> Result<MonorepoNode, ProtocolError> {
+    ) -> Result<MonorepoNodeFacts, ProtocolError> {
         let spool = self.resolve_spool_ref(root_path).await?;
         let _ = root_path;
-        Ok(MonorepoNode {
+        Ok(MonorepoNodeFacts {
             spool_id: spool.id,
-            ..Default::default()
+            content_state: None,
+            edges: Vec::new(),
         })
     }
 }
 
 fn listed_spool_info(
-    spool: api::heddle::api::v2alpha1::ListedSpool,
+    spool: api::heddle::api::v1alpha2::ListedSpool,
 ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
     let reference = spool.r#ref.ok_or_else(|| {
         ProtocolError::InvalidState("Spool list row has no stable identity".into())
@@ -931,7 +931,7 @@ fn listed_spool_info(
     })
 }
 
-fn spool_matches_handle(spool: &api::heddle::api::v2alpha1::ListedSpool, handle: &str) -> bool {
+fn spool_matches_handle(spool: &api::heddle::api::v1alpha2::ListedSpool, handle: &str) -> bool {
     match spool.path_segments.as_slice() {
         [name] => name == handle,
         [kind, name] if kind == "spool" => name == handle,
@@ -940,7 +940,7 @@ fn spool_matches_handle(spool: &api::heddle::api::v2alpha1::ListedSpool, handle:
 }
 
 fn native_spool_info(
-    spool: api::heddle::api::v2alpha1::SpoolOverview,
+    spool: api::heddle::api::v1alpha2::SpoolOverview,
 ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
     let reference = spool.r#ref.ok_or_else(|| {
         ProtocolError::InvalidState("Spool overview has no stable identity".into())
@@ -979,8 +979,8 @@ fn grant_spool_address<'a>(
 
 fn native_grant_role(
     value: &str,
-) -> Result<api::heddle::api::v2alpha1::ResourceRole, ProtocolError> {
-    use api::heddle::api::v2alpha1::ResourceRole;
+) -> Result<api::heddle::api::v1alpha2::ResourceRole, ProtocolError> {
+    use api::heddle::api::v1alpha2::ResourceRole;
     match value {
         "reader" => Ok(ResourceRole::Reader),
         "writer" => Ok(ResourceRole::Writer),
@@ -992,9 +992,9 @@ fn native_grant_role(
 }
 
 pub(super) fn require_applied_receipt(
-    receipt: Option<api::heddle::api::v2alpha1::MutationReceipt>,
+    receipt: Option<api::heddle::api::v1alpha2::MutationReceipt>,
     operation_id: &str,
-    endpoint: &Option<api::heddle::api::v2alpha1::EndpointRef>,
+    endpoint: &Option<api::heddle::api::v1alpha2::EndpointRef>,
     action: &str,
 ) -> Result<(), ProtocolError> {
     let receipt =
@@ -1003,7 +1003,7 @@ pub(super) fn require_applied_receipt(
         || &receipt.endpoint != endpoint
         || !matches!(
             receipt.outcome,
-            Some(api::heddle::api::v2alpha1::mutation_receipt::Outcome::Applied(_))
+            Some(api::heddle::api::v1alpha2::mutation_receipt::Outcome::Applied(_))
         )
     {
         return Err(ProtocolError::InvalidState(format!(
@@ -1190,8 +1190,8 @@ mod tests {
         );
         assert_eq!(credential.subject, "agent:reviewer-1");
         let created = client
-            .create_signup_invite(api::heddle::api::v2alpha1::CreateSignupInvitationRequest {
-                invitation: Some(api::heddle::api::v2alpha1::SignupInvitation {
+            .create_signup_invite(api::heddle::api::v1alpha2::CreateSignupInvitationRequest {
+                invitation: Some(api::heddle::api::v1alpha2::SignupInvitation {
                     bound_email: "alice@example.com".to_string(),
                     ..Default::default()
                 }),
@@ -1256,7 +1256,7 @@ mod tests {
             .expect("native grant update uses observed version");
         assert_eq!(
             updated_grant.role,
-            api::heddle::api::v2alpha1::ResourceRole::Writer as i32
+            api::heddle::api::v1alpha2::ResourceRole::Writer as i32
         );
         assert_eq!(
             client
@@ -1349,7 +1349,7 @@ mod tests {
             .pop()
             .expect("CreateSpool reached the server");
         let signed = match request.ownership {
-            Some(api::heddle::api::v2alpha1::create_spool_request::Ownership::OwnerGenesis(
+            Some(api::heddle::api::v1alpha2::create_spool_request::Ownership::OwnerGenesis(
                 signed,
             )) => signed,
             other => panic!("CreateSpool must send SignedSpoolOwnerGenesis, got {other:?}"),
@@ -1412,7 +1412,7 @@ mod tests {
 
         assert_eq!(
             *calls.lock().unwrap_or_else(|poison| poison.into_inner()),
-            ["/heddle.api.v2alpha1.SpoolService/CreateSpool"],
+            ["/heddle.api.v1alpha2.SpoolService/CreateSpool"],
             "auto-provision must issue CreateSpool without BootstrapOwnerRoot"
         );
     }

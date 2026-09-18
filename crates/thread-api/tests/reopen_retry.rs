@@ -9,7 +9,7 @@ use std::{
 };
 
 use api::{
-    heddle::api::v1alpha1::{CallFailure, CallFailureCode},
+    heddle::api::common::{CallFailure, CallFailureCode},
     v2::{
         MethodDescriptor,
         client::{Client, MessageReader, MessageWriter, RpcTransport},
@@ -159,7 +159,7 @@ fn revision() -> RevisionRef {
     RevisionRef {
         spool: Some(SpoolRef { id: "spool".into() }),
         revision: Some(revision_ref::Revision::State(
-            api::heddle::api::v1alpha1::StateId { value: vec![2; 32] },
+            api::heddle::api::common::StateId { value: vec![2; 32] },
         )),
     }
 }

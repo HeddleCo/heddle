@@ -154,8 +154,8 @@ fn create_spool_genesis_matches_the_stored_seq0_proof_key() {
     );
 }
 
-pub(crate) fn observed_owner(signer: &Ed25519Signer) -> api::heddle::api::v2alpha1::OwnerState {
-    use api::heddle::api::v2alpha1::*;
+pub(crate) fn observed_owner(signer: &Ed25519Signer) -> api::heddle::api::v1alpha2::OwnerState {
+    use api::heddle::api::v1alpha2::*;
     let account = uuid::Uuid::new_v4();
     let root = repo::sign_claimable_deferred_human_root(
         signer,

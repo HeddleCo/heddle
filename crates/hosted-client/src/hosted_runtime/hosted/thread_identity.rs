@@ -1,5 +1,5 @@
 //! Human addresses resolve once; every subsequent command carries stable IDs.
-use api::heddle::api::v2alpha1 as contract;
+use api::heddle::api::v1alpha2 as contract;
 use thread_api::rpc;
 use wire::ProtocolError;
 

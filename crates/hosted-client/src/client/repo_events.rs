@@ -9,8 +9,8 @@
 //! [`RepoEventError::Ended`], and [`RepoEventSubscription::resume_request`]
 //! carries the last received event ID into a new subscription.
 
-use api::heddle::api::v1alpha1::CallFailureCode;
-pub use api::heddle::api::v1alpha1::{RepoEvent, SubscribeRepoEventsRequest};
+pub use crate::legacy_v1::{RepoEvent, SubscribeRepoEventsRequest};
+use api::heddle::api::common::CallFailureCode;
 use config::UserConfig;
 use repo::remote::RemoteTarget;
 

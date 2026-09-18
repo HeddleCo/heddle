@@ -3,7 +3,7 @@
 use std::{collections::BTreeSet, io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1 as identity;
+use api::heddle::api::v1alpha2 as identity;
 use base64::Engine;
 use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
@@ -228,7 +228,7 @@ pub async fn execute(
 }
 
 const CREATE_SIGNUP_INVITE_METHOD: &str =
-    "heddle.api.v2alpha1.IdentityService/CreateSignupInvitation";
+    "heddle.api.v1alpha2.IdentityService/CreateSignupInvitation";
 
 async fn auth_invite(
     options: &AuthOptions,
@@ -300,10 +300,10 @@ async fn create_signup_invite_connected(
 fn create_signup_invite_request(
     recipient_email: Option<String>,
     client_operation_id: String,
-) -> api::heddle::api::v2alpha1::CreateSignupInvitationRequest {
-    api::heddle::api::v2alpha1::CreateSignupInvitationRequest {
+) -> api::heddle::api::v1alpha2::CreateSignupInvitationRequest {
+    api::heddle::api::v1alpha2::CreateSignupInvitationRequest {
         client_operation_id,
-        invitation: Some(api::heddle::api::v2alpha1::SignupInvitation {
+        invitation: Some(api::heddle::api::v1alpha2::SignupInvitation {
             bound_email: recipient_email.unwrap_or_default(),
             ..Default::default()
         }),
@@ -325,7 +325,7 @@ async fn list_signup_invites_connected(auth_client: &mut HostedClient) -> Result
 }
 
 fn signup_invite_output(
-    invite: api::heddle::api::v2alpha1::SignupInvitation,
+    invite: api::heddle::api::v1alpha2::SignupInvitation,
 ) -> Result<SignupInvite> {
     let invite_id = invite
         .r#ref
@@ -1135,7 +1135,7 @@ async fn create_service_token_connected(
             return Ok(prior);
         }
         let create_operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v2alpha1.IdentityService/PutDelegation",
+            "heddle.api.v1alpha2.IdentityService/PutDelegation",
             requested_operation_id,
         );
         let signer = Ed25519Signer::generate().context("generating service credential key")?;
@@ -1273,7 +1273,7 @@ async fn create_service_token_connected(
             return Ok(request);
         }
         let issue_operation_id = ClientOperationId::for_required_method(
-            "heddle.api.v2alpha1.IdentityService/IssueDelegationCredential",
+            "heddle.api.v1alpha2.IdentityService/IssueDelegationCredential",
             prepared.operation_id.clone(),
         )?;
         let mut issue = identity::IssueDelegationCredentialRequest {

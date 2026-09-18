@@ -2,7 +2,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use objects::object::{ContentHash, OperationId};
 use prost::Message;
 use repo::operation_dedup::observation;
@@ -103,7 +103,7 @@ impl DeviceRpc {
         };
         self.observe_authorized_view(
             &authority,
-            "/heddle.api.v2alpha1.OperationService/ObserveOperations",
+            "/heddle.api.v1alpha2.OperationService/ObserveOperations",
             &normalized.encode_to_vec(),
             request.observe.clone().unwrap_or_default(),
             send,

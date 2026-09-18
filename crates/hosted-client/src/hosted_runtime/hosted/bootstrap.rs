@@ -10,7 +10,7 @@ use api::{
         DescriptorSetError, EndpointDescriptorSetDocument, VerifiedEndpoint,
         parse_endpoint_descriptor_set,
     },
-    heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
+    heddle::api::common::{EndpointDescriptor, SignedEndpointDescriptor},
     signing::endpoint_descriptor_bytes,
 };
 use config::ClientConfig;

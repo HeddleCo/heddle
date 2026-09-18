@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use api::heddle::api::v1alpha1::{
-    CallFailureCode, Discussion as ProtoDiscussion, DiscussionKind, DiscussionTurn as ProtoTurn,
-    PathSymbolRef, RepoEvent, RepoEventKind, StateId as ProtoStateId, discussion_resolution,
+use crate::legacy_v1::{
+    Discussion as ProtoDiscussion, DiscussionKind, DiscussionResolution,
+    DiscussionTurn as ProtoTurn, PathSymbolRef, RepoEvent, RepoEventKind, discussion_resolution,
 };
+use api::heddle::api::common::{CallFailureCode, StateId as ProtoStateId};
 use objects::object::{Attribution, CollaborationAnchor, Principal};
 use repo::{CollaborationStore, Repository};
 use tempfile::TempDir;
@@ -566,7 +567,6 @@ fn proto_discussion(id: &str, turns: &[(&str, &str, u64)]) -> ProtoDiscussion {
                     seconds: 1_700_000_000,
                     nanos: 0,
                 }),
-                ..ProtoTurn::default()
             })
             .collect(),
         ..ProtoDiscussion::default()
@@ -579,7 +579,7 @@ fn proto_dismissed_discussion(
     reason: &str,
 ) -> ProtoDiscussion {
     let mut discussion = proto_discussion(id, turns);
-    discussion.resolution = Some(api::heddle::api::v1alpha1::DiscussionResolution {
+    discussion.resolution = Some(DiscussionResolution {
         state: Some(discussion_resolution::State::Dismissed(
             discussion_resolution::Dismissed {
                 reason: reason.to_string(),
@@ -1258,7 +1258,6 @@ fn proto_coordination_discussion(id: &str, turns: &[(&str, &str, u64)]) -> Proto
                     seconds: 1_700_000_000,
                     nanos: 0,
                 }),
-                ..ProtoTurn::default()
             })
             .collect(),
         ..ProtoDiscussion::default()

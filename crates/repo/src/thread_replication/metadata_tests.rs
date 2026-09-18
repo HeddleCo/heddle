@@ -295,7 +295,7 @@ fn browser_signed_read_coverage_decodes_and_verifies_in_rust() {
 
 #[test]
 fn rust_emitted_review_record_is_a_portable_browser_fixture() {
-    use api::heddle::api::v2alpha1 as wire;
+    use api::heddle::api::v1alpha2 as wire;
     use objects::object::{StateId, thread_replication::metadata::*};
     use prost::Message as _;
     let signer = Ed25519Signer::from_seed(&[29; 32]).expect("fixture signer");
@@ -349,7 +349,7 @@ fn rust_emitted_review_record_is_a_portable_browser_fixture() {
     let revision = |state: StateId| wire::RevisionRef {
         spool: Some(spool_ref.clone()),
         revision: Some(wire::revision_ref::Revision::State(
-            api::heddle::api::v1alpha1::StateId {
+            api::heddle::api::common::StateId {
                 value: state.as_bytes().to_vec(),
             },
         )),

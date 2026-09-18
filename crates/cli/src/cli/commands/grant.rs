@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
-use api::heddle::api::v2alpha1::{GrantRecord, ResourceRole};
+use api::heddle::api::v1alpha2::{GrantRecord, ResourceRole};
 use heddle_cli_contract::cli::commands::wire::auth::{
     GrantCreateOutput, GrantDeleteOutput, GrantListOutput, GrantRowOutput,
 };
@@ -326,7 +326,7 @@ fn is_human_verification_required(lowered_message: &str) -> bool {
 mod tests {
     use std::{ffi::OsString, sync::MutexGuard};
 
-    use api::heddle::api::v2alpha1::{GrantRecord, ResourceRole};
+    use api::heddle::api::v1alpha2::{GrantRecord, ResourceRole};
     use clap::Parser;
     use wire::ProtocolError;
 
@@ -502,8 +502,8 @@ mod tests {
     fn grant_row_uses_stable_record_id_for_deletion() {
         let row = grant_row(
             &GrantRecord {
-                r#ref: Some(api::heddle::api::v2alpha1::RecordRef {
-                    spool: Some(api::heddle::api::v2alpha1::SpoolRef {
+                r#ref: Some(api::heddle::api::v1alpha2::RecordRef {
+                    spool: Some(api::heddle::api::v1alpha2::SpoolRef {
                         id: uuid::Uuid::from_bytes([2; 16]).to_string(),
                     }),
                     id: uuid::Uuid::from_bytes([3; 16]).to_string(),
@@ -534,7 +534,7 @@ mod tests {
     #[test]
     fn human_verification_is_not_swallowed_as_a_generic_failure() {
         assert!(is_human_verification_required(
-            "user verification required for /heddle.api.v2alpha1.SpoolService/PutGrant"
+            "user verification required for /heddle.api.v1alpha2.SpoolService/PutGrant"
         ));
         let err = ProtocolError::AuthorizationFailed(
             "user verification required for CreateGrant: use a client with a WebAuthn authenticator"
@@ -566,14 +566,15 @@ mod tests {
         assert_eq!(advice.primary_command, "heddle claim");
         assert_eq!(advice.recovery_commands, vec!["heddle claim".to_string()]);
         assert!(
-            advice
-                .error
-                .contains("human verification required"),
+            advice.error.contains("human verification required"),
             "error must keep the human-verification why: {}",
             advice.error
         );
         assert!(
-            !advice.recovery_commands.iter().any(|c| c.contains("whoami")),
+            !advice
+                .recovery_commands
+                .iter()
+                .any(|c| c.contains("whoami")),
             "Next envelope must not suggest whoami: {:?}",
             advice.recovery_commands
         );

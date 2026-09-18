@@ -59,11 +59,11 @@ use verbs::{
 };
 #[cfg(feature = "client")]
 use verbs::{
-    MonorepoCloneResultSummary, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeExecution,
-    MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodeStepOptions,
-    assemble_monorepo_clone_json_report, assemble_monorepo_clone_result_summary,
-    monorepo_execution_progress, monorepo_rel_display, plan_monorepo_clone,
-    plan_monorepo_execution, validate_monorepo_clone_options, validate_monorepo_execution,
+    MonorepoCloneResultSummary, MonorepoNodeExecution, MonorepoNodeExecutionStep,
+    MonorepoNodeStepOptions, assemble_monorepo_clone_json_report,
+    assemble_monorepo_clone_result_summary, monorepo_execution_progress, monorepo_rel_display,
+    plan_monorepo_clone, plan_monorepo_execution, validate_monorepo_clone_options,
+    validate_monorepo_execution,
 };
 
 use super::{
@@ -1673,8 +1673,7 @@ async fn clone_network_connected(
             thread.as_deref(),
             depth,
             materialization,
-            |ready, refs| {
-                let _ = ready;
+            |refs| {
                 if refs.refs.is_empty() {
                     return Err(wire::ProtocolError::InvalidState(
                         "server does not advertise clone refs".to_string(),
@@ -2255,8 +2254,7 @@ async fn clone_monorepo_connected(
 
     // Resolve the whole child tree into the caller's coherent visible slice,
     // then pure-plan placement, work order, and per-node steps (no FS yet).
-    let resolved = client.resolve_monorepo(root_path, None).await?;
-    let facts = monorepo_node_facts_from_resolved(&resolved);
+    let facts = client.resolve_monorepo(root_path, None).await?;
     let clone_plan = plan_monorepo_clone(&facts).map_err(|err| anyhow!(err))?;
     let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
     // Ordering invariants (Init before Fetch, paired fetch/materialize, …)
@@ -2391,40 +2389,6 @@ fn validate_monorepo_destination(clone_root: &Path, rel_path: &Path) -> Result<P
     }
 
     Ok(clone_root.join(rel_path))
-}
-
-/// Map a transport `MonorepoNode` tree into pure core facts (no I/O).
-///
-/// Parses content-state bytes into [`StateId`]; malformed/absent states map
-/// to `None` (empty checkout), matching prior client planner policy.
-#[cfg(feature = "client")]
-fn monorepo_node_facts_from_resolved(
-    node: &api::heddle::api::v1alpha1::MonorepoNode,
-) -> MonorepoNodeFacts {
-    use objects::object::StateId;
-
-    let content_state = node
-        .content_state
-        .as_ref()
-        .and_then(|state_id| StateId::try_from_slice(&state_id.value).ok());
-    let edges = node
-        .edges
-        .iter()
-        .map(|edge| {
-            let skip_reason = edge.skipped.and_then(MonorepoEdgeSkipReason::from_wire_i32);
-            MonorepoEdgeFacts {
-                mount_name: edge.mount_name.clone(),
-                child_spool_id: edge.child_spool_id.clone(),
-                child: edge.subtree.as_ref().map(monorepo_node_facts_from_resolved),
-                skip_reason,
-            }
-        })
-        .collect();
-    MonorepoNodeFacts {
-        spool_id: node.spool_id.clone(),
-        content_state,
-        edges,
-    }
 }
 
 /// JSON envelope for a monorepo clone from the pure result summary.

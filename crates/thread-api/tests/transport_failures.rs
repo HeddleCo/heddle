@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use api::{
-    heddle::api::v1alpha1::{CallFailure, CallFailureCode},
+    heddle::api::common::{CallFailure, CallFailureCode},
     v2::client::{MessageReader, MessageWriter, Rpc},
 };
 use heddle_thread_api::{

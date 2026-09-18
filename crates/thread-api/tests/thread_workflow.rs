@@ -110,7 +110,7 @@ async fn snapshot_edit_and_live_update_need_no_lookup_or_refetch() {
     assert!(
         routes
             .iter()
-            .all(|r| r.starts_with("/heddle.api.v2alpha1."))
+            .all(|r| r.starts_with("/heddle.api.v1alpha2."))
     );
     view.cancel();
     peer.close().await;

@@ -4,7 +4,7 @@
 //! resolved spool path. No key or authority is minted by this verifier.
 use std::sync::RwLock;
 
-use api::{heddle::api::v1alpha1::CallContext, v2::MethodDescriptor};
+use api::{heddle::api::common::CallContext, v2::MethodDescriptor};
 use base64::Engine as _;
 use biscuit_verifier::{BiscuitFacts, PublicKey};
 use chrono::{DateTime, Utc};

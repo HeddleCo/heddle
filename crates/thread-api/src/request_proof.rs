@@ -1,7 +1,7 @@
 //! Portable v2 request PoP. Hosts supply the effective key from an already
 //! verified Biscuit and separately enforce account attachment, scope, current
 //! revocation and durable nonce consumption. This check grants no authority.
-use api::{heddle::api::v1alpha1::CallContext, v2::MethodDescriptor};
+use api::{heddle::api::common::CallContext, v2::MethodDescriptor};
 
 use crate::transport::Error;
 
@@ -59,7 +59,7 @@ pub fn verify<'a>(
 
 #[cfg(test)]
 mod tests {
-    use api::{heddle::api::v1alpha1::RequestProof, v2::client::Rpc};
+    use api::{heddle::api::common::RequestProof, v2::client::Rpc};
     use crypto::{Ed25519Signer, Signer};
     use prost::Message;
 

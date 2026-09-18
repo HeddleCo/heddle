@@ -47,11 +47,7 @@ fn top_level_start_without_path_defaults_under_heddle_threads() {
         "default checkout should materialize under .heddle/threads/: {started}"
     );
     assert!(
-        !main
-            .path()
-            .join("feature")
-            .join("default-managed")
-            .exists(),
+        !main.path().join("feature").join("default-managed").exists(),
         "default start must not land at ./feature/default-managed"
     );
 }

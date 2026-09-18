@@ -3,7 +3,7 @@
 #![cfg(feature = "client")]
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use api::heddle::api::v2alpha1 as wire;
+use api::heddle::api::v1alpha2 as wire;
 use crypto::{Ed25519Signer, Signer};
 use heddle_cli_args::CliContext as _;
 pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{

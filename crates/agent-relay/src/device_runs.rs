@@ -1,7 +1,7 @@
 //! Project real harness sessions and deliver supported controls at hook edges.
 //! Claude output semantics: https://code.claude.com/docs/en/hooks#json-output
 use anyhow::{Context, Result};
-use api::heddle::api::v2alpha1 as v2;
+use api::heddle::api::v1alpha2 as v2;
 use objects::object::ContentHash;
 use repo::{
     ActorPresenceStatus, Repository, device_runs::RunStore,

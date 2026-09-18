@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1 as v2;
+use api::heddle::api::v1alpha2 as v2;
 use objects::object::ContentHash;
 use repo::{Repository, device_runs::RunStore};
 use serde_json::{Value, json};

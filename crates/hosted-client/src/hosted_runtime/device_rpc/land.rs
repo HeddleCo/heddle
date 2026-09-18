@@ -3,8 +3,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1::*;
-use prost::Message;
+use api::heddle::api::v1alpha2::*;
 use crypto::{Signer, thread_operation::SignedOperation};
 use objects::{
     object::{
@@ -16,6 +15,7 @@ use objects::{
     },
     store::ObjectStore,
 };
+use prost::Message;
 use repo::thread_replication::ThreadReplica;
 
 use super::{
@@ -51,14 +51,13 @@ impl DeviceRpc {
         let command = repo::device_operations::Command {
             namespace: &namespace,
             id: operation_id,
-            method: "/heddle.api.v2alpha1.ThreadService/LandThread",
+            method: "/heddle.api.v1alpha2.ThreadService/LandThread",
             request_hash,
         };
         session.check_current(&self.home)?;
-        if let Some(response) = repo::device_operations::replay_response(
-            &session.spool.heddle_dir,
-            &command,
-        )? {
+        if let Some(response) =
+            repo::device_operations::replay_response(&session.spool.heddle_dir, &command)?
+        {
             return Ok(response);
         }
         if request.expected_policy_version != thread_policy_version(&repository)?.as_bytes() {
@@ -129,18 +128,25 @@ impl DeviceRpc {
                 ConflictLabels::DEFAULT,
             )? {
                 ThreeWayMergeOutcome::Clean { tree } => repository.store().put_tree(&tree)?,
-                ThreeWayMergeOutcome::FastForward { target } => repository
-                    .store()
-                    .get_state(&target)?
-                    .context("source state missing")?
-                    .tree,
-                ThreeWayMergeOutcome::AlreadyIntegrated { .. } => repository
-                    .store()
-                    .get_state(&expected)?
-                    .context("target state missing")?
-                    .tree,
+                ThreeWayMergeOutcome::FastForward { target } => {
+                    repository
+                        .store()
+                        .get_state(&target)?
+                        .context("source state missing")?
+                        .tree
+                }
+                ThreeWayMergeOutcome::AlreadyIntegrated { .. } => {
+                    repository
+                        .store()
+                        .get_state(&expected)?
+                        .context("target state missing")?
+                        .tree
+                }
                 ThreeWayMergeOutcome::Conflicted { paths, .. } => {
-                    bail!("landing has unresolved file conflicts: {}", paths.join(", "))
+                    bail!(
+                        "landing has unresolved file conflicts: {}",
+                        paths.join(", ")
+                    )
                 }
             };
             let mut result_visibility = repository.resolve_capture_default_visibility();
@@ -151,12 +157,8 @@ impl DeviceRpc {
                         parent_floor,
                     )?;
             }
-            let state = State::new_merge(
-                tree,
-                vec![expected, source],
-                session.attribution.clone(),
-            )
-            .with_intent("Device Thread landing");
+            let state = State::new_merge(tree, vec![expected, source], session.attribution.clone())
+                .with_intent("Device Thread landing");
             let frontier = view
                 .frontiers
                 .get(&ThreadFacet::Source)
@@ -217,7 +219,7 @@ impl DeviceRpc {
             &command,
             &response,
         )? {
-            Admission::Accepted => {},
+            Admission::Accepted => {}
             other => bail!("landing was not admitted: {other:?}"),
         }
         Ok(response)

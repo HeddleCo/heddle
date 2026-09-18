@@ -4,7 +4,7 @@ use std::future::Future;
 
 use api::{
     framing,
-    heddle::api::v1alpha1::{CallContext, CallFailure},
+    heddle::api::common::{CallContext, CallFailure},
     v2::MethodDescriptor,
 };
 use prost::Message;
@@ -44,7 +44,7 @@ pub struct RemoteFailure {
 impl RemoteFailure {
     pub fn detail(
         &self,
-    ) -> Result<Option<api::heddle::api::v1alpha1::ErrorDetail>, prost::DecodeError> {
+    ) -> Result<Option<api::heddle::api::common::ErrorDetail>, prost::DecodeError> {
         self.detail
             .as_deref()
             .map(prost::Message::decode)
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn remote_failure_retains_typed_details_without_boxing_the_error_path() {
-        use api::heddle::api::v1alpha1::{ErrorDetail, ErrorReason};
+        use api::heddle::api::common::{ErrorDetail, ErrorReason};
         let detail = ErrorDetail {
             reason: ErrorReason::PolicyDenied as i32,
             resource: "thread".into(),

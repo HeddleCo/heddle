@@ -44,7 +44,7 @@ pub mod transport;
 
 use api::v2::client::{Client, ClientError, RpcTransport};
 pub use api::{
-    heddle::api::v2alpha1 as contract,
+    heddle::api::v1alpha2 as contract,
     v2::{client::Rpc, rpc},
 };
 use contract::{DescribeEndpointRequest, DescribeEndpointResponse, EndpointKind, ThreadRef};
@@ -70,7 +70,7 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
             .unary(
                 rpc::EndpointServiceDescribeEndpoint::METHOD,
                 prost::Message::encode_to_vec(&DescribeEndpointRequest {
-                    understood_packages: vec!["heddle.api.v2alpha1".into()],
+                    understood_packages: vec!["heddle.api.v1alpha2".into()],
                 }),
             )
             .await
@@ -83,7 +83,7 @@ impl<T: RpcTransport<Error = Error>> Remote<T> {
             || !description
                 .supported_packages
                 .iter()
-                .any(|p| p == "heddle.api.v2alpha1")
+                .any(|p| p == "heddle.api.v1alpha2")
         {
             return Err(ClientError::Transport(Error::Protocol(
                 "endpoint identity/package mismatch",

@@ -5,7 +5,7 @@
 //! tests (and this runner) can emit canonical bytes without a second language.
 
 use api::{
-    heddle::api::v1alpha1::{
+    heddle::api::common::{
         TreadleCheck, TreadleCheckClass, TreadleDefinition, TreadleDeterminismClass,
         TreadleIsolationHints, TreadleJob, TreadleNetworkAccess, TreadlePlatform, TreadleRetry,
         TreadleTargetEnvironment, TreadleTrigger, TreadleTriggerKind,

@@ -260,7 +260,7 @@ impl StagedSource {
                             &wrapper.creator_authority,
                             authority,
                             spool_path,
-                            "/heddle.api.v2alpha1.ThreadService/StartThread",
+                            "/heddle.api.v1alpha2.ThreadService/StartThread",
                             now,
                         )
                         .map_err(preparation)?

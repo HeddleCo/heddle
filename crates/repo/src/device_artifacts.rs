@@ -7,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1::{RecordRef, RunArtifact, RunPolicy, RunRecord};
+use api::heddle::api::v1alpha2::{RecordRef, RunArtifact, RunPolicy, RunRecord};
 use objects::object::thread_replication::metadata::retention::MaterialRetention;
 use prost::Message;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -311,7 +311,7 @@ fn policy(connection: &Connection, spool: &str) -> Result<RunPolicy> {
 
 #[cfg(test)]
 mod tests {
-    use api::heddle::api::v2alpha1::{PutRunPolicyRequest, SpoolRef};
+    use api::heddle::api::v1alpha2::{PutRunPolicyRequest, SpoolRef};
 
     use super::*;
     fn fixture() -> (

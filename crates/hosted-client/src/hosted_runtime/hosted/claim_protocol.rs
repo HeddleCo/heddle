@@ -16,7 +16,7 @@ use api::{
         MAX_CALL_CONTEXT, MAX_METHOD_PATH, decode_request_frame, encode_failure_response,
         encode_success_response,
     },
-    heddle::api::v1alpha1::{CallContext, CallFailure, CallFailureCode},
+    heddle::api::common::{CallContext, CallFailure, CallFailureCode},
 };
 use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
@@ -25,10 +25,10 @@ use iroh::{
 
 pub(crate) const NATIVE_ALPN: &[u8] = api::HOSTED_ALPN_V1;
 pub(crate) const CLAIM_PREPARE_METHOD: &str =
-    "/heddle.api.v2alpha1.OwnerAuthorizationService/PrepareAccountClaim";
+    "/heddle.api.v1alpha2.OwnerAuthorizationService/PrepareAccountClaim";
 pub(crate) const CLAIM_SIGN_METHOD: &str =
-    "/heddle.api.v2alpha1.OwnerAuthorizationService/SignAccountClaim";
-const DESCRIBE_METHOD: &str = "/heddle.api.v2alpha1.EndpointService/DescribeEndpoint";
+    "/heddle.api.v1alpha2.OwnerAuthorizationService/SignAccountClaim";
+const DESCRIBE_METHOD: &str = "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint";
 
 const MAX_REQUEST_BODY: usize = 256 * 1024;
 
@@ -339,7 +339,7 @@ impl ClaimProtocolError {
 }
 
 fn describe(endpoint_key: [u8; 32], body: &[u8], device: bool) -> Result<Vec<u8>, CallFailure> {
-    use api::heddle::api::v2alpha1::*;
+    use api::heddle::api::v1alpha2::*;
     use prost::Message;
     DescribeEndpointRequest::decode(body)
         .map_err(|_| failure(CallFailureCode::InvalidArgument, "invalid endpoint request"))?;
@@ -348,7 +348,7 @@ fn describe(endpoint_key: [u8; 32], body: &[u8], device: bool) -> Result<Vec<u8>
             public_key: endpoint_key.to_vec(),
             kind: EndpointKind::Device as i32,
         }),
-        supported_packages: vec!["heddle.api.v2alpha1".into()],
+        supported_packages: vec!["heddle.api.v1alpha2".into()],
         implemented_methods: vec![
             DESCRIBE_METHOD.into(),
             CLAIM_PREPARE_METHOD.into(),

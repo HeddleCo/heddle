@@ -1,6 +1,6 @@
 //! Foreground native account-claim issuer. Browser registration stays browser-signed.
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use crypto::Signer as _;
 use prost::Message;
 

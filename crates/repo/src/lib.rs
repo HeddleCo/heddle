@@ -127,8 +127,9 @@ mod repository_symbol_graph_tests;
 pub(crate) use repository_symbol_graph::SemanticGraphBind;
 mod revision_address;
 pub use repository_state_visibility::{
-    ContentDisclosureProof, DefaultVisibilityBinding, PutVisibilityOutcome, UNRESOLVED_ANCESTOR_SCOPE,
-    VisibilityCommitKind, VisibilityCommitOutcome, VisibilitySidecarRestore,
+    ContentDisclosureProof, DefaultVisibilityBinding, PutVisibilityOutcome,
+    UNRESOLVED_ANCESTOR_SCOPE, VisibilityCommitKind, VisibilityCommitOutcome,
+    VisibilitySidecarRestore,
 };
 mod session_storage;
 pub mod snapshot_metadata;

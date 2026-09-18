@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use api::{
     framing,
-    heddle::api::v1alpha1::{CallContext, CallFailure, CallFailureCode},
+    heddle::api::common::{CallContext, CallFailure, CallFailureCode},
     v2::{
         MethodDescriptor,
         client::{MessageReader, Rpc, RpcTransport},

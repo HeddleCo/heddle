@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use api::{
-    heddle::api::v1alpha1::{CallFailure, CallFailureCode},
+    heddle::api::common::{CallFailure, CallFailureCode},
     v2::client::ClientError,
 };
 

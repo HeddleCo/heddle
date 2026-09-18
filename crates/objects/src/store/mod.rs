@@ -4,8 +4,8 @@
 use std::path::PathBuf;
 
 use crate::object::{
-    Action, ActionId, AnnotatedTag, Blob, ContentHash, OpenedTreeBody, PartialTree,
-    State, StateAttachment, StateAttachmentId, StateId, Tree, TreeEntry, TreeEntryReader,
+    Action, ActionId, AnnotatedTag, Blob, ContentHash, OpenedTreeBody, PartialTree, State,
+    StateAttachment, StateAttachmentId, StateId, Tree, TreeEntry, TreeEntryReader,
     TreeResumeCursor, is_redacted_tree, is_streamable_tree,
 };
 

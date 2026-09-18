@@ -5,7 +5,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use api::heddle::api::v2alpha1::{
+use api::heddle::api::v1alpha2::{
     EndpointKind, EndpointRef, ProviderDialRoute, provider_dial_route,
 };
 use bytes::Bytes;
@@ -451,7 +451,7 @@ fn fresh_handle() -> [u8; 16] {
 mod tests {
     use std::{io, task::Poll};
 
-    use api::heddle::api::v2alpha1::{
+    use api::heddle::api::v1alpha2::{
         EndpointKind, EndpointRef, ProviderDialRoute, provider_dial_route,
     };
     use config::ClientConfig;

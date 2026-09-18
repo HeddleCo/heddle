@@ -4,8 +4,8 @@
 use anyhow::{Context as _, bail};
 use api::{
     heddle::api::{
-        v1alpha1::{CallContext, CallFailure, CallFailureCode},
-        v2alpha1::{PrepareAccountClaimRequest, SignAccountClaimRequest},
+        common::{CallContext, CallFailure, CallFailureCode},
+        v1alpha2::{PrepareAccountClaimRequest, SignAccountClaimRequest},
     },
     v2::client::Rpc as _,
 };

@@ -1,6 +1,6 @@
 //! Materialize shared references without changing the original signed records.
 use anyhow::Result;
-use api::heddle::api::v2alpha1::Coverage;
+use api::heddle::api::v1alpha2::Coverage;
 use objects::{
     object::{
         AnnotationTag, CollaborationAnchor, CollaborationRevision, CollaborationScope,
@@ -141,8 +141,8 @@ pub(super) fn resolution_for(
     owner: &ThreadReplica,
     reference: &objects::object::source_target::SourceTargetReference,
     viewed_revision: Option<objects::object::StateId>,
-) -> Result<api::heddle::api::v2alpha1::SourceTargetResolution> {
-    use api::heddle::api::{v1alpha1::StateId as WireStateId, v2alpha1 as wire};
+) -> Result<api::heddle::api::v1alpha2::SourceTargetResolution> {
+    use api::heddle::api::{common::StateId as WireStateId, v1alpha2 as wire};
     use objects::object::source_target::{
         SourceSelector, SourceTargetBinding, capture::ResolutionStatus,
     };
@@ -284,8 +284,8 @@ fn unique_current_source(replica: &ThreadReplica) -> Result<Option<objects::obje
 fn wire_thread(
     spool: uuid::Uuid,
     thread: objects::object::ContentHash,
-) -> api::heddle::api::v2alpha1::ThreadRef {
-    use api::heddle::api::v2alpha1 as wire;
+) -> api::heddle::api::v1alpha2::ThreadRef {
+    use api::heddle::api::v1alpha2 as wire;
     wire::ThreadRef {
         spool: Some(wire::SpoolRef {
             id: spool.to_string(),

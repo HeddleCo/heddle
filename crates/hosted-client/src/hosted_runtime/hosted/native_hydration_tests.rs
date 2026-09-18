@@ -3,7 +3,7 @@ use std::net::Ipv4Addr;
 
 use api::{
     framing::{decode_request_frame, encode_stream_message, encode_success_response},
-    heddle::api::v2alpha1 as v2,
+    heddle::api::v1alpha2 as v2,
 };
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 use objects::{
@@ -40,7 +40,7 @@ async fn exercise(corrupt: bool, truncated: bool) {
     let revision = v2::RevisionRef {
         spool: Some(v2::SpoolRef { id: spool.clone() }),
         revision: Some(v2::revision_ref::Revision::State(
-            api::heddle::api::v1alpha1::StateId {
+            api::heddle::api::common::StateId {
                 value: state.as_bytes().to_vec(),
             },
         )),
@@ -77,15 +77,15 @@ async fn exercise(corrupt: bool, truncated: bool) {
         let request = recv.read_to_end(1024 * 1024).await.expect("request");
         assert_eq!(
             decode_request_frame(&request).expect("frame").method,
-            "/heddle.api.v2alpha1.EndpointService/DescribeEndpoint"
+            "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint"
         );
         let description = v2::DescribeEndpointResponse {
             endpoint: Some(v2::EndpointRef {
                 kind: v2::EndpointKind::Weft as i32,
                 public_key: key,
             }),
-            supported_packages: vec!["heddle.api.v2alpha1".into()],
-            implemented_methods: vec!["/heddle.api.v2alpha1.ContentService/ReadContent".into()],
+            supported_packages: vec!["heddle.api.v1alpha2".into()],
+            implemented_methods: vec!["/heddle.api.v1alpha2.ContentService/ReadContent".into()],
             default_read_budget: Some(v2::ReadBudget {
                 max_items: 16,
                 max_frame_bytes: 65536,
@@ -105,7 +105,7 @@ async fn exercise(corrupt: bool, truncated: bool) {
         let frame = decode_request_frame(&request).expect("frame");
         assert_eq!(
             frame.method,
-            "/heddle.api.v2alpha1.ContentService/ReadContent"
+            "/heddle.api.v1alpha2.ContentService/ReadContent"
         );
         let read = v2::ReadContentRequest::decode(frame.body).expect("native selection");
         assert_eq!(read.thread, Some(served_thread));

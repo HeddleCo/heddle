@@ -2,7 +2,7 @@
 use std::{fs::OpenOptions, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail, ensure};
-use api::heddle::api::v2alpha1::{RecordReviewRequest, ReviewDecision};
+use api::heddle::api::v1alpha2::{RecordReviewRequest, ReviewDecision};
 use prost::Message;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -250,7 +250,7 @@ mod tests {
         let id = uuid::Uuid::from_bytes([9; 16]);
         let first = RecordReviewRequest {
             client_operation_id: id.to_string(),
-            decision: Some(api::heddle::api::v2alpha1::ReviewDecision {
+            decision: Some(api::heddle::api::v1alpha2::ReviewDecision {
                 policy_version: vec![1; 32],
                 ..Default::default()
             }),
@@ -260,7 +260,7 @@ mod tests {
             .save(&endpoint, &principal, id, "thread-a", &first)
             .expect("persist before send");
         let changed = RecordReviewRequest {
-            decision: Some(api::heddle::api::v2alpha1::ReviewDecision {
+            decision: Some(api::heddle::api::v1alpha2::ReviewDecision {
                 policy_version: vec![2; 32],
                 ..Default::default()
             }),

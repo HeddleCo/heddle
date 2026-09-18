@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::{v1alpha1::CallFailureCode, v2alpha1::*};
+use api::heddle::api::{common::CallFailureCode, v1alpha2::*};
 use iroh::endpoint::SendStream;
 use prost::Message;
 

@@ -28,7 +28,15 @@ impl ThreadReplica {
         store: &impl ObjectStore,
         authorize: impl FnOnce(&objects::object::thread_replication::ThreadOperation) -> Result<()>,
     ) -> Result<Admission> {
-        self.receive_inner(original, store, authorize, false, Some(receipt), false, None)
+        self.receive_inner(
+            original,
+            store,
+            authorize,
+            false,
+            Some(receipt),
+            false,
+            None,
+        )
     }
     pub fn require_authority_admission(
         &self,

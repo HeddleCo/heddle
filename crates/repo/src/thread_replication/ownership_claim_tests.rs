@@ -24,8 +24,8 @@ fn authority(root: &Ed25519Signer) -> crate::device_authority::DeviceAuthority {
         crate::sign_custodial_owner_binding(root, &signed, [6; 32]).expect("owner binding");
     let verified = heddleco_capability_verifier::verify_owner_root(&signed).expect("root");
     crate::device_authority::DeviceAuthority {
-        owner: api::heddle::api::v2alpha1::OwnerState {
-            owner: Some(api::heddle::api::v2alpha1::PrincipalRef {
+        owner: api::heddle::api::v1alpha2::OwnerState {
+            owner: Some(api::heddle::api::v1alpha2::PrincipalRef {
                 id: uuid::Uuid::from_bytes([9; 16]).to_string(),
             }),
             root: Some(signed),

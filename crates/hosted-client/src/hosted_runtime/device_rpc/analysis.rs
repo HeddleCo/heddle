@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 #[cfg(feature = "semantic")]
 use objects::object::OperationId;
 use objects::{object::ContentHash, store::ObjectStore};
@@ -159,7 +159,7 @@ impl DeviceRpc {
                 &repo::device_operations::Command {
                     namespace: &namespace,
                     id,
-                    method: "/heddle.api.v2alpha1.AnalysisService/StartAnalysis",
+                    method: "/heddle.api.v1alpha2.AnalysisService/StartAnalysis",
                     request_hash: *blake3::hash(body).as_bytes(),
                 },
             )? {
@@ -176,7 +176,7 @@ impl DeviceRpc {
                 repo::device_operations::Command {
                     namespace: &namespace,
                     id,
-                    method: "/heddle.api.v2alpha1.AnalysisService/StartAnalysis",
+                    method: "/heddle.api.v1alpha2.AnalysisService/StartAnalysis",
                     request_hash: *blake3::hash(body).as_bytes(),
                 },
                 self.analysis.executor()?,
@@ -222,7 +222,7 @@ impl DeviceRpc {
                         {
                             tracing::error!(%error,"native semantic executor failed");
                             let failure = super::failure(
-                                api::heddle::api::v1alpha1::CallFailureCode::FailedPrecondition,
+                                api::heddle::api::common::CallFailureCode::FailedPrecondition,
                                 error,
                             );
                             if let Err(error) = this.analysis.executor().and_then(|executor| {
@@ -248,7 +248,7 @@ impl DeviceRpc {
             Ok((response, None)) => response,
             Err(error) => {
                 let bytes = api::framing::encode_failure_response(&super::failure(
-                    api::heddle::api::v1alpha1::CallFailureCode::FailedPrecondition,
+                    api::heddle::api::common::CallFailureCode::FailedPrecondition,
                     error,
                 ))?;
                 send.write_all(&bytes).await?;
@@ -321,7 +321,7 @@ impl DeviceRpc {
                             id: source.spool.id.to_string(),
                         }),
                         revision: Some(revision_ref::Revision::State(
-                            api::heddle::api::v1alpha1::StateId {
+                            api::heddle::api::common::StateId {
                                 value: state.as_bytes().to_vec(),
                             },
                         )),
@@ -361,7 +361,7 @@ impl DeviceRpc {
             Err(error) => (
                 operation_record::State::Failed,
                 Some(super::failure(
-                    api::heddle::api::v1alpha1::CallFailureCode::FailedPrecondition,
+                    api::heddle::api::common::CallFailureCode::FailedPrecondition,
                     error,
                 )),
             ),
@@ -397,7 +397,7 @@ impl DeviceRpc {
             repo::device_operations::Command {
                 namespace: &namespace,
                 id: request.client_operation_id.parse()?,
-                method: "/heddle.api.v2alpha1.OperationService/CancelOperation",
+                method: "/heddle.api.v1alpha2.OperationService/CancelOperation",
                 request_hash: *blake3::hash(body).as_bytes(),
             },
             key,
@@ -474,7 +474,7 @@ impl DeviceRpc {
         }
         self.observe_view(
             session,
-            "/heddle.api.v2alpha1.AnalysisService/ObserveAnalysis",
+            "/heddle.api.v1alpha2.AnalysisService/ObserveAnalysis",
             &normalized.encode_to_vec(),
             request.observe.clone().unwrap_or_default(),
             send,

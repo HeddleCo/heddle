@@ -21,7 +21,7 @@ pub(super) async fn roundtrip(
     let source = RevisionRef {
         spool: Some(spool_ref.clone()),
         revision: Some(revision_ref::Revision::State(
-            api::heddle::api::v1alpha1::StateId {
+            api::heddle::api::common::StateId {
                 value: base.as_bytes().to_vec(),
             },
         )),
@@ -266,8 +266,14 @@ pub(super) async fn roundtrip(
         .as_ref()
         .expect("exact source and target assessment");
     assert_eq!(assessment.readiness, ReviewReadiness::Eligible as i32);
-    assert!(landing_overview.actions.iter().any(|action|
-        action.method.ends_with("/LandThread") && action.authorized && action.implemented));
+    assert!(
+        landing_overview
+            .actions
+            .iter()
+            .any(|action| action.method.ends_with("/LandThread")
+                && action.authorized
+                && action.implemented)
+    );
     let logical = LandThreadRequest {
         client_operation_id: uuid::Uuid::new_v4().to_string(),
         thread: materialize.thread.clone(),
@@ -281,8 +287,18 @@ pub(super) async fn roundtrip(
         .call::<thread_api::rpc::ThreadServiceLandThread>(&logical)
         .await
         .expect("native Thread landing");
-    assert!(first_logical.receipt.is_some(), "landing has a durable receipt");
-    assert_eq!(logical_target.view().expect("logical target view").source_heads.len(), 1);
+    assert!(
+        first_logical.receipt.is_some(),
+        "landing has a durable receipt"
+    );
+    assert_eq!(
+        logical_target
+            .view()
+            .expect("logical target view")
+            .source_heads
+            .len(),
+        1
+    );
     assert_eq!(
         first_logical,
         remote
@@ -304,34 +320,60 @@ pub(super) async fn roundtrip(
     );
     let stack_targets = ["device-stack-first", "device-stack-second"]
         .into_iter()
-        .map(|name| repository.create_native_thread(name, base, None, "Stack target")
-            .expect("stack target Thread"))
+        .map(|name| {
+            repository
+                .create_native_thread(name, base, None, "Stack target")
+                .expect("stack target Thread")
+        })
         .collect::<Vec<_>>();
     let stack = LandStackRequest {
         client_operation_id: uuid::Uuid::new_v4().to_string(),
         spool: Some(spool_ref.clone()),
-        landings: stack_targets.iter().map(|target| StackLanding {
-            thread: materialize.thread.clone(),
-            source: captured_overview.materialized.clone(),
-            target: Some(ThreadRef {
-                spool: Some(spool_ref.clone()),
-                id: Some(ThreadId { value: target.thread_id().as_bytes().to_vec() }),
-            }),
-            expected_target: materialize.revision.clone(),
-            expected_policy_version: logical.expected_policy_version.clone(),
-        }).collect(),
+        landings: stack_targets
+            .iter()
+            .map(|target| StackLanding {
+                thread: materialize.thread.clone(),
+                source: captured_overview.materialized.clone(),
+                target: Some(ThreadRef {
+                    spool: Some(spool_ref.clone()),
+                    id: Some(ThreadId {
+                        value: target.thread_id().as_bytes().to_vec(),
+                    }),
+                }),
+                expected_target: materialize.revision.clone(),
+                expected_policy_version: logical.expected_policy_version.clone(),
+            })
+            .collect(),
     };
-    let stack_result = remote.api.call::<thread_api::rpc::ThreadServiceLandStack>(&stack)
-        .await.expect("native atomic Thread stack");
+    let stack_result = remote
+        .api
+        .call::<thread_api::rpc::ThreadServiceLandStack>(&stack)
+        .await
+        .expect("native atomic Thread stack");
     assert!(stack_result.receipt.is_some());
-    assert_eq!(stack_result,
-        remote.api.call::<thread_api::rpc::ThreadServiceLandStack>(&stack)
-            .await.expect("exact stack retry"));
-    assert!(stack_targets.iter().all(|target| target.view().expect("stack view").source_heads.len() == 1));
+    assert_eq!(
+        stack_result,
+        remote
+            .api
+            .call::<thread_api::rpc::ThreadServiceLandStack>(&stack)
+            .await
+            .expect("exact stack retry")
+    );
+    assert!(
+        stack_targets
+            .iter()
+            .all(|target| target.view().expect("stack view").source_heads.len() == 1)
+    );
     let mut changed_stack = stack.clone();
     changed_stack.landings.pop();
-    assert!(remote.api.call::<thread_api::rpc::ThreadServiceLandStack>(&changed_stack).await.is_err(),
-        "stack command ID cannot be rebound to fewer members");
+    assert!(
+        remote
+            .api
+            .call::<thread_api::rpc::ThreadServiceLandStack>(&changed_stack)
+            .await
+            .is_err(),
+        "stack command ID cannot be rebound to fewer members"
+    );
     let second = remote
         .api
         .call::<thread_api::rpc::CheckoutServiceMaterialize>(&MaterializeCheckoutRequest {

@@ -1,6 +1,6 @@
 //! Shared account projections use post-commit pushes and exact local versions.
 use anyhow::{Context, Result, bail, ensure};
-use api::heddle::api::v2alpha1::*;
+use api::heddle::api::v1alpha2::*;
 use prost::Message;
 
 use super::{
@@ -579,7 +579,7 @@ impl DeviceRpc {
         overview.actions = ["CreateSpool", "ReviseSpool", "DeleteSpool"]
             .into_iter()
             .map(|suffix| {
-                let method = format!("/heddle.api.v2alpha1.SpoolService/{suffix}");
+                let method = format!("/heddle.api.v1alpha2.SpoolService/{suffix}");
                 let may_create = suffix != "CreateSpool"
                     || overview
                         .settings
