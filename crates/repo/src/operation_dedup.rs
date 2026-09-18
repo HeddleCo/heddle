@@ -29,7 +29,7 @@ use objects::{
     sync::LockExt,
 };
 use oplog::IsolationKey;
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -322,58 +322,84 @@ impl OperationDedupStore {
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error.into()),
         }
-        let mut connection = Connection::open(&path).map_err(database_error)?;
+        let mut connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(database_error)?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
             .map_err(database_error)?;
-        let mode: String = connection
-            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
-            .map_err(database_error)?;
-        if mode != "wal" {
-            return Err(database_error("WAL mode unavailable"));
-        }
         connection
             .execute_batch("PRAGMA synchronous=FULL;")
             .map_err(database_error)?;
         let version: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(database_error)?;
-        match version {
-            1 => {}
-            0 => {
-                let _initialization = objects::lock::RepoLock::at(
-                    directory.join("operation-receipts.initialize.lock"),
-                )
+        if version == 1 {
+            let mode: String = connection
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .map_err(database_error)?;
+            if mode != "wal" {
+                return Err(database_error("WAL mode unavailable"));
+            }
+            return Ok(Self {
+                change_marker: None,
+                namespace: String::new(),
+                connection: Mutex::new(connection),
+            });
+        }
+        if version != 0 {
+            return Err(database_error(format!(
+                "unsupported bootstrap schema {version}"
+            )));
+        }
+        // WAL activation itself can return SQLITE_BUSY without honoring the busy
+        // handler when two new connections race. Serialize only cold bootstrap;
+        // an initialized store never acquires this filesystem lock.
+        let _initialization =
+            objects::lock::RepoLock::at(directory.join("operation-receipts.initialize.lock"))
                 .write()
                 .map_err(|error| database_error(error.to_string()))?;
-                let version: i64 = connection
-                    .query_row("PRAGMA user_version", [], |row| row.get(0))
+        let mode: String = connection
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .map_err(database_error)?;
+        if mode != "wal" {
+            return Err(database_error("WAL mode unavailable"));
+        }
+        let tx = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(database_error)?;
+        let version: i64 = tx
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(database_error)?;
+        match version {
+            0 => {
+                initialize_schema(&tx).map_err(database_error)?;
+                tx.pragma_update(None, "user_version", 1)
                     .map_err(database_error)?;
-                if version == 0 {
-                    let tx = connection
-                        .transaction_with_behavior(TransactionBehavior::Immediate)
-                        .map_err(database_error)?;
-                    initialize_schema(&tx).map_err(database_error)?;
-                    tx.pragma_update(None, "user_version", 1)
-                        .map_err(database_error)?;
-                    tx.commit().map_err(database_error)?;
-                } else if version != 1 {
-                    return Err(database_error(format!(
-                        "unsupported bootstrap schema {version}"
-                    )));
-                }
             }
+            1 => {}
             other => {
                 return Err(database_error(format!(
                     "unsupported bootstrap schema {other}"
                 )));
             }
         }
+        tx.commit().map_err(database_error)?;
         Ok(Self {
             change_marker: None,
             namespace: String::new(),
             connection: Mutex::new(connection),
         })
+    }
+
+    /// Probe a bootstrap receipt database without creating one. Repo-local
+    /// commands use this to detect first-contact op-id reuse without
+    /// initializing a store that may never record a bootstrap command.
+    pub fn open_bootstrap_existing(directory: impl AsRef<Path>) -> Result<Option<Self>> {
+        let path = directory.as_ref().join("operation-receipts.sqlite3");
+        if !path.try_exists()? {
+            return Ok(None);
+        }
+        Self::open_bootstrap(directory).map(Some)
     }
     fn notify_committed(&self) -> Result<()> {
         if let Some(path) = &self.change_marker {
@@ -1171,6 +1197,52 @@ mod tests {
             repo.reserve(operation, "capture", hash)
                 .expect("independent scope"),
             DedupOutcome::Reserved
+        );
+    }
+
+    #[test]
+    fn open_bootstrap_existing_is_side_effect_free_when_absent() {
+        let directory = TempDir::new().expect("home");
+        let bootstrap = directory.path().join("bootstrap/scope");
+        assert!(
+            OperationDedupStore::open_bootstrap_existing(&bootstrap)
+                .expect("probe")
+                .is_none()
+        );
+        assert!(
+            !bootstrap.exists(),
+            "probe must not create the bootstrap directory"
+        );
+    }
+
+    #[test]
+    fn parallel_open_bootstrap_serializes_wal_init() {
+        use std::sync::{Arc, Barrier};
+
+        let temp = TempDir::new().unwrap();
+        let bootstrap = temp.path().join("bootstrap");
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let bootstrap = bootstrap.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                OperationDedupStore::open_bootstrap(&bootstrap)
+            }));
+        }
+        for handle in handles {
+            handle
+                .join()
+                .expect("open_bootstrap thread")
+                .expect("concurrent bootstrap open must not fail on WAL init");
+        }
+        let store = OperationDedupStore::open_bootstrap(&bootstrap).expect("reopen");
+        assert_eq!(store.len().expect("count"), 0);
+        assert!(
+            OperationDedupStore::open_bootstrap_existing(&bootstrap)
+                .expect("existing probe")
+                .is_some()
         );
     }
 
