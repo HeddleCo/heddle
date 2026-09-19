@@ -1176,6 +1176,24 @@ impl RecoveryAdvice {
         )
     }
 
+    /// Missing or unreachable hosted spool on push (resolve miss / no parent).
+    #[cfg(feature = "client")]
+    pub fn hosted_spool_not_found(spool: &str) -> Self {
+        let spool = verbs::redact_internal_hosted_paths(spool);
+        Self::safety_refusal(
+            "hosted_spool_not_found",
+            format!("Hosted spool '{spool}' was not found"),
+            format!(
+                "A host-only push (`heddle push https://<host>`) creates a spool under your personal spool. To push to '{spool}', create the parent first, then retry."
+            ),
+            format!("no reachable hosted spool exists at '{spool}'"),
+            "push needs an existing destination spool, or a parent the caller can create under",
+            "local Heddle state, Git refs, remote configuration, and worktree files were left unchanged",
+            "heddle push".to_string(),
+            vec!["heddle push".to_string(), "heddle whoami".to_string()],
+        )
+    }
+
     #[cfg(feature = "client")]
     pub fn remote_pull_failed(
         remote_thread: &str,
@@ -1619,5 +1637,17 @@ mod tests {
             vec!["heddle pull", "heddle verify"]
         );
         assert!(!advice.hint.contains("git fetch"));
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_spool_not_found_names_the_spool_and_points_at_host_only_or_parent() {
+        let advice = RecoveryAdvice::hosted_spool_not_found("spool/acme/nested/child");
+        assert_eq!(advice.kind, "hosted_spool_not_found");
+        assert!(advice.error.contains("spool/acme/nested/child"));
+        assert!(advice.hint.contains("host-only"));
+        assert!(advice.hint.contains("personal spool"));
+        assert!(advice.hint.contains("create the parent first"));
+        assert_eq!(advice.primary_command, "heddle push");
     }
 }

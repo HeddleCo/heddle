@@ -17,6 +17,8 @@ use hosted_client::client::HostedClient;
 use hosted_client::client::LocalSync;
 #[cfg(feature = "client")]
 use hosted_client::client::{HostedAuthMode, HostedSession};
+#[cfg(feature = "client")]
+use hosted_client::hosted_runtime::hosted::canonicalize_spool_path;
 use objects::object::ThreadName;
 use repo::{Repository, RepositoryCapability};
 use sley::{
@@ -1420,6 +1422,7 @@ async fn push_network_connected(
     }
 
     let repo_path = auto_provision_hosted_repo(repo, client, &options).await?;
+    let map_missing_spool = |err: anyhow::Error| map_hosted_push_lookup_error(&repo_path, err);
 
     // --all-threads (heddle#838) on the NATIVE hosted path fans out one push
     // per pushable thread. The Git-backed projection path (the #846 default)
@@ -1455,7 +1458,8 @@ async fn push_network_connected(
         &progress,
         options.cli.operation_id_wire(),
     )
-    .await?;
+    .await
+    .map_err(map_missing_spool)?;
     clear_line(&progress);
 
     // Write path for hosted discussions (heddle discuss): the pushed state(s)
@@ -1565,6 +1569,11 @@ async fn push_network_connected(
             }
         }
         HostedPushResult::Failed(failure) => {
+            if let PushFailure::RemoteFailed { error, .. } = &failure
+                && hosted_error_text_is_unresolved_spool(error)
+            {
+                return Err(anyhow!(RecoveryAdvice::hosted_spool_not_found(&repo_path)));
+            }
             return Err(map_push_failure(failure));
         }
     }
@@ -1657,6 +1666,25 @@ async fn push_network_all_threads(
         )
         .await;
         match outcome {
+            Err(err) => {
+                let mapped = map_hosted_push_lookup_error(repo_path, err);
+                if mapped
+                    .downcast_ref::<RecoveryAdvice>()
+                    .is_some_and(|advice| advice.kind == "hosted_spool_not_found")
+                {
+                    return Err(mapped);
+                }
+                let error = transport_error_message(Some(&mapped.to_string()));
+                failures.push((thread.name.clone(), error.clone()));
+                if !json {
+                    let event = multi_ref_thread_failed(thread.name.clone(), Some(&error));
+                    eprintln!(
+                        "{} {}",
+                        style::warn_marker(),
+                        format_multi_ref_push_progress(&event)
+                    );
+                }
+            }
             Ok(result) => {
                 let fields = HostedPushResultFields {
                     success: result.success,
@@ -1695,6 +1723,11 @@ async fn push_network_all_threads(
                         }
                     }
                     HostedPushResult::Failed(failure) => {
+                        if let PushFailure::RemoteFailed { error, .. } = &failure
+                            && hosted_error_text_is_unresolved_spool(error)
+                        {
+                            return Err(anyhow!(RecoveryAdvice::hosted_spool_not_found(repo_path)));
+                        }
                         let err = match failure {
                             PushFailure::RemoteFailed { error, .. } => error,
                             other => other.to_string(),
@@ -1710,18 +1743,6 @@ async fn push_network_all_threads(
                             );
                         }
                     }
-                }
-            }
-            Err(err) => {
-                let error = transport_error_message(Some(&err.to_string()));
-                failures.push((thread.name.clone(), error.clone()));
-                if !json {
-                    let event = multi_ref_thread_failed(thread.name.clone(), Some(&error));
-                    eprintln!(
-                        "{} {}",
-                        style::warn_marker(),
-                        format_multi_ref_push_progress(&event)
-                    );
                 }
             }
         }
@@ -1748,28 +1769,25 @@ async fn auto_provision_hosted_repo(
     client: &mut HostedClient,
     options: &PushNetworkOptions<'_>,
 ) -> Result<String> {
-    if let Some(path) = options.repo_path.filter(|path| !path.is_empty()) {
-        return Ok(path.to_string());
-    }
     let user_spool = client.get_current_user_spool().await?;
-    let full_path = format!(
-        "{}/{}",
-        user_spool.full_path,
-        default_spool_slug_from_repo_root(repo.root())?
-    );
-    let Some(relative_path) = full_path
-        .strip_prefix(&user_spool.full_path)
-        .and_then(|path| path.strip_prefix('/'))
-    else {
-        // Root inference needs authoritative ownership metadata. Until weft
-        // exposes it, do not mistake a discoverable root for an owned root or
-        // silently redirect an explicit destination into another namespace.
-        return Ok(full_path);
+    let explicit_path = options.repo_path.filter(|path| !path.is_empty());
+    let (parent, relative_path, destination) = match explicit_path {
+        None => {
+            let slug = default_spool_slug_from_repo_root(repo.root())?;
+            let destination = format!("{}/{}", user_spool.full_path, slug);
+            (user_spool.full_path.clone(), slug, destination)
+        }
+        Some(path) => match plan_hosted_push_provision(path, &user_spool.full_path)? {
+            HostedPushProvision::UseExisting(path) => return Ok(path),
+            HostedPushProvision::Create {
+                parent,
+                relative,
+                destination,
+            } => (parent, relative, destination),
+        },
     };
-    let provisioned_repo = provision_personal_hosted_path(
-        &user_spool.full_path,
-        relative_path,
-        async |parent, slug, leaf| {
+    let provisioned_repo =
+        provision_personal_hosted_path(&parent, &relative_path, async |parent, slug, leaf| {
             let id = if leaf {
                 repo.native_spool_id()
                     .map_err(|error| ProtocolError::InvalidState(error.to_string()))?
@@ -1779,15 +1797,9 @@ async fn auto_provision_hosted_repo(
             client
                 .create_spool_with_id(parent, slug, leaf, None, id)
                 .await
-        },
-    )
-    .await
-    .map_err(|err| {
-        map_push_failure(remote_push_failure(
-            options.track_name,
-            Some(&auto_provision_create_error_message(&full_path, &err)),
-        ))
-    })?;
+        })
+        .await
+        .map_err(|err| map_auto_provision_error(&destination, options.track_name, &err))?;
 
     let configured_remote = persist_auto_provisioned_remote(
         repo,
@@ -1796,10 +1808,12 @@ async fn auto_provision_hosted_repo(
         provisioned_repo.full_path(),
     )?;
 
-    if !should_output_json(options.cli, Some(repo.config())) {
+    let announce = explicit_path.is_none()
+        || matches!(provisioned_repo, AutoProvisionedHostedRepo::Created(_));
+    if announce && !should_output_json(options.cli, Some(repo.config())) {
         let display_full_path = hosted_spool_display_path(
             user_spool.display_name.as_deref().unwrap_or_default(),
-            relative_path,
+            &relative_path,
             provisioned_repo.full_path(),
         );
         println!(
@@ -1829,6 +1843,177 @@ async fn auto_provision_hosted_repo(
     }
 
     Ok(provisioned_repo.into_full_path())
+}
+
+/// Where a pathed hosted push should CreateSpool from.
+#[cfg(feature = "client")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HostedPushProvision {
+    /// Create `relative` (and missing ancestors) under `parent`.
+    Create {
+        parent: String,
+        relative: String,
+        destination: String,
+    },
+    /// Root-level or already-complete path: do not auto-create.
+    UseExisting(String),
+}
+
+/// Split a typed hosted destination into a resolved parent + remainder.
+///
+/// Host-only push is handled separately (personal spool + local folder name).
+/// A pathed URL creates missing descendants under the first path segment that
+/// names a spool (`spool/<a>/…` or `<a>/…`), the same CreateSpool walk host-only
+/// uses for the leaf. Root-level paths (`spool/<a>`) are not auto-created.
+#[cfg(feature = "client")]
+fn plan_hosted_push_provision(
+    typed_path: &str,
+    personal_root: &str,
+) -> std::result::Result<HostedPushProvision, ProtocolError> {
+    let destination = canonical_hosted_destination(typed_path)?;
+    if let Some(relative) = relative_under_root(&destination, personal_root) {
+        if relative.is_empty() {
+            return Ok(HostedPushProvision::UseExisting(
+                personal_root.trim().trim_matches('/').to_string(),
+            ));
+        }
+        let parent = personal_root.trim().trim_matches('/').to_string();
+        let destination = format!("{parent}/{relative}");
+        return Ok(HostedPushProvision::Create {
+            parent,
+            relative,
+            destination,
+        });
+    }
+    match split_resolved_parent(&destination) {
+        None => Ok(HostedPushProvision::UseExisting(destination)),
+        Some((parent, relative)) => {
+            let destination = format!("{parent}/{relative}");
+            Ok(HostedPushProvision::Create {
+                parent,
+                relative,
+                destination,
+            })
+        }
+    }
+}
+
+#[cfg(feature = "client")]
+fn canonical_hosted_destination(typed: &str) -> std::result::Result<String, ProtocolError> {
+    let trimmed = typed.trim().trim_matches('/');
+    if trimmed == "__users" || trimmed.starts_with("__users/") {
+        if trimmed
+            .split('/')
+            .any(|component| matches!(component, "" | "." | ".."))
+        {
+            return Err(ProtocolError::InvalidState(
+                "hosted spool path must contain nonempty names, without '.' or '..'".to_string(),
+            ));
+        }
+        return Ok(trimmed.to_string());
+    }
+    canonicalize_spool_path(trimmed)
+}
+
+#[cfg(feature = "client")]
+fn relative_under_root(path: &str, root: &str) -> Option<String> {
+    if let Some(relative) = strip_child_prefix(path, root) {
+        return Some(relative.to_string());
+    }
+    let path_rest = path.strip_prefix("spool/").unwrap_or(path);
+    let root_rest = root.strip_prefix("spool/").unwrap_or(root);
+    if path_rest == path && root_rest == root {
+        return None;
+    }
+    strip_child_prefix(path_rest, root_rest).map(str::to_string)
+}
+
+#[cfg(feature = "client")]
+fn strip_child_prefix<'a>(path: &'a str, root: &str) -> Option<&'a str> {
+    let path = path.trim().trim_matches('/');
+    let root = root.trim().trim_matches('/');
+    if root.is_empty() {
+        return None;
+    }
+    if path == root {
+        return Some("");
+    }
+    path.strip_prefix(root)?.strip_prefix('/')
+}
+
+/// First real spool is the parent; remaining segments are created under it.
+/// `spool/` and `__users/` are namespace prefixes, not parent spools.
+#[cfg(feature = "client")]
+fn split_resolved_parent(path: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    let namespace = matches!(parts.first().copied(), Some("spool" | "__users"));
+    let parent_len = if namespace { 2 } else { 1 };
+    if parts.len() <= parent_len {
+        return None;
+    }
+    Some((parts[..parent_len].join("/"), parts[parent_len..].join("/")))
+}
+
+#[cfg(feature = "client")]
+fn map_auto_provision_error(
+    destination: &str,
+    track_name: &str,
+    err: &ProtocolError,
+) -> anyhow::Error {
+    let parent_missing = is_hosted_spool_unresolved(err)
+        || matches!(err, ProtocolError::ObjectNotFound(_))
+        || matches!(
+            err,
+            ProtocolError::RemoteFailure {
+                code: wire::RemoteFailureCode::NotFound,
+                ..
+            }
+        );
+    if parent_missing {
+        anyhow!(RecoveryAdvice::hosted_spool_not_found(destination))
+    } else {
+        map_push_failure(remote_push_failure(
+            track_name,
+            Some(&auto_provision_create_error_message(destination, err)),
+        ))
+    }
+}
+
+#[cfg(feature = "client")]
+fn map_hosted_push_lookup_error(spool: &str, err: anyhow::Error) -> anyhow::Error {
+    let unresolved = err.chain().any(|cause| {
+        cause
+            .downcast_ref::<ProtocolError>()
+            .is_some_and(is_hosted_spool_unresolved)
+            || hosted_error_text_is_unresolved_spool(&cause.to_string())
+    });
+    if unresolved {
+        anyhow!(RecoveryAdvice::hosted_spool_not_found(spool))
+    } else {
+        err
+    }
+}
+
+#[cfg(feature = "client")]
+fn is_hosted_spool_unresolved(err: &ProtocolError) -> bool {
+    match err {
+        ProtocolError::ObjectNotFound(message) => hosted_error_text_is_unresolved_spool(message),
+        ProtocolError::RemoteFailure {
+            code: wire::RemoteFailureCode::NotFound,
+            message,
+            ..
+        } => hosted_error_text_is_unresolved_spool(message) || message.is_empty(),
+        ProtocolError::RemoteFailure { message, .. } | ProtocolError::Remote(message) => {
+            hosted_error_text_is_unresolved_spool(message)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(feature = "client")]
+fn hosted_error_text_is_unresolved_spool(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("unavailable or ambiguous") || lower.contains("resource resolution is absent")
 }
 
 /// Create ancestors before the content-bearing spool using the existing RPC.
@@ -2099,6 +2284,155 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn pathed_push_plan_creates_under_personal_and_resolved_parent() {
+        let under_personal =
+            plan_hosted_push_provision("spool/alice/team/nested/repo", "spool/alice")
+                .expect("plan");
+        assert_eq!(
+            under_personal,
+            HostedPushProvision::Create {
+                parent: "spool/alice".into(),
+                relative: "team/nested/repo".into(),
+                destination: "spool/alice/team/nested/repo".into(),
+            }
+        );
+
+        let unprefixed = plan_hosted_push_provision("alice/team/child", "spool/alice")
+            .expect("canonicalize then personal");
+        assert_eq!(
+            unprefixed,
+            HostedPushProvision::Create {
+                parent: "spool/alice".into(),
+                relative: "team/child".into(),
+                destination: "spool/alice/team/child".into(),
+            }
+        );
+
+        let nested_elsewhere =
+            plan_hosted_push_provision("spool/acme/team/child", "spool/alice").expect("plan");
+        assert_eq!(
+            nested_elsewhere,
+            HostedPushProvision::Create {
+                parent: "spool/acme".into(),
+                relative: "team/child".into(),
+                destination: "spool/acme/team/child".into(),
+            }
+        );
+
+        let root_level =
+            plan_hosted_push_provision("spool/acme", "spool/alice").expect("root-level");
+        assert_eq!(
+            root_level,
+            HostedPushProvision::UseExisting("spool/acme".into())
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn pathed_push_creates_nested_spool_and_missing_ancestors() {
+        use std::collections::HashSet;
+
+        let plan = plan_hosted_push_provision("spool/acme/team/nested/repo", "spool/alice")
+            .expect("plan nested dest");
+        let HostedPushProvision::Create {
+            parent, relative, ..
+        } = plan
+        else {
+            panic!("nested pathed push must create under the resolved parent");
+        };
+
+        let mut paths = HashSet::from([parent.clone()]);
+        let mut calls = Vec::new();
+        let provisioned =
+            provision_personal_hosted_path(&parent, &relative, async |parent, slug, kind| {
+                assert!(
+                    paths.contains(parent),
+                    "parent must exist before creating its child"
+                );
+                calls.push((parent.to_string(), slug.to_string(), kind));
+                let full_path = format!("{parent}/{slug}");
+                if !paths.insert(full_path.clone()) {
+                    return Err(ProtocolError::AlreadyExists(full_path));
+                }
+                Ok(wire::HostedSpoolInfo {
+                    spool_id: full_path.clone(),
+                    full_path,
+                    kind: "spool".to_string(),
+                    is_repo: kind,
+                    display_name: None,
+                })
+            })
+            .await
+            .expect("create nested dest and ancestors");
+        assert!(matches!(provisioned, AutoProvisionedHostedRepo::Created(_)));
+        assert_eq!(provisioned.full_path(), "spool/acme/team/nested/repo");
+        assert_eq!(
+            calls,
+            [
+                ("spool/acme".into(), "team".into(), false),
+                ("spool/acme/team".into(), "nested".into(), false),
+                ("spool/acme/team/nested".into(), "repo".into(), true),
+            ]
+        );
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn pathed_push_unreachable_parent_uses_actionable_missing_spool_advice() {
+        let err = ProtocolError::ObjectNotFound("resource is unavailable or ambiguous".into());
+        let mapped = map_auto_provision_error("spool/missing/child", "main", &err);
+        let advice = mapped
+            .downcast_ref::<RecoveryAdvice>()
+            .expect("missing parent must be RecoveryAdvice");
+        assert_eq!(advice.kind, "hosted_spool_not_found");
+        assert!(
+            advice.error.contains("spool/missing/child"),
+            "{}",
+            advice.error
+        );
+        assert!(
+            advice.hint.contains("host-only"),
+            "hint must mention host-only push: {}",
+            advice.hint
+        );
+        assert!(
+            advice.hint.contains("personal spool"),
+            "hint must mention personal spool: {}",
+            advice.hint
+        );
+        assert!(
+            advice.hint.contains("create the parent first"),
+            "hint must say to create the parent: {}",
+            advice.hint
+        );
+
+        let lookup = map_hosted_push_lookup_error("spool/missing/child", anyhow::Error::new(err));
+        let lookup_advice = lookup
+            .downcast_ref::<RecoveryAdvice>()
+            .expect("resolve miss must be RecoveryAdvice");
+        assert_eq!(lookup_advice.kind, "hosted_spool_not_found");
+        assert!(!lookup_advice.error.contains("object not found"));
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn pathed_push_parent_denial_keeps_create_access_error() {
+        let err = ProtocolError::AuthorizationFailed("missing grant".into());
+        let mapped = map_auto_provision_error("spool/acme/child", "main", &err);
+        let advice = mapped
+            .downcast_ref::<RecoveryAdvice>()
+            .expect("create denial is still RecoveryAdvice");
+        assert_eq!(advice.kind, "remote_push_failed");
+        assert!(
+            advice.error.contains("Check access to the parent spool")
+                || advice.error.contains("could not create hosted spool"),
+            "{}",
+            advice.error
+        );
+    }
 
     #[cfg(feature = "client")]
     #[tokio::test]

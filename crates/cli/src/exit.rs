@@ -100,6 +100,7 @@ impl HeddleExitCode {
             // an IO failure.
             "remote_not_configured"
             | "remote_not_found"
+            | "hosted_spool_not_found"
             | "repository_not_found"
             | "hosted_tls_trust"
             | "auth_login_invite_required" => Some(Self::Config),
@@ -524,6 +525,7 @@ mod tests {
         for (kind, expected) in [
             ("remote_not_configured", HeddleExitCode::Config),
             ("remote_not_found", HeddleExitCode::Config),
+            ("hosted_spool_not_found", HeddleExitCode::Config),
             ("repository_not_found", HeddleExitCode::Config),
             ("hosted_tls_trust", HeddleExitCode::Config),
             ("clone_invalid_remote_url", HeddleExitCode::DataErr),
