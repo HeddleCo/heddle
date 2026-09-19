@@ -8,7 +8,8 @@ use super::{
     limits::{MAX_COMPACT_COUNT, MIN_TREE_ENTRY_BYTES, MIN_TREE_ITEM_BYTES},
 };
 use crate::object::{
-    ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeScheme,
+    ContentHash, EntryType, FileMode, SpoolId, StateId, Tree, TreeEntry, TreeEntryTarget,
+    TreeScheme,
 };
 
 const TREE_MAGIC: &[u8; 4] = b"HCT1";
@@ -133,19 +134,19 @@ fn decode_tree(input: &mut Reader<'_>) -> Result<Tree> {
 }
 
 fn encode_target(output: &mut Writer, entry: &TreeEntry) {
-    match entry.entry_type() {
-        EntryType::Blob | EntryType::Tree | EntryType::Symlink => {
-            output.put_fixed(entry.require_content_hash().as_bytes());
+    match entry.target() {
+        TreeEntryTarget::Blob { hash, .. }
+        | TreeEntryTarget::Tree { hash }
+        | TreeEntryTarget::Symlink { hash } => {
+            output.put_fixed(hash.as_bytes());
         }
-        EntryType::Gitlink => {
-            let target = entry.gitlink_target().expect("gitlink target");
+        TreeEntryTarget::Gitlink { target } => {
             output.put_u8(git_format_tag(target.format()));
             output.put_fixed(target.as_bytes());
         }
-        EntryType::Spoollink => {
-            let (spool, state) = entry.spoollink_target().expect("spoollink target");
-            output.put_bytes(spool.as_str().as_bytes());
-            output.put_fixed(state.as_bytes());
+        TreeEntryTarget::Spoollink { spool_id, state_id } => {
+            output.put_bytes(spool_id.as_str().as_bytes());
+            output.put_fixed(state_id.as_bytes());
         }
     }
 }
@@ -197,18 +198,13 @@ fn decode_entry(
 }
 
 fn target_len(entry: &TreeEntry) -> usize {
-    match entry.entry_type() {
-        EntryType::Blob | EntryType::Tree | EntryType::Symlink => 32,
-        EntryType::Gitlink => {
-            1 + entry
-                .gitlink_target()
-                .expect("gitlink target")
-                .as_bytes()
-                .len()
-        }
-        EntryType::Spoollink => {
-            let (spool, _) = entry.spoollink_target().expect("spoollink target");
-            varint_len(spool.as_str().len()) + spool.as_str().len() + 32
+    match entry.target() {
+        TreeEntryTarget::Blob { .. }
+        | TreeEntryTarget::Tree { .. }
+        | TreeEntryTarget::Symlink { .. } => 32,
+        TreeEntryTarget::Gitlink { target } => 1 + target.as_bytes().len(),
+        TreeEntryTarget::Spoollink { spool_id, .. } => {
+            varint_len(spool_id.as_str().len()) + spool_id.as_str().len() + 32
         }
     }
 }
