@@ -25,11 +25,11 @@ pub fn everyday_verbs() -> Vec<&'static str> {
 /// Head-of-list contract: the locked everyday verbs lead `heddle help`,
 /// ordered by contract help_rank. Everything else on the screen follows
 /// ranked by the same key. Umbrella nouns do not count as one; this is
-/// display order, not a fold of the live parser to these 23.
+/// display order, not a fold of the live parser to this curated surface.
 pub const LOCKED_EVERYDAY_VERBS: &[&str] = &[
-    "init", "clone", "status", "diff", "capture", "start", "ready", "land", "undo", "pull", "push",
-    "resolve", "continue", "log", "show", "query", "review", "discuss", "context", "whoami",
-    "daemon", "doctor", "help",
+    "init", "clone", "import", "status", "diff", "capture", "start", "ready", "land", "undo",
+    "pull", "push", "resolve", "continue", "log", "show", "query", "review", "discuss", "context",
+    "whoami", "daemon", "doctor", "help",
 ];
 
 /// The ranked first-screen list. Head: the locked everyday verbs in
@@ -98,7 +98,7 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "Start here: `heddle init`, `heddle clone`, or `heddle capture`."
+        "Start here: `heddle init`, `heddle clone`, `heddle import`, or `heddle capture`."
     );
     let _ = writeln!(
         out,
@@ -719,7 +719,7 @@ uses an ephemeral Git repository when it needs to translate native state; it
 does not retain a second object warehouse in `.heddle/git`.
 
 Use `heddle init` to add that sidecar to an existing Git checkout. Use
-`heddle adopt` when you want one atomic transition that imports source history,
+`heddle import local` when you want one atomic transition that imports source history,
 makes Heddle the repository authority, and enables the full native feature set.
 
 Common mappings:
@@ -738,7 +738,7 @@ Common mappings:
 Heddle intentionally does not reproduce the full Git command surface. An
 optional Git-compatible client can perform unsupported Git operations against
 the same `.git`; it is not a Heddle dependency. Explicit `bridge git import`,
-`bridge git export`, and `sync git` translate data between authorities. After `heddle adopt`,
+`bridge git export`, and `sync git` translate data between authorities. After `heddle import local`,
 the retained `.git` is an explicit Git Projection adapter; it no longer selects
 repository source authority.
 "#;
@@ -1001,7 +1001,7 @@ Recover or prove state:
 State-specific recovery:
 
     Worktree has unsaved edits: heddle capture -m "..."
-    Move atomically to the full Native Heddle feature set: heddle adopt --ref <branch>
+    Move atomically to the full Native Heddle feature set: heddle import local --ref <branch>
 "#;
 
 const GIT_PROJECTION_TOPIC: &str = r#"Git Projection — translate between Native Heddle and Git.
@@ -1013,7 +1013,7 @@ operates on that repository directly and normal operation never reads or creates
 
 Move an existing Git repository to Native Heddle atomically:
 
-    heddle adopt --ref <branch>
+    heddle import local --ref <branch>
 
 Translate explicitly without changing source authority:
 
@@ -1421,7 +1421,7 @@ mod tests {
 
         let projection = topic_text("git-projection").expect("git-projection topic should exist");
         assert!(projection.contains("It is not Git Overlay"));
-        assert!(projection.contains("heddle adopt --ref <branch>"));
+        assert!(projection.contains("heddle import local --ref <branch>"));
         assert!(projection.contains("heddle bridge git export --destination"));
         assert!(projection.contains("normal operation never reads or creates"));
         assert!(projection.contains("`.heddle/git`"));

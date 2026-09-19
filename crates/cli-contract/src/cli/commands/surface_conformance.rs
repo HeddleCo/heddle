@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 
 use clap::Command;
 
-use crate::cli::INIT_VERB;
+use crate::cli::{IMPORT_VERB, INIT_VERB};
 
 /// Closed-world roots the current parser may expose. This is not the
 /// heddle#473 destination (~23 everyday verbs; umbrella nouns do not
@@ -16,7 +16,6 @@ use crate::cli::INIT_VERB;
 /// gate; reserved names stay listed so they cannot appear silently.
 pub const CANONICAL_ROOT_COMMANDS: &[&str] = &[
     "abort",
-    "adopt",
     "agent",
     "auth",
     "blame",
@@ -30,6 +29,7 @@ pub const CANONICAL_ROOT_COMMANDS: &[&str] = &[
     "discuss",
     "doctor",
     "help",
+    IMPORT_VERB,
     INIT_VERB,
     "integration",
     "land",

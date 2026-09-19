@@ -1173,7 +1173,7 @@ impl PushFailure {
                 "Add a remote with `heddle remote add <name> <url>`, inspect remotes with `heddle remote list`, or choose one with `heddle remote set-default <name>`. Ad-hoc targets are supported without configuration: `heddle push <remote>` accepts a remote name, URL, local path, or hosted address positionally.".to_string()
             }
             Self::Preflight(RemotePreflightBlocker::TransportMismatch) => {
-                "Use a Heddle-native remote here, or clone/adopt that Git remote in a Git-overlay checkout.".to_string()
+                "Use a Heddle-native remote here, or clone/import that Git remote in a Git-overlay checkout.".to_string()
             }
             Self::Preflight(RemotePreflightBlocker::GitOverlayThreadMismatch {
                 requested, ..
@@ -1266,7 +1266,7 @@ impl PullFailure {
                 "Add a remote with `heddle remote add <name> <url>`, inspect remotes with `heddle remote list`, or choose one with `heddle remote set-default <name>`. Ad-hoc targets are supported without configuration: `heddle pull <remote>` accepts a remote name, URL, local path, or hosted address positionally.".to_string()
             }
             Self::Preflight(RemotePreflightBlocker::TransportMismatch) => {
-                "Use a Heddle-native remote here, or clone/adopt that Git remote in a Git-overlay checkout.".to_string()
+                "Use a Heddle-native remote here, or clone/import that Git remote in a Git-overlay checkout.".to_string()
             }
             Self::Preflight(RemotePreflightBlocker::GitOverlayThreadMismatch { .. }) => {
                 "Switch to the attached thread, or omit an explicit mismatched thread name.".to_string()

@@ -32,6 +32,7 @@ const COMPACT_ALLOWED_KEYS: &[&str] = &[
     "conflicts",
     "conflict_count",
     "state_id",
+    "operation_id",
 ];
 
 /// Decision-surface keys for a compact *error* envelope. Same recovery
@@ -88,6 +89,8 @@ pub(crate) struct CompactOutput {
     /// they have a single current state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
 }
 
 impl CompactOutput {
@@ -104,6 +107,7 @@ impl CompactOutput {
             conflicts: None,
             conflict_count: None,
             state_id: None,
+            operation_id: None,
         }
     }
 }

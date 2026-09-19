@@ -1052,7 +1052,7 @@ hard gate and clears the weighted score thresholds.
 
 Release thresholds:
 
-- Everyday commands must score **A or better**: `init`, `adopt`, `status`,
+- Everyday commands must score **A or better**: `init`, `import local`, `status`,
   `verify`, `start`, `capture`, `log`, `show`, `diff`, `ready`,
   `land`, `resolve`, `undo`, `thread`, `doctor`, `help`, `version`.
   Git projection commands, including `import git`, `export git`, and `sync git`, must meet the
@@ -1070,7 +1070,7 @@ Any hard-gate failure caps the affected command at **F**, regardless of weighted
 score. A global hard-gate failure blocks release.
 
 1. **No `git` executable dependency in Git-overlay mode.** With `PATH` stripped
-   of `git`, supported overlay workflows must still work: init/adopt, status,
+   of `git`, supported overlay workflows must still work: init/import, status,
    verify, clone from local/bare repos where implemented, log/show/diff, capture,
    merge, and fsck. Explicit Git projection workflows such as `import git`, `export git`, and
    `sync git` have their own projection gates. Production CLI
@@ -2108,7 +2108,7 @@ fixed corpus:
 | `heddle status` | 10 k tracked files, clean tree | <TBD: maintainer> ms |
 | `heddle capture` | 100 changed files | <TBD: maintainer> ms |
 | `heddle log --oneline -n 1000` | 10 k-state history | <TBD: maintainer> ms |
-| `heddle adopt --ref <branch>` | linux.git head | <TBD: maintainer> s |
+| `heddle import local --ref <branch>` | linux.git head | <TBD: maintainer> s |
 | Snapshot 1 000 small files | synthetic | <TBD: maintainer> ms |
 
 Tradeoffs:
@@ -2738,7 +2738,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 - `PlainGitImportHint` is deleted as a null-only sidecar; public `status` and `doctor` JSON no longer emits legacy `git_overlay_import_hint` sidecars. Internal callers may still compute import-hint data for text/advice until the core verification migration absorbs it.
 - Useful observe-only plain-Git context belongs in a shared core `PlainGitProbe`: root, active branch, dirty/index summary, commit/ref shape, and recommended setup action.
-- Existing committed plain-Git repositories recommend `heddle adopt --ref <branch>` or `heddle adopt`; unborn Git recommends `heddle init`.
+- Existing committed plain-Git repositories recommend `heddle import local --ref <branch>` or `heddle import local`; unborn Git recommends `heddle init`.
 
 ### Public JSON And Actions
 
@@ -2774,10 +2774,10 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 - The persistent `.heddle/git` Bridge Mirror is removed from the current runtime.
 - No current-format flow creates or reads `.heddle/git`.
-- Public `bridge git` commands are retired in favor of `adopt`, `import git`, `export git`, and top-level remote verbs routed by remote capability.
+- Public `bridge git` commands are retired in favor of `import local`, `import git`, `export git`, and top-level remote verbs routed by remote capability.
 - `bridge git init` is removed; it exists to initialize the persistent mirror that the target model deletes.
 - Legacy bridge status is removed from public UX; useful diagnostics move into `verify`, `fsck`, import/export dry-runs, or explicit diagnostics.
-- `import git` becomes `import git`; `export git` becomes `export git`. `adopt` remains the friendly existing-checkout onboarding path.
+- `import git` becomes `import git`; `export git` becomes `export git`. `import local` remains the friendly existing-checkout onboarding path.
 - `bridge git push` / `pull` are removed in favor of top-level `push` / `pull`; `bridge git sync` is removed in favor of `sync git` for explicit bidirectional Git projection.
 - `export git` must require an explicit destination or named remote target. It must not create hidden repo-local Git state.
 - `import git` and `export git` expose their current JSON contracts without restoring bridge-git UX.
@@ -2840,7 +2840,7 @@ migration, reporting, and maintenance are deleted.
 - `verify` proves and recommends; it must not mutate Git Projection Mapping or Raw Git Object Residuals unless an explicit repair mode is requested.
 - `fsck` owns integrity checks and repair flows for Git Projection Mapping and Raw Git Object Residuals.
 - The Git repair mode may synthesize missing Git Projection Mapping only when a Heddle state match or Git note/provenance link proves the mapping unambiguously. It must not guess.
-- Opposite-direction repair is refused without mutation and points to `adopt` or `import git`, which make the authority change or import explicit.
+- Opposite-direction repair is refused without mutation and points to `import local` or `import git`, which make the authority change or import explicit.
 - The Git repair mode never consults `.heddle/git`; old repositories are converted offline before this runtime opens them.
 - Metadata-only Git repair is allowed in dirty worktrees. Any repair that would write real `.git` refs, index, or worktree state requires clean verification or explicit confirmation.
 - Normal user output should not expose Git Projection Mapping internals. Verbose, fsck, import/export dry-run, and diagnostics can.
@@ -2892,7 +2892,7 @@ migration, reporting, and maintenance are deleted.
 
 Keep these tests until their replacement track has landed:
 
-- Plain-Git observe/adopt/init loop tests; they protect the `init` versus `adopt` split.
+- Plain-Git observe/adopt/init loop tests; they protect the `init` versus `import local` split.
 - Negative regressions proving no current-format flow creates `.heddle/git`.
 - Machine-contract integration tests; they become proof that core receives command-catalog coverage rather than hardcoded counters.
 - Checkpoint guidance tests; `checkpoint` is an advanced primitive, not legacy.
@@ -2973,7 +2973,7 @@ A clean verification report means all applicable dimensions agree:
 | Machine contract | Command catalog, JSON error envelopes, op-id metadata, schema introspection, docs drift, and schema coverage agree. `available_with_doc_gaps` is currently non-blocking. | `machine_contract_gaps` / `schema_gaps`, command contract drift, schema validation failures. |
 | Generated and ignored artifacts | Heddle auto-ignores only its own `.heddle/` metadata. Everything else is ignored only when the repo explicitly says so. In Git-overlay mode, `.gitignore` is the preferred source of ignored-worktree truth; `.heddleignore` is reserved for Heddle-specific or native-Heddle excludes. | Unignored generated output is ordinary worktree dirt; large captures/deletions require explicit force; redaction/purge flows must name the ignore file that Heddle will actually consult. |
 | Persona/output contract | TTY text is human-facing, piped/explicit JSON is machine-facing, and both carry the same next action semantics. | Prose on JSON stdout, missing error envelopes, stale help/schema metadata, narrow/no-color output that hides the action. |
-| Clone/adoption | Git checkout and Heddle mapping agree after clone/adoption. | Clone verification blocked by any verification blocker above. |
+| Clone/adoption | Git checkout and Heddle mapping agree after clone/importion. | Clone verification blocked by any verification blocker above. |
 
 ## Precedence
 
@@ -2991,7 +2991,7 @@ repair and ready work from being hidden by `heddle push`.
 flowchart TD
     A["Command asks for repository verification"] --> B{"Plain Git without .heddle?"}
     B -- yes --> C{"Git HEAD has commits?"}
-    C -- yes --> D["needs_init: exact heddle adopt command; observe-only"]
+    C -- yes --> D["needs_init: exact heddle import local command; observe-only"]
     C -- no --> E["needs_init/no_commits: initialize with heddle init; observe-only"]
     B -- no --> F{"Git overlay enabled?"}
     F -- no --> G["Native Heddle proof"]
@@ -3023,7 +3023,7 @@ flowchart TD
 | Command family | Gate |
 |---|---|
 | Observe-only commands | `status`, strict `verify`, `doctor`, `thread list/show`, `log`, `show`, `diff`, `help`, and `schemas` may probe plain Git, but must not create `.heddle`, write refs, or change `git status --short`. Blocked `verify` exits nonzero and carries the proof in the JSON error envelope. |
-| First-run adoption | `adopt` is the guided path that initializes Heddle, imports Git branch tips, and returns post-adoption verification. Plain Git with one active branch recommends `heddle adopt --ref <branch>`; multi-ref repos may recommend `heddle adopt`; unborn Git recommends `heddle init`. `init` leaves project files untouched, may protect only Heddle metadata with local Git excludes in Git-overlay mode, does not install `.heddleignore`, does not add broad generated-noise patterns, and exposes `needs_import` until adoption/import completes. |
+| First-run adoption | `import local` is the guided path that initializes Heddle, imports Git branch tips, and returns post-adoption verification. Plain Git with one active branch recommends `heddle import local --ref <branch>`; multi-ref repos may recommend `heddle import local`; unborn Git recommends `heddle init`. `init` leaves project files untouched, may protect only Heddle metadata with local Git excludes in Git-overlay mode, does not install `.heddleignore`, does not add broad generated-noise patterns, and exposes `needs_import` until adoption/import completes. |
 | Active branch import | Mutating commands that could capture, checkpoint, move refs, materialize work, or claim up-to-date must refuse while the active Git branch needs import or mapping repair. |
 | Side-branch import | Missing side-branch tips are surfaced as available import work, but do not make the current checkout unverified and must not replace the active repair action. |
 | Tag import and marker agreement | Git tags visible to the checkout must map to Heddle markers. Missing markers report `tags_need_import`; disagreeing or unmapped markers report `tag_marker_mismatch`. Both are current hard blockers because tag names are user-facing refs, not optional side-branch hints. |
@@ -3091,7 +3091,7 @@ the new behavior.
   active Git branch advances outside Heddle (`git_branch_advanced`), the report
   states how far it moved ("N out-of-band git commits detected", with an
   `out_of_band_commit_count` detail) and the recovery is the one-line manual
-  `heddle adopt --ref <branch>`. Auto-reconcile-on-read is deliberately not
+  `heddle import local --ref <branch>`. Auto-reconcile-on-read is deliberately not
   implemented: observe-only read paths (`status`, `verify`, `doctor`,
   `status`) must not mutate repository state, and the explicit
   adoption/repair step keeps an auditable record of when external Git history entered
@@ -6498,7 +6498,7 @@ them.
 
 ---
 
-## `heddle adopt --output json`
+## `heddle import local --output json`
 
 One-command Git adoption. Initializes Heddle sidecar data when needed,
 imports the requested Git refs, atomically moves Repository Source Authority to
@@ -6509,7 +6509,7 @@ native Heddle, and returns the post-adoption verification proof. The existing
 
 ```json
 {
-  "output_kind": "adopt",
+  "output_kind": "import_local",
   "adopted": true,
   "initialized": true,
   "path": "/repo/.heddle",
@@ -6540,7 +6540,7 @@ native Heddle, and returns the post-adoption verification proof. The existing
 
 Canonical surface for Git Overlay and native Heddle state. Plain Git first-run
 flows recommend `heddle init`; Git Overlay reconciliation uses explicit
-`heddle bridge git import ...`; `heddle adopt` is the explicit authority transition.
+`heddle bridge git import ...`; `heddle import local` is the explicit authority transition.
 
 `verification` is the public proof block. Legacy `git_overlay_import_hint`
 and `git_overlay_health` sidecars are internal render data, not public JSON
@@ -6908,7 +6908,7 @@ State detail view, pretty-printed.
     {
       "name": "support/git-only",
       "git_commit": "9fceb02",
-      "recommended_action": "heddle adopt --ref support/git-only"
+      "recommended_action": "heddle import local --ref support/git-only"
     }
   ],
   "current": "feature/parser-fast",
@@ -7024,8 +7024,8 @@ set should filter the returned `commands` array by `display`, `tier`,
 | `recommended_action_templates` | array<object> | required | Structured fillable forms for display-only recommended actions. Agents may fill templates only when `agent_may_fill` is true. When `agent_may_fill` is false, treat `action`/`argv_template` as display-only: do not substitute `<name>`/`<url>` placeholders; surface the template to a human or discard it. Substituting and running it will pass literal `<name>` to Heddle and fail. |
 
 `command_action` is the per-command action contract. For example, `push`
-advertises executable argv `["/path/to/heddle", "push"]`, while `adopt`
-advertises the fillable template `["/path/to/heddle", "adopt", "--ref",
+advertises executable argv `["/path/to/heddle", "push"]`, while `import local`
+advertises the fillable template `["/path/to/heddle", "import", "local", "--ref",
 "<branch>"]` and `land` advertises `["/path/to/heddle", "land", "--thread",
 "<thread>"]`.
 Agents should execute `argv` directly and fill `template.argv_template`

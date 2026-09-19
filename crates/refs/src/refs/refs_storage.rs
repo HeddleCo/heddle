@@ -224,7 +224,7 @@ impl RefManager {
     /// Staging + fsync is done in one overlapped-writeback batch by
     /// [`stage_temp_files_durable`](objects::fs_atomic::stage_temp_files_durable)
     /// so publishing N refs pays ~1 fsync barrier's worth of latency instead of
-    /// N serial ones (the `heddle adopt` bulk-ref hot path).
+    /// N serial ones (the `heddle import local` bulk-ref hot path).
     pub(super) fn alloc_temp_path(&self, path: &Path) -> Result<PathBuf> {
         let parent = path
             .parent()

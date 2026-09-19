@@ -70,8 +70,8 @@ fn public_git_import_streams_progress_and_clones_exact_head() {
     let operation_id = uuid::Uuid::new_v4().to_string();
     let output = Command::new(env!("CARGO_BIN_EXE_heddle"))
         .args([
-            "remote",
-            "import-source",
+            "import",
+            "url",
             &source_url,
             "--to",
             &destination,
@@ -90,27 +90,18 @@ fn public_git_import_streams_progress_and_clones_exact_head() {
         "source import failed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let records: Vec<serde_json::Value> = String::from_utf8(output.stdout)
-        .expect("UTF-8 JSONL")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("ImportSource JSON event"))
-        .collect();
-    let running: Vec<u64> = records
-        .iter()
-        .filter(|record| record["state"] == "running")
-        .filter_map(|record| record["completed_units"].as_u64())
-        .collect();
+    let record: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("finite import URL JSON result");
     assert!(
-        running.windows(2).any(|pair| pair[1] > pair[0]),
-        "expected rising intermediate RUNNING progress, got {running:?}"
-    );
-    assert!(records.iter().any(|record| {
         record["state"] == "completed"
             && record["terminal"] == true
+            && record["operation_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
             && record["results"]
                 .as_array()
                 .is_some_and(|rows| !rows.is_empty())
-    }));
+    );
 
     let clone_root = tempfile::tempdir().expect("clone root");
     let clone_home = tempfile::tempdir().expect("fresh clone HEDDLE_HOME");
@@ -141,8 +132,8 @@ fn unreachable_public_git_source_is_a_failed_operation() {
     let operation_id = uuid::Uuid::new_v4().to_string();
     let output = Command::new(env!("CARGO_BIN_EXE_heddle"))
         .args([
-            "remote",
-            "import-source",
+            "import",
+            "url",
             "https://github.com/octocat/heddle-import-source-missing.git",
             "--to",
             &destination,

@@ -1131,7 +1131,7 @@ pub fn import_git_into_scoped_with_options_and_progress(
 /// For ordinary Git commits the tip is translated as a Heddle root because its
 /// Git parents have not been mapped. A portable Heddle export note instead
 /// preserves its embedded source State and parent identities exactly; a later
-/// full [`import_git_into`] / `heddle adopt` validates and materializes that
+/// full [`import_git_into`] / `heddle import local` validates and materializes that
 /// graph. The mapping always records the real Git OID for later export.
 ///
 /// Returns the mapped Heddle state id for `git_sha`. Idempotent when the tip

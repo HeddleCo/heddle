@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Wire payloads for `clone`, `adopt`, `remote add/remove/set-default`,
+//! Wire payloads for `clone`, `import`, `remote add/remove/set-default`,
 //! `pull`, and `push`.
 
 use std::path::PathBuf;
@@ -38,9 +38,9 @@ pub struct CloneOutput {
     pub trust: Option<RepositoryVerificationState>,
 }
 
-/// JSON payload for `heddle adopt`.
+/// JSON payload for `heddle import local`.
 #[derive(Serialize, JsonSchema)]
-#[schemars(rename = "AdoptSchema")]
+#[schemars(rename = "ImportLocalSchema")]
 pub struct AdoptOutput {
     pub output_kind: &'static str,
     pub status: &'static str,
@@ -77,17 +77,18 @@ pub struct RemoteMutationOutput {
     pub trust: RepositoryVerificationState,
 }
 
-/// One committed operation update from `remote import-source`.
-///
-/// JSON mode is a stream of these records, including the terminal update.
+/// One committed hosted import operation update.
 #[derive(Serialize, JsonSchema)]
-#[schemars(rename = "ImportSourceOutput")]
-pub struct ImportSourceOutput {
+#[schemars(rename = "ImportOperationOutput")]
+pub struct ImportOperationOutput {
     pub output_kind: &'static str,
     pub event: &'static str,
-    pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
     pub destination: String,
-    pub thread: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+    pub operation_id: String,
     pub client_operation_id: String,
     pub state: String,
     pub completed_units: u64,
@@ -97,6 +98,29 @@ pub struct ImportSourceOutput {
     pub results: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure: Option<String>,
+}
+
+/// Finite result returned after an explicit import retry is admitted.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "ImportRetryOutput")]
+pub struct ImportRetryOutput {
+    pub output_kind: &'static str,
+    pub action: &'static str,
+    pub status: &'static str,
+    pub success: bool,
+    pub destination: String,
+    pub original_operation_id: String,
+    pub operation_id: String,
+    pub client_operation_id: String,
+}
+
+#[derive(Serialize, JsonSchema, Clone, Debug, PartialEq, Eq)]
+pub struct PushReplicationOutcome {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// JSON payload for `heddle pull`: the verbs [`PullOutcome`] body beside
@@ -121,6 +145,10 @@ pub struct PushOutput {
     pub next_action_template: Option<ActionTemplate>,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplate>,
+    pub source: PushReplicationOutcome,
+    pub discussions: PushReplicationOutcome,
+    pub context: PushReplicationOutcome,
+    pub reviews: PushReplicationOutcome,
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
 }

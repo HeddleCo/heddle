@@ -94,6 +94,14 @@ pub fn run_local_idempotency_if_requested(
         return Err(anyhow!(RecoveryAdvice::op_id_unsupported(command_name)));
     }
 
+    let local_idempotency = crate::cli::commands::command_runtime_contract(command_name)
+        .is_some_and(|contract| {
+            contract.targets_current_repository || contract.uses_bootstrap_op_id_store
+        });
+    if !local_idempotency {
+        return Ok(LocalIdempotencyOutcome::Continue);
+    }
+
     let bootstrap_store = uses_bootstrap_op_id_store(command_name);
     let normalized_args = normalized_argv_for_op_id();
     let bootstrap_scope = if bootstrap_store {
@@ -344,7 +352,13 @@ struct BootstrapOpIdScope {
 fn bootstrap_op_id_scope(cli: &Cli) -> Result<BootstrapOpIdScope> {
     let root = match &cli.command {
         crate::cli::Commands::Init(args) => args.path.clone().or_else(|| cli.repo.clone()),
-        crate::cli::Commands::Adopt(args) => args.path.clone().or_else(|| cli.repo.clone()),
+        crate::cli::Commands::Import(args) => match &args.command {
+            crate::cli::ImportCommands::Local(local) => {
+                local.path.clone().or_else(|| cli.repo.clone())
+            }
+            #[cfg(feature = "client")]
+            _ => cli.repo.clone(),
+        },
         // Clone destinations normally don't exist yet, so feeding the
         // raw string into the hasher (and relying on the canonicalize
         // fallback) lets two different cwds with `./repo` collide in

@@ -10,6 +10,7 @@ use super::commands_git_projection::SyncCommands;
 /// registry. A second `"init"` literal can still compile; pairing is
 /// checked in tests, not by the type system.
 pub const INIT_VERB: &str = "init";
+pub const IMPORT_VERB: &str = "import";
 
 /// Arguments for the `init` command.
 #[derive(Clone, Debug, clap::Args)]
@@ -53,21 +54,21 @@ impl InitArgs {
     pub const VERB: &'static str = INIT_VERB;
 }
 
-/// Arguments for the `adopt` command.
+/// Arguments for `heddle import local`.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle adopt                                # adopt all local Git refs into native Heddle storage
-  heddle adopt --ref main                     # adopt one branch or tag
-  heddle adopt ../repo --ref main --ref v1.0  # adopt selected refs in another repo
+  heddle import local                                # import all local Git refs into native Heddle storage
+  heddle import local --ref main                     # import one branch or tag
+  heddle import local ../repo --ref main --ref v1.0  # import selected refs in another repo
 
-Adoption imports Git refs, makes Heddle the source authority, and retains `.git` for explicit Git Projection. Normal Git Overlay setup uses `heddle init` instead.
+Importing locally makes Heddle the source authority and retains `.git` for explicit Git Projection. Normal Git Overlay setup uses `heddle init` instead.
 ")]
-pub struct AdoptArgs {
-    /// Git repository to adopt into native Heddle storage (default: current directory).
+pub struct ImportLocalArgs {
+    /// Git repository to import into native Heddle storage (default: current directory).
     pub path: Option<std::path::PathBuf>,
 
-    /// Git branch or tag to adopt. Repeat for selected refs; omit to adopt all refs.
+    /// Git branch or tag to import. Repeat for selected refs; omit to import all refs.
     #[arg(long = "ref", value_name = "REF")]
     pub refs: Vec<String>,
 }

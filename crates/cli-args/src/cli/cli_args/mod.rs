@@ -15,6 +15,7 @@ mod commands_env;
 #[cfg(feature = "git-overlay")]
 mod commands_git_projection;
 mod commands_hook;
+mod commands_import;
 mod commands_integration;
 mod commands_main;
 mod commands_oplog;
@@ -36,20 +37,21 @@ pub use commands_agent::{
     PresenceCommands,
 };
 pub use commands_args::{
-    AdoptArgs, AgentApiListArgs, AgentCaptureArgs, AgentFanoutPlanArgs, AgentFanoutStartArgs,
+    AgentApiListArgs, AgentCaptureArgs, AgentFanoutPlanArgs, AgentFanoutStartArgs,
     AgentHeartbeatArgs, AgentPresenceCompleteArgs, AgentPresenceExplainArgs, AgentPresenceListArgs,
     AgentPresenceShowArgs, AgentProvenanceBeginArgs, AgentProvenanceEndArgs,
     AgentProvenanceListArgs, AgentProvenanceSegmentArgs, AgentProvenanceShowArgs, AgentReadyArgs,
     AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs, AgentTaskCreateArgs,
     AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg, AgentTaskUpdateArgs, CloneArgs,
     CollapseArgs, DiffArgs, DiffBaseArg, DoctorArgs, DoctorCommands, DoctorDocsArgs, ExpandArgs,
-    INIT_VERB, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs,
-    SnapshotArgs, SyncArgs, ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs,
-    ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs,
-    ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs,
-    ThreadShowArgs, ThreadStartArgs, TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs,
-    TimelineRecordStartArgs, TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs,
-    TimelineStatusArgs, TimelineTargetArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
+    IMPORT_VERB, INIT_VERB, ImportLocalArgs, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs,
+    ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadAbsorbArgs,
+    ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs,
+    ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs,
+    ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TimelineCommands,
+    TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs, TimelineRecordToolArgs,
+    TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, UndoArgs,
+    WatchArgs, WorkspaceModeArg,
 };
 #[cfg(feature = "ci")]
 pub use commands_ci::{CiCommands, CiRunArgs};
@@ -73,6 +75,9 @@ pub use commands_env::{EnvCommands, EnvCreateArgs, EnvListArgs, EnvRunArgs};
 #[cfg(feature = "git-overlay")]
 pub use commands_git_projection::{BridgeCommands, BridgeGitCommands, GitSource, SyncCommands};
 pub use commands_hook::{HookCommands, HookInstallSource};
+pub use commands_import::{ImportArgs, ImportCommands};
+#[cfg(feature = "client")]
+pub use commands_import::{ImportOperationArgs, ImportUrlArgs};
 pub use commands_integration::{
     IntegrationCommands, IntegrationInstallArgs, IntegrationRelayArgs, IntegrationStampArgs,
     IntegrationTargetArgs,
@@ -87,8 +92,6 @@ pub use commands_redact::{
     PurgeApplyArgs, PurgeCommands, PurgeListArgs, RedactApplyArgs, RedactCommands, RedactListArgs,
     RedactShowArgs,
 };
-#[cfg(feature = "client")]
-pub use commands_remote::ImportSourceArgs;
 pub use commands_remote::RemoteCommands;
 pub use commands_review::{
     ReviewCommands, ReviewHealthArgs, ReviewNextArgs, ReviewShowArgs, ReviewSignArgs, SignKindArg,

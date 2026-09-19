@@ -11,6 +11,7 @@ use wire::ProtocolError;
 use super::{HostedClient, operation_id::ClientOperationId};
 
 const IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/ImportSource";
+const RETRY_IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/RetryImportSource";
 
 /// Stable identities minted for one accepted hosted source import.
 #[derive(Clone, Debug)]
@@ -18,6 +19,14 @@ pub struct ImportSourceStart {
     pub client_operation_id: String,
     pub destination: contract::SpoolRef,
     pub thread: contract::ThreadRef,
+    pub operation: contract::RecordRef,
+}
+
+/// Durable operation created by an explicit retry.
+#[derive(Clone, Debug)]
+pub struct ImportOperationStart {
+    pub client_operation_id: String,
+    pub destination: contract::SpoolRef,
     pub operation: contract::RecordRef,
 }
 
@@ -162,6 +171,149 @@ impl HostedClient {
             "hosted source import observation ended before a terminal state".into(),
         ))
     }
+
+    /// Observe a durable import operation by its record ID.
+    pub async fn observe_import_operation(
+        &self,
+        destination_path: &str,
+        operation_id: &str,
+        follow: bool,
+        mut on_progress: impl FnMut(&contract::OperationRecord) -> Result<(), ProtocolError>,
+    ) -> Result<contract::OperationRecord, ProtocolError> {
+        let overview = self.native_spool_overview(destination_path).await?;
+        let destination = overview.r#ref.ok_or_else(|| {
+            ProtocolError::InvalidState("hosted import destination identity is absent".into())
+        })?;
+        let operation = contract::RecordRef {
+            spool: Some(destination.clone()),
+            id: operation_id.to_string(),
+        };
+        self.observe_operation(&destination, &operation, None, follow, &mut on_progress)
+            .await
+    }
+
+    /// Submit the API's explicit retry against the exact observed version.
+    pub async fn retry_import_source(
+        &self,
+        original: &contract::OperationRecord,
+        caller_operation_id: impl Into<String>,
+    ) -> Result<ImportOperationStart, ProtocolError> {
+        let operation_id =
+            ClientOperationId::caller_or_fresh(RETRY_IMPORT_SOURCE, caller_operation_id);
+        let request = retry_import_source_request(original, operation_id.to_wire())?;
+        let original_ref = request.original_operation.as_ref().ok_or_else(|| {
+            ProtocolError::InvalidState("original import operation reference is absent".into())
+        })?;
+        let destination = original_ref.spool.clone().ok_or_else(|| {
+            ProtocolError::InvalidState("original import destination identity is absent".into())
+        })?;
+        let remote = self.native().await.map_err(protocol_error)?;
+        let response: contract::MutationResponse = self
+            .call_unary(RETRY_IMPORT_SOURCE, &request)
+            .await
+            .map_err(super::helpers::hosted_to_protocol_error)?;
+        let pending_operation = require_pending_receipt(
+            response.receipt,
+            operation_id.as_str(),
+            &remote.description.endpoint,
+            &destination,
+            "hosted source import retry",
+        )?;
+        Ok(ImportOperationStart {
+            client_operation_id: operation_id.to_wire(),
+            destination,
+            operation: pending_operation,
+        })
+    }
+
+    async fn observe_operation(
+        &self,
+        destination: &contract::SpoolRef,
+        operation: &contract::RecordRef,
+        client_operation_id: Option<&str>,
+        follow: bool,
+        on_progress: &mut impl FnMut(&contract::OperationRecord) -> Result<(), ProtocolError>,
+    ) -> Result<contract::OperationRecord, ProtocolError> {
+        let remote = self.native().await.map_err(protocol_error)?;
+        let mut observation = remote
+            .observe::<rpc::OperationServiceObserveOperations>(
+                contract::ObserveOperationsRequest {
+                    spools: vec![destination.clone()],
+                    operations: vec![operation.clone()],
+                    client_operation_ids: client_operation_id
+                        .map(|id| vec![id.to_string()])
+                        .unwrap_or_default(),
+                    observe: Some(contract::ObserveOptions {
+                        mode: if follow {
+                            contract::ObservationMode::Follow as i32
+                        } else {
+                            contract::ObservationMode::Once as i32
+                        },
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(protocol_error)?;
+        let mut latest = None;
+        while let Some(batch) = observation.next_commit().await.map_err(protocol_error)? {
+            for change in batch.changes {
+                let contract::operation_event::Payload::Operation(record) = change else {
+                    continue;
+                };
+                if record.r#ref.as_ref() != Some(operation)
+                    || client_operation_id
+                        .is_some_and(|id| record.client_operation_id.as_str() != id)
+                {
+                    return Err(ProtocolError::InvalidState(
+                        "operation stream returned another hosted source import".into(),
+                    ));
+                }
+                on_progress(&record)?;
+                let terminal = is_terminal_state(record.state);
+                latest = Some(record);
+                if follow && terminal {
+                    observation.cancel();
+                    return latest.ok_or_else(|| {
+                        ProtocolError::InvalidState("import operation observation was empty".into())
+                    });
+                }
+            }
+        }
+        latest.ok_or_else(|| {
+            ProtocolError::ObjectNotFound("hosted import operation was not found".into())
+        })
+    }
+}
+
+fn retry_import_source_request(
+    original: &contract::OperationRecord,
+    client_operation_id: String,
+) -> Result<contract::RetryImportSourceRequest, ProtocolError> {
+    let original_operation = original.r#ref.clone().ok_or_else(|| {
+        ProtocolError::InvalidState("original import operation reference is absent".into())
+    })?;
+    if original.version.is_empty() {
+        return Err(ProtocolError::InvalidState(
+            "original import operation version is absent".into(),
+        ));
+    }
+    Ok(contract::RetryImportSourceRequest {
+        client_operation_id,
+        original_operation: Some(original_operation),
+        expected_operation_version: original.version.clone(),
+    })
+}
+
+fn is_terminal_state(state: i32) -> bool {
+    matches!(
+        contract::operation_record::State::try_from(state),
+        Ok(contract::operation_record::State::Completed
+            | contract::operation_record::State::Failed
+            | contract::operation_record::State::Canceled)
+    )
 }
 
 fn require_pending_receipt(
@@ -260,6 +412,26 @@ mod tests {
                 .expect("pending receipt"),
             operation
         );
+    }
+
+    #[test]
+    fn retry_request_uses_the_observed_record_and_version() {
+        let original = contract::OperationRecord {
+            r#ref: Some(contract::RecordRef {
+                spool: Some(contract::SpoolRef {
+                    id: "spool-1".into(),
+                }),
+                id: "durable-operation".into(),
+            }),
+            version: vec![7; 32],
+            state: contract::operation_record::State::Failed as i32,
+            ..Default::default()
+        };
+        let request = retry_import_source_request(&original, "request-id".into())
+            .expect("valid retry request");
+        assert_eq!(request.client_operation_id, "request-id");
+        assert_eq!(request.original_operation, original.r#ref);
+        assert_eq!(request.expected_operation_version, vec![7; 32]);
     }
 
     #[tokio::test]

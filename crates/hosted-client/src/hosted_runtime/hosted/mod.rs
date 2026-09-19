@@ -77,7 +77,7 @@ pub(crate) use descriptor_trust::{descriptor_trust_path, insert_verified_pin};
 pub use error::HostedError;
 pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 pub use hydration::register_hosted_factory;
-pub use import_source::ImportSourceStart;
+pub use import_source::{ImportOperationStart, ImportSourceStart};
 use iroh::{Endpoint, EndpointAddr};
 use objects::{NoopWarnings, Warning, WarningSink};
 use prost::Message;

@@ -90,7 +90,7 @@ fn adopted_git_overlay() -> TempDir {
     std::fs::write(dir.join("a.txt"), "hello\n").expect("write a.txt");
     git(&["add", "a.txt"], dir);
     git(&["commit", "-qm", "init"], dir);
-    heddle_output(&["adopt"], Some(dir)).expect("heddle adopt");
+    heddle_output(&["import", "local"], Some(dir)).expect("heddle import local");
     heddle_output(&["bridge", "git", "import", "--ref", "main"], Some(dir))
         .expect("heddle bridge git import");
     temp

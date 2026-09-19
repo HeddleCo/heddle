@@ -31,7 +31,7 @@ fn git_overlay_guide_is_concise_and_actionable() {
     assert!(
         help.contains("Worktree has unsaved edits")
             && help.contains("Move atomically to the full Native Heddle feature set")
-            && help.contains("heddle adopt --ref <branch>"),
+            && help.contains("heddle import local --ref <branch>"),
         "guide should name concrete recovery states instead of vague Git/Heddle disagreement: {help}"
     );
     assert!(
@@ -81,7 +81,7 @@ fn git_projection_help_topic_distinguishes_native_projection_from_overlay() {
         "git projection topic should open with the workflow, not advanced notes metadata: {help}"
     );
     for needle in [
-        "heddle adopt --ref <branch>",
+        "heddle import local --ref <branch>",
         "heddle bridge git import --path <git-repository> --ref <branch>",
         "heddle bridge git export --destination <bare-git-repository>",
         "heddle sync git --path <git-repository>",
@@ -114,7 +114,7 @@ fn bridge_git_import_help_names_the_explicit_git_importer() {
 
 #[test]
 fn adopt_help_does_not_claim_dirty_git_worktree_becomes_clean() {
-    let help = heddle_help(&["adopt", "--help"]);
+    let help = heddle_help(&["import", "local", "--help"]);
     assert!(
         help.contains("makes Heddle the source authority")
             && help.contains("retains `.git` for explicit Git Projection")
@@ -1620,16 +1620,30 @@ fn op_id_replays_first_contact_init_adopt_and_clone() {
     let adopt_op_id = objects::object::OperationId::new().to_string();
     let adopt_first = json_value(
         git_repo.path(),
-        &["--output", "json", "--op-id", &adopt_op_id, "adopt"],
+        &[
+            "--output",
+            "json",
+            "--op-id",
+            &adopt_op_id,
+            "import",
+            "local",
+        ],
     );
-    assert_eq!(adopt_first["action"], "adopt");
+    assert_eq!(adopt_first["action"], "import");
     assert_eq!(adopt_first["op_id"], adopt_op_id);
     assert_eq!(adopt_first["idempotency_status"], "executed");
     let adopt_replay = json_value(
         git_repo.path(),
-        &["--output", "json", "--op-id", &adopt_op_id, "adopt"],
+        &[
+            "--output",
+            "json",
+            "--op-id",
+            &adopt_op_id,
+            "import",
+            "local",
+        ],
     );
-    assert_eq!(adopt_replay["action"], "adopt");
+    assert_eq!(adopt_replay["action"], "import");
     assert_eq!(adopt_replay["idempotency_status"], "replayed");
 
     let source = TempDir::new().unwrap();
@@ -1682,10 +1696,10 @@ fn bootstrap_op_ids_are_scoped_to_first_contact_repo_path() {
     let first_adopt = json_value(
         first.path(),
         &[
-            "--output", "json", "--op-id", op_id, "adopt", "--ref", "main",
+            "--output", "json", "--op-id", op_id, "import", "local", "--ref", "main",
         ],
     );
-    assert_eq!(first_adopt["action"], "adopt");
+    assert_eq!(first_adopt["action"], "import");
     assert_eq!(first_adopt["op_id"], op_id);
     assert_eq!(first_adopt["idempotency_status"], "executed");
 
@@ -1697,10 +1711,10 @@ fn bootstrap_op_ids_are_scoped_to_first_contact_repo_path() {
     let second_adopt = json_value(
         second.path(),
         &[
-            "--output", "json", "--op-id", op_id, "adopt", "--ref", "main",
+            "--output", "json", "--op-id", op_id, "import", "local", "--ref", "main",
         ],
     );
-    assert_eq!(second_adopt["action"], "adopt");
+    assert_eq!(second_adopt["action"], "import");
     assert_eq!(second_adopt["op_id"], op_id);
     assert_eq!(
         second_adopt["idempotency_status"], "executed",
@@ -1713,7 +1727,8 @@ fn bootstrap_op_ids_are_scoped_to_first_contact_repo_path() {
             "json",
             "--op-id",
             op_id,
-            "adopt",
+            "import",
+            "local",
             "--ref",
             "refs/heads/main",
         ],
@@ -1729,8 +1744,8 @@ fn bootstrap_op_ids_are_scoped_to_first_contact_repo_path() {
         .unwrap_or_else(|err| panic!("conflict should be a JSON envelope: {err}: {stderr}"));
     assert_eq!(parsed["kind"], "op_id_conflict");
     assert_eq!(parsed["op_id"], op_id);
-    assert_eq!(parsed["recorded_command"], "adopt");
-    assert_eq!(parsed["incoming_command"], "adopt");
+    assert_eq!(parsed["recorded_command"], "import local");
+    assert_eq!(parsed["incoming_command"], "import local");
     assert!(
         parsed["dedup_scope"].as_str().is_some_and(
             |scope| scope.contains(second.path().file_name().unwrap().to_str().unwrap())
@@ -1750,9 +1765,9 @@ fn bootstrap_op_id_reused_by_capture_conflicts_before_noop_execution() {
     let op_id = objects::object::OperationId::new().to_string();
     let adopt = json_value(
         temp.path(),
-        &["--output", "json", "--op-id", &op_id, "adopt"],
+        &["--output", "json", "--op-id", &op_id, "import", "local"],
     );
-    assert_eq!(adopt["action"], "adopt");
+    assert_eq!(adopt["action"], "import");
     assert_eq!(adopt["idempotency_status"], "executed");
 
     let conflict = heddle_output(
@@ -1782,7 +1797,7 @@ fn bootstrap_op_id_reused_by_capture_conflicts_before_noop_execution() {
     assert_eq!(parsed["kind"], "op_id_conflict");
     assert_eq!(parsed["op_id"], op_id);
     assert_eq!(parsed["idempotency_status"], "conflict");
-    assert_eq!(parsed["recorded_command"], "adopt");
+    assert_eq!(parsed["recorded_command"], "import local");
     assert_eq!(parsed["incoming_command"], "capture");
     assert_eq!(parsed["recorded_status"], "completed");
 }
@@ -1793,7 +1808,7 @@ fn op_id_replays_export_git() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "export me\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    heddle(&["import", "local"], Some(temp.path())).unwrap();
 
     let export_dest = temp.path().join("export.git");
     let export_dest_arg = export_dest.display().to_string();
@@ -2349,7 +2364,7 @@ fn query_reads_live_oplog_before_operation_index_is_warm() {
 fn core_loop_schemas_are_discoverable() {
     for verb in [
         "init",
-        "adopt",
+        "import local",
         "capture",
         "doctor",
         "doctor docs",
@@ -5501,7 +5516,7 @@ fn verify_plain_git_blocker_text_is_not_redundant() {
     );
 
     let adopt = heddle(
-        &["adopt", "--ref", "main", "--output", "text"],
+        &["import", "local", "--ref", "main", "--output", "text"],
         Some(temp.path()),
     )
     .expect("adopt should render text");
@@ -6430,7 +6445,7 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         );
     }
     // One ranked list: the remaining non-hidden roots render too.
-    for verb in ["thread", "adopt", "verify"] {
+    for verb in ["thread", "import", "verify"] {
         assert!(
             stdout.contains(&format!("\n  {verb}")),
             "non-hidden root `{verb}` should be on the ranked screen: {stdout}"
@@ -6948,26 +6963,29 @@ fn command_catalog_exposes_public_surface_for_agents() {
             .is_some_and(|summary| summary.contains("Import Git commits")),
         "runtime import surface should be exposed by the command catalog: {import_git}"
     );
-    let adopt = commands
+    let local_import = commands
         .iter()
-        .find(|entry| entry["display"] == "adopt")
-        .expect("adopt command should be cataloged");
+        .find(|entry| entry["display"] == "import local")
+        .expect("import local command should be cataloged");
     assert_eq!(
-        adopt["command_action"]["action"],
-        "heddle adopt --ref <branch>"
+        local_import["command_action"]["action"],
+        "heddle import local --ref <branch>"
     );
-    assert_eq!(adopt["command_action"]["executable"], false);
-    assert_eq!(adopt["command_action"]["argv"], Value::Null);
+    assert_eq!(local_import["command_action"]["executable"], false);
+    assert_eq!(local_import["command_action"]["argv"], Value::Null);
     assert_eq!(
-        adopt["command_action"]["template"]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "<branch>"])
+        local_import["command_action"]["template"]["argv_template"],
+        heddle_argv_json(["import", "local", "--ref", "<branch>"])
     );
     assert_eq!(
-        adopt["command_action"]["template"]["required_inputs"],
+        local_import["command_action"]["template"]["required_inputs"],
         serde_json::json!(["branch"])
     );
-    assert_eq!(adopt["command_action"]["template"]["agent_may_fill"], true);
-    for display in ["init", "adopt", "clone"] {
+    assert_eq!(
+        local_import["command_action"]["template"]["agent_may_fill"],
+        true
+    );
+    for display in ["init", "import local", "clone"] {
         let entry = commands
             .iter()
             .find(|entry| entry["display"] == display)
@@ -9804,7 +9822,7 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
             .to_string()
     };
 
-    json_value(temp.path(), &["adopt", "--output", "json"]);
+    json_value(temp.path(), &["import", "local", "--output", "json"]);
     std::fs::write(temp.path().join("tracked.txt"), "heddle side\n").unwrap();
     let capture = heddle_output_with_env(
         &["capture", "-m", "heddle side", "--output", "json"],

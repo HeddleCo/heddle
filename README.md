@@ -35,7 +35,7 @@ In a plain Git repo, observe-only commands do not create `.heddle/`. `heddle sta
 
 Run the exact command printed by `heddle status`. In an existing Git checkout, that is `heddle init`: it creates the `.heddle` sidecar while the real `.git` remains authoritative for commits, trees, refs, packs, index, and worktree state. Heddle stores captures, threads, provenance, discussions, and source mappings in `.heddle`. Those are a native Heddle feature: they travel over `heddle push` / `heddle pull` to a Heddle remote, and are deliberately **not** projected into Git. In a Git Overlay repository, context annotations (`heddle context`) and discussions (`heddle discuss`) are therefore local to that working copy — a collaborator who `git clone`s the repository receives the source history and no Heddle store at all. Its embedded Sley engine powers the thin Git surface — `clone`, `capture`, `pull`, `push`, and `remote` — directly against `.git`. Heddle never requires the `git` executable or retains a second object warehouse at `.heddle/git`; explicit projection composes reconstructable state with Raw Git Object Residuals.
 
-`heddle adopt` atomically imports selected Git refs, makes Heddle the source authority, and enables the full Native Heddle feature set. The retained `.git` is then an explicit Git Projection adapter. Adoption is not required for normal Git Overlay use.
+`heddle import local` atomically imports selected Git refs, makes Heddle the source authority, and enables the full Native Heddle feature set. The retained `.git` is then an explicit Git Projection adapter. Adoption is not required for normal Git Overlay use.
 
 Heddle's CLI follows five operating principles — verification, disposability, composability, restraint, honesty — documented in [docs/PRINCIPLES.md](docs/PRINCIPLES.md).
 
@@ -52,7 +52,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 - Semantic integration by default: `ready`, `land`, and `sync` use AST-item-level merge within a file when built with the default `semantic` feature (first-class Rust/Python/JS/TS; Go/C/C++/Java opt-in); the engine does not auto-rewrite cross-file imports or call-sites
 - Automatic state signing: device-local ed25519 identity minted on first use signs every authored state — provenance with no manual key setup
 - Git overlay: direct `.git` integration, explicit native adoption, import, export, sync
-- Byte-identical Git round-trip, CI-enforced: adopt→export reproduces identical commit/tree/blob/tag SHAs and a valid Git object graph, gated per-PR by 10 deterministic fixtures
+- Byte-identical Git round-trip, CI-enforced: import local→export reproduces identical commit/tree/blob/tag SHAs and a valid Git object graph, gated per-PR by 10 deterministic fixtures
 - Multi-agent worktrees and agent registry
 
 ### Foundation in place
@@ -111,7 +111,7 @@ heddle init --principal-name "Ada Lovelace" --principal-email ada@example.com
 heddle capture -m "start project"
 ```
 
-In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`. `heddle capture` saves Heddle metadata and provenance in `.heddle` and writes the matching Git checkpoint through Sley as one operation. `pull`, `push`, and `remote` also use Sley directly. A capture includes the complete worktree and replaces the Git index with that tree. Use `heddle adopt` when you want an atomic transition to Heddle-native source authority and its full feature set.
+In a Git checkout, `heddle init` creates the Heddle sidecar and leaves source storage in the checkout's real `.git`. `heddle capture` saves Heddle metadata and provenance in `.heddle` and writes the matching Git checkpoint through Sley as one operation. `pull`, `push`, and `remote` also use Sley directly. A capture includes the complete worktree and replaces the Git index with that tree. Use `heddle import local` when you want an atomic transition to Heddle-native source authority and its full feature set.
 
 ### The verb-by-verb tour
 

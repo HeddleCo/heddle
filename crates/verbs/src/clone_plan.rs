@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pure clone and adopt planning.
 //!
-//! Owns decision logic shared by `heddle clone` and `heddle adopt`:
+//! Owns decision logic shared by `heddle clone` and `heddle import local`:
 //! - destination path validation and absolute-resolution policy
 //! - remote mode selection (local path vs network hosted vs git-overlay URL)
 //! - security preflight flag assembly (no network I/O)

@@ -126,7 +126,10 @@ const SWEPT: &[&str] = &[
     // wire-frozen values that differ from the snake-cased display path —
     // see `output_kind_override`.
     "abort",
-    "adopt",
+    "import local",
+    "import url",
+    "import status",
+    "import retry",
     "agent capture",
     "agent ready",
     "agent task create",
@@ -273,6 +276,7 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
             Some("thread_ownership")
         }
         "start" => Some("thread_start"),
+        "import url" | "import status" => Some("import_operation"),
         // The garbage-collection wrapper emits its inner tool's kind.
         "maintenance gc" => Some("gc"),
         // `redact purge` preserves the pre-consolidation wire values.

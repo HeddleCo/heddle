@@ -17,7 +17,8 @@ use cli::cli::commands::cmd_context_reason_git;
 use cli::cli::commands::cmd_semantic;
 #[cfg(feature = "client")]
 use cli::cli::commands::{
-    cmd_grant, cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami, cmd_promote,
+    cmd_grant, cmd_hosted_auth, cmd_hosted_claim, cmd_hosted_whoami, cmd_import_retry,
+    cmd_import_status, cmd_import_url, cmd_promote,
 };
 #[cfg(feature = "git-overlay")]
 use cli::cli::{
@@ -419,7 +420,17 @@ async fn async_main() -> Result<()> {
     let result = match &cli.command {
         Commands::Init(args) => cmd_init(&cli, args.clone()),
 
-        Commands::Adopt(args) => cmd_adopt(&cli, args.clone()),
+        Commands::Import(args) => match &args.command {
+            cli::cli::ImportCommands::Local(local) => cmd_adopt(&cli, local.clone()),
+            #[cfg(feature = "client")]
+            cli::cli::ImportCommands::Url(url) => cmd_import_url(&cli, url.clone()).await,
+            #[cfg(feature = "client")]
+            cli::cli::ImportCommands::Status(status) => {
+                cmd_import_status(&cli, status.clone()).await
+            }
+            #[cfg(feature = "client")]
+            cli::cli::ImportCommands::Retry(retry) => cmd_import_retry(&cli, retry.clone()).await,
+        },
 
         Commands::Help { topics } => {
             // Curated help printer. No op-id (read-only), no
@@ -912,11 +923,12 @@ fn shutdown_command_telemetry(
 }
 
 /// Check for an existing recovery target without opening or bootstrapping it.
-/// Adopt resolves a destination Git root, so only metadata at that exact root
+/// Local import resolves a destination Git root, so only metadata at that exact root
 /// belongs to the invocation; inheriting an ancestor `.heddle` would let
 /// `Repository::open` create a sidecar before adopt preflight completes.
 fn recovery_target_has_existing_metadata(command: &Commands, start: &Path) -> bool {
-    if matches!(command, Commands::Adopt(_)) {
+    if matches!(command, Commands::Import(args) if matches!(args.command, cli::cli::ImportCommands::Local(_)))
+    {
         return repo::is_heddle_repository_root(start);
     }
     repo::discover_heddle_root(start).is_some()
@@ -1145,17 +1157,21 @@ fn incomplete_land_recovery_start(
         // recovers the selected existing target there. Opening cwd here would
         // violate destination isolation.
         Commands::Init(args) if args.path.is_some() => Ok(None),
-        Commands::Adopt(args) => {
-            let cwd = std::env::current_dir()?;
-            let plan = verbs::plan_adopt(&verbs::AdoptPlanOptions {
-                path: args.path.clone(),
-                repo_flag: cli.repo.clone(),
-                cwd,
-                refs: args.refs.clone(),
-            })
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            Ok(Some(plan.start_path))
-        }
+        Commands::Import(import) => match &import.command {
+            cli::cli::ImportCommands::Local(args) => {
+                let cwd = std::env::current_dir()?;
+                let plan = verbs::plan_adopt(&verbs::AdoptPlanOptions {
+                    path: args.path.clone(),
+                    repo_flag: cli.repo.clone(),
+                    cwd,
+                    refs: args.refs.clone(),
+                })
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                Ok(Some(plan.start_path))
+            }
+            #[cfg(feature = "client")]
+            _ => Ok(None),
+        },
         _ if !contract.targets_current_repository => Ok(None),
         _ => Ok(Some(match &cli.repo {
             Some(path) => path.clone(),
