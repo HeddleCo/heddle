@@ -45,6 +45,12 @@ pub(crate) struct SpoolMutationCapture {
     pub native_deletes: Vec<v2::DeleteSpoolRequest>,
 }
 
+#[derive(Default)]
+pub(crate) struct ImportSourceCapture {
+    pub requests: Vec<v2::ImportSourceRequest>,
+    pub observations: Vec<v2::ObserveOperationsRequest>,
+}
+
 fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
     let bytes = hex::decode(OWNER_GENESIS_FIXTURE_HEX).expect("published v2 fixture hex");
     SignedSpoolOwnerGenesis::decode(bytes.as_slice()).expect("published v2 fixture genesis")
@@ -73,7 +79,7 @@ pub(crate) struct ContextFixture {
 }
 
 pub async fn start() -> (HostedClient, JoinHandle<()>) {
-    start_inner(None, None, None, None, None, None).await
+    start_inner(None, None, None, None, None, None, None).await
 }
 
 #[cfg(test)]
@@ -81,7 +87,7 @@ pub(crate) async fn start_with_collaboration(
     fixture: CollaborationFixture,
 ) -> (HostedClient, JoinHandle<()>, CollaborationFixture) {
     let fixture_clone = fixture.clone();
-    let (client, server) = start_inner(None, None, None, None, None, Some(fixture)).await;
+    let (client, server) = start_inner(None, None, None, None, None, Some(fixture), None).await;
     (client, server, fixture_clone)
 }
 
@@ -90,7 +96,7 @@ pub(crate) async fn start_with_context(
     fixture: ContextFixture,
 ) -> (HostedClient, JoinHandle<()>, ContextFixture) {
     let fixture_clone = fixture.clone();
-    let (client, server) = start_inner(None, None, None, None, Some(fixture), None).await;
+    let (client, server) = start_inner(None, None, None, None, Some(fixture), None, None).await;
     (client, server, fixture_clone)
 }
 
@@ -98,8 +104,16 @@ pub(crate) async fn start_with_context(
 pub(crate) async fn start_recording_push()
 -> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<PushRequest>>>) {
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let (client, server) =
-        start_inner(None, None, None, Some(Arc::clone(&captured)), None, None).await;
+    let (client, server) = start_inner(
+        None,
+        None,
+        None,
+        Some(Arc::clone(&captured)),
+        None,
+        None,
+        None,
+    )
+    .await;
     (client, server, captured)
 }
 
@@ -110,8 +124,16 @@ pub(crate) async fn start_recording_create_spool() -> (
     Arc<Mutex<Vec<v2::CreateSpoolRequest>>>,
 ) {
     let captured = Arc::new(Mutex::new(Vec::new()));
-    let (client, server) =
-        start_inner(None, Some(Arc::clone(&captured)), None, None, None, None).await;
+    let (client, server) = start_inner(
+        None,
+        Some(Arc::clone(&captured)),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
     (client, server, captured)
 }
 
@@ -122,8 +144,36 @@ pub(crate) async fn start_recording_spool_mutations() -> (
     Arc<Mutex<SpoolMutationCapture>>,
 ) {
     let captured = Arc::new(Mutex::new(SpoolMutationCapture::default()));
-    let (client, server) =
-        start_inner(None, None, Some(Arc::clone(&captured)), None, None, None).await;
+    let (client, server) = start_inner(
+        None,
+        None,
+        Some(Arc::clone(&captured)),
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    (client, server, captured)
+}
+
+#[cfg(test)]
+pub(crate) async fn start_recording_import_source() -> (
+    HostedClient,
+    JoinHandle<()>,
+    Arc<Mutex<ImportSourceCapture>>,
+) {
+    let captured = Arc::new(Mutex::new(ImportSourceCapture::default()));
+    let (client, server) = start_inner(
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(Arc::clone(&captured)),
+    )
+    .await;
     (client, server, captured)
 }
 
@@ -136,6 +186,7 @@ pub(crate) async fn start_with_remote_state(
             remote_state,
             pack: None,
         }),
+        None,
         None,
         None,
         None,
@@ -161,6 +212,7 @@ pub(crate) async fn start_with_pull_pack(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -179,6 +231,7 @@ struct TestServerState {
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
+    import_source: Option<Arc<Mutex<ImportSourceCapture>>>,
     server_key: Vec<u8>,
     owner: v2::OwnerState,
     grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
@@ -193,6 +246,7 @@ async fn start_inner(
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
+    import_source: Option<Arc<Mutex<ImportSourceCapture>>>,
 ) -> (HostedClient, JoinHandle<()>) {
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
@@ -225,6 +279,7 @@ async fn start_inner(
         push_requests,
         context,
         collaboration,
+        import_source,
         server_key,
         owner,
         grants: Arc::new(Mutex::new(Vec::<v2::GrantRecord>::new())),
@@ -271,6 +326,7 @@ async fn serve_call(
         push_requests,
         context,
         collaboration,
+        import_source,
         server_key,
         owner,
         grants,
@@ -324,6 +380,8 @@ async fn serve_call(
                         "/heddle.api.v1alpha2.CollaborationService/AppendTurn".into(),
                         "/heddle.api.v1alpha2.CollaborationService/ResolveDiscussion".into(),
                         "/heddle.api.v1alpha2.CollaborationService/PutContext".into(),
+                        "/heddle.api.v1alpha2.IntegrationService/ImportSource".into(),
+                        "/heddle.api.v1alpha2.OperationService/ObserveOperations".into(),
                     ],
                     default_read_budget: Some(v2::ReadBudget {
                         max_items: 64,
@@ -482,6 +540,15 @@ async fn serve_call(
                     server_key,
                 )
                 .await;
+            } else if method == "/heddle.api.v1alpha2.IntegrationService/ImportSource" {
+                serve_import_source(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    import_source,
+                )
+                .await;
             } else {
                 send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
                     .await
@@ -521,6 +588,15 @@ async fn serve_call(
                         discussions: live_discussions,
                         operations: live_operations,
                     },
+                )
+                .await;
+            } else if method == "/heddle.api.v1alpha2.OperationService/ObserveOperations" {
+                serve_import_operations(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    import_source,
                 )
                 .await;
             } else {
@@ -789,6 +865,175 @@ async fn serve_native_create_spool(
     .unwrap();
 }
 
+async fn serve_import_source(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    captured: Option<Arc<Mutex<ImportSourceCapture>>>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ImportSourceRequest::decode(frame.body).ok())
+        .expect("native ImportSource request");
+    if let Some(captured) = captured {
+        captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .requests
+            .push(body.clone());
+    }
+    let operation = v2::RecordRef {
+        spool: body.destination.clone(),
+        id: body.client_operation_id.clone(),
+    };
+    let response = v2::MutationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::PendingOperation(operation)),
+            ..Default::default()
+        }),
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_import_operations(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    captured: Option<Arc<Mutex<ImportSourceCapture>>>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveOperationsRequest::decode(frame.body).ok())
+        .expect("native ObserveOperations request");
+    if let Some(captured) = captured {
+        captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .observations
+            .push(body.clone());
+    }
+    let operation_id = body
+        .client_operation_ids
+        .first()
+        .expect("operation ID filter")
+        .clone();
+    let operation = body
+        .operations
+        .first()
+        .expect("operation reference filter")
+        .clone();
+    let destination = body.spools.first().expect("operation Spool filter").clone();
+    let open = v2::OperationEvent {
+        frame: Some(v2::StreamFrame {
+            sequence: 1,
+            body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                source: Some(v2::EndpointRef {
+                    kind: v2::EndpointKind::Weft as i32,
+                    public_key: server_key,
+                }),
+                binding_digest: vec![19; 32],
+                accepted_budget: Some(v2::ReadBudget {
+                    max_items: 64,
+                    max_frame_bytes: 65536,
+                    max_snapshot_bytes: 1048576,
+                }),
+                ..Default::default()
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&open.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let states = [
+        (v2::operation_record::State::Queued, 0),
+        (v2::operation_record::State::Running, 8 * 1024 * 1024),
+        (v2::operation_record::State::Running, 16 * 1024 * 1024),
+        (v2::operation_record::State::Completed, 32 * 1024 * 1024),
+    ];
+    let mut cursor = Vec::new();
+    let mut sequence = 1u64;
+    for (index, (state, completed_units)) in states.into_iter().enumerate() {
+        sequence += 1;
+        let event = v2::OperationEvent {
+            frame: Some(v2::StreamFrame {
+                sequence,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: if index == 0 {
+                        v2::StreamDataKind::Snapshot as i32
+                    } else {
+                        v2::StreamDataKind::Upsert as i32
+                    },
+                })),
+            }),
+            payload: Some(v2::operation_event::Payload::Operation(
+                v2::OperationRecord {
+                    r#ref: Some(operation.clone()),
+                    client_operation_id: operation_id.clone(),
+                    state: state as i32,
+                    completed_units,
+                    total_units: Some(32 * 1024 * 1024),
+                    unit: "bytes".into(),
+                    results: (state == v2::operation_record::State::Completed)
+                        .then(|| v2::EntityRef {
+                            entity: Some(v2::entity_ref::Entity::Spool(destination.clone())),
+                        })
+                        .into_iter()
+                        .collect(),
+                    ..Default::default()
+                },
+            )),
+        };
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+        sequence += 1;
+        let next_cursor = vec![(index + 1) as u8];
+        let checkpoint = v2::OperationEvent {
+            frame: Some(v2::StreamFrame {
+                sequence,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: next_cursor.clone(),
+                    previous_cursor: cursor,
+                    snapshot_complete: index == 0,
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        };
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&checkpoint.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+        cursor = next_cursor;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
 async fn serve_native_create_signup_invitation(
     send: &mut iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
@@ -968,6 +1213,7 @@ async fn serve_native_identity_observation(
                         acting_agent_id: "reviewer-1".into(),
                         agent_provider: "codex".into(),
                         agent_model: "gpt".into(),
+                        thread_control_authority: vec![6; 32],
                         session: Some(v2::SessionRecord {
                             r#ref: Some(v2::RecordRef {
                                 id: uuid::Uuid::from_bytes([13; 16]).to_string(),

@@ -210,7 +210,7 @@ impl HostedClient {
         Ok(threads)
     }
 
-    async fn current_creator_authority(
+    pub(super) async fn current_creator_authority(
         &self,
     ) -> Result<(Uuid, Vec<u8>, Option<String>), ProtocolError> {
         let owner = self.current_owner_state().await?;

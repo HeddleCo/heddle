@@ -77,6 +77,28 @@ pub struct RemoteMutationOutput {
     pub trust: RepositoryVerificationState,
 }
 
+/// One committed operation update from `remote import-source`.
+///
+/// JSON mode is a stream of these records, including the terminal update.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "ImportSourceOutput")]
+pub struct ImportSourceOutput {
+    pub output_kind: &'static str,
+    pub event: &'static str,
+    pub source: String,
+    pub destination: String,
+    pub thread: String,
+    pub client_operation_id: String,
+    pub state: String,
+    pub completed_units: u64,
+    pub total_units: Option<u64>,
+    pub unit: String,
+    pub terminal: bool,
+    pub results: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
+}
+
 /// JSON payload for `heddle pull`: the verbs [`PullOutcome`] body beside
 /// repository verification.
 #[derive(Serialize, JsonSchema)]

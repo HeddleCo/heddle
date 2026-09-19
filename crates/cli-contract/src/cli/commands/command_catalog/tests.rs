@@ -387,6 +387,17 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["remote", "set-default", "origin"],
     ),
     sample(&["remote", "show"], &["remote", "show", "origin"]),
+    #[cfg(feature = "client")]
+    sample(
+        &["remote", "import-source"],
+        &[
+            "remote",
+            "import-source",
+            "https://github.com/octocat/Hello-World.git",
+            "--to",
+            "spool/willow-ibis-8e7264/hello-world",
+        ],
+    ),
     sample(&["resolve"], &["resolve"]),
     sample(&["revert"], &["revert", "HEAD"]),
     sample(&["review", "show"], &["review", "show"]),
@@ -1905,6 +1916,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "remote remove",
             "remote set-default",
             "remote show",
+            "remote import-source",
             "resolve",
             "revert",
             "review show",

@@ -74,6 +74,8 @@ use crate::{
 };
 
 mod remote_ops;
+#[cfg(feature = "client")]
+mod source_import;
 
 // The wire payload lives in cli-contract so the schema registry registers
 // the real serialization type.
@@ -83,6 +85,8 @@ pub(crate) use remote_ops::{
     pull_current_git_overlay_authoritative, resolve_default_remote_name,
     resolved_default_remote_name,
 };
+#[cfg(feature = "client")]
+pub use source_import::cmd_import_source;
 
 /// CLI machine envelope: domain [`PushOutcome`] plus verification next-actions.
 fn push_output_from_outcome(
@@ -2050,6 +2054,34 @@ async fn provision_personal_hosted_path(
         };
     }
     Ok(provisioned)
+}
+
+/// Provision an explicit hosted source-import destination through the same
+/// path planner and CreateSpool walk used by hosted push.
+#[cfg(feature = "client")]
+async fn provision_hosted_source_destination(
+    client: &mut HostedClient,
+    typed_path: &str,
+) -> std::result::Result<(String, bool), ProtocolError> {
+    let personal = client.get_current_user_spool().await?;
+    match plan_hosted_push_provision(typed_path, &personal.full_path)? {
+        HostedPushProvision::UseExisting(path) => Ok((path, false)),
+        HostedPushProvision::Create {
+            parent,
+            relative,
+            destination: _,
+        } => {
+            let provisioned =
+                provision_personal_hosted_path(&parent, &relative, async |parent, slug, leaf| {
+                    client
+                        .create_spool_with_id(parent, slug, leaf, None, uuid::Uuid::now_v7())
+                        .await
+                })
+                .await?;
+            let created = matches!(provisioned, AutoProvisionedHostedRepo::Created(_));
+            Ok((provisioned.into_full_path(), created))
+        }
+    }
 }
 
 #[cfg(feature = "client")]

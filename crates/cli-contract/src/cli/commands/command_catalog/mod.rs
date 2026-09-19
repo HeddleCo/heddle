@@ -2612,6 +2612,43 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
+        &["remote", "import-source"],
+        feature_gated(
+            exits(
+                surface(
+                    json_discriminators(
+                        documented_schemas(
+                            CommandContract {
+                                may_import_git: true,
+                                json_kind: "jsonl",
+                                network_io: true,
+                                ..user_scoped(MUTATION_BASE)
+                            },
+                            &["remote import-source"],
+                        ),
+                        &[json_discriminator(
+                            Some("remote import-source"),
+                            "output_kind",
+                            "import_source",
+                        )],
+                    ),
+                    "source_authority",
+                ),
+                &[
+                    (0, "ok"),
+                    (75, "server or source unreachable; safe to retry"),
+                    (
+                        76,
+                        "source import rejected or failed; inspect the operation failure",
+                    ),
+                    (77, "not authorized to write the destination spool"),
+                    (78, "not authenticated or destination path missing"),
+                ],
+            ),
+            "client",
+        ),
+    ),
+    entry(
         &["resolve"],
         front_door(
             documented_core_report_schema(REF_MUTATION, ResolveReport::CONTRACT),
@@ -4795,6 +4832,8 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             RemoteCommands::Remove { .. } => vec!["remote", "remove"],
             RemoteCommands::SetDefault { .. } => vec!["remote", "set-default"],
             RemoteCommands::Show { .. } => vec!["remote", "show"],
+            #[cfg(feature = "client")]
+            RemoteCommands::ImportSource(_) => vec!["remote", "import-source"],
         },
         #[cfg(feature = "client")]
         Commands::Invite { command, .. } => match command {

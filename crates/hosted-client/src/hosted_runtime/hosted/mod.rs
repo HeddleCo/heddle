@@ -18,6 +18,7 @@ mod error;
 pub(crate) mod helpers;
 mod human;
 mod hydration;
+mod import_source;
 mod native_hydration;
 #[cfg(test)]
 mod native_hydration_tests;
@@ -76,6 +77,7 @@ pub(crate) use descriptor_trust::{descriptor_trust_path, insert_verified_pin};
 pub use error::HostedError;
 pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 pub use hydration::register_hosted_factory;
+pub use import_source::ImportSourceStart;
 use iroh::{Endpoint, EndpointAddr};
 use objects::{NoopWarnings, Warning, WarningSink};
 use prost::Message;

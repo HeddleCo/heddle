@@ -242,6 +242,9 @@ impl CallContextFactory {
         if signer.is_some() && config.authenticated_principal.is_none() {
             return Err(HostedError::SigningIdentityRequired);
         }
+        let signing_identity = signer
+            .as_ref()
+            .map(|signer| Self::device_key_principal(signer.public_key()));
         Ok(Self {
             bearer_capability: config
                 .token
@@ -250,7 +253,11 @@ impl CallContextFactory {
             bearer_grant_envelope: Vec::new(),
             mint_root_attachment: config.mint_root_attachment.clone(),
             signer,
-            signing_identity: config.authenticated_principal.clone(),
+            // Portable v2 request proofs identify the terminal proof key, not
+            // the bearer subject. The server independently derives the
+            // account from the verified Biscuit and binds this identity to its
+            // `device_pop_key` fact.
+            signing_identity,
             timeout: Duration::from_secs(config.timeout_secs.max(1)),
             trace: None,
         })
@@ -358,9 +365,20 @@ impl CallContextFactory {
     }
 
     fn base(&self, method: &str, client_operation_id: String) -> Result<CallContext> {
+        let bearer_capability =
+            match biscuit_auth::UnverifiedBiscuit::from_base64(&self.bearer_capability)
+                .and_then(|token| token.to_vec())
+            {
+                Ok(raw) => raw,
+                Err(_) => self.bearer_capability.clone(),
+            };
         Ok(CallContext {
             deadline: Some(deadline(self.timeout)?),
-            bearer_capability: self.bearer_capability.clone(),
+            // Stored credentials keep the Biscuit's URL-safe base64 text, but
+            // CallContext carries the transport-neutral raw Biscuit bytes.
+            // Native credentials already make this conversion above; generic
+            // unary and streaming calls must use the same wire representation.
+            bearer_capability,
             bearer_proof: self.bearer_proof(method)?,
             request_proof: None,
             human_verification: None,
@@ -629,6 +647,29 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn configured_factory_decodes_a_stored_biscuit_for_the_wire_context() {
+        let authority = biscuit_auth::KeyPair::new();
+        let token = biscuit_auth::Biscuit::builder()
+            .build(&authority)
+            .expect("test Biscuit")
+            .to_base64()
+            .expect("base64 Biscuit");
+        let expected = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+            .and_then(|biscuit| biscuit.to_vec())
+            .expect("raw Biscuit");
+        let signed = CallContextFactory::default()
+            .with_bearer_capability(token.into_bytes())
+            .unary(
+                "/heddle.api.v1alpha2.IntegrationService/ImportSource",
+                &[],
+                uuid::Uuid::now_v7().to_string(),
+            )
+            .expect("wire context");
+
+        assert_eq!(signed.context.bearer_capability, expected);
+    }
+
     #[tokio::test]
     async fn provider_credentials_keep_the_pop_key_without_forwarding_hosted_authority() {
         use api::v2::client::Rpc as _;
@@ -665,6 +706,7 @@ mod tests {
     #[test]
     fn stream_opening_proof_is_bound_to_route_repository_and_identity() {
         let signer = Ed25519Signer::generate().unwrap();
+        let identity = CallContextFactory::device_key_principal(signer.public_key());
         let config = ClientConfig::default()
             .with_token(wire::AuthToken::new("token", "alice"))
             .with_auth_proof_key_pem(signer.to_pem().unwrap())
@@ -685,7 +727,7 @@ mod tests {
             )
             .unwrap();
         let canonical = signing::stream_open_bytes(
-            "principal:alice",
+            &identity,
             "stream-1",
             "/heddle.api.v1alpha2.SyncService/Fetch",
             "acme/widgets",
