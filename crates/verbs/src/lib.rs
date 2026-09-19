@@ -210,7 +210,8 @@ pub use oplog_plan::{
     plan_oplog_recover_status,
 };
 pub use principal::{
-    ResolvedPrincipal, principal_source_display, resolve_principal, resolve_principal_without_repo,
+    ResolvedPrincipal, apply_hosted_principal_fallback, principal_source_display,
+    resolve_principal, resolve_principal_from_context, resolve_principal_without_repo,
 };
 // prove_plan timestamp helpers intentionally not re-exported at crate root (collide with
 // approval_plan::timestamp_secs_u64 / format_unix_secs_label). Use verbs::prove_plan::*.

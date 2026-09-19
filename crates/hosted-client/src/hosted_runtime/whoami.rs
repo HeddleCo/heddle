@@ -131,6 +131,13 @@ fn resolve_capture_actor(start: &std::path::Path) -> Result<CaptureActor> {
         Some(repo) => resolve_principal(&repo, user_config.principal_pair())?,
         None => resolve_principal_without_repo(user_config.principal_pair()),
     };
+    let hosted = super::hosted::hosted_account_principal();
+    let resolved = verbs::apply_hosted_principal_fallback(
+        resolved,
+        hosted
+            .as_ref()
+            .map(|(name, email)| (name.as_str(), email.as_str())),
+    );
     Ok(capture_actor_from_resolved(&resolved))
 }
 

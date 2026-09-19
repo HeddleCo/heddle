@@ -33,7 +33,7 @@ use cli::{
         cli_args::LandArgs,
         commands::{
             LogCommandOptions, SnapshotAgentOverrides, build_command_catalog, cmd_abort, cmd_adopt,
-            cmd_agent, cmd_capture_split, cmd_clone, cmd_complete, cmd_completions,
+            cmd_agent, cmd_blame, cmd_capture_split, cmd_clone, cmd_complete, cmd_completions,
             cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
             cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
             cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
@@ -567,6 +567,10 @@ async fn async_main() -> Result<()> {
 
         Commands::Show { state } => cmd_show(&cli, state.clone()),
 
+        Commands::Blame(args) => {
+            cmd_blame(&cli, args.path.clone(), args.state.clone(), args.context)
+        }
+
         Commands::Diff(DiffArgs {
             from,
             to,
@@ -717,30 +721,8 @@ async fn async_main() -> Result<()> {
         Commands::Whoami { server } => cmd_hosted_whoami(&cli, server.clone()).await,
 
         Commands::Context { command } => match command {
-            ContextCommands::Set(args) => {
-                cmd_context_set(
-                    &cli,
-                    args.resolved_path().map(str::to_owned),
-                    args.target.state.clone(),
-                    args.scope.clone(),
-                    args.kind.clone(),
-                    args.tag.clone(),
-                    args.message.clone(),
-                    args.file.clone(),
-                )
-                .await
-            }
-            ContextCommands::Get(args) => {
-                cmd_context_get(
-                    &cli,
-                    args.target.path.clone(),
-                    args.target.state.clone(),
-                    args.scope.clone(),
-                    args.tag.clone(),
-                    args.r#ref.clone(),
-                )
-                .await
-            }
+            ContextCommands::Set(args) => cmd_context_set(&cli, args).await,
+            ContextCommands::Get(args) => cmd_context_get(&cli, args).await,
             ContextCommands::List(args) => {
                 cmd_context_list(
                     &cli,
@@ -774,30 +756,8 @@ async fn async_main() -> Result<()> {
                 )
                 .await
             }
-            ContextCommands::Supersede(args) => {
-                cmd_context_supersede(
-                    &cli,
-                    args.annotation_id.clone(),
-                    args.target.path.clone(),
-                    args.target.state.clone(),
-                    args.scope.clone(),
-                    args.kind.clone(),
-                    args.tag.clone(),
-                    args.message.clone(),
-                    args.file.clone(),
-                )
-                .await
-            }
-            ContextCommands::Rm(args) => {
-                cmd_context_rm(
-                    &cli,
-                    args.target.path.clone(),
-                    args.target.state.clone(),
-                    args.scope.clone(),
-                    args.all,
-                )
-                .await
-            }
+            ContextCommands::Supersede(args) => cmd_context_supersede(&cli, args).await,
+            ContextCommands::Rm(args) => cmd_context_rm(&cli, args).await,
             ContextCommands::Check(args) => {
                 cmd_context_check(
                     &cli,

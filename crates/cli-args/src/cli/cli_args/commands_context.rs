@@ -53,6 +53,32 @@ pub struct ContextTargetArgs {
     pub state: Option<String>,
 }
 
+/// Explicit `--path` / `--symbol` / `--line` scope, matching `heddle discuss`.
+///
+/// `--scope` remains a hidden deprecated alias for one release.
+#[derive(Clone, Debug, Default, clap::Args)]
+pub struct ContextScopeArgs {
+    /// Anchor symbol. Requires a file `--path`.
+    #[arg(long, conflicts_with = "line")]
+    pub symbol: Option<String>,
+
+    /// Anchor line (1-indexed). Requires a file `--path`.
+    #[arg(long, conflicts_with = "symbol")]
+    pub line: Option<u32>,
+
+    /// Deprecated alias of `--symbol` / `--line`.
+    /// `file`, `symbol:<name>`, or `lines:<start>-<end>`.
+    #[arg(short, long, hide = true, conflicts_with_all = ["symbol", "line"])]
+    pub scope: Option<String>,
+}
+
+impl ContextScopeArgs {
+    /// True when any scope flag, including the deprecated `--scope`, is set.
+    pub fn is_set(&self) -> bool {
+        self.symbol.is_some() || self.line.is_some() || self.scope.is_some()
+    }
+}
+
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum ContextReasonCommands {
@@ -106,9 +132,8 @@ pub struct ContextSetArgs {
     #[command(flatten)]
     pub target: ContextTargetArgs,
 
-    /// Annotation scope: "file" (default), "symbol:<name>", or "lines:<start>-<end>".
-    #[arg(short, long)]
-    pub scope: Option<String>,
+    #[command(flatten)]
+    pub anchor: ContextScopeArgs,
 
     /// Primary annotation kind: constraint, invariant, or rationale.
     #[arg(
@@ -146,9 +171,8 @@ pub struct ContextGetArgs {
     #[command(flatten)]
     pub target: ContextTargetArgs,
 
-    /// Filter by scope.
-    #[arg(short, long)]
-    pub scope: Option<String>,
+    #[command(flatten)]
+    pub anchor: ContextScopeArgs,
 
     /// Filter by tag.
     #[arg(long)]
@@ -227,9 +251,8 @@ pub struct ContextSupersedeArgs {
     #[command(flatten)]
     pub target: ContextTargetArgs,
 
-    /// Replacement annotation scope.
-    #[arg(short, long)]
-    pub scope: Option<String>,
+    #[command(flatten)]
+    pub anchor: ContextScopeArgs,
 
     /// Replacement annotation kind: constraint, invariant, or rationale.
     #[arg(
@@ -258,9 +281,8 @@ pub struct ContextRmArgs {
     #[command(flatten)]
     pub target: ContextTargetArgs,
 
-    /// Remove only annotations matching this scope.
-    #[arg(short, long)]
-    pub scope: Option<String>,
+    #[command(flatten)]
+    pub anchor: ContextScopeArgs,
 
     /// Remove all annotations for this target.
     #[arg(long)]
@@ -413,6 +435,111 @@ mod tests {
             ])
             .is_err(),
             "--from-file is not an alias of --file"
+        );
+    }
+
+    #[test]
+    fn context_set_accepts_path_symbol_and_line_flags() {
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "set",
+            "--path",
+            "src/auth.rs",
+            "--symbol",
+            "verify",
+            "-m",
+            "keep timing constant",
+        ])
+        .expect("set --path --symbol")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Set(args),
+            } => {
+                assert_eq!(args.resolved_path(), Some("src/auth.rs"));
+                assert_eq!(args.anchor.symbol.as_deref(), Some("verify"));
+                assert!(args.anchor.line.is_none());
+                assert!(args.anchor.scope.is_none());
+            }
+            _ => panic!("expected context set"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "set",
+            "--path",
+            "src/auth.rs",
+            "--line",
+            "12",
+            "-m",
+            "guard this row",
+        ])
+        .expect("set --path --line")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Set(args),
+            } => {
+                assert_eq!(args.anchor.line, Some(12));
+                assert!(args.anchor.symbol.is_none());
+            }
+            _ => panic!("expected context set"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "set",
+            "--path",
+            "src/auth.rs",
+            "--scope",
+            "symbol:verify",
+            "-m",
+            "legacy",
+        ])
+        .expect("hidden --scope alias")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Set(args),
+            } => {
+                assert_eq!(args.anchor.scope.as_deref(), Some("symbol:verify"));
+            }
+            _ => panic!("expected context set"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "heddle",
+                "context",
+                "set",
+                "--path",
+                "src/auth.rs",
+                "--symbol",
+                "verify",
+                "--line",
+                "12",
+                "-m",
+                "both",
+            ])
+            .is_err(),
+            "--symbol and --line conflict"
+        );
+        assert!(
+            Cli::try_parse_from([
+                "heddle",
+                "context",
+                "set",
+                "--path",
+                "src/auth.rs",
+                "--symbol",
+                "verify",
+                "--scope",
+                "file",
+                "-m",
+                "both",
+            ])
+            .is_err(),
+            "--scope conflicts with --symbol"
         );
     }
 }

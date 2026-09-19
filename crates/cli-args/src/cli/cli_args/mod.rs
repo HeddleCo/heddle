@@ -59,9 +59,12 @@ pub use commands_client::{
     AuthTrustShowArgs, ClaimArgs, DEFAULT_CLAIM_WEB_ORIGIN, GrantCommands, GrantCreateArgs,
     GrantDeleteArgs, GrantListArgs, GrantRoleArg, PromoteArgs,
 };
-pub use commands_context::ContextCommands;
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 pub use commands_context::ContextReasonCommands;
+pub use commands_context::{
+    ContextCommands, ContextGetArgs, ContextRmArgs, ContextScopeArgs, ContextSetArgs,
+    ContextSupersedeArgs,
+};
 pub use commands_discuss::{
     DiscussArgs, DiscussCommands, DiscussListArgs, DiscussReopenArgs, DiscussResolveArgs,
     DiscussShowArgs, DiscussWaitArgs, ResolveModeArg,
@@ -79,7 +82,7 @@ pub use commands_main::{
     MaintenanceCommands, NetdCommands,
 };
 pub use commands_oplog::OplogCommands;
-pub use commands_query::QueryArgs;
+pub use commands_query::{BlameArgs, QueryArgs};
 pub use commands_redact::{
     PurgeApplyArgs, PurgeCommands, PurgeListArgs, RedactApplyArgs, RedactCommands, RedactListArgs,
     RedactShowArgs,

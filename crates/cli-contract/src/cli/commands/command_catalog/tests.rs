@@ -233,6 +233,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["context", "reason", "git"],
         &["context", "reason", "git", "--path", "."],
     ),
+    sample(&["blame"], &["blame", "src/lib.rs"]),
     sample(&["capture"], &["capture"]),
     sample(&["clone"], &["clone", "remote", "local"]),
     sample(
@@ -1865,6 +1866,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "netd status",
             "netd stop",
             "daemon stop",
+            "blame",
             "diff",
             "discuss",
             "discuss",
@@ -2259,13 +2261,30 @@ fn catalog_option_lookup_includes_globals_and_finite_values() {
     let context_set_options = catalog
         .options_for_path(&["context".to_string(), "set".to_string()])
         .expect("context set should be cataloged");
+    let symbol = context_set_options
+        .iter()
+        .find(|option| option.long.as_deref() == Some("symbol"))
+        .expect("context set --symbol should be cataloged");
+    assert!(
+        !symbol.hidden,
+        "context set --symbol is the explicit scope flag"
+    );
+    let line = context_set_options
+        .iter()
+        .find(|option| option.long.as_deref() == Some("line"))
+        .expect("context set --line should be cataloged");
+    assert!(
+        !line.hidden,
+        "context set --line is the explicit scope flag"
+    );
     let scope = context_set_options
         .iter()
         .find(|option| option.long.as_deref() == Some("scope"))
-        .expect("context set --scope should be cataloged");
+        .expect("context set --scope should remain as a hidden deprecated alias");
+    assert!(scope.hidden, "context set --scope is a hidden alias");
     assert!(
         scope.possible_values.is_empty(),
-        "context scope accepts open-ended values like symbol:<name>"
+        "deprecated context --scope accepts open-ended values like symbol:<name>"
     );
     let kind = context_set_options
         .iter()
@@ -2339,6 +2358,7 @@ fn command_contract_table_drives_help_tiers() {
             "capture", "everyday", "native", "everyday", None, None, false,
         ),
         ("query", "everyday", "native", "everyday", None, None, false),
+        ("blame", "everyday", "native", "everyday", None, None, false),
         (
             "review", "everyday", "native", "everyday", None, None, false,
         ),
