@@ -57,6 +57,44 @@ fn native_mapped_object_files(path: &std::path::Path, state_id: &str) -> Vec<std
     files
 }
 
+fn import_linear_git_history(path: &std::path::Path, commits: usize) {
+    let mut child = Command::new("git")
+        .args(["fast-import", "--quiet"])
+        .current_dir(path)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("start git fast-import");
+    let mut stdin = child.stdin.take().expect("open git fast-import stdin");
+    for generation in 1..=commits {
+        let message = format!("commit {generation}");
+        writeln!(stdin, "commit refs/heads/main").expect("write commit command");
+        writeln!(stdin, "mark :{generation}").expect("write commit mark");
+        writeln!(
+            stdin,
+            "author Deep Test <deep@test.invalid> {} +0000",
+            1_700_000_000 + generation
+        )
+        .expect("write commit author");
+        writeln!(
+            stdin,
+            "committer Deep Test <deep@test.invalid> {} +0000",
+            1_700_000_000 + generation
+        )
+        .expect("write commit committer");
+        writeln!(stdin, "data {}\n{message}", message.len()).expect("write commit message");
+        if generation > 1 {
+            writeln!(stdin, "from :{}", generation - 1).expect("write commit parent");
+        }
+        writeln!(stdin).expect("finish commit command");
+    }
+    writeln!(stdin, "done").expect("finish git fast-import stream");
+    drop(stdin);
+    let status = child.wait().expect("wait for git fast-import");
+    assert!(status.success(), "git fast-import should succeed: {status}");
+}
+
 #[test]
 fn capture_persists_unchanged_git_subtree_and_blob_as_native_closure() {
     let temp = TempDir::new().unwrap();
@@ -493,6 +531,66 @@ fn adopt_roots_native_threads_at_the_hosted_seed_and_admits_git_history_as_captu
                 .is_empty()
         );
     }
+}
+
+#[test]
+fn adopt_deep_linear_history_registers_a_publishable_native_thread() {
+    const COMMIT_COUNT: usize = 5_000;
+
+    let temp = TempDir::new().expect("test directory");
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).expect("Git worktree");
+    git(&work, &["init", "-b", "main"]);
+    import_linear_git_history(&work, COMMIT_COUNT);
+    let git_root = git(&work, &["rev-list", "--max-parents=0", "HEAD"]);
+    let git_tip = git(&work, &["rev-parse", "HEAD"]);
+
+    let output = heddle_output(&["adopt", "--output", "json"], Some(&work))
+        .expect("run deep-history adoption");
+    assert!(
+        output.status.success(),
+        "deep-history adoption failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let adopted_output: Value =
+        serde_json::from_slice(&output.stdout).expect("adopt output should be JSON");
+    assert_eq!(adopted_output["commits_imported"], COMMIT_COUNT);
+    assert_eq!(adopted_output["states_created"], COMMIT_COUNT);
+
+    let adopted = repo::Repository::open(&work).expect("open adopted repository");
+    let map = ingest::ShaMap::open(work.join(".heddle/ingest/sha_map.sqlite"))
+        .expect("open adopted SHA map");
+    let root = map
+        .get_commit(&git_root)
+        .expect("read root mapping")
+        .expect("root state mapping");
+    let tip = map
+        .get_commit(&git_tip)
+        .expect("read tip mapping")
+        .expect("tip state mapping");
+    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+        .expect("canonical hosted seed");
+    let root_state = adopted
+        .store()
+        .get_state(&root)
+        .expect("read adopted root")
+        .expect("adopted root state");
+    assert_eq!(root_state.parents, vec![seed.id()]);
+
+    let replica = adopted.native_thread("main").expect("main native identity");
+    assert_eq!(replica.genesis().expect("native genesis").base, seed.id());
+    adopted
+        .native_thread_signer(&replica)
+        .expect("native Thread should retain its publishing signer");
+    assert_eq!(
+        replica
+            .source_operation_page(tip, None, 1)
+            .expect("tip source operation")
+            .len(),
+        1,
+        "the adopted tip must be admitted for hosted publication"
+    );
 }
 
 #[test]

@@ -439,32 +439,107 @@ impl Repository {
             }
             self.create_native_thread(name, state_id, None, "")?;
         }
-        let state = self
-            .store()
-            .get_state(&state_id)?
-            .ok_or_else(|| Error::Invalid("captured state unavailable".into()))?;
-        // Captures must declare ancestry; an empty-parent snapshot is genesis
-        // material, not a source operation on an already created Thread.
-        if state.parents.is_empty() {
-            return Ok(());
+
+        enum Work {
+            Visit(StateId),
+            AdmitCaptureParents {
+                state_id: StateId,
+                state: Box<State>,
+                replica: ThreadReplica,
+                base: StateId,
+                next_parent: usize,
+            },
+            VerifyCaptureParent {
+                parent: StateId,
+                replica: ThreadReplica,
+            },
         }
-        match classify_attached_source(self, name, &state)? {
-            AttachedSourceKind::Capture => {
-                self.admit_local_capture_parents(name, &state)?;
-                self.record_native_capture(name, state_id)?;
-            }
-            AttachedSourceKind::LocalIntegration {
-                source_thread,
-                source_operation,
-                source_revision,
-            } => {
-                self.record_native_local_integration(
-                    name,
+
+        let mut work = vec![Work::Visit(state_id)];
+        while let Some(item) = work.pop() {
+            match item {
+                Work::Visit(state_id) => {
+                    let state = self
+                        .store()
+                        .get_state(&state_id)?
+                        .ok_or_else(|| Error::Invalid("captured state unavailable".into()))?;
+                    // Captures must declare ancestry; an empty-parent snapshot is genesis
+                    // material, not a source operation on an already created Thread.
+                    if state.parents.is_empty() {
+                        continue;
+                    }
+                    match classify_attached_source(self, name, &state)? {
+                        AttachedSourceKind::Capture => {
+                            let replica = self.native_thread(name)?;
+                            let base = replica.genesis()?.base;
+                            work.push(Work::AdmitCaptureParents {
+                                state_id,
+                                state: Box::new(state),
+                                replica,
+                                base,
+                                next_parent: 0,
+                            });
+                        }
+                        AttachedSourceKind::LocalIntegration {
+                            source_thread,
+                            source_operation,
+                            source_revision,
+                        } => {
+                            self.record_native_local_integration(
+                                name,
+                                state_id,
+                                source_thread,
+                                source_operation,
+                                source_revision,
+                            )?;
+                        }
+                    }
+                }
+                Work::AdmitCaptureParents {
                     state_id,
-                    source_thread,
-                    source_operation,
-                    source_revision,
-                )?;
+                    state,
+                    replica,
+                    base,
+                    next_parent,
+                } => {
+                    let Some(parent) = state.parents.get(next_parent).copied() else {
+                        self.record_native_capture(name, state_id)?;
+                        continue;
+                    };
+                    if parent == base || !replica.source_operation_page(parent, None, 1)?.is_empty()
+                    {
+                        work.push(Work::AdmitCaptureParents {
+                            state_id,
+                            state,
+                            replica,
+                            base,
+                            next_parent: next_parent + 1,
+                        });
+                        continue;
+                    }
+
+                    let verify_replica = replica.clone();
+                    work.push(Work::AdmitCaptureParents {
+                        state_id,
+                        state,
+                        replica,
+                        base,
+                        next_parent: next_parent + 1,
+                    });
+                    work.push(Work::VerifyCaptureParent {
+                        parent,
+                        replica: verify_replica,
+                    });
+                    work.push(Work::Visit(parent));
+                }
+                Work::VerifyCaptureParent { parent, replica } => {
+                    if replica.source_operation_page(parent, None, 1)?.is_empty() {
+                        return Err(Error::Invalid(format!(
+                            "capture parent {} has no admitted native operation",
+                            parent.to_string_full()
+                        )));
+                    }
+                }
             }
         }
         Ok(())
@@ -610,30 +685,6 @@ impl Repository {
                 "local integration was not admitted: {other:?}"
             ))),
         }
-    }
-
-    /// Fast-forward land moves the target ref onto another Thread's tip without
-    /// a merge State. A later Capture of that tip needs those parents admitted
-    /// here first, or `record_native_capture` refuses the ancestry.
-    fn admit_local_capture_parents(&self, name: &str, state: &State) -> Result<()> {
-        let replica = self.native_thread(name)?;
-        let base = replica.genesis()?.base;
-        for parent in &state.parents {
-            if *parent == base {
-                continue;
-            }
-            if !replica.source_operation_page(*parent, None, 1)?.is_empty() {
-                continue;
-            }
-            self.record_native_source(name, *parent)?;
-            if replica.source_operation_page(*parent, None, 1)?.is_empty() {
-                return Err(Error::Invalid(format!(
-                    "capture parent {} has no admitted native operation",
-                    parent.to_string_full()
-                )));
-            }
-        }
-        Ok(())
     }
 }
 
