@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Import policy shared by git tree translators.
 
+use objects::object::StateId;
+
 /// Policy knobs for mechanical git imports.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ImportOptions {
@@ -13,6 +15,13 @@ pub struct ImportOptions {
     /// Use the classic buffered pack builder and its sliding-window delta
     /// search instead of the bounded-memory streaming builder.
     pub delta_search: bool,
+    /// Attach every parentless Git root to this native pre-history state.
+    ///
+    /// Ordinary mechanical imports leave this unset and preserve Git's empty
+    /// root parent list. Native adoption sets it to the canonical synthetic
+    /// seed so the rewritten graph can be admitted as ordinary captures on a
+    /// hosted-publishable root Thread.
+    pub root_parent: Option<StateId>,
 }
 
 use serde::{Deserialize, Serialize};

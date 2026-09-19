@@ -432,6 +432,7 @@ fn run_git_import(
     let import_options = ImportOptions {
         lossy,
         delta_search: repo.config().storage.delta_search.import,
+        ..ImportOptions::default()
     };
     let mut on_commit = |event| progress.commit_tick(event);
     let source_path = resolved
