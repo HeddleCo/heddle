@@ -1388,6 +1388,10 @@ fn save_pulled_thread_metadata(
 
 /// Execute remote command.
 pub async fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
+    #[cfg(feature = "client")]
+    if let RemoteCommands::ImportSource(args) = &command {
+        return super::cmd_import_source(cli, args.clone()).await;
+    }
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
     match &command {
@@ -1411,6 +1415,12 @@ pub async fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
         RemoteCommands::Add { .. }
         | RemoteCommands::Remove { .. }
         | RemoteCommands::SetDefault { .. } => {}
+        #[cfg(feature = "client")]
+        RemoteCommands::ImportSource(_) => {
+            return Err(anyhow::anyhow!(
+                "hosted source import was not dispatched before repository discovery"
+            ));
+        }
     }
 
     let repo = Repository::open(start)?;
@@ -1493,6 +1503,10 @@ pub async fn cmd_remote(cli: &Cli, command: RemoteCommands) -> Result<()> {
             render_remote_info(&output, should_output_json(cli, Some(repo.config())))?;
             Ok(())
         }
+        #[cfg(feature = "client")]
+        RemoteCommands::ImportSource(_) => Err(anyhow::anyhow!(
+            "hosted source import was not dispatched before repository discovery"
+        )),
     }
 }
 
@@ -1570,6 +1584,10 @@ fn cmd_git_overlay_remote(cli: &Cli, repo: &Repository, command: RemoteCommands)
                 json,
             )
         }
+        #[cfg(feature = "client")]
+        RemoteCommands::ImportSource(_) => Err(anyhow::anyhow!(
+            "hosted source import was not dispatched before repository discovery"
+        )),
     }
 }
 

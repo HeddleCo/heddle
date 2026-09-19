@@ -87,6 +87,8 @@ pub use commands_redact::{
     PurgeApplyArgs, PurgeCommands, PurgeListArgs, RedactApplyArgs, RedactCommands, RedactListArgs,
     RedactShowArgs,
 };
+#[cfg(feature = "client")]
+pub use commands_remote::ImportSourceArgs;
 pub use commands_remote::RemoteCommands;
 pub use commands_review::{
     ReviewCommands, ReviewHealthArgs, ReviewNextArgs, ReviewShowArgs, ReviewSignArgs, SignKindArg,

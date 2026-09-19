@@ -66,7 +66,7 @@ pub struct ContextScopeArgs {
     #[arg(long, conflicts_with = "symbol")]
     pub line: Option<u32>,
 
-    /// Deprecated alias of `--symbol` / `--line`.
+    /// Internal deprecated alias of `--symbol` / `--line`.
     /// `file`, `symbol:<name>`, or `lines:<start>-<end>`.
     #[arg(short, long, hide = true, conflicts_with_all = ["symbol", "line"])]
     pub scope: Option<String>,

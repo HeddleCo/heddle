@@ -70,7 +70,9 @@ pub use operator::{
 pub use ready::{
     ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary, ready_blocked_by_missing_intent,
 };
-pub use remote::{AdoptOutput, CloneOutput, PullOutput, PushOutput, RemoteMutationOutput};
+pub use remote::{
+    AdoptOutput, CloneOutput, ImportSourceOutput, PullOutput, PushOutput, RemoteMutationOutput,
+};
 pub use thread::{
     ApprovalOutput, ApprovalRevokeOutput, DroppedThread, EligibilityOutput, FskitReadinessReport,
     SkippedThread, ThreadAbsorbOutput, ThreadCaptureOutput, ThreadCaptureSummary,
