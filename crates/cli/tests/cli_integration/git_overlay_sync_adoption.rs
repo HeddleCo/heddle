@@ -193,7 +193,7 @@ fn native_adoption_does_not_fall_back_to_git_when_native_objects_are_missing() {
     configure_git_identity(&work);
     commit_file(&work, "story.txt", "native truth\n", "seed");
     heddle(&["init"], Some(&work)).unwrap();
-    heddle(&["adopt"], Some(&work)).unwrap();
+    heddle(&["import", "local"], Some(&work)).unwrap();
 
     let native = repo::Repository::open(&work).unwrap();
     let state_id = native
@@ -337,7 +337,7 @@ fn adopt_renders_in_repo_paths_relative_to_repo_root() {
     // The .heddle data path lives inside the repo and must render relative
     // to the repo root, not as an absolute path that leaks the user's home
     // directory (#551).
-    let json = heddle(&["adopt", "--output", "json"], Some(&work)).unwrap();
+    let json = heddle(&["import", "local", "--output", "json"], Some(&work)).unwrap();
     let value: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(value["path"], ".heddle");
     let abs = work.to_str().unwrap();
@@ -356,7 +356,7 @@ fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
     configure_git_identity(&work);
     let git_tip = commit_file(&work, "story.txt", "one\n", "seed");
 
-    let json = heddle(&["adopt", "--output", "json"], Some(&work)).unwrap();
+    let json = heddle(&["import", "local", "--output", "json"], Some(&work)).unwrap();
     let value: Value = serde_json::from_str(&json).unwrap();
 
     assert_eq!(value["commits_imported"], 1);
@@ -423,7 +423,7 @@ fn adopt_roots_native_threads_at_the_hosted_seed_and_admits_git_history_as_captu
         "the control import must retain Git's parentless root"
     );
 
-    heddle(&["adopt"], Some(&work)).expect("adopt Git repository");
+    heddle(&["import", "local"], Some(&work)).expect("adopt Git repository");
     let adopted = repo::Repository::open(&work).expect("open adopted repository");
     let adopted_map =
         ingest::ShaMap::open(work.join(".heddle/ingest/sha_map.sqlite")).expect("adopt map");
@@ -545,7 +545,7 @@ fn adopt_deep_linear_history_registers_a_publishable_native_thread() {
     let git_root = git(&work, &["rev-list", "--max-parents=0", "HEAD"]);
     let git_tip = git(&work, &["rev-parse", "HEAD"]);
 
-    let output = heddle_output(&["adopt", "--output", "json"], Some(&work))
+    let output = heddle_output(&["import", "local", "--output", "json"], Some(&work))
         .expect("run deep-history adoption");
     assert!(
         output.status.success(),
@@ -789,7 +789,7 @@ fn lazy_tip_log_cache_then_adopt_materializes_complete_native_graph() {
     .expect("lazy log json");
     assert_eq!(lazy_log["states"].as_array().map(Vec::len), Some(1));
 
-    heddle(&["adopt"], Some(&work)).expect("full adoption after lazy bind");
+    heddle(&["import", "local"], Some(&work)).expect("full adoption after lazy bind");
     let native_state = ingest_mapped_change(&work, &main_tip).expect("native tip mapping");
     std::fs::rename(work.join(".git"), work.join(".git-disabled")).unwrap();
 
@@ -937,7 +937,7 @@ fn adopt_emits_no_terminal_control_codes_in_piped_output() {
     git(&work, &["init", "-b", "main"]);
     configure_git_identity(&work);
     commit_file(&work, "story.txt", "one\n", "seed");
-    let human = heddle(&["adopt"], Some(&work)).unwrap();
+    let human = heddle(&["import", "local"], Some(&work)).unwrap();
     assert!(
         !human.contains('\r'),
         "human adopt output leaked a carriage return: {human:?}"
@@ -953,7 +953,7 @@ fn adopt_emits_no_terminal_control_codes_in_piped_output() {
     git(&work2, &["init", "-b", "main"]);
     configure_git_identity(&work2);
     commit_file(&work2, "story.txt", "one\n", "seed");
-    let json = heddle(&["adopt", "--output", "json"], Some(&work2)).unwrap();
+    let json = heddle(&["import", "local", "--output", "json"], Some(&work2)).unwrap();
     assert!(
         !json.contains('\r'),
         "adopt JSON leaked a carriage return: {json:?}"

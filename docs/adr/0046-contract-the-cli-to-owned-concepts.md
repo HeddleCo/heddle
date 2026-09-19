@@ -10,7 +10,7 @@ The everyday workflow is `init` or `clone`, then `status`, `diff`, `capture`, `s
 
 Git Overlay is not a compatibility shim. The checkout's real `.git` owns commits, refs, packs, index, and worktree state. Heddle uses Sley, its embedded Git engine, to implement capture checkpoints, `clone`, `pull`, `push`, and `remote` directly against that store. `.heddle` owns captures, provenance, threads, discussions, and mappings. Heddle never requires the `git` executable or a second `.heddle/git` object store; explicit projection uses reconstructable state plus Raw Git Object Residuals.
 
-The surface stays intentionally narrow. Operations outside it may be performed with another Git-compatible client, but that client is optional and Heddle never invokes it. Explicit projection operations remain under Heddle when they translate between Git and Heddle data. `adopt` is the atomic transition from Git Overlay to Native Heddle and its full feature set.
+The surface stays intentionally narrow. Operations outside it may be performed with another Git-compatible client, but that client is optional and Heddle never invokes it. Explicit projection operations remain under Heddle when they translate between Git and Heddle data. `import local` is the atomic transition from Git Overlay to Native Heddle and its full feature set.
 
 Hosted authentication needed by Heddle remains available, but Weft support grants, spool administration, external proof flows, and presence publishing are not Heddle version-control commands. Their interfaces belong to Weft tools, hosted products, or internal adapters.
 

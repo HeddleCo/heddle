@@ -60,7 +60,7 @@ fn merged_thread_list_reads_integrated_not_actionable() {
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("base.txt"), "base").unwrap();
     git_commit_all(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    heddle(&["import", "local"], Some(temp.path())).unwrap();
 
     let started: Value = serde_json::from_str(
         &heddle(

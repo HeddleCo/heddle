@@ -74,24 +74,20 @@ async fn real_import_source_fetches_public_git_and_clones_round_trip() -> Result
     let output = run_heddle(
         temp.path(),
         &[
-            "remote",
-            "import-source",
+            "import",
+            "url",
             &source_url,
             "--to",
             &remote_url,
-            "--name",
+            "--thread",
             "main",
         ],
     )?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let terminal = stdout
-        .lines()
-        .rfind(|line| !line.trim().is_empty())
-        .context("source import emitted no JSON operation event")?;
     let terminal: serde_json::Value =
-        serde_json::from_str(terminal).context("decode terminal source-import event")?;
+        serde_json::from_str(&stdout).context("decode finite source-import result")?;
     ensure!(
-        terminal.get("output_kind").and_then(|value| value.as_str()) == Some("import_source")
+        terminal.get("output_kind").and_then(|value| value.as_str()) == Some("import_operation")
             && terminal.get("state").and_then(|value| value.as_str()) == Some("completed")
             && terminal.get("terminal").and_then(|value| value.as_bool()) == Some(true),
         "source import did not emit a completed terminal event: {terminal}"

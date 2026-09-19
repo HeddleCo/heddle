@@ -719,7 +719,7 @@ fn render_available_git_refs(refs: &[AvailableGitRef], verbose: bool) {
     }
     println!(
         "  {}",
-        style::dim("adopt when you want to work on this branch in Heddle")
+        style::dim("run `heddle import local` when you want to work on this branch in Heddle")
     );
     if !verbose && refs.len() > visible_count {
         let remaining = refs.len() - visible_count;

@@ -16,18 +16,19 @@ use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
 use sley::Repository as SleyRepository;
 use verbs::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
 
+use super::compact::{CompactOutput, CompactProjection};
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
     import_progress::ImportProgress,
-    next_action::{NextActionValidationContext, write_full_command_json},
+    next_action::NextActionValidationContext,
     verification_health::{
         RepositoryVerificationState, build_repository_verification_state,
         build_repository_verification_state_profiled,
     },
 };
 use crate::{
-    cli::{AdoptArgs, Cli, should_output_json, style},
+    cli::{Cli, ImportLocalArgs, should_output_json, style},
     perf::{ProfileField, emit_profile, instrumentation_enabled},
 };
 
@@ -41,7 +42,7 @@ struct AdoptImportStats {
     skipped_non_commit_refs: usize,
 }
 
-pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
+pub fn cmd_adopt(cli: &Cli, args: ImportLocalArgs) -> Result<()> {
     // Pure path preflight: positional / --repo / cwd resolution and conflict
     // policy. Git discovery, bootstrap, and import stay CLI-owned.
     let cwd = std::env::current_dir()
@@ -70,7 +71,7 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     };
     if repo.capability() != RepositoryCapability::GitOverlay {
         bail!(
-            "`heddle adopt` is for Git repositories. This checkout is already a native Heddle repository."
+            "`heddle import local` is for Git repositories. This checkout is already a native Heddle repository."
         );
     }
 
@@ -85,7 +86,7 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
         format!("{} ref(s): {}", plan.refs.len(), plan.refs.join(", "))
     };
     let source_label = repo.root().display().to_string();
-    let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
+    let mut progress = ImportProgress::start_for_finite_import(cli, &repo, &scope, &source_label);
     progress.begin_commit_import();
     let import_start = std::time::Instant::now();
     let stats = import_git_history_for_adopt(&repo, &plan.refs, initialized, &mut progress)?;
@@ -109,7 +110,7 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     let verification_ms = verification_start.elapsed().as_millis();
     if let Some(profile) = verification_profile {
         emit_profile(
-            "adopt",
+            "import local",
             &[
                 ProfileField::millis("import_ms", import_ms),
                 ProfileField::millis("state_store_write_ms", stats.state_store_write_ms),
@@ -134,9 +135,9 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
         .map(Path::to_path_buf)
         .unwrap_or_else(|_| heddle_dir.to_path_buf());
     let output = AdoptOutput {
-        output_kind: "adopt",
+        output_kind: "import_local",
         status: "completed",
-        action: "adopt",
+        action: "import",
         adopted: true,
         initialized,
         path: heddle_data_path,
@@ -151,7 +152,17 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
         recommended_action_template: trust.recommended_action_template.clone(),
         trust,
     };
-    render_adopt(&output, should_output_json(cli, Some(repo.config())))
+    render_adopt(cli, &output, should_output_json(cli, Some(repo.config())))
+}
+
+impl CompactProjection for AdoptOutput {
+    fn compact(&self) -> CompactOutput {
+        let mut output = CompactOutput::new(self.output_kind);
+        output.status = Some(self.status.to_string());
+        output.next_action = self.recommended_action.clone();
+        output.next_action_template = self.recommended_action_template.clone();
+        output
+    }
 }
 
 fn adopt_plan_error_to_anyhow(err: AdoptPlanError) -> anyhow::Error {
@@ -305,13 +316,13 @@ fn no_git_commits_to_adopt_advice(git_root: &Path, missing_refs: Vec<String>) ->
     };
     RecoveryAdvice::safety_refusal(
         "git_history_empty",
-        "No Git commits are available to adopt",
-        "Run `heddle init` to start tracking this checkout before the first Git commit, or create the first Git commit and rerun `heddle adopt`.",
+        "No Git commits are available to import",
+        "Run `heddle init` to start tracking this checkout before the first Git commit, or create the first Git commit and rerun `heddle import local`.",
         format!(
             "Git repository at {} has no importable commit history; {detail}",
             git_root.display()
         ),
-        "adopt would initialize Heddle metadata, but there is no Git commit to map into Heddle history",
+        "import local would initialize Heddle metadata, but there is no Git commit to map into Heddle history",
         "Git refs, Heddle metadata, and worktree files were left unchanged",
         primary.clone(),
         vec![primary],
@@ -330,28 +341,29 @@ fn git_worktree_root(start: &Path) -> Result<PathBuf> {
     Ok(workdir.to_path_buf())
 }
 
-fn render_adopt(output: &AdoptOutput, json: bool) -> Result<()> {
+fn render_adopt(cli: &Cli, output: &AdoptOutput, json: bool) -> Result<()> {
     if json {
-        write_full_command_json(
+        super::next_action::write_command_json(
             output,
-            NextActionValidationContext::without_repo(&["adopt"]),
+            crate::cli::output_is_compact(cli),
+            NextActionValidationContext::without_repo(&["import", "local"]),
         )?;
         return Ok(());
     }
 
     if output.initialized {
         println!(
-            "{} adopted the Git repository into Heddle-native source storage",
+            "{} imported the Git repository into Heddle-native source storage",
             style::ok_marker()
         );
     } else if output.already_in_sync {
         println!(
-            "{} adopted the already-imported Git history into Heddle-native source storage",
+            "{} imported the already-present Git history into Heddle-native source storage",
             style::ok_marker()
         );
     } else {
         println!(
-            "{} adopted Git history into Heddle-native source storage",
+            "{} imported Git history into Heddle-native source storage",
             style::ok_marker()
         );
     }

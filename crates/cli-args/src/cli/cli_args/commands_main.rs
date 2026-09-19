@@ -9,10 +9,10 @@ use super::BridgeCommands;
 use super::SemanticCommands;
 use super::{
     AgentCommands, BlameArgs, CompletionSubject, ContextCommands, DiscussArgs, EnvCommands,
-    HookCommands, IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands,
-    ReviewCommands, ShellCommands, ThreadCommands, VisibilityCommands,
+    HookCommands, ImportArgs, IntegrationCommands, OplogCommands, QueryArgs, RedactCommands,
+    RemoteCommands, ReviewCommands, ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
-        AdoptArgs, CloneArgs, DiffArgs, DoctorArgs, INIT_VERB, InitArgs, LandArgs, LogArgs,
+        CloneArgs, DiffArgs, DoctorArgs, IMPORT_VERB, INIT_VERB, InitArgs, LandArgs, LogArgs,
         PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs,
         ThreadStartArgs, UndoArgs, WatchArgs,
     },
@@ -78,12 +78,9 @@ pub enum Commands {
     #[command(name = INIT_VERB)]
     Init(InitArgs),
 
-    /// Adopt Git history into Heddle-native source authority.
-    ///
-    /// Git Overlay is the normal existing-Git mode: Git keeps source objects,
-    /// refs, index, and worktree state while Heddle stores metadata in
-    /// `.heddle`. `adopt` imports history and moves source authority to Heddle.
-    Adopt(AdoptArgs),
+    /// Bring an existing Git repository into Heddle.
+    #[command(name = IMPORT_VERB, verbatim_doc_comment)]
+    Import(ImportArgs),
 
     /// Curated, progressive-disclosure help.
     ///

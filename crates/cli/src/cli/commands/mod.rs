@@ -166,6 +166,8 @@ pub use purge::cmd_purge;
 pub use query::run as cmd_query;
 pub use ready_cmd::cmd_ready;
 pub use redact::cmd_redact;
+#[cfg(feature = "client")]
+pub use remote::{cmd_import_retry, cmd_import_status, cmd_import_url};
 pub use remote::{cmd_pull, cmd_push, cmd_remote};
 pub use resolve::cmd_resolve;
 pub use revert::cmd_revert;

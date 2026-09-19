@@ -4,9 +4,9 @@
 //! This is a thin *consumer* of the generic [`Progress`](objects::Progress)
 //! substrate: it owns the import-specific phrasing (the `[n/3]` phased steps and
 //! the per-commit inspected/percent body) and drives a `Progress` handle. All
-//! TTY concerns — `\r`-redraw, dim styling, the completion line, and JSON
-//! suppression — live in the shared `TerminalSink` (`progress_render`), not
-//! here. The per-commit throttle stays here because the body carries fields
+//! TTY concerns — `\r`-redraw, dim styling, the completion line, and the
+//! ordinary JSON suppression policy — live in `progress_render`. The
+//! per-commit throttle stays here because the body carries fields
 //! (`states_created`) the generic snapshot does not model.
 
 use ingest::ImportProgressEvent;
@@ -15,13 +15,13 @@ use repo::Repository;
 
 use crate::cli::{
     Cli,
-    progress_render::{COMMIT_TICK_INTERVAL, finish_line, progress_for},
-    style,
+    progress_render::{COMMIT_TICK_INTERVAL, TerminalSink, finish_line, progress_for},
+    should_output_json, style,
 };
 
 pub(crate) struct ImportProgress {
-    /// The generic handle. A null handle (under `--json`) makes every method a
-    /// no-op that renders nothing.
+    /// The generic progress handle. Finite import commands can explicitly keep
+    /// it active for JSON because their structured result remains on stdout.
     progress: Progress,
     current: usize,
     total: usize,
@@ -29,8 +29,32 @@ pub(crate) struct ImportProgress {
 
 impl ImportProgress {
     pub(crate) fn start(cli: &Cli, repo: &Repository, scope: &str, source_label: &str) -> Self {
-        let progress = progress_for(cli, repo);
-        if progress.is_active() {
+        Self::start_with_progress(cli, repo, scope, source_label, progress_for(cli, repo))
+    }
+
+    pub(crate) fn start_for_finite_import(
+        cli: &Cli,
+        repo: &Repository,
+        scope: &str,
+        source_label: &str,
+    ) -> Self {
+        Self::start_with_progress(
+            cli,
+            repo,
+            scope,
+            source_label,
+            Progress::with_sink(Box::new(TerminalSink::new())),
+        )
+    }
+
+    fn start_with_progress(
+        cli: &Cli,
+        repo: &Repository,
+        scope: &str,
+        source_label: &str,
+        progress: Progress,
+    ) -> Self {
+        if !should_output_json(cli, Some(repo.config())) {
             println!(
                 "{} {} from {}",
                 style::dim("Importing Git history:"),
@@ -69,9 +93,9 @@ impl ImportProgress {
         self.advance("writing refs");
     }
 
-    /// Live per-commit counter for the import phase. Under `--json` the handle
-    /// is null so this is a no-op (progress never leaks into machine-readable
-    /// stdout, #550). Throttling on the commit count happens here — a throttled
+    /// Live per-commit counter for the import phase. When active, progress uses
+    /// stderr and never leaks into machine-readable stdout (#550). Throttling
+    /// on the commit count happens here — a throttled
     /// tick becomes a `set_phase` on the substrate, which the `TerminalSink`
     /// paints (it always repaints on a phase-string change).
     pub(crate) fn commit_tick(&mut self, event: ImportProgressEvent) {

@@ -18,9 +18,10 @@ use crate::cli::SemanticCommands;
 use crate::cli::cli_args::SyncCommands;
 use crate::cli::{
     AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands, EnvCommands,
-    HookCommands, INIT_VERB, IntegrationCommands, MaintenanceCommands, NetdCommands, OplogCommands,
-    PurgeCommands, RedactCommands, RemoteCommands, ShellCommands, ThreadCommands,
-    ThreadMarkerCommands, ThreadOwnershipCommands, TimelineCommands, VisibilityCommands,
+    HookCommands, IMPORT_VERB, INIT_VERB, ImportCommands, IntegrationCommands, MaintenanceCommands,
+    NetdCommands, OplogCommands, PurgeCommands, RedactCommands, RemoteCommands, ShellCommands,
+    ThreadCommands, ThreadMarkerCommands, ThreadOwnershipCommands, TimelineCommands,
+    VisibilityCommands,
     cli_args::{
         AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands, DiscussCommands,
         PresenceCommands, ReviewCommands,
@@ -1165,21 +1166,105 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[json_discriminator(Some("abort"), "output_kind", "abort")],
         ),
     ),
+    entry(&[IMPORT_VERB], front_door(GROUP, 15)),
     entry(
-        &["adopt"],
+        &[IMPORT_VERB, "local"],
         front_door(
             advertised_action(
                 json_discriminators(
-                    documented_schemas(ADOPT, &["adopt"]),
-                    &[json_discriminator(Some("adopt"), "output_kind", "adopt")],
+                    documented_schemas(compact_json(ADOPT), &["import local"]),
+                    &[json_discriminator(
+                        Some("import local"),
+                        "output_kind",
+                        "import_local",
+                    )],
                 ),
-                "heddle adopt --ref <branch>",
-                &["heddle", "adopt", "--ref", "<branch>"],
+                "heddle import local --ref <branch>",
+                &["heddle", "import", "local", "--ref", "<branch>"],
                 &["branch"],
                 true,
                 false,
             ),
-            210,
+            211,
+        ),
+    ),
+    entry(
+        &[IMPORT_VERB, "url"],
+        feature_gated(
+            exits(
+                surface(
+                    json_discriminators(
+                        documented_schemas(
+                            compact_json(CommandContract {
+                                may_import_git: true,
+                                network_io: true,
+                                ..user_scoped(MUTATION_BASE)
+                            }),
+                            &["import url"],
+                        ),
+                        &[json_discriminator(
+                            Some("import url"),
+                            "output_kind",
+                            "import_operation",
+                        )],
+                    ),
+                    "source_authority",
+                ),
+                &[
+                    (0, "ok"),
+                    (75, "server or source unreachable; safe to retry"),
+                    (76, "source import rejected"),
+                    (77, "not authorized"),
+                    (78, "configuration missing"),
+                ],
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &[IMPORT_VERB, "status"],
+        feature_gated(
+            surface(
+                json_discriminators(
+                    documented_schemas(
+                        compact_json(CommandContract {
+                            network_io: true,
+                            ..READ_JSONL
+                        }),
+                        &["import status"],
+                    ),
+                    &[json_discriminator(
+                        Some("import status"),
+                        "output_kind",
+                        "import_operation",
+                    )],
+                ),
+                "source_authority",
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &[IMPORT_VERB, "retry"],
+        feature_gated(
+            surface(
+                json_discriminators(
+                    documented_schemas(
+                        compact_json(CommandContract {
+                            network_io: true,
+                            ..user_scoped(MUTATION_BASE)
+                        }),
+                        &["import retry"],
+                    ),
+                    &[json_discriminator(
+                        Some("import retry"),
+                        "output_kind",
+                        "import_retry",
+                    )],
+                ),
+                "source_authority",
+            ),
+            "client",
         ),
     ),
     entry(&["ci"], feature_gated(surface(GROUP, "automation"), "ci")),
@@ -1791,9 +1876,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
                         "sync_git",
                     )],
                 ),
-                "adopt",
+                "import local",
                 "workflow",
-                "Use adopt to initialize Heddle from an existing Git repository and import its history.",
+                "Use import local to initialize Heddle from an existing Git repository and import its history.",
             ),
             &[
                 (0, "ok"),
@@ -2609,43 +2694,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 )],
             ),
             "source_authority",
-        ),
-    ),
-    entry(
-        &["remote", "import-source"],
-        feature_gated(
-            exits(
-                surface(
-                    json_discriminators(
-                        documented_schemas(
-                            CommandContract {
-                                may_import_git: true,
-                                json_kind: "jsonl",
-                                network_io: true,
-                                ..user_scoped(MUTATION_BASE)
-                            },
-                            &["remote import-source"],
-                        ),
-                        &[json_discriminator(
-                            Some("remote import-source"),
-                            "output_kind",
-                            "import_source",
-                        )],
-                    ),
-                    "source_authority",
-                ),
-                &[
-                    (0, "ok"),
-                    (75, "server or source unreachable; safe to retry"),
-                    (
-                        76,
-                        "source import rejected or failed; inspect the operation failure",
-                    ),
-                    (77, "not authorized to write the destination spool"),
-                    (78, "not authenticated or destination path missing"),
-                ],
-            ),
-            "client",
         ),
     ),
     entry(
@@ -3592,11 +3640,11 @@ fn canonical_action_metadata(
     kind: &str,
 ) -> (Option<Vec<String>>, Option<ActionTemplate>) {
     match (command, kind) {
-        ("adopt", "workflow") => (
+        ("import local", "workflow") => (
             None,
             Some(action_template_from_parts(
-                "heddle adopt --ref <branch>",
-                &["heddle", "adopt", "--ref", "<branch>"],
+                "heddle import local --ref <branch>",
+                &["heddle", "import", "local", "--ref", "<branch>"],
                 &["branch"],
                 true,
             )),
@@ -4700,7 +4748,15 @@ where
 pub fn command_path(command: &Commands) -> Vec<&'static str> {
     match command {
         Commands::Init(_) => vec![INIT_VERB],
-        Commands::Adopt(_) => vec!["adopt"],
+        Commands::Import(args) => match &args.command {
+            ImportCommands::Local(_) => vec![IMPORT_VERB, "local"],
+            #[cfg(feature = "client")]
+            ImportCommands::Url(_) => vec![IMPORT_VERB, "url"],
+            #[cfg(feature = "client")]
+            ImportCommands::Status(_) => vec![IMPORT_VERB, "status"],
+            #[cfg(feature = "client")]
+            ImportCommands::Retry(_) => vec![IMPORT_VERB, "retry"],
+        },
         Commands::Help { .. } => vec!["help"],
         Commands::Status { .. } => vec!["status"],
         Commands::Watch(_) => vec!["watch"],
@@ -4832,8 +4888,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             RemoteCommands::Remove { .. } => vec!["remote", "remove"],
             RemoteCommands::SetDefault { .. } => vec!["remote", "set-default"],
             RemoteCommands::Show { .. } => vec!["remote", "show"],
-            #[cfg(feature = "client")]
-            RemoteCommands::ImportSource(_) => vec!["remote", "import-source"],
         },
         #[cfg(feature = "client")]
         Commands::Invite { command, .. } => match command {

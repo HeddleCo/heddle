@@ -1335,7 +1335,7 @@ fn status_next_reason(output: &StatusOutput) -> &'static str {
     if output.operation.is_some() {
         return "an operation is in progress; finish or abort it before starting another workflow";
     }
-    if output.recommended_action.contains("adopt --ref")
+    if output.recommended_action.contains("import local --ref")
         || output.import_guidance.as_ref().is_some_and(|hint| {
             hint.missing_branches
                 .iter()

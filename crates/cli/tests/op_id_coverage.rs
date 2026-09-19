@@ -153,7 +153,7 @@ fn command_contract_table_drives_op_id_and_read_only_classification() {
 
     for mutating in [
         "init",
-        "adopt",
+        "import local",
         "clone",
         "thread switch",
         "thread drop",

@@ -185,7 +185,7 @@ fixed corpus:
 | `heddle status` | 10 k tracked files, clean tree | <TBD: maintainer> ms |
 | `heddle capture` | 100 changed files | <TBD: maintainer> ms |
 | `heddle log --oneline -n 1000` | 10 k-state history | <TBD: maintainer> ms |
-| `heddle adopt --ref <branch>` | linux.git head | <TBD: maintainer> s |
+| `heddle import local --ref <branch>` | linux.git head | <TBD: maintainer> s |
 | Snapshot 1 000 small files | synthetic | <TBD: maintainer> ms |
 
 Tradeoffs:

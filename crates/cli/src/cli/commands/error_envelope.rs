@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Shared stderr error envelopes for CLI failures.
 
-use clap::error::{ContextKind, ContextValue, Error as ClapError, ErrorKind};
+use clap::{
+    CommandFactory,
+    error::{ContextKind, ContextValue, Error as ClapError, ErrorKind},
+};
 use repo::Config;
 
 use super::{
@@ -168,11 +171,22 @@ fn invalid_subcommand_name(err: &ClapError) -> Option<String> {
 }
 
 pub fn print_parse_error_json_envelope(err: &ClapError) {
-    let primary_command = "heddle help --output json";
+    let nearest_help = nearest_help_command(err);
+    let primary_command = nearest_help
+        .as_deref()
+        .unwrap_or("heddle help --output json");
     let recovery_commands = vec![
         primary_command.to_string(),
+        "heddle help --output json".to_string(),
         "heddle help --output text".to_string(),
-    ];
+    ]
+    .into_iter()
+    .fold(Vec::new(), |mut commands, command| {
+        if !commands.contains(&command) {
+            commands.push(command);
+        }
+        commands
+    });
     let recovery_action_templates = command_templates(&recovery_commands);
     let suggestion = unrecognized_subcommand_suggestion(err);
     let default_error = err.to_string();
@@ -189,7 +203,7 @@ pub fn print_parse_error_json_envelope(err: &ClapError) {
                 .map(str::to_string)
         })
         .unwrap_or_else(|| {
-            "Run `heddle help --output json` to inspect the command surface.".to_string()
+            format!("Run `{primary_command}` to inspect the nearest valid command.")
         });
     let body = serde_json::json!({
         "error": error,
@@ -205,6 +219,40 @@ pub fn print_parse_error_json_envelope(err: &ClapError) {
         "recovery_action_templates": recovery_action_templates,
     });
     eprintln!("{body}");
+}
+
+fn nearest_help_command(err: &ClapError) -> Option<String> {
+    let rendered = err.to_string();
+    let from_usage = rendered
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Usage: "))
+        .map(|usage| {
+            usage
+                .split_whitespace()
+                .take_while(|token| {
+                    !token.starts_with('<') && !token.starts_with('[') && !token.starts_with('-')
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|command| command.len() > 1)
+        .map(|command| format!("{} --help", command.join(" ")));
+    from_usage.or_else(nearest_help_command_from_argv)
+}
+
+fn nearest_help_command_from_argv() -> Option<String> {
+    let mut command = Cli::command();
+    let mut path = vec!["heddle".to_string()];
+    for argument in std::env::args_os().skip(1) {
+        let Some(argument) = argument.to_str() else {
+            continue;
+        };
+        let Some(subcommand) = command.find_subcommand(argument).cloned() else {
+            continue;
+        };
+        path.push(subcommand.get_name().to_string());
+        command = subcommand;
+    }
+    (path.len() > 1).then(|| format!("{} --help", path.join(" ")))
 }
 
 fn idempotency_status_for_error(kind: &str) -> &'static str {
@@ -577,7 +625,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         kind: "repository_format_too_old".to_string(),
                         human_error: Some(heddle_err.to_string()),
                         hint: format!(
-                            "This alpha repository uses format v{found}. Back it up, then recreate it or re-adopt its Git history as format v{required}."
+                            "This alpha repository uses format v{found}. Back it up, then recreate it or reimport its Git history as format v{required}."
                         ),
                         unsafe_condition: format!(
                             "repository format v{found} is incompatible with required format v{required}"
@@ -588,8 +636,8 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         preserved:
                             "the repository config, objects, refs, metadata, and worktree were left unchanged"
                                 .to_string(),
-                        primary_command: "heddle help adopt".to_string(),
-                        recovery_commands: vec!["heddle help adopt".to_string()],
+                        primary_command: "heddle help import local".to_string(),
+                        recovery_commands: vec!["heddle help import local".to_string()],
                         extra_json_fields: serde_json::Map::new(),
                     };
                 }
@@ -626,7 +674,7 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         kind: "storage_format_too_old".to_string(),
                         human_error: Some(heddle_err.to_string()),
                         hint: format!(
-                            "This alpha repository contains {storage} format {found}. Back it up, then recreate it or re-adopt its Git history as format {required}."
+                            "This alpha repository contains {storage} format {found}. Back it up, then recreate it or reimport its Git history as format v{required}."
                         ),
                         unsafe_condition: format!(
                             "{storage} format {found} is incompatible with required format {required}"
@@ -637,8 +685,8 @@ fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
                         preserved:
                             "repository objects, refs, metadata, and worktree files were left unchanged"
                                 .to_string(),
-                        primary_command: "heddle help adopt".to_string(),
-                        recovery_commands: vec!["heddle help adopt".to_string()],
+                        primary_command: "heddle help import local".to_string(),
+                        recovery_commands: vec!["heddle help import local".to_string()],
                         extra_json_fields: serde_json::Map::new(),
                     };
                 }
@@ -935,7 +983,7 @@ mod tests {
 
         let classified = classify_error(&err);
         assert_eq!(classified.kind, "repository_format_too_old");
-        assert_eq!(classified.primary_command, "heddle help adopt");
+        assert_eq!(classified.primary_command, "heddle help import local");
         assert!(classified.preserved.contains("config"));
         assert!(classified.recovery_commands.iter().all(|command| {
             crate::cli::commands::command_catalog::validate_recommended_action(command).is_ok()
@@ -962,7 +1010,7 @@ mod tests {
 
         let classified = classify_error(&err);
         assert_eq!(classified.kind, "storage_format_too_old");
-        assert_eq!(classified.primary_command, "heddle help adopt");
+        assert_eq!(classified.primary_command, "heddle help import local");
         assert!(classified.preserved.contains("left unchanged"));
         assert!(classified.recovery_commands.iter().all(|command| {
             crate::cli::commands::command_catalog::validate_recommended_action(command).is_ok()

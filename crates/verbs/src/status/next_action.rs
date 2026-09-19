@@ -208,7 +208,7 @@ pub fn remote_untracked_action_for(
 }
 
 pub fn canonical_adopt_ref_command(ref_name: &str) -> String {
-    heddle_action(["adopt", "--ref", ref_name])
+    heddle_action(["import", "local", "--ref", ref_name])
 }
 
 pub fn canonical_git_import_ref_command(ref_name: &str) -> String {

@@ -352,22 +352,22 @@ impl RecoveryAdvice {
         Self::invalid_usage(
             "adopt_path_conflict",
             format!(
-                "`heddle adopt` received both a positional path ({positional}) and --repo ({repo_path})"
+                "`heddle import local` received both a positional path ({positional}) and --repo ({repo_path})"
             ),
             "Pass exactly one repository path so adoption targets a single Git worktree.",
-            "heddle adopt <path>",
+            "heddle import local <path>",
         )
     }
 
     pub fn adopt_requires_git_worktree(details: Option<String>) -> Self {
         let error = match details {
-            Some(details) => format!("`heddle adopt` needs a Git worktree: {details}"),
-            None => "`heddle adopt` needs a Git worktree".to_string(),
+            Some(details) => format!("`heddle import local` needs a Git worktree: {details}"),
+            None => "`heddle import local` needs a Git worktree".to_string(),
         };
         Self::safety_refusal(
             "adopt_requires_git_worktree",
             error,
-            "Run `heddle init` for a new native Heddle repository, or run `heddle adopt` from inside a Git worktree.",
+            "Run `heddle init` for a new native Heddle repository, or run `heddle import local` from inside a Git worktree.",
             "the selected path is not a Git worktree",
             "adoption would otherwise initialize mapping metadata for an unknown Git checkout",
             "repository state, refs, metadata, and worktree files were left unchanged",
@@ -377,7 +377,7 @@ impl RecoveryAdvice {
     }
 
     pub fn git_overlay_tip_bind_failed(details: impl Into<String>) -> Self {
-        let primary = "heddle adopt".to_string();
+        let primary = "heddle import local".to_string();
         Self::safety_refusal(
             "git_overlay_tip_bind_failed",
             "Could not bind the active Git tip into Heddle",

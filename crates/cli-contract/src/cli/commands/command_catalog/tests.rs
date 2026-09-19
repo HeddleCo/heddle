@@ -27,7 +27,28 @@ struct RuntimeContractParseSample {
 // and Git projection grouping rows.
 const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["abort"], &["abort"]),
-    sample(&["adopt"], &["adopt"]),
+    sample(&["import", "local"], &["import", "local"]),
+    #[cfg(feature = "client")]
+    sample(
+        &["import", "url"],
+        &[
+            "import",
+            "url",
+            "https://github.com/acme/widget.git",
+            "--to",
+            "acme/widget",
+        ],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["import", "status"],
+        &["import", "status", "operation-1", "--to", "acme/widget"],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["import", "retry"],
+        &["import", "retry", "operation-1", "--to", "acme/widget"],
+    ),
     #[cfg(feature = "ci")]
     sample(&["ci", "run"], &["ci", "run", "--local"]),
     sample(
@@ -387,17 +408,6 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["remote", "set-default", "origin"],
     ),
     sample(&["remote", "show"], &["remote", "show", "origin"]),
-    #[cfg(feature = "client")]
-    sample(
-        &["remote", "import-source"],
-        &[
-            "remote",
-            "import-source",
-            "https://github.com/octocat/Hello-World.git",
-            "--to",
-            "spool/willow-ibis-8e7264/hello-world",
-        ],
-    ),
     sample(&["resolve"], &["resolve"]),
     sample(&["revert"], &["revert", "HEAD"]),
     sample(&["review", "show"], &["review", "show"]),
@@ -1078,6 +1088,10 @@ fn json_compact_runtime_contract_is_projection_or_rejection() {
         "continue".to_string(),
         "diff".to_string(),
         "discuss".to_string(),
+        "import local".to_string(),
+        "import retry".to_string(),
+        "import status".to_string(),
+        "import url".to_string(),
         "land".to_string(),
         "log".to_string(),
         "ready".to_string(),
@@ -1297,7 +1311,6 @@ fn command_contract_metadata_is_internally_consistent() {
                     && !contract.writes_metadata
                     && !contract.writes_config
                     && !contract.writes_hooks
-                    && !contract.network_io
                     && !contract.daemon_process
                     && !contract.object_gc
                     && !contract.external_command
@@ -1664,7 +1677,7 @@ fn sync_git_adopt_note_is_authority_neutral() {
     assert_eq!(
         contract.canonical_note,
         Some(
-            "Use adopt to initialize Heddle from an existing Git repository and import its history."
+            "Use import local to initialize Heddle from an existing Git repository and import its history."
         )
     );
 }
@@ -1815,7 +1828,10 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // snake-cased display paths — see the overrides documented in
             // tests/cli_integration/output_kind_invariant.rs.
             "abort",
-            "adopt",
+            "import local",
+            "import url",
+            "import status",
+            "import retry",
             "agent capture",
             "agent ready",
             "agent task create",
@@ -1916,7 +1932,6 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "remote remove",
             "remote set-default",
             "remote show",
-            "remote import-source",
             "resolve",
             "revert",
             "review show",
@@ -2535,7 +2550,7 @@ fn op_id_persistence_reads_contract_table() {
         ("review sign", false, "repository"),
         ("status", false, "none"),
         ("init", false, "bootstrap"),
-        ("adopt", false, "bootstrap"),
+        ("import local", false, "bootstrap"),
         ("clone", false, "bootstrap"),
     ] {
         let entry = catalog

@@ -80,13 +80,14 @@ mod source_import;
 // The wire payload lives in cli-contract so the schema registry registers
 // the real serialization type.
 pub(crate) use heddle_cli_contract::cli::commands::wire::remote::PushOutput;
+use heddle_cli_contract::cli::commands::wire::remote::PushReplicationOutcome;
 pub use remote_ops::{cmd_pull, cmd_remote};
 pub(crate) use remote_ops::{
     pull_current_git_overlay_authoritative, resolve_default_remote_name,
     resolved_default_remote_name,
 };
 #[cfg(feature = "client")]
-pub use source_import::cmd_import_source;
+pub use source_import::{cmd_import_retry, cmd_import_status, cmd_import_url};
 
 /// CLI machine envelope: domain [`PushOutcome`] plus verification next-actions.
 fn push_output_from_outcome(
@@ -95,6 +96,30 @@ fn push_output_from_outcome(
 ) -> PushOutput {
     let action = ActionFields::from_action(&trust.recommended_action);
     PushOutput {
+        source: PushReplicationOutcome {
+            status: if outcome.success {
+                "succeeded"
+            } else {
+                "failed"
+            },
+            count: None,
+            error: None,
+        },
+        discussions: PushReplicationOutcome {
+            status: "not_applicable",
+            count: None,
+            error: None,
+        },
+        context: PushReplicationOutcome {
+            status: "not_applicable",
+            count: None,
+            error: None,
+        },
+        reviews: PushReplicationOutcome {
+            status: "not_applicable",
+            count: None,
+            error: None,
+        },
         outcome,
         next_action: action.action.clone(),
         next_action_template: action.template.clone(),
@@ -524,12 +549,12 @@ fn git_overlay_push_state_advice() -> anyhow::Error {
     RecoveryAdvice::safety_refusal(
         "git_overlay_push_state_unsupported",
         "Git Overlay push cannot use --state",
-        "Push the current Git branch, or adopt the repository before pushing a Heddle state.",
+        "Push the current Git branch, or run `heddle import local` before pushing a Heddle state.",
         "Git Overlay publishes Git refs rather than Heddle state identifiers",
         "accepting --state would imply a state-selection behavior the Git transport cannot honor",
         "no hook ran and repository, remote, index, and worktree state were left unchanged",
         "heddle push",
-        vec!["heddle push".to_string(), "heddle adopt".to_string()],
+        vec!["heddle push".to_string(), "heddle import local".to_string()],
     )
     .into()
 }
@@ -1466,14 +1491,19 @@ async fn push_network_connected(
     .map_err(map_missing_spool)?;
     clear_line(&progress);
 
-    // Write path for hosted discussions (heddle discuss): the pushed state(s)
-    // are now on the server, so replay any local symbol-anchored discussions to
-    // the hosted CollaborationService over the same signed client. Best-effort:
-    // the object push already succeeded, so a discussion-sync hiccup warns
-    // rather than failing the push (the next push resumes from the mirror map).
+    let not_attempted = || PushReplicationOutcome {
+        status: "not_attempted",
+        count: None,
+        error: None,
+    };
+    let mut discussions = not_attempted();
+    let mut context = not_attempted();
+    let mut reviews = not_attempted();
     if result.success {
-        match hosted_client::client::discussion_sync::push_discussions(repo, client, &repo_path)
-            .await
+        discussions = match hosted_client::client::discussion_sync::push_discussions(
+            repo, client, &repo_path,
+        )
+        .await
         {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
@@ -1481,36 +1511,66 @@ async fn push_network_connected(
                     style::ok_marker(),
                     style::dim(&repo_path)
                 );
+                PushReplicationOutcome {
+                    status: "succeeded",
+                    count: Some(count),
+                    error: None,
+                }
             }
-            Ok(_) => {}
+            Ok(count) => PushReplicationOutcome {
+                status: "succeeded",
+                count: Some(count),
+                error: None,
+            },
             Err(error) => {
-                eprintln!(
-                    "{} discussion sync skipped: {error:#}",
-                    style::warn_marker()
-                );
+                let message = format!("{error:#}");
+                eprintln!("{} discussion sync failed: {message}", style::warn_marker());
+                PushReplicationOutcome {
+                    status: "failed",
+                    count: None,
+                    error: Some(message),
+                }
             }
-        }
+        };
 
         // Write path for hosted context annotations (heddle context) and review
         // signatures (heddle review sign) — same seam as discussions. #549
         // rejects these attachments in the pack, so they only reach the server
-        // over the caller-authenticated RPCs. Best-effort: the object push
-        // already landed, so a sync hiccup warns rather than failing the push.
-        match hosted_client::client::context_sync::push_context(repo, client, &repo_path).await {
+        // over the caller-authenticated RPCs.
+        context = match hosted_client::client::context_sync::push_context(repo, client, &repo_path)
+            .await
+        {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
                     "{} synced {count} annotation(s) to {}",
                     style::ok_marker(),
                     style::dim(&repo_path)
                 );
+                PushReplicationOutcome {
+                    status: "succeeded",
+                    count: Some(count),
+                    error: None,
+                }
             }
-            Ok(_) => {}
+            Ok(count) => PushReplicationOutcome {
+                status: "succeeded",
+                count: Some(count),
+                error: None,
+            },
             Err(error) => {
-                eprintln!("{} context sync skipped: {error:#}", style::warn_marker());
+                let message = format!("{error:#}");
+                eprintln!("{} context sync failed: {message}", style::warn_marker());
+                PushReplicationOutcome {
+                    status: "failed",
+                    count: None,
+                    error: Some(message),
+                }
             }
-        }
-        match hosted_client::client::review_sync::push_review_signatures(repo, client, &repo_path)
-            .await
+        };
+        reviews = match hosted_client::client::review_sync::push_review_signatures(
+            repo, client, &repo_path,
+        )
+        .await
         {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(
@@ -1518,13 +1578,29 @@ async fn push_network_connected(
                     style::ok_marker(),
                     style::dim(&repo_path)
                 );
+                PushReplicationOutcome {
+                    status: "succeeded",
+                    count: Some(count),
+                    error: None,
+                }
             }
-            Ok(_) => {}
+            Ok(count) => PushReplicationOutcome {
+                status: "succeeded",
+                count: Some(count),
+                error: None,
+            },
             Err(error) => {
-                eprintln!("{} review sync skipped: {error:#}", style::warn_marker());
+                let message = format!("{error:#}");
+                eprintln!("{} review sync failed: {message}", style::warn_marker());
+                PushReplicationOutcome {
+                    status: "failed",
+                    count: None,
+                    error: Some(message),
+                }
             }
-        }
+        };
     }
+    let replication_complete = hosted_replication_complete(&discussions, &context, &reviews);
 
     // CLI maps wire/protobuf transport fields → pure domain fields; core
     // parses success/failure and builds execution facts / outcome.
@@ -1537,14 +1613,26 @@ async fn push_network_connected(
         HostedPushResult::Success { state } => {
             if should_output_json(options.cli, Some(repo.config())) {
                 let trust = build_repository_verification_state(repo);
-                let output = heddle_push_output(options.plan, state, None, trust);
+                let mut output = heddle_push_output(options.plan, state, None, trust);
+                apply_hosted_replication_outcomes(
+                    &mut output,
+                    discussions.clone(),
+                    context.clone(),
+                    reviews.clone(),
+                );
                 write_full_command_json(
                     &output,
                     NextActionValidationContext::without_repo(&["push"]),
                 )?;
             } else {
                 let trust = build_repository_verification_state(repo);
-                let output = heddle_push_output(options.plan, state.clone(), None, trust);
+                let mut output = heddle_push_output(options.plan, state.clone(), None, trust);
+                apply_hosted_replication_outcomes(
+                    &mut output,
+                    discussions.clone(),
+                    context.clone(),
+                    reviews.clone(),
+                );
                 let text = format_push_outcome_text(&output.outcome, Some(options.track_name));
                 println!(
                     "{} pushed to {}",
@@ -1582,7 +1670,39 @@ async fn push_network_connected(
         }
     }
 
-    Ok(())
+    if replication_complete {
+        Ok(())
+    } else {
+        Err(crate::exit::OutcomeExit::data_err().into())
+    }
+}
+
+#[cfg(feature = "client")]
+fn apply_hosted_replication_outcomes(
+    output: &mut PushOutput,
+    discussions: PushReplicationOutcome,
+    context: PushReplicationOutcome,
+    reviews: PushReplicationOutcome,
+) {
+    let complete = hosted_replication_complete(&discussions, &context, &reviews);
+    output.discussions = discussions;
+    output.context = context;
+    output.reviews = reviews;
+    if !complete {
+        output.outcome.status = "partial";
+        output.outcome.success = false;
+    }
+}
+
+#[cfg(feature = "client")]
+fn hosted_replication_complete(
+    discussions: &PushReplicationOutcome,
+    context: &PushReplicationOutcome,
+    reviews: &PushReplicationOutcome,
+) -> bool {
+    [discussions, context, reviews]
+        .iter()
+        .all(|outcome| outcome.status == "succeeded")
 }
 
 /// Push one Heddle state or one authoritative Git mirror over hosted transport.
@@ -2316,6 +2436,66 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn partial_push_keeps_replication_outcomes_separate_and_is_not_complete() {
+        let discussions = PushReplicationOutcome {
+            status: "succeeded",
+            count: Some(2),
+            error: None,
+        };
+        let context = PushReplicationOutcome {
+            status: "failed",
+            count: None,
+            error: Some("context unavailable".into()),
+        };
+        let reviews = PushReplicationOutcome {
+            status: "succeeded",
+            count: Some(1),
+            error: None,
+        };
+        assert!(!hosted_replication_complete(
+            &discussions,
+            &context,
+            &reviews
+        ));
+        assert_eq!(discussions.count, Some(2));
+        assert_eq!(context.error.as_deref(), Some("context unavailable"));
+        assert_eq!(reviews.count, Some(1));
+
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("native repo");
+        let plan = PushPlan {
+            remote: Some("origin".into()),
+            all_threads: false,
+            force: false,
+            track_name: "main".into(),
+            uses_local_git_overlay: false,
+            hosted: HostedPushPlan::NativeSingleThread,
+            uses_git_overlay_mirror_rpc: false,
+            native_all_threads_fanout: false,
+            path: PushPath::NativeRemote {
+                hosted: HostedPushPlan::NativeSingleThread,
+                uses_mirror_rpc: false,
+                native_all_threads_fanout: false,
+            },
+        };
+        let mut output = heddle_push_output(
+            &plan,
+            Some("state-1".into()),
+            None,
+            build_repository_verification_state(&repo),
+        );
+        apply_hosted_replication_outcomes(&mut output, discussions, context, reviews);
+        assert_eq!(output.source.status, "succeeded");
+        assert_eq!(output.discussions.status, "succeeded");
+        assert_eq!(output.context.status, "failed");
+        assert_eq!(output.reviews.status, "succeeded");
+        assert_eq!(output.outcome.status, "partial");
+        assert!(!output.outcome.success);
+        assert!(output.outcome.pushed, "source objects did reach the server");
+    }
 
     #[cfg(feature = "client")]
     #[test]

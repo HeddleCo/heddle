@@ -68,8 +68,8 @@ fn repository_setup_guidance_distinguishes_init_from_adopt() {
     assert!(guidance.effect.contains("Git commits stay in Git storage"));
 
     let mut convert = verification_state(
-        "heddle adopt --ref main",
-        vec!["heddle adopt --ref main".to_string()],
+        "heddle import local --ref main",
+        vec!["heddle import local --ref main".to_string()],
     );
     convert.status = "needs_import".to_string();
     convert.repository_mode = "git-overlay".to_string();
@@ -80,7 +80,7 @@ fn repository_setup_guidance_distinguishes_init_from_adopt() {
     assert!(
         guidance
             .setup_line
-            .contains("connect this branch with heddle adopt --ref main")
+            .contains("connect this branch with heddle import local --ref main")
     );
     assert!(guidance.effect.contains("adoption imports Git history"));
 }

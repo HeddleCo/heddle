@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle remote import-source` — weft fetches and imports public Git.
+//! Hosted `heddle import` operations.
 
 use anyhow::{Context, Result, anyhow};
 use api::heddle::api::v1alpha2 as contract;
-use heddle_cli_contract::cli::commands::wire::remote::ImportSourceOutput;
+use heddle_cli_contract::cli::commands::wire::remote::{ImportOperationOutput, ImportRetryOutput};
 use hosted_client::hosted_runtime::{
     auth::resolve_server,
     hosted::{HostedAuthMode, HostedClient, HostedSession},
@@ -13,24 +13,27 @@ use objects::{Progress, object::ThreadName};
 use super::provision_hosted_source_destination;
 use crate::{
     cli::{
-        Cli, CliContext, ImportSourceArgs,
+        Cli, CliContext, ImportOperationArgs, ImportUrlArgs, output_is_compact,
         progress_render::{TerminalSink, finish_line, format_transfer_bytes},
-        render::write_json_stdout,
         should_output_json, style,
     },
     config::UserConfig,
     remote::RemoteTarget,
 };
 
-pub async fn cmd_import_source(cli: &Cli, args: ImportSourceArgs) -> Result<()> {
+use crate::cli::commands::{
+    compact::{CompactOutput, CompactProjection},
+    next_action::{NextActionValidationContext, write_command_json},
+};
+
+pub async fn cmd_import_url(cli: &Cli, args: ImportUrlArgs) -> Result<()> {
     let (server, destination) = import_destination(&args.to, args.server.as_deref())?;
     let config = UserConfig::load_default()?;
     let session = HostedSession::build(
         &config,
         Some(server.clone()),
         HostedAuthMode::CredentialFallback,
-    )?
-    .with_allow_insecure(args.insecure);
+    )?;
     let mut client = session.connect(&server).await?;
     let result = import_connected(cli, &mut client, &server, &destination, &args).await;
     client.close().await;
@@ -42,12 +45,12 @@ async fn import_connected(
     client: &mut HostedClient,
     server: &str,
     destination: &str,
-    args: &ImportSourceArgs,
+    args: &ImportUrlArgs,
 ) -> Result<()> {
     let (destination, created) = provision_hosted_source_destination(client, destination)
         .await
         .context("provision hosted import destination")?;
-    let thread_name = args.name.as_deref().unwrap_or("main").trim();
+    let thread_name = args.thread.as_deref().unwrap_or("main").trim();
     if thread_name.is_empty() {
         return Err(anyhow!(
             "hosted source import thread name must not be empty"
@@ -58,7 +61,7 @@ async fn import_connected(
     let started = client
         .import_source(
             &destination,
-            &args.clone_url,
+            &args.url,
             thread_name.as_str(),
             cli.operation_id_wire(),
         )
@@ -66,34 +69,21 @@ async fn import_connected(
         .context("submit hosted source import")?;
     let thread = thread_name.into_string();
     let json = should_output_json(cli, None);
-    let progress = if json {
-        Progress::null()
-    } else {
-        println!(
-            "{} {} hosted spool {}",
-            style::ok_marker(),
-            if created { "created" } else { "using" },
-            style::bold(&destination)
-        );
+    let progress = {
+        if !json {
+            println!(
+                "{} {} hosted spool {}",
+                style::ok_marker(),
+                if created { "created" } else { "using" },
+                style::bold(&destination)
+            );
+        }
         Progress::with_sink(Box::new(TerminalSink::new()))
     };
 
     let terminal = client
         .observe_import_source(&started, |record| {
-            let output = operation_output(
-                record,
-                &args.clone_url,
-                &destination,
-                &thread,
-                &started.client_operation_id,
-            );
-            if json {
-                write_json_stdout(&output).map_err(|error| {
-                    wire::ProtocolError::Io(std::io::Error::other(error.to_string()))
-                })?;
-            } else {
-                progress.set_phase(format_progress(record));
-            }
+            progress.set_phase(format_progress(record));
             Ok(())
         })
         .await
@@ -102,11 +92,19 @@ async fn import_connected(
     match contract::operation_record::State::try_from(terminal.state) {
         Ok(contract::operation_record::State::Completed) => {
             finish_line(&progress, "[done] imported Git history on weft");
-            if !json {
+            if json {
+                let output =
+                    operation_output(&terminal, Some(&args.url), &destination, Some(&thread));
+                write_command_json(
+                    &output,
+                    output_is_compact(cli),
+                    NextActionValidationContext::without_repo(&["import", "url"]),
+                )?;
+            } else {
                 println!(
                     "{} imported {} into {} on {}",
                     style::ok_marker(),
-                    style::bold(&args.clone_url),
+                    style::bold(&args.url),
                     style::bold(&destination),
                     style::dim(server)
                 );
@@ -119,16 +117,125 @@ async fn import_connected(
         }
         Ok(contract::operation_record::State::Failed) => {
             let failure = format_failure(terminal.failure.as_ref());
-            Err(anyhow!(
-                "hosted source import failed: {failure}. RetryImportSource is available for an explicit retry; no retry was run"
-            ))
+            let output = operation_output(&terminal, Some(&args.url), &destination, Some(&thread));
+            if json {
+                write_command_json(
+                    &output,
+                    output_is_compact(cli),
+                    NextActionValidationContext::without_repo(&["import", "url"]),
+                )?;
+            } else {
+                eprintln!(
+                    "{} hosted source import failed: {failure}",
+                    style::warn_marker()
+                );
+                super::super::action_line::print_next(&format!(
+                    "heddle import retry {} --to {}",
+                    output.operation_id, destination
+                ));
+            }
+            Err(crate::exit::OutcomeExit::new(crate::exit::HeddleExitCode::Protocol).into())
         }
         Ok(contract::operation_record::State::Canceled) => {
-            Err(anyhow!("hosted source import was canceled"))
+            let output = operation_output(&terminal, Some(&args.url), &destination, Some(&thread));
+            if json {
+                write_command_json(
+                    &output,
+                    output_is_compact(cli),
+                    NextActionValidationContext::without_repo(&["import", "url"]),
+                )?;
+            } else {
+                eprintln!("{} hosted source import was canceled", style::warn_marker());
+            }
+            Err(crate::exit::OutcomeExit::new(crate::exit::HeddleExitCode::Protocol).into())
         }
         _ => Err(anyhow!(
             "hosted source import ended in a nonterminal operation state"
         )),
+    }
+}
+
+pub async fn cmd_import_status(cli: &Cli, args: ImportOperationArgs) -> Result<()> {
+    let (server, destination) = import_destination(&args.to, args.server.as_deref())?;
+    let config = UserConfig::load_default()?;
+    let session = HostedSession::build(
+        &config,
+        Some(server.clone()),
+        HostedAuthMode::CredentialFallback,
+    )?;
+    let client = session.connect(&server).await?;
+    let json = should_output_json(cli, None);
+    let compact = output_is_compact(cli);
+    let result = client
+        .observe_import_operation(&destination, &args.operation, true, |record| {
+            let output = operation_output(record, None, &destination, None);
+            if json {
+                write_command_json(
+                    &output,
+                    compact,
+                    NextActionValidationContext::without_repo(&["import", "status"]),
+                )
+                .map_err(|error| {
+                    wire::ProtocolError::Io(std::io::Error::other(error.to_string()))
+                })?;
+            } else {
+                println!("{}", format_progress(record));
+            }
+            Ok(())
+        })
+        .await
+        .context("observe hosted source import");
+    client.close().await;
+    result.map(|_| ())
+}
+
+pub async fn cmd_import_retry(cli: &Cli, args: ImportOperationArgs) -> Result<()> {
+    let (server, destination) = import_destination(&args.to, args.server.as_deref())?;
+    let config = UserConfig::load_default()?;
+    let session = HostedSession::build(
+        &config,
+        Some(server.clone()),
+        HostedAuthMode::CredentialFallback,
+    )?;
+    let client = session.connect(&server).await?;
+    let original = client
+        .observe_import_operation(&destination, &args.operation, false, |_| Ok(()))
+        .await
+        .context("observe import operation before retry")?;
+    let started = client
+        .retry_import_source(&original, cli.operation_id_wire())
+        .await
+        .context("submit hosted source import retry")?;
+    client.close().await;
+    let output = ImportRetryOutput {
+        output_kind: "import_retry",
+        action: "retry",
+        status: "submitted",
+        success: true,
+        destination: destination.clone(),
+        original_operation_id: args.operation,
+        operation_id: started.operation.id,
+        client_operation_id: started.client_operation_id,
+    };
+    if should_output_json(cli, None) {
+        write_command_json(
+            &output,
+            output_is_compact(cli),
+            NextActionValidationContext::without_repo(&["import", "retry"]),
+        )
+    } else {
+        println!(
+            "{} submitted retry {} for import operation {} on {}",
+            style::ok_marker(),
+            style::bold(&output.operation_id),
+            style::bold(&output.original_operation_id),
+            style::dim(&server)
+        );
+        super::super::action_line::print_next(&format!(
+            "heddle import status {} --to {}",
+            output.operation_id, destination
+        ));
+        Ok(())
     }
 }
 
@@ -157,23 +264,27 @@ fn import_destination(value: &str, server: Option<&str>) -> Result<(String, Stri
 
 fn operation_output(
     record: &contract::OperationRecord,
-    source: &str,
+    source: Option<&str>,
     destination: &str,
-    thread: &str,
-    operation_id: &str,
-) -> ImportSourceOutput {
+    thread: Option<&str>,
+) -> ImportOperationOutput {
     let state = operation_state(record.state);
-    ImportSourceOutput {
-        output_kind: "import_source",
+    ImportOperationOutput {
+        output_kind: "import_operation",
         event: if is_terminal(record.state) {
             "terminal"
         } else {
             "progress"
         },
-        source: source.to_string(),
+        source: source.map(str::to_string),
         destination: destination.to_string(),
-        thread: thread.to_string(),
-        client_operation_id: operation_id.to_string(),
+        thread: thread.map(str::to_string),
+        operation_id: record
+            .r#ref
+            .as_ref()
+            .map(|reference| reference.id.clone())
+            .unwrap_or_default(),
+        client_operation_id: record.client_operation_id.clone(),
         state: state.to_string(),
         completed_units: record.completed_units,
         total_units: record.total_units,
@@ -184,6 +295,24 @@ fn operation_output(
             .failure
             .as_ref()
             .map(|failure| format_failure(Some(failure))),
+    }
+}
+
+impl CompactProjection for ImportOperationOutput {
+    fn compact(&self) -> CompactOutput {
+        let mut output = CompactOutput::new(self.output_kind);
+        output.status = Some(self.state.clone());
+        output.operation_id = Some(self.operation_id.clone());
+        output
+    }
+}
+
+impl CompactProjection for ImportRetryOutput {
+    fn compact(&self) -> CompactOutput {
+        let mut output = CompactOutput::new(self.output_kind);
+        output.status = Some(self.status.to_string());
+        output.operation_id = Some(self.operation_id.clone());
+        output
     }
 }
 
@@ -290,6 +419,12 @@ mod tests {
     #[test]
     fn failed_operation_is_terminal_and_retains_executor_message() {
         let record = contract::OperationRecord {
+            r#ref: Some(contract::RecordRef {
+                spool: Some(contract::SpoolRef {
+                    id: "destination".into(),
+                }),
+                id: "durable-operation".into(),
+            }),
             state: contract::operation_record::State::Failed as i32,
             failure: Some(api::heddle::api::common::CallFailure {
                 code: api::heddle::api::common::CallFailureCode::Unavailable as i32,
@@ -298,8 +433,10 @@ mod tests {
             }),
             ..Default::default()
         };
-        let output = operation_output(&record, "source", "dest", "thread", "operation");
+        let output = operation_output(&record, Some("source"), "dest", Some("thread"));
         assert!(output.terminal);
+        assert_eq!(output.event, "terminal");
+        assert_eq!(output.operation_id, "durable-operation");
         assert_eq!(output.state, "failed");
         assert!(
             output

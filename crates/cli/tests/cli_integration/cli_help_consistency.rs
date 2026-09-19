@@ -366,7 +366,7 @@ fn git_concepts_topic_explains_authority_and_current_surface() {
     }
     assert!(
         help.contains("Use `heddle init` to add that sidecar")
-            && help.contains("`heddle adopt`")
+            && help.contains("`heddle import local`")
             && help.contains("one atomic transition")
             && help.contains("makes Heddle the repository authority"),
         "git-concepts topic should distinguish sidecar initialization from adoption: {help}"

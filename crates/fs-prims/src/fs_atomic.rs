@@ -324,7 +324,7 @@ fn kick_writeback(_file: &File) {}
 /// file individually — but the writeback I/O overlaps instead of serializing
 /// one synchronous `fsync` barrier per file.
 ///
-/// This is the bulk-ref hot path (`heddle adopt` of N branches publishes N ref
+/// This is the bulk-ref hot path (`heddle import local` of N branches publishes N ref
 /// files in one batch): the per-file `write → fsync` loop paid ~N serial fsync
 /// barriers (~2.3s for 800 refs on a local SSD); overlapping the writeback
 /// collapses that to ~0.1s with no change to the durability contract. Callers

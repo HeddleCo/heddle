@@ -48,7 +48,7 @@ async fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
     commit_file(&work, "one\ntwo\n", "head by Git author");
 
     heddle_env(
-        &["adopt"],
+        &["import", "local"],
         Some(&work),
         &[(
             "HEDDLE_HOME",
