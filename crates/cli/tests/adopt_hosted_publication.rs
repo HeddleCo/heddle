@@ -122,6 +122,14 @@ async fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
         .expect("clone published adopted source");
     assert!(pulled.success);
     assert_eq!(pulled.final_state, Some(source_state.id()));
+    assert_eq!(
+        cloned
+            .refs()
+            .get_thread(&objects::object::ThreadName::new("main"))
+            .expect("read clone thread ref"),
+        None,
+        "native object installation must not publish the clone checkout ref"
+    );
     let cloned_state = cloned
         .store()
         .get_state(&source_state.id())
@@ -147,6 +155,44 @@ async fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
             .expect("cloned story")
             .content(),
         b"one\ntwo\n"
+    );
+
+    cloned
+        .fast_forward_attached_from_materialized_state(&source_state.id(), None)
+        .expect("publish materialized clone checkout");
+    let newer_local_state = objects::object::State::new(
+        cloned_state.tree,
+        vec![source_state.id()],
+        source_attribution.clone(),
+    );
+    let newer_local = newer_local_state.id();
+    cloned
+        .store()
+        .put_state(&newer_local_state)
+        .expect("store newer local state");
+    assert_ne!(newer_local, source_state.id());
+    cloned
+        .set_thread_recorded(&objects::object::ThreadName::new("main"), &newer_local)
+        .expect("advance local main without changing its tree");
+    hosted
+        .fetch_state(&cloned, "acme/widgets", "main", source_state.id())
+        .await
+        .expect("hydrate historical hosted revision");
+    assert_eq!(
+        cloned
+            .refs()
+            .get_thread(&objects::object::ThreadName::new("main"))
+            .expect("read main after hydration"),
+        Some(newer_local),
+        "historical hydration must leave the current thread at its newer tip"
+    );
+    assert_eq!(
+        cloned.head().expect("HEAD after hydration"),
+        Some(newer_local)
+    );
+    assert_eq!(
+        std::fs::read_to_string(clone.join("story.txt")).expect("checkout after hydration"),
+        "one\ntwo\n"
     );
 
     hosted.close().await;

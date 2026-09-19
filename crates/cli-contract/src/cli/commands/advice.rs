@@ -1147,10 +1147,8 @@ impl RecoveryAdvice {
         let pull_without_lazy = format!("heddle pull {source}");
         Self::safety_refusal(
             "local_lazy_pull_unsupported",
-            "Refusing lazy pull from local remote: lazy materialization requires a hosted or network remote",
-            format!(
-                "Run `{pull_without_lazy}` without `--lazy`, or configure a hosted remote and retry lazy pull there."
-            ),
+            "Refusing lazy pull: lazy materialization is not yet supported end to end",
+            format!("Run `{pull_without_lazy}` without `--lazy`."),
             format!("selected remote resolves to local path file://{source}"),
             "lazy pull would leave the worktree depending on on-demand object fetches that the local transport does not provide",
             "repository state was left unchanged",

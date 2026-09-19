@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 use crate::legacy_v1::{
     AnnotatedFile, AnnotationScope, ContextAnnotation, ContextAnnotationKind, ContextRevision,
-    ListContextSuggestionsResponse, ReviseContextResponse, SetContextResponse, StateContextEntry,
-    SupersedeContextResponse, SymbolScope, annotation_scope,
+    ReviseContextResponse, SetContextResponse, StateContextEntry, SupersedeContextResponse,
+    SymbolScope, annotation_scope,
 };
 use api::heddle::api::v1alpha2::{
     AnnotationQuery, ContextRecord, ObserveCollaborationRequest, RecordRef, annotation_tag,
@@ -282,15 +282,6 @@ impl HostedClient {
         // Oldest-first on the wire; GetContextHistory is newest-first.
         revisions.reverse();
         Ok(revisions)
-    }
-
-    pub async fn list_context_suggestions(
-        &mut self,
-        _repo_path: &str,
-        _ref: Option<&str>,
-        _limit: u32,
-    ) -> Result<ListContextSuggestionsResponse, ProtocolError> {
-        Ok(ListContextSuggestionsResponse::default())
     }
 
     #[allow(clippy::too_many_arguments)]

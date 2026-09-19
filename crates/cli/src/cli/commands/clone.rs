@@ -1359,9 +1359,9 @@ fn local_clone_option_unsupported_advice(option: &'static str, value: &str) -> R
     };
     RecoveryAdvice::safety_refusal(
         "local_clone_option_unsupported",
-        format!("{detail} is only supported for hosted/network remotes"),
-        "Retry without lazy/filter options for local remotes, or use a hosted/network remote that supports lazy materialization.",
-        format!("selected clone transport is local but {detail} requires hosted/network hydration"),
+        format!("{detail} is not supported for local clones"),
+        "Retry without lazy/filter options; hosted lazy materialization is also reserved until end-to-end support lands.",
+        format!("selected clone transport is local but {detail} requires object hydration support"),
         "clone cannot create a lazy local checkout because the local transport does not provide on-demand object hydration",
         "destination path was left unchanged; no local clone repository was initialized",
         "heddle clone <remote> <path>",
@@ -1570,6 +1570,7 @@ async fn clone_network(
 
     use crate::config::UserConfig;
 
+    reject_unsupported_for_hosted(options)?;
     let user_config = UserConfig::load_default()?;
     // On every network-connecting command, TLS/auth config validation
     // (`hosted_runtime_config`) must succeed before any irreversible
@@ -1606,6 +1607,25 @@ async fn clone_network(
 }
 
 #[cfg(feature = "client")]
+fn reject_unsupported_for_hosted(options: &CloneOptions) -> Result<()> {
+    let mut unsupported = Vec::new();
+    if options.depth.is_some_and(|depth| depth != 0) {
+        unsupported.push("--depth");
+    }
+    if options.lazy || options.filter.is_some() {
+        unsupported.push("--lazy/--filter=blob:none");
+    }
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "hosted native fetch does not yet support {}; retry without {}",
+        unsupported.join(" and "),
+        unsupported.join(" or ")
+    )
+}
+
+#[cfg(feature = "client")]
 async fn clone_network_connected(
     cli: &Cli,
     authority: &str,
@@ -1623,8 +1643,8 @@ async fn clone_network_connected(
         insecure: _,
     } = options;
     let depth = *depth;
-    // `--filter blob:none` is a synonym for `--lazy` on hosted/network
-    // remotes; both produce a clone whose blob content is hydrated on demand.
+    // Keep the shared representation ready for end-to-end support. The hosted
+    // entry point currently rejects either spelling before reaching this path.
     let lazy = *lazy || filter.is_some();
     let json_output = should_output_json(cli, None);
 
@@ -1747,16 +1767,6 @@ async fn clone_network_connected(
             verify_hosted_clone(&local_repo, final_state, depth, lazy)
                 .context("clone remained incomplete after targeted remote repair")?;
         }
-        client
-            .fetch_advertised_synthetic_frontier_objects(
-                &local_repo,
-                repo_path,
-                &remote_refs,
-                depth,
-                materialization,
-            )
-            .await?;
-
         let bootstrap =
             hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
                 .context("decode hosted clone bootstrap")?
@@ -1844,15 +1854,6 @@ async fn clone_network_connected(
             .into());
         }
         persist_advertised_synthetic_refs(&local_repo, &remote_refs)?;
-        client
-            .publish_clone_markers(
-                &local_repo,
-                repo_path,
-                &result.checkpoint,
-                depth,
-                materialization,
-            )
-            .await?;
         // Lazy clone: persist the hydrator metadata so future
         // `Repository::open` calls (in any process) can reconstruct
         // the on-read hydrator. Without this, lazy clones would only
@@ -2022,16 +2023,6 @@ async fn recover_interrupted_clone_connected(
             .context("clone repair retry completed without a final state")?;
         verify_hosted_clone(&repo, final_state, intent.depth, intent.lazy)?;
     }
-    client
-        .fetch_advertised_synthetic_frontier_objects(
-            &repo,
-            &intent.repository,
-            &remote_refs,
-            intent.depth,
-            materialization,
-        )
-        .await?;
-
     if intent.lazy {
         use repo::lazy_hydrator::LazyHydratorConfig;
         LazyHydratorConfig::hosted(
@@ -2097,15 +2088,6 @@ async fn recover_interrupted_clone_connected(
         .into());
     }
     persist_advertised_synthetic_refs(&repo, &remote_refs)?;
-    client
-        .publish_clone_markers(
-            &repo,
-            &intent.repository,
-            &result.checkpoint,
-            intent.depth,
-            materialization,
-        )
-        .await?;
     if intent.lazy {
         publish_attached_clone_thread(&repo, &track_name, &final_state)?;
     } else if git_overlay_clone {
@@ -3834,6 +3816,31 @@ mod tests {
             insecure: false,
         };
         reject_unsupported_for_git_overlay(&ok).expect("plain options ok");
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn reject_unsupported_for_hosted_runs_before_clone_state_creation() {
+        let unsupported = CloneOptions {
+            thread: None,
+            depth: Some(1),
+            lazy: true,
+            filter: None,
+            insecure: false,
+        };
+        let error = reject_unsupported_for_hosted(&unsupported)
+            .expect_err("hosted partial clone must be rejected");
+        assert!(error.to_string().contains("--depth"));
+        assert!(error.to_string().contains("--lazy"));
+
+        let full = CloneOptions {
+            thread: None,
+            depth: Some(0),
+            lazy: false,
+            filter: None,
+            insecure: false,
+        };
+        reject_unsupported_for_hosted(&full).expect("full hosted clone remains supported");
     }
 
     #[test]

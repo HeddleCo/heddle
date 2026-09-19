@@ -12,9 +12,9 @@ use api::heddle::api::{
     common::StateId as ApiStateId,
     v1alpha2::{
         self as contract, EndpointKind, EndpointRef, FetchOpen, ObservationMode,
-        ObserveIdentityRequest, ObserveOptions, ObserveThreadsRequest, RevisionRef, SpoolRef,
-        ThreadOverview, ThreadQuery, ThreadRef, TransferSelection, identity_event, revision_ref,
-        thread_list_event, thread_query,
+        ObserveIdentityRequest, ObserveOptions, ObserveThreadsRequest, PageRequest, RevisionRef,
+        SpoolRef, ThreadOverview, ThreadQuery, ThreadRef, TransferSelection, identity_event,
+        revision_ref, thread_list_event, thread_query,
     },
 };
 use crypto::{Signer as _, thread_operation::SignedOperation};
@@ -41,7 +41,6 @@ use super::{
     HostedClient, HostedRefEntry, PullBootstrapRefs, PullMaterialization,
     helpers::native_client_error,
     native_provider::preferred_fetch_open,
-    persist_advertised_thread_identity,
     sync::{PullProfile, PushProfile, encode_empty_pull_bootstrap},
 };
 
@@ -51,6 +50,7 @@ const SOURCE_OBJECTS: usize = 100_000;
 const SOURCE_BYTES: u64 = 256 * 1024 * 1024;
 const ANCESTRY_RECORDS: usize = 10_000;
 const ANCESTRY_BYTES: usize = 16 * 1024 * 1024;
+const THREAD_PAGE_SIZE: u32 = 64;
 
 fn native_error(error: impl std::fmt::Display) -> ProtocolError {
     ProtocolError::InvalidState(error.to_string())
@@ -86,10 +86,10 @@ fn state_from_revision(revision: Option<&RevisionRef>) -> Option<StateId> {
 }
 
 fn overview_state(overview: &ThreadOverview) -> Option<StateId> {
-    overview
-        .source_heads
-        .iter()
-        .find_map(|head| state_from_revision(Some(head)))
+    let [head] = overview.source_heads.as_slice() else {
+        return None;
+    };
+    state_from_revision(Some(head))
 }
 
 fn overview_thread_id(overview: &ThreadOverview) -> Result<ContentHash, ProtocolError> {
@@ -109,6 +109,9 @@ fn overview_thread_id(overview: &ThreadOverview) -> Result<ContentHash, Protocol
 fn hosted_ref_from_overview(
     overview: &ThreadOverview,
 ) -> Result<Option<HostedRefEntry>, ProtocolError> {
+    if overview.source_heads.len() > 1 {
+        return Err(multiple_heads_error(overview));
+    }
     let Some(state_id) = overview_state(overview) else {
         return Ok(None);
     };
@@ -184,28 +187,59 @@ impl HostedClient {
     ) -> Result<Vec<ThreadOverview>, ProtocolError> {
         let spool = self.resolve_spool_ref(repo_path).await?;
         let remote = self.native().await.map_err(native_error)?;
-        let mut observation = remote
-            .observe::<rpc::ThreadServiceObserveThreads>(
-                ObserveThreadsRequest {
-                    query: Some(ThreadQuery {
-                        spools: vec![spool],
-                        order: thread_query::Order::NameAsc as i32,
-                        ..Default::default()
-                    }),
-                    observe: Some(once_observe()),
-                    ..Default::default()
-                },
-                None,
-            )
-            .await
-            .map_err(native_error)?;
+        let query = ThreadQuery {
+            spools: vec![spool],
+            order: thread_query::Order::NameAsc as i32,
+            ..Default::default()
+        };
         let mut threads = Vec::new();
-        while let Some(batch) = observation.next_commit().await.map_err(native_error)? {
-            for change in batch.changes {
-                if let thread_list_event::Payload::Thread(thread) = change {
-                    threads.push(thread);
+        let mut after_page = Vec::new();
+        let mut page_tokens = std::collections::BTreeSet::new();
+        loop {
+            let mut observation = remote
+                .observe::<rpc::ThreadServiceObserveThreads>(
+                    ObserveThreadsRequest {
+                        query: Some(query.clone()),
+                        page: Some(PageRequest {
+                            size: THREAD_PAGE_SIZE,
+                            after_page: after_page.clone(),
+                        }),
+                        observe: Some(once_observe()),
+                    },
+                    None,
+                )
+                .await
+                .map_err(native_error)?;
+            let mut page = None;
+            while let Some(batch) = observation.next_commit().await.map_err(native_error)? {
+                if batch.page.is_some() {
+                    page = batch.page;
+                }
+                for change in batch.changes {
+                    if let thread_list_event::Payload::Thread(thread) = change {
+                        threads.push(thread);
+                    }
                 }
             }
+            let page = page.ok_or_else(|| {
+                ProtocolError::InvalidState(
+                    "Thread listing ended without snapshot page coverage".into(),
+                )
+            })?;
+            if page.exhausted {
+                if !page.next_page.is_empty() {
+                    return Err(ProtocolError::InvalidState(
+                        "exhausted Thread listing returned another page token".into(),
+                    ));
+                }
+                break;
+            }
+            if page.next_page.is_empty() || !page_tokens.insert(page.next_page.clone()) {
+                return Err(ProtocolError::InvalidState(
+                    "Thread listing pagination did not advance".into(),
+                ));
+            }
+            after_page = page.next_page;
         }
         Ok(threads)
     }
@@ -621,11 +655,11 @@ impl HostedClient {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        local_thread: Option<&str>,
+        _local_thread: Option<&str>,
     ) -> Result<(PullComplete, PullProfile), ProtocolError> {
         let started = Instant::now();
         let complete = self
-            .fetch_hosted_thread(repo, repo_path, remote_thread, local_thread, None)
+            .fetch_hosted_thread(repo, repo_path, remote_thread, None)
             .await?;
         Ok((
             complete,
@@ -641,11 +675,12 @@ impl HostedClient {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        local_thread: Option<&str>,
-        _depth: Option<u32>,
-        _materialization: PullMaterialization,
+        _local_thread: Option<&str>,
+        depth: Option<u32>,
+        materialization: PullMaterialization,
     ) -> Result<PullComplete, ProtocolError> {
-        self.fetch_hosted_thread(repo, repo_path, remote_thread, local_thread, None)
+        reject_unsupported_hosted_fetch_modes(depth, materialization)?;
+        self.fetch_hosted_thread(repo, repo_path, remote_thread, None)
             .await
     }
 
@@ -654,10 +689,11 @@ impl HostedClient {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        _depth: Option<u32>,
-        _materialization: PullMaterialization,
+        depth: Option<u32>,
+        materialization: PullMaterialization,
     ) -> Result<PullComplete, ProtocolError> {
-        self.fetch_hosted_thread(repo, repo_path, remote_thread, None, None)
+        reject_unsupported_hosted_fetch_modes(depth, materialization)?;
+        self.fetch_hosted_thread(repo, repo_path, remote_thread, None)
             .await
     }
 
@@ -665,13 +701,14 @@ impl HostedClient {
         &mut self,
         repo_path: &str,
         requested_thread: Option<&str>,
-        _depth: Option<u32>,
-        _materialization: PullMaterialization,
+        depth: Option<u32>,
+        materialization: PullMaterialization,
         initialize: F,
     ) -> Result<(PullComplete, Repository), ProtocolError>
     where
         F: FnOnce(&PullBootstrapRefs) -> Result<Repository, ProtocolError>,
     {
+        reject_unsupported_hosted_fetch_modes(depth, materialization)?;
         let advertised = self.advertised_pull_refs(repo_path).await?;
         if advertised.refs.is_empty() {
             return Err(ProtocolError::InvalidState(
@@ -692,13 +729,13 @@ impl HostedClient {
         }
         let repo = initialize(&advertised)?;
         let complete = self
-            .fetch_hosted_thread(&repo, repo_path, &track, Some(&track), None)
+            .fetch_hosted_thread(&repo, repo_path, &track, None)
             .await?;
         for entry in &advertised.refs {
             if !entry.is_user_thread() || entry.name == track {
                 continue;
             }
-            self.fetch_hosted_thread(&repo, repo_path, &entry.name, Some(&entry.name), None)
+            self.fetch_hosted_thread(&repo, repo_path, &entry.name, None)
                 .await?;
         }
         Ok((complete, repo))
@@ -730,7 +767,7 @@ impl HostedClient {
         remote_thread: &str,
         target_state: StateId,
     ) -> Result<usize, ProtocolError> {
-        self.fetch_hosted_thread(repo, repo_path, remote_thread, None, Some(target_state))
+        self.fetch_hosted_thread(repo, repo_path, remote_thread, Some(target_state))
             .await
             .map(|complete| usize::from(complete.success))
     }
@@ -751,33 +788,63 @@ impl HostedClient {
         repo: &Repository,
         repo_path: &str,
         remote_thread: &str,
-        local_thread: Option<&str>,
         target_state: Option<StateId>,
     ) -> Result<PullComplete, ProtocolError> {
         let spool = self.resolve_spool_ref(repo_path).await?;
+        let resolved = self.resolve_thread_ref(repo_path, remote_thread).await?;
         let overview = self
             .observe_thread_overviews(repo_path)
             .await?
             .into_iter()
-            .find(|overview| overview.name == remote_thread)
+            .find(|overview| {
+                overview.name == remote_thread && overview.r#ref.as_ref() == Some(&resolved)
+            })
             .ok_or_else(|| {
-                ProtocolError::ObjectNotFound(format!(
-                    "Thread '{remote_thread}' is not published on this spool"
+                ProtocolError::InvalidState(format!(
+                    "resolved Thread '{remote_thread}' was absent from its complete listing snapshot"
                 ))
             })?;
         let reference = overview
             .r#ref
             .clone()
             .ok_or_else(|| ProtocolError::InvalidState("observed Thread has no identity".into()))?;
-        let revision = match target_state {
-            Some(state) => Some(revision_ref(&spool, state)),
-            None => overview.source_heads.into_iter().next(),
-        };
-        if revision.is_none() && target_state.is_none() {
-            return Err(ProtocolError::InvalidState(
-                "Fetch requires a started Thread with a published source revision".into(),
-            ));
+        let revisions = fetch_revisions(&overview, &spool, target_state)?;
+        let ambiguous = target_state.is_none() && revisions.len() > 1;
+        let mut installed = Vec::with_capacity(revisions.len());
+        for (selected, revision) in revisions {
+            installed.push(
+                self.fetch_and_install_revision(repo, &reference, revision, selected)
+                    .await?,
+            );
         }
+        if ambiguous {
+            return Err(multiple_heads_error(&overview));
+        }
+        let final_state = installed.into_iter().next().ok_or_else(|| {
+            ProtocolError::InvalidState(
+                "Fetch requires a started Thread with a published source revision".into(),
+            )
+        })?;
+        Ok(PullComplete {
+            success: true,
+            final_state: Some(final_state),
+            error: None,
+            transfer_id: String::new(),
+            transport_mode: String::new(),
+            resume_offset: 0,
+            chunk_index: 0,
+            checkpoint: encode_empty_pull_bootstrap(final_state)?,
+            is_complete: true,
+        })
+    }
+
+    async fn fetch_and_install_revision(
+        &self,
+        repo: &Repository,
+        reference: &ThreadRef,
+        revision: RevisionRef,
+        selected: StateId,
+    ) -> Result<StateId, ProtocolError> {
         // ProviderDialRoute is a client hint on FetchOpen. Weft matches those
         // hints against configured shards; DescribeEndpoint and ThreadOverview
         // currently do not advertise them, so clone stays on direct Fetch until
@@ -785,7 +852,7 @@ impl HostedClient {
         let open = preferred_fetch_open(
             FetchOpen {
                 thread: Some(reference.clone()),
-                revision: revision.clone(),
+                revision: Some(revision),
                 selection: Some(TransferSelection {
                     facets: vec![contract::SharedFacet::Source as i32],
                     ..Default::default()
@@ -805,40 +872,15 @@ impl HostedClient {
         let final_state = staged
             .install(repo, now)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        if final_state != selected {
+            return Err(ProtocolError::InvalidState(format!(
+                "Fetch installed {final_state} instead of selected revision {selected}"
+            )));
+        }
         let seed = synthetic_initial_base().map_err(native_error)?;
         repo.store().put_tree(&objects::object::Tree::new())?;
         repo.store().put_state(&seed)?;
-        let track = local_thread.unwrap_or(remote_thread);
-        repo.set_thread_recorded(&ThreadName::new(track), &final_state)?;
-        if let Ok(id) = overview_thread_id_from_ref(&reference) {
-            if let Ok(replica) = ThreadReplica::open(repo.heddle_dir(), id) {
-                let _ = replica.bind_local_name(track);
-            }
-            persist_advertised_thread_identity(
-                repo,
-                &[HostedRefEntry::from_advertised(
-                    track.to_string(),
-                    final_state,
-                    true,
-                    repo::RevisionAddress::heddle(final_state).to_string(),
-                    Some(hex::encode(id.as_bytes())),
-                )],
-                track,
-                &final_state,
-            )
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        }
-        Ok(PullComplete {
-            success: true,
-            final_state: Some(final_state),
-            error: None,
-            transfer_id: String::new(),
-            transport_mode: String::new(),
-            resume_offset: 0,
-            chunk_index: 0,
-            checkpoint: encode_empty_pull_bootstrap(final_state)?,
-            is_complete: true,
-        })
+        Ok(final_state)
     }
 
     pub async fn get_thread_metadata(
@@ -882,46 +924,69 @@ impl HostedClient {
                 .flatten()),
         }
     }
+}
 
-    pub async fn publish_clone_markers(
-        &mut self,
-        repo: &Repository,
-        _repo_path: &str,
-        checkpoint: &[u8],
-        _depth: Option<u32>,
-        _materialization: PullMaterialization,
-    ) -> Result<(), ProtocolError> {
-        let _ = (repo, checkpoint);
-        Ok(())
+fn reject_unsupported_hosted_fetch_modes(
+    depth: Option<u32>,
+    materialization: PullMaterialization,
+) -> Result<(), ProtocolError> {
+    let mut unsupported = Vec::new();
+    if depth.is_some_and(|value| value != 0) {
+        unsupported.push("--depth");
     }
+    if materialization == PullMaterialization::Lazy {
+        unsupported.push("--lazy/--filter=blob:none");
+    }
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    Err(ProtocolError::InvalidState(format!(
+        "hosted native fetch does not yet support {}; retry without {}",
+        unsupported.join(" and "),
+        unsupported.join(" or ")
+    )))
+}
 
-    pub async fn fetch_advertised_synthetic_frontier_objects(
-        &mut self,
-        _repo: &Repository,
-        _repo_path: &str,
-        _advertised: &[HostedRefEntry],
-        _depth: Option<u32>,
-        _materialization: PullMaterialization,
-    ) -> Result<(), ProtocolError> {
-        Ok(())
+fn fetch_revisions(
+    overview: &ThreadOverview,
+    spool: &SpoolRef,
+    target_state: Option<StateId>,
+) -> Result<Vec<(StateId, RevisionRef)>, ProtocolError> {
+    if let Some(state) = target_state {
+        return Ok(vec![(state, revision_ref(spool, state))]);
     }
+    if overview.source_heads.is_empty() {
+        return Err(ProtocolError::InvalidState(
+            "Fetch requires a started Thread with a published source revision".into(),
+        ));
+    }
+    let mut revisions = std::collections::BTreeMap::new();
+    for revision in &overview.source_heads {
+        let state = state_from_revision(Some(revision)).ok_or_else(|| {
+            ProtocolError::InvalidState(
+                "hosted Thread source frontier contains a non-State revision; select an explicit revision"
+                    .into(),
+            )
+        })?;
+        revisions.entry(state).or_insert_with(|| revision.clone());
+    }
+    Ok(revisions.into_iter().collect())
+}
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn update_ref(
-        &mut self,
-        _repo_path: &str,
-        _name: &str,
-        _is_thread: bool,
-        _old_value: Option<StateId>,
-        _new_value: StateId,
-        _force: bool,
-        _thread_id: Option<String>,
-        _client_operation_id: String,
-    ) -> Result<wire::RefUpdated, ProtocolError> {
-        Err(ProtocolError::InvalidState(
-            "v2 Weft has no UpdateRef; source publication is SyncService/PublishContent".into(),
-        ))
-    }
+fn multiple_heads_error(overview: &ThreadOverview) -> ProtocolError {
+    let mut heads = overview
+        .source_heads
+        .iter()
+        .filter_map(|revision| state_from_revision(Some(revision)))
+        .map(|state| state.to_string_full())
+        .collect::<Vec<_>>();
+    heads.sort();
+    heads.dedup();
+    ProtocolError::InvalidState(format!(
+        "Thread '{}' has multiple source heads ({}); integrate them or select an explicit revision before pulling",
+        overview.name,
+        heads.join(", ")
+    ))
 }
 
 struct HostedStartSet {
@@ -1276,6 +1341,8 @@ fn record_hosted_capture(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use crypto::{Ed25519Signer, Signer, thread_operation::SignedGenesis};
     use objects::{
         object::{
@@ -1290,6 +1357,119 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+
+    #[test]
+    fn concurrent_source_heads_never_select_a_winner_by_wire_order() {
+        let spool = SpoolRef {
+            id: Uuid::from_u128(1).to_string(),
+        };
+        let first = revision_ref(&spool, StateId::from_bytes([1; 32]));
+        let second = revision_ref(&spool, StateId::from_bytes([2; 32]));
+        let mut conflicts = Vec::new();
+        for source_heads in [
+            vec![first.clone(), second.clone()],
+            vec![second.clone(), first.clone()],
+        ] {
+            let overview = ThreadOverview {
+                name: "main".into(),
+                source_heads,
+                ..Default::default()
+            };
+            assert_eq!(
+                overview_state(&overview),
+                None,
+                "a concurrent frontier requires explicit integration"
+            );
+            let selected = fetch_revisions(&overview, &spool, None)
+                .expect("all concurrent revisions remain fetchable")
+                .into_iter()
+                .map(|(state, _)| state)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                selected,
+                vec![StateId::from_bytes([1; 32]), StateId::from_bytes([2; 32])]
+            );
+            conflicts.push(multiple_heads_error(&overview).to_string());
+        }
+        assert_eq!(conflicts[0], conflicts[1]);
+        assert!(conflicts[0].contains("multiple source heads"));
+    }
+
+    #[tokio::test]
+    async fn thread_listing_follows_pages_until_main_and_requested_name_are_observed() {
+        let spool = SpoolRef {
+            id: Uuid::from_bytes([2; 16]).to_string(),
+        };
+        let revision = revision_ref(&spool, StateId::from_bytes([7; 32]));
+        let mut names = (0..65)
+            .map(|index| format!("a{index:03}"))
+            .collect::<Vec<_>>();
+        names.extend(["main".to_string(), "wanted".to_string()]);
+        let overviews = names
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| ThreadOverview {
+                name,
+                r#ref: Some(ThreadRef {
+                    spool: Some(spool.clone()),
+                    id: Some(contract::ThreadId {
+                        value: vec![(index + 1) as u8; 32],
+                    }),
+                }),
+                source_heads: vec![revision.clone()],
+                ..Default::default()
+            })
+            .collect();
+        let fixture = super::super::test_server::ThreadListingFixture {
+            overviews,
+            page_size: 64,
+            requests: Arc::new(Mutex::new(Vec::new())),
+        };
+        let (mut client, server, captured) =
+            super::super::test_server::start_with_thread_listing(fixture).await;
+
+        let advertised = client.advertised_pull_refs("acme/widgets").await.unwrap();
+        assert_eq!(advertised.refs.len(), 67);
+        assert_eq!(advertised.head_thread.as_deref(), Some("main"));
+        assert!(advertised.refs.iter().any(|entry| entry.name == "wanted"));
+        {
+            let requests = captured
+                .requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            assert_eq!(requests.len(), 2);
+            assert!(requests[0].page.as_ref().unwrap().after_page.is_empty());
+            assert_eq!(
+                requests[1].page.as_ref().unwrap().after_page,
+                64u32.to_be_bytes()
+            );
+        }
+        let resolved = client
+            .resolve_thread_ref("acme/widgets", "wanted")
+            .await
+            .expect("explicit Thread name resolves directly");
+        assert_eq!(
+            resolved,
+            captured
+                .overviews
+                .iter()
+                .find(|overview| overview.name == "wanted")
+                .and_then(|overview| overview.r#ref.clone())
+                .expect("wanted Thread identity")
+        );
+        assert_eq!(
+            captured
+                .requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .len(),
+            2,
+            "direct Thread resolution must not restart the paged collection scan"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
 
     fn hosted_like_replica() -> (
         tempfile::TempDir,
