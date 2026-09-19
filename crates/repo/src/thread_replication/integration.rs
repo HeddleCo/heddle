@@ -141,7 +141,7 @@ mod tests {
         Attribution, Principal, State, Tree,
         thread_replication::{
             Admission, GenesisOwner, ThreadGenesis, ThreadOperationBody,
-            hosted_import::{HostedImport, ImportedCommit},
+            hosted_import::{HostedImport, ImportProvider, ImportedCommit},
         },
     };
 
@@ -189,8 +189,9 @@ mod tests {
             target_thread: replica.thread_id(),
             expected_target_frontier: BTreeSet::new(),
             result: state.encode_current_msgpack().expect("state").into(),
-            provider: "github".into(),
-            provider_repository_id: "123".into(),
+            provider: ImportProvider::GitHub {
+                repository_id: "123".into(),
+            },
             source_commit: ImportedCommit::Sha1([45; 20]),
             initiating_request_proof: ContentHash::from_bytes([46; 32]),
             executed_at_ms: 100,

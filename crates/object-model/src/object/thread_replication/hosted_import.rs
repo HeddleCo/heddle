@@ -55,6 +55,25 @@ pub enum ImportedCommit {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImportProvider {
+    /// Connected GitHub App installation; `repository_id` is the numeric GitHub repo id.
+    GitHub { repository_id: String },
+    /// Credential-free public Git; `clone_url` is the exact clone URL and sole locator.
+    Git { clone_url: String },
+}
+
+impl ImportProvider {
+    fn is_valid(&self) -> bool {
+        let locator = match self {
+            Self::GitHub { repository_id } => repository_id,
+            Self::Git { clone_url } => clone_url,
+        };
+        !locator.is_empty() && locator.len() <= 4096 && !locator.chars().any(char::is_control)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HostedImport {
     pub version: u16,
@@ -66,9 +85,7 @@ pub struct HostedImport {
     /// Thread source ancestry is independent of the retained Git history. The
     /// executor preserves Git attribution and records its source commit below.
     pub result: Capture,
-    pub provider: String,
-    /// Stable provider repository identity or credential-free public Git locator.
-    pub provider_repository_id: String,
+    pub provider: ImportProvider,
     pub source_commit: ImportedCommit,
     pub initiating_request_proof: ContentHash,
     pub executed_at_ms: i64,
@@ -79,10 +96,7 @@ impl HostedImport {
             || self.spool.is_nil()
             || self.expected_target_frontier.len() > 128
             || self.executed_at_ms < 0
-            || !matches!(self.provider.as_str(), "github" | "git")
-            || self.provider_repository_id.is_empty()
-            || self.provider_repository_id.len() > 4096
-            || self.provider_repository_id.chars().any(char::is_control)
+            || !self.provider.is_valid()
         {
             return Err(invalid("invalid or unbounded hosted import receipt"));
         }
@@ -185,8 +199,9 @@ mod tests {
             target_thread: genesis.id().expect("Thread"),
             expected_target_frontier: BTreeSet::new(),
             result: state.encode_current_msgpack().expect("source").into(),
-            provider: "github".into(),
-            provider_repository_id: "123".into(),
+            provider: ImportProvider::GitHub {
+                repository_id: "123".into(),
+            },
             source_commit: ImportedCommit::Sha1([6; 20]),
             initiating_request_proof: ContentHash::from_bytes([7; 32]),
             executed_at_ms: 100,
@@ -199,6 +214,37 @@ mod tests {
             body: ThreadOperationBody::HostedImport(receipt.encode().expect("receipt")),
         };
         (genesis, receipt, operation)
+    }
+    #[test]
+    fn public_git_provider_round_trips_and_validates() {
+        let (_, mut receipt, _) = fixture();
+        receipt.provider = ImportProvider::Git {
+            clone_url: "https://example.test/owner/repository.git".into(),
+        };
+
+        let bytes = receipt.encode().expect("valid public Git provider");
+        assert_eq!(
+            HostedImport::decode(&bytes).expect("canonical public Git provider"),
+            receipt
+        );
+    }
+    #[test]
+    fn provider_locators_are_bounded_and_free_of_control_characters() {
+        let (_, mut receipt, _) = fixture();
+        for provider in [
+            ImportProvider::GitHub {
+                repository_id: String::new(),
+            },
+            ImportProvider::GitHub {
+                repository_id: "x".repeat(4097),
+            },
+            ImportProvider::Git {
+                clone_url: "https://example.test/repository.git\n".into(),
+            },
+        ] {
+            receipt.provider = provider;
+            assert!(receipt.encode().is_err());
+        }
     }
     #[test]
     fn import_preserves_git_attribution_and_binds_executor_scope_and_ancestry() {
