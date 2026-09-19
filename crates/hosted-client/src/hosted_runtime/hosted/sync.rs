@@ -1397,8 +1397,8 @@ mod native_exchange_tests {
             .clone_pull_with_depth_and_materialization(
                 "acme/widgets",
                 Some("main"),
-                Some(1),
-                PullMaterialization::Lazy,
+                None,
+                PullMaterialization::Full,
                 |_| Repository::init_default(clone.path()).map_err(ProtocolError::from),
             )
             .await
@@ -1406,6 +1406,37 @@ mod native_exchange_tests {
         assert!(!pulled.success);
         assert_eq!(pulled.error.as_deref(), Some("test rejection"));
         assert_eq!(cloned_repo.root(), clone.path());
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unsupported_hosted_clone_modes_fail_before_local_initialization() {
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        let clone = TempDir::new().unwrap();
+        let initialized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let initialized_in_callback = std::sync::Arc::clone(&initialized);
+        let error = client
+            .clone_pull_with_depth_and_materialization(
+                "acme/widgets",
+                Some("main"),
+                Some(1),
+                PullMaterialization::Lazy,
+                |_| {
+                    initialized_in_callback.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Repository::init_default(clone.path()).map_err(ProtocolError::from)
+                },
+            )
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("unsupported hosted clone modes were accepted"));
+        assert!(error.to_string().contains("--depth"));
+        assert!(error.to_string().contains("--lazy"));
+        assert!(
+            !initialized.load(std::sync::atomic::Ordering::SeqCst),
+            "unsupported hosted clone modes must fail before local initialization"
+        );
 
         client.close().await;
         server.await.unwrap();
@@ -1456,27 +1487,23 @@ mod native_exchange_tests {
             .unwrap();
         assert!(profiled.success);
         assert_eq!(profile.objects_received, 0);
-        assert!(
-            client
-                .pull_with_depth(&repo, "acme/widgets", bootstrap, None, Some(1))
-                .await
-                .unwrap()
-                .success
-        );
-        assert!(
-            client
-                .pull_with_depth_and_materialization(
-                    &repo,
-                    "acme/widgets",
-                    bootstrap,
-                    None,
-                    Some(1),
-                    PullMaterialization::Lazy,
-                )
-                .await
-                .unwrap()
-                .success
-        );
+        let depth_error = client
+            .pull_with_depth(&repo, "acme/widgets", bootstrap, None, Some(1))
+            .await
+            .unwrap_err();
+        assert!(depth_error.to_string().contains("--depth"));
+        let lazy_error = client
+            .pull_with_depth_and_materialization(
+                &repo,
+                "acme/widgets",
+                bootstrap,
+                None,
+                None,
+                PullMaterialization::Lazy,
+            )
+            .await
+            .unwrap_err();
+        assert!(lazy_error.to_string().contains("--lazy"));
         assert!(
             client
                 .repair_clone_with_depth_and_materialization(

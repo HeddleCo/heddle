@@ -51,6 +51,13 @@ pub(crate) struct ImportSourceCapture {
     pub observations: Vec<v2::ObserveOperationsRequest>,
 }
 
+#[derive(Clone)]
+pub(crate) struct ThreadListingFixture {
+    pub overviews: Vec<v2::ThreadOverview>,
+    pub page_size: usize,
+    pub requests: Arc<Mutex<Vec<v2::ObserveThreadsRequest>>>,
+}
+
 fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
     let bytes = hex::decode(OWNER_GENESIS_FIXTURE_HEX).expect("published v2 fixture hex");
     SignedSpoolOwnerGenesis::decode(bytes.as_slice()).expect("published v2 fixture genesis")
@@ -79,7 +86,17 @@ pub(crate) struct ContextFixture {
 }
 
 pub async fn start() -> (HostedClient, JoinHandle<()>) {
-    start_inner(None, None, None, None, None, None, None).await
+    start_inner(None, None, None, None, None, None, None, None).await
+}
+
+#[cfg(test)]
+pub(crate) async fn start_with_thread_listing(
+    fixture: ThreadListingFixture,
+) -> (HostedClient, JoinHandle<()>, ThreadListingFixture) {
+    let captured = fixture.clone();
+    let (client, server) =
+        start_inner(None, None, None, None, None, None, None, Some(fixture)).await;
+    (client, server, captured)
 }
 
 #[cfg(test)]
@@ -87,7 +104,8 @@ pub(crate) async fn start_with_collaboration(
     fixture: CollaborationFixture,
 ) -> (HostedClient, JoinHandle<()>, CollaborationFixture) {
     let fixture_clone = fixture.clone();
-    let (client, server) = start_inner(None, None, None, None, None, Some(fixture), None).await;
+    let (client, server) =
+        start_inner(None, None, None, None, None, Some(fixture), None, None).await;
     (client, server, fixture_clone)
 }
 
@@ -96,7 +114,8 @@ pub(crate) async fn start_with_context(
     fixture: ContextFixture,
 ) -> (HostedClient, JoinHandle<()>, ContextFixture) {
     let fixture_clone = fixture.clone();
-    let (client, server) = start_inner(None, None, None, None, Some(fixture), None, None).await;
+    let (client, server) =
+        start_inner(None, None, None, None, Some(fixture), None, None, None).await;
     (client, server, fixture_clone)
 }
 
@@ -109,6 +128,7 @@ pub(crate) async fn start_recording_push()
         None,
         None,
         Some(Arc::clone(&captured)),
+        None,
         None,
         None,
         None,
@@ -127,6 +147,7 @@ pub(crate) async fn start_recording_create_spool() -> (
     let (client, server) = start_inner(
         None,
         Some(Arc::clone(&captured)),
+        None,
         None,
         None,
         None,
@@ -152,6 +173,7 @@ pub(crate) async fn start_recording_spool_mutations() -> (
         None,
         None,
         None,
+        None,
     )
     .await;
     (client, server, captured)
@@ -172,6 +194,7 @@ pub(crate) async fn start_recording_import_source() -> (
         None,
         None,
         Some(Arc::clone(&captured)),
+        None,
     )
     .await;
     (client, server, captured)
@@ -186,6 +209,7 @@ pub(crate) async fn start_with_remote_state(
             remote_state,
             pack: None,
         }),
+        None,
         None,
         None,
         None,
@@ -213,6 +237,7 @@ pub(crate) async fn start_with_pull_pack(
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -232,6 +257,7 @@ struct TestServerState {
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
     import_source: Option<Arc<Mutex<ImportSourceCapture>>>,
+    thread_listing: Option<ThreadListingFixture>,
     server_key: Vec<u8>,
     owner: v2::OwnerState,
     grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
@@ -239,6 +265,7 @@ struct TestServerState {
     live_operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_inner(
     pull: Option<PullFixture>,
     create_spool: Option<Arc<Mutex<Vec<v2::CreateSpoolRequest>>>>,
@@ -247,6 +274,7 @@ async fn start_inner(
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
     import_source: Option<Arc<Mutex<ImportSourceCapture>>>,
+    thread_listing: Option<ThreadListingFixture>,
 ) -> (HostedClient, JoinHandle<()>) {
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
@@ -280,6 +308,7 @@ async fn start_inner(
         context,
         collaboration,
         import_source,
+        thread_listing,
         server_key,
         owner,
         grants: Arc::new(Mutex::new(Vec::<v2::GrantRecord>::new())),
@@ -327,6 +356,7 @@ async fn serve_call(
         context,
         collaboration,
         import_source,
+        thread_listing,
         server_key,
         owner,
         grants,
@@ -423,15 +453,26 @@ async fn serve_call(
                         }
                         _ => None,
                     });
+                let listed_thread = thread_name.and_then(|name| {
+                    thread_listing.as_ref().and_then(|fixture| {
+                        fixture
+                            .overviews
+                            .iter()
+                            .find(|overview| overview.name == name)
+                            .and_then(|overview| overview.r#ref.clone())
+                    })
+                });
                 let mut results = vec![v2::ResourceResolution {
                     resource: Some(v2::EntityRef {
                         entity: Some(if let Some(name) = thread_name {
-                            v2::entity_ref::Entity::Thread(v2::ThreadRef {
-                                spool: Some(spool.clone()),
-                                id: Some(v2::ThreadId {
-                                    value: vec![if name == "main" { 4 } else { 3 }; 32],
-                                }),
-                            })
+                            v2::entity_ref::Entity::Thread(listed_thread.unwrap_or_else(|| {
+                                v2::ThreadRef {
+                                    spool: Some(spool.clone()),
+                                    id: Some(v2::ThreadId {
+                                        value: vec![if name == "main" { 4 } else { 3 }; 32],
+                                    }),
+                                }
+                            }))
                         } else {
                             v2::entity_ref::Entity::Spool(spool)
                         }),
@@ -575,7 +616,14 @@ async fn serve_call(
             } else if method == "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership" {
                 serve_native_owner_observation(&mut send, server_key, owner).await;
             } else if method == "/heddle.api.v1alpha2.ThreadService/ObserveThreads" {
-                serve_observe_threads(&mut send, server_key.clone()).await;
+                serve_observe_threads(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key.clone(),
+                    thread_listing,
+                )
+                .await;
             } else if method == OBSERVE_COLLABORATION_METHOD {
                 serve_observe_collaboration(
                     &mut send,
@@ -1779,7 +1827,59 @@ async fn serve_push(
     send.finish().unwrap();
 }
 
-async fn serve_observe_threads(send: &mut iroh::endpoint::SendStream, server_key: Vec<u8>) {
+async fn serve_observe_threads(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    fixture: Option<ThreadListingFixture>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let requested = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveThreadsRequest::decode(frame.body).ok())
+        .expect("native ObserveThreads request");
+    if let Some(fixture) = fixture {
+        fixture
+            .requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(requested.clone());
+        let after = requested
+            .page
+            .as_ref()
+            .map(|page| page.after_page.as_slice())
+            .unwrap_or_default();
+        let start = if after.is_empty() {
+            0
+        } else {
+            let bytes: [u8; 4] = after.try_into().expect("test page token");
+            u32::from_be_bytes(bytes) as usize
+        };
+        let page_size = fixture.page_size.max(1);
+        let end = start.saturating_add(page_size).min(fixture.overviews.len());
+        let payloads = fixture.overviews[start..end]
+            .iter()
+            .cloned()
+            .map(v2::thread_list_event::Payload::Thread)
+            .collect();
+        let next_page = if end == fixture.overviews.len() {
+            Vec::new()
+        } else {
+            (end as u32).to_be_bytes().to_vec()
+        };
+        write_thread_list_observation(
+            send,
+            server_key,
+            payloads,
+            next_page,
+            end == fixture.overviews.len(),
+        )
+        .await;
+        return;
+    }
     let spool = v2::SpoolRef {
         id: uuid::Uuid::from_bytes([2; 16]).to_string(),
     };
@@ -1799,13 +1899,15 @@ async fn serve_observe_threads(send: &mut iroh::endpoint::SendStream, server_key
     let payloads = overviews
         .map(v2::thread_list_event::Payload::Thread)
         .collect();
-    write_thread_list_observation(send, server_key, payloads).await;
+    write_thread_list_observation(send, server_key, payloads, Vec::new(), true).await;
 }
 
 async fn write_thread_list_observation(
     send: &mut iroh::endpoint::SendStream,
     server_key: Vec<u8>,
     payloads: Vec<v2::thread_list_event::Payload>,
+    next_page: Vec<u8>,
+    exhausted: bool,
 ) {
     let source = v2::EndpointRef {
         kind: v2::EndpointKind::Weft as i32,
@@ -1859,8 +1961,9 @@ async fn write_thread_list_observation(
                 cursor: vec![1],
                 snapshot_complete: true,
                 page: Some(v2::PageInfo {
-                    exhausted: true,
-                    ..Default::default()
+                    next_page,
+                    exhausted,
+                    matching_count: None,
                 }),
                 ..Default::default()
             })),

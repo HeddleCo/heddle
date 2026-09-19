@@ -1179,7 +1179,7 @@ impl PushArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Advanced (hidden) flags:
-  --lazy leaves blob content absent by design and hydrates it explicitly later. Hosted/network Heddle remotes only.
+  --lazy is reserved for hosted lazy hydration and is rejected until end-to-end support lands.
 ")]
 pub struct PullArgs {
     #[command(flatten)]
@@ -1189,7 +1189,7 @@ pub struct PullArgs {
     #[arg(short, long)]
     pub local_thread: Option<String>,
 
-    /// Leave blob content absent by design and hydrate it explicitly later.
+    /// Request lazy blobs. Hosted pull currently rejects this planned mode.
     #[arg(long, hide = true)]
     pub lazy: bool,
 }
@@ -1210,7 +1210,7 @@ Advanced/planned flags: see `heddle help clone`.
 
 Examples:
   heddle clone ../native-repo ./clone                # local native Heddle repository
-  heddle clone https://host/repo ./clone --depth 1   # shallow Heddle clone: tip plus immediate parents
+  heddle clone https://host/repo ./clone             # hosted Heddle spool
 ")]
 pub struct CloneArgs {
     /// Remote repository path.
@@ -1223,13 +1223,13 @@ pub struct CloneArgs {
     #[arg(long)]
     pub thread: Option<String>,
 
-    /// Create a shallow clone with the specified depth. `0` means full history.
+    /// Request a history depth. Hosted native clones currently accept only `0` (full history).
     #[arg(long)]
     pub depth: Option<u32>,
 
-    // Hosted/network remotes only. The user-facing exposition lives in the
-    // after-help breadcrumb above and `heddle help clone`.
-    /// Leave blob content absent by design and hydrate it explicitly later.
+    // Planned hosted syntax. The user-facing exposition lives in the after-help
+    // breadcrumb above and `heddle help clone`.
+    /// Request lazy blobs. Hosted native clones currently reject this planned mode.
     #[arg(long, hide = true)]
     pub lazy: bool,
 
@@ -1237,11 +1237,11 @@ pub struct CloneArgs {
     #[arg(long)]
     pub insecure: bool,
 
-    // Only `blob:none` is accepted (a synonym for --lazy on hosted
-    // remotes); git-style filters such as `tree:0` or `blob:limit=…` are
+    // Only the planned `blob:none` spelling is accepted. Git-style filters
+    // such as `tree:0` or `blob:limit=…` are
     // rejected at parse time. See the after-help breadcrumb and `heddle help
     // clone`.
-    /// Partial-clone filter spec (`blob:none` only).
+    /// Request lazy blobs (`blob:none` only). Hosted native clones currently reject it.
     #[arg(long, hide = true, value_name = "SPEC", value_parser = parse_clone_filter_spec)]
     pub filter: Option<String>,
 

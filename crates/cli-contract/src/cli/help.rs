@@ -592,21 +592,16 @@ Run `heddle clone --help` for the flag list.
   to override.
 - Clone never prompts.
 
-# Shallow clones (--depth)
+# Planned partial clones
 
---depth 0 (the default) clones full history. --depth N fetches only the
-tip plus N generations of ancestry (--depth 1: the tip plus its immediate parents),
-so `heddle log` stops at the depth boundary; history older than that is
-not present locally — re-clone at a greater --depth (or --depth 0) to
-obtain it.
+Omitting --depth, or passing --depth 0, clones full history. Hosted native
+clone currently rejects nonzero --depth before creating the destination because
+the server does not yet support bounded source fetches. Git Overlay and local
+clone paths also reject partial-history options.
 
-Depth controls native Heddle history extent only — how many states the clone fetches —
-and says nothing about object contents. Whether a state's blobs are
-present locally or fetched lazily is a separate concern that `--depth`
-never governs. Git Overlay clones ingest full history and reject partial-history
-options. Advanced/planned flags `--lazy` and `--filter blob:none`
-skip blob content and hydrate it on demand for hosted/network Heddle
-remotes; local clone paths reject them today.
+Advanced/planned flags --lazy and --filter blob:none are accepted by the parser
+but rejected before clone state is created. Hosted blob hydration will use these
+flags once bounded source selection is supported end to end.
 
 A bare hosted name (`https://host/notes`) clones your personal copy
 `spool/<handle>/notes` when it exists, otherwise the root `spool/notes`.
