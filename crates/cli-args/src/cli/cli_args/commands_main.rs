@@ -8,9 +8,9 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
-    AgentCommands, CompletionSubject, ContextCommands, DiscussArgs, EnvCommands, HookCommands,
-    IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
-    ShellCommands, ThreadCommands, VisibilityCommands,
+    AgentCommands, BlameArgs, CompletionSubject, ContextCommands, DiscussArgs, EnvCommands,
+    HookCommands, IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands,
+    ReviewCommands, ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
         AdoptArgs, CloneArgs, DiffArgs, DoctorArgs, INIT_VERB, InitArgs, LandArgs, LogArgs,
         PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs,
@@ -213,6 +213,21 @@ Examples:
 
     /// Show what changed in the worktree, a thread, or two states.
     Diff(DiffArgs),
+
+    /// Show line-by-line attribution for a tracked file.
+    ///
+    /// Names the state that last changed each line, with the same
+    /// structured principal / agent shape as `log` and `show`.
+    /// `heddle query --attribution <path>` remains as the equivalent
+    /// query form.
+    #[command(after_help = "\
+Examples:
+  heddle blame src/auth.rs
+  heddle blame src/auth.rs --state HEAD
+  heddle blame src/auth.rs --context
+  heddle blame src/auth.rs --output json
+")]
+    Blame(BlameArgs),
 
     /// Open or resolve discussions anchored to code.
     ///
@@ -495,8 +510,8 @@ Scope:
   Git Overlay repository arrives with no annotations and no Heddle store.
 
 Examples:
-  heddle context set --path src/auth.rs --scope symbol:verify --kind invariant -m 'returns false on timing mismatch'
-  heddle context get --path src/auth.rs --scope symbol:verify
+  heddle context set --path src/auth.rs --symbol verify --kind invariant -m 'returns false on timing mismatch'
+  heddle context get --path src/auth.rs --symbol verify
   heddle context history --path src/auth.rs      # same --path as set, or pass the id
   heddle context list --prefix src/auth          # everything attached under a path
   heddle context check --path src/auth.rs        # surface annotations for editor tooling

@@ -3,6 +3,21 @@
 
 use clap::Args;
 
+/// Line-by-line attribution for a tracked file (`heddle blame <path>`).
+#[derive(Clone, Debug, Args)]
+pub struct BlameArgs {
+    /// Tracked file to attribute.
+    #[arg(value_name = "PATH")]
+    pub path: String,
+    /// State to inspect. Accepts short or full state IDs, marker names,
+    /// `HEAD`, `@`, or `HEAD~N`.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Include applicable context annotations.
+    #[arg(long)]
+    pub context: bool,
+}
+
 #[derive(Clone, Debug, Args)]
 pub struct QueryArgs {
     /// Show line-by-line attribution for a tracked file.
@@ -44,4 +59,43 @@ pub struct QueryArgs {
     /// Include checkpoint entries (excluded by default).
     #[arg(long)]
     pub include_checkpoints: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::cli::{Cli, Commands};
+
+    #[test]
+    fn blame_parses_path_state_and_context() {
+        match Cli::try_parse_from(["heddle", "blame", "src/auth.rs"])
+            .expect("blame path")
+            .command
+        {
+            Commands::Blame(args) => {
+                assert_eq!(args.path, "src/auth.rs");
+                assert!(args.state.is_none());
+                assert!(!args.context);
+            }
+            _ => panic!("expected blame"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "blame",
+            "src/auth.rs",
+            "--state",
+            "HEAD",
+            "--context",
+        ])
+        .expect("blame flags")
+        .command
+        {
+            Commands::Blame(args) => {
+                assert_eq!(args.state.as_deref(), Some("HEAD"));
+                assert!(args.context);
+            }
+            _ => panic!("expected blame"),
+        }
+    }
 }

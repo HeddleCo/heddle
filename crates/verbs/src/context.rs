@@ -14,6 +14,7 @@ pub struct ExecutionContext {
     repo: Option<Repository>,
     start_path: Option<PathBuf>,
     principal_fallback: Option<(String, String)>,
+    hosted_principal: Option<(String, String)>,
     fsmonitor_mode: FsMonitorMode,
 }
 
@@ -43,6 +44,14 @@ impl ExecutionContext {
             .map(|(name, email)| (name.as_str(), email.as_str()))
     }
 
+    /// Hosted-account principal derived from a local login, used only when no
+    /// local principal is configured.
+    pub fn hosted_principal(&self) -> Option<(&str, &str)> {
+        self.hosted_principal
+            .as_ref()
+            .map(|(name, email)| (name.as_str(), email.as_str()))
+    }
+
     /// Resolved fsmonitor mode for worktree-status hot paths.
     pub fn fsmonitor_mode(&self) -> FsMonitorMode {
         self.fsmonitor_mode
@@ -63,6 +72,7 @@ pub struct ExecutionContextBuilder {
     repo: Option<Repository>,
     start_path: Option<PathBuf>,
     principal_fallback: Option<(String, String)>,
+    hosted_principal: Option<(String, String)>,
     fsmonitor_mode: FsMonitorMode,
 }
 
@@ -82,6 +92,11 @@ impl ExecutionContextBuilder {
         self
     }
 
+    pub fn hosted_principal(mut self, principal: Option<(String, String)>) -> Self {
+        self.hosted_principal = principal;
+        self
+    }
+
     pub fn fsmonitor_mode(mut self, mode: FsMonitorMode) -> Self {
         self.fsmonitor_mode = mode;
         self
@@ -92,6 +107,7 @@ impl ExecutionContextBuilder {
             repo: self.repo,
             start_path: self.start_path,
             principal_fallback: self.principal_fallback,
+            hosted_principal: self.hosted_principal,
             fsmonitor_mode: self.fsmonitor_mode,
         }
     }

@@ -63,7 +63,10 @@ pub use context::CallContextFactory;
 #[cfg(test)]
 pub(crate) use credential::CredentialSource;
 pub(crate) use credential::server_keys_match;
-pub use credential::{ResolvedHostedCredential, resolve_active_bearer, resolve_hosted_credential};
+pub use credential::{
+    ResolvedHostedCredential, hosted_account_principal, principal_from_hosted_subject,
+    resolve_active_bearer, resolve_hosted_credential,
+};
 use crypto::{Ed25519Signer, Signer as _};
 pub use descriptor_trust::{
     DescriptorTrustSource, canonical_server_authority, replace_descriptor_trust, trust_report,

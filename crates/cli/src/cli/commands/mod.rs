@@ -100,6 +100,7 @@ pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,
 };
+pub use blame::cmd_blame;
 #[cfg(feature = "ci")]
 pub use ci::cmd_ci;
 #[cfg(feature = "client")]

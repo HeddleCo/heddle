@@ -59,6 +59,16 @@ pub(crate) fn execution_context_from_cli_parts(
                 .principal_pair()
                 .map(|(name, email)| (name.to_string(), email.to_string())),
         )
+        .hosted_principal({
+            #[cfg(feature = "client")]
+            {
+                hosted_client::hosted_runtime::hosted::hosted_account_principal()
+            }
+            #[cfg(not(feature = "client"))]
+            {
+                None
+            }
+        })
         .fsmonitor_mode(fsmonitor_mode);
 
     if let Some(repo) = repo {

@@ -396,7 +396,7 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle init --principal-name <name> --principal-email <email>",
     "heddle ready -m \"...\"",
     "heddle context get --path <path>",
-    "heddle context set --path <path> --scope file -m \"...\"",
+    "heddle context set --path <path> -m \"...\"",
     "heddle agent provenance begin",
     "heddle start <name> --path <empty-path>",
     "heddle start <name>",
@@ -471,15 +471,13 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle context set --path <path> --scope file -m \"...\"",
+        "heddle context set --path <path> -m \"...\"",
         &[
             "heddle",
             "context",
             "set",
             "--path",
             "<path>",
-            "--scope",
-            "file",
             "-m",
             "<message>",
         ],
@@ -2063,6 +2061,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 )],
             ),
             "admin",
+        ),
+    ),
+    entry(
+        &["blame"],
+        front_door(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["blame"]),
+                &[json_discriminator(Some("blame"), "output_kind", "blame")],
+            ),
+            145,
         ),
     ),
     entry(
@@ -4688,6 +4696,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
         Commands::Diff(_) => vec!["diff"],
+        Commands::Blame(_) => vec!["blame"],
         Commands::Discuss(args) => match &args.command {
             None => vec!["discuss"],
             Some(DiscussCommands::Resolve(_)) => vec!["discuss", "resolve"],

@@ -141,6 +141,40 @@ pub fn resolve_active_bearer() -> Result<Option<AuthToken>> {
     Ok(resolve_hosted_credential(server.as_deref())?.token)
 }
 
+/// Derive a capture principal from a locally stored hosted account.
+///
+/// Name is the hosted handle / account subject. Email is the subject when it
+/// looks like an address; otherwise a noreply address derived from that same
+/// handle so Git overlay commits still have an accountable identity.
+pub fn hosted_account_principal() -> Option<(String, String)> {
+    let server = credentials::default_server().ok().flatten().or_else(|| {
+        credentials::load_credentials()
+            .ok()
+            .and_then(|store| store.servers.keys().next().cloned())
+    });
+    let resolved = resolve_hosted_credential(server.as_deref()).ok()?;
+    let subject = resolved
+        .subject
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(principal_from_hosted_subject(subject))
+}
+
+pub fn principal_from_hosted_subject(subject: &str) -> (String, String) {
+    let subject = subject.trim();
+    if let Some((local, domain)) = subject.split_once('@')
+        && !local.is_empty()
+        && !domain.is_empty()
+    {
+        return (local.to_string(), subject.to_string());
+    }
+    (
+        subject.to_string(),
+        format!("{subject}@users.noreply.heddle.sh"),
+    )
+}
+
 pub(crate) fn server_keys_match(left: &str, right: &str) -> bool {
     fn without_scheme(value: &str) -> &str {
         value
@@ -297,6 +331,44 @@ mod tests {
 
             resolve_hosted_credential(Some("api.target.test"))
                 .expect_err("unreadable explicit credential must be a hard error");
+        });
+    }
+
+    #[test]
+    fn hosted_subject_derives_handle_and_optional_email() {
+        assert_eq!(
+            super::principal_from_hosted_subject("luke@example.com"),
+            ("luke".to_string(), "luke@example.com".to_string())
+        );
+        assert_eq!(
+            super::principal_from_hosted_subject("luke"),
+            (
+                "luke".to_string(),
+                "luke@users.noreply.heddle.sh".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn hosted_account_principal_reads_stored_login() {
+        with_isolated_env(|_| {
+            config::credentials::store_server_credential(
+                "api.heddle.test",
+                config::credentials::ServerCredential {
+                    mint_root_attachment: None,
+                    token: "token".to_string(),
+                    subject: "luke@example.com".to_string(),
+                    device_id: None,
+                    credential_id: None,
+                    private_key_pem: None,
+                    expires_at: None,
+                },
+            )
+            .expect("store hosted login");
+            assert_eq!(
+                super::hosted_account_principal(),
+                Some(("luke".to_string(), "luke@example.com".to_string()))
+            );
         });
     }
 }

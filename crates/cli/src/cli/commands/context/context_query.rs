@@ -18,10 +18,11 @@ use verbs::{
 use super::{
     AnnotationHistoryOutput, AnnotationOutput, ContextListRow, RevisionOutput,
     annotation_anchor_candidates, annotation_anchor_status_label, context_root_for_state,
-    parse_scope, print_context_get, resolve_state, resolve_state_id, target_label,
+    print_context_get, resolve_state, resolve_state_id, scope_from_flags, target_label,
 };
 use crate::cli::{
     Cli,
+    cli_args::ContextGetArgs,
     commands::{
         RecoveryAdvice,
         native_scope::{
@@ -75,19 +76,12 @@ struct SuggestionOutput {
     stale_annotations: u32,
 }
 
-pub async fn cmd_context_get(
-    cli: &Cli,
-    path: Option<String>,
-    state: Option<String>,
-    scope: Option<String>,
-    tag: Option<String>,
-    r#ref: Option<String>,
-) -> Result<()> {
+pub async fn cmd_context_get(cli: &Cli, args: &ContextGetArgs) -> Result<()> {
     let Some(repo) = open_for_read(cli, "context_get", false)? else {
         return Ok(());
     };
-    let state_obj = resolve_state(&repo, r#ref.as_deref())?;
-    let target = super::resolve_target(&repo, path, state)?;
+    let state_obj = resolve_state(&repo, args.r#ref.as_deref())?;
+    let target = super::resolve_target(&repo, args.target.path.clone(), args.target.state.clone())?;
     let Some(context_root) = context_root_for_state(&repo, &state_obj)? else {
         return print_context_get(cli, &target, Vec::new());
     };
@@ -95,20 +89,28 @@ pub async fn cmd_context_get(
     let blob = repo.get_context_blob(&context_root, &target)?;
     let empty = objects::object::ContextBlob::new(vec![]);
     let blob_ref = blob.as_ref().unwrap_or(&empty);
-    let scope_filter = match scope.as_deref() {
-        Some(s) => Some(parse_scope(Some(s))?),
-        None => None,
-    };
+    let scope_filter = scope_from_flags(
+        args.anchor.symbol.as_deref(),
+        args.anchor.line,
+        args.anchor.scope.as_deref(),
+    )?;
     let annotations = filter_annotations(
         &blob_ref.annotations,
         scope_filter.as_ref(),
-        tag.as_deref(),
+        args.tag.as_deref(),
         false,
     );
 
+    let scope_log = args
+        .anchor
+        .symbol
+        .as_deref()
+        .map(|name| format!("symbol:{name}"))
+        .or_else(|| args.anchor.line.map(|line| format!("lines:{line}-{line}")))
+        .or_else(|| args.anchor.scope.clone());
     let _ = target
         .path()
-        .map(|path| log_context_query_if_agent_session(&repo, path, scope.as_deref()));
+        .map(|path| log_context_query_if_agent_session(&repo, path, scope_log.as_deref()));
 
     print_context_get(cli, &target, annotations)
 }

@@ -19,6 +19,7 @@ pub const CANONICAL_ROOT_COMMANDS: &[&str] = &[
     "adopt",
     "agent",
     "auth",
+    "blame",
     "bridge",
     "claim",
     "clean",

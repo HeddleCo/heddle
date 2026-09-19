@@ -445,8 +445,12 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
     }
     let preflight_ms = preflight_started.elapsed().as_millis();
     let attribution_started = Instant::now();
-    let resolved_attribution =
-        resolve_capture_attribution(repo, ctx.principal_fallback(), &options.agent)?;
+    let resolved_attribution = resolve_capture_attribution(
+        repo,
+        ctx.principal_fallback(),
+        ctx.hosted_principal(),
+        &options.agent,
+    )?;
     let harness_session_id = resolved_attribution
         .attribution
         .agent
@@ -585,9 +589,13 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
 fn resolve_capture_attribution(
     repo: &Repository,
     principal_fallback: Option<(&str, &str)>,
+    hosted_principal: Option<(&str, &str)>,
     options: &CaptureAgentOptions,
 ) -> Result<CaptureAttribution> {
-    let resolved_principal = crate::resolve_principal(repo, principal_fallback)?;
+    let resolved_principal = crate::apply_hosted_principal_fallback(
+        crate::resolve_principal(repo, principal_fallback)?,
+        hosted_principal,
+    );
     let principal_source = resolved_principal.source.unwrap_or("unknown").to_string();
     let principal = resolved_principal.principal;
     if crate::principal_lacks_accountable_identity(
@@ -710,7 +718,7 @@ pub fn resolve_capture_author(
     principal_fallback: Option<(&str, &str)>,
     options: &CaptureAgentOptions,
 ) -> Result<Attribution> {
-    resolve_capture_attribution(repo, principal_fallback, options)
+    resolve_capture_attribution(repo, principal_fallback, None, options)
         .map(|resolved| resolved.attribution)
 }
 

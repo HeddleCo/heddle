@@ -155,6 +155,7 @@ schema_registry! {
     (&["discuss show"], DiscussionShowOutput),
     (&["discuss list"], DiscussionListOutput),
     (&["discuss wait"], DiscussWaitLineOutput),
+    (&["blame"], BlameOutput),
     (&["query --attribution"], BlameOutput),
     (&["bridge git export"], ExportGitOutput),
     (&["bridge git import"], ImportGitOutput),
@@ -1492,6 +1493,7 @@ mod tests {
             "discuss wait",
             "query",
             "query --attribution",
+            "blame",
         ] {
             assert!(
                 !opaque_schema_verbs().contains(&verb),

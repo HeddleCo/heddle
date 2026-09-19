@@ -635,14 +635,14 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "context_annotations_empty",
             "No context annotations in this repository",
-            "Inspect context with `heddle context list`, or add an annotation with `heddle context set --path <path> --scope file -m \"...\"`.",
+            "Inspect context with `heddle context list`, or add an annotation with `heddle context set --path <path> -m \"...\"`.",
             "the current state has no context annotation root",
             "guessing a missing annotation would target metadata that does not exist",
             "no repository objects, refs, metadata, or worktree files were changed",
             "heddle context list",
             vec![
                 "heddle context list".to_string(),
-                "heddle context set --path <path> --scope file -m \"...\"".to_string(),
+                "heddle context set --path <path> -m \"...\"".to_string(),
             ],
         )
     }

@@ -215,18 +215,7 @@ pub(crate) fn parse_scope(input: Option<&str>) -> Result<AnnotationScope> {
         None | Some("file") => Ok(AnnotationScope::File),
         Some(s) if s.starts_with("symbol:") => {
             let name = s.strip_prefix("symbol:").unwrap();
-            if name.is_empty() {
-                return Err(anyhow!(RecoveryAdvice::invalid_usage(
-                    "context_symbol_name_required",
-                    "Symbol name must not be empty",
-                    "Use `--scope symbol:<name>` with a non-empty symbol name.",
-                    "heddle context set --path <path> --scope symbol:<name> -m \"...\"",
-                )));
-            }
-            Ok(AnnotationScope::Symbol {
-                name: name.to_string(),
-                resolved_lines: None,
-            })
+            symbol_scope(name)
         }
         Some(s) if s.starts_with("lines:") => {
             let range = s.strip_prefix("lines:").unwrap();
@@ -235,25 +224,79 @@ pub(crate) fn parse_scope(input: Option<&str>) -> Result<AnnotationScope> {
                 .ok_or_else(|| anyhow::anyhow!("Line range must be 'lines:<start>-<end>'"))?;
             let start: u32 = start.parse()?;
             let end: u32 = end.parse()?;
-            if start > end {
-                return Err(anyhow!(RecoveryAdvice::invalid_usage(
-                    "context_line_range_invalid",
-                    format!("Line range start ({start}) must not exceed end ({end})"),
-                    "Use `--scope lines:<start>-<end>` with start less than or equal to end.",
-                    "heddle context set --path <path> --scope lines:1-10 -m \"...\"",
-                )));
-            }
-            Ok(AnnotationScope::Lines(start, end))
+            line_scope(start, end)
         }
         Some(other) => Err(anyhow!(RecoveryAdvice::invalid_usage(
             "context_scope_invalid",
             format!(
-                "Invalid scope '{other}'. Use 'file', 'symbol:<name>', or 'lines:<start>-<end>'"
+                "Invalid scope '{other}'. Use --symbol <name>, --line <n>, or the deprecated --scope file|symbol:<name>|lines:<start>-<end>"
             ),
-            "Use `--scope file`, `--scope symbol:<name>`, or `--scope lines:<start>-<end>`.",
-            "heddle context set --path <path> --scope file -m \"...\"",
+            "Pass `--symbol <name>` or `--line <n>` (or the deprecated `--scope` alias).",
+            "heddle context set --path <path> --symbol <name> -m \"...\"",
         ))),
     }
+}
+
+fn symbol_scope(name: &str) -> Result<AnnotationScope> {
+    if name.is_empty() {
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "context_symbol_name_required",
+            "Symbol name must not be empty",
+            "Use `--symbol <name>` with a non-empty symbol name.",
+            "heddle context set --path <path> --symbol <name> -m \"...\"",
+        )));
+    }
+    Ok(AnnotationScope::Symbol {
+        name: name.to_string(),
+        resolved_lines: None,
+    })
+}
+
+fn line_scope(start: u32, end: u32) -> Result<AnnotationScope> {
+    if start > end {
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "context_line_range_invalid",
+            format!("Line range start ({start}) must not exceed end ({end})"),
+            "Use `--line <n>` with a 1-indexed line, or the deprecated `--scope lines:<start>-<end>`.",
+            "heddle context set --path <path> --line 10 -m \"...\"",
+        )));
+    }
+    Ok(AnnotationScope::Lines(start, end))
+}
+
+/// Resolve `--symbol` / `--line` / deprecated `--scope` into an annotation scope.
+///
+/// Returns `None` when no scope flag was passed so callers can default
+/// (file for `set`) or keep an existing value (`supersede` / `get` filter).
+pub(crate) fn scope_from_flags(
+    symbol: Option<&str>,
+    line: Option<u32>,
+    scope: Option<&str>,
+) -> Result<Option<AnnotationScope>> {
+    match (
+        symbol.map(str::trim).filter(|value| !value.is_empty()),
+        line,
+        scope,
+    ) {
+        (Some(name), None, None) => Ok(Some(symbol_scope(name)?)),
+        (None, Some(n), None) => Ok(Some(line_scope(n, n)?)),
+        (None, None, Some(raw)) => Ok(Some(parse_scope(Some(raw))?)),
+        (None, None, None) => Ok(None),
+        _ => Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "context_scope_conflict",
+            "--symbol, --line, and --scope are mutually exclusive",
+            "Pass exactly one of `--symbol <name>`, `--line <n>`, or the deprecated `--scope` alias.",
+            "heddle context set --path <path> --symbol <name> -m \"...\"",
+        ))),
+    }
+}
+
+pub(crate) fn scope_from_flags_or_file(
+    symbol: Option<&str>,
+    line: Option<u32>,
+    scope: Option<&str>,
+) -> Result<AnnotationScope> {
+    Ok(scope_from_flags(symbol, line, scope)?.unwrap_or(AnnotationScope::File))
 }
 
 pub(crate) fn resolve_annotation_locator(
@@ -477,6 +520,28 @@ mod tests {
     use repo::StateAttachmentKind;
 
     use super::*;
+
+    #[test]
+    fn scope_from_flags_prefers_explicit_symbol_and_line() {
+        match scope_from_flags(Some("verify"), None, None).unwrap() {
+            Some(AnnotationScope::Symbol { name, .. }) => assert_eq!(name, "verify"),
+            other => panic!("expected symbol scope, got {other:?}"),
+        }
+        match scope_from_flags(None, Some(12), None).unwrap() {
+            Some(AnnotationScope::Lines(start, end)) => assert_eq!((start, end), (12, 12)),
+            other => panic!("expected line scope, got {other:?}"),
+        }
+        match scope_from_flags(None, None, Some("symbol:legacy")).unwrap() {
+            Some(AnnotationScope::Symbol { name, .. }) => assert_eq!(name, "legacy"),
+            other => panic!("expected deprecated scope alias, got {other:?}"),
+        }
+        assert!(scope_from_flags(None, None, None).unwrap().is_none());
+        assert!(scope_from_flags(Some("verify"), Some(12), None).is_err());
+        assert_eq!(
+            scope_from_flags_or_file(None, None, None).unwrap(),
+            AnnotationScope::File
+        );
+    }
 
     #[test]
     fn annotation_output_surfaces_ambiguous_anchor_candidates() {

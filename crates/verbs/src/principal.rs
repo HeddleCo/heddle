@@ -8,6 +8,8 @@
 use objects::object::Principal;
 use repo::Repository;
 
+use crate::ExecutionContext;
+
 /// A principal together with the configuration surface that selected it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPrincipal {
@@ -86,12 +88,44 @@ fn finish_principal_resolution(
     ResolvedPrincipal::unknown(fallback)
 }
 
+/// Resolve capture attribution from an execution context, including a hosted
+/// account fallback when no local principal is configured.
+pub fn resolve_principal_from_context(
+    repo: &Repository,
+    ctx: &ExecutionContext,
+) -> repo::Result<ResolvedPrincipal> {
+    let resolved = resolve_principal(repo, ctx.principal_fallback())?;
+    Ok(apply_hosted_principal_fallback(
+        resolved,
+        ctx.hosted_principal(),
+    ))
+}
+
+/// Use a hosted-account identity only when local resolution produced the
+/// unaccountable Unknown placeholder.
+pub fn apply_hosted_principal_fallback(
+    resolved: ResolvedPrincipal,
+    hosted: Option<(&str, &str)>,
+) -> ResolvedPrincipal {
+    if principal_is_accountable(&resolved.principal) {
+        return resolved;
+    }
+    let Some((name, email)) = hosted else {
+        return resolved;
+    };
+    if name.trim().is_empty() {
+        return resolved;
+    }
+    ResolvedPrincipal::configured(Principal::new(name, email), "hosted_account")
+}
+
 /// Human-facing source label. User config is called out as global because it
 /// is shared across repositories unless `HEDDLE_HOME` or `HEDDLE_CONFIG`
 /// isolates it.
 pub fn principal_source_display(source: &str) -> &str {
     match source {
         "user_config" => "user_config (shared global config)",
+        "hosted_account" => "hosted_account",
         _ => source,
     }
 }
@@ -129,5 +163,23 @@ mod tests {
             "user_config (shared global config)"
         );
         assert_eq!(principal_source_display("environment"), "environment");
+        assert_eq!(principal_source_display("hosted_account"), "hosted_account");
+    }
+
+    #[test]
+    fn hosted_fallback_fills_unaccountable_local_principal() {
+        let unknown = resolve_principal_without_repo(None);
+        let derived = apply_hosted_principal_fallback(unknown, Some(("luke", "luke@example.com")));
+        assert_eq!(derived.source, Some("hosted_account"));
+        assert_eq!(derived.principal.name_lossy(), "luke");
+        assert_eq!(derived.principal.email_lossy(), "luke@example.com");
+    }
+
+    #[test]
+    fn hosted_fallback_does_not_override_configured_principal() {
+        let local = resolve_principal_without_repo(Some(("Ada", "ada@example.com")));
+        let derived =
+            apply_hosted_principal_fallback(local.clone(), Some(("luke", "luke@example.com")));
+        assert_eq!(derived, local);
     }
 }
