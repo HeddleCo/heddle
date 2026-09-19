@@ -1501,7 +1501,10 @@ async fn push_network_connected(
     let mut reviews = not_attempted();
     if result.success {
         discussions = match hosted_client::client::discussion_sync::push_discussions(
-            repo, client, &repo_path,
+            repo,
+            client,
+            &repo_path,
+            options.track_name,
         )
         .await
         {
@@ -1537,8 +1540,13 @@ async fn push_network_connected(
         // signatures (heddle review sign) — same seam as discussions. #549
         // rejects these attachments in the pack, so they only reach the server
         // over the caller-authenticated RPCs.
-        context = match hosted_client::client::context_sync::push_context(repo, client, &repo_path)
-            .await
+        context = match hosted_client::client::context_sync::push_context(
+            repo,
+            client,
+            &repo_path,
+            options.track_name,
+        )
+        .await
         {
             Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
                 println!(

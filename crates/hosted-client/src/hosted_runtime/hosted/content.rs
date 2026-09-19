@@ -1,32 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 use crate::legacy_v1::{
     AnnotatedFile, AnnotationScope, ContextAnnotation, ContextAnnotationKind, ContextRevision,
-    ReviseContextResponse, SetContextResponse, StateContextEntry, SupersedeContextResponse,
-    SymbolScope, annotation_scope,
+    StateContextEntry, SymbolScope, annotation_scope,
 };
 use api::heddle::api::v1alpha2::{
     AnnotationQuery, ContextRecord, ObserveCollaborationRequest, RecordRef, annotation_tag,
     collaboration_anchor, collaboration_event, revision_ref,
 };
 use objects::object::StateId;
+use objects::object::{
+    AnnotationKind as NativeKind, CollaborationAnchor as NativeAnchor,
+    CollaborationRevision as NativeRevision, ContentHash, ContextRevision as NativeContextRevision,
+    thread_replication::ThreadOperationBody,
+};
 use wire::ProtocolError;
 
 use super::HostedClient;
-
-const PUT_CONTEXT: &str = "heddle.api.v1alpha2.CollaborationService/PutContext";
-
-fn parse_state(value: Option<&str>) -> Option<StateId> {
-    value.and_then(|value| StateId::parse(value).ok())
-}
-
-fn scope_path_symbol(scope: &AnnotationScope) -> (String, String) {
-    match scope.scope.as_ref() {
-        Some(annotation_scope::Scope::File(_)) => (String::new(), String::new()),
-        Some(annotation_scope::Scope::Symbol(symbol)) => (String::new(), symbol.name.clone()),
-        Some(annotation_scope::Scope::Lines(_)) => (String::new(), String::new()),
-        None => (String::new(), String::new()),
-    }
-}
 
 fn context_record_id(annotation_id: &str) -> String {
     annotation_id.trim_start_matches("ann-").to_string()
@@ -153,6 +142,159 @@ fn collect_context_records(events: Vec<collaboration_event::Payload>) -> Vec<Con
         .collect()
 }
 
+fn native_context_operations(
+    events: &[collaboration_event::Payload],
+) -> Result<Vec<(ContentHash, NativeContextRevision)>, ProtocolError> {
+    events
+        .iter()
+        .filter_map(|change| match change {
+            collaboration_event::Payload::Operation(record) => Some(record),
+            _ => None,
+        })
+        .map(|record| {
+            let operation = thread_api::collaboration::verify(record)
+                .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+            let id = operation
+                .id()
+                .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+            let ThreadOperationBody::Context(bytes) = operation.body else {
+                return Err(ProtocolError::InvalidState(
+                    "ObserveCollaboration returned a non-context operation for a context query"
+                        .into(),
+                ));
+            };
+            let context = NativeContextRevision::decode(&bytes)
+                .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+            Ok((id, context))
+        })
+        .collect()
+}
+
+fn legacy_kind(kind: NativeKind) -> i32 {
+    match kind {
+        NativeKind::Constraint => ContextAnnotationKind::Constraint as i32,
+        NativeKind::Invariant => ContextAnnotationKind::Invariant as i32,
+        NativeKind::Rationale => ContextAnnotationKind::Rationale as i32,
+    }
+}
+
+fn legacy_scope(anchor: &NativeAnchor) -> Option<AnnotationScope> {
+    match anchor {
+        NativeAnchor::Source { source } if source.start_line.is_some() => Some(AnnotationScope {
+            scope: Some(annotation_scope::Scope::Lines(
+                crate::legacy_v1::LineRange {
+                    start: source.start_line.unwrap_or_default(),
+                    end: source.end_line.unwrap_or_default(),
+                },
+            )),
+        }),
+        NativeAnchor::Source { source } if !source.symbol_id.is_empty() => Some(AnnotationScope {
+            scope: Some(annotation_scope::Scope::Symbol(SymbolScope {
+                name: source.symbol_id.clone(),
+                resolved_start: source.start_line,
+                resolved_end: source.end_line,
+            })),
+        }),
+        NativeAnchor::Source { .. }
+        | NativeAnchor::State { .. }
+        | NativeAnchor::Path { .. }
+        | NativeAnchor::Repository => Some(AnnotationScope {
+            scope: Some(annotation_scope::Scope::File(true)),
+        }),
+        NativeAnchor::Symbol { symbol, .. } => Some(AnnotationScope {
+            scope: Some(annotation_scope::Scope::Symbol(SymbolScope {
+                name: symbol.clone(),
+                ..Default::default()
+            })),
+        }),
+        NativeAnchor::Change { .. } => None,
+    }
+}
+
+fn native_location(context: &NativeContextRevision) -> (String, Option<StateId>) {
+    match &context.anchor {
+        NativeAnchor::Source { source } => {
+            let state = match source.revision {
+                NativeRevision::State { state_id } => Some(state_id),
+                NativeRevision::GitCommit { .. } => None,
+            };
+            (source.path.clone(), state)
+        }
+        NativeAnchor::State { state_id }
+        | NativeAnchor::Path { state_id, .. }
+        | NativeAnchor::Symbol { state_id, .. } => {
+            let path = match &context.anchor {
+                NativeAnchor::Path { path, .. } | NativeAnchor::Symbol { path, .. } => path.clone(),
+                _ => String::new(),
+            };
+            (path, Some(*state_id))
+        }
+        NativeAnchor::Repository | NativeAnchor::Change { .. } => (String::new(), None),
+    }
+}
+
+fn native_revision(
+    operation_id: ContentHash,
+    context: &NativeContextRevision,
+) -> Result<ContextRevision, ProtocolError> {
+    let provenance = context.provenance.as_ref().ok_or_else(|| {
+        ProtocolError::InvalidState(format!(
+            "context {} has no authored provenance; replication is incomplete",
+            context.id
+        ))
+    })?;
+    Ok(ContextRevision {
+        revision_id: if provenance.revision_id.is_empty() {
+            operation_id.to_string()
+        } else {
+            provenance.revision_id.clone()
+        },
+        kind: legacy_kind(provenance.kind),
+        content: context.content.clone(),
+        tags: context
+            .tags
+            .iter()
+            .filter_map(|tag| match tag {
+                objects::object::AnnotationTag::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect(),
+        attribution: provenance.attribution.clone(),
+        created_at: Some(prost_types::Timestamp {
+            seconds: context.occurred_at_ms.div_euclid(1000),
+            nanos: (context.occurred_at_ms.rem_euclid(1000) * 1_000_000) as i32,
+        }),
+        source_hash: provenance.source_hash.map(|hash| hash.as_bytes().to_vec()),
+        created_at_state: provenance.created_at_state.map(|state| {
+            api::heddle::api::common::StateId {
+                value: state.as_bytes().to_vec(),
+            }
+        }),
+    })
+}
+
+fn native_annotation(
+    operation_id: ContentHash,
+    context: &NativeContextRevision,
+) -> Result<ContextAnnotation, ProtocolError> {
+    let revision = native_revision(operation_id, context)?;
+    Ok(ContextAnnotation {
+        id: context.id.to_string(),
+        scope: legacy_scope(&context.anchor),
+        content: revision.content,
+        tags: revision.tags,
+        attribution: revision.attribution,
+        created_at: revision.created_at,
+        source_hash: revision.source_hash,
+        created_at_state: revision.created_at_state,
+        status: crate::legacy_v1::ContextAnnotationStatus::Active as i32,
+        kind: revision.kind,
+        revision_count: 1,
+        supersedes_annotation_id: context.supersedes.map(|id| id.to_string()),
+        supersedes_rewrite_pct: None,
+    })
+}
+
 impl HostedClient {
     pub async fn list_context(
         &mut self,
@@ -170,14 +312,66 @@ impl HostedClient {
             .observe_collaboration_events(ObserveCollaborationRequest {
                 spool: Some(spool),
                 include_history: true,
+                include_operations: true,
                 annotations: Some(AnnotationQuery::default()),
                 ..Default::default()
             })
             .await?;
+        let native = native_context_operations(&events)?;
+        if !native.is_empty() {
+            let mut latest = std::collections::BTreeMap::new();
+            for (operation_id, context) in native {
+                latest
+                    .entry(context.id)
+                    .and_modify(|current: &mut (ContentHash, NativeContextRevision)| {
+                        if context.occurred_at_ms >= current.1.occurred_at_ms {
+                            *current = (operation_id, context.clone());
+                        }
+                    })
+                    .or_insert((operation_id, context));
+            }
+            let mut files = Vec::new();
+            let mut states = Vec::new();
+            for (operation_id, context) in latest.into_values() {
+                let annotation = native_annotation(operation_id, &context)?;
+                if let Some(tag) = tag_filter
+                    && !annotation.tags.iter().any(|value| value == tag)
+                {
+                    continue;
+                }
+                let (path, state) = native_location(&context);
+                if let Some(prefix) = prefix
+                    && !path.starts_with(prefix)
+                {
+                    continue;
+                }
+                if path.is_empty() {
+                    states.push(StateContextEntry {
+                        state_id: state.map(|state_id| api::heddle::api::common::StateId {
+                            value: state_id.as_bytes().to_vec(),
+                        }),
+                        annotations: vec![annotation],
+                    });
+                } else {
+                    files.push(AnnotatedFile {
+                        path,
+                        annotations: vec![annotation],
+                    });
+                }
+            }
+            return Ok((files, states));
+        }
+        let projected = collect_context_records(events);
+        if !projected.is_empty() {
+            return Err(ProtocolError::InvalidState(
+                "hosted context records omitted their signed operations; replication is incomplete"
+                    .into(),
+            ));
+        }
         let mut files: Vec<AnnotatedFile> = Vec::new();
         let mut states: Vec<StateContextEntry> = Vec::new();
         let mut seen = std::collections::BTreeSet::new();
-        for record in collect_context_records(events) {
+        for record in projected {
             let annotation = annotation_from_record(&record);
             if annotation.id.is_empty() || !seen.insert(annotation.id.clone()) {
                 continue;
@@ -212,43 +406,6 @@ impl HostedClient {
         Ok((files, states))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn set_context(
-        &mut self,
-        repo_path: &str,
-        path: &str,
-        target_state_id: Option<&str>,
-        scope: AnnotationScope,
-        _kind: ContextAnnotationKind,
-        tags: Vec<String>,
-        content: &str,
-        _agent_provider: Option<&str>,
-        _agent_model: Option<&str>,
-        client_operation_id: String,
-        annotation_id: &str,
-    ) -> Result<SetContextResponse, ProtocolError> {
-        let (_, symbol) = scope_path_symbol(&scope);
-        let response = self
-            .put_context_record(
-                repo_path,
-                None,
-                annotation_id,
-                parse_state(target_state_id),
-                path,
-                &symbol,
-                content,
-                tags,
-                client_operation_id,
-                None,
-            )
-            .await?;
-        let _ = (response, PUT_CONTEXT);
-        Ok(SetContextResponse {
-            annotation_id: annotation_id.to_string(),
-            ..Default::default()
-        })
-    }
-
     pub async fn get_context_history(
         &mut self,
         repo_path: &str,
@@ -265,9 +422,26 @@ impl HostedClient {
                     id: id.clone(),
                 }],
                 include_history: true,
+                include_operations: true,
                 ..Default::default()
             })
             .await?;
+        let native = native_context_operations(&events)?;
+        if !native.is_empty() {
+            let mut revisions = native
+                .into_iter()
+                .filter(|(_, context)| context.id.to_string() == id)
+                .map(|(operation, context)| native_revision(operation, &context))
+                .collect::<Result<Vec<_>, _>>()?;
+            revisions.sort_by_key(|revision| {
+                revision
+                    .created_at
+                    .as_ref()
+                    .map(|time| (time.seconds, time.nanos))
+            });
+            revisions.reverse();
+            return Ok(revisions);
+        }
         let mut revisions: Vec<ContextRevision> = collect_context_records(events)
             .into_iter()
             .filter(|record| {
@@ -282,73 +456,6 @@ impl HostedClient {
         // Oldest-first on the wire; GetContextHistory is newest-first.
         revisions.reverse();
         Ok(revisions)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn revise_context(
-        &mut self,
-        repo_path: &str,
-        annotation_id: &str,
-        content: &str,
-        tags: Vec<String>,
-        _agent_provider: Option<&str>,
-        _agent_model: Option<&str>,
-        _kind: ContextAnnotationKind,
-        client_operation_id: String,
-    ) -> Result<ReviseContextResponse, ProtocolError> {
-        self.put_context_record(
-            repo_path,
-            None,
-            annotation_id,
-            None,
-            "",
-            "",
-            content,
-            tags,
-            client_operation_id,
-            None,
-        )
-        .await?;
-        Ok(ReviseContextResponse::default())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn supersede_context(
-        &mut self,
-        repo_path: &str,
-        _annotation_id: &str,
-        path: Option<&str>,
-        target_state_id: Option<&str>,
-        scope: AnnotationScope,
-        tags: Vec<String>,
-        content: &str,
-        _agent_provider: Option<&str>,
-        _agent_model: Option<&str>,
-        _kind: ContextAnnotationKind,
-        client_operation_id: String,
-    ) -> Result<SupersedeContextResponse, ProtocolError> {
-        let (_, symbol) = scope_path_symbol(&scope);
-        let new_id = uuid::Uuid::now_v7().to_string();
-        let superseded = uuid::Uuid::parse_str(_annotation_id.trim_start_matches("ann-"))
-            .or_else(|_| uuid::Uuid::parse_str(_annotation_id))
-            .ok();
-        self.put_context_record(
-            repo_path,
-            None,
-            &new_id,
-            parse_state(target_state_id),
-            path.unwrap_or(""),
-            &symbol,
-            content,
-            tags,
-            client_operation_id,
-            superseded,
-        )
-        .await?;
-        Ok(SupersedeContextResponse {
-            new_annotation_id: new_id,
-            ..Default::default()
-        })
     }
 }
 

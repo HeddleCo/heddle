@@ -1424,6 +1424,8 @@ mod tests {
             overviews,
             page_size: 64,
             requests: Arc::new(Mutex::new(Vec::new())),
+            resolution_failure: None,
+            resolution_requests: Arc::new(Mutex::new(Vec::new())),
         };
         let (mut client, server, captured) =
             super::super::test_server::start_with_thread_listing(fixture).await;

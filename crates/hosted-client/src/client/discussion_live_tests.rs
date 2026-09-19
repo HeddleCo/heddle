@@ -709,7 +709,7 @@ async fn get_discussion_not_found_is_skipped_and_advances_the_watermark() {
 }
 
 #[tokio::test]
-async fn bootstrap_none_hits_list_by_state() {
+async fn bootstrap_none_rejects_projection_without_signed_operation() {
     let (_temp, repo) = seed_repo();
     let fixture = CollaborationFixture {
         list: vec![proto_discussion(
@@ -721,27 +721,23 @@ async fn bootstrap_none_hits_list_by_state() {
     let (mut client, server, fixture) =
         crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
 
-    let cursor = bootstrap_discussions(&repo, &mut client, "acme/widgets", None)
+    let error = bootstrap_discussions(&repo, &mut client, "acme/widgets", None)
         .await
-        .unwrap();
-    assert!(cursor.bootstrapped);
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("omitted their signed operations"),
+        "projection-only discussion must be an explicit incomplete result: {error:#}"
+    );
     assert_eq!(
         *fixture
             .list_requests
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()),
-        1
+        2
     );
 
     let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let discussion = store
-        .materialize()
-        .unwrap()
-        .discussions
-        .into_values()
-        .next()
-        .unwrap();
-    assert_eq!(discussion.turns[0].1.body, "from list");
+    assert!(store.materialize().unwrap().discussions.is_empty());
 
     client.close().await;
     server.await.unwrap();
@@ -1539,7 +1535,7 @@ fn proto_discussion_on_thread(
 }
 
 #[tokio::test]
-async fn thread_scoped_bootstrap_does_not_import_another_thread_ref() {
+async fn thread_scoped_bootstrap_rejects_projection_without_signed_operation() {
     let foo = proto_discussion_on_thread("disc-foo", "foo", &[("turn-foo", "from foo", 1)]);
     let bar = proto_discussion_on_thread("disc-bar", "bar", &[("turn-bar", "from bar", 1)]);
 
@@ -1557,47 +1553,25 @@ async fn thread_scoped_bootstrap_does_not_import_another_thread_ref() {
         thread_id: "thr-foo".into(),
         ..DiscussionCursorScope::default()
     };
-    bootstrap_discussions_scoped(&repo_scoped, &mut client, "acme/widgets", &scoped, None)
-        .await
-        .unwrap();
+    let error =
+        bootstrap_discussions_scoped(&repo_scoped, &mut client, "acme/widgets", &scoped, None)
+            .await
+            .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("omitted their signed operations"),
+        "projection-only discussion must be an explicit incomplete result: {error:#}"
+    );
     assert_eq!(
         *fixture
             .list_requests
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()),
-        1,
-        "thread-scoped wait must reuse ListByState, not a second list RPC"
+        2,
+        "native originals and the legacy projection are observed separately"
     );
 
     let scoped_store = CollaborationStore::open(repo_scoped.heddle_dir()).unwrap();
-    let scoped_discussions = scoped_store.materialize().unwrap().discussions;
-    assert_eq!(
-        scoped_discussions.len(),
-        1,
-        "wait --thread foo must not materialize bar-thread discussions"
-    );
-    let only = scoped_discussions.into_values().next().unwrap();
-    assert_eq!(only.thread_ref.as_deref(), Some("foo"));
-    assert_eq!(only.turns[0].1.body, "from foo");
-
-    let (_temp_all, repo_all) = seed_repo();
-    bootstrap_discussions(&repo_all, &mut client, "acme/widgets", None)
-        .await
-        .unwrap();
-    let all_store = CollaborationStore::open(repo_all.heddle_dir()).unwrap();
-    let mut bodies: Vec<_> = all_store
-        .materialize()
-        .unwrap()
-        .discussions
-        .into_values()
-        .map(|discussion| discussion.turns[0].1.body.clone())
-        .collect();
-    bodies.sort();
-    assert_eq!(
-        bodies,
-        ["from bar".to_string(), "from foo".to_string()],
-        "unfiltered wait still imports every thread at HEAD"
-    );
+    assert!(scoped_store.materialize().unwrap().discussions.is_empty());
 
     client.close().await;
     server.await.unwrap();
@@ -1798,7 +1772,7 @@ async fn alice_skipping_a_restricted_event_does_not_advance_bob() {
 }
 
 #[tokio::test]
-async fn thread_scoped_bootstrap_matches_stable_thread_id_after_rename() {
+async fn renamed_thread_projection_without_signed_operation_is_incomplete() {
     let mut renamed = proto_discussion_on_thread(
         "disc-renamed",
         "old-name",
@@ -1820,21 +1794,17 @@ async fn thread_scoped_bootstrap_matches_stable_thread_id_after_rename() {
         thread_id: "thr-stable".into(),
         ..DiscussionCursorScope::default()
     };
-    bootstrap_discussions_scoped(&repo, &mut client, "acme/widgets", &scoped, None)
+    let error = bootstrap_discussions_scoped(&repo, &mut client, "acme/widgets", &scoped, None)
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("omitted their signed operations"),
+        "projection-only discussion must be an explicit incomplete result: {error:#}"
+    );
 
     let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
     let discussions = store.materialize().unwrap().discussions;
-    assert_eq!(
-        discussions.len(),
-        1,
-        "stable thread_id must keep the renamed discussion and drop the other thread"
-    );
-    assert_eq!(
-        discussions.into_values().next().unwrap().turns[0].1.body,
-        "still this thread"
-    );
+    assert!(discussions.is_empty());
 
     client.close().await;
     server.await.unwrap();

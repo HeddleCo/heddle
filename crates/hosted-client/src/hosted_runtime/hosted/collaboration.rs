@@ -2,22 +2,21 @@
 //! Hosted `CollaborationService` client wrappers over v2 RPCs.
 //!
 //! Write path: signed original operations via `OpenDiscussion`, `AppendTurn`,
-//! `ResolveDiscussion`. Read path: `ObserveCollaboration`.
+//! and `PutContext`. Read path: `ObserveCollaboration`.
 
 use std::collections::BTreeSet;
 
 use api::heddle::api::v1alpha2::{
     self as contract, AppendDiscussionRequest, Audience, CollaborationAnchor, MutationResponse,
     ObservationMode, ObserveCollaborationRequest, ObserveOptions, OpenDiscussionRequest,
-    PageRequest, PutContextRequest, RecordRef, ResolveDiscussionRequest, collaboration_anchor,
-    collaboration_event, discussion_record, resolve_discussion_request, revision_ref,
+    PageRequest, PutContextRequest, RecordRef, collaboration_anchor, collaboration_event,
+    discussion_record, revision_ref,
 };
 use objects::object::{
-    AnnotationKind, Attribution, CollaborationActor, CollaborationAnchor as Anchor,
-    CollaborationIdempotencyKey, CollaborationMetadata, CollaborationOperationBodyV1 as Body,
-    CollaborationOperationEnvelope, CollaborationResolution, CollaborationScope, ContentHash,
-    ContextRevision, DiscussionRecordId, DiscussionTurnV1, Principal, StateId, VisibilityTier,
-    thread_replication::ThreadOperationBody,
+    AnnotationTag, Attribution, CollaborationActor, CollaborationAnchor as Anchor,
+    CollaborationMetadata, CollaborationOperationBodyV1 as Body, CollaborationOperationEnvelope,
+    CollaborationScope, ContentHash, ContextProvenance, ContextRevision, DiscussionRecordId,
+    Principal, StateId, VisibilityTier, thread_replication::ThreadOperationBody,
 };
 use thread_api::rpc;
 use wire::ProtocolError;
@@ -29,7 +28,6 @@ use super::{
 
 const OPEN: &str = "heddle.api.v1alpha2.CollaborationService/OpenDiscussion";
 const APPEND: &str = "heddle.api.v1alpha2.CollaborationService/AppendTurn";
-const RESOLVE: &str = "heddle.api.v1alpha2.CollaborationService/ResolveDiscussion";
 const PUT_CONTEXT: &str = "heddle.api.v1alpha2.CollaborationService/PutContext";
 
 /// One turn of a hosted discussion, decoded from the wire.
@@ -120,19 +118,6 @@ fn ensure_observe_page(request: &mut ObserveCollaborationRequest) {
     }
 }
 
-fn visibility_tier(value: &str) -> Result<VisibilityTier, ProtocolError> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "" | "internal" | "members" | "team" => Ok(VisibilityTier::Internal),
-        "public" => Ok(VisibilityTier::Public),
-        "private" => Ok(VisibilityTier::Private {
-            scope_label: "private".into(),
-        }),
-        other => Ok(VisibilityTier::Private {
-            scope_label: other.to_string(),
-        }),
-    }
-}
-
 fn audience_of(tier: &VisibilityTier) -> Result<(i32, String), ProtocolError> {
     thread_api::collaboration::audience(tier)
         .ok_or_else(|| {
@@ -162,10 +147,14 @@ fn discussion_ids_match(left: &str, right: &str) -> bool {
     }
 }
 
-fn parse_context_id(value: &str) -> uuid::Uuid {
+fn parse_context_id(value: &str) -> Result<uuid::Uuid, ProtocolError> {
     uuid::Uuid::parse_str(value.trim_start_matches("ann-"))
         .or_else(|_| uuid::Uuid::parse_str(value))
-        .unwrap_or_else(|_| uuid::Uuid::now_v7())
+        .map_err(|_| {
+            ProtocolError::InvalidState(format!(
+                "context id {value} is not a UUID; replication is incomplete"
+            ))
+        })
 }
 
 fn causal_hashes(
@@ -473,11 +462,14 @@ impl HostedClient {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or("main");
-        let reference = match self.resolve_thread_ref(repo_path, name).await {
-            Ok(reference) => reference,
-            Err(_) if name != "main" => self.resolve_thread_ref(repo_path, "main").await?,
-            Err(error) => return Err(error),
-        };
+        let reference = self
+            .resolve_thread_ref(repo_path, name)
+            .await
+            .map_err(|error| {
+                ProtocolError::InvalidState(format!(
+                    "cannot resolve requested collaboration scope {name:?}: {error}; no collaboration write was submitted"
+                ))
+            })?;
         let thread = thread_hash(&reference)?;
         Ok((
             spool,
@@ -513,6 +505,111 @@ impl HostedClient {
             },
             Attribution::human(Principal::new(name, "")),
         ))
+    }
+
+    /// Bind a locally authored open operation to its exact hosted scope and
+    /// actor, then sign the complete authored body. Callers persist the
+    /// returned record before delivery so retries transmit identical bytes.
+    pub(crate) async fn prepare_open_discussion_operation(
+        &mut self,
+        repo_path: &str,
+        default_thread_ref: &str,
+        authored: &CollaborationOperationEnvelope,
+    ) -> Result<contract::SignedRecord, ProtocolError> {
+        let Body::Open {
+            blocking,
+            title,
+            anchor,
+            visibility,
+            turn,
+            thread_ref,
+        } = &authored.body
+        else {
+            return Err(ProtocolError::InvalidState(
+                "native discussion preparation requires an authored Open operation".into(),
+            ));
+        };
+        let requested_thread_ref = thread_ref.as_deref().unwrap_or(default_thread_ref);
+        let (_, _, scope) = self
+            .collaboration_scope(repo_path, Some(requested_thread_ref))
+            .await?;
+        let (actor, _) = self.collaboration_actor().await?;
+        let signer = self
+            .claim_proof_signer()
+            .ok_or(super::HostedError::SigningIdentityRequired)
+            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+        let (anchor, _) = canonical_anchor(anchor.clone(), &scope)?;
+        thread_api::collaboration::Command {
+            discussion: authored.discussion_id,
+            operation_id: authored.idempotency_key.clone(),
+            metadata: CollaborationMetadata {
+                scope,
+                actor,
+                mentions: vec![],
+            },
+            author: authored.author.clone(),
+            occurred_at_ms: authored.occurred_at_ms,
+            body: Body::Open {
+                blocking: *blocking,
+                title: title.clone(),
+                anchor,
+                visibility: visibility.clone(),
+                turn: turn.clone(),
+                thread_ref: thread_ref.clone(),
+            },
+        }
+        .sign(&[], signer)
+        .map_err(native_error)
+    }
+
+    /// Deliver an already prepared Open operation without reconstructing or
+    /// restamping any authored field.
+    pub(crate) async fn publish_open_discussion_operation(
+        &self,
+        signed: contract::SignedRecord,
+        client_operation_id: String,
+    ) -> Result<HostedDiscussion, ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(OPEN, client_operation_id);
+        let record = decoded_discussion(&signed)?;
+        let metadata = record.metadata.as_ref().ok_or_else(|| {
+            ProtocolError::InvalidState("signed discussion metadata is absent".into())
+        })?;
+        let spool = contract::SpoolRef {
+            id: metadata.scope.spool.to_string(),
+        };
+        let request = open_request_from_signed(
+            signed,
+            operation_id.to_wire(),
+            spool.clone(),
+            &metadata.scope,
+        )?;
+        let discussion = request
+            .signed_operation
+            .as_ref()
+            .map(decoded_discussion)
+            .transpose()?
+            .ok_or_else(|| ProtocolError::InvalidState("signed discussion is absent".into()))?
+            .discussion_id;
+        let remote = self.native().await.map_err(native_error)?;
+        let response = remote
+            .api
+            .call::<rpc::CollaborationServiceOpenDiscussion>(&request)
+            .await
+            .map_err(native_client_error)?;
+        require_applied_receipt(
+            response.receipt,
+            &request.client_operation_id,
+            &remote.description.endpoint,
+            "open discussion",
+        )?;
+        self.observe_discussion(
+            spool,
+            RecordRef {
+                spool: request.spool,
+                id: discussion.to_string(),
+            },
+        )
+        .await
     }
 
     pub(crate) async fn observe_collaboration_events(
@@ -727,214 +824,20 @@ impl HostedClient {
         Ok((heads, record.version))
     }
 
-    /// Open a hosted discussion anchored at `state_id`, seeded with `body`.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn open_discussion(
-        &mut self,
-        repo_path: &str,
-        state_id: StateId,
-        file: &str,
-        symbol: &str,
-        body: &str,
-        visibility: &str,
-        thread_ref: Option<&str>,
-        client_operation_id: String,
-        discussion_id: &str,
-    ) -> Result<HostedDiscussion, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(OPEN, client_operation_id);
-        let (spool, _, scope) = self.collaboration_scope(repo_path, thread_ref).await?;
-        let (actor, author) = self.collaboration_actor().await?;
-        let signer = self
-            .claim_proof_signer()
-            .ok_or(super::HostedError::SigningIdentityRequired)
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let discussion = parse_discussion_id(discussion_id)?;
-        let tier = visibility_tier(visibility)?;
-        let (anchor, _) = canonical_anchor(
-            Anchor::Symbol {
-                state_id,
-                path: file.to_string(),
-                symbol: symbol.to_string(),
-            },
-            &scope,
-        )?;
-        let signed = thread_api::collaboration::Command {
-            discussion,
-            operation_id: CollaborationIdempotencyKey::new(operation_id.as_str())
-                .map_err(native_error)?,
-            metadata: CollaborationMetadata {
-                scope: scope.clone(),
-                actor,
-                mentions: vec![],
-            },
-            author,
-            occurred_at_ms: chrono::Utc::now().timestamp_millis(),
-            body: Body::Open {
-                blocking: false,
-                title: format!("{file}:{symbol}"),
-                anchor,
-                visibility: tier,
-                turn: DiscussionTurnV1::new(body).map_err(native_error)?,
-                thread_ref: None,
-            },
-        }
-        .sign(&[], signer)
-        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let request =
-            open_request_from_signed(signed, operation_id.to_wire(), spool.clone(), &scope)?;
-        let remote = self.native().await.map_err(native_error)?;
-        let response = remote
-            .api
-            .call::<rpc::CollaborationServiceOpenDiscussion>(&request)
-            .await
-            .map_err(native_client_error)?;
-        require_applied_receipt(
-            response.receipt,
-            &request.client_operation_id,
-            &remote.description.endpoint,
-            "open discussion",
-        )?;
-        self.observe_discussion(
-            spool,
-            RecordRef {
-                spool: request.spool,
-                id: discussion.to_string(),
-            },
-        )
-        .await
-    }
-
-    /// Resolve a hosted discussion by creating and linking a context annotation.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn resolve_discussion_into_annotation(
+    /// Prepare an authored append against the observed native frontier.
+    pub(crate) async fn prepare_append_discussion_operation(
         &mut self,
         repo_path: &str,
         discussion_id: &str,
-        kind: AnnotationKind,
-        content: &str,
-        tags: Vec<String>,
-        client_operation_id: String,
-    ) -> Result<HostedDiscussion, ProtocolError> {
-        let _ = kind;
-        let operation_id = ClientOperationId::caller_or_fresh(RESOLVE, client_operation_id);
-        let (spool, _, _) = self.collaboration_scope(repo_path, None).await?;
-        let (current, operations) = self
-            .observe_discussion_heads(
-                spool.clone(),
-                RecordRef {
-                    spool: Some(spool.clone()),
-                    id: discussion_id.to_string(),
-                },
-            )
-            .await?;
-        let (actor, author) = self.collaboration_actor().await?;
-        let signer = self
-            .claim_proof_signer()
-            .ok_or(super::HostedError::SigningIdentityRequired)
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let discussion = parse_discussion_id(discussion_id)?;
-        let parents = discussion_parent_ids(&current)?;
-        if parents.is_empty() {
+        authored: &CollaborationOperationEnvelope,
+    ) -> Result<contract::SignedRecord, ProtocolError> {
+        let Body::AppendTurn { turn } = &authored.body else {
             return Err(ProtocolError::InvalidState(
-                "non-root collaboration operation requires a parent".into(),
-            ));
-        }
-        let parent_records = signed_head_records(&operations, &parents)?;
-        let scope = parent_scope(&parent_records[0])?;
-        let (anchor, _) = canonical_anchor(
-            Anchor::Symbol {
-                state_id: current
-                    .opened_against_state
-                    .unwrap_or_else(|| StateId::from_bytes([0; 32])),
-                path: current.file.clone(),
-                symbol: current.symbol.clone(),
-            },
-            &scope,
-        )?;
-        let context = ContextRevision {
-            version: 2,
-            id: uuid::Uuid::now_v7(),
-            parents: vec![],
-            metadata: CollaborationMetadata {
-                scope: scope.clone(),
-                actor: actor.clone(),
-                mentions: vec![],
-            },
-            anchor,
-            content: content.to_string(),
-            tags: tags.into_iter().map(Into::into).collect(),
-            supersedes: None,
-            extracted_from: Some(discussion),
-            occurred_at_ms: chrono::Utc::now().timestamp_millis(),
-        };
-        let signed = thread_api::collaboration::Command {
-            discussion,
-            operation_id: CollaborationIdempotencyKey::new(operation_id.as_str())
-                .map_err(native_error)?,
-            metadata: CollaborationMetadata {
-                scope,
-                actor,
-                mentions: vec![],
-            },
-            author,
-            occurred_at_ms: chrono::Utc::now().timestamp_millis(),
-            body: Body::Resolve {
-                resolution: CollaborationResolution::IntoContext {
-                    context: context.clone(),
-                },
-            },
-        }
-        .sign(&parent_records, signer)
-        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let Body::Resolve {
-            resolution:
-                CollaborationResolution::IntoContext {
-                    context: signed_context,
-                },
-        } = decoded_discussion(&signed)?.body
-        else {
-            return Err(ProtocolError::InvalidState(
-                "signed resolve is not IntoContext".into(),
+                "unsupported authored discussion operation; native replication is incomplete"
+                    .into(),
             ));
         };
-        let request = ResolveDiscussionRequest {
-            client_operation_id: operation_id.to_wire(),
-            discussion: Some(RecordRef {
-                spool: Some(spool.clone()),
-                id: discussion.to_string(),
-            }),
-            resolution: Some(resolve_discussion_request::Resolution::ExtractContext(
-                context_draft_from_revision(&signed_context, spool.clone())?,
-            )),
-            signed_operation: Some(signed),
-            expected_version: current.version.clone(),
-        };
-        let remote = self.native().await.map_err(native_error)?;
-        let response = remote
-            .api
-            .call::<rpc::CollaborationServiceResolveDiscussion>(&request)
-            .await
-            .map_err(native_client_error)?;
-        require_applied_receipt(
-            response.receipt,
-            &request.client_operation_id,
-            &remote.description.endpoint,
-            "resolve discussion",
-        )?;
-        self.observe_discussion(spool, request.discussion.unwrap_or_default())
-            .await
-    }
-
-    /// Append `body` as a new turn on an existing hosted discussion.
-    pub async fn append_turn(
-        &mut self,
-        repo_path: &str,
-        discussion_id: &str,
-        body: &str,
-        client_operation_id: String,
-    ) -> Result<HostedDiscussion, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(APPEND, client_operation_id);
-        let (spool, _, _) = self.collaboration_scope(repo_path, None).await?;
+        let spool = self.resolve_spool_ref(repo_path).await?;
         let reference = RecordRef {
             spool: Some(spool.clone()),
             id: discussion_id.to_string(),
@@ -950,38 +853,63 @@ impl HostedClient {
         }
         let parent_records = signed_head_records(&operations, &parents)?;
         let scope = parent_scope(&parent_records[0])?;
-        let (actor, author) = self.collaboration_actor().await?;
+        let (actor, _) = self.collaboration_actor().await?;
         let signer = self
             .claim_proof_signer()
             .ok_or(super::HostedError::SigningIdentityRequired)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
         let discussion = parse_discussion_id(discussion_id)?;
+        if discussion != authored.discussion_id {
+            return Err(ProtocolError::InvalidState(
+                "authored turn belongs to another discussion".into(),
+            ));
+        }
         let signed = thread_api::collaboration::Command {
             discussion,
-            operation_id: CollaborationIdempotencyKey::new(operation_id.as_str())
-                .map_err(native_error)?,
+            operation_id: authored.idempotency_key.clone(),
             metadata: CollaborationMetadata {
                 scope,
                 actor,
                 mentions: vec![],
             },
-            author,
-            occurred_at_ms: chrono::Utc::now().timestamp_millis(),
-            body: Body::AppendTurn {
-                turn: DiscussionTurnV1::new(body).map_err(native_error)?,
-            },
+            author: authored.author.clone(),
+            occurred_at_ms: authored.occurred_at_ms,
+            body: Body::AppendTurn { turn: turn.clone() },
         }
         .sign(&parent_records, signer)
-        .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let Body::AppendTurn { turn } = decoded_discussion(&signed)?.body else {
+        .map_err(native_error)?;
+        Ok(signed)
+    }
+
+    /// Deliver a prepared append operation unchanged.
+    pub(crate) async fn publish_append_discussion_operation(
+        &self,
+        signed: contract::SignedRecord,
+        client_operation_id: String,
+    ) -> Result<HostedDiscussion, ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(APPEND, client_operation_id);
+        let outer = thread_api::collaboration::verify(&signed).map_err(native_error)?;
+        let parents: Vec<_> = outer.parents.iter().copied().collect();
+        let record = decoded_discussion(&signed)?;
+        let Body::AppendTurn { turn } = &record.body else {
             return Err(ProtocolError::InvalidState(
-                "signed append is not a turn".into(),
+                "prepared native discussion operation is not an append".into(),
             ));
+        };
+        let metadata = record.metadata.as_ref().ok_or_else(|| {
+            ProtocolError::InvalidState("signed discussion metadata is absent".into())
+        })?;
+        let spool = contract::SpoolRef {
+            id: metadata.scope.spool.to_string(),
+        };
+        let reference = RecordRef {
+            spool: Some(spool.clone()),
+            id: record.discussion_id.to_string(),
         };
         let request = AppendDiscussionRequest {
             client_operation_id: operation_id.to_wire(),
             discussion: Some(reference.clone()),
-            body: turn.body,
+            body: turn.body.clone(),
             signed_operation: Some(signed),
             causal_parents: parent_bytes(&parents),
             mentions: Vec::new(),
@@ -1046,47 +974,66 @@ impl HostedClient {
         Ok(discussions)
     }
 
-    /// Publish a context annotation via v2 `PutContext`.
+    /// Return the verified transport originals used by native replication.
+    /// Projection-only discussion records are intentionally excluded.
+    pub(crate) async fn list_discussion_operations(
+        &mut self,
+        repo_path: &str,
+    ) -> Result<Vec<contract::SignedRecord>, ProtocolError> {
+        let spool = self.resolve_spool_ref(repo_path).await?;
+        let (_, operations) = self
+            .observe_discussions(spool, None, Vec::new(), Vec::new(), true)
+            .await?;
+        Ok(operations)
+    }
+
+    pub(crate) async fn list_context_operations(
+        &mut self,
+        repo_path: &str,
+    ) -> Result<Vec<contract::SignedRecord>, ProtocolError> {
+        let spool = self.resolve_spool_ref(repo_path).await?;
+        let events = self
+            .observe_collaboration_events(ObserveCollaborationRequest {
+                spool: Some(spool),
+                include_history: true,
+                include_operations: true,
+                annotations: Some(contract::AnnotationQuery::default()),
+                observe: Some(once_observe()),
+                ..Default::default()
+            })
+            .await?;
+        Ok(events
+            .into_iter()
+            .filter_map(|event| match event {
+                collaboration_event::Payload::Operation(record) => Some(record),
+                _ => None,
+            })
+            .collect())
+    }
+
+    /// Prepare and sign a native context revision. Callers persist both the
+    /// signed record and expected version before delivery.
     #[allow(clippy::too_many_arguments)]
-    pub async fn put_context_record(
+    pub(crate) async fn prepare_native_context_record(
         &mut self,
         repo_path: &str,
         thread_ref: Option<&str>,
         annotation_id: &str,
-        state_id: Option<StateId>,
-        path: &str,
-        symbol: &str,
+        anchor: Anchor,
         content: &str,
-        tags: Vec<String>,
-        client_operation_id: String,
+        tags: Vec<AnnotationTag>,
+        provenance: ContextProvenance,
+        occurred_at_ms: i64,
         supersedes: Option<uuid::Uuid>,
-    ) -> Result<MutationResponse, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(PUT_CONTEXT, client_operation_id);
+    ) -> Result<(contract::SignedRecord, Vec<u8>), ProtocolError> {
         let (spool, _, scope) = self.collaboration_scope(repo_path, thread_ref).await?;
         let (actor, _) = self.collaboration_actor().await?;
         let signer = self
             .claim_proof_signer()
             .ok_or(super::HostedError::SigningIdentityRequired)
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
-        let id = parse_context_id(annotation_id);
-        let local_anchor = if path.is_empty() {
-            match state_id {
-                Some(state_id) => Anchor::State { state_id },
-                None => Anchor::Repository,
-            }
-        } else if symbol.is_empty() {
-            Anchor::Path {
-                state_id: state_id.unwrap_or_else(|| StateId::from_bytes([0; 32])),
-                path: path.to_string(),
-            }
-        } else {
-            Anchor::Symbol {
-                state_id: state_id.unwrap_or_else(|| StateId::from_bytes([0; 32])),
-                path: path.to_string(),
-                symbol: symbol.to_string(),
-            }
-        };
-        let (anchor, _) = canonical_anchor(local_anchor, &scope)?;
+        let id = parse_context_id(annotation_id)?;
+        let (anchor, _) = canonical_anchor(anchor, &scope)?;
         let (parent_ids, expected_version) = self
             .observe_context_heads(spool.clone(), annotation_id)
             .await?;
@@ -1101,15 +1048,31 @@ impl HostedClient {
             },
             anchor,
             content: content.to_string(),
-            tags: tags.iter().cloned().map(Into::into).collect(),
+            tags,
             supersedes,
             extracted_from: None,
-            occurred_at_ms: chrono::Utc::now().timestamp_millis(),
+            occurred_at_ms,
+            provenance: Some(provenance),
         };
         let signed =
             thread_api::collaboration::sign_context_parent_ids(context, &parent_ids, signer)
-                .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
+                .map_err(native_error)?;
+        Ok((signed, expected_version))
+    }
+
+    /// Deliver a prepared context revision without resolving scope or
+    /// reconstructing authored fields.
+    pub(crate) async fn publish_native_context_record(
+        &self,
+        signed: contract::SignedRecord,
+        expected_version: Vec<u8>,
+        client_operation_id: String,
+    ) -> Result<MutationResponse, ProtocolError> {
+        let operation_id = ClientOperationId::caller_or_fresh(PUT_CONTEXT, client_operation_id);
         let record = decoded_context(&signed)?;
+        let spool = contract::SpoolRef {
+            id: record.metadata.scope.spool.to_string(),
+        };
         let request = PutContextRequest {
             client_operation_id: operation_id.to_wire(),
             context: Some(context_draft_from_revision(&record, spool)?),
@@ -1134,22 +1097,12 @@ impl HostedClient {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::ContentHash;
+    use objects::object::{
+        AnnotationKind, CollaborationIdempotencyKey, ContentHash, DiscussionTurnV1,
+    };
     use uuid::Uuid;
 
     use super::*;
-
-    #[test]
-    fn visibility_tier_maps_known_labels() {
-        assert!(matches!(
-            visibility_tier("public").unwrap(),
-            VisibilityTier::Public
-        ));
-        assert!(matches!(
-            visibility_tier("internal").unwrap(),
-            VisibilityTier::Internal
-        ));
-    }
 
     #[test]
     fn discussion_id_accepts_disc_prefix_and_raw_uuidv7() {
@@ -1485,6 +1438,7 @@ mod tests {
             supersedes: Some(superseded),
             extracted_from: None,
             occurred_at_ms: 1,
+            provenance: None,
         };
         let signed =
             thread_api::collaboration::sign_context(context.clone(), &[], &proof_signer()).unwrap();
@@ -1541,6 +1495,7 @@ mod tests {
             supersedes: Some(Uuid::from_u128(11)),
             extracted_from: None,
             occurred_at_ms: 1,
+            provenance: None,
         };
         let signed =
             thread_api::collaboration::sign_context(context, &[], &proof_signer()).unwrap();
@@ -1554,5 +1509,204 @@ mod tests {
             diffs.is_empty(),
             "context fields differ from signed revision: {diffs:?}"
         );
+    }
+
+    #[test]
+    fn native_discussion_open_preserves_every_supported_anchor_and_authored_evidence() {
+        let scope = proof_scope();
+        let state = StateId::from_bytes([9; 32]);
+        let anchors = vec![
+            Anchor::Repository,
+            Anchor::Path {
+                state_id: state,
+                path: "src/path.rs".into(),
+            },
+            Anchor::Source {
+                source: objects::object::CollaborationSourceAnchor {
+                    revision: objects::object::CollaborationRevision::State { state_id: state },
+                    path: "src/line.rs".into(),
+                    symbol_id: String::new(),
+                    start_line: Some(17),
+                    end_line: Some(19),
+                    target: None,
+                },
+            },
+            Anchor::Symbol {
+                state_id: state,
+                path: "src/symbol.rs".into(),
+                symbol: "entry".into(),
+            },
+        ];
+        for local_anchor in anchors {
+            let (anchor, _) = canonical_anchor(local_anchor, &scope).expect("canonical anchor");
+            let author = Attribution::human(Principal::new("Original Author", "author@test"));
+            let signed = thread_api::collaboration::Command {
+                discussion: DiscussionRecordId::generate(),
+                operation_id: CollaborationIdempotencyKey::new("authored-operation")
+                    .expect("idempotency"),
+                metadata: proof_metadata(scope.clone()),
+                author: author.clone(),
+                occurred_at_ms: 1_726_000_123_456,
+                body: Body::Open {
+                    blocking: true,
+                    title: "Authored title".into(),
+                    anchor: anchor.clone(),
+                    visibility: VisibilityTier::Internal,
+                    turn: DiscussionTurnV1::new("authored body").expect("turn"),
+                    thread_ref: Some("feature/provenance".into()),
+                },
+            }
+            .sign(&[], &proof_signer())
+            .expect("signed");
+            let request = open_request_from_signed(
+                signed.clone(),
+                Uuid::now_v7().to_string(),
+                contract::SpoolRef {
+                    id: scope.spool.to_string(),
+                },
+                &scope,
+            )
+            .expect("request");
+            assert!(
+                open_field_diffs(&request, &signed, &scope).is_empty(),
+                "request must be a projection of the signed original"
+            );
+            let decoded = decoded_discussion(&signed).expect("decode signed discussion");
+            assert_eq!(decoded.author, author);
+            assert_eq!(decoded.occurred_at_ms, 1_726_000_123_456);
+            assert_eq!(decoded.metadata.expect("metadata").scope, scope);
+            let Body::Open {
+                title,
+                anchor: decoded_anchor,
+                thread_ref,
+                ..
+            } = decoded.body
+            else {
+                panic!("open")
+            };
+            assert_eq!(title, "Authored title");
+            assert_eq!(decoded_anchor, anchor);
+            assert_eq!(thread_ref.as_deref(), Some("feature/provenance"));
+        }
+    }
+
+    #[test]
+    fn native_context_edit_preserves_anchor_scope_creation_state_and_time() {
+        let scope = proof_scope();
+        let state = StateId::from_bytes([9; 32]);
+        let (anchor, _) = canonical_anchor(
+            Anchor::Source {
+                source: objects::object::CollaborationSourceAnchor {
+                    revision: objects::object::CollaborationRevision::State { state_id: state },
+                    path: "src/line.rs".into(),
+                    symbol_id: "entry".into(),
+                    start_line: Some(21),
+                    end_line: Some(24),
+                    target: None,
+                },
+            },
+            &scope,
+        )
+        .expect("canonical anchor");
+        let provenance = ContextProvenance {
+            revision_id: Uuid::now_v7().to_string(),
+            kind: AnnotationKind::Invariant,
+            attribution: "Original Author <author@test> (via codex/model)".into(),
+            source_hash: Some(ContentHash::from_bytes([8; 32])),
+            created_at_state: Some(state),
+        };
+        let first = ContextRevision {
+            version: 2,
+            id: Uuid::now_v7(),
+            parents: vec![],
+            metadata: proof_metadata(scope.clone()),
+            anchor: anchor.clone(),
+            content: "first".into(),
+            tags: vec!["tag".into()],
+            supersedes: None,
+            extracted_from: None,
+            occurred_at_ms: 1_726_000_123_456,
+            provenance: Some(provenance.clone()),
+        };
+        let signed_first =
+            thread_api::collaboration::sign_context(first.clone(), &[], &proof_signer())
+                .expect("first");
+        let mut edit = first;
+        edit.content = "edited".into();
+        edit.occurred_at_ms += 77;
+        edit.provenance.as_mut().expect("provenance").revision_id = Uuid::now_v7().to_string();
+        let signed_edit =
+            thread_api::collaboration::sign_context(edit.clone(), &[signed_first], &proof_signer())
+                .expect("edit");
+        let decoded = decoded_context(&signed_edit).expect("decode edit");
+        assert_eq!(decoded.anchor, anchor);
+        assert_eq!(decoded.metadata.scope, scope);
+        assert_eq!(decoded.occurred_at_ms, edit.occurred_at_ms);
+        assert_eq!(decoded.provenance, edit.provenance);
+        assert_eq!(
+            decoded
+                .provenance
+                .as_ref()
+                .and_then(|value| value.created_at_state),
+            Some(state)
+        );
+    }
+
+    #[tokio::test]
+    async fn requested_scope_failure_never_retargets_main() {
+        use crate::hosted_runtime::hosted::test_server;
+        use api::heddle::api::common::CallFailureCode;
+
+        for failure in [
+            None,
+            Some(CallFailureCode::PermissionDenied),
+            Some(CallFailureCode::Unavailable),
+        ] {
+            let fixture = test_server::ThreadListingFixture {
+                overviews: Vec::new(),
+                page_size: 64,
+                requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                resolution_failure: failure,
+                resolution_requests: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            };
+            let (mut client, server, captured) =
+                test_server::start_with_thread_listing(fixture).await;
+            let authored = CollaborationOperationEnvelope::new(
+                DiscussionRecordId::generate(),
+                Vec::new(),
+                CollaborationIdempotencyKey::new("exact-scope").expect("key"),
+                Attribution::human(Principal::new("Original Author", "author@test")),
+                1_726_000_123_456,
+                Body::Open {
+                    blocking: false,
+                    title: "exact scope".into(),
+                    anchor: Anchor::Repository,
+                    visibility: VisibilityTier::Internal,
+                    turn: DiscussionTurnV1::new("body").expect("turn"),
+                    thread_ref: None,
+                },
+            )
+            .expect("authored operation");
+            let error = client
+                .prepare_open_discussion_operation("acme/widgets", "feature/missing", &authored)
+                .await
+                .expect_err("the requested scope must fail");
+            let message = error.to_string();
+            assert!(message.contains("feature/missing"), "{message}");
+            assert!(
+                message.contains("no collaboration write was submitted"),
+                "{message}"
+            );
+            assert_eq!(
+                *captured
+                    .resolution_requests
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()),
+                vec!["feature/missing".to_string()],
+                "scope resolution must never retry main"
+            );
+            client.close().await;
+            server.await.expect("server");
+        }
     }
 }
