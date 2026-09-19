@@ -343,6 +343,159 @@ fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
 }
 
 #[test]
+fn adopt_roots_native_threads_at_the_hosted_seed_and_admits_git_history_as_captures() {
+    use objects::object::thread_replication::{Admission, ThreadFacet, ThreadOperationBody};
+
+    let temp = TempDir::new().unwrap();
+    let work = temp.path().join("work");
+    std::fs::create_dir(&work).unwrap();
+    git(&work, &["init", "-b", "main"]);
+    configure_git_identity(&work);
+    let root_git = commit_file(&work, "story.txt", "one\n", "root by git author");
+    git(&work, &["branch", "feature/root"]);
+    let head_git = commit_file(&work, "story.txt", "one\ntwo\n", "head by git author");
+
+    // A plain mechanical ingest is the control: Git's root has no content
+    // parents, so seeding adoption must necessarily derive different IDs.
+    let raw = temp.path().join("raw-import");
+    let (_, raw_map) = ingest::import_git_into_scoped_with_options(
+        &work,
+        &raw,
+        ingest::ImportOptions::default(),
+        ingest::ImportScope::all(),
+    )
+    .expect("control import");
+    let raw_root = raw_map
+        .get_commit(&root_git)
+        .expect("read raw root mapping")
+        .expect("raw root mapping");
+    let raw_head = raw_map
+        .get_commit(&head_git)
+        .expect("read raw head mapping")
+        .expect("raw head mapping");
+    let raw_repo = repo::Repository::open(&raw).expect("open control import");
+    assert!(
+        raw_repo
+            .store()
+            .get_state(&raw_root)
+            .expect("read raw root")
+            .expect("raw root state")
+            .parents
+            .is_empty(),
+        "the control import must retain Git's parentless root"
+    );
+
+    heddle(&["adopt"], Some(&work)).expect("adopt Git repository");
+    let adopted = repo::Repository::open(&work).expect("open adopted repository");
+    let adopted_map =
+        ingest::ShaMap::open(work.join(".heddle/ingest/sha_map.sqlite")).expect("adopt map");
+    let rooted_root = adopted_map
+        .get_commit(&root_git)
+        .expect("read adopted root mapping")
+        .expect("adopted root mapping");
+    let rooted_head = adopted_map
+        .get_commit(&head_git)
+        .expect("read adopted head mapping")
+        .expect("adopted head mapping");
+    let seed = objects::object::thread_replication::hosted_import::synthetic_initial_base()
+        .expect("canonical hosted seed");
+    let root_state = adopted
+        .store()
+        .get_state(&rooted_root)
+        .expect("read rooted root")
+        .expect("rooted root state");
+    let head_state = adopted
+        .store()
+        .get_state(&rooted_head)
+        .expect("read rooted head")
+        .expect("rooted head state");
+    let raw_head_state = raw_repo
+        .store()
+        .get_state(&raw_head)
+        .expect("read raw head")
+        .expect("raw head state");
+
+    assert_eq!(root_state.parents, vec![seed.id()]);
+    assert_ne!(rooted_root, raw_root, "re-parenting must re-hash the root");
+    assert_ne!(
+        rooted_head, raw_head,
+        "the new root ID must cascade to HEAD"
+    );
+    assert_eq!(
+        head_state.tree, raw_head_state.tree,
+        "HEAD tree must survive"
+    );
+    assert_eq!(
+        head_state.attribution, raw_head_state.attribution,
+        "Git attribution must survive"
+    );
+    assert_eq!(head_state.attribution.principal.name_lossy(), "Heddle Test");
+    assert_eq!(
+        head_state.attribution.principal.email_lossy(),
+        "heddle@example.com"
+    );
+    let tree = adopted
+        .store()
+        .get_tree(&head_state.tree)
+        .expect("read adopted HEAD tree")
+        .expect("adopted HEAD tree");
+    let story = tree
+        .entries()
+        .iter()
+        .find(|entry| entry.name() == "story.txt")
+        .and_then(|entry| entry.blob_hash())
+        .expect("story blob");
+    assert_eq!(
+        adopted
+            .store()
+            .get_blob(&story)
+            .expect("read story blob")
+            .expect("story blob present")
+            .content(),
+        b"one\ntwo\n"
+    );
+
+    for (name, tip) in [("main", rooted_head), ("feature/root", rooted_root)] {
+        let replica = adopted
+            .native_thread(name)
+            .unwrap_or_else(|error| panic!("{name} native identity: {error}"));
+        assert_eq!(
+            replica.genesis().expect("native genesis").base,
+            seed.id(),
+            "{name} must use the canonical hosted root"
+        );
+        let operation_ids = replica
+            .source_operation_page(tip, None, 1)
+            .expect("source operation lookup");
+        assert_eq!(operation_ids.len(), 1, "{name} tip must be admitted");
+        let (signed, admission) = replica
+            .operation(&operation_ids[0])
+            .expect("load source operation")
+            .expect("source operation present");
+        assert_eq!(admission, Admission::Accepted);
+        let operation = signed.verify().expect("valid source signature");
+        assert!(
+            matches!(operation.body, ThreadOperationBody::Capture(_)),
+            "adopted Git history must use ordinary Capture operations"
+        );
+        assert_eq!(
+            operation
+                .source_state()
+                .expect("decode source state")
+                .expect("capture source state")
+                .id(),
+            tip
+        );
+        assert!(
+            !replica
+                .accepted_page(ThreadFacet::Source, None, 16)
+                .expect("accepted source operations")
+                .is_empty()
+        );
+    }
+}
+
+#[test]
 fn init_then_ready_with_dirty_worktree_captures_edits_instead_of_binding_tip() {
     let temp = TempDir::new().unwrap();
     let work = temp.path().join("work");

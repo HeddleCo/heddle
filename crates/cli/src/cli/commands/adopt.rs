@@ -7,7 +7,11 @@ use anyhow::{Result, anyhow, bail};
 // The wire payload lives in cli-contract so the schema registry registers
 // the real serialization type.
 pub use heddle_cli_contract::cli::commands::wire::remote::AdoptOutput;
-use objects::lock::RepositoryLockExt;
+use objects::{
+    lock::RepositoryLockExt,
+    object::{StateId, Tree, thread_replication::hosted_import::synthetic_initial_base},
+    store::ObjectStore as _,
+};
 use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
 use sley::Repository as SleyRepository;
 use verbs::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
@@ -84,7 +88,7 @@ pub fn cmd_adopt(cli: &Cli, args: AdoptArgs) -> Result<()> {
     let mut progress = ImportProgress::start(cli, &repo, &scope, &source_label);
     progress.begin_commit_import();
     let import_start = std::time::Instant::now();
-    let stats = import_git_history_for_adopt(&repo, &plan.refs, &mut progress)?;
+    let stats = import_git_history_for_adopt(&repo, &plan.refs, initialized, &mut progress)?;
     let import_ms = import_start.elapsed().as_millis();
     progress.begin_ref_write();
     progress.finish();
@@ -164,6 +168,7 @@ fn adopt_plan_error_to_anyhow(err: AdoptPlanError) -> anyhow::Error {
 fn import_git_history_for_adopt(
     repo: &Repository,
     refs: &[String],
+    initialize_native_threads: bool,
     progress: &mut ImportProgress,
 ) -> Result<AdoptImportStats> {
     let scope = if refs.is_empty() {
@@ -171,12 +176,13 @@ fn import_git_history_for_adopt(
     } else {
         ingest::ImportScope::refs(refs.to_vec())
     };
-    import_ingest_for_adopt(repo, scope, progress)
+    import_ingest_for_adopt(repo, scope, initialize_native_threads, progress)
 }
 
 fn import_ingest_for_adopt(
     repo: &Repository,
     scope: ingest::ImportScope,
+    initialize_native_threads: bool,
     progress: &mut ImportProgress,
 ) -> Result<AdoptImportStats> {
     progress.checking_notes();
@@ -184,12 +190,17 @@ fn import_ingest_for_adopt(
     progress.ordering_commits();
     use ingest::{ImportOptions, import_git_into_scoped_with_options_and_progress};
 
+    let root_parent = initialize_native_threads
+        .then(|| seed_hosted_publishable_base(repo))
+        .transpose()?;
+
     let mut on_commit = |event: ingest::ImportProgressEvent| progress.commit_tick(event);
     let (stats, _map) = import_git_into_scoped_with_options_and_progress(
         repo.root(),
         repo.root(),
         ImportOptions {
             delta_search: repo.config().storage.delta_search.import,
+            root_parent,
             ..ImportOptions::default()
         },
         scope,
@@ -201,6 +212,9 @@ fn import_ingest_for_adopt(
         }
         other => anyhow::Error::from(other),
     })?;
+    if let Some(root_parent) = root_parent {
+        register_imported_native_threads(repo, root_parent)?;
+    }
     Ok(AdoptImportStats {
         commits_imported: stats.commits_imported,
         states_created: stats.states_created,
@@ -209,6 +223,22 @@ fn import_ingest_for_adopt(
         tags_synced: stats.refs.markers_written,
         skipped_non_commit_refs: stats.refs_seen.non_commit_skipped,
     })
+}
+
+fn seed_hosted_publishable_base(repo: &Repository) -> Result<StateId> {
+    let seed = synthetic_initial_base()?;
+    repo.store().put_tree(&Tree::new())?;
+    repo.store().put_state(&seed)?;
+    Ok(seed.id())
+}
+
+fn register_imported_native_threads(repo: &Repository, base: StateId) -> Result<()> {
+    for (name, tip) in repo.refs().list_threads_with_states()? {
+        let name = name.to_string();
+        repo.create_native_thread(&name, base, None, "")?;
+        repo.record_native_source(&name, tip)?;
+    }
+    Ok(())
 }
 
 fn action_value(trust: &RepositoryVerificationState) -> Option<String> {
