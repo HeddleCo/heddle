@@ -300,41 +300,6 @@ pub struct SupersedeContextResponse {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(i32)]
-pub enum ReviewKind {
-    #[default]
-    Unspecified = 0,
-    Read = 1,
-    AgentPreview = 2,
-    AgentCoReview = 3,
-}
-
-pub mod review_scope {
-    #[derive(Clone, Debug, Default, PartialEq)]
-    pub struct WholeChange {}
-    #[derive(Clone, Debug, Default, PartialEq)]
-    pub struct SymbolList {
-        pub symbols: Vec<super::PathSymbolRef>,
-    }
-    #[derive(Clone, Debug, PartialEq)]
-    pub enum Scope {
-        WholeChange(WholeChange),
-        Symbols(SymbolList),
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ReviewScope {
-    pub scope: Option<review_scope::Scope>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct SignStateResponse {
-    pub signature_id: String,
-    pub state_id: Option<StateId>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(i32)]
 pub enum TransportMode {
     #[default]
     Unspecified = 0,
