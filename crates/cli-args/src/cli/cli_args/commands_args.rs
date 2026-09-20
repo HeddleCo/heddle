@@ -999,54 +999,6 @@ pub struct ThreadDropArgs {
     pub force: bool,
 }
 
-/// Arguments for `thread approve` — sign the current exact Thread comparison.
-#[derive(Clone, Debug, clap::Args)]
-pub struct ThreadApproveArgs {
-    /// Thread name or ID to review.
-    pub thread: String,
-
-    /// Optional human note attached to the approval.
-    #[arg(long)]
-    pub note: Option<String>,
-
-    #[command(flatten)]
-    pub remote_choice: super::RemoteChoiceArgs,
-}
-
-/// Arguments for `thread approvals` — list decisions for one Thread.
-#[derive(Clone, Debug, clap::Args)]
-pub struct ThreadApprovalsArgs {
-    pub thread: String,
-    #[command(flatten)]
-    pub remote_choice: super::RemoteChoiceArgs,
-}
-
-/// Arguments for `thread revoke-approval` — remove a recorded
-/// approval by id.
-#[derive(Clone, Debug, clap::Args)]
-pub struct ThreadRevokeApprovalArgs {
-    /// Thread containing the decision.
-    pub thread: String,
-
-    /// UUID of the approval row to revoke.
-    pub id: String,
-    #[command(flatten)]
-    pub remote_choice: super::RemoteChoiceArgs,
-}
-
-/// Arguments for `thread readiness` — inspect the Thread's current review state.
-#[derive(Clone, Debug, clap::Args)]
-pub struct ThreadCheckMergeArgs {
-    /// Source Thread whose accepted head would land.
-    pub thread: String,
-
-    /// Target Thread receiving the landing.
-    pub target: String,
-
-    #[command(flatten)]
-    pub remote_choice: super::RemoteChoiceArgs,
-}
-
 /// Arguments for the `collapse` command.
 #[derive(Clone, Debug, clap::Args)]
 pub struct CollapseArgs {

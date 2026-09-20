@@ -47,9 +47,8 @@ pub use commands_args::{
     CollapseArgs, DiffArgs, DiffBaseArg, DoctorArgs, DoctorCommands, DoctorDocsArgs, ExpandArgs,
     IMPORT_VERB, INIT_VERB, ImportLocalArgs, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs,
     ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadAbsorbArgs,
-    ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs,
-    ThreadCheckoutArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadRenameArgs,
-    ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TimelineCommands,
+    ThreadCapturesArgs, ThreadCheckoutArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs,
+    ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs, TimelineCommands,
     TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs, TimelineRecordToolArgs,
     TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, UndoArgs,
     WatchArgs, WorkspaceModeArg,
@@ -94,7 +93,8 @@ pub use commands_redact::{
 };
 pub use commands_remote::RemoteCommands;
 pub use commands_review::{
-    ReviewCommands, ReviewHealthArgs, ReviewNextArgs, ReviewShowArgs, ReviewSignArgs, SignKindArg,
+    ReviewApproveArgs, ReviewCommands, ReviewHealthArgs, ReviewListArgs, ReviewNextArgs,
+    ReviewReadinessArgs, ReviewRevokeArgs, ReviewShowArgs, ReviewSignArgs, SignKindArg,
 };
 #[cfg(feature = "semantic")]
 pub use commands_semantic::{HotEventKindArg, HotSpotKeyArg, SemanticCommands};

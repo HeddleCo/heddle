@@ -250,7 +250,19 @@ pub struct ThreadAbsorbOutput {
     pub message: String,
 }
 
-/// One native signed review decision (`thread approve`, `thread approvals`).
+/// Exact hosted comparison shown by `review show`.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "ReviewComparisonSchema")]
+pub struct ReviewComparisonOutput {
+    pub output_kind: &'static str,
+    pub thread: String,
+    pub source_revision: String,
+    pub target_revision: String,
+    pub policy_version: String,
+    pub decision_count: usize,
+}
+
+/// One native signed review decision (`review approve`, `review list`).
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadApprovalSchema")]
 pub struct ApprovalOutput {
@@ -275,7 +287,7 @@ pub struct UnmetOutput {
     pub recovery_method: String,
 }
 
-/// JSON payload for `thread readiness`.
+/// JSON payload for `review readiness`.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadMergeEligibilitySchema")]
 pub struct EligibilityOutput {
@@ -288,7 +300,7 @@ pub struct EligibilityOutput {
     pub requirements: Vec<UnmetOutput>,
 }
 
-/// JSON payload for `thread revoke-approval`.
+/// JSON payload for `review revoke`.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadRevokeApprovalSchema")]
 pub struct ApprovalRevokeOutput {

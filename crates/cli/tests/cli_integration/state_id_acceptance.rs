@@ -3,10 +3,9 @@
 //! verb must accept the short ID form printed by `heddle log --output json`.
 //!
 //! Before this fix, `heddle log --output json` returned `state_id` in the
-//! short form (`hs-…12 chars`), but `heddle review show`, `heddle
-//! discuss list`, and a couple of others rejected anything that wasn't
-//! a full state ID. The CLI's own JSON shape was unparseable by its
-//! own commands. This test pins the contract.
+//! short form (`hs-…12 chars`), but state-taking commands rejected
+//! anything that wasn't a full state ID. The CLI's own JSON shape was
+//! unparseable by its own commands. This test pins the contract.
 
 use std::fs;
 
@@ -37,41 +36,17 @@ fn first_short_id(repo: &std::path::Path) -> String {
         .to_string()
 }
 
-/// `heddle review show <SHORT>` was the headline regression: hosted
-/// review demanded full IDs. This pins the fix.
 #[test]
-fn review_show_accepts_short_id() {
+fn show_respects_global_repo_argument() {
     let temp = setup_repo();
     let short = first_short_id(temp.path());
-    let raw = heddle(
-        &["review", "show", &short, "--output", "json"],
-        Some(temp.path()),
-    )
-    .expect("review show should accept short IDs");
-    let value: Value = serde_json::from_str(&raw).expect("review show output should be JSON");
-    // Server normalizes back to the full form on the way out, but it
-    // must round-trip to a state with a matching prefix.
-    let returned = value["state_id"].as_str().expect("state_id present");
-    assert!(
-        returned.starts_with(&short),
-        "round-trip should resolve to the same state: short={short}, returned={returned}"
-    );
-}
-
-#[test]
-fn review_show_respects_global_repo_argument() {
-    let temp = setup_repo();
     let repo_arg = format!("--repo={}", temp.path().display());
-    let raw = heddle(
-        &[repo_arg.as_str(), "--output=json", "review", "show", "HEAD"],
-        None,
-    )
-    .expect("review show --repo should inspect the selected repository");
-    let value: Value = serde_json::from_str(&raw).expect("review show output should be JSON");
-    assert_eq!(value["headline"], "init");
+    let raw = heddle(&[repo_arg.as_str(), "--output=json", "show", "HEAD"], None)
+        .expect("show --repo should inspect the selected repository");
+    let value: Value = serde_json::from_str(&raw).expect("show output should be JSON");
     assert_eq!(
-        value["files_changed"], 1,
-        "review show --repo HEAD should summarize the selected repo's captured change: {value}"
+        value["state_id"], short,
+        "show --repo HEAD should resolve the selected repository's current state: {value}"
     );
 }
 

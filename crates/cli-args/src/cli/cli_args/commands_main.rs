@@ -172,7 +172,7 @@ Examples:
     /// Abort the active operation without remembering the specific subcommand.
     Abort,
 
-    /// Integrate a ready thread into its local target.
+    /// Integrate into the local target thread; push to publish.
     ///
     /// `land` is the local integration verb: capture outstanding work if needed,
     /// refresh against the target when safe, and land the thread. It fails
@@ -180,7 +180,7 @@ Examples:
     /// when you want the verdict and next action before landing anything.
     Land(LandArgs),
 
-    /// Prepare this thread for review or merge.
+    /// Check this checkout before local integration.
     ///
     /// `ready` captures outstanding work if needed, checks conflicts,
     /// blockers, freshness, and semantic risk, then marks the thread
@@ -258,20 +258,19 @@ Examples:
     /// structured results consumable by agents.
     Query(QueryArgs),
 
-    /// Review a state — render the payload, sign, see signal health.
+    /// Review and approve an exact hosted Thread comparison.
     ///
-    /// `heddle review show` renders the review payload (summary,
-    /// agent narrative, in-budget signals, anchored discussions).
-    /// `heddle review sign` submits a `read` / `agent_preview` /
-    /// `agent_co_review` signature on the state. `heddle review
-    /// health` reports per-module signal fire rates over a rolling
-    /// window.
+    /// `show`, `approve`, and `list` default to the current Thread.
+    /// `readiness` checks the exact source and target comparison before
+    /// hosted landing. Remote selection is explicit, then the configured
+    /// default, and fails when neither is available.
     #[command(after_help = "\
 Examples:
-  heddle review show HEAD                                # render the review payload for HEAD
-  heddle review show HEAD --base last-turn               # review this agent peer's turn
-  heddle review sign HEAD --kind read --public-key <hex> --signature <hex> --signed-at-unix <ts>
-  heddle review health --window 7                       # signal fire-rates over recent states
+  heddle review show feature
+  heddle review approve feature -m \"Looks good\"
+  heddle review list feature
+  heddle review revoke <review-id> --thread feature
+  heddle review readiness feature --into main
 ")]
     Review {
         #[command(subcommand)]

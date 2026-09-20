@@ -224,33 +224,35 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::*;
-    use crate::cli::{Cli, Commands, ContextCommands, DiscussCommands, ThreadCommands};
+    use crate::cli::{
+        Cli, Commands, ContextCommands, DiscussCommands, ReviewCommands, ThreadCommands,
+    };
 
     #[test]
     fn remote_choice_has_no_origin_default() {
-        match Cli::try_parse_from(["heddle", "thread", "approve", "feat"])
+        match Cli::try_parse_from(["heddle", "review", "approve", "feat"])
             .expect("approve without --remote")
             .command
         {
-            Commands::Thread {
-                command: ThreadCommands::Approve(args),
+            Commands::Review {
+                command: ReviewCommands::Approve(args),
             } => {
                 assert!(args.remote_choice.requested().is_none());
             }
-            _ => panic!("expected thread approve"),
+            _ => panic!("expected review approve"),
         }
         match Cli::try_parse_from([
-            "heddle", "thread", "approve", "feat", "--remote", "upstream",
+            "heddle", "review", "approve", "feat", "--remote", "upstream",
         ])
         .expect("approve with --remote")
         .command
         {
-            Commands::Thread {
-                command: ThreadCommands::Approve(args),
+            Commands::Review {
+                command: ReviewCommands::Approve(args),
             } => {
                 assert_eq!(args.remote_choice.requested(), Some("upstream"));
             }
-            _ => panic!("expected thread approve"),
+            _ => panic!("expected review approve"),
         }
     }
 

@@ -76,8 +76,8 @@ pub use remote::{
 };
 pub use thread::{
     ApprovalOutput, ApprovalRevokeOutput, DroppedThread, EligibilityOutput, FskitReadinessReport,
-    SkippedThread, ThreadAbsorbOutput, ThreadCaptureOutput, ThreadCaptureSummary,
-    ThreadCleanupOutput, ThreadCurrentOutput, ThreadListImportGuidanceOutput, ThreadListOutput,
-    ThreadOpOutput, ThreadOwnershipOutput, ThreadRecordOutput, ThreadResolveOutput,
-    ThreadShowOutput, UnmetOutput,
+    ReviewComparisonOutput, SkippedThread, ThreadAbsorbOutput, ThreadCaptureOutput,
+    ThreadCaptureSummary, ThreadCleanupOutput, ThreadCurrentOutput, ThreadListImportGuidanceOutput,
+    ThreadListOutput, ThreadOpOutput, ThreadOwnershipOutput, ThreadRecordOutput,
+    ThreadResolveOutput, ThreadShowOutput, UnmetOutput,
 };
