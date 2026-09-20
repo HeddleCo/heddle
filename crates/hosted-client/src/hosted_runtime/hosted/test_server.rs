@@ -56,6 +56,8 @@ pub(crate) struct ThreadListingFixture {
     pub overviews: Vec<v2::ThreadOverview>,
     pub page_size: usize,
     pub requests: Arc<Mutex<Vec<v2::ObserveThreadsRequest>>>,
+    pub resolution_failure: Option<CallFailureCode>,
+    pub resolution_requests: Arc<Mutex<Vec<String>>>,
 }
 
 fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
@@ -462,20 +464,47 @@ async fn serve_call(
                             .and_then(|overview| overview.r#ref.clone())
                     })
                 });
+                if let Some(name) = thread_name
+                    && let Some(fixture) = &thread_listing
+                {
+                    fixture
+                        .resolution_requests
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push(name.to_string());
+                }
+                if thread_name.is_some()
+                    && let Some(code) = thread_listing
+                        .as_ref()
+                        .and_then(|fixture| fixture.resolution_failure)
+                {
+                    let failure = CallFailure {
+                        code: code as i32,
+                        message: "thread resolution failed".into(),
+                        error: None,
+                    };
+                    send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
+                        .await
+                        .unwrap();
+                    send.finish().unwrap();
+                    return;
+                }
                 let mut results = vec![v2::ResourceResolution {
                     resource: Some(v2::EntityRef {
-                        entity: Some(if let Some(name) = thread_name {
-                            v2::entity_ref::Entity::Thread(listed_thread.unwrap_or_else(|| {
-                                v2::ThreadRef {
-                                    spool: Some(spool.clone()),
-                                    id: Some(v2::ThreadId {
-                                        value: vec![if name == "main" { 4 } else { 3 }; 32],
-                                    }),
-                                }
-                            }))
+                        entity: if let Some(name) = thread_name {
+                            listed_thread
+                                .or_else(|| {
+                                    thread_listing.is_none().then(|| v2::ThreadRef {
+                                        spool: Some(spool.clone()),
+                                        id: Some(v2::ThreadId {
+                                            value: vec![if name == "main" { 4 } else { 3 }; 32],
+                                        }),
+                                    })
+                                })
+                                .map(v2::entity_ref::Entity::Thread)
                         } else {
-                            v2::entity_ref::Entity::Spool(spool)
-                        }),
+                            Some(v2::entity_ref::Entity::Spool(spool))
+                        },
                     }),
                     coverage: v2::Coverage::Complete as i32,
                     ..Default::default()
@@ -571,6 +600,7 @@ async fn serve_call(
                     &mut request,
                     server_key,
                     context.clone(),
+                    live_operations,
                 )
                 .await;
             } else if method == "/heddle.api.v1alpha2.IdentityService/CreateSignupInvitation" {
@@ -2109,6 +2139,7 @@ async fn serve_put_context(
     request: &mut Vec<u8>,
     server_key: Vec<u8>,
     context: Option<ContextFixture>,
+    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 ) {
     read_request_body(recv, request).await;
     let body = decode_request_frame(request)
@@ -2131,6 +2162,14 @@ async fn serve_put_context(
                 .unwrap();
             return;
         }
+    }
+    if let Some(signed) = body.signed_operation.clone()
+        && let Ok(operation) = thread_api::collaboration::verify(&signed)
+        && let objects::object::thread_replication::ThreadOperationBody::Context(bytes) =
+            operation.body
+        && let Ok(record) = objects::object::ContextRevision::decode(&bytes)
+    {
+        remember_signed_operation(&operations, &record.id.to_string(), Some(signed));
     }
     write_native_grant_receipt(send, server_key, body.client_operation_id).await;
 }
@@ -2289,6 +2328,25 @@ fn observe_payloads(
             .collect();
     }
     if !request.contexts.is_empty() {
+        let operations = operations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let native: Vec<_> = request
+            .contexts
+            .iter()
+            .flat_map(|reference| {
+                context_operation_payloads(
+                    operations
+                        .get(&reference.id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                    request.include_operations,
+                )
+            })
+            .collect();
+        if !native.is_empty() {
+            return native;
+        }
         if let Some(fixture) = context {
             fixture
                 .history_requests
@@ -2309,6 +2367,16 @@ fn observe_payloads(
         return Vec::new();
     }
     if request.annotations.is_some() {
+        let operations = operations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let native: Vec<_> = operations
+            .values()
+            .flat_map(|records| context_operation_payloads(records, request.include_operations))
+            .collect();
+        if !native.is_empty() {
+            return native;
+        }
         if let Some(fixture) = context {
             *fixture
                 .list_requests
@@ -2484,6 +2552,60 @@ fn source_anchor(path: String, symbol: String) -> v2::CollaborationAnchor {
             ..Default::default()
         })),
     }
+}
+
+fn context_operation_payloads(
+    operations: &[v2::SignedRecord],
+    include_operations: bool,
+) -> Vec<v2::collaboration_event::Payload> {
+    let mut payloads = Vec::new();
+    for signed in operations {
+        let Ok(operation) = thread_api::collaboration::verify(signed) else {
+            continue;
+        };
+        let Ok(causal_id) = operation.id() else {
+            continue;
+        };
+        let objects::object::thread_replication::ThreadOperationBody::Context(bytes) =
+            operation.body
+        else {
+            continue;
+        };
+        let Ok(context) = objects::object::ContextRevision::decode(&bytes) else {
+            continue;
+        };
+        let Ok(anchor) =
+            thread_api::collaboration::anchor_ref(&context.anchor, &context.metadata.scope)
+        else {
+            continue;
+        };
+        payloads.push(v2::collaboration_event::Payload::Context(
+            v2::ContextRecord {
+                r#ref: Some(v2::RecordRef {
+                    spool: Some(v2::SpoolRef {
+                        id: context.metadata.scope.spool.to_string(),
+                    }),
+                    id: context.id.to_string(),
+                }),
+                anchor: Some(anchor),
+                content: context.content.clone(),
+                tags: context
+                    .tags
+                    .iter()
+                    .map(thread_api::collaboration::annotation_tag_ref)
+                    .collect(),
+                principal_id: context.metadata.actor.principal_id.to_string(),
+                causal_id: causal_id.as_bytes().to_vec(),
+                causal_heads: vec![causal_id.as_bytes().to_vec()],
+                version: causal_id.as_bytes().to_vec(),
+                ..Default::default()
+            },
+        ));
+        if include_operations {
+            payloads.push(v2::collaboration_event::Payload::Operation(signed.clone()));
+        }
+    }
+    payloads
 }
 
 fn context_list_payloads(fixture: &ContextFixture) -> Vec<v2::collaboration_event::Payload> {

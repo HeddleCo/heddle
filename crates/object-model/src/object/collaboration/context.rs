@@ -6,9 +6,23 @@ use uuid::Uuid;
 use super::{
     CollaborationAnchor, CollaborationCodecError, CollaborationMetadata, DiscussionRecordId,
 };
-use crate::object::ContentHash;
+use crate::object::{AnnotationKind, ContentHash, StateId};
 
 pub const CONTEXT_FORMAT: &str = "heddle-context-revision-v2";
+
+/// Evidence captured by the authoring context command. This remains inside the
+/// signed native operation even when a hosted view does not project every
+/// field.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextProvenance {
+    pub revision_id: String,
+    pub kind: AnnotationKind,
+    pub attribution: String,
+    pub source_hash: Option<ContentHash>,
+    pub created_at_state: Option<StateId>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextRevision {
@@ -23,6 +37,10 @@ pub struct ContextRevision {
     pub supersedes: Option<Uuid>,
     pub extracted_from: Option<DiscussionRecordId>,
     pub occurred_at_ms: i64,
+    /// Absent only on native records authored before provenance was carried in
+    /// the signed body. New local replication must always populate it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<ContextProvenance>,
 }
 impl ContextRevision {
     pub fn encode(&self) -> Result<Vec<u8>, CollaborationCodecError> {

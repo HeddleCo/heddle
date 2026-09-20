@@ -96,6 +96,7 @@ fn fixture() -> (
             supersedes: None,
             extracted_from: None,
             occurred_at_ms: 100,
+            provenance: None,
         };
         let operation = ThreadOperation {
             version: 1,

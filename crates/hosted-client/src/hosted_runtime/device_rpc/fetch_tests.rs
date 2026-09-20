@@ -150,6 +150,7 @@ pub(super) async fn partial_roundtrip(
         supersedes: None,
         extracted_from: None,
         occurred_at_ms: 100,
+        provenance: None,
     };
     let context_operation = ThreadOperation {
         version: 1,

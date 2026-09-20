@@ -11,7 +11,7 @@ mod source;
 mod tags;
 
 pub use codec::{CollaborationCodecError, DecodedCollaborationOperation};
-pub use context::{CONTEXT_FORMAT, ContextRevision};
+pub use context::{CONTEXT_FORMAT, ContextProvenance, ContextRevision};
 pub use ids::{
     CollabOpId, CollabOpIdParseError, CollaborationIdempotencyKey, DiscussionRecordId,
     DiscussionRecordIdParseError, LegacyDiscussionId, LegacySourceLocator,
