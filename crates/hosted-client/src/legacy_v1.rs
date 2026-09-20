@@ -5,8 +5,6 @@
 //! the rest of v1alpha1. Hosted adapters still project v1alpha2 wire records
 //! into these shapes for existing client/test code.
 
-#![allow(dead_code, clippy::large_enum_variant)]
-
 use api::heddle::api::common::{RepositoryRef, StateId};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -394,6 +392,8 @@ pub struct PullServerFrame {
 }
 
 pub mod pull_server_frame {
+    // This mirrors deleted v1 prost output; boxing would change adapter-facing types.
+    #[allow(clippy::large_enum_variant)]
     #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Frame {
         #[prost(message, tag = "1")]

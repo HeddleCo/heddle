@@ -1,5 +1,3 @@
-#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
-
 use biscuit_auth::{Biscuit, KeyPair, PrivateKey, builder::Algorithm};
 use ed25519_dalek::{Signer, SigningKey};
 use prost::Message;
