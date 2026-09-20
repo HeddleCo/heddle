@@ -1,196 +1,82 @@
 use std::{
-    collections::HashMap,
-    os::fd::AsRawFd,
-    path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
+    collections::HashMap, future::Future, net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration,
 };
 
-use api::heddle::api::v1alpha1::ProviderSource;
-use bytes::Bytes;
-use config::ClientConfig;
-use iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMode,
-    endpoint::{AckFrequencyConfig, QuicTransportConfig, presets},
-    protocol::Router,
+use api::heddle::api::v1alpha2::{
+    DescribeEndpointResponse, EndpointKind, EndpointRef, ProviderDialRoute,
 };
+use config::ClientConfig;
+use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, endpoint::presets, protocol::Router};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::Mutex,
 };
 
 use super::{
-    HostedError, Result, VerifiedEndpointDescriptor,
-    claim_protocol::{CLAIM_ALPN_V1, ClaimProtocol},
+    HostedError, Result,
+    claim_protocol::{ClaimProtocol, NATIVE_ALPN},
     hosted_bridge,
     provider_transport::ProviderWebSocketTransport,
 };
 
-const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
-
-/// Foreground wait for `Router::shutdown` / `Endpoint::close`.
+/// Foreground budget for graceful endpoint drain.
 ///
-/// Loopback drain is sub-millisecond in release. On a relay/WAN path
-/// `noq wait_all_draining` waits for a close-frame ACK / probe timeout
-/// that measures a repeatable ~1000 ms after the RPC is already
-/// `LocallyClosed`. One-shot CLI verbs must not sit on that wait:
-/// initiate graceful close (so the endpoint is not dropped dirty),
-/// then detach the remainder.
+/// Relay paths can spend about one second waiting for a close-frame ACK after
+/// the operation is already locally closed. Start the graceful drain, but let
+/// one-shot commands return after this bound while the spawned task finishes.
 const FOREGROUND_ENDPOINT_DRAIN: Duration = Duration::from_millis(20);
 
 #[cfg(test)]
 static NEXT_SHUTDOWN_HOLD_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-#[cfg(test)]
-pub(super) fn hold_next_shutdown_for_test(duration: Duration) {
-    NEXT_SHUTDOWN_HOLD_MS.store(duration.as_millis() as u64, Ordering::SeqCst);
-}
-
-fn shutdown_hold_for_test() -> Option<Duration> {
-    #[cfg(test)]
-    {
-        let ms = NEXT_SHUTDOWN_HOLD_MS.swap(0, Ordering::SeqCst);
-        if ms > 0 {
-            return Some(Duration::from_millis(ms));
-        }
-    }
-    None
-}
-
 #[derive(Debug)]
 pub(super) struct HostedConnection {
-    inner: HostedTransport,
+    // A transient inbound claim listener on this connection's endpoint.
+    // It serves resolve/consent for a browser that reaches this process's
+    // endpoint, but it holds no owner-root co-sign consumer: the persisted
+    // box network daemon owns that, and the owner-root co-sign is bridged
+    // to a foreground signer (heddle#1620). A co-sign dialed here therefore
+    // fails closed rather than being performed without a foreground owner.
+    router: Router,
+    pub(super) endpoint: Endpoint,
+    pub(super) connection: iroh::endpoint::Connection,
+    pub(super) native_description:
+        tokio::sync::OnceCell<api::heddle::api::v1alpha2::DescribeEndpointResponse>,
+    provider_transport: Option<ProviderWebSocketTransport>,
     provider_connections:
         Mutex<HashMap<EndpointId, Arc<Mutex<Option<iroh::endpoint::Connection>>>>>,
-}
-
-#[derive(Debug)]
-enum HostedTransport {
-    Local {
-        // A transient inbound claim listener on this connection's endpoint.
-        // It serves resolve/consent for a browser that reaches this process's
-        // endpoint, but it holds no owner-root co-sign consumer: the persisted
-        // box network daemon owns that, and the owner-root co-sign is bridged
-        // to a foreground signer (heddle#1620). A co-sign dialed here therefore
-        // fails closed rather than being performed without a foreground owner.
-        router: Router,
-        endpoint: Endpoint,
-        connection: iroh::endpoint::Connection,
-        provider_transport: Option<ProviderWebSocketTransport>,
-    },
-    #[cfg(unix)]
-    Proxied(ProxiedTransport),
-}
-
-#[cfg(unix)]
-#[derive(Debug)]
-struct ProxiedTransport {
-    server: String,
-    allow_insecure: bool,
-    socket_path: PathBuf,
-    node_id: EndpointId,
-    reused: AtomicBool,
-    /// Ephemeral local endpoint for provider (CAS) dials.
-    ///
-    /// Weft stays in netd. `ProviderBackend` needs a real Iroh
-    /// `Connection`, which cannot cross the UDS splice, so the CLI
-    /// binds this once per process the first time a provider is used.
-    provider_local: Mutex<Option<LocalProviderEndpoint>>,
-}
-
-#[cfg(unix)]
-#[derive(Debug)]
-struct LocalProviderEndpoint {
-    endpoint: Endpoint,
-    transport: ProviderWebSocketTransport,
+    /// Local loopback endpoint that adapts the v2 Iroh transport to netd's UDS
+    /// stream bridge. `None` for an ordinary direct connection.
+    proxy_endpoint: Option<Endpoint>,
+    reused_warm: bool,
 }
 
 impl HostedConnection {
-    pub(super) async fn connect_verified(
-        descriptor: &VerifiedEndpointDescriptor,
-        config: &ClientConfig,
-    ) -> Result<Arc<Self>> {
-        Self::connect_verified_inner(descriptor, config, EndpointIdentity::Device).await
-    }
-
-    /// Connect for outbound calls only, on an *ephemeral* endpoint node id.
-    ///
-    /// The persistent box network daemon owns the device node id and the
-    /// inbound `heddle-claim/1` router (heddle#1620). A foreground
-    /// `heddle claim` that also bound the device node id would fight the
-    /// daemon for the relay's home registration and strand browsers
-    /// dialing the advertised node id. Its weft auth is carried entirely
-    /// by the credential proof key (bearer + PoP + request proof), which
-    /// is independent of the endpoint node id, so an ephemeral endpoint
-    /// makes the same authenticated calls without the collision.
-    pub(super) async fn connect_verified_outbound(
-        descriptor: &VerifiedEndpointDescriptor,
-        config: &ClientConfig,
-    ) -> Result<Arc<Self>> {
-        Self::connect_verified_inner(descriptor, config, EndpointIdentity::Ephemeral).await
-    }
-
-    async fn connect_verified_inner(
-        descriptor: &VerifiedEndpointDescriptor,
-        config: &ClientConfig,
-        identity: EndpointIdentity,
-    ) -> Result<Arc<Self>> {
-        heddle_perf_contract::record_network_client_initialization();
-        let relays = descriptor.relay_urls()?;
-        let address = descriptor.endpoint_addr()?;
-        let direct_address = descriptor.direct_endpoint_addr()?;
-
-        if direct_address.ip_addrs().next().is_some() {
-            let provider_transport = ProviderWebSocketTransport::new(config.clone());
-            // The endpoint is now also an inbound claim listener. Keep its
-            // signed relays online even when the hosted connection itself can
-            // use a direct path, or a browser holding only the claim link
-            // cannot reach the advertised node id.
-            let relay_mode = if relays.is_empty() {
-                RelayMode::Disabled
-            } else {
-                RelayMode::custom(relays.clone())
-            };
-            let endpoint =
-                bind_endpoint(relay_mode, Some(provider_transport.clone()), identity).await?;
-            if relays.is_empty() {
-                return Self::connect_inner(endpoint, direct_address, Some(provider_transport))
-                    .await;
-            }
-            let direct = tokio::time::timeout(
-                DIRECT_CONNECT_TIMEOUT,
-                Self::connect_inner(endpoint, direct_address, Some(provider_transport)),
-            )
-            .await;
-            match direct {
-                Ok(Ok(connection)) => return Ok(connection),
-                Ok(Err(error)) => {
-                    tracing::debug!(%error, "signed direct addresses unavailable; enabling relays")
-                }
-                Err(_) => tracing::debug!(
-                    timeout_ms = DIRECT_CONNECT_TIMEOUT.as_millis(),
-                    "signed direct-address attempt timed out; enabling relays"
-                ),
-            }
-        }
-
-        let relay_mode = if relays.is_empty() {
-            RelayMode::Disabled
-        } else {
-            RelayMode::custom(relays)
-        };
-        let provider_transport = ProviderWebSocketTransport::new(config.clone());
-        let endpoint =
-            bind_endpoint(relay_mode, Some(provider_transport.clone()), identity).await?;
-        Self::connect_inner(endpoint, address, Some(provider_transport)).await
-    }
-
     pub(super) async fn connect(endpoint: Endpoint, address: EndpointAddr) -> Result<Arc<Self>> {
         heddle_perf_contract::record_network_client_initialization();
         Self::connect_inner(endpoint, address, None).await
+    }
+
+    /// Wrap a connection already discovered by [`weft_client::HostedClient`].
+    pub(super) fn from_discovered(
+        endpoint: Endpoint,
+        connection: iroh::endpoint::Connection,
+        config: &ClientConfig,
+        description: DescribeEndpointResponse,
+    ) -> Arc<Self> {
+        let native_description = tokio::sync::OnceCell::new();
+        let _ = native_description.set(description);
+        let router = claim_router(endpoint.clone());
+        Arc::new(Self {
+            native_description,
+            router,
+            endpoint,
+            connection,
+            provider_transport: Some(ProviderWebSocketTransport::new(config.clone())),
+            provider_connections: Mutex::new(HashMap::new()),
+            proxy_endpoint: None,
+            reused_warm: false,
+        })
     }
 
     async fn connect_inner(
@@ -207,85 +93,138 @@ impl HostedConnection {
         };
         let router = claim_router(endpoint.clone());
         Ok(Arc::new(Self {
-            inner: HostedTransport::Local {
-                router,
-                endpoint,
-                connection,
-                provider_transport,
-            },
+            native_description: tokio::sync::OnceCell::new(),
+            router,
+            endpoint,
+            connection,
+            provider_transport,
             provider_connections: Mutex::new(HashMap::new()),
+            proxy_endpoint: None,
+            reused_warm: false,
         }))
     }
 
+    /// Reuse netd's persistent endpoint and cached Weft QUIC session while
+    /// retaining the v2 client's concrete Iroh transport.
+    ///
+    /// The local connection terminates at an in-process loopback adapter. Each
+    /// v2 RPC stream is spliced to netd over its same-uid UDS bridge. Provider
+    /// connections still dial directly from this process's local endpoint.
     #[cfg(unix)]
     pub(super) async fn connect_via_netd(server: &str, config: &ClientConfig) -> Result<Arc<Self>> {
-        let socket = hosted_bridge::hosted_bridge_socket_path(&repo::identity::heddle_home_dir());
-        if !socket.exists() {
+        let socket_path =
+            hosted_bridge::hosted_bridge_socket_path(&repo::identity::heddle_home_dir());
+        if !socket_path.exists() {
             return Err(HostedError::transport("netd hosted bridge is not running"));
         }
         let ensured =
-            hosted_bridge::ensure_via_netd(&socket, server, config.allow_insecure).await?;
+            hosted_bridge::ensure_via_netd(&socket_path, server, config.allow_insecure).await?;
+
+        let proxy_endpoint = Endpoint::builder(presets::Minimal)
+            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .map_err(HostedError::transport)?
+            .bind()
+            .await
+            .map_err(HostedError::transport)?;
+        let proxy_address = proxy_endpoint.addr();
+        let proxy_task_endpoint = proxy_endpoint.clone();
+        let proxy_socket = socket_path.clone();
+        let proxy_server = server.to_string();
+        let allow_insecure = config.allow_insecure;
+        tokio::spawn(async move {
+            if let Err(error) = serve_netd_proxy(
+                proxy_task_endpoint,
+                proxy_socket,
+                proxy_server,
+                allow_insecure,
+            )
+            .await
+            {
+                tracing::debug!(%error, "local netd hosted proxy stopped");
+            }
+        });
+
+        let provider_transport = ProviderWebSocketTransport::new(config.clone());
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .map_err(HostedError::transport)?
+            .add_custom_transport(Arc::new(provider_transport.clone()))
+            .bind()
+            .await
+            .map_err(HostedError::transport)?;
+        heddle_perf_contract::record_network_client_initialization();
+        let connection = match endpoint.connect(proxy_address, api::HOSTED_ALPN_V1).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                endpoint.close().await;
+                proxy_endpoint.close().await;
+                return Err(HostedError::transport(error));
+            }
+        };
+        let router = claim_router(endpoint.clone());
         tracing::debug!(
             reused = ensured.reused,
-            node_id = %ensured.node_id,
+            netd_node_id = %ensured.node_id,
+            local_node_id = %endpoint.id(),
             "hosted connect using netd warm bridge"
         );
         Ok(Arc::new(Self {
-            inner: HostedTransport::Proxied(ProxiedTransport {
-                server: server.to_string(),
-                allow_insecure: config.allow_insecure,
-                socket_path: socket,
-                node_id: ensured.node_id,
-                reused: AtomicBool::new(ensured.reused),
-                provider_local: Mutex::new(None),
-            }),
+            native_description: tokio::sync::OnceCell::new(),
+            router,
+            endpoint,
+            connection,
+            provider_transport: Some(provider_transport),
             provider_connections: Mutex::new(HashMap::new()),
+            proxy_endpoint: Some(proxy_endpoint),
+            reused_warm: ensured.reused,
         }))
     }
 
     pub(super) fn endpoint_id(&self) -> EndpointId {
-        match &self.inner {
-            HostedTransport::Local { endpoint, .. } => endpoint.id(),
-            #[cfg(unix)]
-            HostedTransport::Proxied(proxied) => proxied.node_id,
-        }
+        self.endpoint.id()
     }
 
-    pub(super) fn supports_provider_transport(&self) -> bool {
-        match &self.inner {
-            HostedTransport::Local {
-                provider_transport, ..
-            } => provider_transport.is_some(),
-            #[cfg(unix)]
-            HostedTransport::Proxied(_) => true,
-        }
+    pub(super) fn reused_warm(&self) -> bool {
+        self.reused_warm
     }
 
-    #[cfg(test)]
-    pub(super) fn local_endpoint(&self) -> Option<&Endpoint> {
-        match &self.inner {
-            HostedTransport::Local { endpoint, .. } => Some(endpoint),
-            #[cfg(unix)]
-            HostedTransport::Proxied(_) => None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn quic_connection(&self) -> Option<&iroh::endpoint::Connection> {
-        match &self.inner {
-            HostedTransport::Local { connection, .. } => Some(connection),
-            #[cfg(unix)]
-            HostedTransport::Proxied(_) => None,
-        }
-    }
-
-    pub(super) async fn provider_connection(
+    pub(super) async fn native_provider_connection(
         &self,
-        source: &ProviderSource,
+        provider: &EndpointRef,
+        routes: &[ProviderDialRoute],
     ) -> Result<iroh::endpoint::Connection> {
-        let endpoint_id: EndpointId = source.endpoint_id.parse().map_err(|error| {
-            HostedError::InvalidDescriptor(format!("provider endpoint id: {error}"))
+        if provider.kind != EndpointKind::Provider as i32 {
+            return Err(HostedError::InvalidDescriptor(
+                "native provider endpoint kind is not provider".to_string(),
+            ));
+        }
+        let key: &[u8; 32] = provider.public_key.as_slice().try_into().map_err(|_| {
+            HostedError::InvalidDescriptor(
+                "native provider endpoint key must be 32 bytes".to_string(),
+            )
         })?;
+        let endpoint_id = EndpointId::from_bytes(key).map_err(|error| {
+            HostedError::InvalidDescriptor(format!("native provider endpoint key: {error}"))
+        })?;
+        self.connect_provider(endpoint_id, || {
+            let transport = self.provider_transport.as_ref().ok_or_else(|| {
+                HostedError::InvalidDescriptor(
+                    "the active Iroh endpoint has no provider transport".to_string(),
+                )
+            })?;
+            transport.register_routes(provider, routes)
+        })
+        .await
+    }
+
+    async fn connect_provider(
+        &self,
+        endpoint_id: EndpointId,
+        address: impl FnOnce() -> Result<EndpointAddr>,
+    ) -> Result<iroh::endpoint::Connection> {
         let slot = {
             let mut connections = self.provider_connections.lock().await;
             Arc::clone(
@@ -301,342 +240,143 @@ impl HostedConnection {
             return Ok(connection.clone());
         }
 
-        match &self.inner {
-            HostedTransport::Local {
-                endpoint,
-                provider_transport,
-                ..
-            } => {
-                let transport = provider_transport.as_ref().ok_or_else(|| {
-                    HostedError::InvalidDescriptor(
-                        "the active Iroh endpoint has no provider transport".to_string(),
-                    )
-                })?;
-                let connection = dial_provider(endpoint, transport, source).await?;
-                *cached = Some(connection.clone());
-                Ok(connection)
-            }
-            #[cfg(unix)]
-            HostedTransport::Proxied(proxied) => {
-                let (endpoint, transport) = proxied.ensure_local_provider().await?;
-                let connection = dial_provider(&endpoint, &transport, source).await?;
-                *cached = Some(connection.clone());
-                Ok(connection)
-            }
-        }
+        let connection = self
+            .endpoint
+            .connect(address()?, api::PROVIDER_ALPN_V1)
+            .await
+            .map_err(HostedError::transport)?;
+        *cached = Some(connection.clone());
+        Ok(connection)
     }
 
     pub(super) async fn close(&self) {
-        match &self.inner {
-            HostedTransport::Local {
-                router, connection, ..
-            } => {
-                connection.close(0u32.into(), b"Heddle client closed");
-                let router = router.clone();
-                bounded_foreground_shutdown(async move { router.shutdown().await }).await;
+        self.connection.close(0u32.into(), b"Heddle client closed");
+        let router = self.router.clone();
+        let proxy_endpoint = self.proxy_endpoint.clone();
+        bounded_foreground_shutdown(async move {
+            if let Err(error) = router.shutdown().await {
+                tracing::warn!(%error, "failed to shut down Heddle Iroh router");
             }
-            #[cfg(unix)]
-            HostedTransport::Proxied(proxied) => {
-                // The weft QUIC session lives in netd; dropping this handle
-                // must not drain it. A lazy local provider endpoint is
-                // this process's, so start a bounded close if we bound one.
-                let local = {
-                    let mut guard = proxied.provider_local.lock().await;
-                    guard.take()
-                };
-                if let Some(local) = local {
-                    let endpoint = local.endpoint;
-                    bounded_foreground_shutdown(async move {
-                        endpoint.close().await;
-                        Ok::<(), &'static str>(())
-                    })
-                    .await;
-                }
+            if let Some(endpoint) = proxy_endpoint {
+                endpoint.close().await;
             }
-        }
-    }
-
-    pub(super) fn reused_warm(&self) -> bool {
-        match &self.inner {
-            HostedTransport::Local { .. } => false,
-            #[cfg(unix)]
-            HostedTransport::Proxied(proxied) => proxied.reused.load(Ordering::Relaxed),
-        }
-    }
-
-    #[cfg(all(test, unix))]
-    fn local_provider_endpoint_id_for_test(&self) -> Option<EndpointId> {
-        match &self.inner {
-            HostedTransport::Local { .. } => None,
-            HostedTransport::Proxied(proxied) => proxied
-                .provider_local
-                .try_lock()
-                .ok()
-                .and_then(|guard| guard.as_ref().map(|local| local.endpoint.id())),
-        }
-    }
-
-    #[cfg(all(test, unix))]
-    async fn ensure_local_provider_for_test(&self) -> Result<EndpointId> {
-        match &self.inner {
-            HostedTransport::Local { .. } => Err(HostedError::transport(
-                "local sessions already have an endpoint",
-            )),
-            HostedTransport::Proxied(proxied) => Ok(proxied.ensure_local_provider().await?.0.id()),
-        }
-    }
-
-    pub(super) async fn open_bi(&self) -> Result<(HostedSendStream, HostedRecvStream)> {
-        match &self.inner {
-            HostedTransport::Local { connection, .. } => {
-                let (send, recv) = connection.open_bi().await.map_err(HostedError::transport)?;
-                Ok((
-                    HostedSendStream::Direct(send),
-                    HostedRecvStream::Direct(recv),
-                ))
-            }
-            #[cfg(unix)]
-            HostedTransport::Proxied(proxied) => {
-                let (stream, reused) = hosted_bridge::open_bi_via_netd(
-                    &proxied.socket_path,
-                    &proxied.server,
-                    proxied.allow_insecure,
-                    None,
-                )
-                .await?;
-                proxied.reused.store(reused, Ordering::Relaxed);
-                let (read, write) = stream.into_split();
-                Ok((
-                    HostedSendStream::Proxied(write),
-                    HostedRecvStream::Proxied(read),
-                ))
-            }
-        }
+        })
+        .await;
     }
 }
 
 #[cfg(unix)]
-impl ProxiedTransport {
-    async fn ensure_local_provider(&self) -> Result<(Endpoint, ProviderWebSocketTransport)> {
-        let mut guard = self.provider_local.lock().await;
-        if let Some(local) = guard.as_ref() {
-            return Ok((local.endpoint.clone(), local.transport.clone()));
-        }
-        let config = ClientConfig {
-            allow_insecure: self.allow_insecure,
-            ..ClientConfig::default()
-        };
-        let transport = ProviderWebSocketTransport::new(config);
-        let endpoint = bind_endpoint(
-            RelayMode::Disabled,
-            Some(transport.clone()),
-            EndpointIdentity::Ephemeral,
-        )
-        .await?;
-        tracing::debug!(
-            node_id = %endpoint.id(),
-            "bound local ephemeral endpoint for provider dials on a netd-proxied session"
-        );
-        *guard = Some(LocalProviderEndpoint {
-            endpoint: endpoint.clone(),
-            transport: transport.clone(),
-        });
-        Ok((endpoint, transport))
-    }
-}
-
-async fn dial_provider(
-    endpoint: &Endpoint,
-    transport: &ProviderWebSocketTransport,
-    source: &ProviderSource,
-) -> Result<iroh::endpoint::Connection> {
-    let address = transport.register_source(
-        &source.provider_id,
-        &source.endpoint_id,
-        &source.direct_url,
-        &source.opaque_ticket,
-    )?;
-    endpoint
-        .connect(address, api::PROVIDER_ALPN_V1)
+async fn serve_netd_proxy(
+    endpoint: Endpoint,
+    socket_path: PathBuf,
+    server: String,
+    allow_insecure: bool,
+) -> Result<()> {
+    let incoming = endpoint
+        .accept()
         .await
-        .map_err(HostedError::transport)
+        .ok_or_else(|| HostedError::transport("local netd proxy endpoint closed before accept"))?;
+    let connection = incoming.await.map_err(HostedError::transport)?;
+    while let Ok((send, recv)) = connection.accept_bi().await {
+        let socket_path = socket_path.clone();
+        let server = server.clone();
+        tokio::spawn(async move {
+            if let Err(error) =
+                splice_netd_stream(send, recv, &socket_path, &server, allow_insecure).await
+            {
+                tracing::debug!(%error, "local netd stream proxy stopped");
+            }
+        });
+    }
+    endpoint.close().await;
+    Ok(())
 }
 
-pub(super) enum HostedSendStream {
-    Direct(iroh::endpoint::SendStream),
-    #[cfg(unix)]
-    Proxied(tokio::net::unix::OwnedWriteHalf),
-}
-
-pub(super) enum HostedRecvStream {
-    Direct(iroh::endpoint::RecvStream),
-    #[cfg(unix)]
-    Proxied(tokio::net::unix::OwnedReadHalf),
-}
-
-impl HostedSendStream {
-    pub(super) async fn write_chunk(&mut self, chunk: Bytes) -> Result<()> {
-        match self {
-            Self::Direct(send) => send
-                .write_chunk(chunk)
+#[cfg(unix)]
+async fn splice_netd_stream(
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    socket_path: &std::path::Path,
+    server: &str,
+    allow_insecure: bool,
+) -> Result<()> {
+    let (stream, _reused) =
+        hosted_bridge::open_bi_via_netd(socket_path, server, allow_insecure).await?;
+    let (mut unix_read, mut unix_write) = stream.into_split();
+    let to_netd = async {
+        while let Some(chunk) = recv
+            .read_chunk(64 * 1024)
+            .await
+            .map_err(HostedError::transport)?
+        {
+            unix_write
+                .write_all(&chunk)
                 .await
-                .map_err(HostedError::transport),
-            #[cfg(unix)]
-            Self::Proxied(send) => send.write_all(&chunk).await.map_err(HostedError::transport),
+                .map_err(HostedError::transport)?;
         }
-    }
-
-    pub(super) async fn write_all(&mut self, buf: &[u8]) -> Result<()> {
-        match self {
-            Self::Direct(send) => send.write_all(buf).await.map_err(HostedError::transport),
-            #[cfg(unix)]
-            Self::Proxied(send) => send.write_all(buf).await.map_err(HostedError::transport),
-        }
-    }
-
-    pub(super) fn finish(&mut self) -> Result<()> {
-        match self {
-            Self::Direct(send) => send.finish().map_err(HostedError::transport),
-            #[cfg(unix)]
-            Self::Proxied(send) => {
-                let fd = send.as_ref().as_raw_fd();
-                let rc = unsafe { libc::shutdown(fd, libc::SHUT_WR) };
-                if rc == 0 {
-                    Ok(())
-                } else {
-                    Err(HostedError::transport(std::io::Error::last_os_error()))
-                }
+        unix_write.shutdown().await.map_err(HostedError::transport)
+    };
+    let from_netd = async {
+        let mut buffer = vec![0; 64 * 1024];
+        loop {
+            let read = unix_read
+                .read(&mut buffer)
+                .await
+                .map_err(HostedError::transport)?;
+            if read == 0 {
+                send.finish().map_err(HostedError::transport)?;
+                return Ok(());
             }
+            send.write_all(&buffer[..read])
+                .await
+                .map_err(HostedError::transport)?;
         }
-    }
-
-    pub(super) fn reset(&mut self, error_code: u32) -> Result<()> {
-        match self {
-            Self::Direct(send) => send
-                .reset(error_code.into())
-                .map_err(HostedError::transport),
-            #[cfg(unix)]
-            Self::Proxied(send) => {
-                let fd = send.as_ref().as_raw_fd();
-                let _ = unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
-                Ok(())
-            }
-        }
-    }
+    };
+    let (to_netd, from_netd) = tokio::join!(to_netd, from_netd);
+    to_netd?;
+    from_netd
 }
 
-impl HostedRecvStream {
-    pub(super) async fn read_to_end(&mut self, max: usize) -> Result<Vec<u8>> {
-        match self {
-            Self::Direct(recv) => recv.read_to_end(max).await.map_err(HostedError::transport),
-            #[cfg(unix)]
-            Self::Proxied(recv) => {
-                let mut buf = Vec::new();
-                recv.read_to_end(&mut buf)
-                    .await
-                    .map_err(HostedError::transport)?;
-                if buf.len() > max {
-                    buf.truncate(max + 1);
-                }
-                Ok(buf)
-            }
-        }
-    }
-
-    pub(super) async fn read_chunk(&mut self, max: usize) -> Result<Option<Bytes>> {
-        match self {
-            Self::Direct(recv) => recv.read_chunk(max).await.map_err(HostedError::transport),
-            #[cfg(unix)]
-            Self::Proxied(recv) => {
-                let mut buf = vec![0u8; max.max(1)];
-                match recv.read(&mut buf).await {
-                    Ok(0) => Ok(None),
-                    Ok(n) => {
-                        buf.truncate(n);
-                        Ok(Some(Bytes::from(buf)))
-                    }
-                    Err(error) => Err(HostedError::transport(error)),
-                }
-            }
-        }
-    }
-
-    pub(super) fn stop(&mut self, error_code: u32) -> Result<()> {
-        match self {
-            Self::Direct(recv) => recv.stop(error_code.into()).map_err(HostedError::transport),
-            #[cfg(unix)]
-            Self::Proxied(recv) => {
-                let fd = recv.as_ref().as_raw_fd();
-                let _ = unsafe { libc::shutdown(fd, libc::SHUT_RDWR) };
-                Ok(())
-            }
-        }
-    }
-}
-
-/// Initiate graceful router/endpoint shutdown without gating the
-/// caller on QUIC drain. Wait up to [`FOREGROUND_ENDPOINT_DRAIN`];
-/// if close is still running, detach the task so drain continues.
-///
-/// Do not wrap the [`tokio::task::JoinHandle`] in
-/// [`tokio::time::timeout`]: on `Elapsed` that future is dropped,
-/// and a dropped handle must not be what stops close. Race join
-/// against the bound and [`std::mem::forget`] the handle so the
-/// runtime keeps the drain.
-pub(super) async fn bounded_foreground_shutdown<E, F>(shutdown: F)
-where
-    F: std::future::Future<Output = std::result::Result<(), E>> + Send + 'static,
-    E: std::fmt::Display + Send + 'static,
-{
+async fn bounded_foreground_shutdown(shutdown: impl Future<Output = ()> + Send + 'static) {
     let hold = shutdown_hold_for_test();
-    let mut task = tokio::spawn(async move {
+    let mut drain = tokio::spawn(async move {
         if let Some(hold) = hold {
             tokio::time::sleep(hold).await;
         }
-        if let Err(error) = shutdown.await {
-            tracing::warn!(%error, "failed to shut down Heddle Iroh router");
-        }
+        shutdown.await;
     });
     tokio::select! {
-        _ = &mut task => {}
+        result = &mut drain => {
+            if let Err(error) = result {
+                tracing::warn!(%error, "hosted endpoint drain task failed");
+            }
+        }
         () = tokio::time::sleep(FOREGROUND_ENDPOINT_DRAIN) => {
-            tracing::debug!(
-                timeout_ms = FOREGROUND_ENDPOINT_DRAIN.as_millis(),
-                "detached hosted endpoint drain after foreground bound"
-            );
-            std::mem::forget(task);
+            // Dropping a JoinHandle detaches the task. Be explicit so a future
+            // refactor does not replace this with abort-on-timeout behavior.
+            std::mem::forget(drain);
         }
     }
 }
 
-/// Which node identity a hosted endpoint binds.
-#[derive(Clone, Copy, Debug)]
-enum EndpointIdentity {
-    /// The persisted device node id — the machine's single stable
-    /// address, also served by the box network daemon.
-    Device,
-    /// A fresh per-process node id, for outbound-only connections that
-    /// must not contend with the daemon for the device node id.
-    Ephemeral,
+#[cfg(test)]
+pub(super) fn hold_next_shutdown_for_test(duration: Duration) {
+    NEXT_SHUTDOWN_HOLD_MS.store(
+        duration.as_millis() as u64,
+        std::sync::atomic::Ordering::SeqCst,
+    );
 }
 
-async fn bind_endpoint(
-    relay_mode: RelayMode,
-    provider_transport: Option<ProviderWebSocketTransport>,
-    identity: EndpointIdentity,
-) -> Result<Endpoint> {
-    let mut builder = Endpoint::builder(presets::Minimal)
-        .transport_config(transport_config())
-        .relay_mode(relay_mode);
-    if let EndpointIdentity::Device = identity {
-        let device = crate::hosted_runtime::agent_node_identity::load_or_create()
-            .map_err(HostedError::transport)?;
-        builder = builder.secret_key(device.secret_key());
+fn shutdown_hold_for_test() -> Option<Duration> {
+    #[cfg(test)]
+    {
+        let millis = NEXT_SHUTDOWN_HOLD_MS.swap(0, std::sync::atomic::Ordering::SeqCst);
+        (millis != 0).then(|| Duration::from_millis(millis))
     }
-    if let Some(provider_transport) = provider_transport {
-        builder = builder.add_custom_transport(Arc::new(provider_transport));
+    #[cfg(not(test))]
+    {
+        None
     }
-    builder.bind().await.map_err(HostedError::transport)
 }
 
 /// Mount a transient claim listener on this connection's endpoint.
@@ -651,42 +391,25 @@ fn claim_router(endpoint: Endpoint) -> Router {
     let (authorization, _completion, _owner_root_calls) =
         crate::hosted_runtime::claim_authorization::StoredClaimAuthorization::new();
     let authorization = Arc::new(authorization);
+    let endpoint_key = *endpoint.id().as_bytes();
     Router::builder(endpoint)
         .accept(
-            CLAIM_ALPN_V1,
-            ClaimProtocol::new(Arc::clone(&authorization), authorization),
+            NATIVE_ALPN,
+            ClaimProtocol::new(Arc::clone(&authorization), authorization, endpoint_key),
         )
         .spawn()
 }
 
 impl Drop for HostedConnection {
     fn drop(&mut self) {
-        if let HostedTransport::Local { connection, .. } = &self.inner {
-            connection.close(0u32.into(), b"Heddle client closed");
-        }
+        self.connection.close(0u32.into(), b"Heddle client closed");
     }
-}
-
-fn transport_config() -> QuicTransportConfig {
-    // Match Weft's WAN-oriented profile: enough BDP for a 1 Gbit/s, ~32 ms
-    // path while keeping per-stream memory well below the 16 MiB experiment.
-    const STREAM_RECEIVE_WINDOW: u32 = 4 * 1024 * 1024;
-    const CONNECTION_RECEIVE_WINDOW: u32 = 8 * STREAM_RECEIVE_WINDOW;
-    let mut acknowledgements = AckFrequencyConfig::default();
-    acknowledgements.ack_eliciting_threshold(50u32.into());
-    QuicTransportConfig::builder()
-        .stream_receive_window(STREAM_RECEIVE_WINDOW.into())
-        .receive_window(CONNECTION_RECEIVE_WINDOW.into())
-        .ack_frequency_config(Some(acknowledgements))
-        .build()
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
         net::Ipv4Addr,
-        path::PathBuf,
         sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
@@ -694,14 +417,121 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use api::heddle::api::v1alpha1::ProviderSource;
+    use api::heddle::api::v1alpha2::{EndpointKind, EndpointRef};
     use iroh::{Endpoint, RelayMode, endpoint::presets};
     use tokio::sync::Mutex;
 
-    use super::{HostedConnection, bounded_foreground_shutdown};
+    use super::{HostedConnection, bounded_foreground_shutdown, hold_next_shutdown_for_test};
+
+    #[tokio::test]
+    async fn bounded_shutdown_detaches_and_keeps_draining() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_after_drain = Arc::clone(&completed);
+        hold_next_shutdown_for_test(Duration::from_millis(80));
+        let started = Instant::now();
+        bounded_foreground_shutdown(async move {
+            completed_after_drain.store(true, Ordering::SeqCst);
+        })
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_millis(50),
+            "foreground close must detach an 80ms drain"
+        );
+        assert!(!completed.load(Ordering::SeqCst));
+        tokio::time::timeout(Duration::from_millis(200), async {
+            while !completed.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached graceful drain must keep running");
+    }
+
+    #[tokio::test]
+    async fn close_does_not_wait_for_peer_after_locally_closed() {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let address = server.addr();
+        let server_task = tokio::spawn(async move {
+            let connection = server
+                .accept()
+                .await
+                .expect("incoming connection")
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            connection.close(0u32.into(), b"test");
+            server.close().await;
+        });
+        let client = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let connection = HostedConnection::connect(client, address).await.unwrap();
+        connection
+            .connection
+            .close(0u32.into(), b"Heddle client closed");
+        tokio::time::timeout(Duration::from_secs(2), connection.connection.closed())
+            .await
+            .expect("QUIC close should become locally closed");
+
+        let started = Instant::now();
+        connection.close().await;
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "close after locally closed must not wait for endpoint drain"
+        );
+        server_task.abort();
+        let _ = server_task.await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn netd_proxy_reuses_weft_and_carries_iroh_streams() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let fixture =
+            crate::hosted_runtime::hosted::hosted_bridge::tests::WarmBridgeFixture::start().await;
+        let _home = crate::hosted_runtime::hosted::hosted_bridge::tests::PinHeddleHome::new(
+            fixture.home.path(),
+        );
+        let connection = HostedConnection::connect_via_netd(
+            crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
+            &config::ClientConfig::default(),
+        )
+        .await
+        .expect("connect through warm netd bridge");
+        assert!(connection.reused_warm());
+        assert_ne!(
+            connection.endpoint_id(),
+            fixture.node_id,
+            "provider-capable endpoint must remain local when Weft is proxied"
+        );
+
+        let (mut send, mut recv) = connection.connection.open_bi().await.unwrap();
+        send.write_all(b"v2-over-netd").await.unwrap();
+        send.finish().unwrap();
+        assert_eq!(recv.read_to_end(64 * 1024).await.unwrap(), b"v2-over-netd");
+        assert_eq!(
+            fixture.accepts(),
+            1,
+            "netd must reuse its cached QUIC session"
+        );
+        connection.close().await;
+    }
 
     #[tokio::test]
     async fn failed_connect_closes_the_client_endpoint() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let server = Endpoint::builder(presets::Minimal)
             .alpns(vec![b"not-heddle".to_vec()])
             .relay_mode(RelayMode::Disabled)
@@ -742,6 +572,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_connection_is_reused_by_cryptographic_endpoint_id() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let server = Endpoint::builder(presets::Minimal)
             .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
             .relay_mode(RelayMode::Disabled)
@@ -774,20 +605,17 @@ mod tests {
             .unwrap();
         connection.provider_connections.lock().await.insert(
             server_id,
-            Arc::new(Mutex::new(Some(
-                connection.quic_connection().expect("local fixture").clone(),
-            ))),
+            Arc::new(Mutex::new(Some(connection.connection.clone()))),
         );
 
         let reused = connection
-            .provider_connection(&ProviderSource {
-                provider_id: "provider-a".to_string(),
-                endpoint_id: server_id.to_string(),
-                direct_url: "wss://unused.invalid/direct?provider=provider-a&ticket=unused"
-                    .to_string(),
-                opaque_ticket: "unused".to_string(),
-                expires_at_unix_millis: u64::MAX,
-            })
+            .native_provider_connection(
+                &EndpointRef {
+                    kind: EndpointKind::Provider as i32,
+                    public_key: server_id.as_bytes().to_vec(),
+                },
+                &[],
+            )
             .await
             .unwrap();
 
@@ -796,376 +624,5 @@ mod tests {
         println!("provider_connection_reuse endpoint={server_id} connection_count=1 reused=true");
         connection.close().await;
         server_task.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn bounded_shutdown_returns_before_a_one_second_drain() {
-        let started = Instant::now();
-        bounded_foreground_shutdown(async {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            Ok::<(), &'static str>(())
-        })
-        .await;
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(200),
-            "foreground close must detach a 1s drain, took {elapsed:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn bounded_shutdown_still_completes_after_foreground_detach() {
-        let finished = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&finished);
-        let started = Instant::now();
-        bounded_foreground_shutdown(async move {
-            tokio::time::sleep(Duration::from_millis(80)).await;
-            flag.store(true, Ordering::SeqCst);
-            Ok::<(), &'static str>(())
-        })
-        .await;
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(50),
-            "foreground close must return at the 20ms bound, took {elapsed:?}"
-        );
-        assert!(
-            !finished.load(Ordering::SeqCst),
-            "an 80ms drain must still be in flight when the caller returns"
-        );
-        tokio::time::timeout(Duration::from_millis(400), async {
-            while !finished.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("detached drain must still complete after the caller returns");
-    }
-
-    #[tokio::test]
-    async fn close_does_not_block_a_second_after_locally_closed() {
-        let server = Endpoint::builder(presets::Minimal)
-            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .bind()
-            .await
-            .unwrap();
-        let server_addr = server.addr();
-        let server_task = tokio::spawn(async move {
-            let connection = server
-                .accept()
-                .await
-                .expect("incoming connection")
-                .await
-                .unwrap();
-            // Hold the peer without acknowledging close so drain would
-            // otherwise wait for the probe timeout.
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            connection.close(0u32.into(), b"test");
-            server.close().await;
-        });
-
-        let client = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .bind()
-            .await
-            .unwrap();
-        let connection = HostedConnection::connect(client, server_addr)
-            .await
-            .unwrap();
-        let quic = connection.quic_connection().expect("local fixture");
-        quic.close(0u32.into(), b"Heddle client closed");
-        tokio::time::timeout(Duration::from_secs(2), quic.closed())
-            .await
-            .expect("QUIC close should become LocallyClosed");
-        assert!(quic.close_reason().is_some());
-
-        let started = Instant::now();
-        connection.close().await;
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(200),
-            "close after LocallyClosed must not wait for endpoint drain, took {elapsed:?}"
-        );
-        server_task.abort();
-        let _ = server_task.await;
-    }
-
-    #[cfg(unix)]
-    fn test_proxied() -> std::sync::Arc<HostedConnection> {
-        let node_id = iroh_base::SecretKey::generate().public();
-        std::sync::Arc::new(HostedConnection {
-            inner: super::HostedTransport::Proxied(super::ProxiedTransport {
-                server: "https://api.test.heddle.sh".to_string(),
-                allow_insecure: true,
-                socket_path: PathBuf::from("/tmp/heddle-hosted-unused.sock"),
-                node_id,
-                reused: AtomicBool::new(true),
-                provider_local: Mutex::new(None),
-            }),
-            provider_connections: Mutex::new(HashMap::new()),
-        })
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn proxied_provider_connection_binds_local_endpoint_instead_of_failing_closed() {
-        let connection = test_proxied();
-        let endpoint_id = iroh_base::SecretKey::generate().public();
-        let source = ProviderSource {
-            provider_id: "provider-a".to_string(),
-            endpoint_id: endpoint_id.to_string(),
-            direct_url: "wss://127.0.0.1:1/direct?provider=provider-a&ticket=opaque".to_string(),
-            opaque_ticket: "opaque".to_string(),
-            expires_at_unix_millis: u64::MAX,
-        };
-        let dial = {
-            let connection = Arc::clone(&connection);
-            tokio::spawn(async move { connection.provider_connection(&source).await })
-        };
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let first = loop {
-            if let Some(id) = connection.local_provider_endpoint_id_for_test() {
-                break id;
-            }
-            if Instant::now() >= deadline {
-                panic!(
-                    "netd-proxied provider_connection must bind a local endpoint (failing closed with 'opened as streams' would never bind)"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        };
-        dial.abort();
-        let _ = dial.await;
-
-        let second = connection
-            .ensure_local_provider_for_test()
-            .await
-            .expect("local provider endpoint must stay bound");
-        assert_eq!(
-            first, second,
-            "a proxied session must reuse one local provider endpoint"
-        );
-
-        let started = Instant::now();
-        connection.close().await;
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(200),
-            "closing a proxied session with a local provider endpoint must not drain, took {elapsed:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn proxied_provider_connection_reuses_a_live_cached_connection() {
-        let server = Endpoint::builder(presets::Minimal)
-            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .bind()
-            .await
-            .unwrap();
-        let server_id = server.id();
-        let server_addr = server.addr();
-        let server_task = tokio::spawn(async move {
-            let connection = server
-                .accept()
-                .await
-                .expect("incoming connection")
-                .await
-                .unwrap();
-            connection.closed().await;
-            server.close().await;
-        });
-        let client = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))
-            .unwrap()
-            .bind()
-            .await
-            .unwrap();
-        let live = HostedConnection::connect(client, server_addr)
-            .await
-            .unwrap();
-        let connection = test_proxied();
-        connection.provider_connections.lock().await.insert(
-            server_id,
-            Arc::new(Mutex::new(Some(
-                live.quic_connection().expect("local fixture").clone(),
-            ))),
-        );
-
-        let reused = connection
-            .provider_connection(&ProviderSource {
-                provider_id: "provider-a".to_string(),
-                endpoint_id: server_id.to_string(),
-                direct_url: "wss://unused.invalid/direct?provider=provider-a&ticket=unused"
-                    .to_string(),
-                opaque_ticket: "unused".to_string(),
-                expires_at_unix_millis: u64::MAX,
-            })
-            .await
-            .unwrap();
-
-        assert!(reused.close_reason().is_none());
-        assert!(
-            connection.local_provider_endpoint_id_for_test().is_none(),
-            "a live cached provider connection must not bind a local endpoint"
-        );
-        connection.close().await;
-        live.close().await;
-        server_task.await.unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn connect_via_netd_fails_when_the_bridge_socket_is_missing() {
-        let _env_guard = config::credentials::lock_test_env();
-        let home = tempfile::TempDir::new().unwrap();
-        let _pin = super::hosted_bridge::tests::PinHeddleHome::new(home.path());
-        let error = HostedConnection::connect_via_netd(
-            super::hosted_bridge::tests::TEST_WEFT_SERVER,
-            &config::ClientConfig::default(),
-        )
-        .await
-        .expect_err("connect_via_netd must fail closed without netd");
-        assert!(error.to_string().contains("not running"), "got {error}");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn connect_via_netd_reuses_warm_weft_and_proxied_streams() {
-        let _env_guard = config::credentials::lock_test_env();
-        let fixture = super::hosted_bridge::tests::WarmBridgeFixture::start().await;
-        let _pin = super::hosted_bridge::tests::PinHeddleHome::new(fixture.home.path());
-        let connection = HostedConnection::connect_via_netd(
-            super::hosted_bridge::tests::TEST_WEFT_SERVER,
-            &config::ClientConfig::default(),
-        )
-        .await
-        .expect("warm netd must be usable");
-        assert!(connection.reused_warm());
-        assert!(connection.supports_provider_transport());
-        assert_eq!(connection.endpoint_id(), fixture.node_id);
-        assert!(connection.local_endpoint().is_none());
-        assert!(connection.quic_connection().is_none());
-
-        let (mut send, mut recv) = connection.open_bi().await.unwrap();
-        send.write_all(b"via-netd").await.unwrap();
-        send.finish().unwrap();
-        let reply = recv.read_to_end(64 * 1024).await.unwrap();
-        assert_eq!(reply, b"via-netd");
-
-        let (mut send, mut recv) = connection.open_bi().await.unwrap();
-        send.write_chunk(bytes::Bytes::from_static(b"chunk"))
-            .await
-            .unwrap();
-        send.finish().unwrap();
-        let chunk = recv.read_chunk(64).await.unwrap();
-        assert_eq!(chunk.as_deref(), Some(b"chunk".as_slice()));
-
-        let (mut send, mut recv) = connection.open_bi().await.unwrap();
-        send.reset(1).unwrap();
-        recv.stop(1).unwrap();
-
-        assert_eq!(
-            fixture.accepts(),
-            1,
-            "proxied OpenBi must stay on the cached weft connection"
-        );
-
-        let started = Instant::now();
-        connection.close().await;
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(200),
-            "proxied close without a local provider must not drain, took {elapsed:?}"
-        );
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn hosted_client_connect_via_netd_runs_a_unary_on_proxied_streams() {
-        let _env_guard = config::credentials::lock_test_env();
-        let fixture = super::hosted_bridge::tests::WarmBridgeFixture::start().await;
-        let _pin = super::hosted_bridge::tests::PinHeddleHome::new(fixture.home.path());
-        let client = crate::hosted_runtime::hosted::HostedClient::connect_via_netd(
-            super::hosted_bridge::tests::TEST_WEFT_SERVER,
-            &config::ClientConfig::default(),
-        )
-        .await
-        .unwrap();
-        assert!(client.reused_warm_connection());
-        let context = crate::hosted_runtime::hosted::CallContextFactory::default()
-            .unary("/heddle.api.v1alpha1.IdentityService/WhoAmI", &[], "")
-            .unwrap()
-            .context;
-        let error = client
-            .unary::<api::heddle::api::v1alpha1::WhoAmIRequest, api::heddle::api::v1alpha1::WhoAmIResponse>(
-                "/heddle.api.v1alpha1.IdentityService/WhoAmI",
-                &context,
-                &api::heddle::api::v1alpha1::WhoAmIRequest {},
-            )
-            .await
-            .expect_err("echo fixture is not a framed WhoAmI server");
-        assert!(!error.to_string().is_empty());
-        client.close().await;
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn session_connect_uses_netd_when_the_bridge_is_up() {
-        let _env_guard = config::credentials::lock_test_env();
-        let fixture = super::hosted_bridge::tests::WarmBridgeFixture::start().await;
-        let _pin = super::hosted_bridge::tests::PinHeddleHome::new(fixture.home.path());
-        let session = crate::hosted_runtime::hosted::HostedSession::build(
-            &config::UserConfig::default(),
-            None,
-            crate::hosted_runtime::hosted::HostedAuthMode::Unauthenticated,
-        )
-        .unwrap();
-        let client = session
-            .connect(super::hosted_bridge::tests::TEST_WEFT_SERVER)
-            .await
-            .expect("session.connect must reuse a running hosted bridge");
-        assert!(client.reused_warm_connection());
-        client.close().await;
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn session_connect_falls_back_when_netd_is_down() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let _env_guard = config::credentials::lock_test_env();
-        let home = tempfile::TempDir::new().unwrap();
-        let _pin = super::hosted_bridge::tests::PinHeddleHome::new(home.path());
-        let session = crate::hosted_runtime::hosted::HostedSession::build(
-            &config::UserConfig::default(),
-            None,
-            crate::hosted_runtime::hosted::HostedAuthMode::Unauthenticated,
-        )
-        .unwrap();
-        let error = session
-            .connect("https://127.0.0.1:1")
-            .await
-            .expect_err("without netd, connect must fall through to local discovery");
-        assert!(!error.to_string().is_empty());
-        let outbound = session
-            .connect_outbound("https://127.0.0.1:1")
-            .await
-            .expect_err("outbound connect must use the same netd fallback");
-        assert!(!outbound.to_string().is_empty());
     }
 }

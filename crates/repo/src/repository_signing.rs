@@ -1028,19 +1028,24 @@ mod tests {
         with_signing_home(home.path(), || {
             let (temp, repo) = setup_repo();
 
-            // Force the local-identity mint to fail by occupying its path with a
-            // directory, so `read_to_string` errors and no key can be produced.
-            std::fs::create_dir(temp.path().join(".heddle").join("identity.toml"))
-                .expect("occupy identity path");
+            // Native capture needs the Thread owner key minted at genesis.
+            // Occupying that path after init must fail closed rather than
+            // emit an unsigned source operation.
+            let identity = temp.path().join(".heddle").join("identity.toml");
+            std::fs::remove_file(&identity).expect("remove minted identity");
+            std::fs::create_dir(&identity).expect("occupy identity path");
 
             std::fs::write(temp.path().join("file.txt"), "x").expect("write");
-            // Capture must still succeed — signing is best-effort.
-            let state = repo.snapshot(Some("x".to_string()), None).expect("capture");
-
-            assert!(repo.get_state_signature(&state.id()).unwrap().is_none());
-            assert_eq!(
-                repo.verify_state_signature(&state.id()).expect("verify"),
-                SignatureStatus::Unsigned,
+            let error = repo
+                .snapshot(Some("x".to_string()), None)
+                .expect_err("native capture requires the owner key");
+            assert!(
+                matches!(
+                    &error,
+                    objects::error::HeddleError::NativeSourceSignerUnavailable { thread, .. }
+                        if thread == "main"
+                ),
+                "expected the typed owner-key refusal on main, got {error:?}"
             );
         });
     }
@@ -1079,19 +1084,25 @@ mod tests {
             std::fs::set_permissions(&identity, std::fs::Permissions::from_mode(0o644))
                 .expect("loosen perms");
 
-            // The SAME handle must refuse to reuse a cached signer: the gate is
-            // re-validated per sign, so this capture is unsigned-but-marked.
+            // Native source recording re-reads the owner key; a world-readable
+            // key must not produce a Capture. State-signature caching is a
+            // separate gate and still must not keep signing.
             std::fs::write(temp.path().join("b.txt"), "b").expect("write");
-            let exposed = repo
+            let error = repo
                 .snapshot(Some("b".to_string()), None)
-                .expect("capture b");
-            assert!(repo.get_state_signature(&exposed.id()).unwrap().is_none());
-            assert_eq!(
-                repo.verify_state_signature(&exposed.id()).expect("verify"),
-                SignatureStatus::Unsigned,
+                .expect_err("exposed owner key cannot record native capture");
+            let objects::error::HeddleError::NativeSourceSignerUnavailable { thread, reason } =
+                &error
+            else {
+                panic!("expected the typed owner-key refusal, got {error:?}");
+            };
+            assert_eq!(thread, "main");
+            assert!(
+                reason.contains("group/world-accessible"),
+                "the refusal must name the permission gate, got {reason}"
             );
 
-            // Re-securing the key restores signing on the very same handle.
+            // Re-securing the key restores native capture on the same handle.
             std::fs::set_permissions(&identity, std::fs::Permissions::from_mode(0o600))
                 .expect("re-secure perms");
             std::fs::write(temp.path().join("c.txt"), "c").expect("write");

@@ -178,7 +178,7 @@ pub fn describe_thread_advice_with_initial(
     } else if thread.freshness == ThreadFreshness::Stale {
         blockers.push(format!(
             "Thread '{}' is stale against '{}'",
-            thread.id,
+            thread.thread,
             thread
                 .target_thread
                 .as_deref()
@@ -236,7 +236,7 @@ pub fn describe_thread_advice_with_initial(
         return ThreadAdvice {
             thread_health: "ready".to_string(),
             blockers,
-            recommended_action: format!("heddle land {}", thread_flag(&thread.id)),
+            recommended_action: format!("heddle land {}", thread_flag(&thread.thread)),
         };
     } else if clean_ready_merges_to_apply || thread.state == ThreadState::Ready {
         RecommendedAction::Land
@@ -262,7 +262,7 @@ pub fn describe_thread_advice_with_initial(
     ThreadAdvice {
         thread_health,
         blockers,
-        recommended_action: action.command(&thread.id).unwrap_or_default(),
+        recommended_action: action.command(&thread.thread).unwrap_or_default(),
     }
 }
 
@@ -324,6 +324,43 @@ mod tests {
         let advice = describe_thread_advice(&thread_json("active"), false, 2, false);
         assert_ne!(advice.recommended_action, "heddle resolve --list");
         assert_eq!(advice.recommended_action, "heddle land --thread feature/x");
+    }
+
+    #[test]
+    fn recommended_commands_use_thread_name_not_native_id() {
+        let mut thread = thread_json("ready");
+        thread.id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        thread.thread = "feature/x".to_string();
+        thread.integration_policy_result.status = Some("previewed".to_string());
+        let ready = describe_thread_advice(&thread, false, 0, false);
+        assert_eq!(ready.recommended_action, "heddle land --thread feature/x");
+        assert!(
+            !ready.recommended_action.contains(&thread.id),
+            "land advice must not interpolate the native thread id: {}",
+            ready.recommended_action
+        );
+
+        thread.state = ThreadState::Active;
+        thread.freshness = ThreadFreshness::Stale;
+        thread.integration_policy_result.status = None;
+        let stale = describe_thread_advice(&thread, false, 0, false);
+        assert_eq!(stale.recommended_action, "heddle sync --thread feature/x");
+        assert!(
+            stale
+                .blockers
+                .iter()
+                .any(|blocker| blocker.contains("feature/x")),
+            "stale blocker must name the thread: {:?}",
+            stale.blockers
+        );
+        assert!(
+            stale
+                .blockers
+                .iter()
+                .all(|blocker| !blocker.contains(&thread.id)),
+            "stale blocker must not interpolate the native thread id: {:?}",
+            stale.blockers
+        );
     }
 
     // A clean slug renders bare in every breadcrumb (no regression): quoting is

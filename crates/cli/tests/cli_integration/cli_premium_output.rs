@@ -32,21 +32,21 @@ fn status_text_counts_dirty_worktree_paths() {
 
     let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
     assert!(
-        text.contains("Changed paths: 1"),
+        text.contains("dirty  1 path"),
         "dirty worktree should not render as zero changed paths: {text}"
     );
     assert!(
-        text.contains("Changes not yet saved") && text.contains("dirty.txt"),
+        text.contains("dirty.txt"),
         "status should still list the dirty file: {text}"
     );
     assert!(
-        text.contains("Verdict: work in progress")
-            && text.contains("Lifecycle: active")
-            && text.contains("Work in progress")
-            && !text.contains("Verdict: blocked")
-            && !text.contains("Lifecycle: blocked")
+        text.contains("Next:")
+            && text.contains("heddle capture")
+            && !text.contains("Verdict:")
+            && !text.contains("Lifecycle:")
+            && !text.contains("Work in progress")
             && !text.contains("Blocked by"),
-        "ordinary dirty work should read like work in progress, not failure: {text}"
+        "ordinary dirty work should read as compact dirty, not failure: {text}"
     );
     assert!(
         !text.contains("Tracked changes: 0"),
@@ -60,7 +60,7 @@ fn merged_thread_list_reads_integrated_not_actionable() {
     init_git_repo(temp.path());
     std::fs::write(temp.path().join("base.txt"), "base").unwrap();
     git_commit_all(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    heddle(&["import", "local"], Some(temp.path())).unwrap();
 
     let started: Value = serde_json::from_str(
         &heddle(
@@ -268,7 +268,7 @@ fn status_output_modes_are_explicit_under_non_tty_capture() {
     // Default is text — no surprise JSON on pipes/subprocesses/`| less`.
     let default = heddle(&["status"], Some(temp.path())).unwrap();
     assert!(
-        default.contains("Heddle status") && serde_json::from_str::<Value>(&default).is_err(),
+        default.contains("main") && serde_json::from_str::<Value>(&default).is_err(),
         "default status should be text, not JSON: {default}"
     );
 
@@ -278,7 +278,7 @@ fn status_output_modes_are_explicit_under_non_tty_capture() {
 
     let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
     assert!(
-        text.contains("Heddle status") && serde_json::from_str::<Value>(&text).is_err(),
+        text.contains("main") && serde_json::from_str::<Value>(&text).is_err(),
         "--output text should match the default: {text}"
     );
 }
@@ -310,12 +310,12 @@ fn status_long_default_shows_combined_verdict_not_component_axes() {
 
     let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
     assert!(
-        text.contains("Verdict: clean"),
-        "default long mode should show a combined verdict: {text}"
+        text.contains("main") && text.contains("native"),
+        "default compact mode should show the thread header: {text}"
     );
     assert!(
-        !text.contains("Health:") && !text.contains("Coordination:"),
-        "default long mode must hide the per-axis component lines: {text}"
+        !text.contains("Health:") && !text.contains("Coordination:") && !text.contains("Verdict:"),
+        "default compact mode must hide the per-axis component lines: {text}"
     );
 }
 
@@ -330,27 +330,23 @@ fn status_long_default_verdict_signals_non_clean_when_health_dirty() {
 
     let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
     assert!(
-        text.contains("Verdict: work in progress"),
-        "a dirty worktree must read as a non-clean combined verdict: {text}"
+        text.contains("dirty"),
+        "a dirty worktree must read as compact dirty: {text}"
     );
     assert!(
-        !text.contains("Verdict: clean"),
-        "combined verdict must not claim clean when an axis is dirty: {text}"
+        !text.contains("up to date") && !text.contains("Verdict: clean"),
+        "compact status must not claim clean when the worktree is dirty: {text}"
     );
     assert!(
-        !text.contains("Health:") && !text.contains("Coordination:"),
-        "default long mode must hide the per-axis component lines: {text}"
+        !text.contains("Health:") && !text.contains("Coordination:") && !text.contains("Verdict:"),
+        "default compact mode must hide the per-axis component lines: {text}"
     );
     // The dirty health blocker is encoded as `coordination_status =
-    // Blocked`; the combined verdict reason must not double-count it as a
+    // Blocked`; the compact view must not double-count it as a
     // coordination failure (heddle#276 r2 / cid 3327903846).
     assert!(
         !text.contains("coordination") && !text.contains("both need attention"),
         "ordinary dirty WIP must not surface a coordination warning: {text}"
-    );
-    assert!(
-        text.contains("checkout health needs attention"),
-        "the reason for dirty WIP must be the health/WIP reason alone: {text}"
     );
 }
 

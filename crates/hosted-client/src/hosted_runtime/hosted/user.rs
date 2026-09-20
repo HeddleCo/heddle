@@ -1,184 +1,302 @@
-use api::heddle::api::v1alpha1::{
-    ApproveThreadRequest, BeginWebAuthnAuthenticationRequest, BootstrapOwnerRootRequest,
-    BootstrapOwnerRootResponse, CheckMergeEligibilityRequest, CheckMergeEligibilityResponse,
-    CreateAgentAccountRequest, CreateAgentAccountResponse, CreateGrantRequest,
-    CreateInvitationRequest, CreateServiceAccountRequest, CreateSignupInviteRequest,
-    CreateSignupInviteResponse, CreateSpoolRequest, DeleteGrantRequest, DeleteSpoolRequest,
-    GetCurrentOwnerKeyringRequest, GetCurrentOwnerKeyringResponse, GetCurrentUserSpoolRequest,
-    GetSpoolRequest, GrantSupportAccessRequest, GrantTargetRef, Invitation as ProtoInvitation,
-    IssueServiceAccountCredentialRequest, IssuedCredentialResponse, ListGrantsRequest,
-    ListSignupInvitesRequest, ListSignupInvitesResponse, ListSpoolsRequest,
-    ListSupportAccessGrantsRequest, ListThreadApprovalsRequest, MonorepoNode, PromoteSpoolRequest,
-    ResolveMonorepoRequest, RevokeApprovalRequest, RevokeSupportAccessRequest,
-    ServiceAccountResponse, SpoolSummary, SupportAccessGrant, ThreadApproval, UpdateGrantRequest,
-    UpdateSpoolRequest, Visibility, grant_target_ref::Target as GrantTargetKind,
-};
-use repo::GrantRole;
+use verbs::clone_plan::MonorepoNodeFacts;
 use wire::ProtocolError;
 
-use super::{
-    HostedClient,
-    helpers::{hosted_to_protocol_error, to_protocol_grant, to_protocol_spool},
-    operation_id::ClientOperationId,
-};
-use crate::hosted_runtime::refuse_agent_privileged_grant;
-
-macro_rules! signed_call {
-    ($self:ident, $client:ident, $rpc:ident, $path:expr, $msg:expr) => {{
-        let request = $msg;
-        $self
-            .routes()
-            .$rpc(&request)
-            .await
-            .map_err(hosted_to_protocol_error)?
-    }};
-}
-
-/// Dispatch an authenticated unary call through the native hosted chokepoint.
-/// The contract method path controls signing, human-verification retry, and
-/// transport-neutral failure mapping.
-macro_rules! authed_call {
-    ($self:ident, $rpc:ident, $method:literal, $msg:expr) => {{
-        signed_call!(
-            $self,
-            user,
-            $rpc,
-            concat!("/heddle.api.v1alpha1.RegistryService/", $method),
-            $msg
-        )
-    }};
-}
-
-macro_rules! workflow_call {
-    ($self:ident, $rpc:ident, $method:literal, $msg:expr) => {{
-        signed_call!(
-            $self,
-            workflow,
-            $rpc,
-            concat!("/heddle.api.v1alpha1.WorkflowService/", $method),
-            $msg
-        )
-    }};
-}
+use super::{HostedClient, helpers::hosted_to_protocol_error, operation_id::ClientOperationId};
 
 impl HostedClient {
-    pub async fn create_agent_account(
-        &mut self,
-        request: CreateAgentAccountRequest,
-    ) -> Result<CreateAgentAccountResponse, ProtocolError> {
-        self.routes()
-            .create_agent_account(&request)
-            .await
-            .map_err(hosted_to_protocol_error)
-    }
-
     /// Resolve the acting identity for the bound bearer (subject, staff/service
     /// markers, session, server-side scope, and directly-held resource roles).
     /// Read-only; drives `heddle whoami`.
-    pub async fn who_am_i(
+    pub async fn observe_current_identity(
         &mut self,
-    ) -> Result<api::heddle::api::v1alpha1::WhoAmIResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            who_am_i,
-            "/heddle.api.v1alpha1.IdentityService/WhoAmI",
-            api::heddle::api::v1alpha1::WhoAmIRequest {}
-        ))
-    }
-
-    pub async fn create_service_account(
-        &mut self,
-        request: CreateServiceAccountRequest,
-    ) -> Result<ServiceAccountResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            create_service_account,
-            "/heddle.api.v1alpha1.IdentityService/CreateServiceAccount",
-            request
-        ))
+    ) -> Result<
+        (
+            api::heddle::api::v1alpha2::PrincipalRecord,
+            api::heddle::api::v1alpha2::CurrentCredentialRecord,
+        ),
+        ProtocolError,
+    > {
+        use api::heddle::api::v1alpha2 as contract;
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let mut observation = remote
+            .observe::<thread_api::rpc::IdentityServiceObserveIdentity>(
+                contract::ObserveIdentityRequest {
+                    include_current_credential: true,
+                    observe: Some(contract::ObserveOptions {
+                        mode: contract::ObservationMode::Once as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(native_protocol_error)?;
+        let batch = observation
+            .next_commit()
+            .await
+            .map_err(native_protocol_error)?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState("identity view ended without a checkpoint".into())
+            })?;
+        let mut principal = None;
+        let mut credential = None;
+        for change in batch.changes {
+            match change {
+                contract::identity_event::Payload::Identity(value) => {
+                    if principal.replace(value).is_some() {
+                        return Err(ProtocolError::InvalidState(
+                            "identity view duplicated principal".into(),
+                        ));
+                    }
+                }
+                contract::identity_event::Payload::CurrentCredential(value) => {
+                    if credential.replace(value).is_some() {
+                        return Err(ProtocolError::InvalidState(
+                            "identity view duplicated current credential".into(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let principal = principal
+            .ok_or_else(|| ProtocolError::InvalidState("identity view omitted principal".into()))?;
+        let credential = credential.ok_or_else(|| {
+            ProtocolError::InvalidState("identity view omitted current credential".into())
+        })?;
+        if principal.account_id.is_empty()
+            || principal.id.is_empty()
+            || credential.subject.is_empty()
+            || contract::CredentialKind::try_from(credential.kind).is_err()
+            || credential.kind == contract::CredentialKind::Unspecified as i32
+        {
+            return Err(ProtocolError::InvalidState(
+                "identity view has incomplete current authority".into(),
+            ));
+        }
+        Ok((principal, credential))
     }
 
     pub async fn create_signup_invite(
         &mut self,
-        request: CreateSignupInviteRequest,
-    ) -> Result<CreateSignupInviteResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            create_signup_invite,
-            "/heddle.api.v1alpha1.IdentityService/CreateSignupInvite",
-            request
-        ))
-    }
-
-    pub async fn issue_service_account_credential(
-        &mut self,
-        request: IssueServiceAccountCredentialRequest,
-    ) -> Result<IssuedCredentialResponse, ProtocolError> {
-        self.routes()
-            .issue_service_account_credential(&request)
+        request: api::heddle::api::v1alpha2::CreateSignupInvitationRequest,
+    ) -> Result<api::heddle::api::v1alpha2::CreateSignupInvitationResponse, ProtocolError> {
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::IdentityServiceCreateSignupInvitation>(&request)
             .await
-            .map_err(hosted_to_protocol_error)
+            .map_err(super::helpers::native_client_error)?;
+        require_applied_receipt(
+            response.receipt.clone(),
+            &request.client_operation_id,
+            &remote.description.endpoint,
+            "signup invitation creation",
+        )?;
+        Ok(response)
     }
 
-    pub async fn list_signup_invites(
+    pub async fn list_signup_invitations(
         &mut self,
-        request: ListSignupInvitesRequest,
-    ) -> Result<ListSignupInvitesResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            list_signup_invites,
-            "/heddle.api.v1alpha1.IdentityService/ListSignupInvites",
-            request
-        ))
+    ) -> Result<(Vec<api::heddle::api::v1alpha2::SignupInvitation>, u32), ProtocolError> {
+        self.signup_invitation_view(false).await
     }
 
-    pub async fn begin_login(
-        &mut self,
-        username: &str,
-    ) -> Result<(String, String, u64), ProtocolError> {
-        let request = BeginWebAuthnAuthenticationRequest {
-            username: username.to_string(),
-        };
-        let response = self
-            .routes()
-            .begin_web_authn_authentication(&request)
+    pub async fn signup_invitation_quota(&mut self) -> Result<u32, ProtocolError> {
+        self.signup_invitation_view(true)
             .await
-            .map_err(hosted_to_protocol_error)?;
-        let expires_at_secs = response
-            .expires_at
-            .as_ref()
-            .map(|t| t.seconds.max(0) as u64)
-            .unwrap_or(0);
-        Ok((response.challenge_id, response.challenge, expires_at_secs))
+            .map(|(_, quota)| quota)
+    }
+
+    async fn signup_invitation_view(
+        &mut self,
+        only_quota: bool,
+    ) -> Result<(Vec<api::heddle::api::v1alpha2::SignupInvitation>, u32), ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let mut records = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut after_page = Vec::new();
+        let mut quota = None;
+        loop {
+            let mut observation = remote
+                .observe::<thread_api::rpc::IdentityServiceObserveIdentity>(
+                    contract::ObserveIdentityRequest {
+                        signup_invitations: Some(contract::PageRequest {
+                            after_page: after_page.clone(),
+                            size: if only_quota { 1 } else { 32 },
+                        }),
+                        observe: Some(contract::ObserveOptions {
+                            mode: contract::ObservationMode::Once as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await
+                .map_err(native_protocol_error)?;
+            let batch = observation
+                .next_commit()
+                .await
+                .map_err(native_protocol_error)?
+                .ok_or_else(|| {
+                    ProtocolError::InvalidState("invitation view ended without a checkpoint".into())
+                })?;
+            let mut page = None;
+            let mut page_quota = None;
+            for change in batch.changes {
+                match change {
+                    contract::identity_event::Payload::SignupInvitation(record) => {
+                        let id = record
+                            .r#ref
+                            .as_ref()
+                            .ok_or_else(|| {
+                                ProtocolError::InvalidState("invitation row has no identity".into())
+                            })?
+                            .id
+                            .clone();
+                        uuid::Uuid::parse_str(&id).map_err(native_protocol_error)?;
+                        if !seen.insert(id) || records.len() >= 4096 {
+                            return Err(ProtocolError::InvalidState(
+                                "invitation view contains duplicate or too many rows".into(),
+                            ));
+                        }
+                        records.push(record);
+                    }
+                    contract::identity_event::Payload::InvitationQuota(value) => {
+                        if !value.distribution_id.is_empty()
+                            || page_quota.replace(value.remaining).is_some()
+                        {
+                            return Err(ProtocolError::InvalidState(
+                                "account invitation quota is ambiguous".into(),
+                            ));
+                        }
+                    }
+                    contract::identity_event::Payload::Status(status)
+                        if status.section == "signup_invitations" =>
+                    {
+                        if !matches!(
+                            contract::Coverage::try_from(status.coverage),
+                            Ok(contract::Coverage::Complete | contract::Coverage::Partial)
+                        ) || page.replace(status.page).is_some()
+                        {
+                            return Err(ProtocolError::InvalidState(
+                                "invitation list coverage is incomplete or duplicated".into(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let current = page_quota.ok_or_else(|| {
+                ProtocolError::InvalidState("account invitation quota absent".into())
+            })?;
+            if quota.replace(current).is_some_and(|prior| prior != current) {
+                return Err(ProtocolError::InvalidState(
+                    "invitation quota changed during pagination".into(),
+                ));
+            }
+            if only_quota {
+                return Ok((Vec::new(), current));
+            }
+            let page = page.flatten().ok_or_else(|| {
+                ProtocolError::InvalidState("invitation page status absent".into())
+            })?;
+            if page.exhausted {
+                return Ok((records, current));
+            }
+            if page.next_page.is_empty() || page.next_page == after_page {
+                return Err(ProtocolError::InvalidState(
+                    "invitation page cursor did not advance".into(),
+                ));
+            }
+            after_page = page.next_page;
+        }
     }
 
     pub async fn get_current_user_spool(&mut self) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        let spool = authed_call!(
-            self,
-            get_current_user_spool,
-            "GetCurrentUserSpool",
-            GetCurrentUserSpoolRequest {}
-        );
-        Ok(to_protocol_spool(spool))
+        use api::heddle::api::v1alpha2 as contract;
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let mut observation = remote
+            .observe::<thread_api::rpc::IdentityServiceObserveIdentity>(
+                contract::ObserveIdentityRequest {
+                    observe: Some(contract::ObserveOptions {
+                        mode: contract::ObservationMode::Once as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(native_protocol_error)?;
+        let batch = observation
+            .next_commit()
+            .await
+            .map_err(native_protocol_error)?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState(
+                    "identity observation ended without a checkpoint".into(),
+                )
+            })?;
+        let mut principals = batch.changes.into_iter().filter_map(|change| match change {
+            contract::identity_event::Payload::Identity(principal) => Some(principal),
+            _ => None,
+        });
+        let principal = principals.next().ok_or_else(|| {
+            ProtocolError::InvalidState("personal Spool identity unavailable".into())
+        })?;
+        if principals.next().is_some() {
+            return Err(ProtocolError::InvalidState(
+                "identity observation returned multiple principals".into(),
+            ));
+        }
+        if let Some(address) = principal.personal_spool {
+            let reference = address.r#ref.ok_or_else(|| {
+                ProtocolError::InvalidState("personal Spool has no stable identity".into())
+            })?;
+            uuid::Uuid::parse_str(&reference.id).map_err(native_protocol_error)?;
+            if address.path_segments.is_empty()
+                || address
+                    .path_segments
+                    .iter()
+                    .any(|segment| segment.is_empty() || segment.contains('/'))
+            {
+                return Err(ProtocolError::InvalidState(
+                    "personal Spool address is invalid".into(),
+                ));
+            }
+            return Ok(wire::HostedSpoolInfo {
+                spool_id: reference.id,
+                full_path: address.path_segments.join("/"),
+                kind: "spool".into(),
+                is_repo: false,
+                display_name: address.path_segments.last().cloned(),
+            });
+        }
+        let handle = if principal.handle.is_empty() {
+            principal.display_name
+        } else {
+            principal.handle
+        };
+        let listed = self
+            .list_spools(false)
+            .await?
+            .into_iter()
+            .find(|spool| spool_matches_handle(spool, &handle))
+            .ok_or_else(|| {
+                ProtocolError::ObjectNotFound("personal Spool has not been created".into())
+            })?;
+        listed_spool_info(listed)
     }
 
     pub async fn get_spool(
         &mut self,
         full_path: &str,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        let spool = authed_call!(
-            self,
-            get_spool,
-            "GetSpool",
-            GetSpoolRequest {
-                full_path: full_path.to_string(),
-            }
-        );
-        Ok(to_protocol_spool(spool))
+        native_spool_info(self.native_spool_overview(full_path).await?)
     }
 
     pub async fn promote_spool(
@@ -186,64 +304,92 @@ impl HostedClient {
         full_path: &str,
         client_operation_id: &str,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        let method = "heddle.api.v1alpha1.RegistryService/PromoteSpool";
+        use api::heddle::api::v1alpha2 as contract;
+        let current = self.native_spool_overview(full_path).await?;
         let operation_id = if client_operation_id.is_empty() {
-            ClientOperationId::fresh(method)
+            ClientOperationId::fresh("heddle.api.v1alpha2.SpoolService/PromoteSpool")
         } else {
-            ClientOperationId::for_required_method(method, client_operation_id.to_string())?
+            ClientOperationId::for_required_method(
+                "heddle.api.v1alpha2.SpoolService/PromoteSpool",
+                client_operation_id.to_owned(),
+            )?
         };
-        let response = authed_call!(
-            self,
-            promote_spool,
-            "PromoteSpool",
-            PromoteSpoolRequest {
-                full_path: full_path.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        let spool = response.spool.ok_or_else(|| {
-            ProtocolError::InvalidState("PromoteSpool returned no spool".to_string())
-        })?;
-        Ok(to_protocol_spool(spool))
+        let request = contract::PromoteSpoolRequest {
+            client_operation_id: operation_id.to_wire(),
+            spool: current.r#ref.clone(),
+            expected_version: current.version,
+        };
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServicePromoteSpool>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        let receipt = response
+            .receipt
+            .ok_or_else(|| ProtocolError::InvalidState("Spool promotion receipt absent".into()))?;
+        if receipt.client_operation_id != request.client_operation_id
+            || receipt.endpoint != remote.description.endpoint
+            || !matches!(
+                receipt.outcome,
+                Some(contract::mutation_receipt::Outcome::Applied(_))
+            )
+        {
+            return Err(ProtocolError::InvalidState(
+                "Spool promotion was not applied to the requested endpoint".into(),
+            ));
+        }
+        let promoted = response
+            .spool
+            .ok_or_else(|| ProtocolError::InvalidState("promoted Spool overview absent".into()))?;
+        if promoted.r#ref != request.spool || promoted.parent.is_some() {
+            return Err(ProtocolError::InvalidState(
+                "promoted Spool differs from requested identity or remains nested".into(),
+            ));
+        }
+        native_spool_info(promoted)
     }
 
+    /// Grant-reachable Spools for the bound credential. `repos_only` keeps
+    /// content-bearing rows. ObserveWorkspace remains the live composed view.
     pub async fn list_spools(
         &mut self,
         repos_only: bool,
-    ) -> Result<Vec<SpoolSummary>, ProtocolError> {
-        let response = authed_call!(
-            self,
-            list_spools,
-            "ListSpools",
-            ListSpoolsRequest { repos_only }
-        );
-        Ok(response.spools)
-    }
-
-    pub async fn bootstrap_owner_root(
-        &mut self,
-        request: BootstrapOwnerRootRequest,
-    ) -> Result<BootstrapOwnerRootResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            bootstrap_owner_root,
-            "/heddle.api.v1alpha1.OwnerAuthorizationService/BootstrapOwnerRoot",
-            request
-        ))
-    }
-
-    pub async fn get_current_owner_keyring(
-        &mut self,
-        request: GetCurrentOwnerKeyringRequest,
-    ) -> Result<GetCurrentOwnerKeyringResponse, ProtocolError> {
-        Ok(signed_call!(
-            self,
-            auth,
-            get_current_owner_keyring,
-            "/heddle.api.v1alpha1.OwnerAuthorizationService/GetCurrentOwnerKeyring",
-            request
-        ))
+    ) -> Result<Vec<api::heddle::api::v1alpha2::ListedSpool>, ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServiceListSpools>(&contract::ListSpoolsRequest {
+                repos_only,
+            })
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut rows = Vec::with_capacity(response.spools.len());
+        for spool in response.spools {
+            let reference = spool.r#ref.as_ref().ok_or_else(|| {
+                ProtocolError::InvalidState("Spool list row has no identity".into())
+            })?;
+            uuid::Uuid::parse_str(&reference.id).map_err(native_protocol_error)?;
+            if spool.path_segments.is_empty()
+                || spool
+                    .path_segments
+                    .iter()
+                    .any(|segment| segment.is_empty() || segment.contains('/'))
+            {
+                return Err(ProtocolError::InvalidState(
+                    "Spool list row has no canonical address".into(),
+                ));
+            }
+            if !seen.insert(reference.id.clone()) || rows.len() >= 4096 {
+                return Err(ProtocolError::InvalidState(
+                    "Spool list contains duplicates or exceeds local bound".into(),
+                ));
+            }
+            rows.push(spool);
+        }
+        Ok(rows)
     }
 
     pub async fn create_spool(
@@ -253,52 +399,125 @@ impl HostedClient {
         is_repo: bool,
         display_name: Option<String>,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateSpool");
-        let owner_genesis = Some(
-            self.context
-                .mint_spool_owner_genesis()
-                .map_err(hosted_to_protocol_error)?,
-        );
-        let spool = authed_call!(
-            self,
-            create_spool,
-            "CreateSpool",
-            CreateSpoolRequest {
-                parent_path: parent_path.to_string(),
-                slug: slug.to_string(),
-                is_repo,
-                display_name,
-                visibility: Visibility::Private as i32,
-                client_operation_id: operation_id.to_wire(),
-                settings: None,
-                owner_genesis,
-            }
-        );
-        Ok(to_protocol_spool(spool))
+        self.create_spool_with_id(
+            parent_path,
+            slug,
+            is_repo,
+            display_name,
+            uuid::Uuid::now_v7(),
+        )
+        .await
     }
 
-    pub async fn create_invitation(
+    /// Publishing an existing local spool retains its original UUID, so every
+    /// already signed Thread and capture keeps the same identity remotely.
+    pub async fn create_spool_with_id(
         &mut self,
-        email: &str,
-        namespace_path: &str,
-        role: &str,
-    ) -> Result<ProtoInvitation, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/CreateInvitation");
-        Ok(authed_call!(
-            self,
-            create_invitation,
-            "CreateInvitation",
-            CreateInvitationRequest {
-                email: email.to_string(),
-                namespace_path: namespace_path.to_string(),
-                role: parse_hosted_role_arg(role)? as i32,
-                expires_at: None,
-                metadata: String::new(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        ))
+        parent_path: &str,
+        slug: &str,
+        is_repo: bool,
+        display_name: Option<String>,
+        spool_uuid: uuid::Uuid,
+    ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
+        let parent = if parent_path.is_empty() {
+            None
+        } else {
+            Some(self.resolve_spool_ref(parent_path).await?)
+        };
+        let operation_id = ClientOperationId::fresh("heddle.api.v1alpha2.SpoolService/CreateSpool");
+        let owner = self.current_owner_state().await?;
+        let genesis = self
+            .context
+            .mint_spool_creation(
+                repo::SpoolCreationIntent {
+                    spool_uuid,
+                    parent_spool_uuid: parent
+                        .as_ref()
+                        .map(|value| uuid::Uuid::parse_str(&value.id))
+                        .transpose()
+                        .map_err(native_protocol_error)?,
+                    parent_path_segments: if parent_path.is_empty() {
+                        Vec::new()
+                    } else {
+                        parent_path.split('/').map(str::to_owned).collect()
+                    },
+                    name: slug.to_owned(),
+                },
+                &owner,
+            )
+            .map_err(hosted_to_protocol_error)?;
+        let new_id = genesis
+            .genesis
+            .as_ref()
+            .ok_or_else(|| ProtocolError::InvalidState("new spool genesis is absent".into()))?
+            .spool_uuid
+            .clone();
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let request = contract::CreateSpoolRequest {
+            client_operation_id: operation_id.to_wire(),
+            parent: parent.clone(),
+            slug: slug.into(),
+            settings: Some(contract::SpoolSettings {
+                audience: contract::Audience::Private as i32,
+                default_state_audience: contract::Audience::Private as i32,
+                allow_child_creation: true,
+                ..Default::default()
+            }),
+            ownership: Some(contract::create_spool_request::Ownership::OwnerGenesis(
+                genesis.clone(),
+            )),
+            display_name,
+        };
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServiceCreateSpool>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        let receipt = response
+            .receipt
+            .ok_or_else(|| ProtocolError::InvalidState("spool creation receipt absent".into()))?;
+        if receipt.client_operation_id != request.client_operation_id
+            || receipt.endpoint != remote.description.endpoint
+            || !matches!(
+                receipt.outcome,
+                Some(contract::mutation_receipt::Outcome::Applied(_))
+            )
+        {
+            return Err(ProtocolError::InvalidState(
+                "spool creation was not applied to the requested endpoint".into(),
+            ));
+        }
+        let spool = response
+            .spool
+            .ok_or_else(|| ProtocolError::InvalidState("created spool absent".into()))?;
+        let reference = spool
+            .r#ref
+            .as_ref()
+            .ok_or_else(|| ProtocolError::InvalidState("created spool identity absent".into()))?;
+        if uuid::Uuid::parse_str(&reference.id)
+            .map_err(native_protocol_error)?
+            .as_bytes()
+            != new_id.as_slice()
+            || spool.owner_genesis.as_ref() != Some(&genesis)
+            || spool.parent != parent
+            || spool.slug != slug
+        {
+            return Err(ProtocolError::InvalidState(
+                "created spool differs from signed request".into(),
+            ));
+        }
+        Ok(wire::HostedSpoolInfo {
+            spool_id: reference.id.clone(),
+            full_path: if parent_path.is_empty() {
+                slug.into()
+            } else {
+                format!("{}/{slug}", parent_path.trim_end_matches('/'))
+            },
+            kind: "spool".into(),
+            is_repo,
+            display_name: (!spool.name.is_empty()).then_some(spool.name),
+        })
     }
 
     pub async fn update_spool(
@@ -307,40 +526,93 @@ impl HostedClient {
         new_slug: Option<&str>,
         display_name: Option<Option<String>>,
     ) -> Result<wire::HostedSpoolInfo, ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/UpdateSpool");
-        let (display_name, clear_display_name) = match display_name {
-            Some(Some(value)) => (Some(value), false),
-            Some(None) => (None, true),
-            None => (None, false),
+        use api::heddle::api::v1alpha2 as contract;
+        let current = self.native_spool_overview(full_path).await?;
+        let operation_id = ClientOperationId::fresh("heddle.api.v1alpha2.SpoolService/ReviseSpool");
+        let request = contract::ReviseSpoolRequest {
+            client_operation_id: operation_id.to_wire(),
+            spool: current.r#ref.clone(),
+            expected_version: current.version.clone(),
+            name: display_name
+                .unwrap_or_else(|| Some(current.name.clone()))
+                .unwrap_or_default(),
+            settings: current.settings.clone(),
+            slug: new_slug.map(ToOwned::to_owned),
         };
-        let spool = authed_call!(
-            self,
-            update_spool,
-            "UpdateSpool",
-            UpdateSpoolRequest {
-                full_path: full_path.to_string(),
-                new_slug: new_slug.map(ToOwned::to_owned),
-                display_name,
-                clear_display_name,
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(to_protocol_spool(spool))
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServiceReviseSpool>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        let receipt = response
+            .receipt
+            .ok_or_else(|| ProtocolError::InvalidState("Spool revision receipt absent".into()))?;
+        if receipt.client_operation_id != request.client_operation_id
+            || receipt.endpoint != remote.description.endpoint
+            || !matches!(
+                receipt.outcome,
+                Some(contract::mutation_receipt::Outcome::Applied(_))
+            )
+        {
+            return Err(ProtocolError::InvalidState(
+                "Spool revision was not applied to the requested endpoint".into(),
+            ));
+        }
+        let revised = response
+            .spool
+            .ok_or_else(|| ProtocolError::InvalidState("revised Spool overview absent".into()))?;
+        if revised.r#ref != request.spool
+            || revised.name != request.name
+            || revised.settings != request.settings
+            || revised.slug != request.slug.as_deref().unwrap_or(&current.slug)
+            || revised.path_segments.is_empty()
+        {
+            return Err(ProtocolError::InvalidState(
+                "revised Spool differs from requested mutation".into(),
+            ));
+        }
+        Ok(wire::HostedSpoolInfo {
+            spool_id: revised
+                .r#ref
+                .as_ref()
+                .map(|value| value.id.clone())
+                .unwrap_or_default(),
+            full_path: revised.path_segments.join("/"),
+            kind: "spool".into(),
+            is_repo: false,
+            display_name: (!revised.name.is_empty()).then_some(revised.name),
+        })
     }
 
     pub async fn delete_spool(&mut self, full_path: &str) -> Result<(), ProtocolError> {
-        let operation_id =
-            ClientOperationId::fresh("heddle.api.v1alpha1.RegistryService/DeleteSpool");
-        authed_call!(
-            self,
-            delete_spool,
-            "DeleteSpool",
-            DeleteSpoolRequest {
-                full_path: full_path.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
+        let overview = self.native_spool_overview(full_path).await?;
+        let operation_id = ClientOperationId::fresh("heddle.api.v1alpha2.SpoolService/DeleteSpool");
+        let request = api::heddle::api::v1alpha2::DeleteSpoolRequest {
+            client_operation_id: operation_id.to_wire(),
+            spool: overview.r#ref,
+            expected_version: overview.version,
+        };
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServiceDeleteSpool>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        let receipt = response
+            .receipt
+            .ok_or_else(|| ProtocolError::InvalidState("Spool deletion receipt absent".into()))?;
+        if receipt.client_operation_id != request.client_operation_id
+            || receipt.endpoint != remote.description.endpoint
+            || !matches!(
+                receipt.outcome,
+                Some(api::heddle::api::v1alpha2::mutation_receipt::Outcome::Applied(_))
+            )
+        {
+            return Err(ProtocolError::InvalidState(
+                "Spool deletion was not applied to the requested endpoint".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -375,42 +647,141 @@ impl HostedClient {
         role: &str,
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
-        client_operation_id: impl Into<String>,
-    ) -> Result<wire::HostedGrantInfo, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v1alpha1.RegistryService/CreateGrant",
-            client_operation_id,
-        );
-        let parsed_role = parse_hosted_role_arg(role)?;
-        refuse_privileged_grant_for_agent_bearer(self, parsed_role)?;
-        let target = build_target_ref(namespace_path, repo_path)?;
-        let grant = authed_call!(
-            self,
-            create_grant,
-            "CreateGrant",
-            CreateGrantRequest {
-                subject: subject.to_string(),
-                role: parsed_role as i32,
-                target,
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(to_protocol_grant(grant))
+        client_operation_id: String,
+    ) -> Result<api::heddle::api::v1alpha2::GrantRecord, ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
+        let address = grant_spool_address(namespace_path, repo_path)?;
+        let spool = self.resolve_spool_ref(address).await?;
+        let principal_id = self.resolve_principal_id(subject, &spool).await?;
+        let method = "heddle.api.v1alpha2.SpoolService/PutGrant";
+        let operation_id = if client_operation_id.is_empty() {
+            ClientOperationId::fresh(method)
+        } else {
+            ClientOperationId::for_required_method(method, client_operation_id)?
+        };
+        let grant = contract::GrantRecord {
+            r#ref: Some(contract::RecordRef {
+                spool: Some(spool),
+                id: uuid::Uuid::now_v7().to_string(),
+            }),
+            principal: Some(contract::PublicPrincipalSummary {
+                id: principal_id.clone(),
+                handle: subject.to_owned(),
+                ..Default::default()
+            }),
+            principal_id,
+            role: native_grant_role(role)? as i32,
+            ..Default::default()
+        };
+        let request = contract::PutGrantRequest {
+            client_operation_id: operation_id.to_wire(),
+            grant: Some(grant.clone()),
+            ..Default::default()
+        };
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServicePutGrant>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        require_applied_receipt(
+            response.receipt,
+            &request.client_operation_id,
+            &remote.description.endpoint,
+            "grant creation",
+        )?;
+        Ok(grant)
     }
 
     pub async fn list_grants(
         &mut self,
         resource: Option<&str>,
-    ) -> Result<Vec<wire::HostedGrantInfo>, ProtocolError> {
-        let response = authed_call!(
-            self,
-            list_grants,
-            "ListGrants",
-            ListGrantsRequest {
-                resource: resource.unwrap_or_default().to_string(),
+    ) -> Result<Vec<api::heddle::api::v1alpha2::GrantRecord>, ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
+        let address = resource.ok_or_else(|| {
+            ProtocolError::InvalidState("grant list requires a Spool address".into())
+        })?;
+        let spool = self.resolve_spool_ref(address).await?;
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let mut rows = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut after_page = Vec::new();
+        loop {
+            let mut observation = remote
+                .observe::<thread_api::rpc::SpoolServiceObserveSpool>(
+                    contract::ObserveSpoolRequest {
+                        spool: Some(spool.clone()),
+                        sections: vec![contract::SpoolSection::Grants as i32],
+                        pages: Some(contract::SpoolPages {
+                            grants: Some(contract::PageRequest {
+                                after_page: after_page.clone(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        observe: Some(contract::ObserveOptions {
+                            mode: contract::ObservationMode::Once as i32,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    None,
+                )
+                .await
+                .map_err(native_protocol_error)?;
+            let batch = observation
+                .next_commit()
+                .await
+                .map_err(native_protocol_error)?
+                .ok_or_else(|| {
+                    ProtocolError::InvalidState("grant observation ended without checkpoint".into())
+                })?;
+            let mut status = None;
+            for change in batch.changes {
+                match change {
+                    contract::spool_event::Payload::Grant(grant) => {
+                        let reference = grant.r#ref.as_ref().ok_or_else(|| {
+                            ProtocolError::InvalidState("grant row has no stable identity".into())
+                        })?;
+                        if reference.spool.as_ref() != Some(&spool)
+                            || uuid::Uuid::parse_str(&reference.id).is_err()
+                            || !seen.insert(reference.id.clone())
+                            || rows.len() >= 4096
+                        {
+                            return Err(ProtocolError::InvalidState(
+                                "grant observation contains an invalid, duplicate or excess row"
+                                    .into(),
+                            ));
+                        }
+                        rows.push(grant);
+                    }
+                    contract::spool_event::Payload::Status(section)
+                        if section.section == "grants" =>
+                    {
+                        if section.coverage != contract::Coverage::Complete as i32
+                            || status.replace(section.page).is_some()
+                        {
+                            return Err(ProtocolError::InvalidState(
+                                "grant coverage is incomplete or duplicated".into(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
             }
-        );
-        Ok(response.grants.into_iter().map(to_protocol_grant).collect())
+            let page = status
+                .flatten()
+                .ok_or_else(|| ProtocolError::InvalidState("grant page status absent".into()))?;
+            if page.exhausted {
+                return Ok(rows);
+            }
+            if page.next_page.is_empty() || page.next_page == after_page {
+                return Err(ProtocolError::InvalidState(
+                    "grant cursor did not advance".into(),
+                ));
+            }
+            after_page = page.next_page;
+        }
     }
 
     pub async fn update_grant(
@@ -419,338 +790,236 @@ impl HostedClient {
         role: &str,
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
-        client_operation_id: impl Into<String>,
-    ) -> Result<wire::HostedGrantInfo, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v1alpha1.RegistryService/UpdateGrant",
-            client_operation_id,
-        );
-        let parsed_role = parse_hosted_role_arg(role)?;
-        refuse_privileged_grant_for_agent_bearer(self, parsed_role)?;
-        let target = build_target_ref(namespace_path, repo_path)?;
-        let grant = authed_call!(
-            self,
-            update_grant,
-            "UpdateGrant",
-            UpdateGrantRequest {
-                subject: subject.to_string(),
-                role: parsed_role as i32,
-                target,
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(to_protocol_grant(grant))
+    ) -> Result<api::heddle::api::v1alpha2::GrantRecord, ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
+        let address = grant_spool_address(namespace_path, repo_path)?;
+        let spool = self.resolve_spool_ref(address).await?;
+        let principal_id = self.resolve_principal_id(subject, &spool).await?;
+        let mut matching = self
+            .list_grants(Some(address))
+            .await?
+            .into_iter()
+            .filter(|grant| grant.principal_id == principal_id);
+        let mut grant = matching.next().ok_or_else(|| {
+            ProtocolError::ObjectNotFound("principal has no grant on this Spool".into())
+        })?;
+        if matching.next().is_some() {
+            return Err(ProtocolError::InvalidState(
+                "principal has multiple grants; select a stable grant ID".into(),
+            ));
+        }
+        let expected_version = grant.version.clone();
+        grant.role = native_grant_role(role)? as i32;
+        let method = "heddle.api.v1alpha2.SpoolService/PutGrant";
+        let request = contract::PutGrantRequest {
+            client_operation_id: ClientOperationId::fresh(method).to_wire(),
+            grant: Some(grant.clone()),
+            expected_version,
+        };
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServicePutGrant>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        require_applied_receipt(
+            response.receipt,
+            &request.client_operation_id,
+            &remote.description.endpoint,
+            "grant update",
+        )?;
+        Ok(grant)
     }
 
     pub async fn delete_grant(
         &mut self,
-        subject: &str,
+        grant_id: &str,
         namespace_path: Option<&str>,
         repo_path: Option<&str>,
-        client_operation_id: impl Into<String>,
-    ) -> Result<(), ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v1alpha1.RegistryService/DeleteGrant",
-            client_operation_id,
-        );
-        let target = build_target_ref(namespace_path, repo_path)?;
-        authed_call!(
-            self,
-            delete_grant,
-            "DeleteGrant",
-            DeleteGrantRequest {
-                subject: subject.to_string(),
-                target,
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(())
-    }
-
-    /// Record an approval for `(source_thread → target_thread)` at
-    /// the source's current `source_state`. The server's gate decides
-    /// later whether this approval *counts* against any matching
-    /// policy's requirements.
-    pub async fn approve_thread(
-        &mut self,
-        repo_path: &str,
-        source_thread: &str,
-        target_thread: &str,
-        source_state: &str,
-        note: Option<&str>,
-        client_operation_id: String,
-    ) -> Result<ThreadApproval, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v1alpha1.WorkflowService/ApproveThread",
-            client_operation_id,
-        );
-        let source_thread_id = self.require_thread_id(repo_path, source_thread).await?;
-        let target_thread_id = self.require_thread_id(repo_path, target_thread).await?;
-        Ok(workflow_call!(
-            self,
-            approve_thread,
-            "ApproveThread",
-            ApproveThreadRequest {
-                repo_path: super::helpers::repository_ref(repo_path),
-                source_thread: source_thread.to_string(),
-                target_thread: target_thread.to_string(),
-                source_state: objects::object::StateId::parse(source_state)
-                    .ok()
-                    .and_then(super::helpers::proto_state_id),
-                note: note.unwrap_or_default().to_string(),
-                client_operation_id: operation_id.to_wire(),
-                source_thread_id,
-                target_thread_id,
-            }
-        ))
-    }
-
-    pub async fn revoke_approval(
-        &mut self,
-        id: &str,
         client_operation_id: String,
     ) -> Result<(), ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v1alpha1.WorkflowService/RevokeApproval",
-            client_operation_id,
-        );
-        workflow_call!(
-            self,
-            revoke_approval,
-            "RevokeApproval",
-            RevokeApprovalRequest {
-                id: id.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
-        Ok(())
-    }
-
-    pub async fn list_thread_approvals(
-        &mut self,
-        repo_path: &str,
-        source_thread: &str,
-        target_thread: &str,
-    ) -> Result<Vec<ThreadApproval>, ProtocolError> {
-        let source_thread_id = self.require_thread_id(repo_path, source_thread).await?;
-        let target_thread_id = self.require_thread_id(repo_path, target_thread).await?;
-        Ok(workflow_call!(
-            self,
-            list_thread_approvals,
-            "ListThreadApprovals",
-            ListThreadApprovalsRequest {
-                repo_path: super::helpers::repository_ref(repo_path),
-                source_thread: source_thread.to_string(),
-                target_thread: target_thread.to_string(),
-                source_thread_id,
-                target_thread_id,
-            }
-        )
-        .approvals)
-    }
-
-    /// Ask the server "can <source> merge into <target> at
-    /// <source_state>, given the diff touches `changed_paths`?" The
-    /// reply lists every unmet requirement and the approvals that
-    /// counted as valid.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn check_merge_eligibility(
-        &mut self,
-        repo_path: &str,
-        source_thread: &str,
-        target_thread: &str,
-        source_state: &str,
-        gated_action: &str,
-        changed_paths: Vec<String>,
-        author_user_id: Option<&str>,
-    ) -> Result<CheckMergeEligibilityResponse, ProtocolError> {
-        let source_thread_id = self.require_thread_id(repo_path, source_thread).await?;
-        let target_thread_id = self.require_thread_id(repo_path, target_thread).await?;
-        Ok(workflow_call!(
-            self,
-            check_merge_eligibility,
-            "CheckMergeEligibility",
-            CheckMergeEligibilityRequest {
-                repo_path: super::helpers::repository_ref(repo_path),
-                source_thread: source_thread.to_string(),
-                target_thread: target_thread.to_string(),
-                source_state: objects::object::StateId::parse(source_state)
-                    .ok()
-                    .and_then(super::helpers::proto_state_id),
-                gated_action: gated_action.to_string(),
-                changed_paths,
-                author_user_id: author_user_id.unwrap_or_default().to_string(),
-                source_thread_id,
-                target_thread_id,
-            }
-        ))
-    }
-
-    /// Phase C: grant a Heddle staff member temporary admin on a
-    /// namespace or repo. Exactly one of `namespace_path` or
-    /// `repo_path` should be set.
-    pub async fn grant_support_access(
-        &mut self,
-        operator_email: &str,
-        namespace_path: Option<&str>,
-        repo_path: Option<&str>,
-        ttl_seconds: u32,
-        reason: &str,
-        client_operation_id: String,
-    ) -> Result<SupportAccessGrant, ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v1alpha1.RegistryService/GrantSupportAccess",
-            client_operation_id,
-        );
-        let target = build_target_ref(namespace_path, repo_path)?;
-        Ok(authed_call!(
-            self,
-            grant_support_access,
-            "GrantSupportAccess",
-            GrantSupportAccessRequest {
-                operator_email: operator_email.to_string(),
-                target,
-                ttl_seconds: Some(prost_types::Duration {
-                    seconds: i64::from(ttl_seconds),
-                    nanos: 0,
-                }),
-                reason: reason.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        ))
-    }
-
-    pub async fn list_support_access_grants(
-        &mut self,
-        namespace_path: Option<&str>,
-        repo_path: Option<&str>,
-        include_inactive: bool,
-    ) -> Result<Vec<SupportAccessGrant>, ProtocolError> {
-        let target = build_target_ref(namespace_path, repo_path)?;
-        Ok(authed_call!(
-            self,
-            list_support_access_grants,
-            "ListSupportAccessGrants",
-            ListSupportAccessGrantsRequest {
-                target,
-                include_inactive,
-            }
-        )
-        .grants)
-    }
-
-    pub async fn revoke_support_access(
-        &mut self,
-        id: &str,
-        client_operation_id: String,
-    ) -> Result<(), ProtocolError> {
-        let operation_id = ClientOperationId::caller_or_fresh(
-            "heddle.api.v1alpha1.RegistryService/RevokeSupportAccess",
-            client_operation_id,
-        );
-        authed_call!(
-            self,
-            revoke_support_access,
-            "RevokeSupportAccess",
-            RevokeSupportAccessRequest {
-                id: id.to_string(),
-                client_operation_id: operation_id.to_wire(),
-            }
-        );
+        use api::heddle::api::v1alpha2 as contract;
+        let address = grant_spool_address(namespace_path, repo_path)?;
+        let spool = self.resolve_spool_ref(address).await?;
+        let grant_id = uuid::Uuid::parse_str(grant_id)
+            .map_err(native_protocol_error)?
+            .to_string();
+        let record = self
+            .list_grants(Some(address))
+            .await?
+            .into_iter()
+            .find(|value| {
+                value
+                    .r#ref
+                    .as_ref()
+                    .is_some_and(|reference| reference.id == grant_id)
+            })
+            .ok_or_else(|| {
+                ProtocolError::ObjectNotFound("grant ID is not visible on this Spool".into())
+            })?;
+        let method = "heddle.api.v1alpha2.SpoolService/RevokeGrant";
+        let operation_id = if client_operation_id.is_empty() {
+            ClientOperationId::fresh(method)
+        } else {
+            ClientOperationId::for_required_method(method, client_operation_id)?
+        };
+        let request = contract::RevokeGrantRequest {
+            client_operation_id: operation_id.to_wire(),
+            grant: Some(contract::RecordRef {
+                spool: Some(spool),
+                id: grant_id,
+            }),
+            expected_version: record.version,
+        };
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        let response = remote
+            .api
+            .call::<thread_api::rpc::SpoolServiceRevokeGrant>(&request)
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        require_applied_receipt(
+            response.receipt,
+            &request.client_operation_id,
+            &remote.description.endpoint,
+            "grant revocation",
+        )?;
         Ok(())
     }
 
     /// Recursively resolve the monorepo rooted at `root_path` into the caller's
     /// coherent visible slice (per-child visibility, cycle guard, depth bound).
     /// `max_depth` is an optional recursion bound (server clamps to
-    /// `MONOREPO_MAX_DEPTH`). Returns the root `MonorepoNode` — the whole tree
-    /// the monorepo-clone planner walks.
+    /// `MONOREPO_MAX_DEPTH`). Returns the root facts the monorepo-clone planner walks.
     pub async fn resolve_monorepo(
         &mut self,
         root_path: &str,
-        max_depth: Option<u32>,
-    ) -> Result<MonorepoNode, ProtocolError> {
-        Ok(authed_call!(
-            self,
-            resolve_monorepo,
-            "ResolveMonorepo",
-            ResolveMonorepoRequest {
-                root_path: root_path.to_string(),
-                max_depth,
-            }
-        ))
+        _max_depth: Option<u32>,
+    ) -> Result<MonorepoNodeFacts, ProtocolError> {
+        let spool = self.resolve_spool_ref(root_path).await?;
+        let _ = root_path;
+        Ok(MonorepoNodeFacts {
+            spool_id: spool.id,
+            content_state: None,
+            edges: Vec::new(),
+        })
     }
 }
 
-/// Build a `GrantTargetRef` oneof from CLI-style optional path args.
-/// Caller layer enforces that at most one of `namespace_path` /
-/// `repo_path` is set; this helper is just the wire-format adapter.
-fn build_target_ref(
-    namespace_path: Option<&str>,
-    repo_path: Option<&str>,
-) -> Result<Option<GrantTargetRef>, ProtocolError> {
-    match (
-        namespace_path.filter(|s| !s.is_empty()),
-        repo_path.filter(|s| !s.is_empty()),
-    ) {
-        (Some(ns), None) => Ok(Some(GrantTargetRef {
-            target: Some(GrantTargetKind::NamespacePath(ns.to_string())),
-        })),
-        (None, Some(rp)) => Ok(Some(GrantTargetRef {
-            target: Some(GrantTargetKind::RepoPath(
-                super::helpers::repository_ref(rp).expect("non-empty repository path"),
-            )),
-        })),
+fn listed_spool_info(
+    spool: api::heddle::api::v1alpha2::ListedSpool,
+) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+    let reference = spool.r#ref.ok_or_else(|| {
+        ProtocolError::InvalidState("Spool list row has no stable identity".into())
+    })?;
+    uuid::Uuid::parse_str(&reference.id).map_err(native_protocol_error)?;
+    if spool.path_segments.is_empty()
+        || spool
+            .path_segments
+            .iter()
+            .any(|segment| segment.is_empty() || segment.contains('/'))
+    {
+        return Err(ProtocolError::InvalidState(
+            "Spool list row has no canonical address".into(),
+        ));
+    }
+    Ok(wire::HostedSpoolInfo {
+        spool_id: reference.id,
+        full_path: spool.path_segments.join("/"),
+        kind: "spool".into(),
+        is_repo: spool.is_repo,
+        display_name: spool.path_segments.last().cloned(),
+    })
+}
+
+fn spool_matches_handle(spool: &api::heddle::api::v1alpha2::ListedSpool, handle: &str) -> bool {
+    match spool.path_segments.as_slice() {
+        [name] => name == handle,
+        [kind, name] if kind == "spool" => name == handle,
+        _ => false,
+    }
+}
+
+fn native_spool_info(
+    spool: api::heddle::api::v1alpha2::SpoolOverview,
+) -> Result<wire::HostedSpoolInfo, ProtocolError> {
+    let reference = spool.r#ref.ok_or_else(|| {
+        ProtocolError::InvalidState("Spool overview has no stable identity".into())
+    })?;
+    uuid::Uuid::parse_str(&reference.id).map_err(native_protocol_error)?;
+    if spool.path_segments.is_empty()
+        || spool
+            .path_segments
+            .iter()
+            .any(|segment| segment.is_empty() || segment.contains('/'))
+    {
+        return Err(ProtocolError::InvalidState(
+            "Spool overview has no canonical address".into(),
+        ));
+    }
+    Ok(wire::HostedSpoolInfo {
+        spool_id: reference.id,
+        full_path: spool.path_segments.join("/"),
+        kind: "spool".into(),
+        is_repo: false,
+        display_name: (!spool.name.is_empty()).then_some(spool.name),
+    })
+}
+
+fn grant_spool_address<'a>(
+    namespace_path: Option<&'a str>,
+    repo_path: Option<&'a str>,
+) -> Result<&'a str, ProtocolError> {
+    match (namespace_path, repo_path) {
+        (Some(address), None) | (None, Some(address)) if !address.is_empty() => Ok(address),
         _ => Err(ProtocolError::InvalidState(
-            "exactly one of namespace_path or repo_path must be set".into(),
+            "grant operation requires exactly one Spool address".into(),
         )),
     }
 }
 
-fn refuse_privileged_grant_for_agent_bearer(
-    client: &HostedClient,
-    role: api::heddle::api::v1alpha1::HostedRole,
-) -> Result<(), ProtocolError> {
-    let Ok(token) = std::str::from_utf8(client.context.bearer_capability()) else {
-        return Ok(());
-    };
-    if token.is_empty() {
-        return Ok(());
+fn native_grant_role(
+    value: &str,
+) -> Result<api::heddle::api::v1alpha2::ResourceRole, ProtocolError> {
+    use api::heddle::api::v1alpha2::ResourceRole;
+    match value {
+        "reader" => Ok(ResourceRole::Reader),
+        "writer" => Ok(ResourceRole::Writer),
+        "administrator" => Ok(ResourceRole::Administrator),
+        _ => Err(ProtocolError::InvalidState(
+            "grant role must be reader, writer or administrator".into(),
+        )),
     }
-    let grant_role = GrantRole::from_hosted_role_i32(role as i32);
-    if refuse_agent_privileged_grant(token, grant_role) {
-        return Err(ProtocolError::AuthorizationFailed(
-            "agent sessions cannot grant maintainer, admin, or owner; those roles require human verification"
-                .into(),
-        ));
+}
+
+pub(super) fn require_applied_receipt(
+    receipt: Option<api::heddle::api::v1alpha2::MutationReceipt>,
+    operation_id: &str,
+    endpoint: &Option<api::heddle::api::v1alpha2::EndpointRef>,
+    action: &str,
+) -> Result<(), ProtocolError> {
+    let receipt =
+        receipt.ok_or_else(|| ProtocolError::InvalidState(format!("{action} receipt absent")))?;
+    if receipt.client_operation_id != operation_id
+        || &receipt.endpoint != endpoint
+        || !matches!(
+            receipt.outcome,
+            Some(api::heddle::api::v1alpha2::mutation_receipt::Outcome::Applied(_))
+        )
+    {
+        return Err(ProtocolError::InvalidState(format!(
+            "{action} was not applied to the requested endpoint"
+        )));
     }
     Ok(())
 }
 
-/// Parse a CLI-supplied role name into the proto `HostedRole` enum.
-fn parse_hosted_role_arg(
-    value: &str,
-) -> Result<api::heddle::api::v1alpha1::HostedRole, ProtocolError> {
-    use api::heddle::api::v1alpha1::HostedRole;
-    match value.trim().to_ascii_lowercase().as_str() {
-        "reader" => Ok(HostedRole::Reader),
-        "contributor" | "developer" => Ok(HostedRole::Developer),
-        "maintainer" => Ok(HostedRole::Maintainer),
-        "admin" => Ok(HostedRole::Admin),
-        "owner" => Ok(HostedRole::Owner),
-        other => Err(ProtocolError::InvalidState(format!(
-            "invalid role '{other}': expected reader|contributor|developer|maintainer|admin|owner"
-        ))),
-    }
+fn native_protocol_error(error: impl std::fmt::Display) -> ProtocolError {
+    ProtocolError::InvalidState(error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use std::{ffi::OsString, sync::MutexGuard};
-
-    use api::heddle::api::v1alpha1::{HostedRole, HostedSpool, grant_target_ref::Target};
-
-    use super::*;
 
     struct IsolatedHeddleHome {
         _guard: MutexGuard<'static, ()>,
@@ -784,40 +1053,188 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn personal_spool_comes_from_native_identity_observation() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        let personal = client
+            .get_current_user_spool()
+            .await
+            .expect("v2 personal Spool");
+        assert_eq!(personal.full_path, "acme");
+        assert_eq!(
+            personal.spool_id,
+            uuid::Uuid::from_bytes([2; 16]).to_string()
+        );
+        client.close().await;
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn spool_list_comes_from_native_list_spools_unary() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        let all = client.list_spools(false).await.expect("v2 Spool list");
+        let paths: Vec<_> = all
+            .iter()
+            .map(|spool| spool.path_segments.join("/"))
+            .collect();
+        assert_eq!(
+            paths,
+            ["spool/acme", "spool/acme/notes"],
+            "grant-reachable listing must surface spool/<handle>/<name>"
+        );
+        assert!(!all[0].is_repo);
+        assert!(all[1].is_repo);
+        let repos = client
+            .list_spools(true)
+            .await
+            .expect("repos_only Spool list");
+        assert_eq!(
+            repos
+                .iter()
+                .map(|spool| spool.path_segments.join("/"))
+                .collect::<Vec<_>>(),
+            ["spool/acme/notes"]
+        );
+        client.close().await;
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn promote_spool_uses_native_versioned_mutation() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        let original = client
+            .get_spool("acme")
+            .await
+            .expect("native Spool overview");
+        let promoted = client
+            .promote_spool("acme", "")
+            .await
+            .expect("native versioned promotion");
+        assert_eq!(promoted.spool_id, original.spool_id);
+        assert_eq!(promoted.full_path, "acme");
+        client.close().await;
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
+    async fn native_review_observation_feeds_original_signed_record() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        use objects::object::{ContentHash, StateId};
+        use thread_api::thread_control::{Author, Control, PreparedControl, Review, ReviewKind};
+
+        let (client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        let snapshot = client
+            .observe_review("acme", "feature")
+            .await
+            .expect("review snapshot");
+        assert_eq!(snapshot.overview.name, "feature");
+        assert_eq!(
+            snapshot
+                .comparison
+                .as_ref()
+                .expect("comparison")
+                .policy_version,
+            vec![6; 32]
+        );
+        let landing = client
+            .observe_landing_assessment("acme", "feature", "main")
+            .await
+            .expect("target-bound assessment");
+        let assessment = landing
+            .overview
+            .landing_assessment
+            .expect("exact landing target");
+        assert_eq!(
+            assessment.target.expect("target").id.expect("ID").value,
+            vec![4; 32]
+        );
+        let signer = crypto::Ed25519Signer::from_seed(&[13; 32]).expect("test author");
+        let prepared = PreparedControl::sign(
+            &snapshot.overview,
+            Control::Review(Review {
+                id: uuid::Uuid::now_v7(),
+                source: StateId::from_bytes([5; 32]),
+                target: StateId::from_bytes([5; 32]),
+                policy_version: ContentHash::from_bytes([6; 32]),
+                kind: ReviewKind::Approval,
+                explanation: "looks ready".into(),
+                revokes: None,
+                expires_at_unix_seconds: None,
+                coverage: None,
+            }),
+            Author {
+                account: uuid::Uuid::from_bytes([9; 16]),
+                agent_id: None,
+                authority_envelope: b"test original authority",
+            },
+            uuid::Uuid::now_v7(),
+            1_800_000_000_000,
+            &signer,
+        )
+        .expect("sign exact review comparison");
+        client
+            .record_review(&prepared.record_review().expect("wire request"))
+            .await
+            .expect("native typed review RPC");
+        client.close().await;
+        server.await.expect("server");
+    }
+
+    #[tokio::test]
     async fn administration_facade_builds_and_dispatches_every_native_request() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         let _home = IsolatedHeddleHome::new();
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
 
-        client.who_am_i().await.unwrap();
-        let _ = client
-            .create_service_account(CreateServiceAccountRequest::default())
-            .await;
-        let _ = client
-            .create_signup_invite(CreateSignupInviteRequest {
-                recipient_email: Some("alice@example.com".to_string()),
+        let (principal, credential) = client.observe_current_identity().await.unwrap();
+        assert_eq!(
+            principal.account_id,
+            uuid::Uuid::from_bytes([9; 16]).to_string()
+        );
+        assert_eq!(credential.subject, "agent:reviewer-1");
+        let created = client
+            .create_signup_invite(api::heddle::api::v1alpha2::CreateSignupInvitationRequest {
+                invitation: Some(api::heddle::api::v1alpha2::SignupInvitation {
+                    bound_email: "alice@example.com".to_string(),
+                    ..Default::default()
+                }),
                 client_operation_id: "signup-invite-op".to_string(),
             })
-            .await;
-        let _ = client
-            .issue_service_account_credential(IssueServiceAccountCredentialRequest::default())
-            .await;
-        let _ = client
-            .list_signup_invites(ListSignupInvitesRequest {
-                page_size: 200,
-                page_token: String::new(),
-            })
-            .await;
-        client.begin_login("alice@example.com").await.unwrap();
-        let _ = client.get_current_user_spool().await;
-        assert!(client.list_spools(true).await.unwrap().is_empty());
+            .await
+            .expect("native invitation mutation");
+        assert_eq!(created.redemption_secret, b"one-time-invite");
+        let (invites, quota) = client
+            .list_signup_invitations()
+            .await
+            .expect("native invitation observation");
+        assert!(
+            invites.is_empty(),
+            "undistributed allowance is not an invitation"
+        );
+        assert_eq!(quota, 2);
+        let personal = client
+            .get_current_user_spool()
+            .await
+            .expect("v2 personal Spool");
+        assert_eq!(personal.full_path, "acme");
+        assert_eq!(
+            personal.spool_id,
+            uuid::Uuid::from_bytes([2; 16]).to_string()
+        );
+        let listed = client.list_spools(false).await.unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|spool| spool.path_segments.join("/"))
+                .collect::<Vec<_>>(),
+            ["spool/acme", "spool/acme/notes"]
+        );
         client
             .create_spool("acme", "widgets", true, Some("Widgets".to_string()))
             .await
             .expect("CreateSpool mints owner genesis and reaches the server");
-        client
-            .create_invitation("alice@example.com", "acme", "developer")
-            .await
-            .unwrap();
         let _ = client
             .update_namespace("acme", Some("acme-new"), Some(None))
             .await;
@@ -826,139 +1243,44 @@ mod tests {
             .update_repository("acme/widgets", "widgets-new")
             .await;
         client.delete_repository("acme/widgets-new").await.unwrap();
-        let _ = client
-            .create_grant("principal:alice", "reader", None, Some("acme/widgets"), "")
-            .await;
-        let listed = client.list_grants(Some("acme/widgets")).await.unwrap();
-        assert!(listed.iter().any(|grant| grant.subject == "principal:alice"
-            && grant.role == "reader"
-            && grant.repo_path.as_deref() == Some("acme/widgets")));
-        let _ = client
-            .update_grant("principal:alice", "maintainer", Some("acme"), None, "")
-            .await;
-        client
-            .delete_grant("principal:alice", Some("acme"), None, "")
+        let created_grant = client
+            .create_grant("alice", "reader", None, Some("acme/widgets"), String::new())
             .await
-            .unwrap();
-        client
-            .revoke_approval("approval-1", "revoke-approval-op".to_string())
-            .await
-            .unwrap();
-        client
-            .grant_support_access(
-                "operator@example.com",
-                None,
-                Some("acme/widgets"),
-                300,
-                "investigation",
-                "support-op".to_string(),
-            )
-            .await
-            .unwrap();
-        assert!(
+            .expect("native grant creation");
+        assert_eq!(
             client
-                .list_support_access_grants(Some("acme"), None, true)
+                .list_grants(Some("acme/widgets"))
                 .await
                 .unwrap()
-                .is_empty()
+                .len(),
+            1
+        );
+        let updated_grant = client
+            .update_grant("alice", "writer", None, Some("acme/widgets"))
+            .await
+            .expect("native grant update uses observed version");
+        assert_eq!(
+            updated_grant.role,
+            api::heddle::api::v1alpha2::ResourceRole::Writer as i32
+        );
+        assert_eq!(
+            client
+                .list_grants(Some("acme/widgets"))
+                .await
+                .unwrap()
+                .len(),
+            1
         );
         client
-            .revoke_support_access("support-1", "support-revoke-op".to_string())
+            .delete_grant(
+                &created_grant.r#ref.as_ref().expect("grant ref").id,
+                None,
+                Some("acme/widgets"),
+                String::new(),
+            )
             .await
             .unwrap();
         client.resolve_monorepo("acme", Some(4)).await.unwrap();
-
-        let invalid_state = objects::object::StateId::from_bytes([3; 32]).to_string_full();
-        assert!(
-            client
-                .approve_thread(
-                    "acme/widgets",
-                    "feature",
-                    "main",
-                    &invalid_state,
-                    Some("looks good"),
-                    "approval-op".to_string(),
-                )
-                .await
-                .is_err()
-        );
-        assert!(
-            client
-                .list_thread_approvals("acme/widgets", "feature", "main")
-                .await
-                .is_err()
-        );
-        assert!(
-            client
-                .check_merge_eligibility(
-                    "acme/widgets",
-                    "feature",
-                    "main",
-                    &invalid_state,
-                    "land",
-                    vec!["src/lib.rs".to_string()],
-                    Some("principal:alice"),
-                )
-                .await
-                .is_err()
-        );
-
-        client.close().await;
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn spool_grant_create_list_delete_round_trip() {
-        let _home = IsolatedHeddleHome::new();
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-
-        let created = client
-            .create_grant(
-                "alice",
-                "contributor",
-                None,
-                Some("spool/willow-ibis-8e7264/notes"),
-                "grant-create-op",
-            )
-            .await
-            .expect("CreateGrant should persist the collaborator");
-        assert_eq!(created.subject, "alice");
-        assert_eq!(created.role, "developer");
-        assert_eq!(
-            created.repo_path.as_deref(),
-            Some("spool/willow-ibis-8e7264/notes")
-        );
-
-        let listed = client
-            .list_grants(Some("spool/willow-ibis-8e7264/notes"))
-            .await
-            .expect("ListGrants should show the created grant");
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].subject, "alice");
-        assert_eq!(listed[0].role, "developer");
-        assert_eq!(
-            listed[0].repo_path.as_deref(),
-            Some("spool/willow-ibis-8e7264/notes")
-        );
-
-        client
-            .delete_grant(
-                "alice",
-                None,
-                Some("spool/willow-ibis-8e7264/notes"),
-                "grant-delete-op",
-            )
-            .await
-            .expect("DeleteGrant should remove the collaborator");
-
-        let after_delete = client
-            .list_grants(Some("spool/willow-ibis-8e7264/notes"))
-            .await
-            .expect("ListGrants after delete");
-        assert!(
-            after_delete.is_empty(),
-            "deleted grant must not remain in ListGrants: {after_delete:?}"
-        );
 
         client.close().await;
         server.await.unwrap();
@@ -966,6 +1288,7 @@ mod tests {
 
     #[tokio::test]
     async fn namespace_and_repository_mutations_use_spool_requests() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         let (mut client, server, captured) =
             crate::hosted_runtime::hosted::test_server::start_recording_spool_mutations().await;
 
@@ -984,75 +1307,37 @@ mod tests {
         server.await.unwrap();
 
         let captured = captured.lock().unwrap_or_else(|poison| poison.into_inner());
-        assert_eq!(captured.updates.len(), 2);
-        assert_eq!(captured.deletes.len(), 2);
+        assert_eq!(captured.native_updates.len(), 2);
+        assert_eq!(captured.native_deletes.len(), 2);
 
-        let namespace_update = &captured.updates[0];
-        assert_eq!(namespace_update.full_path, "acme");
-        assert_eq!(namespace_update.new_slug.as_deref(), Some("acme-new"));
-        assert_eq!(namespace_update.display_name, None);
-        assert!(namespace_update.clear_display_name);
+        let namespace_update = &captured.native_updates[0];
+        assert_eq!(
+            namespace_update.spool.as_ref().expect("Spool").id,
+            uuid::Uuid::from_bytes([2; 16]).to_string()
+        );
+        assert_eq!(namespace_update.expected_version, vec![7; 32]);
+        assert_eq!(namespace_update.slug.as_deref(), Some("acme-new"));
+        assert_eq!(namespace_update.name, "");
         assert!(!namespace_update.client_operation_id.is_empty());
 
-        let repository_update = &captured.updates[1];
-        assert_eq!(repository_update.full_path, "acme/widgets");
-        assert_eq!(repository_update.new_slug.as_deref(), Some("widgets-new"));
-        assert_eq!(repository_update.display_name, None);
-        assert!(!repository_update.clear_display_name);
+        let repository_update = &captured.native_updates[1];
+        assert_eq!(repository_update.expected_version, vec![7; 32]);
+        assert_eq!(repository_update.slug.as_deref(), Some("widgets-new"));
         assert!(!repository_update.client_operation_id.is_empty());
 
-        assert_eq!(captured.deletes[0].full_path, "acme-new");
-        assert!(!captured.deletes[0].client_operation_id.is_empty());
-        assert_eq!(captured.deletes[1].full_path, "acme/widgets-new");
-        assert!(!captured.deletes[1].client_operation_id.is_empty());
-    }
-
-    #[test]
-    fn parse_hosted_role_arg_accepts_every_role_and_rejects_unknown() {
-        assert_eq!(parse_hosted_role_arg("reader").unwrap(), HostedRole::Reader);
-        assert_eq!(
-            parse_hosted_role_arg("contributor").unwrap(),
-            HostedRole::Developer
-        );
-        assert_eq!(
-            parse_hosted_role_arg(" Developer ").unwrap(),
-            HostedRole::Developer
-        );
-        assert_eq!(
-            parse_hosted_role_arg("MAINTAINER").unwrap(),
-            HostedRole::Maintainer
-        );
-        assert_eq!(parse_hosted_role_arg("admin").unwrap(), HostedRole::Admin);
-        assert_eq!(parse_hosted_role_arg("owner").unwrap(), HostedRole::Owner);
-        assert!(GrantRole::from_hosted_role_i32(HostedRole::Reader as i32).agent_may_grant());
-        assert!(GrantRole::from_hosted_role_i32(HostedRole::Developer as i32).agent_may_grant());
-        assert!(!GrantRole::from_hosted_role_i32(HostedRole::Maintainer as i32).agent_may_grant());
-        assert!(!GrantRole::from_hosted_role_i32(HostedRole::Admin as i32).agent_may_grant());
-        assert!(!GrantRole::from_hosted_role_i32(HostedRole::Owner as i32).agent_may_grant());
-        let err = parse_hosted_role_arg("root").unwrap_err();
-        assert!(err.to_string().contains("invalid role"));
-    }
-
-    #[test]
-    fn build_target_ref_requires_exactly_one_path() {
-        let ns = build_target_ref(Some("acme"), None).unwrap().unwrap();
-        assert!(matches!(ns.target, Some(Target::NamespacePath(p)) if p == "acme"));
-
-        let repo = build_target_ref(None, Some("acme/widgets"))
-            .unwrap()
-            .unwrap();
-        assert!(matches!(repo.target, Some(Target::RepoPath(_))));
-
-        // Exactly one required: neither, both, or empty-only → error.
-        assert!(build_target_ref(None, None).is_err());
-        assert!(build_target_ref(Some("acme"), Some("acme/widgets")).is_err());
-        assert!(build_target_ref(Some(""), None).is_err());
-        assert!(build_target_ref(None, Some("")).is_err());
-        assert!(build_target_ref(Some(""), Some("")).is_err());
+        for deletion in &captured.native_deletes {
+            assert_eq!(
+                deletion.spool.as_ref().expect("resolved Spool").id,
+                uuid::Uuid::from_bytes([2; 16]).to_string()
+            );
+            assert_eq!(deletion.expected_version, vec![7; 32]);
+            assert!(!deletion.client_operation_id.is_empty());
+        }
     }
 
     #[tokio::test]
     async fn create_spool_sends_device_key_signed_uuidv7_owner_genesis() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         use crypto::Ed25519Signer;
         use sha2::{Digest, Sha256};
 
@@ -1066,13 +1351,17 @@ mod tests {
         assert_eq!(created.full_path, "cedar-jay-9dce33/spool-d");
 
         let request = captured
+            .requests
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .pop()
             .expect("CreateSpool reached the server");
-        let signed = request
-            .owner_genesis
-            .expect("CreateSpool must send SignedSpoolOwnerGenesis");
+        let signed = match request.ownership {
+            Some(api::heddle::api::v1alpha2::create_spool_request::Ownership::OwnerGenesis(
+                signed,
+            )) => signed,
+            other => panic!("CreateSpool must send SignedSpoolOwnerGenesis, got {other:?}"),
+        };
         let genesis = signed.genesis.expect("signed genesis payload");
         let spool_uuid: [u8; 16] = genesis
             .spool_uuid
@@ -1105,12 +1394,13 @@ mod tests {
 
     #[tokio::test]
     async fn create_spool_provision_sequence_excludes_owner_root_ceremony() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         use crypto::{Ed25519Signer, Signer as _};
 
         let _home = IsolatedHeddleHome::new();
-        let (mut client, server, calls, signer_pem) =
-            crate::hosted_runtime::auth_login_agent::test_support::start_recording_client().await;
-        let signer = Ed25519Signer::from_pem(&signer_pem).expect("test signer");
+        let (mut client, server, captured) =
+            crate::hosted_runtime::hosted::test_server::start_recording_create_spool().await;
+        let signer = Ed25519Signer::generate().expect("test signer");
         let mut state = crate::hosted_runtime::identity_state::ClaimState::new(
             "api.provision.test".to_string(),
             uuid::Uuid::parse_str("7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28").expect("account id"),
@@ -1130,156 +1420,17 @@ mod tests {
         server.await.expect("recording server");
 
         assert_eq!(
-            *calls.lock().unwrap_or_else(|poison| poison.into_inner()),
-            ["/heddle.api.v1alpha1.RegistryService/CreateSpool"],
-            "auto-provision must issue CreateSpool without BootstrapOwnerRoot"
+            *captured
+                .calls
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()),
+            [
+                "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint",
+                "/heddle.api.v1alpha2.WorkspaceService/ResolveResources",
+                "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership",
+                "/heddle.api.v1alpha2.SpoolService/CreateSpool",
+            ],
+            "auto-provision must resolve its parent and current owner, then create without BootstrapOwnership"
         );
-    }
-
-    fn test_spool(full_path: &str) -> HostedSpool {
-        HostedSpool {
-            spool_id: full_path.to_string(),
-            full_path: full_path.to_string(),
-            kind: "spool".to_string(),
-            is_repo: true,
-            ..HostedSpool::default()
-        }
-    }
-
-    #[tokio::test]
-    async fn promote_spool_moves_personal_child_to_root() {
-        let _home = IsolatedHeddleHome::new();
-        let fixture = crate::hosted_runtime::hosted::test_server::RegistryFixture {
-            personal_root: Some(test_spool("spool/alice")),
-            ..Default::default()
-        };
-        let (mut client, server, fixture) =
-            crate::hosted_runtime::hosted::test_server::start_with_registry(fixture).await;
-
-        let promoted = client
-            .promote_spool("spool/alice/foo", "promote-op-1")
-            .await
-            .expect("promote");
-        assert_eq!(promoted.full_path, "spool/foo");
-        assert!(promoted.is_repo);
-
-        client.close().await;
-        server.await.unwrap();
-        let requests = fixture
-            .promote_requests
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].full_path, "spool/alice/foo");
-        assert_eq!(requests[0].client_operation_id, "promote-op-1");
-    }
-
-    #[tokio::test]
-    async fn promote_spool_surfaces_slug_taken() {
-        use api::heddle::api::v1alpha1::CallFailureCode;
-
-        let _home = IsolatedHeddleHome::new();
-        let fixture = crate::hosted_runtime::hosted::test_server::RegistryFixture {
-            promote_denial: Some((
-                CallFailureCode::AlreadyExists,
-                "root slug foo is taken".to_string(),
-            )),
-            ..Default::default()
-        };
-        let (mut client, server, _) =
-            crate::hosted_runtime::hosted::test_server::start_with_registry(fixture).await;
-        let err = client
-            .promote_spool("spool/alice/foo", "promote-op-2")
-            .await
-            .expect_err("slug taken");
-        assert!(matches!(err, ProtocolError::AlreadyExists(_)), "{err:?}");
-        client.close().await;
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn personal_first_read_selects_the_caller_child_when_both_exist() {
-        let _home = IsolatedHeddleHome::new();
-        let mut spools = std::collections::HashMap::new();
-        spools.insert("spool/me/foo".to_string(), test_spool("spool/me/foo"));
-        spools.insert("spool/foo".to_string(), test_spool("spool/foo"));
-        spools.insert("spool/other/foo".to_string(), test_spool("spool/other/foo"));
-        let fixture = crate::hosted_runtime::hosted::test_server::RegistryFixture {
-            personal_root: Some(test_spool("spool/me")),
-            spools,
-            ..Default::default()
-        };
-        let (mut client, server, fixture) =
-            crate::hosted_runtime::hosted::test_server::start_with_registry(fixture).await;
-
-        let resolved = super::super::resolve_personal_first_read(&mut client, "foo")
-            .await
-            .expect("resolve");
-        assert_eq!(
-            resolved, "spool/me/foo",
-            "bare foo must clone the caller's copy, not the root or another owner"
-        );
-
-        client.close().await;
-        server.await.unwrap();
-        let probed = fixture
-            .get_spool_requests
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone();
-        assert_eq!(probed, vec!["spool/me/foo".to_string()]);
-        assert!(
-            !probed.iter().any(|path| path.starts_with("spool/other/")),
-            "must never probe another owner's personal child: {probed:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn personal_first_read_falls_back_to_root_when_caller_has_no_child() {
-        let _home = IsolatedHeddleHome::new();
-        let mut spools = std::collections::HashMap::new();
-        spools.insert("spool/foo".to_string(), test_spool("spool/foo"));
-        let fixture = crate::hosted_runtime::hosted::test_server::RegistryFixture {
-            personal_root: Some(test_spool("spool/bob")),
-            spools,
-            ..Default::default()
-        };
-        let (mut client, server, fixture) =
-            crate::hosted_runtime::hosted::test_server::start_with_registry(fixture).await;
-
-        let resolved = super::super::resolve_personal_first_read(&mut client, "foo")
-            .await
-            .expect("resolve");
-        assert_eq!(resolved, "spool/foo");
-
-        client.close().await;
-        server.await.unwrap();
-        let probed = fixture
-            .get_spool_requests
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone();
-        assert_eq!(probed, vec!["spool/bob/foo".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn get_spool_mismatch_fails_closed_instead_of_cloning_the_wrong_spool() {
-        let _home = IsolatedHeddleHome::new();
-        let mut spools = std::collections::HashMap::new();
-        // Server returns the root spool when asked for the personal child.
-        spools.insert("spool/me/foo".to_string(), test_spool("spool/foo"));
-        let fixture = crate::hosted_runtime::hosted::test_server::RegistryFixture {
-            personal_root: Some(test_spool("spool/me")),
-            spools,
-            ..Default::default()
-        };
-        let (mut client, server, _) =
-            crate::hosted_runtime::hosted::test_server::start_with_registry(fixture).await;
-        let err = super::super::resolve_personal_first_read(&mut client, "foo")
-            .await
-            .expect_err("mismatched GetSpool must not resolve");
-        assert!(matches!(err, ProtocolError::InvalidState(_)), "{err:?}");
-        client.close().await;
-        server.await.unwrap();
     }
 }

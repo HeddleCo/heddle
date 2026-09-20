@@ -328,3 +328,40 @@ fn init_status_and_capture_agree_on_user_config_principal() {
         "the isolated run must not overwrite shared global config"
     );
 }
+
+#[test]
+fn capture_derives_principal_from_hosted_account_when_none_is_local() {
+    let temp = TempDir::new().expect("tempdir");
+    let shared_home = temp.path().join("shared-home");
+    let heddle_home = temp.path().join("heddle-home");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&shared_home).expect("shared home");
+    fs::create_dir_all(&heddle_home).expect("heddle home");
+    fs::create_dir_all(&repo).expect("repo");
+
+    let init = isolated_command(&repo, &shared_home, &heddle_home, &["init"])
+        .output()
+        .expect("run init without principal");
+    assert_success(&init, "init without local principal");
+
+    let credentials = "[defaults]\nserver = \"api.heddle.test\"\n\n[servers.\"api.heddle.test\"]\ntoken = \"token\"\nsubject = \"luke@example.com\"\n";
+    fs::write(heddle_home.join("credentials.toml"), credentials).expect("store hosted login");
+
+    fs::write(repo.join("notes.txt"), "after login\n").expect("worktree change");
+    let capture = isolated_command(
+        &repo,
+        &shared_home,
+        &heddle_home,
+        &["capture", "-m", "signup then capture", "--output", "json"],
+    )
+    .output()
+    .expect("run capture");
+    assert_success(
+        &capture,
+        &format!("capture after hosted login: {}", output_text(&capture)),
+    );
+    let json: serde_json::Value = serde_json::from_slice(&capture.stdout).expect("capture JSON");
+    assert_eq!(json["principal"]["name"], "luke");
+    assert_eq!(json["principal"]["email"], "luke@example.com");
+    assert_eq!(json["principal_source"], "hosted_account");
+}

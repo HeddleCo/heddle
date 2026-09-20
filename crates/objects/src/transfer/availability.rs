@@ -71,12 +71,11 @@ impl ObjectAvailabilityPlan {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         object::{Blob, ContentHash, StateId, Tree},
         store::{ObjectStore, Result as StoreResult, SidecarStore},
     };
-
-    use super::*;
 
     #[derive(Default)]
     struct DummyStore {

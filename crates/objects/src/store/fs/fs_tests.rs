@@ -564,6 +564,71 @@ fn install_pack_rejects_hash_mismatch_without_partial_commit() {
 }
 
 #[test]
+fn flat_tree_revert_cannot_replace_its_epoch_anchor_with_a_delta() {
+    let (temp, store) = create_test_store();
+    let anchor = Tree::from_entries(
+        (0..240)
+            .map(|index| {
+                TreeEntry::file(
+                    format!("module_{index:04}.rs"),
+                    ContentHash::compute(format!("anchor-{index}").as_bytes()),
+                    false,
+                )
+                .expect("anchor entry")
+            })
+            .collect(),
+    );
+    let anchor_id = store.put_tree(&anchor).expect("anchor");
+    let mut entries = anchor.entries().to_vec();
+    entries[117] = TreeEntry::file("module_0117.rs", ContentHash::compute(b"changed"), false)
+        .expect("changed entry");
+    let changed = Tree::from_entries(entries);
+    let state = State::new(
+        changed.hash(),
+        vec![],
+        Attribution::human(Principal::new("test", "test@example.com")),
+    );
+    store
+        .put_snapshot_objects_packed_impl(
+            Vec::new(),
+            Vec::new(),
+            &TreeWrite::descendant(changed.clone(), anchor_id),
+            &state,
+            Vec::new(),
+            None,
+        )
+        .expect("delta descendant pack");
+    assert!(crate::object::is_delta_tree(
+        &store
+            .get_tree_serialized(&changed.hash())
+            .expect("delta bytes")
+            .expect("tree")
+    ));
+    let reverted = store
+        .encode_tree_write(&TreeWrite::descendant(anchor.clone(), changed.hash()))
+        .expect("reverting to an epoch anchor remains encodable");
+    assert!(
+        !crate::object::is_delta_tree(&reverted.data),
+        "an anchor may never depend on itself"
+    );
+    store
+        .put_tree_serialized(&reverted.data, anchor_id)
+        .expect("revert write");
+    drop(store);
+    let reopened = FsStore::new(temp.path().join(".heddle"));
+    assert_eq!(
+        reopened.get_tree(&anchor_id).expect("original anchor"),
+        Some(anchor)
+    );
+    assert_eq!(
+        reopened
+            .get_tree(&changed.hash())
+            .expect("delta still resolves"),
+        Some(changed)
+    );
+}
+
+#[test]
 fn install_pack_rejects_hdc1_result_hash_mismatch() {
     let (_temp, store) = create_test_store();
     let anchor = Tree::from_entries(
@@ -1681,4 +1746,94 @@ fn test_recent_object_cache_large_shared_read_gets_second_chance() {
         "oldest untouched entry must be evicted"
     );
     assert!(cache.contains(&CAPACITY), "new entry must be retained");
+}
+
+// ── V4 salted-tree store round-trips (HSR1) ─────────────────────────
+
+#[test]
+fn v4_tree_round_trips_through_fs_put_and_get() {
+    use crate::object::TreeScheme;
+    let (_temp, store) = create_test_store();
+    let tree = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("readme.md", ContentHash::compute(b"readme"), false).unwrap(),
+            TreeEntry::file("secret.md", ContentHash::compute(b"secret"), false).unwrap(),
+            TreeEntry::directory("src", ContentHash::compute(b"src")).unwrap(),
+        ],
+        vec![[0x11; 32], [0x22; 32], [0x33; 32]],
+    )
+    .unwrap();
+    let hash = store.put_tree(&tree).unwrap();
+    assert_eq!(hash, tree.hash());
+
+    // The stored loose body is HSR1 (salted), never HLR1/HTR4.
+    let serialized = store.get_tree_serialized(&hash).unwrap().unwrap();
+    let body = crate::store::codec::decode_tree_body(&serialized).unwrap();
+    assert!(
+        crate::object::is_salted_tree(&body),
+        "a v4 tree must be stored as an HSR1 salted body"
+    );
+
+    let loaded = store.get_tree(&hash).unwrap().unwrap();
+    assert_eq!(loaded, tree);
+    assert_eq!(loaded.hash(), tree.hash());
+    assert_eq!(loaded.scheme(), TreeScheme::V4Salted);
+    assert_eq!(loaded.salts(), tree.salts());
+}
+
+#[test]
+fn v4_tree_round_trips_through_in_memory_store() {
+    use crate::store::InMemoryStore;
+    let store = InMemoryStore::new();
+    let tree = Tree::from_entries_salted_v4(
+        vec![TreeEntry::file("a", ContentHash::compute(b"a"), false).unwrap()],
+        vec![[0x44; 32]],
+    )
+    .unwrap();
+    let hash = store.put_tree(&tree).unwrap();
+    let loaded = store.get_tree(&hash).unwrap().unwrap();
+    assert_eq!(loaded, tree);
+    assert_eq!(loaded.hash(), tree.hash());
+}
+
+#[test]
+fn v4_put_tree_serialized_round_trips_hsr1() {
+    let (_temp, store) = create_test_store();
+    let tree = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("a", ContentHash::compute(b"a"), false).unwrap(),
+            TreeEntry::file("b", ContentHash::compute(b"b"), false).unwrap(),
+        ],
+        vec![[0x55; 32], [0x66; 32]],
+    )
+    .unwrap();
+    let body = tree.encode_canonical().unwrap();
+    let hash = store.put_tree_serialized(&body, tree.hash()).unwrap();
+    assert_eq!(hash, tree.hash());
+    let loaded = store.get_tree(&tree.hash()).unwrap().unwrap();
+    assert_eq!(loaded, tree);
+}
+
+#[test]
+fn fs_open_tree_on_a_v4_salted_tree_errors_not_none() {
+    // The paging reader cannot stream an HSR1 (V4) body; it must surface a loud
+    // Err, never a silent Ok(None) that looks like a missing tree.
+    let (_temp, store) = create_test_store();
+    let tree = Tree::from_entries_salted_v4(
+        vec![
+            TreeEntry::file("readme.md", ContentHash::compute(b"readme"), false).unwrap(),
+            TreeEntry::file("secret.md", ContentHash::compute(b"secret"), false).unwrap(),
+        ],
+        vec![[0x11; 32], [0x22; 32]],
+    )
+    .unwrap();
+    let hash = store.put_tree(&tree).unwrap();
+    // Eager decode still works.
+    assert_eq!(store.get_tree(&hash).unwrap().unwrap(), tree);
+    // Streaming open must be an Err, not None.
+    match store.open_tree(&hash, None) {
+        Err(_) => {}
+        Ok(None) => panic!("open_tree on a v4 tree must not silently return None"),
+        Ok(Some(_)) => panic!("open_tree must not stream a v4 salted tree"),
+    }
 }

@@ -326,35 +326,8 @@ impl Repository {
             .get_tree(&state.tree)?
             .ok_or_else(|| HeddleError::Config(format!("tree for {state_id} missing")))?;
         self.materialize_tree(&tree, dest)?;
-        // Canonicalize only now that `materialize_tree` (via `create_dir_all`) has made
-        // `dest` exist — same read/write-root agreement as the withheld branch above
-        // (heddle#316).
-        let canonical = canonical_worktree_path(dest);
-        // Reconcile the root UP to the served tier: `materialize_tree` wrote the
-        // real tree's leaves but does NOT remove a stale leaf a prior
-        // materialize of a *different* tree left at this root. `keep` is the set
-        // of leaves the served tree just wrote — any prior tracked leaf NOT in
-        // it is removed, so the root holds exactly this tier's content
-        // (heddle#316 CLASS 1).
-        let mut served_leaves = BTreeSet::new();
-        collect_tree_leaf_paths(self, &tree, "", &mut served_leaves)?;
-        self.reconcile_materialized_root(dest, &canonical, &served_leaves, &BTreeSet::new())?;
-        // Persist the clobber-proof per-root record of exactly the tracked leaves
-        // this visible materialize left on disk, so a later withheld
-        // re-materialize of this root removes precisely them even if a sibling
-        // worktree of the same thread clobbered the per-thread manifest in the
-        // interim (heddle#316 CLASS 1).
-        crate::thread_manifest::write_materialized_leaves(
-            self.heddle_dir(),
-            &canonical,
-            &served_leaves,
-        )
-        .map_err(HeddleError::Io)?;
-        // This root now holds real served bytes: clear any stale withheld marker
-        // a prior under-tier materialize of the same root may have left, so it
-        // can't suppress this worktree's capture (heddle#316).
-        crate::thread_manifest::clear_withheld_checkout(self.heddle_dir(), &canonical)
-            .map_err(HeddleError::Io)?;
+        // The common materializer owns per-root reconciliation and the capture
+        // guard for both complete trees and nested partial projections.
         // Remove any leftover courtesy stub a prior under-tier materialize of the
         // same root wrote: the stub is untracked, so the reconcile leaf-removal
         // above leaves it in place. Cosmetic — capture ignores it — but an
@@ -394,7 +367,7 @@ impl Repository {
     /// Never blanket-`rm -rf`s: only paths sourced from the per-root record /
     /// `must_remove` are touched, so user-untracked files and `.git`/heddle
     /// metadata are never removed.
-    fn reconcile_materialized_root(
+    pub(super) fn reconcile_materialized_root(
         &self,
         dest: &Path,
         canonical_root: &Path,
@@ -725,7 +698,7 @@ impl Repository {
         if crate::thread_manifest::is_withheld_checkout(
             self.heddle_dir(),
             &canonical_worktree_path(root),
-        ) {
+        )? {
             debug!(thread = %thread, "thread capture skipped (withheld checkout)");
             return Ok(ThreadCaptureOutcome::NoOp);
         }
@@ -823,6 +796,8 @@ impl Repository {
         // is a real author capture that bypasses `stage_snapshot_objects`. Last
         // mutation before the write.
         self.put_authored_state(&state)?;
+        self.record_native_source(thread, state.id())
+            .map_err(|error| HeddleError::Config(error.to_string()))?;
         self.set_thread_recorded(&thread_name, &state.id())?;
 
         // 4. Rewrite the manifest to reflect the new state. `root` is

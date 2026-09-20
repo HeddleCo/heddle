@@ -5,7 +5,7 @@ use std::{
 };
 
 use objects::{
-    object::{Blob, ThreadName, Tree, TreeEntry, is_delta_tree},
+    object::{Blob, ThreadName, Tree, TreeEntry},
     store::{ObjectStore, ShallowInfo},
     util::{gitlink_placeholder_bytes, symlink_target_bytes},
 };
@@ -41,13 +41,28 @@ fn init_default_persists_and_reuses_stable_main_thread_record() {
         .get_thread(&ThreadName::new("main"))
         .unwrap()
         .expect("init_default must seed the main ref");
+    assert_eq!(
+        main_state,
+        objects::object::thread_replication::hosted_import::synthetic_initial_base()
+            .expect("canonical system seed")
+            .id(),
+        "native init and hosted import share the exact system base"
+    );
     let manager = ThreadManager::new(repo.heddle_dir());
 
     let first = manager
         .find_synced_record_by_thread(&repo, "main", Some(main_state))
         .unwrap()
         .expect("init_default must persist main thread metadata");
-    assert!(uuid::Uuid::parse_str(&first.id).is_ok());
+    let native_id = repo
+        .native_thread("main")
+        .expect("init_default must bind native main")
+        .thread_id()
+        .to_hex();
+    assert_eq!(
+        first.id, native_id,
+        "default main's stable id is the signed native Thread identity"
+    );
     assert_eq!(first.thread, "main");
     assert_eq!(
         first.current_state.as_deref(),
@@ -134,52 +149,61 @@ fn capture_refresh_does_not_rewrite_identity_only_default_main() {
 }
 
 #[test]
-fn snapshot_modify_then_revert_keeps_epoch_anchor_readable_after_reopen() {
+fn snapshot_modify_then_revert_preserves_salted_history_after_reopen() {
     let (temp_dir, repo) = create_test_repo();
-    for index in 0..128 {
-        fs::write(
-            temp_dir.path().join(format!("fixture-{index:03}.txt")),
-            format!("unchanged-{index}\n"),
-        )
-        .unwrap();
-    }
+    fs::write(temp_dir.path().join("unchanged.txt"), "stable\n").expect("sibling source");
     let root = temp_dir.path().join("root.txt");
-
-    fs::write(&root, "v1\n").unwrap();
-    let anchor_state = repo.snapshot(Some("anchor".to_string()), None).unwrap();
-    let anchor_tree = repo.store().get_tree(&anchor_state.tree).unwrap().unwrap();
-    fs::write(&root, "v2\n").unwrap();
-    let descendant_state = repo.snapshot(Some("descendant".to_string()), None).unwrap();
-    let descendant_tree = repo
-        .store()
-        .get_tree(&descendant_state.tree)
-        .unwrap()
-        .unwrap();
-    assert!(
-        is_delta_tree(
+    fs::write(&root, "v1\n").expect("initial source");
+    let first = repo
+        .snapshot(Some("first".into()), None)
+        .expect("first capture");
+    fs::write(&root, "v2\n").expect("changed source");
+    let changed = repo
+        .snapshot(Some("changed".into()), None)
+        .expect("changed capture");
+    fs::write(&root, "v1\n").expect("reverted source");
+    let reverted = repo
+        .snapshot(Some("revert".into()), None)
+        .expect("reverted capture");
+    let trees = [&first, &changed, &reverted].map(|state| {
+        assert!(objects::object::is_salted_tree(
             &repo
                 .store()
-                .get_tree_serialized(&descendant_state.tree)
-                .unwrap()
-                .unwrap()
-        ),
-        "fixture must store the modified tree as HDC1",
+                .get_tree_serialized(&state.tree)
+                .expect("source bytes")
+                .expect("tree")
+        ));
+        repo.store()
+            .get_tree(&state.tree)
+            .expect("source tree")
+            .expect("tree")
+    });
+    assert_eq!(
+        trees[0].entries(),
+        trees[2].entries(),
+        "revert restores source content"
     );
-
-    fs::write(&root, "v1\n").unwrap();
-    let reverted_state = repo.snapshot(Some("revert".to_string()), None).unwrap();
-    assert_eq!(reverted_state.tree, anchor_state.tree);
+    assert_ne!(
+        first.tree, reverted.tree,
+        "edited leaves receive fresh privacy commitments"
+    );
+    for tree in &trees[1..] {
+        assert_eq!(
+            tree.v4_leaf_hash_for("unchanged.txt"),
+            trees[0].v4_leaf_hash_for("unchanged.txt")
+        );
+    }
     drop(repo);
-
-    let reopened = Repository::open(temp_dir.path()).unwrap();
-    assert_eq!(
-        reopened.store().get_tree(&anchor_state.tree).unwrap(),
-        Some(anchor_tree),
-    );
-    assert_eq!(
-        reopened.store().get_tree(&descendant_state.tree).unwrap(),
-        Some(descendant_tree),
-    );
+    let reopened = Repository::open(temp_dir.path()).expect("reopen captures");
+    for (state, tree) in [&first, &changed, &reverted].into_iter().zip(trees) {
+        assert_eq!(
+            reopened
+                .store()
+                .get_tree(&state.tree)
+                .expect("durable source"),
+            Some(tree)
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -1094,6 +1118,95 @@ fn snapshot_atomic_mutation_fault_and_exactly_once_contract() {
     assert_eq!(
         transaction_count, 1,
         "capture batch must contain one transaction marker"
+    );
+}
+
+#[test]
+fn native_lookup_failure_cannot_publish_unsigned_snapshot() {
+    let (temp_dir, repo) = create_test_repo();
+    let before = repo.head().expect("head before capture");
+    let database = repo.heddle_dir().join(crate::local_metadata::DATABASE_NAME);
+    let connection = rusqlite::Connection::open(database).expect("metadata database");
+    connection
+        .execute("DROP TABLE local_thread_names", [])
+        .expect("simulate damaged native name mapping");
+    drop(connection);
+
+    fs::write(temp_dir.path().join("tracked.txt"), "new work").expect("write worktree");
+    let error = repo
+        .snapshot(Some("new work".to_string()), None)
+        .expect_err("native metadata failure must stop capture");
+    assert!(
+        error.to_string().contains("local_thread_names"),
+        "native lookup failure must be visible: {error}"
+    );
+    assert_eq!(repo.head().expect("head after refusal"), before);
+}
+
+#[test]
+fn native_admission_before_ref_publish_survives_a_crash_between_them() {
+    let (temp_dir, repo) = create_test_repo();
+    fs::write(temp_dir.path().join("tracked.txt"), "baseline").unwrap();
+    let baseline = repo.snapshot(Some("baseline".to_string()), None).unwrap();
+    let main = repo
+        .native_thread("main")
+        .expect("init_default binds native main");
+
+    fs::write(
+        temp_dir.path().join("tracked.txt"),
+        "admitted, never published",
+    )
+    .unwrap();
+    let crashed = with_snapshot_fault(SnapshotFault::NativeSourceRecordedBeforeRefPublish, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = repo.snapshot(Some("admitted, never published".to_string()), None);
+        }))
+    });
+    assert!(
+        crashed.is_err(),
+        "the checkpoint must crash after native admission"
+    );
+    // Read the canonical ref file. `Repository::head` reconciles the oplog and
+    // would materialize the reconstructible snapshot, which is the publish step
+    // this crash window is supposed to have skipped.
+    assert_eq!(
+        fs::read_to_string(temp_dir.path().join(".heddle/refs/threads/main"))
+            .unwrap()
+            .trim(),
+        baseline.id().to_string_full(),
+        "the ref must not have moved before the crash"
+    );
+    let orphaned = main.view().unwrap().source_heads;
+    assert_eq!(orphaned.len(), 1, "one admitted head: {orphaned:?}");
+    assert!(
+        !orphaned.contains(&baseline.id()),
+        "the crashed capture is admitted on main although the ref never reached it"
+    );
+
+    // The retry captures from the unmoved ref. Its parent is admitted, so it
+    // lands beside the orphaned operation instead of wedging the checkout.
+    let retried = repo
+        .snapshot(Some("admitted, never published".to_string()), None)
+        .expect("capture after the crash must still be admitted");
+    assert_eq!(repo.head().unwrap(), Some(retried.id()));
+    assert!(
+        !main
+            .source_operation_page(retried.id(), None, 1)
+            .unwrap()
+            .is_empty(),
+        "the retried capture must be admitted on main"
+    );
+
+    fs::write(temp_dir.path().join("tracked.txt"), "after recovery").unwrap();
+    let next = repo
+        .snapshot(Some("after recovery".to_string()), None)
+        .expect("captures continue from the published ref");
+    assert_eq!(next.parents, vec![retried.id()]);
+    assert!(
+        !main
+            .source_operation_page(next.id(), None, 1)
+            .unwrap()
+            .is_empty()
     );
 }
 
@@ -2369,6 +2482,9 @@ fn test_open_preserves_explicit_detached_head_in_git_overlay() {
 
     let repo = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);
+    // Overlay bootstrap does not seed a native Thread; captures still need one
+    // to sign source operations. Keep the git-overlay HEAD untouched.
+    repo.seed_default_thread().unwrap();
 
     fs::write(temp_dir.path().join("a.txt"), "version 1").unwrap();
     let state1 = repo.snapshot(Some("v1".to_string()), None).unwrap();
@@ -3283,4 +3399,61 @@ fn source_authority_transition_compares_against_disk() {
         RepositorySourceAuthority::Native
     );
     assert_eq!(reopened.capability(), RepositoryCapability::NativeHeddle);
+}
+
+// RR-PROBE (temporary; not for commit)
+#[test]
+fn rr_probe_crash_windows() {
+    for fault in [
+        SnapshotFault::AtomicCommitBeforeRefPublish,
+        SnapshotFault::NativeSourceRecordedBeforeRefPublish,
+    ] {
+        let (temp_dir, repo) = create_test_repo();
+        fs::write(temp_dir.path().join("tracked.txt"), "baseline").unwrap();
+        let baseline = repo.snapshot(Some("baseline".to_string()), None).unwrap();
+        let main = repo.native_thread("main").unwrap();
+        eprintln!(
+            "RR fault={:?} baseline={} native_heads={:?}",
+            fault as u8,
+            baseline.id(),
+            main.view().unwrap().source_heads
+        );
+        fs::write(temp_dir.path().join("tracked.txt"), "crashed").unwrap();
+        let _ = with_snapshot_fault(fault, || {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = repo.snapshot(Some("crashed".to_string()), None);
+            }))
+        });
+        eprintln!(
+            "RR after-crash head={:?} native_heads={:?}",
+            repo.head().unwrap(),
+            main.view().unwrap().source_heads
+        );
+        let retried = repo.snapshot(Some("crashed".to_string()), None);
+        eprintln!(
+            "RR retry(same tree) => {:?}",
+            retried
+                .as_ref()
+                .map(|s| (s.id(), s.parents.clone()))
+                .map_err(|e| e.to_string())
+        );
+        eprintln!(
+            "RR after-retry head={:?} native_heads={:?}",
+            repo.head().unwrap(),
+            main.view().unwrap().source_heads
+        );
+        fs::write(temp_dir.path().join("tracked.txt"), "different").unwrap();
+        let next = repo.snapshot(Some("different".to_string()), None);
+        eprintln!(
+            "RR different capture => {:?}",
+            next.as_ref()
+                .map(|s| (s.id(), s.parents.clone()))
+                .map_err(|e| e.to_string())
+        );
+        eprintln!(
+            "RR after-different head={:?} native_heads={:?}",
+            repo.head().unwrap(),
+            main.view().unwrap().source_heads
+        );
+    }
 }

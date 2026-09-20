@@ -1,0 +1,10 @@
+{
+  "name": "capability-verifier-workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wasm-pack build --target web --out-dir npm/dist --out-name capability_verifier --release",
+    "conformance": "owner-authorization-conformance/run.sh",
+    "pack:binding": "cd npm && npm pack --dry-run"
+  }
+}

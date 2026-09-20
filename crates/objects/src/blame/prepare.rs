@@ -3,11 +3,6 @@
 
 use std::path::Path;
 
-use crate::{
-    object::{ObjectSource, State},
-    util::{ResourceBudget, ResourceKind, ResourceUsage},
-};
-
 use super::{
     lookup::{load_blob_within_budget, lookup_blob_at_path},
     mapping::identity_mapping,
@@ -15,6 +10,10 @@ use super::{
         BlameFrontierGroup, BlameFrontierRecord, BlamePreparation, BlameSliceError,
         BlameSliceLimits, BlameTarget, origin_from_state,
     },
+};
+use crate::{
+    object::{ObjectSource, State},
+    util::{ResourceBudget, ResourceKind, ResourceUsage},
 };
 
 // Local line count so prepare does not own strings.

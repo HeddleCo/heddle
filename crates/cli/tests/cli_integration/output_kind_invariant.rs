@@ -88,13 +88,17 @@ const SWEPT: &[&str] = &[
     "visibility promote",
     "visibility show",
     "visibility list",
-    "discuss open",
-    "discuss append",
+    "invite",
+    "invite list",
+    "discuss",
     "discuss resolve",
     "discuss reopen",
     "discuss list",
     "discuss show",
     "discuss wait",
+    "thread ownership status",
+    "thread ownership claim",
+    "thread ownership resolve",
     "context set",
     "context get",
     "context list",
@@ -106,6 +110,7 @@ const SWEPT: &[&str] = &[
     "context suggest",
     "context audit",
     "review show",
+    "review revoke",
     "review sign",
     "review next",
     "review health",
@@ -122,7 +127,10 @@ const SWEPT: &[&str] = &[
     // wire-frozen values that differ from the snake-cased display path —
     // see `output_kind_override`.
     "abort",
-    "adopt",
+    "import local",
+    "import url",
+    "import status",
+    "import retry",
     "agent capture",
     "agent ready",
     "agent task create",
@@ -172,7 +180,6 @@ const SWEPT: &[&str] = &[
     "thread refresh",
     "thread rename",
     "thread resolve",
-    "thread revoke-approval",
     "thread switch",
     // heddle#1709 — `heddle env` (confidential-runtime env-store) verbs emit
     // `output_kind: "env_create"/"env_list"`; discriminators are in the catalog
@@ -228,10 +235,10 @@ const UNSWEPT_TODO: &[&str] = &[
     "session show",
     "session start",
     "thread absorb",
-    "thread approvals",
-    "thread approve",
+    "review list",
+    "review approve",
     "thread captures",
-    "thread check-merge",
+    "review readiness",
     "thread current",
     "thread move",
     "watch",
@@ -262,7 +269,14 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // they emit the delegate's kind.
         "agent capture" => Some("capture"),
         "agent ready" => Some("ready"),
+        "discuss" => Some("discuss_open"),
+        "invite" => Some("auth_invite"),
+        "invite list" => Some("auth_invite_list"),
+        "thread ownership status" | "thread ownership claim" | "thread ownership resolve" => {
+            Some("thread_ownership")
+        }
         "start" => Some("thread_start"),
+        "import url" | "import status" => Some("import_operation"),
         // The garbage-collection wrapper emits its inner tool's kind.
         "maintenance gc" => Some("gc"),
         // `redact purge` preserves the pre-consolidation wire values.

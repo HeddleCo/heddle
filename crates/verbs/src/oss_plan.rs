@@ -16,13 +16,13 @@ pub struct GitOverlayGuide {
 /// Canonical git-overlay guide payload.
 pub const GIT_OVERLAY_GUIDE: GitOverlayGuide = GitOverlayGuide {
     topic: "git-overlay",
-    summary: "Use Heddle as the daily loop with automatic Git projection compatibility: status, diff, capture, start --path, ready, land, push, undo, verify.",
+    summary: "Use Heddle as the daily loop with automatic Git projection compatibility: status, diff, capture, start, ready, land, push, undo, verify.",
     steps: &[
         "heddle status",
         "heddle init",
         "heddle diff",
         "heddle capture -m <message>",
-        "heddle start <name> --path ../<name>",
+        "heddle start <name>",
         "heddle ready",
         "heddle land --thread <name>",
         "heddle push",

@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::path::Path;
 
-use crate::blame::{BlameSliceLimits, blame_file};
-
 use super::fixture::{principals_at, put_state_with_file, store};
+use crate::blame::{BlameSliceLimits, blame_file};
 
 #[test]
 fn linear_history_credits_introducing_authors() {

@@ -208,7 +208,7 @@ pub fn remote_untracked_action_for(
 }
 
 pub fn canonical_adopt_ref_command(ref_name: &str) -> String {
-    heddle_action(["adopt", "--ref", ref_name])
+    heddle_action(["import", "local", "--ref", ref_name])
 }
 
 pub fn canonical_git_import_ref_command(ref_name: &str) -> String {
@@ -226,7 +226,7 @@ pub fn canonical_git_repair_ref_preview_command(prefer: Option<&str>, ref_name: 
             prefer,
             "--ref",
             ref_name,
-            "--preview",
+            "--dry-run",
         ]),
         None => heddle_action([
             "maintenance",
@@ -235,7 +235,7 @@ pub fn canonical_git_repair_ref_preview_command(prefer: Option<&str>, ref_name: 
             "git",
             "--ref",
             ref_name,
-            "--preview",
+            "--dry-run",
         ]),
     }
 }

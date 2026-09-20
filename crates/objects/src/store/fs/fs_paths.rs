@@ -89,6 +89,14 @@ pub(super) fn redaction_path(root: &Path, blob: &ContentHash) -> PathBuf {
     redactions_dir(root).join(format!("{}.bin", blob.to_hex()))
 }
 
+pub(super) fn partial_trees_dir(root: &Path) -> PathBuf {
+    objects_dir(root).join("partial-trees")
+}
+
+pub(super) fn partial_tree_path(root: &Path, hash: &ContentHash) -> PathBuf {
+    partial_trees_dir(root).join(format!("{}.bin", hash.to_hex()))
+}
+
 pub(super) fn state_visibility_dir(root: &Path) -> PathBuf {
     root.join("visibility")
 }

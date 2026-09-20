@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! State-signature helpers that depend on crypto implementations.
 
-use objects::object::{ContentHash, StateSignature};
+use heddle_object_model::object::{ContentHash, StateSignature};
 
 use crate::{Signer, SignerError, state_signature_payload, verify_state_signature};
 

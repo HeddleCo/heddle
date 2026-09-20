@@ -14,9 +14,8 @@ use objects::{
     util::gitlink_placeholder_bytes,
     worktree::WorktreeStatus,
 };
-use tracing::{debug, instrument, trace, warn};
-
 use serde::{Deserialize, Serialize};
+use tracing::{debug, instrument, trace, warn};
 
 use super::{
     HeddleError, Repository, Result,
@@ -163,9 +162,19 @@ fn rewrite_single_tracked_file(
         descendant_trees.push(TreeWrite::descendant(updated_child, child_hash));
         TreeEntry::directory((*name).to_string(), updated_hash)?
     };
-    let mut updated = tree.clone();
-    updated.insert(replacement);
-    Ok(Some(updated))
+    // Rebuild as a flat V3 tree rather than `tree.clone().insert(..)`: the
+    // baseline may be V4, and `Tree::insert` on a V4 tree mints a random salt
+    // for the replaced entry — which would make this fast path emit a V4 root
+    // while the revalidation fingerprint walk builds V3, so the two never match
+    // and every capture that races an fs event spuriously Conflicts. Every
+    // other walker path emits V3 and lets the capture chokepoint apply the
+    // sticky-salt V4 conversion uniformly; this must too.
+    let mut entries: Vec<TreeEntry> = tree.entries().to_vec();
+    match entries.iter().position(|entry| entry.name() == *name) {
+        Some(index) => entries[index] = replacement,
+        None => entries.push(replacement),
+    }
+    Ok(Some(Tree::from_entries(entries)))
 }
 
 impl Repository {
@@ -546,6 +555,24 @@ impl Repository {
             && tree.hash() == *hash
         {
             return Ok(tree);
+        }
+        // P5: on a PARTIAL checkout the state's tree is held only as a redacted
+        // projection — `get_tree` (full-only) returns `None` and `require_tree`
+        // would fail loud with MissingObject, so `heddle status` on a partial
+        // clone crashes today. Resolve via `read_tree` and, for a partial root,
+        // compare against the VISIBLE-set tree: the withheld entries are unknown
+        // to this client by construction and were never written to the worktree
+        // (nor to the persisted index), so omitting them keeps status from
+        // mis-reporting a withheld entry as a local deletion. The visible-set
+        // tree is NOT cached (its hash ≠ the declared root).
+        match self.store.read_tree(hash)? {
+            objects::store::TreeRead::Partial(partial) => {
+                return partial.visible_tree().map_err(HeddleError::from);
+            }
+            objects::store::TreeRead::Full(_) | objects::store::TreeRead::Absent => {
+                // Fall through to the caching full-tree path (Absent surfaces as
+                // MissingObject there, unchanged).
+            }
         }
         let tree = self.require_tree(hash)?;
         if let Ok(bytes) = rmp_serde::to_vec_named(&tree)
@@ -1506,8 +1533,10 @@ fn append_ignore_file_patterns(patterns: &mut Vec<String>, path: &Path) -> Resul
 mod tests {
     use std::path::Path;
 
-    use objects::object::{ContentHash, LeafPolicy, Tree, TreeEntry, resolve_tree_path};
-    use objects::store::ObjectStore;
+    use objects::{
+        object::{ContentHash, LeafPolicy, Tree, TreeEntry, resolve_tree_path},
+        store::ObjectStore,
+    };
     use tempfile::TempDir;
 
     use crate::{

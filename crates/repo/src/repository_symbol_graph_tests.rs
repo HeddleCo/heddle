@@ -8,11 +8,9 @@ use objects::{
     object::{Attribution, OccurrenceRole, Principal, SemanticIndexRoot, StateId},
     store::ObjectStore,
 };
-
-use crate::SemanticGraphBind;
 use tempfile::TempDir;
 
-use crate::{Repository, ResolvedSemanticEdgeSet};
+use crate::{Repository, ResolvedSemanticEdgeSet, SemanticGraphBind};
 
 fn repo() -> (TempDir, Repository) {
     let temp = TempDir::new().unwrap();

@@ -10,7 +10,7 @@ use api::{
     descriptor_trust::{
         AttestedEndpointDescriptorEntry, EndpointDescriptorSetDocument, ephemeral_attestation_bytes,
     },
-    heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
+    heddle::api::common::{EndpointDescriptor, SignedEndpointDescriptor},
     signing::endpoint_descriptor_bytes,
 };
 use crypto::{Ed25519Signer, Signer};
@@ -30,6 +30,7 @@ const NOW_SKEW_AFTER: i64 = 60_000;
 
 #[tokio::test]
 async fn clean_first_contact_pins_the_root_and_reuses_without_rediscovery() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let server = server_with_root("first-key", &root, 2);
@@ -58,6 +59,7 @@ async fn clean_first_contact_pins_the_root_and_reuses_without_rediscovery() {
 
 #[tokio::test]
 async fn tls_authenticates_first_contact_and_configured_ca_allows_it() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let server = server_with_root("tls-key", &root, 1);
@@ -83,6 +85,7 @@ async fn tls_authenticates_first_contact_and_configured_ca_allows_it() {
 
 #[tokio::test]
 async fn failed_tls_chain_is_rejected_outright() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let server = server_with_root("tls-fail", &root, 1);
@@ -97,6 +100,7 @@ async fn failed_tls_chain_is_rejected_outright() {
 
 #[tokio::test]
 async fn invalid_key_documents_and_unverified_candidates_never_pin() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let cases = [
         ("malformed", TestResponse::json(b"{".to_vec())),
         ("oversized", TestResponse::json(vec![b'x'; 4 * 1024 + 1])),
@@ -161,6 +165,7 @@ async fn invalid_key_documents_and_unverified_candidates_never_pin() {
 
 #[tokio::test]
 async fn unattested_and_tampered_entries_are_never_dialed() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let ephemeral = Ed25519Signer::generate().unwrap();
@@ -195,6 +200,7 @@ async fn unattested_and_tampered_entries_are_never_dialed() {
 
 #[tokio::test]
 async fn ephemeral_rotation_under_the_pinned_root_does_not_change_the_pin() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let first_ephemeral = Ed25519Signer::generate().unwrap();
@@ -236,6 +242,7 @@ async fn ephemeral_rotation_under_the_pinned_root_does_not_change_the_pin() {
 
 #[tokio::test]
 async fn served_set_cannot_swap_the_pinned_root() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let other = Ed25519Signer::generate().unwrap();
@@ -288,6 +295,7 @@ async fn served_set_cannot_swap_the_pinned_root() {
 
 #[tokio::test]
 async fn expired_and_not_yet_valid_entries_are_excluded() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let now = chrono::Utc::now().timestamp_millis();
@@ -332,6 +340,7 @@ async fn expired_and_not_yet_valid_entries_are_excluded() {
 
 #[tokio::test]
 async fn region_preference_selects_local_then_falls_back_to_remote() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let remote_ephemeral = Ed25519Signer::generate().unwrap();
@@ -396,6 +405,7 @@ async fn region_preference_selects_local_then_falls_back_to_remote() {
 #[cfg(unix)]
 #[tokio::test]
 async fn trust_store_write_failure_prevents_iroh_and_iroh_failure_keeps_pin() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     use std::os::unix::fs::PermissionsExt;
 
     with_isolated_home_async(|_| async {
@@ -440,6 +450,7 @@ async fn trust_store_write_failure_prevents_iroh_and_iroh_failure_keeps_pin() {
 
 #[tokio::test]
 async fn explicit_pair_skips_discovery_and_old_server_failure_is_actionable() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let server = TestHttpsServer::start(HashMap::from([(
@@ -477,6 +488,7 @@ async fn explicit_pair_skips_discovery_and_old_server_failure_is_actionable() {
 
 #[tokio::test]
 async fn missing_iroh_endpoint_is_named_and_never_downgrades() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     with_isolated_home_async(|_| async {
         let root = Ed25519Signer::generate().unwrap();
         let server = TestHttpsServer::start(HashMap::from([(
@@ -626,8 +638,9 @@ fn trusted_config(server: &TestHttpsServer) -> config::ClientConfig {
         .with_tls_ca_certificate_pem(server.certificate_pem().to_string())
 }
 
-// HEDDLE_HOME is process-global, so this test helper deliberately holds the
-// repository's shared environment lock across each async scenario.
+// reason: HEDDLE_HOME is process-global, so this test helper deliberately holds
+// the shared environment lock across each async scenario (payload `()`, single
+// per-test runtime — no other task contends for the guard, no deadlock).
 #[allow(clippy::await_holding_lock)]
 async fn with_isolated_home_async<F, Fut, T>(test: F) -> T
 where

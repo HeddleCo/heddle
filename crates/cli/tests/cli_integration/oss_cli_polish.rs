@@ -31,11 +31,11 @@ fn git_overlay_guide_is_concise_and_actionable() {
     assert!(
         help.contains("Worktree has unsaved edits")
             && help.contains("Move atomically to the full Native Heddle feature set")
-            && help.contains("heddle adopt --ref <branch>"),
+            && help.contains("heddle import local --ref <branch>"),
         "guide should name concrete recovery states instead of vague Git/Heddle disagreement: {help}"
     );
     assert!(
-        help.contains("heddle start <name> --path ../<name>"),
+        help.contains("heddle start <name>"),
         "guide should teach isolated threads with the real start argument name: {help}"
     );
     assert!(
@@ -81,7 +81,7 @@ fn git_projection_help_topic_distinguishes_native_projection_from_overlay() {
         "git projection topic should open with the workflow, not advanced notes metadata: {help}"
     );
     for needle in [
-        "heddle adopt --ref <branch>",
+        "heddle import local --ref <branch>",
         "heddle bridge git import --path <git-repository> --ref <branch>",
         "heddle bridge git export --destination <bare-git-repository>",
         "heddle sync git --path <git-repository>",
@@ -114,7 +114,7 @@ fn bridge_git_import_help_names_the_explicit_git_importer() {
 
 #[test]
 fn adopt_help_does_not_claim_dirty_git_worktree_becomes_clean() {
-    let help = heddle_help(&["adopt", "--help"]);
+    let help = heddle_help(&["import", "local", "--help"]);
     assert!(
         help.contains("makes Heddle the source authority")
             && help.contains("retains `.git` for explicit Git Projection")
@@ -313,18 +313,20 @@ fn native_dirty_status_blocks_verification_without_git_overlay_language() {
 
     let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
     assert!(
-        text.contains("Verification: 1 Heddle worktree path(s) are not captured"),
-        "native dirty status should name the verify blocker: {text}"
+        text.contains("dirty") && text.contains("work.txt"),
+        "native dirty status should name the unsaved path: {text}"
     );
     assert!(
         !text.contains("Git overlay:"),
         "native Heddle status should not use Git-overlay labeling: {text}"
     );
     assert!(
-        text.contains("Changes not yet saved")
-            && text.contains("heddle capture -m \"...\"")
-            && !text.contains("Git checkpoint"),
+        text.contains("heddle capture -m \"...\"") && !text.contains("Git checkpoint"),
         "native Heddle status should describe unsaved work with capture language: {text}"
+    );
+    assert!(
+        !text.contains("Verification:") && !text.contains("Work in progress"),
+        "default status should not repeat verification/WIP chrome: {text}"
     );
 }
 
@@ -433,11 +435,27 @@ fn first_status_before_capture_names_default_identity() {
     assert!(output.status.success(), "status should succeed");
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(
-        text.contains("Identity:")
-            && text.contains("first capture")
-            && text.contains("Unknown <unknown@example.com>")
-            && text.contains("HEDDLE_PRINCIPAL_NAME"),
-        "first-run status should make default attribution explicit before capture: {text}"
+        text.contains("main")
+            && text.contains("native")
+            && text.contains("heddle capture -m \"...\""),
+        "compact first-run status should name the thread and the capture next step: {text}"
+    );
+    assert!(
+        !text.contains("Identity:") && !text.contains("Heddle status"),
+        "compact first-run status should not repeat long-form identity chrome: {text}"
+    );
+
+    let verbose =
+        heddle_output_without_principal_env(&["-v", "status", "--output", "text"], temp.path())
+            .expect("verbose status output");
+    assert!(verbose.status.success(), "verbose status should succeed");
+    let verbose_text = String::from_utf8_lossy(&verbose.stdout);
+    assert!(
+        verbose_text.contains("Identity:")
+            && verbose_text.contains("first capture")
+            && verbose_text.contains("Unknown <unknown@example.com>")
+            && verbose_text.contains("HEDDLE_PRINCIPAL_NAME"),
+        "verbose first-run status should make default attribution explicit before capture: {verbose_text}"
     );
 }
 
@@ -530,13 +548,23 @@ fn git_overlay_isolated_checkout_status_and_verify_identify_parent_context() {
     let status_text =
         heddle(&["status", "--output", "text"], Some(&checkout)).expect("status text");
     assert!(
-        status_text.contains("Repository: Git + Heddle isolated checkout")
-            && status_text.contains(&format!("Parent repo: {parent_repo}"))
-            && status_text
+        status_text.contains("feature/git-overlay-child")
+            && status_text.contains("native")
+            && status_text.contains("up to date")
+            && !status_text.contains("Repository: native-heddle")
+            && !status_text.contains("Repository: Git + Heddle isolated checkout"),
+        "compact status should name the isolated thread without long-form repository chrome: {status_text}"
+    );
+    let status_verbose = heddle(&["-v", "status", "--output", "text"], Some(&checkout))
+        .expect("verbose status text");
+    assert!(
+        status_verbose.contains("Repository: Git + Heddle isolated checkout")
+            && status_verbose.contains(&format!("Parent repo: {parent_repo}"))
+            && status_verbose
                 .contains("Git checkout: no .git here; raw Git commands belong in the parent repo")
-            && status_text.contains("Target thread: main")
-            && !status_text.contains("Repository: native-heddle"),
-        "status text should surface managed Git-overlay child context: {status_text}"
+            && status_verbose.contains("Target thread: main")
+            && !status_verbose.contains("Repository: native-heddle"),
+        "verbose status should surface managed Git-overlay child context: {status_verbose}"
     );
 
     let verify = json_value(&checkout, &["verify", "--output", "json"]);
@@ -1541,7 +1569,7 @@ fn op_id_local_dedup_is_cross_process_safe() {
     // second `(op-id, verb)` slot from being claimed.
     let store = OperationDedupStore::open(repo_path.join(".heddle")).unwrap();
     assert_eq!(
-        store.len(),
+        store.len().expect("count"),
         1,
         "exactly one dedup entry should persist for the shared op-id"
     );
@@ -1592,16 +1620,30 @@ fn op_id_replays_first_contact_init_adopt_and_clone() {
     let adopt_op_id = objects::object::OperationId::new().to_string();
     let adopt_first = json_value(
         git_repo.path(),
-        &["--output", "json", "--op-id", &adopt_op_id, "adopt"],
+        &[
+            "--output",
+            "json",
+            "--op-id",
+            &adopt_op_id,
+            "import",
+            "local",
+        ],
     );
-    assert_eq!(adopt_first["action"], "adopt");
+    assert_eq!(adopt_first["action"], "import");
     assert_eq!(adopt_first["op_id"], adopt_op_id);
     assert_eq!(adopt_first["idempotency_status"], "executed");
     let adopt_replay = json_value(
         git_repo.path(),
-        &["--output", "json", "--op-id", &adopt_op_id, "adopt"],
+        &[
+            "--output",
+            "json",
+            "--op-id",
+            &adopt_op_id,
+            "import",
+            "local",
+        ],
     );
-    assert_eq!(adopt_replay["action"], "adopt");
+    assert_eq!(adopt_replay["action"], "import");
     assert_eq!(adopt_replay["idempotency_status"], "replayed");
 
     let source = TempDir::new().unwrap();
@@ -1654,10 +1696,10 @@ fn bootstrap_op_ids_are_scoped_to_first_contact_repo_path() {
     let first_adopt = json_value(
         first.path(),
         &[
-            "--output", "json", "--op-id", op_id, "adopt", "--ref", "main",
+            "--output", "json", "--op-id", op_id, "import", "local", "--ref", "main",
         ],
     );
-    assert_eq!(first_adopt["action"], "adopt");
+    assert_eq!(first_adopt["action"], "import");
     assert_eq!(first_adopt["op_id"], op_id);
     assert_eq!(first_adopt["idempotency_status"], "executed");
 
@@ -1669,10 +1711,10 @@ fn bootstrap_op_ids_are_scoped_to_first_contact_repo_path() {
     let second_adopt = json_value(
         second.path(),
         &[
-            "--output", "json", "--op-id", op_id, "adopt", "--ref", "main",
+            "--output", "json", "--op-id", op_id, "import", "local", "--ref", "main",
         ],
     );
-    assert_eq!(second_adopt["action"], "adopt");
+    assert_eq!(second_adopt["action"], "import");
     assert_eq!(second_adopt["op_id"], op_id);
     assert_eq!(
         second_adopt["idempotency_status"], "executed",
@@ -1685,7 +1727,8 @@ fn bootstrap_op_ids_are_scoped_to_first_contact_repo_path() {
             "json",
             "--op-id",
             op_id,
-            "adopt",
+            "import",
+            "local",
             "--ref",
             "refs/heads/main",
         ],
@@ -1701,8 +1744,8 @@ fn bootstrap_op_ids_are_scoped_to_first_contact_repo_path() {
         .unwrap_or_else(|err| panic!("conflict should be a JSON envelope: {err}: {stderr}"));
     assert_eq!(parsed["kind"], "op_id_conflict");
     assert_eq!(parsed["op_id"], op_id);
-    assert_eq!(parsed["recorded_command"], "adopt");
-    assert_eq!(parsed["incoming_command"], "adopt");
+    assert_eq!(parsed["recorded_command"], "import local");
+    assert_eq!(parsed["incoming_command"], "import local");
     assert!(
         parsed["dedup_scope"].as_str().is_some_and(
             |scope| scope.contains(second.path().file_name().unwrap().to_str().unwrap())
@@ -1722,9 +1765,9 @@ fn bootstrap_op_id_reused_by_capture_conflicts_before_noop_execution() {
     let op_id = objects::object::OperationId::new().to_string();
     let adopt = json_value(
         temp.path(),
-        &["--output", "json", "--op-id", &op_id, "adopt"],
+        &["--output", "json", "--op-id", &op_id, "import", "local"],
     );
-    assert_eq!(adopt["action"], "adopt");
+    assert_eq!(adopt["action"], "import");
     assert_eq!(adopt["idempotency_status"], "executed");
 
     let conflict = heddle_output(
@@ -1754,7 +1797,7 @@ fn bootstrap_op_id_reused_by_capture_conflicts_before_noop_execution() {
     assert_eq!(parsed["kind"], "op_id_conflict");
     assert_eq!(parsed["op_id"], op_id);
     assert_eq!(parsed["idempotency_status"], "conflict");
-    assert_eq!(parsed["recorded_command"], "adopt");
+    assert_eq!(parsed["recorded_command"], "import local");
     assert_eq!(parsed["incoming_command"], "capture");
     assert_eq!(parsed["recorded_status"], "completed");
 }
@@ -1765,7 +1808,7 @@ fn op_id_replays_export_git() {
     init_git_repo_for_json_contract(temp.path(), "main");
     std::fs::write(temp.path().join("tracked.txt"), "export me\n").unwrap();
     git_commit_all_for_json_contract(temp.path(), "seed");
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    heddle(&["import", "local"], Some(temp.path())).unwrap();
 
     let export_dest = temp.path().join("export.git");
     let export_dest_arg = export_dest.display().to_string();
@@ -2321,7 +2364,7 @@ fn query_reads_live_oplog_before_operation_index_is_warm() {
 fn core_loop_schemas_are_discoverable() {
     for verb in [
         "init",
-        "adopt",
+        "import local",
         "capture",
         "doctor",
         "doctor docs",
@@ -4228,6 +4271,7 @@ fn start_default_path_lands_under_heddle_threads() {
     git_commit_all_for_json_contract(temp.path(), "seed");
     initialize_direct_git_overlay_for_polish_tests(temp.path());
 
+    let leaf = temp.path().file_name().unwrap();
     for (mode, name) in [("solid", "solid-thread"), ("materialized", "mat-thread")] {
         let started = json_value(
             temp.path(),
@@ -4239,14 +4283,20 @@ fn start_default_path_lands_under_heddle_threads() {
             .unwrap_or_else(|| {
                 panic!("{mode} start output should carry a checkout path: {started}")
             });
-        let needle = format!("/.heddle/threads/{name}");
+        let expected = temp
+            .path()
+            .join(".heddle")
+            .join("threads")
+            .join(name)
+            .join(leaf);
         assert!(
-            path.contains(&needle),
-            "{mode} thread should default under .heddle/threads/<name> (got {path})"
+            path.contains("/.heddle/threads/") && path.contains(name),
+            "{mode} thread should default under .heddle/threads/ (got {path})"
         );
         assert!(
-            std::path::Path::new(path).join(".heddle").exists(),
-            "{mode} checkout should be materialized at {path}"
+            expected.join(".heddle").exists(),
+            "{mode} checkout should be materialized at {}: {started}",
+            expected.display()
         );
     }
 }
@@ -4259,7 +4309,14 @@ fn parent_status_ignores_default_thread_checkout_under_heddle() {
     git_commit_all_for_json_contract(temp.path(), "seed");
     initialize_direct_git_overlay_for_polish_tests(temp.path());
 
-    // A default `start` drops a full checkout under `.heddle/threads/<name>`.
+    // An explicit checkout under `.heddle/threads/<name>` must not pollute
+    // parent status. (Omitted `--path` also defaults under `.heddle/threads/`.)
+    let managed = temp
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("pollution-check")
+        .join(temp.path().file_name().unwrap());
     json_value(
         temp.path(),
         &[
@@ -4269,17 +4326,13 @@ fn parent_status_ignores_default_thread_checkout_under_heddle() {
             "pollution-check",
             "--workspace",
             "materialized",
+            "--path",
+            managed.to_str().unwrap(),
         ],
     );
     assert!(
-        temp.path()
-            .join(".heddle")
-            .join("threads")
-            .join("pollution-check")
-            .join(temp.path().file_name().unwrap())
-            .join(".heddle")
-            .exists(),
-        "thread checkout should materialize under .heddle/threads/"
+        managed.join(".heddle").exists(),
+        "thread checkout should materialize under .heddle/threads/<name>/<repo-name>"
     );
 
     // Git itself must not see the checkout — `.heddle/` lives in
@@ -5463,7 +5516,7 @@ fn verify_plain_git_blocker_text_is_not_redundant() {
     );
 
     let adopt = heddle(
-        &["adopt", "--ref", "main", "--output", "text"],
+        &["import", "local", "--ref", "main", "--output", "text"],
         Some(temp.path()),
     )
     .expect("adopt should render text");
@@ -5575,7 +5628,8 @@ fn initialized_git_overlay_status_and_ready_do_not_claim_actionable_readiness() 
     let status_text = heddle(&["status", "--output", "text"], Some(temp.path()))
         .expect("status should render clean direct Git-backed text");
     assert!(
-        status_text.contains("Verdict: clean") && status_text.contains("Git + Heddle"),
+        status_text.contains("up to date")
+            && (status_text.contains("git-overlay") || status_text.contains("main")),
         "initialized Git-overlay status should be calm and clean: {status_text}"
     );
 
@@ -5863,23 +5917,23 @@ fn thread_list_groups_threads_by_user_workflow() {
 
     let output = heddle(&["--output", "text", "thread", "list"], Some(temp.path())).unwrap();
     assert!(
-        output.contains("Current"),
-        "thread list should group current work: {output}"
+        output.contains("* main") && output.contains("this checkout"),
+        "thread list should mark the current checkout: {output}"
     );
     assert!(
-        output.contains("Ready to merge"),
-        "thread list should group mergeable work: {output}"
+        output.contains("feature-work"),
+        "thread list should name other threads: {output}"
     );
     assert!(
-        output.contains("next step:"),
-        "thread list should use consistent next-step copy: {output}"
+        !output.contains("Threads in") && !output.contains("Repository:"),
+        "default thread list should drop doubled repository chrome: {output}"
     );
     assert!(
-        !output.contains("    next:"),
-        "thread list should not use the older lowercase next label: {output}"
+        !output.contains("    next:") && !output.contains("next step:"),
+        "default thread list should not use nested next-step copy: {output}"
     );
     assert!(
-        !output.contains("lifecycle:") && !output.contains("git tip:"),
+        !output.contains("lifecycle:") && !output.contains("git tip:") && !output.contains("●"),
         "default thread list should keep internal state and Git tips out of the first-run view: {output}"
     );
     let verbose = heddle(
@@ -6078,8 +6132,9 @@ fn quiet_no_color_and_narrow_text_outputs_preserve_global_contract() {
         "narrow text status should not need stderr: {narrow_stderr}"
     );
     assert!(
-        narrow_stdout.contains("Heddle status") && narrow_stdout.contains("Verdict:"),
-        "narrow status should retain the primary labels: {narrow_stdout}"
+        narrow_stdout.contains("main")
+            && (narrow_stdout.contains("dirty") || narrow_stdout.contains("up to date")),
+        "narrow status should retain the compact header: {narrow_stdout}"
     );
     assert!(
         !narrow_stdout.contains('\u{1b}'),
@@ -6148,7 +6203,7 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "status"],
-        &["Heddle status", "Verdict:"],
+        &["main", "dirty"],
     );
     assert_text_surface(
         temp.path(),
@@ -6178,7 +6233,7 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "thread", "list"],
-        &["Current"],
+        &["* main", "this checkout"],
     );
     assert_text_surface(
         temp.path(),
@@ -6186,11 +6241,11 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
         &["main"],
     );
     // The `Repository:` mode preamble is dropped from the default read
-    // view (heddle#275); the everyday surface leads with verification state.
+    // view (heddle#275); the everyday surface leads with the compact header.
     assert_text_surface(
         temp.path(),
         vec!["--quiet", "--output", "text", "status"],
-        &["Verdict"],
+        &["dirty"],
     );
     assert_text_surface(
         temp.path(),
@@ -6222,7 +6277,8 @@ fn narrow_no_color_text_outputs_cover_everyday_read_surfaces() {
     assert!(ready.stderr.is_empty(), "ready should keep stderr quiet");
     let ready_stdout = String::from_utf8_lossy(&ready.stdout);
     assert!(
-        !ready_stdout.contains('\u{1b}') && ready_stdout.contains("Readiness"),
+        !ready_stdout.contains('\u{1b}')
+            && (ready_stdout.contains("Readiness") || ready_stdout.contains("Next:")),
         "ready narrow text should be no-color and retain labels: {ready_stdout}"
     );
     assert!(
@@ -6389,7 +6445,7 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         );
     }
     // One ranked list: the remaining non-hidden roots render too.
-    for verb in ["thread", "adopt", "verify"] {
+    for verb in ["thread", "import", "verify"] {
         assert!(
             stdout.contains(&format!("\n  {verb}")),
             "non-hidden root `{verb}` should be on the ranked screen: {stdout}"
@@ -6412,7 +6468,7 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         stdout.contains("Save: heddle init -> heddle capture -m \"...\"")
             && !stdout.contains("-> heddle commit ->")
             && stdout
-                .contains("Isolated work: heddle start <name> --path ../<name> -> heddle capture -m \"...\" -> heddle ready -> heddle land"),
+                .contains("Isolated work: heddle start <name> -> heddle capture -m \"...\" -> heddle ready -> heddle land"),
         "default help should teach native capture-as-save, not overlay commit: {stdout}"
     );
     assert!(
@@ -6829,10 +6885,8 @@ fn workspace_bare_command_defaults_to_show() {
     let text = heddle(&["--output", "text", "status"], Some(temp.path()))
         .expect("status should render the canonical workspace view");
     assert!(
-        text.contains("Heddle status")
-            && text.contains("Thread:")
-            && text.contains("Changed paths:"),
-        "status should render the canonical workspace summary, not subcommand help: {text}"
+        text.contains("main") && text.contains("native"),
+        "status should render the compact workspace summary, not subcommand help: {text}"
     );
     assert!(
         !text.contains("git tip:") && !text.contains("    next:"),
@@ -6909,26 +6963,29 @@ fn command_catalog_exposes_public_surface_for_agents() {
             .is_some_and(|summary| summary.contains("Import Git commits")),
         "runtime import surface should be exposed by the command catalog: {import_git}"
     );
-    let adopt = commands
+    let local_import = commands
         .iter()
-        .find(|entry| entry["display"] == "adopt")
-        .expect("adopt command should be cataloged");
+        .find(|entry| entry["display"] == "import local")
+        .expect("import local command should be cataloged");
     assert_eq!(
-        adopt["command_action"]["action"],
-        "heddle adopt --ref <branch>"
+        local_import["command_action"]["action"],
+        "heddle import local --ref <branch>"
     );
-    assert_eq!(adopt["command_action"]["executable"], false);
-    assert_eq!(adopt["command_action"]["argv"], Value::Null);
+    assert_eq!(local_import["command_action"]["executable"], false);
+    assert_eq!(local_import["command_action"]["argv"], Value::Null);
     assert_eq!(
-        adopt["command_action"]["template"]["argv_template"],
-        heddle_argv_json(["adopt", "--ref", "<branch>"])
+        local_import["command_action"]["template"]["argv_template"],
+        heddle_argv_json(["import", "local", "--ref", "<branch>"])
     );
     assert_eq!(
-        adopt["command_action"]["template"]["required_inputs"],
+        local_import["command_action"]["template"]["required_inputs"],
         serde_json::json!(["branch"])
     );
-    assert_eq!(adopt["command_action"]["template"]["agent_may_fill"], true);
-    for display in ["init", "adopt", "clone"] {
+    assert_eq!(
+        local_import["command_action"]["template"]["agent_may_fill"],
+        true
+    );
+    for display in ["init", "import local", "clone"] {
         let entry = commands
             .iter()
             .find(|entry| entry["display"] == display)
@@ -7736,8 +7793,10 @@ fn discuss_resolve_by_edit_emits_resolved_state_json() {
         temp.path(),
         &[
             "discuss",
-            "open",
+            "--new",
+            "--path",
             "src/lib.rs",
+            "--symbol",
             "foo",
             "Please keep this rationale",
             "--state",
@@ -7746,7 +7805,7 @@ fn discuss_resolve_by_edit_emits_resolved_state_json() {
     );
     let discussion_id = opened["discussion"]["id"]
         .as_str()
-        .expect("discuss open should return an id")
+        .expect("discuss --new should return an id")
         .to_string();
     let resolved_state_id = opened["discussion"]["anchor"]["state_id"]
         .as_str()
@@ -7793,12 +7852,11 @@ fn discuss_open_named_flags_records_thread_ref() {
         temp.path(),
         &[
             "discuss",
-            "open",
-            "--file",
+            "--new",
+            "--path",
             "src/lib.rs",
             "--symbol",
             "foo",
-            "--body",
             "Keep the thread context attached",
             "--thread",
             "refs/heads/feature/foo",
@@ -7821,15 +7879,17 @@ fn discuss_resolve_into_annotation_creates_context_annotation() {
         temp.path(),
         &[
             "discuss",
-            "open",
+            "--new",
+            "--path",
             "src/lib.rs",
+            "--symbol",
             "foo",
             "Please preserve this invariant",
         ],
     );
     let discussion_id = opened["discussion"]["id"]
         .as_str()
-        .expect("discuss open should return an id");
+        .expect("discuss --new should return an id");
 
     let op_id = "11111111-1111-4111-8111-111111111111";
     let resolved = json_value(
@@ -7923,6 +7983,112 @@ fn discuss_resolve_into_annotation_creates_context_annotation() {
         ids,
         vec![annotation_id],
         "replaying resolve --into-annotation must not mint a second context row: {after}"
+    );
+}
+
+#[test]
+fn discuss_write_path_file_body_short_id_and_turn() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    std::fs::create_dir_all(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/lib.rs"), "fn greet() {}\n").unwrap();
+    heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
+    std::fs::write(temp.path().join("why.md"), "why greet?\n").unwrap();
+
+    let opened = json_value(
+        temp.path(),
+        &[
+            "discuss",
+            "--new",
+            "--path",
+            "src/lib.rs",
+            "--file",
+            "why.md",
+        ],
+    );
+    assert_eq!(opened["output_kind"], "discuss_open");
+    assert_eq!(opened["discussion"]["anchor"]["path"], "src/lib.rs");
+    assert_eq!(opened["discussion"]["turns"][0]["body"], "why greet?");
+    let full_id = opened["discussion"]["id"]
+        .as_str()
+        .expect("full disc- id")
+        .to_string();
+    assert!(full_id.starts_with("disc-") && full_id.len() > "disc-".len() + 8);
+    let short = format!("disc-{}", &full_id.trim_start_matches("disc-")[..8]);
+    assert!(
+        opened["operation_id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("co-"))
+    );
+
+    let text = heddle(
+        &[
+            "discuss",
+            "--new",
+            "--path",
+            "src/lib.rs",
+            "--symbol",
+            "greet",
+            "why greet?",
+        ],
+        Some(temp.path()),
+    )
+    .expect("text discuss --new");
+    assert!(
+        text.contains("opened disc-") && text.contains("src/lib.rs:greet"),
+        "text write should print short id and anchor: {text}"
+    );
+    assert!(
+        !text.contains("co-"),
+        "text default should omit the co- operation id: {text}"
+    );
+
+    let verbose = heddle(
+        &["-v", "discuss", "--id", &full_id, "second thought"],
+        Some(temp.path()),
+    )
+    .expect("verbose discuss --id");
+    assert!(
+        verbose.contains("appended disc-") && verbose.contains("co-"),
+        "-v should print the co- line: {verbose}"
+    );
+    assert!(
+        verbose.contains(&short),
+        "text write should still name the short disc- id: {verbose}"
+    );
+
+    let replied = json_value(
+        temp.path(),
+        &[
+            "discuss",
+            "--id",
+            &full_id,
+            "--turn",
+            "1",
+            "reply to that turn",
+        ],
+    );
+    assert_eq!(replied["output_kind"], "discuss_turn");
+    assert_eq!(
+        replied["discussion"]["turns"].as_array().map(Vec::len),
+        Some(3)
+    );
+}
+
+#[test]
+fn discuss_append_is_not_a_command() {
+    let temp = TempDir::new().unwrap();
+    heddle(&["init"], Some(temp.path())).unwrap();
+    let output = heddle_output(
+        &["discuss", "append", "disc-01a0afc6", "later"],
+        Some(temp.path()),
+    )
+    .expect("invoke discuss append");
+    assert!(!output.status.success(), "append must be absent");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Next:"),
+        "removed discuss append must not print a migration hint: {stderr}"
     );
 }
 
@@ -8345,7 +8511,7 @@ fn default_output_is_text_and_json_requires_explicit_flag() {
     assert!(default.status.success(), "default status should succeed");
     let default_stdout = String::from_utf8_lossy(&default.stdout);
     assert!(
-        default_stdout.contains("Heddle status"),
+        default_stdout.contains("main") && default_stdout.contains("dirty"),
         "default status should render text, not JSON: {default_stdout}"
     );
     assert!(
@@ -8705,8 +8871,8 @@ fn tty_auto_mode_renders_text_and_explicit_json_stays_json() {
     );
     let text_stdout = String::from_utf8_lossy(&text.stdout);
     assert!(
-        text_stdout.contains("Heddle status")
-            && text_stdout.contains("Verdict:")
+        text_stdout.contains("main")
+            && (text_stdout.contains("dirty") || text_stdout.contains("up to date"))
             && !text_stdout.trim_start().starts_with('{')
             && !text_stdout.contains('\u{1b}'),
         "auto mode on a TTY should render no-color human text: {text_stdout:?}"
@@ -9364,12 +9530,12 @@ fn freshly_initialized_repo_reports_clean_health() {
 
     let text = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
     assert!(
-        text.contains("Verdict: clean"),
+        text.contains("main") && !text.contains("needs_attention"),
         "a fresh init should be healthy, not 'needs_attention': {text}"
     );
     assert!(
-        !text.contains("Next step:"),
-        "a fresh init has nothing to recommend; the renderer should stay silent: {text}"
+        !text.contains("Next step:") && !text.contains("Verdict:"),
+        "a fresh init should not repeat the long-form verdict chrome: {text}"
     );
 
     let json = heddle(&["status", "--output", "json"], Some(temp.path())).unwrap();
@@ -9656,7 +9822,7 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
             .to_string()
     };
 
-    json_value(temp.path(), &["adopt", "--output", "json"]);
+    json_value(temp.path(), &["import", "local", "--output", "json"]);
     std::fs::write(temp.path().join("tracked.txt"), "heddle side\n").unwrap();
     let capture = heddle_output_with_env(
         &["capture", "-m", "heddle side", "--output", "json"],
@@ -9910,8 +10076,14 @@ fn read_commands_gate_repository_preamble_on_verbose() {
             .unwrap_or_else(|e| panic!("{label} default text should render: {e}"));
         if label == "status" {
             assert!(
-                default_text.contains("Repository:"),
-                "status text should retain repository context: {default_text}"
+                default_text.contains("main")
+                    && (default_text.contains("git-overlay")
+                        || default_text.contains("up to date")),
+                "status default text should retain the compact header: {default_text}"
+            );
+            assert!(
+                !default_text.contains("Repository:"),
+                "status default text should drop the mode preamble: {default_text}"
             );
         } else {
             assert!(

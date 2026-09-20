@@ -110,8 +110,8 @@ pub struct VisibilityPromoteArgs {
 
 #[derive(Clone, Debug, Args)]
 pub struct VisibilityShowArgs {
-    /// State to inspect.
-    pub state: String,
+    /// State to inspect. Defaults to HEAD.
+    pub state: Option<String>,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -130,9 +130,11 @@ mod tests {
             })
         );
         assert!(VisibilityTierArg::Restricted.into_tier(None).is_err());
-        assert!(VisibilityTierArg::Restricted
-            .into_tier(Some("   ".to_string()))
-            .is_err());
+        assert!(
+            VisibilityTierArg::Restricted
+                .into_tier(Some("   ".to_string()))
+                .is_err()
+        );
     }
 
     #[test]
@@ -175,5 +177,24 @@ mod tests {
         assert!(VisibilityTier::Public.is_strictly_less_restrictive_than(&private));
         // Promoting *to* private (a narrowing) is not an opening — use `set`.
         assert!(!private.is_strictly_less_restrictive_than(&VisibilityTier::Internal));
+    }
+
+    #[test]
+    fn show_defaults_state_when_omitted() {
+        use clap::Parser;
+
+        use crate::cli::{Cli, Commands, VisibilityCommands};
+
+        match Cli::try_parse_from(["heddle", "visibility", "show"])
+            .expect("visibility show without state")
+            .command
+        {
+            Commands::Visibility {
+                command: VisibilityCommands::Show(args),
+            } => {
+                assert!(args.state.is_none());
+            }
+            _ => panic!("expected visibility show"),
+        }
     }
 }

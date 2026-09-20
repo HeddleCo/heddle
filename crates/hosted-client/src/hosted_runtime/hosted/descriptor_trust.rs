@@ -362,6 +362,7 @@ mod tests {
 
     #[test]
     fn canonical_aliases_share_default_port_and_non_default_ports_do_not() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         for alias in [
             "API.Example",
             "https://api.example",
@@ -384,6 +385,7 @@ mod tests {
 
     #[test]
     fn canonical_authority_rejects_ambiguous_url_components() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         for invalid in [
             "http://api.example",
             "https://user@api.example",
@@ -397,6 +399,7 @@ mod tests {
 
     #[test]
     fn store_is_fail_closed_and_replacement_is_compare_and_swap() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|_| {
             let server = "https://api.example";
             let old = [0x11; 32];
@@ -432,6 +435,7 @@ mod tests {
 
     #[test]
     fn same_pair_concurrent_first_contact_converges() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|_| {
             let barrier = Arc::new(Barrier::new(2));
             let handles = (0..2)
@@ -461,6 +465,7 @@ mod tests {
 
     #[test]
     fn different_pair_concurrent_first_contact_preserves_the_winner() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|_| {
             let barrier = Arc::new(Barrier::new(2));
             let handles = [(0x55, "key-a"), (0x66, "key-b")]
@@ -507,6 +512,7 @@ mod tests {
 
     #[test]
     fn report_distinguishes_explicit_and_automatic_trust() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|_| {
             insert_verified_pin("https://api.example", "automatic-id", &[0x77; 32]).unwrap();
             let automatic = trust_report("https://API.example:443", None).unwrap();

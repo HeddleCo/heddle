@@ -28,7 +28,6 @@ use std::{
 };
 
 use anstyle::{Color, Style};
-
 use heddle_cli_args::Cli;
 
 /// Process-wide gate, encoded as a tristate atomic so tests can

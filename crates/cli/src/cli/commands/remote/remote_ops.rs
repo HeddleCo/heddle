@@ -22,7 +22,9 @@ use objects::{
     store::ObjectStore,
 };
 use refs::Head;
-use repo::{Repository, RepositoryCapability, SyncedThreadMetadata, ThreadManager};
+use repo::{
+    CommitGraphIndex, Repository, RepositoryCapability, SyncedThreadMetadata, ThreadManager,
+};
 use sley::{
     ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefChange, ReferenceTarget,
     RemoteConfigRefusal, RemoteConfigRemove, RemoteConfigSet, Repository as SleyRepository,
@@ -774,12 +776,12 @@ fn git_pull_lazy_advice() -> anyhow::Error {
     RecoveryAdvice::safety_refusal(
         "git_overlay_pull_lazy_unsupported",
         "Git Overlay pull cannot use --lazy",
-        "Pull the complete Git history, or adopt the repository before using native lazy transfer.",
+        "Pull the complete Git history, or run `heddle import local` before using native lazy transfer.",
         "the Git Overlay importer requires a complete commit and tree closure",
         "a partial fetch could publish a branch whose Heddle mapping cannot be completed",
         "Git refs, Heddle metadata, the index, and worktree were left unchanged",
         "heddle pull",
-        vec!["heddle pull".to_string(), "heddle adopt".to_string()],
+        vec!["heddle pull".to_string(), "heddle import local".to_string()],
     )
     .into()
 }
@@ -1130,6 +1132,11 @@ async fn pull_network_connected(
         }
     }
 
+    let track_to_update = options.local_thread.unwrap_or(options.remote_thread);
+    let track_tn = ThreadName::new(track_to_update);
+    let pre_target = repo.refs().get_thread(&track_tn)?;
+    let pre_head = repo.head_ref()?;
+
     let result = client
         .pull_with_depth_and_materialization(
             repo,
@@ -1183,9 +1190,30 @@ async fn pull_network_connected(
     };
     match parse_hosted_pull_result(options.remote_thread, options.local_thread, &fields) {
         HostedPullResult::Success { final_state } => {
-            let track_to_update = options.local_thread.unwrap_or(options.remote_thread);
             let mut changed = false;
             if let Some(final_state_id) = final_state_id {
+                validate_hosted_pull_advance(
+                    repo,
+                    &track_tn,
+                    pre_target,
+                    &pre_head,
+                    final_state_id,
+                )?;
+                let pre_target_str = pre_target.as_ref().map(|s| s.to_string());
+                changed = pull_tip_changed(pre_target_str.as_deref(), final_state.as_deref());
+                if changed {
+                    let should_materialize =
+                        pull_should_materialize(options.plan.will_materialize, options.lazy);
+                    publish_hosted_pull_advance(
+                        repo,
+                        options.remote_thread,
+                        &track_tn,
+                        pre_target,
+                        &pre_head,
+                        final_state_id,
+                        should_materialize,
+                    )?;
+                }
                 let pulled_thread_metadata = if options.local_thread.is_some() {
                     Some(
                         client
@@ -1234,38 +1262,6 @@ async fn pull_network_connected(
                         }
                     }
                 };
-                let track_tn = ThreadName::new(track_to_update);
-                let pre_target = repo.refs().get_thread(&track_tn)?;
-                let pre_target_str = pre_target.as_ref().map(|s| s.to_string());
-                changed = pull_tip_changed(pre_target_str.as_deref(), final_state.as_deref());
-                if changed {
-                    let head_ref = repo.head_ref()?;
-                    let should_materialize =
-                        pull_should_materialize(options.plan.will_materialize, options.lazy);
-                    if should_materialize {
-                        match (&head_ref, pre_target) {
-                            (Head::Attached { .. }, Some(_)) => {
-                                super::super::ff_record::record_ff_advance(
-                                    repo,
-                                    options.remote_thread,
-                                    &final_state_id,
-                                )?;
-                            }
-                            (Head::Attached { .. }, None) => {
-                                repo.fast_forward_attached_from_materialized_state(
-                                    &final_state_id,
-                                    None,
-                                )?;
-                            }
-                            (Head::Detached { .. }, _) => {
-                                repo.goto(&final_state_id)?;
-                                repo.set_thread_recorded(&track_tn, &final_state_id)?;
-                            }
-                        }
-                    } else {
-                        repo.set_thread_recorded(&track_tn, &final_state_id)?;
-                    }
-                }
                 save_pulled_thread_metadata(
                     repo,
                     track_to_update,
@@ -1366,6 +1362,78 @@ async fn pull_network_connected(
         }
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "client")]
+fn validate_hosted_pull_advance(
+    repo: &Repository,
+    track: &ThreadName,
+    pre_target: Option<StateId>,
+    pre_head: &Head,
+    final_state: StateId,
+) -> Result<()> {
+    let current_target = repo.refs().get_thread(track)?;
+    if current_target != pre_target {
+        anyhow::bail!(
+            "hosted pull refused because local thread '{track}' moved during transfer (was {}, now {})",
+            pre_target
+                .map(|state| state.to_string_full())
+                .unwrap_or_else(|| "missing".to_string()),
+            current_target
+                .map(|state| state.to_string_full())
+                .unwrap_or_else(|| "missing".to_string())
+        );
+    }
+    let current_head = repo.head_ref()?;
+    if &current_head != pre_head {
+        anyhow::bail!("hosted pull refused because HEAD moved during transfer");
+    }
+    if let Some(previous) = pre_target
+        && previous != final_state
+        && !CommitGraphIndex::new(repo).is_ancestor(&previous, &final_state)?
+    {
+        anyhow::bail!(
+            "hosted pull found divergent history for thread '{track}': local {} is not an ancestor of hosted {}; integrate explicitly or pull into a new local thread",
+            previous.to_string_full(),
+            final_state.to_string_full()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "client")]
+fn publish_hosted_pull_advance(
+    repo: &Repository,
+    remote_thread: &str,
+    track: &ThreadName,
+    pre_target: Option<StateId>,
+    pre_head: &Head,
+    final_state: StateId,
+    materialize: bool,
+) -> Result<()> {
+    validate_hosted_pull_advance(repo, track, pre_target, pre_head, final_state)?;
+    if !materialize {
+        repo.set_thread_recorded(track, &final_state)?;
+        return Ok(());
+    }
+    match (pre_head, pre_target) {
+        (Head::Attached { thread }, Some(_)) if thread == track => {
+            super::super::ff_record::record_ff_advance(repo, remote_thread, &final_state)?;
+        }
+        (Head::Attached { thread }, None) if thread == track => {
+            repo.fast_forward_attached_from_materialized_state(&final_state, None)?;
+        }
+        (Head::Detached { .. }, _) => {
+            repo.goto(&final_state)?;
+            repo.set_thread_recorded(track, &final_state)?;
+        }
+        (Head::Attached { thread }, _) => {
+            anyhow::bail!(
+                "hosted pull planned to materialize thread '{track}', but HEAD is attached to '{thread}'"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1798,7 +1866,38 @@ struct PullNetworkOptions<'a> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "client")]
+    use tempfile::TempDir;
+
     use super::*;
+
+    #[cfg(feature = "client")]
+    fn snapshot_file(repo: &Repository, root: &Path, body: &str) -> StateId {
+        std::fs::write(root.join("tracked.txt"), body).expect("write fixture");
+        repo.snapshot(Some(body.trim().to_string()), None)
+            .expect("snapshot fixture")
+            .state_id
+    }
+
+    #[cfg(feature = "client")]
+    fn reset_attached(repo: &Repository, state: StateId) {
+        let main = ThreadName::new("main");
+        repo.goto_discard_local(&state)
+            .expect("materialize fixture");
+        repo.set_thread_recorded(&main, &state).expect("reset main");
+        repo.write_head_recorded(&Head::Attached { thread: main })
+            .expect("attach main");
+    }
+
+    #[cfg(feature = "client")]
+    fn linear_fixture() -> (TempDir, Repository, StateId, StateId) {
+        let temp = TempDir::new().expect("fixture directory");
+        let repo = Repository::init_default(temp.path()).expect("fixture repository");
+        let first = snapshot_file(&repo, temp.path(), "state A\n");
+        let second = snapshot_file(&repo, temp.path(), "state B\n");
+        reset_attached(&repo, first);
+        (temp, repo, first, second)
+    }
 
     #[test]
     fn git_pull_progress_keeps_transfer_phase_and_exact_counts() {
@@ -1836,5 +1935,63 @@ mod tests {
         assert_eq!(format_transfer_bytes(42), "42 B");
         assert_eq!(format_transfer_bytes(1536), "1.5 KiB");
         assert_eq!(format_transfer_bytes(3 * 1024 * 1024), "3.0 MiB");
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_pull_materializes_before_publishing_the_new_tip() {
+        let (temp, repo, first, second) = linear_fixture();
+        let track = ThreadName::new("main");
+        let head = repo.head_ref().expect("HEAD");
+
+        publish_hosted_pull_advance(&repo, "main", &track, Some(first), &head, second, true)
+            .expect("clean hosted fast-forward");
+
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("tracked.txt")).expect("checkout"),
+            "state B\n"
+        );
+        assert_eq!(repo.refs().get_thread(&track).expect("main"), Some(second));
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_pull_divergence_is_explicit_and_leaves_checkout_unchanged() {
+        let (temp, repo, first, remote) = linear_fixture();
+        let local = snapshot_file(&repo, temp.path(), "local fork\n");
+        assert_ne!(local, remote);
+        let track = ThreadName::new("main");
+        let head = repo.head_ref().expect("HEAD");
+
+        let error =
+            publish_hosted_pull_advance(&repo, "main", &track, Some(local), &head, remote, true)
+                .expect_err("divergent hosted tip must be refused");
+
+        assert!(error.to_string().contains("divergent history"));
+        assert_eq!(repo.refs().get_thread(&track).expect("main"), Some(local));
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("tracked.txt")).expect("checkout"),
+            "local fork\n"
+        );
+        assert_ne!(first, local);
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_pull_materialization_failure_keeps_the_old_tip() {
+        let (temp, repo, first, second) = linear_fixture();
+        std::fs::write(temp.path().join("tracked.txt"), "dirty local edit\n")
+            .expect("dirty checkout");
+        let track = ThreadName::new("main");
+        let head = repo.head_ref().expect("HEAD");
+
+        publish_hosted_pull_advance(&repo, "main", &track, Some(first), &head, second, true)
+            .expect_err("dirty checkout must refuse materialization");
+
+        assert_eq!(repo.refs().get_thread(&track).expect("main"), Some(first));
+        assert_eq!(
+            std::fs::read_to_string(temp.path().join("tracked.txt")).expect("checkout"),
+            "dirty local edit\n"
+        );
     }
 }

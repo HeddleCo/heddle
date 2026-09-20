@@ -514,7 +514,10 @@ impl ThreadManager {
         let materialized = materialized_thread_for_state(
             repo,
             thread,
-            uuid::Uuid::now_v7().to_string(),
+            repo.native_thread(thread)
+                .map_err(|error| HeddleError::Config(error.to_string()))?
+                .thread_id()
+                .to_hex(),
             ref_state,
         )?;
         let record = materialized.to_record();

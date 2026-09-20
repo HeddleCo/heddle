@@ -167,6 +167,7 @@ mod tests {
 
     #[test]
     fn bare_name_prefers_the_caller_personal_child_over_the_root() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let plan = plan_personal_first_read("spool/alice", "foo").expect("plan");
         assert_eq!(
             plan,
@@ -179,12 +180,14 @@ mod tests {
 
     #[test]
     fn caller_with_no_personal_root_gets_the_root_spool() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let plan = plan_personal_first_read("", "foo").expect("plan");
         assert_eq!(plan, HostedReadPath::Explicit("spool/foo".into()));
     }
 
     #[test]
     fn never_constructs_another_owners_personal_path() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let plan = plan_personal_first_read("spool/alice", "foo").expect("plan");
         match plan {
             HostedReadPath::PersonalFirst { personal, root } => {
@@ -201,24 +204,28 @@ mod tests {
 
     #[test]
     fn explicit_spool_root_is_not_rewritten_to_personal() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let plan = plan_personal_first_read("spool/alice", "spool/foo").expect("plan");
         assert_eq!(plan, HostedReadPath::Explicit("spool/foo".into()));
     }
 
     #[test]
     fn explicit_personal_path_stays_explicit() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let plan = plan_personal_first_read("spool/alice", "spool/alice/foo").expect("plan");
         assert_eq!(plan, HostedReadPath::Explicit("spool/alice/foo".into()));
     }
 
     #[test]
     fn multi_segment_without_prefix_is_prefixed_not_personal_first() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let plan = plan_personal_first_read("spool/alice", "alice/foo").expect("plan");
         assert_eq!(plan, HostedReadPath::Explicit("spool/alice/foo".into()));
     }
 
     #[test]
     fn personal_root_without_spool_prefix_still_scopes_to_the_caller() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let plan = plan_personal_first_read("alice", "foo").expect("plan");
         assert_eq!(
             plan,
@@ -231,6 +238,7 @@ mod tests {
 
     #[test]
     fn rejects_dot_and_empty_components() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         for path in ["", ".", "..", "foo/../bar", "foo//bar", "foo/."] {
             assert!(
                 plan_personal_first_read("spool/alice", path).is_err(),
@@ -241,6 +249,7 @@ mod tests {
 
     #[test]
     fn root_level_detection() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         assert!(is_root_level_spool_path("spool/foo"));
         assert!(!is_root_level_spool_path("spool/alice/foo"));
         assert!(!is_root_level_spool_path("foo"));
@@ -249,6 +258,7 @@ mod tests {
 
     #[test]
     fn picking_the_root_when_a_personal_child_exists_is_the_wrong_spool() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         // This is the security assertion the issue requires: given both
         // spool/<me>/foo and spool/foo, a bare `foo` must select personal.
         match plan_personal_first_read("spool/me", "foo").expect("plan") {

@@ -2937,7 +2937,7 @@ fn first_capture_identity_notice(
     if !current_state.map(is_synthetic_root).unwrap_or(true) {
         return Ok(None);
     }
-    let resolved = crate::resolve_principal(repo, ctx.principal_fallback())?;
+    let resolved = crate::resolve_principal_from_context(repo, ctx)?;
     if principal_is_default_unknown(&resolved.principal) {
         return Ok(Some(
             "no principal configured; the first capture would use Unknown <unknown@example.com>. Set HEDDLE_PRINCIPAL_NAME and HEDDLE_PRINCIPAL_EMAIL or run `heddle init --principal-name <name> --principal-email <email>`.".to_string(),

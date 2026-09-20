@@ -24,14 +24,6 @@ pub enum GrantRole {
 }
 
 impl GrantRole {
-    /// Highest role an agent or attenuated session may grant without
-    /// human verification. Writer is Developer (`contributor` in the CLI).
-    /// Maintainer, admin, and owner stay human-gated (heddle#1738 / weft#2119).
-    ///
-    /// HostedRole has no `writer` token. Everyday collaborator invites
-    /// use reader / contributor (`developer`).
-    pub const AGENT_GRANT_CEILING: Self = Self::Developer;
-
     /// Parse a proto `HostedRole` i32. Unknown values fail closed to
     /// [`GrantRole::Unspecified`].
     pub fn from_hosted_role_i32(role: i32) -> Self {
@@ -56,12 +48,6 @@ impl GrantRole {
             "owner" => Some(Self::Owner),
             _ => None,
         }
-    }
-
-    /// Agent-driven `CreateGrant` may mint this role without WebAuthn.
-    /// Unspecified and anything above [`Self::AGENT_GRANT_CEILING`] fail closed.
-    pub fn agent_may_grant(self) -> bool {
-        !matches!(self, Self::Unspecified) && self <= Self::AGENT_GRANT_CEILING
     }
 }
 
@@ -205,25 +191,6 @@ mod tests {
             None,
             &private
         ));
-    }
-
-    #[test]
-    fn agent_may_grant_writer_and_below_but_not_maintainer_admin_or_owner() {
-        assert!(GrantRole::Reader.agent_may_grant());
-        assert!(GrantRole::Developer.agent_may_grant());
-        assert!(
-            GrantRole::from_hosted_role_name("contributor")
-                .expect("contributor alias")
-                .agent_may_grant()
-        );
-        assert!(!GrantRole::Maintainer.agent_may_grant());
-        assert!(!GrantRole::Admin.agent_may_grant());
-        assert!(!GrantRole::Owner.agent_may_grant());
-        assert!(!GrantRole::Unspecified.agent_may_grant());
-        assert!(!GrantRole::from_hosted_role_i32(99).agent_may_grant());
-        assert!(GrantRole::Developer <= GrantRole::AGENT_GRANT_CEILING);
-        assert!(GrantRole::Maintainer > GrantRole::AGENT_GRANT_CEILING);
-        assert!(GrantRole::Admin > GrantRole::AGENT_GRANT_CEILING);
     }
 
     #[test]

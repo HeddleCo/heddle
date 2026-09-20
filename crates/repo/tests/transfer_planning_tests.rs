@@ -17,7 +17,10 @@ use objects::{
         PurgeEvidence, Redaction, State, StateAttachment, StateAttachmentBody, StateId,
         StateSignature, StateVisibility, SymbolAnchor, Tree, TreeEntry, VisibilityTier,
     },
-    store::{FsStore, ObjectStore, Result as StoreResult, SidecarStore},
+    store::{
+        FsStore, ObjectStore, Result as StoreResult, SidecarStore,
+        codec::{TreeDeltaBase, TreeEncodingKind, encode_tree_hot},
+    },
     transfer::{
         ObjectId, ObjectInfo, ObjectType, PlannedObject, StateClosureOptions,
         enumerate_state_closure_plan_with_options,
@@ -79,27 +82,92 @@ fn assert_contains_object(
     );
 }
 
+fn hdc1_lineage_tree(shared: &[(String, ContentHash)], root: ContentHash) -> Tree {
+    let mut entries = shared
+        .iter()
+        .map(|(name, hash)| TreeEntry::file(name, *hash, false).unwrap())
+        .collect::<Vec<_>>();
+    entries.push(TreeEntry::file("root.txt", root, false).unwrap());
+    Tree::from_entries(entries)
+}
+
+fn put_hdc1_descendant(
+    store: &FsStore,
+    tree: &Tree,
+    anchor_id: ContentHash,
+    anchor: &Tree,
+    parent_depth: u8,
+) -> ContentHash {
+    let encoded = encode_tree_hot(
+        tree,
+        Some(TreeDeltaBase {
+            anchor_id,
+            anchor,
+            parent_depth,
+        }),
+    )
+    .unwrap();
+    assert!(
+        matches!(
+            encoded.kind,
+            TreeEncodingKind::Delta {
+                anchor,
+                ..
+            } if anchor == anchor_id
+        ),
+        "fixture must store an HDC1 body against the epoch anchor, got {:?}",
+        encoded.kind
+    );
+    store
+        .put_tree_serialized(&encoded.data, encoded.hash)
+        .unwrap()
+}
+
 #[test]
 fn depth_one_transfer_includes_hdc1_anchor_and_installs_a_readable_tip() {
+    // Authored capture now emits V4 HSR1 trees, which cannot be HDC1. This
+    // fixture writes a V3 epoch-anchor lineage so the planner still has to
+    // ship the storage anchor when depth excludes that ancestor state.
     let source_temp = TempDir::new().unwrap();
     let source = Repository::init_default(source_temp.path()).unwrap();
-    for index in 0..128 {
-        std::fs::write(
-            source_temp.path().join(format!("fixture-{index:03}.txt")),
-            format!("unchanged-{index}\n"),
-        )
-        .unwrap();
-    }
-    let root = source_temp.path().join("root.txt");
-    std::fs::write(&root, "v1\n").unwrap();
-    let anchor = source.snapshot(Some("anchor".to_string()), None).unwrap();
-    std::fs::write(&root, "v2\n").unwrap();
-    let middle = source.snapshot(Some("middle".to_string()), None).unwrap();
-    std::fs::write(&root, "v3\n").unwrap();
-    let tip = source.snapshot(Some("tip".to_string()), None).unwrap();
+    let store = source.store();
+    let shared = (0..240)
+        .map(|index| {
+            let name = format!("fixture-{index:03}.txt");
+            let hash = store
+                .put_blob(&Blob::from(format!("unchanged-{index}\n").as_str()))
+                .unwrap();
+            (name, hash)
+        })
+        .collect::<Vec<_>>();
+    let root_v1 = store.put_blob(&Blob::from("v1\n")).unwrap();
+    let root_v2 = store.put_blob(&Blob::from("v2\n")).unwrap();
+    let root_v3 = store.put_blob(&Blob::from("v3\n")).unwrap();
+    let anchor_tree = hdc1_lineage_tree(&shared, root_v1);
+    let anchor_hash = store.put_tree(&anchor_tree).unwrap();
+    let middle_hash = put_hdc1_descendant(
+        store,
+        &hdc1_lineage_tree(&shared, root_v2),
+        anchor_hash,
+        &anchor_tree,
+        0,
+    );
+    let tip_hash = put_hdc1_descendant(
+        store,
+        &hdc1_lineage_tree(&shared, root_v3),
+        anchor_hash,
+        &anchor_tree,
+        1,
+    );
+    let anchor = State::new(anchor_hash, Vec::new(), test_attribution());
+    store.put_state(&anchor).unwrap();
+    let middle = State::new(middle_hash, vec![anchor.state_id], test_attribution());
+    store.put_state(&middle).unwrap();
+    let tip = State::new(tip_hash, vec![middle.state_id], test_attribution());
+    store.put_state(&tip).unwrap();
 
     let objects = enumerate_state_closure_with_options(
-        source.store(),
+        store,
         tip.state_id,
         StateClosureOptions {
             depth: Some(1),
@@ -107,7 +175,7 @@ fn depth_one_transfer_includes_hdc1_anchor_and_installs_a_readable_tip() {
         },
     )
     .unwrap();
-    let bundle = wire::build_native_pack(source.store(), &objects).unwrap();
+    let bundle = wire::build_native_pack(store, &objects).unwrap();
     let destination_temp = TempDir::new().unwrap();
     let destination = FsStore::new(destination_temp.path().join(".heddle"));
     destination.init().unwrap();
@@ -115,7 +183,7 @@ fn depth_one_transfer_includes_hdc1_anchor_and_installs_a_readable_tip() {
     wire::install_received_pack(&destination, &bundle.pack_data, &bundle.index_data).unwrap();
     assert_eq!(
         destination.get_tree(&tip.tree).unwrap(),
-        source.store().get_tree(&tip.tree).unwrap(),
+        store.get_tree(&tip.tree).unwrap(),
         "the transferred HDC1 tip must reconstruct after installation",
     );
 
@@ -1079,8 +1147,9 @@ fn enumerate_state_closure_includes_private_ancestor_visibility_on_public_tip() 
     )
     .unwrap();
     assert!(
-        plan.iter().any(|p| p.obj_type == ObjectType::StateVisibility
-            && p.id == ObjectId::StateId(private.state_id)),
+        plan.iter()
+            .any(|p| p.obj_type == ObjectType::StateVisibility
+                && p.id == ObjectId::StateId(private.state_id)),
         "public tip closure must carry the private ancestor sidecar"
     );
 }

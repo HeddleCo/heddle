@@ -100,9 +100,11 @@ fn looks_like_version_tag(spec: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::fs;
+
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn path_shaped_positional_becomes_filter() {

@@ -68,8 +68,8 @@ fn repository_setup_guidance_distinguishes_init_from_adopt() {
     assert!(guidance.effect.contains("Git commits stay in Git storage"));
 
     let mut convert = verification_state(
-        "heddle adopt --ref main",
-        vec!["heddle adopt --ref main".to_string()],
+        "heddle import local --ref main",
+        vec!["heddle import local --ref main".to_string()],
     );
     convert.status = "needs_import".to_string();
     convert.repository_mode = "git-overlay".to_string();
@@ -80,7 +80,7 @@ fn repository_setup_guidance_distinguishes_init_from_adopt() {
     assert!(
         guidance
             .setup_line
-            .contains("connect this branch with heddle adopt --ref main")
+            .contains("connect this branch with heddle import local --ref main")
     );
     assert!(guidance.effect.contains("adoption imports Git history"));
 }
@@ -109,7 +109,7 @@ fn canonical_git_overlay_ref_commands_quote_parseable_refs() {
             "heddle",
             "--ref",
             "feature 'quoted'",
-            "--preview"
+            "--dry-run"
         ]
     );
 }
@@ -140,9 +140,9 @@ fn repository_verification_blocked_advice_uses_verify_when_no_action_exists() {
 #[test]
 fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
     let trust = verification_state(
-        "heddle maintenance fsck repair git --ref main --preview",
+        "heddle maintenance fsck repair git --ref main --dry-run",
         vec![
-            "heddle maintenance fsck repair git --ref main --preview".to_string(),
+            "heddle maintenance fsck repair git --ref main --dry-run".to_string(),
             "heddle verify".to_string(),
         ],
     );
@@ -160,7 +160,7 @@ fn repository_verification_blocked_advice_preserves_trust_recovery_commands() {
 
     assert_eq!(
         advice.primary_command,
-        "heddle maintenance fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --dry-run"
     );
     assert_eq!(advice.recovery_commands, trust.recovery_commands);
 }
@@ -180,13 +180,13 @@ fn repository_verification_blocked_advice_keeps_primary_override_first() {
         "unsafe",
         "would change",
         "nothing changed",
-        Some("heddle pull origin main --preview".to_string()),
+        Some("heddle pull origin main --dry-run".to_string()),
     );
 
-    assert_eq!(advice.primary_command, "heddle pull origin main --preview");
+    assert_eq!(advice.primary_command, "heddle pull origin main --dry-run");
     assert_eq!(
         advice.recovery_commands,
-        vec!["heddle pull origin main --preview", "heddle verify"]
+        vec!["heddle pull origin main --dry-run", "heddle verify"]
     );
 }
 
@@ -225,7 +225,7 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
         unimported.recovery_commands,
         vec![
             "heddle bridge git import --ref origin/main",
-            "heddle maintenance fsck repair git --ref origin/main --preview"
+            "heddle maintenance fsck repair git --ref origin/main --dry-run"
         ]
     );
 
@@ -242,7 +242,7 @@ fn remote_drift_decision_prefers_import_until_upstream_thread_matches_git_tip() 
         stale_thread.recovery_commands,
         vec![
             "heddle bridge git import --ref origin/main",
-            "heddle maintenance fsck repair git --ref origin/main --preview"
+            "heddle maintenance fsck repair git --ref origin/main --dry-run"
         ]
     );
 }

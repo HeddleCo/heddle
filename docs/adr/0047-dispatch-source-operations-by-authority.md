@@ -10,7 +10,7 @@ In Git Overlay, the real `.git` is authoritative for checkpoints, refs, packs, i
 
 `capture` records Heddle State, provenance, and coordination metadata and, in Git Overlay, its corresponding Git Checkpoint as one verified operation. `land` projects a managed thread into the same authoritative Git store. Remote verbs use Sley configuration and streaming transport.
 
-In Native Heddle, `capture`, `pull`, `push`, `remote`, and workflow commands use Heddle-owned storage and transport. `adopt` atomically imports the selected Git history, switches durable source authority, and exposes the full native feature set.
+In Native Heddle, `capture`, `pull`, `push`, `remote`, and workflow commands use Heddle-owned storage and transport. `import local` atomically imports the selected Git history, switches durable source authority, and exposes the full native feature set.
 
 Behavior, recommendations, and machine action templates select typed source actions from durable authority. They do not repair invalid command strings after construction.
 

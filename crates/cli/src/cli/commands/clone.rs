@@ -59,11 +59,11 @@ use verbs::{
 };
 #[cfg(feature = "client")]
 use verbs::{
-    MonorepoCloneResultSummary, MonorepoEdgeFacts, MonorepoEdgeSkipReason, MonorepoNodeExecution,
-    MonorepoNodeExecutionStep, MonorepoNodeFacts, MonorepoNodeStepOptions,
-    assemble_monorepo_clone_json_report, assemble_monorepo_clone_result_summary,
-    monorepo_execution_progress, monorepo_rel_display, plan_monorepo_clone,
-    plan_monorepo_execution, validate_monorepo_clone_options, validate_monorepo_execution,
+    MonorepoCloneResultSummary, MonorepoNodeExecution, MonorepoNodeExecutionStep,
+    MonorepoNodeStepOptions, assemble_monorepo_clone_json_report,
+    assemble_monorepo_clone_result_summary, monorepo_execution_progress, monorepo_rel_display,
+    plan_monorepo_clone, plan_monorepo_execution, validate_monorepo_clone_options,
+    validate_monorepo_execution,
 };
 
 use super::{
@@ -85,6 +85,47 @@ use crate::{
 };
 
 pub const CLONE_OUTPUT_KIND: &str = "clone";
+
+fn classify_clone_remote_source(
+    parse_result: &Result<RemoteTarget, String>,
+    source: Option<heddle_cli_args::CloneSourceArg>,
+) -> CloneRemoteSource {
+    match (source, parse_result) {
+        (Some(heddle_cli_args::CloneSourceArg::Git), Ok(RemoteTarget::Local(path))) => {
+            CloneRemoteSource::Local {
+                path: path.clone(),
+                has_heddle: false,
+                is_git: true,
+            }
+        }
+        (Some(heddle_cli_args::CloneSourceArg::Git), _) => CloneRemoteSource::Unparsed,
+        (Some(heddle_cli_args::CloneSourceArg::Heddle), Ok(RemoteTarget::Local(path))) => {
+            CloneRemoteSource::Local {
+                path: path.clone(),
+                has_heddle: true,
+                is_git: false,
+            }
+        }
+        (
+            Some(heddle_cli_args::CloneSourceArg::Heddle),
+            Ok(RemoteTarget::Network { repo_path, .. }),
+        ) => CloneRemoteSource::Network {
+            has_repo_path: repo_path.is_some(),
+        },
+        (Some(heddle_cli_args::CloneSourceArg::Heddle), Err(_)) => CloneRemoteSource::Network {
+            has_repo_path: true,
+        },
+        (None, Ok(RemoteTarget::Local(path))) => CloneRemoteSource::Local {
+            path: path.clone(),
+            has_heddle: path.join(".heddle").exists(),
+            is_git: open_repo(path).is_ok(),
+        },
+        (None, Ok(RemoteTarget::Network { repo_path, .. })) => CloneRemoteSource::Network {
+            has_repo_path: repo_path.is_some(),
+        },
+        (None, Err(_)) => CloneRemoteSource::Unparsed,
+    }
+}
 
 /// `output_kind` value carried by the *preliminary* JSON record emitted
 /// by `clone_network` before the final clone payload. Hosted clones
@@ -174,29 +215,24 @@ pub async fn cmd_clone(
     filter: Option<String>,
     recursive: bool,
     insecure: bool,
+    source: Option<heddle_cli_args::CloneSourceArg>,
 ) -> Result<()> {
     let local_path = PathBuf::from(&local);
 
     // Cheap remote classification for pure planning (parse may resolve DNS
     // / check path existence; no clone FS body or hosted pull yet).
     let parse_result = RemoteTarget::parse(&remote);
-    let remote_source = match &parse_result {
-        Ok(RemoteTarget::Local(path)) => CloneRemoteSource::Local {
-            path: path.clone(),
-            has_heddle: path.join(".heddle").exists(),
-            is_git: open_repo(path).is_ok(),
-        },
-        Ok(RemoteTarget::Network { repo_path, .. }) => CloneRemoteSource::Network {
-            has_repo_path: repo_path.is_some(),
-        },
-        Err(_) => CloneRemoteSource::Unparsed,
-    };
+    let remote_source = classify_clone_remote_source(&parse_result, source);
 
     let plan = plan_clone(
         &ClonePlanOptions {
             remote: remote.clone(),
             local: local_path.clone(),
             thread,
+            protocol: source.map(|source| match source {
+                heddle_cli_args::CloneSourceArg::Git => verbs::CloneProtocol::Git,
+                heddle_cli_args::CloneSourceArg::Heddle => verbs::CloneProtocol::Heddle,
+            }),
             depth,
             lazy,
             filter,
@@ -1359,9 +1395,9 @@ fn local_clone_option_unsupported_advice(option: &'static str, value: &str) -> R
     };
     RecoveryAdvice::safety_refusal(
         "local_clone_option_unsupported",
-        format!("{detail} is only supported for hosted/network remotes"),
-        "Retry without lazy/filter options for local remotes, or use a hosted/network remote that supports lazy materialization.",
-        format!("selected clone transport is local but {detail} requires hosted/network hydration"),
+        format!("{detail} is not supported for local clones"),
+        "Retry without lazy/filter options; hosted lazy materialization is also reserved until end-to-end support lands.",
+        format!("selected clone transport is local but {detail} requires object hydration support"),
         "clone cannot create a lazy local checkout because the local transport does not provide on-demand object hydration",
         "destination path was left unchanged; no local clone repository was initialized",
         "heddle clone <remote> <path>",
@@ -1570,6 +1606,7 @@ async fn clone_network(
 
     use crate::config::UserConfig;
 
+    reject_unsupported_for_hosted(options)?;
     let user_config = UserConfig::load_default()?;
     // On every network-connecting command, TLS/auth config validation
     // (`hosted_runtime_config`) must succeed before any irreversible
@@ -1606,6 +1643,25 @@ async fn clone_network(
 }
 
 #[cfg(feature = "client")]
+fn reject_unsupported_for_hosted(options: &CloneOptions) -> Result<()> {
+    let mut unsupported = Vec::new();
+    if options.depth.is_some_and(|depth| depth != 0) {
+        unsupported.push("--depth");
+    }
+    if options.lazy || options.filter.is_some() {
+        unsupported.push("--lazy/--filter=blob:none");
+    }
+    if unsupported.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "hosted native fetch does not yet support {}; retry without {}",
+        unsupported.join(" and "),
+        unsupported.join(" or ")
+    )
+}
+
+#[cfg(feature = "client")]
 async fn clone_network_connected(
     cli: &Cli,
     authority: &str,
@@ -1623,8 +1679,8 @@ async fn clone_network_connected(
         insecure: _,
     } = options;
     let depth = *depth;
-    // `--filter blob:none` is a synonym for `--lazy` on hosted/network
-    // remotes; both produce a clone whose blob content is hydrated on demand.
+    // Keep the shared representation ready for end-to-end support. The hosted
+    // entry point currently rejects either spelling before reaching this path.
     let lazy = *lazy || filter.is_some();
     let json_output = should_output_json(cli, None);
 
@@ -1673,8 +1729,7 @@ async fn clone_network_connected(
             thread.as_deref(),
             depth,
             materialization,
-            |ready, refs| {
-                let _ = ready;
+            |refs| {
                 if refs.refs.is_empty() {
                     return Err(wire::ProtocolError::InvalidState(
                         "server does not advertise clone refs".to_string(),
@@ -1748,16 +1803,6 @@ async fn clone_network_connected(
             verify_hosted_clone(&local_repo, final_state, depth, lazy)
                 .context("clone remained incomplete after targeted remote repair")?;
         }
-        client
-            .fetch_advertised_synthetic_frontier_objects(
-                &local_repo,
-                repo_path,
-                &remote_refs,
-                depth,
-                materialization,
-            )
-            .await?;
-
         let bootstrap =
             hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
                 .context("decode hosted clone bootstrap")?
@@ -1845,15 +1890,6 @@ async fn clone_network_connected(
             .into());
         }
         persist_advertised_synthetic_refs(&local_repo, &remote_refs)?;
-        client
-            .publish_clone_markers(
-                &local_repo,
-                repo_path,
-                &result.checkpoint,
-                depth,
-                materialization,
-            )
-            .await?;
         // Lazy clone: persist the hydrator metadata so future
         // `Repository::open` calls (in any process) can reconstruct
         // the on-read hydrator. Without this, lazy clones would only
@@ -2023,16 +2059,6 @@ async fn recover_interrupted_clone_connected(
             .context("clone repair retry completed without a final state")?;
         verify_hosted_clone(&repo, final_state, intent.depth, intent.lazy)?;
     }
-    client
-        .fetch_advertised_synthetic_frontier_objects(
-            &repo,
-            &intent.repository,
-            &remote_refs,
-            intent.depth,
-            materialization,
-        )
-        .await?;
-
     if intent.lazy {
         use repo::lazy_hydrator::LazyHydratorConfig;
         LazyHydratorConfig::hosted(
@@ -2098,15 +2124,6 @@ async fn recover_interrupted_clone_connected(
         .into());
     }
     persist_advertised_synthetic_refs(&repo, &remote_refs)?;
-    client
-        .publish_clone_markers(
-            &repo,
-            &intent.repository,
-            &result.checkpoint,
-            intent.depth,
-            materialization,
-        )
-        .await?;
     if intent.lazy {
         publish_attached_clone_thread(&repo, &track_name, &final_state)?;
     } else if git_overlay_clone {
@@ -2146,7 +2163,14 @@ fn verify_hosted_clone(
             .map(|objects| objects.len())
             .map_err(anyhow::Error::new)
     } else {
-        wire::enumerate_state_closure_with_options(repo.store(), final_state, options)
+        // v2 Fetch installs one published revision. Parent States arrive as
+        // operations; their trees are not in the selected source pack, so a
+        // full-history walk reports missing objects after a correct Fetch.
+        let tip = wire::StateClosureOptions {
+            depth: Some(0),
+            exclude_states: Vec::new(),
+        };
+        wire::enumerate_state_closure_with_options(repo.store(), final_state, tip)
             .map(|objects| objects.len())
             .map_err(anyhow::Error::new)
     }
@@ -2248,8 +2272,7 @@ async fn clone_monorepo_connected(
 
     // Resolve the whole child tree into the caller's coherent visible slice,
     // then pure-plan placement, work order, and per-node steps (no FS yet).
-    let resolved = client.resolve_monorepo(root_path, None).await?;
-    let facts = monorepo_node_facts_from_resolved(&resolved);
+    let facts = client.resolve_monorepo(root_path, None).await?;
     let clone_plan = plan_monorepo_clone(&facts).map_err(|err| anyhow!(err))?;
     let exec = plan_monorepo_execution(&clone_plan, &MonorepoNodeStepOptions::default());
     // Ordering invariants (Init before Fetch, paired fetch/materialize, …)
@@ -2384,40 +2407,6 @@ fn validate_monorepo_destination(clone_root: &Path, rel_path: &Path) -> Result<P
     }
 
     Ok(clone_root.join(rel_path))
-}
-
-/// Map a transport `MonorepoNode` tree into pure core facts (no I/O).
-///
-/// Parses content-state bytes into [`StateId`]; malformed/absent states map
-/// to `None` (empty checkout), matching prior client planner policy.
-#[cfg(feature = "client")]
-fn monorepo_node_facts_from_resolved(
-    node: &api::heddle::api::v1alpha1::MonorepoNode,
-) -> MonorepoNodeFacts {
-    use objects::object::StateId;
-
-    let content_state = node
-        .content_state
-        .as_ref()
-        .and_then(|state_id| StateId::try_from_slice(&state_id.value).ok());
-    let edges = node
-        .edges
-        .iter()
-        .map(|edge| {
-            let skip_reason = edge.skipped.and_then(MonorepoEdgeSkipReason::from_wire_i32);
-            MonorepoEdgeFacts {
-                mount_name: edge.mount_name.clone(),
-                child_spool_id: edge.child_spool_id.clone(),
-                child: edge.subtree.as_ref().map(monorepo_node_facts_from_resolved),
-                skip_reason,
-            }
-        })
-        .collect();
-    MonorepoNodeFacts {
-        spool_id: node.spool_id.clone(),
-        content_state,
-        edges,
-    }
 }
 
 /// JSON envelope for a monorepo clone from the pure result summary.
@@ -3294,7 +3283,7 @@ mod tests {
                 other => panic!("unexpected local remote: {other:?}"),
             };
             assert_eq!(
-                verbs::select_clone_mode(url, false, &source).unwrap(),
+                verbs::select_clone_mode(url, false, &source, None).unwrap(),
                 expected,
                 "{url}"
             );
@@ -3304,7 +3293,8 @@ mod tests {
             verbs::select_clone_mode(
                 "heddle://example.com/ns/repo.git",
                 false,
-                &CloneRemoteSource::Unparsed
+                &CloneRemoteSource::Unparsed,
+                None
             )
             .is_err()
         );
@@ -3863,6 +3853,31 @@ mod tests {
             insecure: false,
         };
         reject_unsupported_for_git_overlay(&ok).expect("plain options ok");
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn reject_unsupported_for_hosted_runs_before_clone_state_creation() {
+        let unsupported = CloneOptions {
+            thread: None,
+            depth: Some(1),
+            lazy: true,
+            filter: None,
+            insecure: false,
+        };
+        let error = reject_unsupported_for_hosted(&unsupported)
+            .expect_err("hosted partial clone must be rejected");
+        assert!(error.to_string().contains("--depth"));
+        assert!(error.to_string().contains("--lazy"));
+
+        let full = CloneOptions {
+            thread: None,
+            depth: Some(0),
+            lazy: false,
+            filter: None,
+            insecure: false,
+        };
+        reject_unsupported_for_hosted(&full).expect("full hosted clone remains supported");
     }
 
     #[test]

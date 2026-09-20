@@ -5,6 +5,7 @@ pub mod blame;
 pub mod fault_inject;
 pub mod observe;
 pub mod progress;
+pub mod reference_store;
 pub mod store;
 pub mod sync;
 pub mod transfer;

@@ -1599,7 +1599,7 @@ mod tests {
             "cargo config should point at the shared target dir: {config}"
         );
         let record = ThreadManager::new(repo.heddle_dir())
-            .load("iso")
+            .load_id_or_name("iso")
             .unwrap()
             .expect("thread record should persist");
         assert!(
@@ -1924,7 +1924,7 @@ mod tests {
             "the restart must re-materialize the checkout (not dedup into a no-op)"
         );
         let record = ThreadManager::new(repo.heddle_dir())
-            .load("iso")
+            .load_id_or_name("iso")
             .unwrap()
             .expect("the restart must persist a record");
         assert_eq!(
@@ -1995,7 +1995,7 @@ mod tests {
         // The record stays the single committed Active record (no duplicate, no
         // Abandoned). And the interrupted reservation is now completed.
         let record = ThreadManager::new(repo.heddle_dir())
-            .load("iso")
+            .load_id_or_name("iso")
             .unwrap()
             .expect("the committed record persists");
         assert_eq!(record.state, repo::ThreadState::Active);

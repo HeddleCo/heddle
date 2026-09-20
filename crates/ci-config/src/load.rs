@@ -7,7 +7,7 @@ use std::{
 };
 
 use api::{
-    heddle::api::v1alpha1::{
+    heddle::api::common::{
         TreadleCheck, TreadleCheckClass, TreadleDefinition, TreadleNetworkAccess,
         TreadleSecretTier, TreadleServiceContainer, TreadleTriggerKind, treadle_env_entry,
     },
@@ -382,7 +382,7 @@ fn trusted_runner_secret(check: &TreadleCheck, definition: &TreadleDefinition) -
 }
 
 fn env_trusted_secret(
-    env: &[api::heddle::api::v1alpha1::TreadleEnvEntry],
+    env: &[api::heddle::api::common::TreadleEnvEntry],
     trusted: &BTreeSet<&str>,
 ) -> Option<String> {
     env.iter().find_map(|entry| match &entry.source {
@@ -479,7 +479,7 @@ fn map_check(
     })
 }
 
-fn literal_env(env: &[api::heddle::api::v1alpha1::TreadleEnvEntry]) -> BTreeMap<String, String> {
+fn literal_env(env: &[api::heddle::api::common::TreadleEnvEntry]) -> BTreeMap<String, String> {
     env.iter()
         .filter_map(|entry| match &entry.source {
             Some(treadle_env_entry::Source::LiteralValue(value)) => {

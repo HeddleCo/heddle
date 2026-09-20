@@ -3,10 +3,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use crate::legacy_v1::StreamOpeningProof;
 use api::{
-    heddle::api::v1alpha1::{
-        BearerProof, CallContext, HumanVerification, RepositoryRef, RequestProof,
-        SignedSpoolOwnerGenesis, StreamOpeningProof, TraceContext, repository_ref,
+    heddle::api::{
+        common::{
+            BearerProof, CallContext, HumanVerification, RepositoryRef, RequestProof, TraceContext,
+            repository_ref,
+        },
+        v1alpha2::SignedSpoolOwnerGenesis,
     },
     signing,
 };
@@ -16,6 +20,7 @@ use crypto::{Ed25519Signer, Signer as _};
 use opentelemetry::propagation::{Injector, TextMapPropagator};
 #[cfg(feature = "telemetry")]
 use opentelemetry_sdk::propagation::TraceContextPropagator;
+use prost::Message;
 use prost_types::Timestamp;
 #[cfg(feature = "telemetry")]
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
@@ -33,6 +38,7 @@ const NONCE_LEN: usize = 16;
 pub struct CallContextFactory {
     bearer_capability: Vec<u8>,
     bearer_grant_envelope: Vec<u8>,
+    mint_root_attachment: Option<Vec<u8>>,
     signer: Option<Arc<Ed25519Signer>>,
     signing_identity: Option<String>,
     timeout: Duration,
@@ -61,6 +67,7 @@ impl Default for CallContextFactory {
         Self {
             bearer_capability: Vec::new(),
             bearer_grant_envelope: Vec::new(),
+            mint_root_attachment: None,
             signer: None,
             signing_identity: None,
             timeout: Duration::from_secs(30),
@@ -70,6 +77,45 @@ impl Default for CallContextFactory {
 }
 
 impl CallContextFactory {
+    pub(super) fn native_credentials(&self) -> Result<thread_api::credentials::Credentials> {
+        let biscuit = if self.bearer_capability.is_empty() {
+            Vec::new()
+        } else {
+            biscuit_auth::UnverifiedBiscuit::from_base64(&self.bearer_capability)
+                .and_then(|token| token.to_vec())
+                .map_err(|error| HostedError::Framing(format!("invalid stored Biscuit: {error}")))?
+        };
+        Ok(match &self.signer {
+            Some(signer) => thread_api::credentials::Credentials::Signed {
+                signer: Arc::clone(signer),
+                biscuit,
+                grant_envelope: self.bearer_grant_envelope.clone(),
+            },
+            None if biscuit.is_empty() => thread_api::credentials::Credentials::Public,
+            None => thread_api::credentials::Credentials::Bearer {
+                biscuit,
+                grant_envelope: self.bearer_grant_envelope.clone(),
+            },
+        })
+    }
+
+    /// Provider reads carry their attenuated capability inside the signed
+    /// `ProviderReadTicket`. Reuse the terminal PoP key without forwarding the
+    /// broader hosted bearer or grant envelope to that provider endpoint.
+    pub(super) fn native_provider_credentials(
+        &self,
+    ) -> Result<thread_api::credentials::Credentials> {
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or(HostedError::SigningIdentityRequired)?;
+        Ok(thread_api::credentials::Credentials::Signed {
+            signer: Arc::clone(signer),
+            biscuit: Vec::new(),
+            grant_envelope: Vec::new(),
+        })
+    }
+
     pub fn bearer_capability(&self) -> &[u8] {
         &self.bearer_capability
     }
@@ -82,40 +128,60 @@ impl CallContextFactory {
         self.signing_identity.as_deref()
     }
 
+    pub(super) fn progress_timeout(&self) -> Duration {
+        self.timeout
+    }
+
     pub(super) fn proof_signer(&self) -> Option<&Ed25519Signer> {
         self.signer.as_deref()
     }
 
-    /// Mint CreateSpool genesis with the same device/proof key used for PoP.
-    ///
-    /// A generated-per-spool key would pass CreateSpool and fail later
-    /// purge/claim: `genesis.owner_public_key` must be the account owner-root.
-    /// When a sequence-0 owner-root public key is already stored, refuse a
-    /// different genesis key so purge/claim stay bound to the account root.
-    pub(crate) fn mint_spool_owner_genesis(&self) -> Result<SignedSpoolOwnerGenesis> {
+    /// The caller supplies a fresh, authenticated owner observation. The shared
+    /// verifier proves the full history and rejects a retired or unrelated key.
+    pub(crate) fn mint_spool_owner_genesis(
+        &self,
+        spool_uuid: uuid::Uuid,
+        owner: &api::heddle::api::v1alpha2::OwnerState,
+    ) -> Result<SignedSpoolOwnerGenesis> {
         let signer = self
             .signer
             .as_ref()
             .ok_or(HostedError::SigningIdentityRequired)?;
-        if let Some(seq0) = crate::hosted_runtime::owner_root::stored_seq0_public_key()
-            .map_err(|error| HostedError::Framing(error.to_string()))?
-            && seq0 != signer.public_key()
-        {
-            return Err(HostedError::Framing(
-                "CreateSpool genesis owner key does not match the account sequence-0 owner root"
-                    .to_owned(),
-            ));
+        repo::sign_current_spool_owner_genesis(
+            signer.as_ref(),
+            spool_uuid,
+            owner,
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(|error| HostedError::Framing(error.to_string()))
+    }
+
+    /// Build owner-derived creation evidence for the exact resolved request.
+    pub(crate) fn mint_spool_creation(
+        &self,
+        intent: repo::SpoolCreationIntent,
+        owner: &api::heddle::api::v1alpha2::OwnerState,
+    ) -> Result<SignedSpoolOwnerGenesis> {
+        let signer = self
+            .signer
+            .as_deref()
+            .ok_or(HostedError::SigningIdentityRequired)?;
+        let now = chrono::Utc::now().timestamp();
+        let current = repo::verify_account_owner_observation(owner, now)
+            .map_err(|error| HostedError::Framing(error.to_string()))?;
+        if current.authority_key().public_key == signer.public_key() {
+            return self.mint_spool_owner_genesis(intent.spool_uuid, owner);
         }
-        let spool_uuid = uuid::Uuid::now_v7();
-        let signed = repo::sign_spool_owner_genesis(signer.as_ref(), *spool_uuid.as_bytes())
-            .map_err(HostedError::from)?;
-        if let Some(seq0) = crate::hosted_runtime::owner_root::stored_seq0_public_key()
-            .map_err(|error| HostedError::Framing(error.to_string()))?
-        {
-            repo::require_genesis_matches_seq0(&signed, &seq0)
-                .map_err(|error| HostedError::Framing(error.to_string()))?;
-        }
-        Ok(signed)
+        let token = std::str::from_utf8(&self.bearer_capability)
+            .map_err(|error| HostedError::Framing(error.to_string()))?;
+        let attachment = self
+            .mint_root_attachment
+            .as_deref()
+            .map(api::heddle::api::v1alpha2::SignedMintRootAttachment::decode)
+            .transpose()
+            .map_err(|error| HostedError::Framing(error.to_string()))?;
+        repo::sign_delegated_spool_creation(signer, intent, owner, token, attachment, now)
+            .map_err(|error| HostedError::Framing(error.to_string()))
     }
 
     pub fn with_bearer_capability(mut self, capability: impl Into<Vec<u8>>) -> Self {
@@ -176,14 +242,22 @@ impl CallContextFactory {
         if signer.is_some() && config.authenticated_principal.is_none() {
             return Err(HostedError::SigningIdentityRequired);
         }
+        let signing_identity = signer
+            .as_ref()
+            .map(|signer| Self::device_key_principal(signer.public_key()));
         Ok(Self {
             bearer_capability: config
                 .token
                 .as_ref()
                 .map_or_else(Vec::new, |token| token.id.as_bytes().to_vec()),
             bearer_grant_envelope: Vec::new(),
+            mint_root_attachment: config.mint_root_attachment.clone(),
             signer,
-            signing_identity: config.authenticated_principal.clone(),
+            // Portable v2 request proofs identify the terminal proof key, not
+            // the bearer subject. The server independently derives the
+            // account from the verified Biscuit and binds this identity to its
+            // `device_pop_key` fact.
+            signing_identity,
             timeout: Duration::from_secs(config.timeout_secs.max(1)),
             trace: None,
         })
@@ -244,16 +318,6 @@ impl CallContextFactory {
         self.base(method, client_operation_id.into())
     }
 
-    pub(super) fn long_lived_streaming(
-        &self,
-        method: &str,
-        client_operation_id: impl Into<String>,
-    ) -> Result<CallContext> {
-        let mut context = self.streaming(method, client_operation_id)?;
-        context.deadline = None;
-        Ok(context)
-    }
-
     pub fn stream_opening_proof(
         &self,
         method: &str,
@@ -300,37 +364,21 @@ impl CallContextFactory {
         })
     }
 
-    pub(crate) fn provider_plan_signature(
-        &self,
-        stream_id: &str,
-        repository: &str,
-        client_endpoint_id: &str,
-        plan_nonce: &[u8],
-        grant_batch_digest: &[u8],
-    ) -> Result<Vec<u8>> {
-        let signer = self
-            .signer
-            .as_ref()
-            .ok_or(HostedError::SigningIdentityRequired)?;
-        let identity = self
-            .signing_identity
-            .as_deref()
-            .ok_or(HostedError::SigningIdentityRequired)?;
-        let canonical = signing::provider_plan_bytes(
-            identity,
-            stream_id,
-            repository,
-            client_endpoint_id,
-            plan_nonce,
-            grant_batch_digest,
-        );
-        Ok(signer.sign(&canonical)?)
-    }
-
     fn base(&self, method: &str, client_operation_id: String) -> Result<CallContext> {
+        let bearer_capability =
+            match biscuit_auth::UnverifiedBiscuit::from_base64(&self.bearer_capability)
+                .and_then(|token| token.to_vec())
+            {
+                Ok(raw) => raw,
+                Err(_) => self.bearer_capability.clone(),
+            };
         Ok(CallContext {
             deadline: Some(deadline(self.timeout)?),
-            bearer_capability: self.bearer_capability.clone(),
+            // Stored credentials keep the Biscuit's URL-safe base64 text, but
+            // CallContext carries the transport-neutral raw Biscuit bytes.
+            // Native credentials already make this conversion above; generic
+            // unary and streaming calls must use the same wire representation.
+            bearer_capability,
             bearer_proof: self.bearer_proof(method)?,
             request_proof: None,
             human_verification: None,
@@ -339,6 +387,7 @@ impl CallContextFactory {
             bearer_grant_envelope: self.bearer_grant_envelope.clone(),
             // empty = legacy scan fallback (weft#1960 leg C cutover)
             bearer_authority_key_selector: Vec::new(),
+            bearer_authority_proof: Vec::new(),
         })
     }
 
@@ -487,26 +536,6 @@ mod tests {
 
     use super::*;
 
-    fn with_isolated_home<T>(test: impl FnOnce() -> T) -> T {
-        let _guard = config::credentials::lock_test_env();
-        let home = tempfile::TempDir::new().expect("temporary Heddle home");
-        let previous = std::env::var_os("HEDDLE_HOME");
-        unsafe {
-            std::env::set_var("HEDDLE_HOME", home.path());
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(test));
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var("HEDDLE_HOME", value),
-                None => std::env::remove_var("HEDDLE_HOME"),
-            }
-        }
-        match result {
-            Ok(value) => value,
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
-    }
-
     #[derive(Deserialize)]
     struct Vector {
         identity: String,
@@ -519,8 +548,9 @@ mod tests {
 
     #[test]
     fn tracing_off_omits_hosted_trace_context() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let context = CallContextFactory::default()
-            .streaming("/heddle.api.v1alpha1.RepoSyncService/Pull", "off")
+            .streaming("/heddle.api.v1alpha2.SyncService/Fetch", "off")
             .unwrap();
         assert!(context.trace.is_none());
     }
@@ -528,6 +558,7 @@ mod tests {
     #[cfg(feature = "telemetry")]
     #[test]
     fn active_span_traceparent_is_carried_in_the_iroh_request_prelude() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let provider = SdkTracerProvider::builder().build();
         let subscriber = tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("propagation-test")));
@@ -541,7 +572,7 @@ mod tests {
                 let span_context = span.context();
                 let expected = span_context.span().span_context().clone();
                 let context = CallContextFactory::default()
-                    .streaming("/heddle.api.v1alpha1.RepoSyncService/Pull", "propagation")
+                    .streaming("/heddle.api.v1alpha2.SyncService/Fetch", "propagation")
                     .unwrap();
                 let trace = context.trace.as_ref().expect("active trace is propagated");
                 let parts = trace.traceparent.split('-').collect::<Vec<_>>();
@@ -552,7 +583,7 @@ mod tests {
                 assert!(trace.baggage.is_empty());
 
                 let frame = api::framing::encode_request_prelude(
-                    "/heddle.api.v1alpha1.RepoSyncService/Pull",
+                    "/heddle.api.v1alpha2.SyncService/Fetch",
                     &context,
                 )
                 .unwrap();
@@ -568,6 +599,7 @@ mod tests {
 
     #[test]
     fn shared_canonical_fixture_is_the_client_signing_contract() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let vector: Vector = serde_json::from_str(UNARY_SIGNING_V1_FIXTURE_JSON).unwrap();
         let canonical = signing::unary_bytes(
             &vector.identity,
@@ -581,6 +613,7 @@ mod tests {
 
     #[test]
     fn configured_factory_places_bearer_and_verifiable_request_proof_in_context() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().unwrap();
         let config = ClientConfig::default()
             .with_token(wire::AuthToken::new("token", "alice"))
@@ -588,13 +621,17 @@ mod tests {
             .with_authenticated_principal("principal:alice");
         let signed = CallContextFactory::from_client_config(&config)
             .unwrap()
-            .unary("/heddle.api.v1alpha1.IdentityService/WhoAmI", &[], "")
+            .unary(
+                "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
+                &[],
+                "",
+            )
             .unwrap();
         assert_eq!(signed.context.bearer_capability, b"token");
         let proof = signed.context.request_proof.unwrap();
         let canonical = signing::unary_bytes(
             &proof.signing_identity,
-            "/heddle.api.v1alpha1.IdentityService/WhoAmI",
+            "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
             proof.timestamp_millis,
             &proof.nonce,
             &[],
@@ -607,7 +644,7 @@ mod tests {
             "token",
             &bearer.timestamp_seconds.to_string(),
             "POST",
-            "/heddle.api.v1alpha1.IdentityService/WhoAmI",
+            "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
             &hex::encode(&bearer.nonce),
             &bearer.signature,
         )
@@ -615,8 +652,68 @@ mod tests {
     }
 
     #[test]
+    fn configured_factory_decodes_a_stored_biscuit_for_the_wire_context() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        let authority = biscuit_auth::KeyPair::new();
+        let token = biscuit_auth::Biscuit::builder()
+            .build(&authority)
+            .expect("test Biscuit")
+            .to_base64()
+            .expect("base64 Biscuit");
+        let expected = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+            .and_then(|biscuit| biscuit.to_vec())
+            .expect("raw Biscuit");
+        let signed = CallContextFactory::default()
+            .with_bearer_capability(token.into_bytes())
+            .unary(
+                "/heddle.api.v1alpha2.IntegrationService/ImportSource",
+                &[],
+                uuid::Uuid::now_v7().to_string(),
+            )
+            .expect("wire context");
+
+        assert_eq!(signed.context.bearer_capability, expected);
+    }
+
+    #[tokio::test]
+    async fn provider_credentials_keep_the_pop_key_without_forwarding_hosted_authority() {
+        let _process_env_guard = crate::test_process_env::shared().await;
+        use api::v2::client::Rpc as _;
+        use thread_api::transport::Authorize as _;
+
+        let signer = Ed25519Signer::generate().expect("provider proof key");
+        let factory = CallContextFactory::default()
+            .with_bearer_capability(b"hosted bearer must stay local".to_vec())
+            .with_signing_key_pem(
+                &signer.to_pem().expect("proof key PEM"),
+                "principal:provider-reader",
+            )
+            .expect("signed hosted context");
+        let credentials = factory
+            .native_provider_credentials()
+            .expect("provider credentials");
+        let method = thread_api::rpc::SyncServiceReadProviderExtent::METHOD;
+        let context = credentials
+            .context(
+                method,
+                &api::heddle::api::v1alpha2::ReadProviderExtentRequest::default().encode_to_vec(),
+            )
+            .await
+            .expect("provider request context");
+
+        assert!(context.bearer_capability.is_empty());
+        assert!(context.bearer_grant_envelope.is_empty());
+        assert!(
+            context.request_proof.is_some(),
+            "provider still receives proof of the ticketed client's terminal key"
+        );
+    }
+
+    #[test]
     fn stream_opening_proof_is_bound_to_route_repository_and_identity() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().unwrap();
+        let identity = CallContextFactory::device_key_principal(signer.public_key());
         let config = ClientConfig::default()
             .with_token(wire::AuthToken::new("token", "alice"))
             .with_auth_proof_key_pem(signer.to_pem().unwrap())
@@ -629,7 +726,7 @@ mod tests {
         let proof = CallContextFactory::from_client_config(&config)
             .unwrap()
             .stream_opening_proof(
-                "/heddle.api.v1alpha1.RepoSyncService/Pull",
+                "/heddle.api.v1alpha2.SyncService/Fetch",
                 "stream-1",
                 repository,
                 "cursor-1",
@@ -637,9 +734,9 @@ mod tests {
             )
             .unwrap();
         let canonical = signing::stream_open_bytes(
-            "principal:alice",
+            &identity,
             "stream-1",
-            "/heddle.api.v1alpha1.RepoSyncService/Pull",
+            "/heddle.api.v1alpha2.SyncService/Fetch",
             "acme/widgets",
             "cursor-1",
             b"capability",
@@ -649,26 +746,20 @@ mod tests {
     }
 
     #[test]
-    fn long_lived_streaming_context_has_no_rpc_deadline() {
-        let context = CallContextFactory::default()
-            .long_lived_streaming(
-                "/heddle.api.v1alpha1.RepositoryService/SubscribeRepoEvents",
-                "",
-            )
-            .unwrap();
-        assert!(context.deadline.is_none());
-    }
-
-    #[test]
     fn mint_spool_owner_genesis_requires_the_device_proof_key() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let error = CallContextFactory::default()
-            .mint_spool_owner_genesis()
+            .mint_spool_owner_genesis(
+                uuid::Uuid::now_v7(),
+                &api::heddle::api::v1alpha2::OwnerState::default(),
+            )
             .expect_err("CreateSpool must not invent a throwaway owner key");
         assert!(matches!(error, HostedError::SigningIdentityRequired));
     }
 
     #[test]
     fn enrolling_device_key_identity_is_lowercase_hex_principal() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().unwrap();
         let identity = CallContextFactory::device_key_principal(signer.public_key());
         assert_eq!(
@@ -683,7 +774,7 @@ mod tests {
         let request = b"device-enrollment";
         let signed = factory
             .unary(
-                "/heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
+                "/heddle.api.v1alpha2.IdentityService/BeginPairing",
                 request,
                 "",
             )
@@ -693,7 +784,7 @@ mod tests {
         assert_eq!(proof.signing_identity, identity);
         let canonical = signing::unary_bytes(
             &proof.signing_identity,
-            "/heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
+            "/heddle.api.v1alpha2.IdentityService/BeginPairing",
             proof.timestamp_millis,
             &proof.nonce,
             request,
@@ -704,6 +795,7 @@ mod tests {
 
     #[test]
     fn as_enrolling_device_key_keeps_the_bearer_and_rewrites_request_identity() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().unwrap();
         let factory = CallContextFactory::default()
             .with_bearer_capability(b"agent-root".to_vec())
@@ -715,7 +807,7 @@ mod tests {
         assert_eq!(enrollment.signing_identity(), Some(expected.as_str()));
         let signed = enrollment
             .unary(
-                "/heddle.api.v1alpha1.IdentityService/RegisterPublicKey",
+                "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
                 b"claim",
                 "op-1",
             )
@@ -730,38 +822,145 @@ mod tests {
 
     #[test]
     fn mint_spool_owner_genesis_uses_the_configured_proof_key_and_a_uuidv7() {
-        with_isolated_home(|| {
-            let signer = Ed25519Signer::generate().unwrap();
-            let factory = CallContextFactory::default()
-                .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
-                .unwrap();
-            let signed = factory.mint_spool_owner_genesis().unwrap();
-            let genesis = signed.genesis.expect("signed genesis payload");
-            let spool_uuid: [u8; 16] = genesis
-                .spool_uuid
-                .as_slice()
-                .try_into()
-                .expect("spool UUID is 16 bytes");
-            assert_eq!(uuid::Uuid::from_bytes(spool_uuid).get_version_num(), 7);
-            assert_eq!(
-                genesis
-                    .owner_public_key
-                    .expect("owner public key")
-                    .public_key,
-                signer.public_key()
-            );
-            use sha2::{Digest, Sha256};
-
-            let digest = Sha256::new()
-                .chain_update(signer.public_key())
-                .chain_update(spool_uuid)
-                .finalize();
-            Ed25519Signer::verify_with_public_key(
-                &digest,
-                signer.public_key(),
-                &signed.owner_signature.expect("owner signature").signature,
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        let signer = Ed25519Signer::generate().unwrap();
+        let factory = CallContextFactory::default()
+            .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
+            .unwrap();
+        let signed = factory
+            .mint_spool_owner_genesis(
+                uuid::Uuid::now_v7(),
+                &crate::hosted_runtime::owner_root_tests::observed_owner(&signer),
             )
             .unwrap();
-        });
+        let genesis = signed.genesis.expect("signed genesis payload");
+        let spool_uuid: [u8; 16] = genesis
+            .spool_uuid
+            .as_slice()
+            .try_into()
+            .expect("spool UUID is 16 bytes");
+        assert_eq!(uuid::Uuid::from_bytes(spool_uuid).get_version_num(), 7);
+        assert_eq!(
+            genesis
+                .owner_public_key
+                .expect("owner public key")
+                .public_key,
+            signer.public_key()
+        );
+        use sha2::{Digest, Sha256};
+
+        let digest = Sha256::new()
+            .chain_update(signer.public_key())
+            .chain_update(spool_uuid)
+            .finalize();
+        Ed25519Signer::verify_with_public_key(
+            &digest,
+            signer.public_key(),
+            &signed.owner_signature.expect("owner signature").signature,
+        )
+        .unwrap();
+    }
+    #[test]
+    fn spool_creation_binds_delegated_parent_path_name_and_original_owner() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        use api::heddle::api::v1alpha2 as v2;
+        let owner = Ed25519Signer::from_seed(&[83; 32]).expect("owner");
+        let agent = Ed25519Signer::from_seed(&[84; 32]).expect("agent");
+        let account = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now().timestamp();
+        let root =
+            repo::sign_claimable_deferred_human_root(&owner, *account.as_bytes(), [7; 32], now)
+                .expect("root");
+        let binding =
+            repo::sign_agent_claim_binding(&owner, &root, "original-owner").expect("binding");
+        let current =
+            heddleco_capability_verifier::verify_owner_root(&root).expect("verified owner");
+        let observed = v2::OwnerState {
+            owner: Some(v2::PrincipalRef {
+                id: account.to_string(),
+            }),
+            root: Some(root),
+            version: current.state_hash().to_vec(),
+            binding: Some(binding),
+            ..Default::default()
+        };
+        let pair = biscuit_auth::KeyPair::from(
+            &biscuit_auth::PrivateKey::from_bytes(
+                &owner.to_seed(),
+                biscuit_auth::Algorithm::Ed25519,
+            )
+            .expect("test mint key"),
+        );
+        let token = biscuit_auth::Biscuit::builder().code(format!("user(\"{account}\"); session(\"original-session\"); device_pop_key(\"{}\"); right(\"spool\", \"acme\", \"admin\");",hex::encode(agent.public_key())).as_str()).expect("authority facts").build(&pair).expect("existing token").to_base64().expect("base64");
+        let factory = CallContextFactory::default()
+            .with_bearer_capability(token.into_bytes())
+            .with_signing_key_pem(
+                &agent.to_pem().expect("pem"),
+                format!("principal:{account}"),
+            )
+            .expect("agent context");
+        let spool = uuid::Uuid::now_v7();
+        let parent = uuid::Uuid::now_v7();
+        let intent = || repo::SpoolCreationIntent {
+            spool_uuid: spool,
+            parent_spool_uuid: Some(parent),
+            parent_path_segments: vec!["acme".into()],
+            name: "project".into(),
+        };
+        let signed = factory
+            .mint_spool_creation(intent(), &observed)
+            .expect("delegated creation without owner private key");
+        let proof = signed.delegated_creation.as_ref().expect("delegated proof");
+        let statement = proof.statement.as_ref().expect("statement");
+        assert_eq!(statement.parent_spool_uuid, parent.as_bytes());
+        assert_eq!(statement.parent_path_segments, ["acme"]);
+        assert_eq!(statement.name, "project");
+        assert_eq!(
+            signed
+                .genesis
+                .as_ref()
+                .expect("genesis")
+                .owner_public_key
+                .as_ref()
+                .expect("owner")
+                .public_key,
+            owner.public_key()
+        );
+        let mut changed = signed.clone();
+        changed
+            .delegated_creation
+            .as_mut()
+            .expect("proof")
+            .statement
+            .as_mut()
+            .expect("statement")
+            .name = "different".into();
+        assert!(
+            heddleco_capability_verifier::creation::validate_spool_creation_structure(
+                &changed, now
+            )
+            .is_err(),
+            "name cannot change after signing"
+        );
+        let mut bad = intent();
+        bad.parent_path_segments.push(String::new());
+        assert!(
+            factory
+                .mint_spool_creation(bad, &observed)
+                .expect_err("noncanonical spelling")
+                .to_string()
+                .contains("non-canonical")
+        );
+        let direct = CallContextFactory::default()
+            .with_signing_key_pem(
+                &owner.to_pem().expect("pem"),
+                format!("principal:{account}"),
+            )
+            .expect("owner context");
+        let genesis = direct
+            .mint_spool_creation(intent(), &observed)
+            .expect("direct current owner");
+        assert!(genesis.owner_signature.is_some());
+        assert!(genesis.delegated_creation.is_none());
     }
 }

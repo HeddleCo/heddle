@@ -3,8 +3,10 @@
 
 #![cfg(feature = "tree-sitter-symbols")]
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use objects::object::{
     ContentHash, LeafPolicy, ObjectSource, SemanticEntryKind, SemanticFileNode, SemanticIndexRoot,
@@ -13,11 +15,10 @@ use objects::object::{
 use semantic::{SemanticParseCache, parser::FunctionDef};
 use tracing::warn;
 
-use crate::{Result, repository_semantic_query::MAX_SEMANTIC_TREE_DEPTH};
-
 use super::repository_semantic_context::{
     PARSE_BUDGET_BYTES, load_semantic_tree, parse_tree_functions_sized,
 };
+use crate::{Result, repository_semantic_query::MAX_SEMANTIC_TREE_DEPTH};
 
 /// File page for the new-state corpus. Alias of the shared parse-cache
 /// page so a filled page is a bound, not a smaller product universe.

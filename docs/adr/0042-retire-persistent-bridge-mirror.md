@@ -8,8 +8,8 @@ Heddle does not maintain a repo-local `.heddle/git` bridge mirror. Git Overlay w
 
 ## Consequences
 
-- Public `bridge git` commands are retired in favor of `adopt`, `import git`, `export git`, and top-level remote verbs routed by remote capability.
-- `init` in an existing Git checkout selects Git Overlay source authority. `adopt` imports the selected Git history, then atomically selects native Heddle source authority; the retained `.git` is available only through explicit Git Projection.
+- Public `bridge git` commands are retired in favor of `import local`, `import git`, `export git`, and top-level remote verbs routed by remote capability.
+- `init` in an existing Git checkout selects Git Overlay source authority. `import local` imports the selected Git history, then atomically selects native Heddle source authority; the retained `.git` is available only through explicit Git Projection.
 - Raw Git Object Residuals are required for non-byte-faithful imported objects that must round-trip byte-identically.
 - Raw Git Object Residuals are the only fallback for an object that cannot be reconstructed byte-for-byte. Missing residual closure is a hard error.
 - There is no runtime migration, mirror fallback, or mirror maintenance surface.

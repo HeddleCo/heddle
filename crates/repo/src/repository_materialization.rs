@@ -98,12 +98,38 @@ struct MaterializationPlan {
     leaves: Vec<WorktreeWriteOp>,
     file_count: usize,
     symlink_count: usize,
+    /// Opaque leaf hashes of entries withheld (redacted) anywhere in the tree —
+    /// at the projected root OR in a nested partial subtree encountered during
+    /// planning. Accumulated so a partial checkout can record every withheld
+    /// leaf across the whole served closure, not just the root level.
+    withheld: Vec<ContentHash>,
 }
 
 #[derive(Debug)]
 pub(crate) struct MaterializedTree {
     pub(crate) file_entries: Vec<SeededWorktreeEntry>,
     pub(crate) directory_contexts: Vec<MaterializedDirectoryContext>,
+}
+
+/// Outcome of materializing a redacted partial projection (HRT1) into a
+/// worktree: the visible entries were written and the withheld ones were
+/// OMITTED. Reports the withheld leaf hashes so a caller can record that this
+/// checkout is incomplete-by-redaction (distinct from missing/corrupt).
+#[derive(Debug, Clone)]
+pub struct PartialMaterialization {
+    /// Opaque leaf hashes of the entries that were withheld (redacted) and so
+    /// not written to the worktree.
+    pub withheld: Vec<ContentHash>,
+    /// Count of visible entries at the projected (root) level that were
+    /// materialized.
+    pub visible_at_root: usize,
+}
+
+impl PartialMaterialization {
+    /// Whether any entry of the projected tree was withheld.
+    pub fn has_withheld(&self) -> bool {
+        !self.withheld.is_empty()
+    }
 }
 
 #[derive(Debug)]
@@ -347,6 +373,7 @@ impl Repository {
             leaves: Vec::new(),
             file_count: 0,
             symlink_count: 0,
+            withheld: Vec::new(),
         };
         self.plan_materialization(tree, Path::new(""), dir, &mut plan)?;
         let plan_duration_ms = plan_start.elapsed().as_millis();
@@ -355,12 +382,17 @@ impl Repository {
         let requested_threads = requested_materialization_threads();
         fs::create_dir_all(dir)
             .map_err(|e| HeddleError::Io(enrich_fs_error(dir, "creating", e)))?;
+        let canonical = fs::canonicalize(dir)?;
+        if !plan.withheld.is_empty() {
+            crate::thread_manifest::mark_withheld_checkout(self.heddle_dir(), &canonical)?;
+        }
         for directory in &plan.directories {
             fs::create_dir_all(directory)
                 .map_err(|e| HeddleError::Io(enrich_fs_error(directory, "creating", e)))?;
         }
 
         let (worker_count, file_entries) = self.materialize_write_ops_seeded(&plan.leaves)?;
+        self.finish_materialization(dir, &canonical, &plan)?;
 
         debug!(
             directories = plan.directories.len(),
@@ -378,6 +410,174 @@ impl Repository {
             file_entries,
             directory_contexts: plan.directory_contexts,
         })
+    }
+
+    /// Materialize a RECEIVED redacted partial projection (HRT1) into `dir`:
+    /// visible entries are checked out, withheld entries are OMITTED — a
+    /// valid-but-incomplete worktree, not an error.
+    ///
+    /// The server has already applied the redaction; this is the client side
+    /// writing what it holds. Before writing anything, the projection is
+    /// verified to reconstruct its own declared root (Leg 1's
+    /// `reconstruct_root`), so a partial clone is proven against the tip's
+    /// declared `State.tree` WITHOUT the withheld content — a tampered
+    /// projection fails loud here rather than seeding a corrupt worktree.
+    ///
+    /// Withheld entries are neither written nor errored, and — because they are
+    /// absent from the projected entry set entirely — a later status/capture
+    /// pass has no on-disk expectation for them to mistake for a local
+    /// deletion. The returned [`PartialMaterialization`] carries the withheld
+    /// leaf hashes so the caller can record the checkout as partial.
+    ///
+    /// Redaction is applied at the projected (root) level: a withheld root
+    /// entry (file or whole subtree) is opaque and omitted; visible subtrees
+    /// are full trees resolved and materialized normally.
+    pub fn materialize_partial_tree(
+        &self,
+        partial: &objects::object::PartialTree,
+        dir: &Path,
+    ) -> Result<PartialMaterialization> {
+        let mut plan = MaterializationPlan {
+            validation_root: dir.to_path_buf(),
+            directories: Vec::new(),
+            directory_contexts: Vec::new(),
+            leaves: Vec::new(),
+            file_count: 0,
+            symlink_count: 0,
+            withheld: Vec::new(),
+        };
+
+        // Plan the projected root as a partial tree: fail-loud root verification,
+        // visible entries planned (recursing into nested partial subtrees), and
+        // withheld leaves recorded into `plan.withheld`.
+        let visible_at_root =
+            self.plan_partial_materialization(partial, Path::new(""), dir, &mut plan)?;
+
+        fs::create_dir_all(dir)
+            .map_err(|e| HeddleError::Io(enrich_fs_error(dir, "creating", e)))?;
+        let canonical = fs::canonicalize(dir)?;
+        if !plan.withheld.is_empty() {
+            crate::thread_manifest::mark_withheld_checkout(self.heddle_dir(), &canonical)?;
+        }
+        for directory in &plan.directories {
+            fs::create_dir_all(directory)
+                .map_err(|e| HeddleError::Io(enrich_fs_error(directory, "creating", e)))?;
+        }
+        self.materialize_write_ops_seeded(&plan.leaves)?;
+        self.finish_materialization(dir, &canonical, &plan)?;
+
+        debug!(
+            visible_at_root,
+            withheld = plan.withheld.len(),
+            files = plan.file_count,
+            symlinks = plan.symlink_count,
+            "Partial (redacted) tree materialization complete"
+        );
+
+        Ok(PartialMaterialization {
+            withheld: plan.withheld,
+            visible_at_root,
+        })
+    }
+
+    /// Share the existing per-root leaf inventory and capture guard with
+    /// whole-state withholding. A partial projection cannot leave previously
+    /// tracked hidden files behind, or change another checkout's guard.
+    fn finish_materialization(
+        &self,
+        dir: &Path,
+        canonical: &Path,
+        plan: &MaterializationPlan,
+    ) -> Result<()> {
+        let served: std::collections::BTreeSet<String> = plan
+            .leaves
+            .iter()
+            .map(|leaf| {
+                leaf.path()
+                    .strip_prefix(dir)
+                    .map(cache_key)
+                    .map_err(|error| {
+                        HeddleError::Config(format!("materialized leaf outside checkout: {error}"))
+                    })
+            })
+            .collect::<Result<_>>()?;
+        self.reconcile_materialized_root(
+            dir,
+            canonical,
+            &served,
+            &std::collections::BTreeSet::new(),
+        )?;
+        crate::thread_manifest::write_materialized_leaves(self.heddle_dir(), canonical, &served)?;
+        if plan.withheld.is_empty() {
+            crate::thread_manifest::clear_withheld_checkout(self.heddle_dir(), canonical)?;
+        }
+        Ok(())
+    }
+
+    /// Plan the materialization of a redacted partial projection (HRT1) rooted
+    /// at `rel_dir`/`dir`. Shared by the ROOT partial checkout
+    /// ([`Self::materialize_partial_tree`]) and by nested partial subtrees
+    /// discovered while planning ([`Self::plan_tree_entry`]) so both agree on
+    /// how a partial tree lands: fail-loud reconstruct-root verification, a
+    /// directory context listing only VISIBLE child names, visible entries
+    /// recursed, and withheld leaves accumulated into `plan.withheld` (never
+    /// written, so a later status/capture pass has no on-disk expectation to
+    /// mistake a withheld entry for a local deletion). Returns the count of
+    /// visible entries at this level.
+    fn plan_partial_materialization(
+        &self,
+        partial: &objects::object::PartialTree,
+        rel_dir: &Path,
+        dir: &Path,
+        plan: &mut MaterializationPlan,
+    ) -> Result<usize> {
+        // Reconstruct-root verification (fail loud before any write): the
+        // visible preimages + withheld leaf hashes must reproduce the declared
+        // root, else this projection cannot be trusted to stand in for the
+        // tip's declared `State.tree` (root) or the parent entry's tree hash
+        // (nested). A tampered projection fails here rather than seeding a
+        // corrupt worktree.
+        let reconstructed = partial.reconstruct_root();
+        let declared = partial.declared_root();
+        if reconstructed != declared {
+            return Err(HeddleError::Corruption {
+                expected: declared,
+                found: reconstructed,
+            });
+        }
+
+        // Directory context: child_names lists only the VISIBLE entries;
+        // withheld names are unknown to this client by construction.
+        let visible_names: Vec<String> = partial
+            .leaves()
+            .iter()
+            .filter_map(|leaf| match leaf {
+                objects::object::PartialTreeLeaf::Visible { entry, .. } => {
+                    Some(entry.name().to_string())
+                }
+                objects::object::PartialTreeLeaf::Redacted { .. } => None,
+            })
+            .collect();
+        plan.directory_contexts.push(MaterializedDirectoryContext {
+            key: cache_key(rel_dir),
+            path: dir.to_path_buf(),
+            child_names: visible_names,
+            tree_hash: declared,
+        });
+
+        let mut visible = 0;
+        for leaf in partial.leaves() {
+            match leaf {
+                objects::object::PartialTreeLeaf::Visible { entry, .. } => {
+                    visible += 1;
+                    self.plan_tree_entry(entry, rel_dir, dir, plan)?;
+                }
+                objects::object::PartialTreeLeaf::Redacted { leaf_hash } => {
+                    plan.withheld.push(*leaf_hash);
+                }
+            }
+        }
+        Ok(visible)
     }
 
     fn plan_materialization(
@@ -399,46 +599,74 @@ impl Repository {
         });
 
         for entry in tree.entries() {
-            let path = dir.join(entry.name());
-            let rel_path = rel_dir.join(entry.name());
-            match entry.target() {
-                TreeEntryTarget::Blob { hash, executable } => {
-                    plan.file_count += 1;
-                    plan.leaves.push(WorktreeWriteOp::Blob {
-                        path,
-                        hash: *hash,
-                        executable: *executable,
-                    });
-                }
-                TreeEntryTarget::Tree { hash } => {
-                    let subtree = self
-                        .store
-                        .get_tree(hash)?
-                        .ok_or_else(|| HeddleError::NotFound(format!("tree {}", hash)))?;
-                    plan.directories.push(path.clone());
-                    self.plan_materialization(&subtree, &rel_path, &path, plan)?;
-                }
-                TreeEntryTarget::Symlink { hash } => {
-                    plan.symlink_count += 1;
-                    plan.leaves.push(WorktreeWriteOp::Symlink {
-                        path,
-                        hash: *hash,
-                        validation_root: plan.validation_root.clone(),
-                    });
-                }
-                TreeEntryTarget::Gitlink { target } => {
-                    plan.file_count += 1;
-                    plan.leaves.push(WorktreeWriteOp::GitlinkPlaceholder {
-                        path,
-                        target: *target,
-                    });
-                }
-                // Native child-spool edge: not materialized to the worktree
-                // in this phase, so it contributes no write op.
-                TreeEntryTarget::Spoollink { .. } => {}
-            }
+            self.plan_tree_entry(entry, rel_dir, dir, plan)?;
         }
 
+        Ok(())
+    }
+
+    /// Plan the write op(s) for a single visible tree entry, recursing into a
+    /// subtree. Shared by full-tree [`Self::plan_materialization`] and partial
+    /// (redacted) [`Self::materialize_partial_tree`] planning so the two agree
+    /// on how every entry kind lands in the worktree.
+    fn plan_tree_entry(
+        &self,
+        entry: &objects::object::TreeEntry,
+        rel_dir: &Path,
+        dir: &Path,
+        plan: &mut MaterializationPlan,
+    ) -> Result<()> {
+        let path = dir.join(entry.name());
+        let rel_path = rel_dir.join(entry.name());
+        match entry.target() {
+            TreeEntryTarget::Blob { hash, executable } => {
+                plan.file_count += 1;
+                plan.leaves.push(WorktreeWriteOp::Blob {
+                    path,
+                    hash: *hash,
+                    executable: *executable,
+                });
+            }
+            TreeEntryTarget::Tree { hash } => {
+                // Partial-aware subtree resolution: a nested subtree may be a
+                // full canonical tree OR a redacted partial projection (HRT1)
+                // when this checkout descends from a partial clone. `read_tree`
+                // distinguishes proven redaction from missing visible data.
+                plan.directories.push(path.clone());
+                match self.store.read_tree(hash)? {
+                    objects::store::TreeRead::Full(subtree) => {
+                        self.plan_materialization(&subtree, &rel_path, &path, plan)?;
+                    }
+                    objects::store::TreeRead::Partial(subtree) => {
+                        self.plan_partial_materialization(&subtree, &rel_path, &path, plan)?;
+                    }
+                    objects::store::TreeRead::Absent => {
+                        return Err(HeddleError::MissingObject {
+                            object_type: "tree".into(),
+                            id: hash.to_string(),
+                        });
+                    }
+                }
+            }
+            TreeEntryTarget::Symlink { hash } => {
+                plan.symlink_count += 1;
+                plan.leaves.push(WorktreeWriteOp::Symlink {
+                    path,
+                    hash: *hash,
+                    validation_root: plan.validation_root.clone(),
+                });
+            }
+            TreeEntryTarget::Gitlink { target } => {
+                plan.file_count += 1;
+                plan.leaves.push(WorktreeWriteOp::GitlinkPlaceholder {
+                    path,
+                    target: *target,
+                });
+            }
+            // Native child-spool edge: not materialized to the worktree
+            // in this phase, so it contributes no write op.
+            TreeEntryTarget::Spoollink { .. } => {}
+        }
         Ok(())
     }
 
@@ -960,13 +1188,391 @@ fn requested_materialization_threads() -> Option<NonZeroUsize> {
 mod tests {
     use std::{num::NonZeroUsize, path::PathBuf};
 
-    use objects::{fs_clone::filesystem_supports_reflink, object::Blob, store::ObjectStore};
+    use objects::{
+        fs_clone::filesystem_supports_reflink,
+        object::{Blob, ContentHash, PartialTree, Tree, TreeEntry},
+        store::ObjectStore,
+    };
     use tempfile::TempDir;
 
     use super::{
-        MaterializationContext, Repository, WorktreeWriteOp, classify_clone_failure,
+        HeddleError, MaterializationContext, Repository, WorktreeWriteOp, classify_clone_failure,
         materialization_worker_count, remove_materialized_leaf,
     };
+
+    /// Build a 3-entry V4 salted tree (`readme.md`, `secret.md`, `visible.txt`),
+    /// storing each blob, and return `(tree, secret_leaf_hash)` where the
+    /// single-entry-tree trick yields `secret.md`'s leaf hash.
+    fn partial_fixture(repo: &Repository) -> (Tree, ContentHash) {
+        let store = repo.store();
+        let readme = store.put_blob(&Blob::from_slice(b"readme body")).unwrap();
+        let secret = store.put_blob(&Blob::from_slice(b"secret body")).unwrap();
+        let visible = store.put_blob(&Blob::from_slice(b"visible body")).unwrap();
+        let entries = vec![
+            TreeEntry::file("readme.md", readme, false).unwrap(),
+            TreeEntry::file("secret.md", secret, false).unwrap(),
+            TreeEntry::file("visible.txt", visible, false).unwrap(),
+        ];
+        let salts = vec![[0x11; 32], [0x22; 32], [0x33; 32]];
+        let tree = Tree::from_entries_salted_v4(entries, salts).unwrap();
+        let secret_leaf = Tree::from_entries_salted_v4(
+            vec![TreeEntry::file("secret.md", secret, false).unwrap()],
+            vec![[0x22; 32]],
+        )
+        .unwrap()
+        .hash();
+        (tree, secret_leaf)
+    }
+
+    /// Checkout from a redacted partial projection: the visible entries are
+    /// materialized and the withheld entry is OMITTED — no error, no corrupt
+    /// worktree, and the withheld entry is reported (not written, so a later
+    /// status pass has no on-disk expectation to mistake for a deletion).
+    #[test]
+    fn partial_checkout_materializes_visible_omits_withheld() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let (tree, secret_leaf) = partial_fixture(&repo);
+
+        let mut redact = std::collections::HashSet::new();
+        redact.insert(secret_leaf);
+        let partial = PartialTree::project(&tree, &redact).unwrap();
+
+        let dest = temp.path().join("partial-checkout");
+        let outcome = repo.materialize_partial_tree(&partial, &dest).unwrap();
+
+        assert_eq!(outcome.visible_at_root, 2);
+        assert_eq!(outcome.withheld, vec![secret_leaf]);
+        assert!(outcome.has_withheld());
+
+        assert!(
+            dest.join("readme.md").exists(),
+            "visible entry must be checked out"
+        );
+        assert!(
+            dest.join("visible.txt").exists(),
+            "visible entry must be checked out"
+        );
+        assert!(
+            !dest.join("secret.md").exists(),
+            "withheld entry must be OMITTED, not written"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("readme.md")).unwrap(),
+            b"readme body"
+        );
+    }
+
+    /// A fully-visible partial materializes exactly like the full tree
+    /// (regression): no entry withheld, every file written.
+    #[test]
+    fn partial_checkout_with_no_redactions_writes_all_entries() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let (tree, _secret_leaf) = partial_fixture(&repo);
+
+        let partial = PartialTree::project(&tree, &std::collections::HashSet::new()).unwrap();
+        let dest = temp.path().join("full-checkout");
+        let outcome = repo.materialize_partial_tree(&partial, &dest).unwrap();
+
+        assert_eq!(outcome.visible_at_root, 3);
+        assert!(!outcome.has_withheld());
+        assert!(dest.join("readme.md").exists());
+        assert!(dest.join("secret.md").exists());
+        assert!(dest.join("visible.txt").exists());
+    }
+
+    /// Nested partial checkout (C2): a partial ROOT whose visible `dir/` entry
+    /// points at a subtree that is itself stored as a redacted PARTIAL
+    /// projection must recurse via `read_tree` — materializing the subtree's
+    /// visible entries, omitting its withheld ones, root-verifying the nested
+    /// projection — rather than resolving the subtree via `get_tree` (which sees
+    /// only full trees) and dying with `NotFound`. The withheld NESTED leaf is
+    /// reported, and its file never touches the worktree.
+    #[test]
+    fn nested_partial_checkout_recurses_and_omits_nested_withheld() {
+        use objects::object::encode_redacted_projection;
+
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let store = repo.store();
+
+        // Inner subtree: one visible file + one withheld file.
+        let inner_visible = store
+            .put_blob(&Blob::from_slice(b"inner visible body"))
+            .unwrap();
+        let inner_secret = store
+            .put_blob(&Blob::from_slice(b"inner secret body"))
+            .unwrap();
+        let inner_tree = Tree::from_entries_salted_v4(
+            vec![
+                TreeEntry::file("visible_inner.txt", inner_visible, false).unwrap(),
+                TreeEntry::file("secret_inner.md", inner_secret, false).unwrap(),
+            ],
+            vec![[0x44; 32], [0x55; 32]],
+        )
+        .unwrap();
+        let inner_secret_leaf = Tree::from_entries_salted_v4(
+            vec![TreeEntry::file("secret_inner.md", inner_secret, false).unwrap()],
+            vec![[0x55; 32]],
+        )
+        .unwrap()
+        .hash();
+
+        // Root tree: a visible file + the `dir/` subtree edge to `inner_tree`.
+        let readme = store.put_blob(&Blob::from_slice(b"root readme")).unwrap();
+        let root_tree = Tree::from_entries_salted_v4(
+            vec![
+                TreeEntry::file("readme.md", readme, false).unwrap(),
+                TreeEntry::directory("dir", inner_tree.hash()).unwrap(),
+            ],
+            vec![[0x66; 32], [0x77; 32]],
+        )
+        .unwrap();
+
+        // Store the INNER subtree ONLY as a redacted partial projection (HRT1)
+        // — never as a full tree — so `get_tree` would miss it and only
+        // `read_tree` (partial-aware) can resolve it.
+        let inner_redact = std::collections::HashSet::from([inner_secret_leaf]);
+        let inner_partial = PartialTree::project(&inner_tree, &inner_redact).unwrap();
+        let inner_hrt1 = encode_redacted_projection(&inner_partial).unwrap();
+        store
+            .put_tree_serialized(&inner_hrt1, inner_tree.hash())
+            .unwrap();
+        assert!(
+            store.get_tree(&inner_tree.hash()).unwrap().is_none(),
+            "inner subtree must be held ONLY as a partial (no full tree)"
+        );
+
+        // Root projection: nothing redacted at the root — `readme.md` and the
+        // `dir/` edge are both visible; the redaction lives in the nested
+        // subtree.
+        let root_partial =
+            PartialTree::project(&root_tree, &std::collections::HashSet::new()).unwrap();
+
+        let dest = temp.path().join("nested-partial-checkout");
+        let outcome = repo.materialize_partial_tree(&root_partial, &dest).unwrap();
+
+        // The NESTED withheld leaf is surfaced (accumulated across the closure),
+        // and the nested checkout materialized the visible side.
+        assert!(
+            outcome.has_withheld(),
+            "the nested withheld leaf must be reported"
+        );
+        assert_eq!(outcome.withheld, vec![inner_secret_leaf]);
+
+        assert!(dest.join("readme.md").exists(), "root visible file present");
+        assert!(
+            dest.join("dir").join("visible_inner.txt").exists(),
+            "nested visible file must be checked out"
+        );
+        assert!(
+            !dest.join("dir").join("secret_inner.md").exists(),
+            "nested withheld file must be OMITTED, not written"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("dir").join("visible_inner.txt")).unwrap(),
+            b"inner visible body"
+        );
+    }
+
+    /// Only an explicit redacted leaf proves withholding. A visible subtree
+    /// with no received body is missing, including inside a partial checkout.
+    #[test]
+    fn nested_absent_subtree_does_not_invent_redaction() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let store = repo.store();
+
+        // Root references a subtree hash that is never stored in any form.
+        let readme = store.put_blob(&Blob::from_slice(b"root readme")).unwrap();
+        let phantom_subtree = ContentHash::compute(b"a subtree that is never stored");
+        let root_tree = Tree::from_entries_salted_v4(
+            vec![
+                TreeEntry::file("readme.md", readme, false).unwrap(),
+                TreeEntry::directory("dir", phantom_subtree).unwrap(),
+            ],
+            vec![[0x66; 32], [0x77; 32]],
+        )
+        .unwrap();
+        let root_partial =
+            PartialTree::project(&root_tree, &std::collections::HashSet::new()).unwrap();
+
+        let dest = temp.path().join("absent-subtree-checkout");
+        match repo.materialize_partial_tree(&root_partial, &dest) {
+            Err(HeddleError::MissingObject { object_type, id }) => {
+                assert_eq!(object_type, "tree");
+                assert_eq!(id, phantom_subtree.to_string());
+            }
+            other => panic!("expected missing visible subtree, got: {other:?}"),
+        }
+        assert!(
+            !dest.exists(),
+            "missing visible data is rejected before filesystem writes"
+        );
+    }
+
+    /// Capture depends on what was materialized at this checkout, not what
+    /// happens to be cached in the shared object store.
+    #[test]
+    fn capture_refuses_until_full_checkout_materialization() {
+        use objects::object::encode_redacted_projection;
+
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let (tree, secret_leaf) = partial_fixture(&repo);
+
+        let redact = std::collections::HashSet::from([secret_leaf]);
+        let partial = PartialTree::project(&tree, &redact).unwrap();
+        let hrt1 = encode_redacted_projection(&partial).unwrap();
+        repo.store()
+            .put_tree_serialized(&hrt1, tree.hash())
+            .unwrap();
+        repo.materialize_partial_tree(&partial, repo.root())
+            .expect("partial checkout");
+        assert!(
+            repo.is_incomplete_checkout().unwrap(),
+            "this checkout omitted withheld leaves"
+        );
+
+        std::fs::write(temp.path().join("newfile.txt"), b"new work").unwrap();
+        match repo.snapshot(Some("attempt".to_string()), None) {
+            Err(HeddleError::RedactedTree(msg)) => assert!(
+                msg.contains("incomplete checkout"),
+                "expected incomplete-checkout refusal, got: {msg}"
+            ),
+            other => panic!("capture must REFUSE on a partial clone, got: {other:?}"),
+        }
+
+        // Receiving a full tree does not write previously withheld files.
+        // It must not make those missing files look like authored deletions.
+        repo.store().put_tree(&tree).unwrap();
+        assert!(
+            repo.is_incomplete_checkout()
+                .expect("still partial checkout")
+        );
+        repo.materialize_tree(&tree, repo.root())
+            .expect("explicit full checkout");
+        assert!(
+            !repo.is_incomplete_checkout().unwrap(),
+            "only materializing the complete tree clears the capture guard"
+        );
+    }
+
+    #[test]
+    fn unrelated_partial_tree_does_not_block_current_checkout_capture() {
+        let temp = TempDir::new().expect("checkout");
+        let repo = Repository::init_default(temp.path()).expect("repo");
+        let (tree, secret_leaf) = partial_fixture(&repo);
+        let partial = PartialTree::project(&tree, &std::collections::HashSet::from([secret_leaf]))
+            .expect("another checkout projection");
+        repo.store()
+            .put_partial_tree(
+                &tree.hash(),
+                &objects::object::encode_redacted_projection(&partial).expect("projection bytes"),
+            )
+            .expect("cache shared source");
+        let sibling = TempDir::new().expect("another checkout");
+        repo.materialize_partial_tree(&partial, sibling.path())
+            .expect("partial sibling");
+        assert!(
+            !repo.is_incomplete_checkout().expect("own checkout scope"),
+            "a sibling checkout must not make this checkout incomplete"
+        );
+        std::fs::write(repo.root().join("new.txt"), b"independent agent work").expect("edit");
+        repo.snapshot(Some("independent edit".into()), None)
+            .expect("capture own complete checkout");
+    }
+
+    #[test]
+    fn partial_checkout_removes_previously_materialized_withheld_files() {
+        let temp = TempDir::new().expect("checkout");
+        let repo = Repository::init_default(temp.path()).expect("repo");
+        let (tree, secret_leaf) = partial_fixture(&repo);
+        repo.materialize_tree(&tree, repo.root())
+            .expect("full checkout");
+        let partial = PartialTree::project(&tree, &std::collections::HashSet::from([secret_leaf]))
+            .expect("limited projection");
+        repo.materialize_partial_tree(&partial, repo.root())
+            .expect("limited checkout");
+        assert!(
+            !repo.root().join("secret.md").exists(),
+            "previously tracked withheld file must be removed"
+        );
+        assert!(
+            repo.root().join("readme.md").exists(),
+            "visible file survives"
+        );
+    }
+
+    /// P5: `heddle status` on a partial checkout must resolve the tip's tree via
+    /// `read_tree` and compare against the VISIBLE set — never crash with
+    /// MissingObject (the `get_tree`-returns-None-on-partial path). The
+    /// visible-set tree omits the withheld entry so it is never mistaken for a
+    /// local deletion.
+    #[test]
+    fn status_resolves_partial_tip_to_visible_set() {
+        use objects::object::encode_redacted_projection;
+
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let (tree, secret_leaf) = partial_fixture(&repo);
+
+        let redact = std::collections::HashSet::from([secret_leaf]);
+        let partial = PartialTree::project(&tree, &redact).unwrap();
+        let hrt1 = encode_redacted_projection(&partial).unwrap();
+        repo.store()
+            .put_tree_serialized(&hrt1, tree.hash())
+            .unwrap();
+        assert!(
+            repo.store().get_tree(&tree.hash()).unwrap().is_none(),
+            "tip tree is held ONLY as a partial projection"
+        );
+
+        // The get_tree-based `require_tree` would fail here; the status resolver
+        // must instead return the visible-set tree.
+        let visible = repo.require_tree_for_worktree_status(&tree.hash()).unwrap();
+        let names: Vec<&str> = visible.entries().iter().map(|e| e.name()).collect();
+        assert!(
+            names.contains(&"readme.md") && names.contains(&"visible.txt"),
+            "visible entries present: {names:?}"
+        );
+        assert!(
+            !names.contains(&"secret.md"),
+            "withheld entry must be ABSENT from the visible-set tree (not a deletion): {names:?}"
+        );
+    }
+
+    /// A projection that does not reconstruct its declared root must fail loud
+    /// BEFORE writing anything — a partial clone is only trustworthy because its
+    /// leaves reproduce the tip's `State.tree`.
+    #[test]
+    fn partial_checkout_rejects_root_mismatch_before_writing() {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let (tree, _secret_leaf) = partial_fixture(&repo);
+
+        let good = PartialTree::project(&tree, &std::collections::HashSet::new()).unwrap();
+        // Re-declare the projection under a bogus root: its leaves no longer
+        // reconstruct the declared hash.
+        let tampered =
+            PartialTree::new(ContentHash::compute(b"bogus-root"), good.leaves().to_vec());
+
+        let dest = temp.path().join("tampered-checkout");
+        match repo.materialize_partial_tree(&tampered, &dest) {
+            Err(err) => assert!(
+                err.to_string().contains("corruption") || err.to_string().contains("expected"),
+                "expected a root-mismatch corruption error, got: {err}"
+            ),
+            Ok(_) => {
+                panic!("a projection that does not reconstruct its declared root must fail loud")
+            }
+        }
+        assert!(
+            !dest.join("readme.md").exists(),
+            "nothing must be written on a failed verify"
+        );
+    }
 
     /// The generic [`Progress`](objects::Progress) handle installed on a
     /// repository must survive the `thread::scope` parallel-materialization seam:

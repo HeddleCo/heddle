@@ -3,8 +3,10 @@
 
 use verbs::{DiffReport, VerifyReport};
 
-use super::compact::{CompactOutput, CompactProjection};
-use super::next_action::normalized_action;
+use super::{
+    compact::{CompactOutput, CompactProjection},
+    next_action::normalized_action,
+};
 
 impl CompactProjection for DiffReport {
     fn compact(&self) -> CompactOutput {

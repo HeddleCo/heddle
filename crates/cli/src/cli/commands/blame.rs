@@ -3,13 +3,12 @@
 
 use std::{collections::HashMap, path::Path};
 
+use anyhow::{Result, anyhow};
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
     AgentInfo, BlameLine, BlameOrigin, BlameOutput, ContextSnippet, PrincipalInfo,
 };
-
-use anyhow::{Result, anyhow};
 use objects::{
     object::{
         AnnotationStatus, Attribution, ContentHash, ContextTarget, FileProvenance, ProvenanceError,
@@ -78,7 +77,18 @@ pub fn cmd_query_attribution(
     state: Option<String>,
     show_context: bool,
 ) -> Result<()> {
-    cmd_blame_with_output_kind(cli, file, state, show_context, "query_attribution")
+    cmd_blame_with_output_kind(
+        cli,
+        file,
+        state,
+        show_context,
+        "query_attribution",
+        &["query", "--attribution"],
+    )
+}
+
+pub fn cmd_blame(cli: &Cli, file: String, state: Option<String>, show_context: bool) -> Result<()> {
+    cmd_blame_with_output_kind(cli, file, state, show_context, "blame", &["blame"])
 }
 
 fn cmd_blame_with_output_kind(
@@ -87,6 +97,7 @@ fn cmd_blame_with_output_kind(
     state: Option<String>,
     show_context: bool,
     output_kind: &'static str,
+    emitting_command: &'static [&'static str],
 ) -> Result<()> {
     let repo = cli.open_repo()?;
 
@@ -98,7 +109,14 @@ fn cmd_blame_with_output_kind(
             .resolve_history_revision(revision)
             .is_ok()
         {
-            return render_unbound_overlay_blame(cli, &repo, &file, revision, output_kind);
+            return render_unbound_overlay_blame(
+                cli,
+                &repo,
+                &file,
+                revision,
+                output_kind,
+                emitting_command,
+            );
         }
     }
 
@@ -192,7 +210,7 @@ fn cmd_blame_with_output_kind(
 
         write_full_command_json(
             &output,
-            NextActionValidationContext::without_repo(&["query", "--attribution"]),
+            NextActionValidationContext::without_repo(emitting_command),
         )?;
     } else {
         if show_context && !context.is_empty() {
@@ -235,6 +253,7 @@ fn render_unbound_overlay_blame(
     file: &str,
     revision: &str,
     output_kind: &'static str,
+    emitting_command: &'static [&'static str],
 ) -> Result<()> {
     let mut lines = Vec::new();
     for line in ingest::OverlayHistory::project_blame(repo.root(), revision, file)? {
@@ -265,7 +284,7 @@ fn render_unbound_overlay_blame(
     if should_output_json(cli, Some(repo.config())) {
         write_full_command_json(
             &output,
-            NextActionValidationContext::without_repo(&["query", "--attribution"]),
+            NextActionValidationContext::without_repo(emitting_command),
         )?;
     } else {
         for line in &output.lines {
@@ -369,7 +388,7 @@ fn blame_file_not_found_advice(file: &Path) -> RecoveryAdvice {
     RecoveryAdvice::safety_refusal(
         "blame_file_not_found",
         format!("File '{}' not found in state", file.display()),
-        "Inspect the state with `heddle show`, then retry `heddle query --attribution <path>` with a tracked file.",
+        "Inspect the state with `heddle show`, then retry `heddle blame <path>` with a tracked file.",
         format!(
             "requested blame path '{}' does not exist in the selected Heddle state",
             file.display()

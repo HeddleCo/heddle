@@ -275,7 +275,7 @@ fn adopt_moves_authority_to_native_and_retains_git_projection() {
     let adopted = json(&heddle(
         repo.path(),
         &config,
-        &["adopt", "--output", "json"],
+        &["import", "local", "--output", "json"],
     ));
     assert_eq!(adopted["verification"]["repository_mode"], "native-heddle");
 

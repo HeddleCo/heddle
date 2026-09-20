@@ -42,12 +42,19 @@ impl HostedSession {
             mut credential_proof_key,
             renewable_authority_credential,
             resolved_credential_subject,
+            mint_root_attachment,
         ) = match mode {
-            HostedAuthMode::Unauthenticated => (None, None, None, None),
+            HostedAuthMode::Unauthenticated => (None, None, None, None, None),
             HostedAuthMode::ProofOnly {
                 proof_key_pem,
                 signing_identity,
-            } => (None, Some(proof_key_pem), None, Some(signing_identity)),
+            } => (
+                None,
+                Some(proof_key_pem),
+                None,
+                Some(signing_identity),
+                None,
+            ),
             HostedAuthMode::PresentedRoot {
                 token,
                 proof_key_pem,
@@ -57,6 +64,7 @@ impl HostedSession {
                 Some(proof_key_pem),
                 None,
                 Some(subject),
+                None,
             ),
             HostedAuthMode::CredentialFallback => {
                 let resolved = resolve_hosted_credential(server_key.as_deref())?;
@@ -65,6 +73,7 @@ impl HostedSession {
                     resolved.proof_key_pem,
                     resolved.renewable,
                     resolved.subject,
+                    resolved.mint_root_attachment,
                 )
             }
         };
@@ -77,6 +86,7 @@ impl HostedSession {
         }
 
         let mut config = user_config.hosted_runtime_config(token)?;
+        config.mint_root_attachment = mint_root_attachment;
         if let Some(key) = server_key {
             config = config.with_server_key(key);
         }

@@ -15,8 +15,6 @@ pub mod human_signature;
 pub mod local_sync;
 #[cfg(feature = "client")]
 pub mod repo_events;
-#[cfg(feature = "client")]
-pub mod review_sync;
 
 pub use config::ClientConfig;
 #[cfg(feature = "client")]
@@ -25,6 +23,6 @@ pub use local_sync::LocalSync;
 
 #[cfg(feature = "client")]
 pub use crate::hosted_runtime::{
-    HostedAuthMode, HostedClient, HostedSession, connect_websocket, credential_is_agent_attenuated,
-    refuse_agent_privileged_grant, resolve_active_bearer, resolve_hosted_credential,
+    HostedAuthMode, HostedClient, HostedSession, ReviewSnapshot, connect_websocket,
+    resolve_active_bearer, resolve_hosted_credential,
 };

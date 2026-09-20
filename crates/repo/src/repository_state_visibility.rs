@@ -37,14 +37,13 @@ use objects::{
 use oplog::{OpLogRecorder, OpRecord, VisibilitySidecarSnapshots};
 
 use crate::{
-    namespace_policy::{resolve_default_visibility, VisibilityResolutionContext},
+    namespace_policy::{VisibilityResolutionContext, resolve_default_visibility},
     repository::Repository,
-    visibility::{visible, AudienceTier},
+    visibility::{AudienceTier, visible},
 };
 
-/// Scope label written when a parent state is missing and is not a recorded
-/// shallow boundary. Checkout withholds rather than materializing a tip whose
-/// ancestry cannot be proven public.
+/// Scope label used when ancestry cannot be established from source metadata.
+/// A local shallow marker carries no proof of the withheld parent's audience.
 pub const UNRESOLVED_ANCESTOR_SCOPE: &str = "unresolved-ancestor";
 
 /// Outcome of a visibility put that captured its before/after images
@@ -61,6 +60,41 @@ pub struct PutVisibilityOutcome {
     pub id: ContentHash,
     pub prior_sidecar: Option<Vec<u8>>,
     pub new_sidecar: Option<Vec<u8>>,
+}
+
+/// Verified local sidecar requirements for one exact source ancestry. This is
+/// rebuildable metadata, never Thread admission or a grant. Callers must still
+/// intersect signed original captures and independently authorize each Thread.
+#[derive(Clone, Debug)]
+pub struct ContentDisclosureProof {
+    selected: StateId,
+    states: Vec<StateId>,
+    tiers: Vec<(StateId, VisibilityTier)>,
+    entries: Vec<objects::object::EntryVisibilityEntry>,
+}
+
+impl ContentDisclosureProof {
+    /// Exact identity-checked ancestry used to collect this proof. The list is
+    /// bounded by the same state and byte limits as the visibility walk.
+    pub fn states(&self) -> &[StateId] {
+        &self.states
+    }
+
+    /// Apply the canonical visibility predicate without re-reading sidecars.
+    /// An ancestor's Internal/Team tier does not taint the selected tip.
+    pub fn for_audience(
+        &self,
+        audience: &AudienceTier,
+    ) -> Option<objects::object::EntryRedactions> {
+        if self.tiers.iter().any(|(id, tier)| {
+            (*id == self.selected || tier.is_embargo()) && !visible(tier, audience)
+        }) {
+            return None;
+        }
+        let mut redactions = objects::object::EntryRedactions::default();
+        redactions.extend_overrides(&self.entries, |tier| visible(tier, audience));
+        Some(redactions)
+    }
 }
 
 /// Which audit op a [`Repository::commit_state_visibility`] emits — and thus
@@ -616,47 +650,144 @@ impl Repository {
         })
     }
 
-    /// Downward-closed visibility gate (spike #266 §5.0, heddle#1733).
-    ///
-    /// A state is served only when it is visible to `audience` **and** every
-    /// reachable parent is itself served. Git projection already withholds
-    /// descendants of an embargoed ancestor; checkout/clone/pull must agree
-    /// so a later public tip cannot disclose private-ancestor path bytes.
-    ///
-    /// A missing parent that is not a shallow boundary fails closed: the
-    /// tip is withheld instead of materializing a tree we cannot prove is
-    /// public. The walk is local object-store I/O (O(ancestors)), not a
-    /// hosted page.
+    /// Serve only when the tip's own tier is visible and no ancestor has an
+    /// unserved Private/Restricted embargo. Internal/Team ancestors do not taint
+    /// descendants. Every parent's identity and metadata must resolve; a local
+    /// shallow marker cannot establish visibility across an unknown boundary.
+    /// The walk is local object-store I/O, bounded to 4096 states / 16 MiB.
     pub fn withholding_visibility_for_audience(
         &self,
         state_id: &StateId,
         audience: &AudienceTier,
     ) -> Result<Option<(StateId, VisibilityTier)>> {
+        self.walk_content_visibility(
+            state_id,
+            |id, tier| (id == *state_id || tier.is_embargo()) && !visible(tier, audience),
+            |_| Ok(0),
+        )
+    }
+
+    /// Local sidecar projection for a whole-tip-admitted state. `None` means
+    /// withheld or unresolved ancestry; malformed metadata returns an error.
+    /// This does not grant Thread access or replace signed original admission.
+    /// Native readers also intersect the original captured privacy metadata.
+    ///
+    /// Explicit ancestor overrides follow unchanged salted leaf commitments.
+    /// Ancestor baselines never create per-entry taint. The walk shares the
+    /// same state/byte bounds and own-tier gate as other visibility surfaces.
+    pub fn content_visibility_for_audience(
+        &self,
+        state_id: &StateId,
+        audience: &AudienceTier,
+    ) -> Result<Option<objects::object::EntryRedactions>> {
+        let mut redactions = objects::object::EntryRedactions::default();
+        let withheld = self.walk_content_visibility(
+            state_id,
+            |id, tier| (id == *state_id || tier.is_embargo()) && !visible(tier, audience),
+            |state| {
+                let Some(bytes) = self.get_entry_visibility_bytes(&state.change_id)? else {
+                    return Ok(0);
+                };
+                let sidecar = objects::object::EntryVisibility::decode(&bytes)?;
+                if sidecar.change_id != state.change_id || sidecar.tree_root != state.tree {
+                    anyhow::bail!("entry visibility does not belong to the source state");
+                }
+                redactions.extend_overrides(&sidecar.entries, |tier| visible(tier, audience));
+                Ok(bytes.len())
+            },
+        )?;
+        Ok(withheld.is_none().then_some(redactions))
+    }
+
+    /// Collect exact local visibility requirements through the same bounded,
+    /// identity-checked ancestry walker used by current reads. An unresolved
+    /// ancestor yields `None`; malformed sidecars fail loudly.
+    pub fn collect_content_disclosure(
+        &self,
+        state_id: &StateId,
+    ) -> Result<Option<ContentDisclosureProof>> {
+        let mut tiers = Vec::new();
+        let mut entries = Vec::new();
+        let mut states = Vec::new();
+        let unresolved = self.walk_content_visibility(
+            state_id,
+            |id, tier| {
+                tiers.push((id, tier.clone()));
+                false
+            },
+            |state| {
+                states.push(state.id());
+                let Some(bytes) = self.get_entry_visibility_bytes(&state.change_id)? else {
+                    return Ok(0);
+                };
+                let sidecar = objects::object::EntryVisibility::decode(&bytes)?;
+                if sidecar.change_id != state.change_id || sidecar.tree_root != state.tree {
+                    anyhow::bail!("entry visibility does not belong to the source state");
+                }
+                entries.extend(sidecar.entries);
+                Ok(bytes.len())
+            },
+        )?;
+        Ok(unresolved.is_none().then_some(ContentDisclosureProof {
+            selected: *state_id,
+            states,
+            tiers,
+            entries,
+        }))
+    }
+
+    fn walk_content_visibility(
+        &self,
+        state_id: &StateId,
+        mut should_withhold: impl FnMut(StateId, &VisibilityTier) -> bool,
+        mut visit: impl FnMut(&objects::object::State) -> Result<usize>,
+    ) -> Result<Option<(StateId, VisibilityTier)>> {
         let mut seen = HashSet::new();
         let mut stack = vec![*state_id];
+        let mut decoded_bytes = 0usize;
+        let unresolved = |id| {
+            Some((
+                id,
+                VisibilityTier::Private {
+                    scope_label: UNRESOLVED_ANCESTOR_SCOPE.to_string(),
+                },
+            ))
+        };
         while let Some(id) = stack.pop() {
             if !seen.insert(id) {
                 continue;
             }
+            if seen.len() > 4096 {
+                return Ok(unresolved(id));
+            }
             let tier = self.effective_visibility_tier(&id)?;
-            if !visible(&tier, audience) {
+            if should_withhold(id, &tier) {
                 return Ok(Some((id, tier)));
             }
             let Some(state) = self.store().get_state(&id)? else {
-                if self.is_shallow(&id) {
+                return Ok(unresolved(id));
+            };
+            decoded_bytes = decoded_bytes.saturating_add(state.encode_current_msgpack()?.len());
+            if state.id() != id || decoded_bytes > 16 * 1024 * 1024 {
+                return Ok(unresolved(id));
+            }
+            decoded_bytes = decoded_bytes.saturating_add(visit(&state)?);
+            if decoded_bytes > 16 * 1024 * 1024 {
+                return Ok(unresolved(id));
+            }
+            // A present shallow ancestor is the graft edge of a depth-limited
+            // clone. Missing parents past that edge are not an unresolved
+            // embargo on the query root. A missing parent of the query root
+            // itself still withholds (shallow cannot invent that ancestry).
+            for parent in &state.parents {
+                if id != *state_id
+                    && self.is_shallow(&id)
+                    && self.store().get_state(parent)?.is_none()
+                {
                     continue;
                 }
-                return Ok(Some((
-                    id,
-                    VisibilityTier::Private {
-                        scope_label: UNRESOLVED_ANCESTOR_SCOPE.to_string(),
-                    },
-                )));
-            };
-            if self.is_shallow(&id) {
-                continue;
+                stack.push(*parent);
             }
-            stack.extend(state.parents.iter().copied());
         }
         Ok(None)
     }
@@ -774,9 +905,9 @@ impl Repository {
         let _own_lock = if lock_held {
             None
         } else {
-            Some(self.locker().write().with_context(|| {
-                "acquire repo write lock for capture-time default visibility binding"
-            })?)
+            Some(self.locker().write().with_context(
+                || "acquire repo write lock for capture-time default visibility binding",
+            )?)
         };
         let mut record = StateVisibility {
             state: *state,
@@ -1016,7 +1147,7 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use crypto::{Ed25519Signer, Signer};
-    use objects::object::{Principal, VisibilityTier};
+    use objects::object::{Principal, State, VisibilityTier};
     use oplog::OpLogBackend;
     use tempfile::TempDir;
 
@@ -1178,9 +1309,10 @@ mod tests {
         let signed = StateVisibilityBlob::new(vec![record]).encode().unwrap();
         repo.accept_wire_state_visibility(state, &signed)
             .expect("pinned owner must be able to land their own Private sidecar");
-        assert!(repo
-            .has_visibility_for_state(&state)
-            .expect("owner visibility persisted"));
+        assert!(
+            repo.has_visibility_for_state(&state)
+                .expect("owner visibility persisted")
+        );
         assert_eq!(
             repo.embargo_membership_label()
                 .expect("membership")
@@ -1316,6 +1448,119 @@ mod tests {
     }
 
     #[test]
+    fn native_whole_tip_uses_own_tier_and_only_ancestor_embargoes() {
+        let (_directory, repo) = fresh_repo();
+        let base = repo.head().expect("head").expect("base");
+        let tree = repo
+            .store()
+            .get_state(&base)
+            .expect("read")
+            .expect("seed")
+            .tree;
+        for (tier, blocked) in [
+            (VisibilityTier::Public, false),
+            (VisibilityTier::Internal, false),
+            (
+                VisibilityTier::TeamScoped {
+                    team_id: "team".into(),
+                },
+                false,
+            ),
+            (
+                VisibilityTier::Private {
+                    scope_label: "security".into(),
+                },
+                true,
+            ),
+            (
+                VisibilityTier::Restricted {
+                    scope_label: "security".into(),
+                },
+                true,
+            ),
+        ] {
+            let parent = State::new_snapshot(
+                tree,
+                vec![base],
+                objects::object::Attribution::human(objects::object::Principal::new("owner", "")),
+            );
+            repo.store().put_state(&parent).expect("parent");
+            repo.put_state_visibility(sample_record(parent.id(), tier.clone()))
+                .expect("tier");
+            let child = State::new_snapshot(
+                tree,
+                vec![parent.id()],
+                objects::object::Attribution::human(objects::object::Principal::new("owner", "")),
+            );
+            repo.store().put_state(&child).expect("child");
+            let own = repo
+                .withholding_visibility_for_audience(&parent.id(), &crate::AudienceTier::Public)
+                .expect("own gate");
+            assert_eq!(
+                own.is_some(),
+                tier != VisibilityTier::Public,
+                "own tier {tier:?}"
+            );
+            let descendant = repo
+                .withholding_visibility_for_audience(&child.id(), &crate::AudienceTier::Public)
+                .expect("descendant gate");
+            assert_eq!(descendant.is_some(), blocked, "ancestor tier {tier:?}");
+            let proof = repo
+                .collect_content_disclosure(&child.id())
+                .expect("checked proof")
+                .expect("complete ancestry");
+            assert_eq!(proof.states().first(), Some(&child.id()));
+            assert!(proof.states().contains(&parent.id()));
+            assert!(proof.states().contains(&base));
+            assert_eq!(
+                proof.for_audience(&crate::AudienceTier::Public).is_none(),
+                blocked,
+                "proof and live gate must agree for ancestor {tier:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_whole_tip_shallow_marker_does_not_prove_unknown_ancestry() {
+        let (_directory, repo) = fresh_repo();
+        let base = repo.head().expect("head").expect("base");
+        let tree = repo
+            .store()
+            .get_state(&base)
+            .expect("read")
+            .expect("seed")
+            .tree;
+        let missing = StateId::from_bytes([93; 32]);
+        let child = State::new_snapshot(
+            tree,
+            vec![missing],
+            objects::object::Attribution::human(objects::object::Principal::new("owner", "")),
+        );
+        repo.store().put_state(&child).expect("child");
+        repo.set_shallow(&missing, &[])
+            .expect("local shallow marker");
+        repo.set_shallow(&child.id(), &[missing])
+            .expect("child shallow marker");
+        let (id, tier) = repo
+            .withholding_visibility_for_audience(&child.id(), &crate::AudienceTier::Public)
+            .expect("visibility")
+            .expect("missing ancestry remains withheld");
+        assert_eq!(id, missing);
+        assert_eq!(
+            tier,
+            VisibilityTier::Private {
+                scope_label: UNRESOLVED_ANCESTOR_SCOPE.into()
+            }
+        );
+        assert!(
+            repo.collect_content_disclosure(&child.id())
+                .expect("checked proof")
+                .is_none(),
+            "shallow marker cannot mint a proof"
+        );
+    }
+
+    #[test]
     fn missing_ancestor_state_fails_closed_without_serving() {
         let dir = TempDir::new().unwrap();
         let repo = Repository::init_default(dir.path()).unwrap();
@@ -1445,11 +1690,12 @@ mod tests {
             "a state with no record must be public-by-absence (has_visibility_for_state == false)"
         );
         // And its sidecar load is an empty blob, never an error.
-        assert!(repo
-            .get_state_visibility_for_state(&no_record)
-            .expect("read record-free state")
-            .records
-            .is_empty());
+        assert!(
+            repo.get_state_visibility_for_state(&no_record)
+                .expect("read record-free state")
+                .records
+                .is_empty()
+        );
     }
 
     #[test]

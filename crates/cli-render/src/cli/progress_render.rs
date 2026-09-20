@@ -19,11 +19,11 @@ use std::{
     sync::Mutex,
 };
 
+use heddle_cli_args::{Cli, should_output_json};
 use objects::{Progress, ProgressSnapshot, Sink};
 use repo::Repository;
 
 use crate::cli::style;
-use heddle_cli_args::{Cli, should_output_json};
 
 /// Redraw the live line at most once per this many completed units, so a large
 /// operation doesn't spend its time flushing the terminal. Matches the historic

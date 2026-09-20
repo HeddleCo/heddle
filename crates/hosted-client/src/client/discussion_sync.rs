@@ -1,103 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Hosted discussion sync bridge.
+//! Hosted replication for native discussion operations.
 //!
-//! Local discussions live in the append-only [`CollaborationStore`] op-log
-//! (`.heddle/collaboration/ops`). The hosted weft `CollaborationService` speaks
-//! a different, per-state `DiscussionsBlob` model (id-keyed discussions with a
-//! linear turn list). This module bridges the two:
+//! Push signs the original local operation envelope, stores the exact signed
+//! record in the durable mirror, and publishes those bytes unchanged. Pull
+//! verifies the signed records returned by the server and writes the original
+//! operation bytes into the local [`CollaborationStore`]. This preserves the
+//! authored anchor, title, actor, scope, causal parents, and occurrence time.
 //!
-//! * **Push (write path):** after a successful `heddle push`, replay local
-//!   symbol-anchored discussion turns *we authored* to the server via the
-//!   caller-authenticated `OpenDiscussion` / `AppendTurn` RPCs (enforce-mode
-//!   signed). #549 rejects attachments in the pack, so they cannot ride it.
-//! * **Pull/clone (read path):** after a successful clone/pull, consume the
-//!   pull bootstrap's discussions when present, falling back to `ListByState`
-//!   for older servers and when the server advertised `discussions_from_pack`
-//!   but this client cannot consume the attachment (missing / wrong kind /
-//!   version skew). Live discussions are not a pack snapshot. Materialize
-//!   unseen turns into the local op-log.
-//!
-//! ## Turn identity
-//!
-//! Local turn order is op-log materialization order; server turn order is
-//! push/append order. They diverge the moment both sides append, so a single
-//! "N turns synced" prefix count is a lie. Instead the per-repo mirror map
-//! (`.heddle/collaboration/hosted-mirror.json`) records, per discussion, an
-//! explicit set of **turn links**: a local turn id ↔ a server turn ordinal.
-//!
-//! A local turn id is `(CollabOpId, index-within-op)` — NOT the `CollabOpId`
-//! alone, because a `LegacyImported` op (a migrated blob→op-log discussion)
-//! materializes *all* its turns under one shared `CollabOpId`. Keying on the op
-//! alone would give turns 2..N the same idempotency key with different bodies
-//! (a weft `with_idempotency` conflict) and collapse them into one link, so the
-//! rest would be silently dropped on exactly the migrated repos.
-//!
-//! Push sends only turns that are self-authored AND unlinked; pull materializes
-//! only server ordinals not yet linked. A materialized turn op's idempotency
-//! key is derived deterministically from `(hosted discussion id, server turn
-//! ordinal)` (see `turn_op_key`) — never a random per-write nonce — so the same
-//! server turn earns the same `CollabOpId` on every clone and a retry replays
-//! instead of conflicting or duplicating.
-//!
-//! `CollabOpId` still hashes the **full** envelope, including author and
-//! `occurred_at_ms`. Weft restamps both on accept, so an originator's local
-//! `heddle discuss open` (local git author + wall-clock time + CLI `--op-id`
-//! / v4 key) cannot content-address to the hosted envelope. That is why
-//! clones agreed with each other after #1677/#1697 while the originator
-//! still printed a different `co-…` (heddle#1695). After a successful push
-//! — and again on pull, when a linked local turn is not hosted-canonical —
-//! the originator **adopts** the same envelope a clone would materialize.
-//! The pre-push local-only op is retired (new bytes, new id; we do not
-//! rewrite bytes under the old id). Adopt remints only originator-local
-//! keys (v4 / `--op-id`). A turn already written with `turn_op_key` is
-//! left alone: a later GetDiscussion doorbell often lacks
-//! `opened_against_state` and must not rebuild a different Open than
-//! bootstrap/clone already stored (#1677/#1697).
-//! Resolve-into-annotation operations use the same durable mirror: their
-//! request identity is derived from `(hosted discussion id, server resolution
-//! key)` (see `resolve_op_key`) and is recorded only after `ResolveDiscussion`
-//! succeeds.
-//!
-//! ## Annotation identity (heddle#1731)
-//!
-//! `discuss resolve --into-annotation` writes a real local context annotation
-//! and records `CollaborationResolution::Annotation { annotation_id }` with
-//! that id. Hosted push still calls weft `ResolveDiscussion.IntoAnnotation`
-//! (kind/content/tags) so the hosted discussion shows as resolved. Weft may
-//! mint a distinct `hc-…` id that is **not** a context-store row. After the
-//! echo we keep the local context id rather than replacing it with that
-//! orphan. The coherent id across push/clone is the context annotation:
-//! local UUID, then the SetContext server id recorded in
-//! `hosted-context-mirror.json`. A weft twin that creates the context row
-//! (or accepts the existing id) would make clone `discuss show` and
-//! `context history` share one id.
-//!
-//! ## Reconciliation is author-aware, never body-alone
-//!
-//! When the mirror map is lost/rebuilt, an unlinked server turn is reconciled
-//! against an unlinked local turn only under an explicit **author** rule — never
-//! body equality alone, which would cross-link two different authors' identical
-//! bodies (`"lgtm"`, `"+1"`) and silently drop one:
-//! * (i) a turn WE pushed — the local turn is self-authored AND the server
-//!   turn's author is our own hosted username (weft stamps
-//!   `Principal::new(username, "")`); or
-//! * (ii) a turn we previously PULLED — the local op's author (written as
-//!   `Principal::new(author_name, author_email)`) and `occurred_at_ms` exactly
-//!   equal the server turn's author and `posted_at`.
-//!
-//! Anything matching neither rule materializes as a new, distinct turn.
-//! Distinguishing "a turn I pushed" from "a turn another clone of the SAME user
-//! pushed" is impossible client-side without server-minted turn ids (weft#640);
-//! rule (i) is precise across distinct hosted principals, which is the real
-//! multi-party case.
-//!
-//! The mirror is saved after **each** discussion and on the error path, with
-//! collect-and-continue per discussion — one wedged discussion (e.g. weft#638's
-//! no-HEAD `AppendTurn`) cannot abort the rest, and a mid-run failure never
-//! leaves durable writes without their mapping.
-//!
-//! Scope: discussions only; `context`/`review` share the same seam (not built).
-//! By-edit, dismiss, and reopen state are not yet mirrored.
+//! The older projection bridge remains only for reading legacy bootstrap and
+//! live event data. A projection without its native signed operation is
+//! reported as incomplete instead of being reconstructed as authored evidence.
+//! Legacy resolution shapes are handled the same way until their native signed
+//! operation is available from the frozen collaboration service contract.
 
 #![cfg(feature = "client")]
 
@@ -109,22 +23,24 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use api::heddle::api::v1alpha2::SignedRecord;
 use objects::{
     fs_atomic::write_file_atomic,
     lock::RepoLock,
     object::{
         Attribution, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
         CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
-        Discussion, DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion, Principal,
-        StateId, VisibilityTier,
+        CollaborationRevision, Discussion, DiscussionRecordId, DiscussionTurnV1,
+        MaterializedDiscussion, Principal, StateId, VisibilityTier,
+        thread_replication::ThreadOperationBody,
     },
     store::ObjectStore,
 };
+use prost::Message;
 use repo::{CollaborationStore, Repository};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    attachments::context_root_for_state,
     client::HostedClient,
     hosted_runtime::hosted::{HostedDiscussion, HostedDiscussionTurn, HostedResolution},
 };
@@ -144,6 +60,16 @@ struct HostedMirror {
 struct RepoMirror {
     #[serde(default)]
     discussions: Vec<MirrorEntry>,
+    /// Native signed originals prepared before delivery. These bytes are the
+    /// retry source of truth and are retained as authored evidence.
+    #[serde(default)]
+    native_operations: Vec<PreparedNativeOperation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PreparedNativeOperation {
+    local_operation_id: String,
+    signed_record: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,7 +107,9 @@ struct TurnLink {
 }
 
 /// One local turn with the identity + attribution the sync bridge reasons over.
+#[derive(Clone)]
 struct LocalTurn {
+    operation_id: CollabOpId,
     turn_id: String,
     body: String,
     author_name: String,
@@ -250,18 +178,6 @@ fn append_op_id(repo_path: &str, server_id: &str, turn_id: &str) -> String {
     .to_string()
 }
 
-fn resolve_into_annotation_op_id(
-    repo_path: &str,
-    server_id: &str,
-    kind: objects::object::AnnotationKind,
-    content: &str,
-    tags: &[String],
-) -> Result<String> {
-    let identity = serde_json::to_vec(&(repo_path, server_id, kind.as_str(), content, tags))
-        .context("encode resolve-into-annotation operation identity")?;
-    Ok(uuid::Uuid::new_v5(&OP_NAMESPACE, &identity).to_string())
-}
-
 /// Enumerate a materialized discussion's turns with their per-op index (turn
 /// identity), author, and whether the local principal authored them. Reads each
 /// distinct op once for its author/timestamp.
@@ -299,6 +215,7 @@ fn collect_local_turns(
         // NOT treated as ours (no `self_attr` ⇒ never self).
         let is_self = self_attr.is_some_and(|attr| principals_match(&principal, &attr.principal));
         turns.push(LocalTurn {
+            operation_id: *op_id,
             turn_id: turn_identity(op_id, index_within_op),
             body: turn.body.clone(),
             author_name: principal.name_lossy().into_owned(),
@@ -310,13 +227,92 @@ fn collect_local_turns(
     Ok(turns)
 }
 
-/// Publish local symbol-anchored discussion turns we authored to the hosted
-/// `CollaborationService`. Saves the mirror after each discussion and continues
-/// past a per-discussion failure (warn-and-skip).
+fn validate_replicable_anchor(repo: &Repository, anchor: &CollaborationAnchor) -> Result<()> {
+    let state = match anchor {
+        CollaborationAnchor::State { state_id }
+        | CollaborationAnchor::Path { state_id, .. }
+        | CollaborationAnchor::Symbol { state_id, .. } => Some(*state_id),
+        CollaborationAnchor::Source { source } => match source.revision {
+            CollaborationRevision::State { state_id } => Some(state_id),
+            CollaborationRevision::GitCommit { .. } => None,
+        },
+        CollaborationAnchor::Repository => None,
+        CollaborationAnchor::Change { .. } => {
+            return Err(anyhow!(
+                "change-anchored discussion replication is incomplete: an exact source revision is required"
+            ));
+        }
+    };
+    if let Some(state) = state
+        && repo
+            .store()
+            .get_state(&state)
+            .context("load discussion anchor state")?
+            .is_none()
+    {
+        return Err(anyhow!(
+            "discussion anchor state {state} is unavailable; native replication is incomplete"
+        ));
+    }
+    Ok(())
+}
+
+async fn publish_authored_append(
+    client: &mut HostedClient,
+    store: &CollaborationStore,
+    repo: &Repository,
+    repo_path: &str,
+    mirror: &mut HostedMirror,
+    server_id: &str,
+    turn: &LocalTurn,
+) -> Result<HostedDiscussion> {
+    let signed = if let Some(prepared) = mirror.repos.get(repo_path).and_then(|repository| {
+        repository
+            .native_operations
+            .iter()
+            .find(|operation| operation.local_operation_id == turn.operation_id.to_string_full())
+    }) {
+        SignedRecord::decode(prepared.signed_record.as_slice())
+            .context("decode prepared native discussion append")?
+    } else {
+        let authored = store
+            .read_operation(&turn.operation_id)
+            .context("read authored discussion turn")?
+            .ok_or_else(|| anyhow!("authored discussion turn {} is missing", turn.operation_id))?
+            .operation;
+        let signed = client
+            .prepare_append_discussion_operation(repo_path, server_id, &authored)
+            .await?;
+        mirror
+            .repos
+            .entry(repo_path.to_string())
+            .or_default()
+            .native_operations
+            .push(PreparedNativeOperation {
+                local_operation_id: turn.operation_id.to_string_full(),
+                signed_record: signed.encode_to_vec(),
+            });
+        save_mirror(repo.heddle_dir(), mirror)?;
+        signed
+    };
+    client
+        .publish_append_discussion_operation(
+            signed,
+            append_op_id(repo_path, server_id, &turn.turn_id),
+        )
+        .await
+        .map_err(Into::into)
+}
+
+/// Publish every supported locally authored discussion anchor through the
+/// hosted `CollaborationService`. The durable signed record is saved before
+/// delivery. Per-discussion failures are collected and returned as an explicit
+/// incomplete replication result after other discussions have been attempted.
 pub async fn push_discussions(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
+    default_thread_ref: &str,
 ) -> Result<usize> {
     let store = CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
     let materialized = store
@@ -330,6 +326,7 @@ pub async fn push_discussions(
     let _guard = lock_mirror_write(repo.heddle_dir())?;
     let mut mirror = load_mirror(repo.heddle_dir())?;
     let mut synced = 0usize;
+    let mut incomplete = Vec::new();
 
     for (discussion_id, discussion) in &materialized.discussions {
         let result = push_one(
@@ -337,6 +334,7 @@ pub async fn push_discussions(
             &store,
             repo,
             repo_path,
+            default_thread_ref,
             &mut mirror,
             self_attr.as_ref(),
             &discussion_id.to_string(),
@@ -354,10 +352,17 @@ pub async fn push_discussions(
                     "hosted_discussion_sync_failed",
                     format!("hosted discussion {discussion_id}: {error:#}"),
                 );
+                incomplete.push(format!("{discussion_id}: {error:#}"));
             }
         }
     }
 
+    if !incomplete.is_empty() {
+        return Err(anyhow!(
+            "hosted discussion replication incomplete: {}",
+            incomplete.join("; ")
+        ));
+    }
     Ok(synced)
 }
 
@@ -367,29 +372,13 @@ async fn push_one(
     store: &CollaborationStore,
     repo: &Repository,
     repo_path: &str,
+    default_thread_ref: &str,
     mirror: &mut HostedMirror,
     self_attr: Option<&Attribution>,
     local_id: &str,
     discussion: &MaterializedDiscussion,
 ) -> Result<bool> {
-    let CollaborationAnchor::Symbol {
-        state_id,
-        path,
-        symbol,
-    } = &discussion.anchor
-    else {
-        // Only symbol-anchored discussions map to the hosted PathSymbolRef.
-        return Ok(false);
-    };
-    let Some(state) = repo
-        .store()
-        .get_state(state_id)
-        .context("load discussion anchor state")?
-    else {
-        return Ok(false);
-    };
-    let change_id = state.change_id;
-    let visibility = discussion.visibility.as_str().to_string();
+    validate_replicable_anchor(repo, &discussion.anchor)?;
 
     let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
     let entry_index = repo_mirror
@@ -407,7 +396,7 @@ async fn push_one(
 
     // Candidates: turns we authored that the server does not already hold.
     let local_turns = collect_local_turns(store, discussion, self_attr)?;
-    let mut candidates: Vec<(String, String)> = Vec::new(); // (turn_id, body)
+    let mut candidates: Vec<LocalTurn> = Vec::new();
     let mut skipped_foreign = 0usize;
     for turn in &local_turns {
         if linked.contains(&turn.turn_id) {
@@ -418,223 +407,137 @@ async fn push_one(
             skipped_foreign += 1;
             continue;
         }
-        candidates.push((turn.turn_id.clone(), turn.body.clone()));
+        candidates.push(turn.clone());
     }
     if skipped_foreign > 0 {
-        // F3: surface principal drift / foreign-authored unpushed turns instead
-        // of silently producing an empty candidate set.
-        client.warn(
-            "hosted_discussion_foreign_attribution",
-            format!(
-                "hosted discussion {local_id}: {skipped_foreign} unlinked turn(s) not attributed to the local principal were left unpublished"
-            ),
-        );
+        return Err(anyhow!(
+            "discussion {local_id} has {skipped_foreign} unlinked turn(s) not attributed to the local principal and no retained native signed operation; replication is incomplete"
+        ));
     }
-    let (index, server_id, mut changed, hosted) =
-        match entry_index {
-            None => {
-                if candidates.is_empty() {
-                    return Ok(false);
-                }
-                let (open_turn_id, open_body) = candidates[0].clone();
-                let proposed_id = local_id.to_string();
-                let mut hosted = client
-                    .open_discussion(
-                        repo_path,
-                        change_id,
-                        path,
-                        symbol,
-                        &open_body,
-                        &visibility,
-                        discussion.thread_ref.as_deref(),
-                        open_op_id(repo_path, local_id),
-                        &proposed_id,
-                    )
+    let (_index, _server_id, changed, _hosted) = match entry_index {
+        None => {
+            if candidates.is_empty() {
+                return Ok(false);
+            }
+            let open_turn = candidates[0].clone();
+            let open_turn_id = open_turn.turn_id.clone();
+            let open_operation_id = discussion
+                .turns
+                .first()
+                .map(|(operation, _)| *operation)
+                .ok_or_else(|| anyhow!("discussion {local_id} has no opening operation"))?;
+            let authored = store
+                .read_operation(&open_operation_id)
+                .context("read authored discussion open")?
+                .ok_or_else(|| anyhow!("authored discussion open {open_operation_id} is missing"))?
+                .operation;
+            if !matches!(authored.body, CollaborationOperationBodyV1::Open { .. }) {
+                return Err(anyhow!(
+                    "discussion {local_id} uses an unsupported imported opening shape; native replication is incomplete"
+                ));
+            }
+            let signed = if let Some(prepared) =
+                mirror.repos.get(repo_path).and_then(|repository| {
+                    repository.native_operations.iter().find(|operation| {
+                        operation.local_operation_id == open_operation_id.to_string_full()
+                    })
+                }) {
+                SignedRecord::decode(prepared.signed_record.as_slice())
+                    .context("decode prepared native discussion operation")?
+            } else {
+                let signed = client
+                    .prepare_open_discussion_operation(repo_path, default_thread_ref, &authored)
                     .await
-                    .with_context(|| format!("open hosted discussion for {local_id}"))?;
-                let server_id = hosted.id.clone();
-                let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
-                repo_mirror.discussions.push(MirrorEntry {
-                    local_id: local_id.to_string(),
-                    server_id: server_id.clone(),
-                    links: vec![TurnLink {
-                        local_turn_id: open_turn_id,
-                        server_ordinal: 0,
-                        server_turn_id: None,
-                    }],
-                    resolved_into_annotation_operation_id: None,
-                    pulled_resolution_key: None,
-                });
-                let index = repo_mirror.discussions.len() - 1;
-                for (turn_id, body) in &candidates[1..] {
-                    hosted = client
-                        .append_turn(
-                            repo_path,
-                            &server_id,
-                            body,
-                            append_op_id(repo_path, &server_id, turn_id),
-                        )
-                        .await
-                        .with_context(|| format!("append hosted turn for {local_id}"))?;
-                    push_link(
-                        mirror,
-                        repo_path,
-                        index,
-                        turn_id.clone(),
-                        hosted.turns.len().saturating_sub(1),
-                        hosted.turns.last().and_then(|turn| {
-                            (!turn.turn_id.is_empty()).then(|| turn.turn_id.clone())
-                        }),
-                    );
-                }
-                // OpenDiscussion / AppendTurn echo the full discussion (≥2 turns
-                // after append). Adopt uses this last snapshot.
-                (index, server_id, true, Some(hosted))
+                    .with_context(|| {
+                        format!("prepare native discussion {local_id} in its requested scope")
+                    })?;
+                mirror
+                    .repos
+                    .entry(repo_path.to_string())
+                    .or_default()
+                    .native_operations
+                    .push(PreparedNativeOperation {
+                        local_operation_id: open_operation_id.to_string_full(),
+                        signed_record: signed.encode_to_vec(),
+                    });
+                save_mirror(repo.heddle_dir(), mirror)?;
+                signed
+            };
+            let mut hosted = client
+                .publish_open_discussion_operation(signed, open_op_id(repo_path, local_id))
+                .await
+                .with_context(|| format!("open hosted discussion for {local_id}"))?;
+            let server_id = hosted.id.clone();
+            let repo_mirror = mirror.repos.entry(repo_path.to_string()).or_default();
+            repo_mirror.discussions.push(MirrorEntry {
+                local_id: local_id.to_string(),
+                server_id: server_id.clone(),
+                links: vec![TurnLink {
+                    local_turn_id: open_turn_id,
+                    server_ordinal: 0,
+                    server_turn_id: None,
+                }],
+                resolved_into_annotation_operation_id: None,
+                pulled_resolution_key: None,
+            });
+            let index = repo_mirror.discussions.len() - 1;
+            for turn in &candidates[1..] {
+                hosted = publish_authored_append(
+                    client, store, repo, repo_path, mirror, &server_id, turn,
+                )
+                .await
+                .with_context(|| format!("append hosted turn for {local_id}"))?;
+                push_link(
+                    mirror,
+                    repo_path,
+                    index,
+                    turn.turn_id.clone(),
+                    hosted.turns.len().saturating_sub(1),
+                    hosted
+                        .turns
+                        .last()
+                        .and_then(|turn| (!turn.turn_id.is_empty()).then(|| turn.turn_id.clone())),
+                );
             }
-            Some(index) => {
-                let server_id = mirror.repos[repo_path].discussions[index].server_id.clone();
-                let mut hosted = None;
-                for (turn_id, body) in &candidates {
-                    let echoed = client
-                        .append_turn(
-                            repo_path,
-                            &server_id,
-                            body,
-                            append_op_id(repo_path, &server_id, turn_id),
-                        )
-                        .await
-                        .with_context(|| format!("append hosted turn for {local_id}"))?;
-                    push_link(
-                        mirror,
-                        repo_path,
-                        index,
-                        turn_id.clone(),
-                        echoed.turns.len().saturating_sub(1),
-                        echoed.turns.last().and_then(|turn| {
-                            (!turn.turn_id.is_empty()).then(|| turn.turn_id.clone())
-                        }),
-                    );
-                    // Weft AppendTurn/OpenDiscussion echoes the full discussion
-                    // (≥2 turns after append). Adopt uses this snapshot so a
-                    // last-turn-only echo cannot under-adopt.
-                    hosted = Some(echoed);
-                }
-                (index, server_id, !candidates.is_empty(), hosted)
-            }
-        };
-
-    if let Some(hosted) = hosted.as_ref() {
-        let head_state = hosted_materialization_state(discussion, repo)?;
-        if let Some(entry) = mirror
-            .repos
-            .get_mut(repo_path)
-            .and_then(|repo_mirror| repo_mirror.discussions.get_mut(index))
-            && adopt_from_push_echo(store, head_state, local_id, hosted, entry)?
-        {
-            changed = true;
+            // OpenDiscussion / AppendTurn echo the full discussion (≥2 turns
+            // after append). Adopt uses this last snapshot.
+            (index, server_id, true, Some(hosted))
         }
-    }
+        Some(index) => {
+            let server_id = mirror.repos[repo_path].discussions[index].server_id.clone();
+            let mut hosted = None;
+            for turn in &candidates {
+                let echoed = publish_authored_append(
+                    client, store, repo, repo_path, mirror, &server_id, turn,
+                )
+                .await
+                .with_context(|| format!("append hosted turn for {local_id}"))?;
+                push_link(
+                    mirror,
+                    repo_path,
+                    index,
+                    turn.turn_id.clone(),
+                    echoed.turns.len().saturating_sub(1),
+                    echoed
+                        .turns
+                        .last()
+                        .and_then(|turn| (!turn.turn_id.is_empty()).then(|| turn.turn_id.clone())),
+                );
+                // Weft AppendTurn/OpenDiscussion echoes the full discussion
+                // (≥2 turns after append). Adopt uses this snapshot so a
+                // last-turn-only echo cannot under-adopt.
+                hosted = Some(echoed);
+            }
+            (index, server_id, !candidates.is_empty(), hosted)
+        }
+    };
 
-    if push_into_annotation_resolution(
-        client, repo_path, mirror, index, &server_id, discussion, repo,
-    )
-    .await?
-    {
-        changed = true;
+    if discussion.resolution.is_some() {
+        return Err(anyhow!(
+            "discussion {local_id} has a legacy resolution without a persisted native signed operation; replication is incomplete"
+        ));
     }
     Ok(changed)
-}
-
-async fn push_into_annotation_resolution(
-    client: &mut HostedClient,
-    repo_path: &str,
-    mirror: &mut HostedMirror,
-    index: usize,
-    server_id: &str,
-    discussion: &MaterializedDiscussion,
-    repo: &Repository,
-) -> Result<bool> {
-    let Some((annotation_kind, content, tags)) = resolution_annotation_payload(repo, discussion)?
-    else {
-        return Ok(false);
-    };
-    let operation_id =
-        resolve_into_annotation_op_id(repo_path, server_id, annotation_kind, &content, &tags)?;
-    if mirror.repos[repo_path].discussions[index]
-        .resolved_into_annotation_operation_id
-        .as_deref()
-        == Some(&operation_id)
-    {
-        return Ok(false);
-    }
-    let hosted = client
-        .resolve_discussion_into_annotation(
-            repo_path,
-            server_id,
-            annotation_kind,
-            &content,
-            tags,
-            operation_id.clone(),
-        )
-        .await
-        .with_context(|| format!("resolve hosted discussion {server_id} into annotation"))?;
-    let entry = mirror
-        .repos
-        .get_mut(repo_path)
-        .and_then(|repo_mirror| repo_mirror.discussions.get_mut(index))
-        .ok_or_else(|| anyhow!("hosted discussion mirror entry disappeared during resolution"))?;
-    entry.resolved_into_annotation_operation_id = Some(operation_id);
-    if let Some(key) = hosted_resolution_key(&hosted.resolution) {
-        entry.pulled_resolution_key = Some(key);
-    }
-    Ok(true)
-}
-
-fn resolution_annotation_payload(
-    repo: &Repository,
-    discussion: &MaterializedDiscussion,
-) -> Result<Option<(objects::object::AnnotationKind, String, Vec<String>)>> {
-    match &discussion.resolution {
-        Some(CollaborationResolution::IntoAnnotation {
-            annotation_kind,
-            content,
-            tags,
-        }) => Ok(Some((*annotation_kind, content.clone(), tags.clone()))),
-        Some(CollaborationResolution::Annotation { annotation_id }) => {
-            let Some(head) = repo.head().context("resolve repository head")? else {
-                return Ok(None);
-            };
-            let Some(head_state) = repo
-                .store()
-                .get_state(&head)
-                .context("load head state for resolution annotation")?
-            else {
-                return Ok(None);
-            };
-            let Some(root) = context_root_for_state(repo, &head_state)? else {
-                return Ok(None);
-            };
-            let Some((_, blob, index)) = repo
-                .find_annotation(&root, annotation_id)
-                .context("look up resolution annotation")?
-            else {
-                return Ok(None);
-            };
-            let Some(revision) = blob
-                .annotations
-                .get(index)
-                .and_then(|annotation| annotation.current_revision())
-            else {
-                return Ok(None);
-            };
-            Ok(Some((
-                revision.kind,
-                revision.content.clone(),
-                revision.tags.clone(),
-            )))
-        }
-        _ => Ok(None),
-    }
 }
 
 /// Fetch hosted discussions for `against` (or repository HEAD) and materialize
@@ -656,13 +559,13 @@ pub async fn pull_discussions(
     pull_discussions_filtered(repo, client, repo_path, bootstrap, against, None).await
 }
 
-/// Wait `--thread` bootstrap: same ListByState RPC, then keep only discussions
-/// whose `thread_ref` matches the paired name or whose wire `thread_id`
-/// matches the stable id.
+/// Wait `--thread` bootstrap: same ObserveCollaboration list, then keep only
+/// discussions whose `thread_ref` matches the paired name or whose wire
+/// `thread_id` matches the stable id.
 ///
-/// `ListDiscussionsByStateRequest` has no thread fields (heddle-api 0.23.0).
-/// Do not call `ListByThreadRef` — that would be a second list RPC.
-/// Pull-fold `Some(discussions)` stays repo-wide: clone/pull must not shrink.
+/// Do not call a second list RPC. Pull-fold `Some(discussions)` stays
+/// repo-wide: clone/pull must not shrink. An empty slice is treated as
+/// missing (v2 source-only bootstrap) and Observes.
 pub async fn pull_discussions_for_thread(
     repo: &Repository,
     client: &mut HostedClient,
@@ -683,6 +586,62 @@ async fn pull_discussions_filtered(
     against: Option<StateId>,
     thread_filter: Option<(&str, &str)>,
 ) -> Result<usize> {
+    if bootstrap.is_none() {
+        let signed = client
+            .list_discussion_operations(repo_path)
+            .await
+            .context("observe native discussion operations")?;
+        if !signed.is_empty() {
+            let store =
+                CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
+            let _guard = lock_mirror_write(repo.heddle_dir())?;
+            let mut mirror = load_mirror(repo.heddle_dir())?;
+            let mut changed = HashSet::new();
+            for record in signed {
+                let verified = thread_api::collaboration::verify(&record)
+                    .map_err(|error| anyhow!(error.to_string()))?;
+                let ThreadOperationBody::Discussion(bytes) = verified.body else {
+                    continue;
+                };
+                let decoded = CollaborationOperationEnvelope::decode(&bytes)
+                    .map_err(|error| anyhow!(error.to_string()))?;
+                if let Some((thread, thread_id)) = thread_filter {
+                    let by_name = matches!(
+                        &decoded.operation.body,
+                        CollaborationOperationBodyV1::Open { thread_ref, .. }
+                            if thread_ref.as_deref() == Some(thread)
+                    );
+                    let by_id = decoded
+                        .operation
+                        .metadata
+                        .as_ref()
+                        .and_then(|metadata| metadata.scope.thread)
+                        .is_some_and(|id| id.to_string() == thread_id);
+                    if !by_name && !by_id {
+                        continue;
+                    }
+                }
+                store
+                    .write_operation_bytes(&bytes)
+                    .context("store native signed discussion operation")?;
+                changed.insert(decoded.operation.discussion_id);
+                let local_operation_id = decoded.operation_id.to_string_full();
+                let repository = mirror.repos.entry(repo_path.to_string()).or_default();
+                if !repository
+                    .native_operations
+                    .iter()
+                    .any(|operation| operation.local_operation_id == local_operation_id)
+                {
+                    repository.native_operations.push(PreparedNativeOperation {
+                        local_operation_id,
+                        signed_record: record.encode_to_vec(),
+                    });
+                }
+            }
+            save_mirror(repo.heddle_dir(), &mirror)?;
+            return Ok(changed.len());
+        }
+    }
     let Some((head_state, hosted)) =
         listed_hosted_discussions(repo, client, repo_path, bootstrap, against, thread_filter)
             .await?
@@ -693,6 +652,11 @@ async fn pull_discussions_filtered(
     };
     if hosted.is_empty() {
         return Ok(0);
+    }
+    if bootstrap.is_none() {
+        return Err(anyhow!(
+            "hosted discussions omitted their signed operations; replication is incomplete"
+        ));
     }
     // Our own hosted principal name, so reconciliation can recognize the turns
     // we pushed (weft stamps `Principal::new(username, "")`).
@@ -760,7 +724,9 @@ async fn listed_hosted_discussions(
 
     // Pull-fold attachments are clone/pull's repo-wide snapshot. Never shrink
     // that set for wait `--thread` — wait's filtered path always passes None.
-    let hosted = match bootstrap {
+    // v2 Fetch does not fold discussions: Some([]) is not "the server has
+    // none", it is a source-only header, so ObserveCollaboration.
+    let mut hosted = match bootstrap.filter(|discussions| !discussions.is_empty()) {
         Some(discussions) => discussions
             .iter()
             .cloned()
@@ -770,7 +736,7 @@ async fn listed_hosted_discussions(
             let listed = client
                 .list_discussions_by_state(repo_path, state.change_id, "all")
                 .await
-                .context("list hosted discussions")?;
+                .context("observe hosted discussions")?;
             match thread_filter {
                 Some((thread, thread_id)) => listed
                     .into_iter()
@@ -782,6 +748,18 @@ async fn listed_hosted_discussions(
             }
         }
     };
+    // Once-mode list can return discussion records without Turn events.
+    // pull_one skips empty Open shells, so hydrate from a per-discussion
+    // ObserveCollaboration (not v1 GetDiscussion) before materializing.
+    for discussion in &mut hosted {
+        if discussion.turns.is_empty()
+            && !discussion.id.is_empty()
+            && let Ok(full) = client.get_discussion(repo_path, &discussion.id, None).await
+            && !full.turns.is_empty()
+        {
+            *discussion = full;
+        }
+    }
     Ok(Some((state_id, hosted)))
 }
 
@@ -853,6 +831,7 @@ fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion 
                 posted_at_secs: turn.posted_at,
                 turn_id: String::new(),
                 turn_seq: 0,
+                causal_id: Vec::new(),
             })
             .collect(),
         resolution: match discussion.resolution {
@@ -870,6 +849,8 @@ fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion 
             }
         },
         kind: 0,
+        causal_heads: Vec::new(),
+        version: Vec::new(),
     }
 }
 
@@ -1216,7 +1197,7 @@ fn is_pushed_annotation_echo(
 }
 
 fn hosted_open_anchor(discussion: &HostedDiscussion, head_state: StateId) -> CollaborationAnchor {
-    use api::heddle::api::v1alpha1::DiscussionKind;
+    use crate::legacy_v1::DiscussionKind;
 
     let kind = DiscussionKind::try_from(discussion.kind).unwrap_or(DiscussionKind::Unspecified);
     let has_symbol = !discussion.file.is_empty() && !discussion.symbol.is_empty();
@@ -1412,21 +1393,6 @@ fn resolve_op_key(
         .map_err(|error| anyhow!("invalid idempotency key: {error}"))
 }
 
-fn hosted_materialization_state(
-    discussion: &MaterializedDiscussion,
-    repo: &Repository,
-) -> Result<StateId> {
-    match &discussion.anchor {
-        CollaborationAnchor::Symbol { state_id, .. }
-        | CollaborationAnchor::State { state_id }
-        | CollaborationAnchor::Path { state_id, .. } => Ok(*state_id),
-        _ => repo
-            .head()
-            .context("resolve repository head for hosted turn adoption")?
-            .ok_or_else(|| anyhow!("cannot adopt hosted turn ops without an anchor state")),
-    }
-}
-
 fn hosted_turn_body(
     discussion: &HostedDiscussion,
     turn: &HostedDiscussionTurn,
@@ -1435,6 +1401,7 @@ fn hosted_turn_body(
 ) -> Result<CollaborationOperationBodyV1> {
     if index == 0 {
         Ok(CollaborationOperationBodyV1::Open {
+            blocking: false,
             title: derive_title(&turn.body, &discussion.symbol),
             anchor: hosted_open_anchor(discussion, head_state),
             visibility: parse_visibility_token(&discussion.visibility),
@@ -1501,6 +1468,7 @@ fn fill_missing_server_turn_ids(entry: &mut MirrorEntry, hosted: &HostedDiscussi
 /// echo. Weft echoes the **full** discussion (≥2 turns after append). Empty
 /// `turns` is a test-server / older-weft no-op. A short echo is refused so a
 /// last-turn-only snapshot cannot retire local turns it cannot replace.
+#[cfg(test)]
 fn adopt_from_push_echo(
     store: &CollaborationStore,
     head_state: StateId,
@@ -1714,10 +1682,10 @@ fn parse_visibility_token(token: &str) -> VisibilityTier {
 
 #[cfg(test)]
 mod tests {
-    use api::heddle::api::v1alpha1::{
+    use crate::legacy_v1::{
         Discussion as ProtoDiscussion, DiscussionTurn as ProtoTurn, PathSymbolRef, RepoEvent,
-        StateId as ProtoStateId,
     };
+    use api::heddle::api::common::StateId as ProtoStateId;
     use objects::object::{
         AnnotationKind, Attribution, CollaborationAnchor, CollaborationIdempotencyKey,
         CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
@@ -1727,10 +1695,11 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    use crate::client::discussion_live::{DiscussionEventOutcome, consume_discussion_event};
-    use crate::hosted_runtime::hosted::test_server::CollaborationFixture;
-
     use super::*;
+    use crate::{
+        client::discussion_live::{DiscussionEventOutcome, consume_discussion_event},
+        hosted_runtime::hosted::test_server::CollaborationFixture,
+    };
 
     /// A stable per-turn idempotency key for tests that drive
     /// `write_local_operation` directly (production callers derive theirs from
@@ -1747,6 +1716,7 @@ mod tests {
         ms: i64,
     ) -> LocalTurn {
         LocalTurn {
+            operation_id: CollabOpId::from_bytes([1; 32]),
             turn_id: format!("co-{author_name}#0"),
             body: body.to_string(),
             author_name: author_name.to_string(),
@@ -1769,6 +1739,7 @@ mod tests {
             posted_at_secs,
             turn_id: String::new(),
             turn_seq: 0,
+            causal_id: Vec::new(),
         }
     }
 
@@ -1777,6 +1748,7 @@ mod tests {
     // unlinked (so push will still publish it). Body equality alone never links.
     #[test]
     fn reconcile_rejects_identical_body_across_authors() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         // A's own unpushed "lgtm" (local principal "alice", not yet on server).
         let available = vec![local("lgtm", "alice", "alice@x", true, 111)];
         // B pushed "lgtm" (server stamped it "bob"); our hosted username is "alice".
@@ -1792,6 +1764,7 @@ mod tests {
     // hosted username on the server) reconciles.
     #[test]
     fn reconcile_links_turn_we_pushed() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let available = vec![local("ship it", "alice-local", "alice@x", true, 111)];
         let st = server("ship it", "alice", "", 9); // server stamped our hosted username
         assert_eq!(reconcile(&available, &st, Some("alice")), Some(0));
@@ -1801,6 +1774,7 @@ mod tests {
     // author + posted_at verbatim) reconciles.
     #[test]
     fn reconcile_links_turn_we_pulled() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let available = vec![local("+1", "bob", "bob@x", false, 7000)]; // occurred = 7 * 1000
         let st = server("+1", "bob", "bob@x", 7);
         assert_eq!(reconcile(&available, &st, Some("alice")), Some(0));
@@ -1814,6 +1788,7 @@ mod tests {
     // otherwise weft dedup conflicts on turn 3 and turns 3..N are dropped.
     #[test]
     fn legacy_imported_multi_turn_op_has_distinct_identities_and_keys() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = tempfile::TempDir::new().unwrap();
         let store = CollaborationStore::open(temp.path()).unwrap();
         let discussion_id: DiscussionRecordId =
@@ -1879,6 +1854,7 @@ mod tests {
 
     #[test]
     fn discussion_sync_state_prefers_the_pulled_tip_over_head() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -1898,6 +1874,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_discussion_sync_uses_against_before_head_is_published() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let temp = TempDir::new().unwrap();
         let repo = Repository::init(temp.path()).unwrap();
         let tree = Tree::new();
@@ -1962,9 +1939,88 @@ mod tests {
         server.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn clone_empty_bootstrap_observes_and_materializes_discussions() {
+        let _process_env_guard = crate::test_process_env::shared().await;
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        let tree = Tree::new();
+        let tree_id = repo.store().put_tree(&tree).unwrap();
+        let state = State::new_snapshot(
+            tree_id,
+            Vec::new(),
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        );
+        repo.store().put_state(&state).unwrap();
+        let against = state.id();
+        assert_eq!(
+            repo.head().unwrap(),
+            None,
+            "clone has not published HEAD yet"
+        );
+
+        let discussion_id = DiscussionRecordId::generate().to_string();
+        let proto = ProtoDiscussion {
+            id: discussion_id.clone(),
+            anchor: Some(PathSymbolRef {
+                file: "lib.rs".to_string(),
+                symbol: "run".to_string(),
+            }),
+            visibility: "internal".to_string(),
+            turns: vec![ProtoTurn {
+                author_name: "Reviewer".to_string(),
+                author_email: "reviewer@example.com".to_string(),
+                body: "keep this invariant".to_string(),
+                turn_id: "turn-open".to_string(),
+                turn_seq: 1,
+                posted_at: Some(prost_types::Timestamp {
+                    seconds: 1_700_000_001,
+                    nanos: 0,
+                }),
+            }],
+            ..ProtoDiscussion::default()
+        };
+        let mut fixture = CollaborationFixture::default();
+        fixture.list.push(proto.clone());
+        fixture.discussions.insert(discussion_id.clone(), proto);
+        let (mut client, server, fixture) =
+            crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
+
+        let empty: &[Discussion] = &[];
+        let changed = pull_discussions(
+            &repo,
+            &mut client,
+            "acme/widgets",
+            Some(empty),
+            Some(against),
+        )
+        .await
+        .unwrap();
+        let observed = *fixture.list_requests.lock().unwrap();
+        assert!(
+            observed >= 1,
+            "empty v2 bootstrap must ObserveCollaboration, not treat Some([]) as no discussions"
+        );
+        assert_eq!(
+            changed, 1,
+            "ObserveCollaboration returned a discussion; pull_one must materialize it (got {changed}, observed={observed})"
+        );
+
+        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
+        let local_id: DiscussionRecordId = discussion_id.parse().unwrap();
+        assert!(
+            store.materialize_discussion(&local_id).unwrap().is_some(),
+            "clone discuss list is empty after Observe returned a discussion: pull_one did not adopt"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
     // F3: no local principal ⇒ turns are NOT treated as ours (fail closed).
     #[test]
     fn collect_local_turns_fails_closed_without_self_principal() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = tempfile::TempDir::new().unwrap();
         let store = CollaborationStore::open(temp.path()).unwrap();
         let discussion_id = DiscussionRecordId::generate();
@@ -1975,6 +2031,7 @@ mod tests {
             Attribution::human(Principal::new("Ada", "ada@x")),
             1,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "t".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: StateId::from_bytes([2; 32]),
@@ -1999,8 +2056,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn unsupported_anchor_is_an_explicit_incomplete_result() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init_default(temp.path()).unwrap();
+        let error = validate_replicable_anchor(
+            &repo,
+            &CollaborationAnchor::Change {
+                change_id: objects::object::ChangeId::from_bytes([7; 16]),
+            },
+        )
+        .expect_err("change anchor needs an exact source revision");
+        let message = error.to_string();
+        assert!(message.contains("replication is incomplete"), "{message}");
+        assert!(message.contains("exact source revision"), "{message}");
+    }
+
     #[tokio::test]
     async fn bootstrap_pull_materializes_discussion_once_and_persists_the_mirror() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2064,7 +2139,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_discussion_opens_appends_and_resolves_into_annotation() {
+    async fn push_discussion_opens_and_appends_native_operations() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2086,6 +2162,7 @@ mod tests {
             author.clone(),
             1_700_000_000_000,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "run contract".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: state,
@@ -2099,15 +2176,7 @@ mod tests {
             test_key("open-run-contract"),
         )
         .unwrap();
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-        assert_eq!(
-            push_discussions(&repo, &mut client, "acme/widgets")
-                .await
-                .unwrap(),
-            1
-        );
-
-        let append = write_local_operation(
+        write_local_operation(
             &store,
             discussion_id,
             vec![open],
@@ -2119,41 +2188,214 @@ mod tests {
             test_key("append-second-turn"),
         )
         .unwrap();
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
         assert_eq!(
-            push_discussions(&repo, &mut client, "acme/widgets")
-                .await
-                .unwrap(),
-            1
-        );
-
-        write_local_operation(
-            &store,
-            discussion_id,
-            vec![append],
-            author,
-            1_700_000_002_000,
-            CollaborationOperationBodyV1::Resolve {
-                resolution: CollaborationResolution::IntoAnnotation {
-                    annotation_kind: AnnotationKind::Invariant,
-                    content: "the cache key includes visibility".to_string(),
-                    tags: vec!["cache".to_string()],
-                },
-            },
-            test_key("resolve-into-annotation"),
-        )
-        .unwrap();
-        assert_eq!(
-            push_discussions(&repo, &mut client, "acme/widgets")
+            push_discussions(&repo, &mut client, "acme/widgets", "main")
                 .await
                 .unwrap(),
             1
         );
         assert_eq!(
-            push_discussions(&repo, &mut client, "acme/widgets")
+            push_discussions(&repo, &mut client, "acme/widgets", "main")
                 .await
                 .unwrap(),
             0,
-            "a mirrored resolution must not be sent again"
+            "mirrored native operations must not be sent again"
+        );
+
+        client.close().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_push_pull_preserves_path_line_symbol_and_repository_discussions() {
+        let _process_env_guard = crate::test_process_env::shared().await;
+        let source_dir = TempDir::new().unwrap();
+        let source = Repository::init_default(source_dir.path()).unwrap();
+        std::fs::write(source_dir.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
+        let state = source
+            .snapshot_with_attribution(
+                Some("seed".to_string()),
+                None,
+                Attribution::human(Principal::new("Original Author", "author@test")),
+            )
+            .unwrap()
+            .id();
+        let store = CollaborationStore::open(source.heddle_dir()).unwrap();
+        let author = source.get_attribution().unwrap();
+        let anchors = vec![
+            CollaborationAnchor::Path {
+                state_id: state,
+                path: "lib.rs".into(),
+            },
+            CollaborationAnchor::Source {
+                source: objects::object::CollaborationSourceAnchor {
+                    revision: CollaborationRevision::State { state_id: state },
+                    path: "lib.rs".into(),
+                    symbol_id: String::new(),
+                    start_line: Some(1),
+                    end_line: Some(1),
+                    target: None,
+                },
+            },
+            CollaborationAnchor::Symbol {
+                state_id: state,
+                path: "lib.rs".into(),
+                symbol: "run".into(),
+            },
+            CollaborationAnchor::Repository,
+        ];
+        let mut expected = Vec::new();
+        for (index, anchor) in anchors.into_iter().enumerate() {
+            let discussion = DiscussionRecordId::generate();
+            let occurred_at_ms = 1_700_000_000_123 + index as i64;
+            let title = format!("authored title {index}");
+            let thread_ref = (index != 0).then(|| "feature/provenance".to_string());
+            let operation = CollaborationOperationEnvelope::new(
+                discussion,
+                Vec::new(),
+                test_key(&format!("native-roundtrip-{index}")),
+                author.clone(),
+                occurred_at_ms,
+                CollaborationOperationBodyV1::Open {
+                    blocking: index % 2 == 0,
+                    title: title.clone(),
+                    anchor: anchor.clone(),
+                    visibility: VisibilityTier::Internal,
+                    turn: DiscussionTurnV1::new(format!("body {index}")).unwrap(),
+                    thread_ref: thread_ref.clone(),
+                },
+            )
+            .unwrap();
+            let open_id = store.write_operation(&operation).unwrap().operation_id;
+            let append_time = if index == 1 {
+                let occurred = occurred_at_ms + 10_000;
+                write_local_operation(
+                    &store,
+                    discussion,
+                    vec![open_id],
+                    author.clone(),
+                    occurred,
+                    CollaborationOperationBodyV1::AppendTurn {
+                        turn: DiscussionTurnV1::new("authored follow-up").unwrap(),
+                    },
+                    test_key("native-roundtrip-append"),
+                )
+                .unwrap();
+                Some(occurred)
+            } else {
+                None
+            };
+            expected.push((
+                discussion,
+                title,
+                occurred_at_ms,
+                anchor,
+                thread_ref,
+                append_time,
+            ));
+        }
+
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        assert_eq!(
+            push_discussions(&source, &mut client, "acme/widgets", "feature/provenance",)
+                .await
+                .unwrap(),
+            4
+        );
+        let mut source_signed: Vec<Vec<u8>> =
+            load_mirror(source.heddle_dir()).unwrap().repos["acme/widgets"]
+                .native_operations
+                .iter()
+                .map(|operation| operation.signed_record.clone())
+                .collect();
+        source_signed.sort();
+
+        let destination_dir = TempDir::new().unwrap();
+        let destination = Repository::init_default(destination_dir.path()).unwrap();
+        assert_eq!(
+            pull_discussions(&destination, &mut client, "acme/widgets", None, None)
+                .await
+                .unwrap(),
+            4
+        );
+        let pulled_store = CollaborationStore::open(destination.heddle_dir()).unwrap();
+        let materialized = pulled_store.materialize().unwrap();
+        for (discussion_id, title, occurred_at_ms, authored_anchor, thread_ref, append_time) in
+            expected
+        {
+            let discussion = materialized.discussions.get(&discussion_id).unwrap();
+            assert_eq!(discussion.title, title);
+            assert_eq!(discussion.thread_ref, thread_ref);
+            let open_id = discussion.turns.first().unwrap().0;
+            let open = pulled_store
+                .read_operation(&open_id)
+                .unwrap()
+                .unwrap()
+                .operation;
+            assert_eq!(open.author, author);
+            assert_eq!(open.occurred_at_ms, occurred_at_ms);
+            let metadata = open.metadata.unwrap();
+            assert!(metadata.scope.thread.is_some());
+            assert!(!metadata.actor.principal_id.is_nil());
+            match append_time {
+                Some(expected_time) => {
+                    assert_eq!(discussion.turns.len(), 2);
+                    let append_id = discussion.turns[1].0;
+                    let append = pulled_store
+                        .read_operation(&append_id)
+                        .unwrap()
+                        .unwrap()
+                        .operation;
+                    assert_eq!(append.parents, vec![open_id]);
+                    assert_eq!(append.author, author);
+                    assert_eq!(append.occurred_at_ms, expected_time);
+                }
+                None => assert_eq!(discussion.turns.len(), 1),
+            }
+            match (authored_anchor, &discussion.anchor) {
+                (CollaborationAnchor::Repository, CollaborationAnchor::Repository) => {}
+                (
+                    CollaborationAnchor::Path { state_id, path },
+                    CollaborationAnchor::Source { source },
+                ) => {
+                    assert_eq!(source.revision, CollaborationRevision::State { state_id });
+                    assert_eq!(source.path, path);
+                    assert!(source.symbol_id.is_empty());
+                    assert_eq!((source.start_line, source.end_line), (None, None));
+                }
+                (
+                    CollaborationAnchor::Symbol {
+                        state_id,
+                        path,
+                        symbol,
+                    },
+                    CollaborationAnchor::Source { source },
+                ) => {
+                    assert_eq!(source.revision, CollaborationRevision::State { state_id });
+                    assert_eq!(source.path, path);
+                    assert_eq!(source.symbol_id, symbol);
+                    assert_eq!((source.start_line, source.end_line), (None, None));
+                }
+                (
+                    CollaborationAnchor::Source { source: authored },
+                    CollaborationAnchor::Source { source: pulled },
+                ) => assert_eq!(*pulled, authored),
+                (authored, pulled) => {
+                    panic!("hosted canonical anchor lost {authored:?}: {pulled:?}")
+                }
+            }
+        }
+        let mut destination_signed: Vec<Vec<u8>> =
+            load_mirror(destination.heddle_dir()).unwrap().repos["acme/widgets"]
+                .native_operations
+                .iter()
+                .map(|operation| operation.signed_record.clone())
+                .collect();
+        destination_signed.sort();
+        assert_eq!(
+            destination_signed, source_signed,
+            "pull must retain the byte-identical signed originals"
         );
 
         client.close().await;
@@ -2182,13 +2424,17 @@ mod tests {
                 posted_at_secs: 1_700_000_000,
                 turn_id: turn_id.to_string(),
                 turn_seq: 1,
+                causal_id: Vec::new(),
             }],
             resolution,
+            causal_heads: Vec::new(),
+            version: Vec::new(),
         }
     }
 
     #[test]
     fn wait_thread_filter_matches_name_or_stamped_id() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let mut discussion = hosted("disc-1", "first", "turn-1", HostedResolution::Open);
         discussion.thread_ref = Some("foo".to_string());
         assert!(discussion_matches_wait_thread(
@@ -2223,6 +2469,7 @@ mod tests {
 
     #[test]
     fn competing_hosted_resolution_is_recorded_not_unchanged() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2318,6 +2565,7 @@ mod tests {
 
     #[test]
     fn pushed_into_annotation_echo_does_not_conflict() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2406,6 +2654,7 @@ mod tests {
 
     #[test]
     fn pushed_real_annotation_echo_keeps_local_context_id() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2493,6 +2742,7 @@ mod tests {
 
     #[test]
     fn concurrent_apply_does_not_drop_turn_links() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2542,6 +2792,7 @@ mod tests {
 
     #[test]
     fn adopt_or_derive_local_id_adopts_valid_disc_and_derives_legacy() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         // A valid `disc-<UUIDv7>` on the wire is adopted verbatim (client-sovereign).
         let minted = DiscussionRecordId::generate();
         assert_eq!(adopt_or_derive_local_id(&minted.to_string()), minted);
@@ -2593,6 +2844,7 @@ mod tests {
     // minted a fresh UUIDv7 per clone, so neither held.
     #[tokio::test]
     async fn pull_adopts_the_originators_disc_id_so_clones_agree() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let originator = DiscussionRecordId::generate();
         let wire_id = originator.to_string();
 
@@ -2642,6 +2894,7 @@ mod tests {
     // resume rather than write a second `Open` root (materialize rejects two roots).
     #[tokio::test]
     async fn pull_resumes_when_oplog_has_it_but_mirror_is_missing() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let (_temp, repo, state) = seed_repo_with_state();
         let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
         // This discussion already exists in the op-log under its own id, with the
@@ -2655,6 +2908,7 @@ mod tests {
             Attribution::human(Principal::new("Reviewer", "reviewer@example.com")),
             1_700_000_001_000,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "run contract".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: state,
@@ -2709,6 +2963,7 @@ mod tests {
     // producing disjoint `co-…` id sets.
     #[tokio::test]
     async fn two_clones_agree_on_turn_op_ids() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         // One server-side discussion, addressed by the originator's id and
         // pinned to a single server `opened_against_state` — identical for every
         // clone (the server sends the same value everywhere), so the Open op's
@@ -2766,6 +3021,7 @@ mod tests {
     // resolve-op cases that previously escaped it via wall-clock now_ms().)
     #[tokio::test]
     async fn two_clones_agree_on_open_op_for_realistic_hosted_turn() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate().to_string();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut op_id_sets = Vec::new();
@@ -2810,6 +3066,7 @@ mod tests {
     // deterministic 0. RED before the fix (disjoint co- ids), GREEN after.
     #[tokio::test]
     async fn two_clones_agree_on_open_op_when_posted_at_is_zero() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate().to_string();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut op_id_sets = Vec::new();
@@ -2853,6 +3110,7 @@ mod tests {
     // server turn `posted_at` (`resolution_ms`). RED before the fix, GREEN after.
     #[tokio::test]
     async fn two_clones_agree_on_resolve_op() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate().to_string();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut op_id_sets = Vec::new();
@@ -2900,11 +3158,13 @@ mod tests {
     // the retry would mint a fresh `CollabOpId` and double the op count.
     #[test]
     fn rederived_turn_op_key_dedupes_on_retry() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state) = seed_repo_with_state();
         let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
         let discussion_id = DiscussionRecordId::generate();
         let author = Attribution::human(Principal::new("Reviewer", "reviewer@example.com"));
         let body = || CollaborationOperationBodyV1::Open {
+            blocking: false,
             title: "run contract".to_string(),
             anchor: CollaborationAnchor::Symbol {
                 state_id: state,
@@ -2954,6 +3214,7 @@ mod tests {
     // this is the hosted-clone path against an originator who opened locally.
     #[tokio::test]
     async fn originator_adopts_hosted_open_op_so_clone_agrees() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let hosted_snapshot = {
@@ -2974,6 +3235,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "a title the clone will not see".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,
@@ -3075,6 +3337,7 @@ mod tests {
     // parent pointers stay hosted-canonical.
     #[tokio::test]
     async fn originator_adopts_hosted_open_and_append_so_clone_agrees() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
@@ -3101,6 +3364,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,
@@ -3199,6 +3463,7 @@ mod tests {
     // AppendTurn echo is the full discussion, so both local ops adopt.
     #[tokio::test]
     async fn push_echo_adopt_uses_full_discussion() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
@@ -3225,6 +3490,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,
@@ -3331,6 +3597,7 @@ mod tests {
     // A last-turn-only echo must not retire the unpublished prefix.
     #[test]
     fn partial_push_echo_does_not_under_adopt() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let wire_id = DiscussionRecordId::generate();
         let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
         let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
@@ -3341,6 +3608,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,
@@ -3420,6 +3688,7 @@ mod tests {
     // matches a fresh clone of the same snapshot.
     #[tokio::test]
     async fn pull_adopts_originator_local_open_to_match_clone() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
@@ -3435,6 +3704,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,
@@ -3535,6 +3805,7 @@ mod tests {
     // or duplicate the first turn. Adopt-in-isolation tests never hit this.
     #[tokio::test]
     async fn doorbell_after_adopt_does_not_duplicate_the_first_turn() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
@@ -3551,6 +3822,7 @@ mod tests {
             Attribution::human(Principal::new("Local Author", "local@example.com")),
             1_111_111_111_111,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: "local title".to_string(),
                 anchor: CollaborationAnchor::Symbol {
                     state_id: originator_state,
@@ -3629,7 +3901,6 @@ mod tests {
                         seconds: 1_700_000_042,
                         nanos: 0,
                     }),
-                    ..ProtoTurn::default()
                 }],
                 ..ProtoDiscussion::default()
             },

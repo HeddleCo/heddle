@@ -18,7 +18,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use api::heddle::api::v1alpha1::ProviderSource;
 use config::ClientConfig;
 use iroh::{Endpoint, EndpointId};
 use serde::{Deserialize, Serialize};
@@ -29,8 +28,7 @@ use tokio::{
 };
 
 use super::{
-    HostedError, VerifiedEndpointDescriptor, provider_transport::ProviderWebSocketTransport,
-    resolver::resolve_and_verify_endpoint_descriptor,
+    HostedError, VerifiedEndpointDescriptor, resolver::resolve_and_verify_endpoint_descriptor,
 };
 
 const MAX_BRIDGE_FRAME: usize = 64 * 1024;
@@ -51,17 +49,7 @@ enum HostedBridgeRequest {
     OpenBi {
         server: String,
         allow_insecure: bool,
-        #[serde(default)]
-        provider: Option<ProviderTarget>,
     },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProviderTarget {
-    provider_id: String,
-    endpoint_id: String,
-    direct_url: String,
-    opaque_ticket: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,25 +65,18 @@ struct CachedWeft {
     expires_at_unix_millis: i64,
 }
 
-/// Warm weft/provider connections on the daemon's persistent endpoint.
+/// Warm Weft connections on the daemon's persistent endpoint.
 pub struct HostedBridge {
     endpoint: Endpoint,
-    provider_transport: Option<ProviderWebSocketTransport>,
     weft: Mutex<HashMap<String, CachedWeft>>,
-    providers: Mutex<HashMap<EndpointId, iroh::endpoint::Connection>>,
 }
 
 impl HostedBridge {
     #[must_use]
-    pub(crate) fn new(
-        endpoint: Endpoint,
-        provider_transport: Option<ProviderWebSocketTransport>,
-    ) -> Self {
+    pub(crate) fn new(endpoint: Endpoint) -> Self {
         Self {
             endpoint,
-            provider_transport,
             weft: Mutex::new(HashMap::new()),
-            providers: Mutex::new(HashMap::new()),
         }
     }
 
@@ -183,12 +164,8 @@ async fn handle_client(bridge: Arc<HostedBridge>, mut stream: UnixStream) -> Res
         HostedBridgeRequest::OpenBi {
             server,
             allow_insecure,
-            provider,
         } => {
-            let opened = match provider {
-                Some(ref target) => open_provider_bi(&bridge, target).await.map(|()| false),
-                None => ensure_weft(&bridge, &server, allow_insecure).await,
-            };
+            let opened = ensure_weft(&bridge, &server, allow_insecure).await;
             match opened {
                 Ok(reused) => {
                     write_frame(
@@ -196,11 +173,7 @@ async fn handle_client(bridge: Arc<HostedBridge>, mut stream: UnixStream) -> Res
                         &serde_json::to_vec(&HostedBridgeResponse::Opened { reused })?,
                     )
                     .await?;
-                    if let Some(target) = provider {
-                        splice_provider(&bridge, &target, stream).await?;
-                    } else {
-                        splice_weft(&bridge, &server, stream).await?;
-                    }
+                    splice_weft(&bridge, &server, stream).await?;
                 }
                 Err(error) => {
                     write_frame(
@@ -261,21 +234,14 @@ async fn connect_weft(
     let address = descriptor
         .endpoint_addr()
         .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let direct_address = descriptor
-        .direct_endpoint_addr()
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    if direct_address.ip_addrs().next().is_some() {
-        let direct = tokio::time::timeout(
+    if relays.is_empty() {
+        return tokio::time::timeout(
             std::time::Duration::from_millis(250),
-            endpoint.connect(direct_address, api::HOSTED_ALPN_V1),
+            endpoint.connect(address, api::HOSTED_ALPN_V1),
         )
-        .await;
-        if let Ok(Ok(connection)) = direct {
-            return Ok(connection);
-        }
-        if relays.is_empty() {
-            anyhow::bail!("signed direct addresses unavailable and the descriptor has no relays");
-        }
+        .await
+        .context("signed direct addresses unavailable and the descriptor has no relays")?
+        .context("connecting directly to Weft through the netd endpoint");
     }
     endpoint
         .connect(address, api::HOSTED_ALPN_V1)
@@ -283,62 +249,10 @@ async fn connect_weft(
         .context("connecting to weft through the netd endpoint")
 }
 
-async fn open_provider_bi(bridge: &HostedBridge, target: &ProviderTarget) -> Result<()> {
-    let _ = provider_connection(bridge, target).await?;
-    Ok(())
-}
-
-async fn provider_connection(
-    bridge: &HostedBridge,
-    target: &ProviderTarget,
-) -> Result<iroh::endpoint::Connection> {
-    let endpoint_id: EndpointId = target.endpoint_id.parse().context("provider endpoint id")?;
-    {
-        let providers = bridge.providers.lock().await;
-        if let Some(connection) = providers.get(&endpoint_id)
-            && connection.close_reason().is_none()
-        {
-            return Ok(connection.clone());
-        }
-    }
-    let transport = bridge
-        .provider_transport
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("the network daemon endpoint has no provider transport"))?;
-    let address = transport
-        .register_source(
-            &target.provider_id,
-            &target.endpoint_id,
-            &target.direct_url,
-            &target.opaque_ticket,
-        )
-        .map_err(|error| anyhow::anyhow!("{error}"))?;
-    let connection = bridge
-        .endpoint
-        .connect(address, api::PROVIDER_ALPN_V1)
-        .await
-        .context("connecting to a provider through the netd endpoint")?;
-    bridge
-        .providers
-        .lock()
-        .await
-        .insert(endpoint_id, connection.clone());
-    Ok(connection)
-}
-
 async fn splice_weft(bridge: &HostedBridge, server: &str, stream: UnixStream) -> Result<()> {
     let connection = live_weft(bridge, server)
         .await
         .context("weft session vanished after OpenBi")?;
-    splice_connection(connection, stream).await
-}
-
-async fn splice_provider(
-    bridge: &HostedBridge,
-    target: &ProviderTarget,
-    stream: UnixStream,
-) -> Result<()> {
-    let connection = provider_connection(bridge, target).await?;
     splice_connection(connection, stream).await
 }
 
@@ -435,12 +349,11 @@ pub struct EnsureOutcome {
     pub node_id: EndpointId,
 }
 
-/// Open a bidirectional stream on the warm weft (or provider) connection.
+/// Open a bidirectional stream on the warm Weft connection.
 pub async fn open_bi_via_netd(
     socket_path: &Path,
     server: &str,
     allow_insecure: bool,
-    provider: Option<&ProviderSource>,
 ) -> std::result::Result<(UnixStream, bool), HostedError> {
     let mut stream = UnixStream::connect(socket_path)
         .await
@@ -448,12 +361,6 @@ pub async fn open_bi_via_netd(
     let request = HostedBridgeRequest::OpenBi {
         server: server.to_string(),
         allow_insecure,
-        provider: provider.map(|source| ProviderTarget {
-            provider_id: source.provider_id.clone(),
-            endpoint_id: source.endpoint_id.clone(),
-            direct_url: source.direct_url.clone(),
-            opaque_ticket: source.opaque_ticket.clone(),
-        }),
     };
     write_frame(
         &mut stream,
@@ -592,7 +499,7 @@ pub(crate) mod tests {
         if let Some(parent) = socket.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let bridge = HostedBridge::new(netd, None);
+        let bridge = HostedBridge::new(netd);
         bridge
             .insert_weft_for_test("https://api.test.heddle.sh", first)
             .await;
@@ -614,10 +521,9 @@ pub(crate) mod tests {
             "pre-seeded weft session must be reported as reused"
         );
 
-        let (mut stream, reused) =
-            open_bi_via_netd(&socket, "https://api.test.heddle.sh", false, None)
-                .await
-                .unwrap();
+        let (mut stream, reused) = open_bi_via_netd(&socket, "https://api.test.heddle.sh", false)
+            .await
+            .unwrap();
         assert!(reused, "OpenBi on a warm session must not cold-connect");
         stream.write_all(b"ping-one").await.unwrap();
         stream.shutdown().await.unwrap();
@@ -625,10 +531,9 @@ pub(crate) mod tests {
         stream.read_to_end(&mut reply).await.unwrap();
         assert_eq!(reply, b"ping-one");
 
-        let (mut stream, reused) =
-            open_bi_via_netd(&socket, "https://api.test.heddle.sh", false, None)
-                .await
-                .unwrap();
+        let (mut stream, reused) = open_bi_via_netd(&socket, "https://api.test.heddle.sh", false)
+            .await
+            .unwrap();
         assert!(reused, "second OpenBi must reuse the same weft connection");
         stream.write_all(b"ping-two").await.unwrap();
         stream.shutdown().await.unwrap();
@@ -682,7 +587,7 @@ pub(crate) mod tests {
             if let Some(parent) = socket.parent() {
                 std::fs::create_dir_all(parent).unwrap();
             }
-            let bridge = HostedBridge::new(netd, None);
+            let bridge = HostedBridge::new(netd);
             bridge.insert_weft_for_test(TEST_WEFT_SERVER, first).await;
             let serve = tokio::spawn(bridge.serve(socket.clone()));
             wait_for_socket(&socket).await;
@@ -764,7 +669,7 @@ pub(crate) mod tests {
         if let Some(parent) = socket.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let serve = tokio::spawn(HostedBridge::new(netd, None).serve(socket.clone()));
+        let serve = tokio::spawn(HostedBridge::new(netd).serve(socket.clone()));
         wait_for_socket(&socket).await;
         (home, socket, serve)
     }
@@ -786,32 +691,12 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn open_bi_without_a_cached_weft_fails_closed() {
         let (_home, socket, serve) = start_empty_bridge().await;
-        let error = open_bi_via_netd(&socket, TEST_WEFT_SERVER, false, None)
+        let error = open_bi_via_netd(&socket, TEST_WEFT_SERVER, false)
             .await
             .expect_err("cold OpenBi must not invent a weft session");
         assert!(!error.to_string().is_empty());
         serve.abort();
         let _ = serve.await;
-    }
-
-    #[tokio::test]
-    async fn open_bi_provider_without_transport_fails_closed() {
-        let fixture = WarmBridgeFixture::start().await;
-        let endpoint_id = iroh_base::SecretKey::generate().public();
-        let source = ProviderSource {
-            provider_id: "provider-a".to_string(),
-            endpoint_id: endpoint_id.to_string(),
-            direct_url: "wss://127.0.0.1:1/direct?provider=provider-a&ticket=opaque".to_string(),
-            opaque_ticket: "opaque".to_string(),
-            expires_at_unix_millis: u64::MAX,
-        };
-        let error = open_bi_via_netd(&fixture.socket, TEST_WEFT_SERVER, false, Some(&source))
-            .await
-            .expect_err("provider OpenBi on a weft-only bridge must fail closed");
-        assert!(
-            error.to_string().contains("provider transport"),
-            "got {error}"
-        );
     }
 
     #[tokio::test]
@@ -834,7 +719,7 @@ pub(crate) mod tests {
         if let Some(parent) = socket.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let bridge = HostedBridge::new(netd, None);
+        let bridge = HostedBridge::new(netd);
         bridge
             .insert_weft_with_expiry_for_test(TEST_WEFT_SERVER, first, 1)
             .await;
@@ -872,7 +757,7 @@ pub(crate) mod tests {
         if let Some(parent) = socket.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let bridge = HostedBridge::new(netd, None);
+        let bridge = HostedBridge::new(netd);
         bridge.insert_weft_for_test(TEST_WEFT_SERVER, first).await;
         let serve = tokio::spawn(bridge.serve(socket.clone()));
         wait_for_socket(&socket).await;
@@ -896,7 +781,7 @@ pub(crate) mod tests {
                 .is_err()
         );
         assert!(
-            open_bi_via_netd(missing, TEST_WEFT_SERVER, false, None)
+            open_bi_via_netd(missing, TEST_WEFT_SERVER, false)
                 .await
                 .is_err()
         );
@@ -974,7 +859,7 @@ pub(crate) mod tests {
             .unwrap();
             let _ = write_frame(&mut stream, &response).await;
         });
-        let error = open_bi_via_netd(&socket, TEST_WEFT_SERVER, false, None)
+        let error = open_bi_via_netd(&socket, TEST_WEFT_SERVER, false)
             .await
             .expect_err("Ready is not a valid OpenBi reply");
         assert!(

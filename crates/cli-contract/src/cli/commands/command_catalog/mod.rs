@@ -18,9 +18,10 @@ use crate::cli::SemanticCommands;
 use crate::cli::cli_args::SyncCommands;
 use crate::cli::{
     AgentCommands, Cli, Commands, ContextCommands, DaemonCommands, DoctorCommands, EnvCommands,
-    HookCommands, INIT_VERB, IntegrationCommands, MaintenanceCommands, NetdCommands, OplogCommands,
-    PurgeCommands, RedactCommands, RemoteCommands, ShellCommands, ThreadCommands,
-    ThreadMarkerCommands, TimelineCommands, VisibilityCommands,
+    HookCommands, IMPORT_VERB, INIT_VERB, ImportCommands, IntegrationCommands, MaintenanceCommands,
+    NetdCommands, OplogCommands, PurgeCommands, RedactCommands, RemoteCommands, ShellCommands,
+    ThreadCommands, ThreadMarkerCommands, ThreadOwnershipCommands, TimelineCommands,
+    VisibilityCommands,
     cli_args::{
         AgentFanoutCommands, AgentProvenanceCommands, AgentTaskCommands, DiscussCommands,
         PresenceCommands, ReviewCommands,
@@ -85,6 +86,10 @@ pub struct CommandCatalogEntry {
     pub side_effect_class: String,
     pub first_run_behavior: String,
     pub json_kind: String,
+    /// Declared output framing: `one`, `stream`, or `none`.
+    pub output_cardinality: String,
+    /// Declared mutation retry: `safe_replay`, `op_id`, or `not_idempotent`.
+    pub retry_semantics: String,
     pub json_discriminators: Vec<CommandJsonDiscriminator>,
     pub schema_verbs: Vec<String>,
     pub documented_schema_verbs: Vec<String>,
@@ -379,6 +384,8 @@ pub struct CommandRuntimeContract {
     pub surface: &'static str,
     pub canonical_command: Option<&'static str>,
     pub json_kind: &'static str,
+    pub output_cardinality: &'static str,
+    pub retry_semantics: &'static str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -396,9 +403,10 @@ const RECOMMENDED_ACTION_PLACEHOLDERS: &[&str] = &[
     "heddle init --principal-name <name> --principal-email <email>",
     "heddle ready -m \"...\"",
     "heddle context get --path <path>",
-    "heddle context set --path <path> --scope file -m \"...\"",
+    "heddle context set --path <path> -m \"...\"",
     "heddle agent provenance begin",
     "heddle start <name> --path <empty-path>",
+    "heddle start <name>",
     "heddle start <name> --path ../<name>",
     "heddle agent presence show <session>",
     "heddle agent presence complete --session <session>",
@@ -470,15 +478,13 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         true,
     ),
     (
-        "heddle context set --path <path> --scope file -m \"...\"",
+        "heddle context set --path <path> -m \"...\"",
         &[
             "heddle",
             "context",
             "set",
             "--path",
             "<path>",
-            "--scope",
-            "file",
             "-m",
             "<message>",
         ],
@@ -504,6 +510,12 @@ const RECOMMENDED_ACTION_TEMPLATES: &[(&str, &[&str], &[&str], bool)] = &[
         "heddle start <name> --path <empty-path>",
         &["heddle", "start", "<name>", "--path", "<empty-path>"],
         &["name", "path"],
+        true,
+    ),
+    (
+        "heddle start <name>",
+        &["heddle", "start", "<name>"],
+        &["name"],
         true,
     ),
     (
@@ -1160,21 +1172,105 @@ const CONTRACTS: &[CommandContractEntry] = &[
             &[json_discriminator(Some("abort"), "output_kind", "abort")],
         ),
     ),
+    entry(&[IMPORT_VERB], front_door(GROUP, 15)),
     entry(
-        &["adopt"],
+        &[IMPORT_VERB, "local"],
         front_door(
             advertised_action(
                 json_discriminators(
-                    documented_schemas(ADOPT, &["adopt"]),
-                    &[json_discriminator(Some("adopt"), "output_kind", "adopt")],
+                    documented_schemas(compact_json(ADOPT), &["import local"]),
+                    &[json_discriminator(
+                        Some("import local"),
+                        "output_kind",
+                        "import_local",
+                    )],
                 ),
-                "heddle adopt --ref <branch>",
-                &["heddle", "adopt", "--ref", "<branch>"],
+                "heddle import local --ref <branch>",
+                &["heddle", "import", "local", "--ref", "<branch>"],
                 &["branch"],
                 true,
                 false,
             ),
-            210,
+            211,
+        ),
+    ),
+    entry(
+        &[IMPORT_VERB, "url"],
+        feature_gated(
+            exits(
+                surface(
+                    json_discriminators(
+                        documented_schemas(
+                            compact_json(CommandContract {
+                                may_import_git: true,
+                                network_io: true,
+                                ..user_scoped(MUTATION_BASE)
+                            }),
+                            &["import url"],
+                        ),
+                        &[json_discriminator(
+                            Some("import url"),
+                            "output_kind",
+                            "import_operation",
+                        )],
+                    ),
+                    "source_authority",
+                ),
+                &[
+                    (0, "ok"),
+                    (75, "server or source unreachable; safe to retry"),
+                    (76, "source import rejected"),
+                    (77, "not authorized"),
+                    (78, "configuration missing"),
+                ],
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &[IMPORT_VERB, "status"],
+        feature_gated(
+            surface(
+                json_discriminators(
+                    documented_schemas(
+                        compact_json(CommandContract {
+                            network_io: true,
+                            ..READ_JSONL
+                        }),
+                        &["import status"],
+                    ),
+                    &[json_discriminator(
+                        Some("import status"),
+                        "output_kind",
+                        "import_operation",
+                    )],
+                ),
+                "source_authority",
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &[IMPORT_VERB, "retry"],
+        feature_gated(
+            surface(
+                json_discriminators(
+                    documented_schemas(
+                        compact_json(CommandContract {
+                            network_io: true,
+                            ..user_scoped(MUTATION_BASE)
+                        }),
+                        &["import retry"],
+                    ),
+                    &[json_discriminator(
+                        Some("import retry"),
+                        "output_kind",
+                        "import_retry",
+                    )],
+                ),
+                "source_authority",
+            ),
+            "client",
         ),
     ),
     entry(&["ci"], feature_gated(surface(GROUP, "automation"), "ci")),
@@ -1494,6 +1590,37 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
+        &["invite"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(
+                    user_scoped(NETWORK_METADATA_MUTATION),
+                    &["invite", "auth invite"],
+                ),
+                &[json_discriminator(
+                    Some("invite"),
+                    "output_kind",
+                    "auth_invite",
+                )],
+            ),
+            "client",
+        ),
+    ),
+    entry(
+        &["invite", "list"],
+        feature_gated(
+            json_discriminators(
+                documented_schemas(user_scoped(READ_JSON), &["invite list", "auth invite list"]),
+                &[json_discriminator(
+                    Some("invite list"),
+                    "output_kind",
+                    "auth_invite_list",
+                )],
+            ),
+            "client",
+        ),
+    ),
+    entry(
         &["auth", "trust"],
         feature_gated(user_scoped(GROUP), "client"),
     ),
@@ -1755,9 +1882,9 @@ const CONTRACTS: &[CommandContractEntry] = &[
                         "sync_git",
                     )],
                 ),
-                "adopt",
+                "import local",
                 "workflow",
-                "Use adopt to initialize Heddle from an existing Git repository and import its history.",
+                "Use import local to initialize Heddle from an existing Git repository and import its history.",
             ),
             &[
                 (0, "ok"),
@@ -2028,6 +2155,16 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
+        &["blame"],
+        front_door(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["blame"]),
+                &[json_discriminator(Some("blame"), "output_kind", "blame")],
+            ),
+            145,
+        ),
+    ),
+    entry(
         &["diff"],
         front_door(
             documented_core_report_schema(compact_json(READ_JSON), DiffReport::CONTRACT),
@@ -2036,24 +2173,24 @@ const CONTRACTS: &[CommandContractEntry] = &[
     ),
     entry(&["discuss"], front_door(GROUP, 170)),
     entry(
-        &["discuss", "open"],
+        &["discuss", "new"],
         json_discriminators(
-            documented_schemas(compact_json(METADATA_MUTATION), &["discuss open"]),
+            documented_schemas(compact_json(METADATA_MUTATION), &["discuss new"]),
             &[json_discriminator(
-                Some("discuss open"),
+                Some("discuss new"),
                 "output_kind",
                 "discuss_open",
             )],
         ),
     ),
     entry(
-        &["discuss", "append"],
+        &["discuss", "reply"],
         json_discriminators(
-            documented_schemas(METADATA_MUTATION, &["discuss append"]),
+            documented_schemas(compact_json(METADATA_MUTATION), &["discuss reply"]),
             &[json_discriminator(
-                Some("discuss append"),
+                Some("discuss reply"),
                 "output_kind",
-                "discuss_append",
+                "discuss_turn",
             )],
         ),
     ),
@@ -2590,7 +2727,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["review", "show"],
         json_discriminators(
-            documented_schemas(READ_JSON, &["review show"]),
+            documented_schemas(
+                CommandContract {
+                    network_io: true,
+                    ..READ_JSON
+                },
+                &["review show"],
+            ),
             &[json_discriminator(
                 Some("review show"),
                 "output_kind",
@@ -2599,37 +2742,72 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["review", "sign"],
+        &["review", "approve"],
+        documented_schemas(NETWORK_METADATA_MUTATION, &["review approve"]),
+    ),
+    entry(
+        &["review", "list"],
+        documented_schemas(
+            CommandContract {
+                network_io: true,
+                ..READ_JSON
+            },
+            &["review list"],
+        ),
+    ),
+    entry(
+        &["review", "revoke"],
         json_discriminators(
+            documented_schemas(NETWORK_METADATA_MUTATION, &["review revoke"]),
+            &[json_discriminator(
+                Some("review revoke"),
+                "output_kind",
+                "review_revoke",
+            )],
+        ),
+    ),
+    entry(
+        &["review", "readiness"],
+        documented_schemas(
+            CommandContract {
+                network_io: true,
+                ..READ_JSON
+            },
+            &["review readiness"],
+        ),
+    ),
+    entry(
+        &["review", "sign"],
+        hidden(json_discriminators(
             documented_schemas(METADATA_MUTATION, &["review sign"]),
             &[json_discriminator(
                 Some("review sign"),
                 "output_kind",
                 "review_sign",
             )],
-        ),
+        )),
     ),
     entry(
         &["review", "next"],
-        json_discriminators(
+        hidden(json_discriminators(
             documented_schemas(READ_JSON, &["review next"]),
             &[json_discriminator(
                 Some("review next"),
                 "output_kind",
                 "review_next",
             )],
-        ),
+        )),
     ),
     entry(
         &["review", "health"],
-        json_discriminators(
+        hidden(json_discriminators(
             documented_schemas(READ_JSON, &["review health"]),
             &[json_discriminator(
                 Some("review health"),
                 "output_kind",
                 "review_health",
             )],
-        ),
+        )),
     ),
     entry(&["semantic"], GROUP),
     entry(
@@ -2851,12 +3029,46 @@ const CONTRACTS: &[CommandContractEntry] = &[
             )],
         ),
     ),
+    entry(&["thread", "ownership"], GROUP),
     entry(
-        &["thread", "promote"],
+        &["thread", "ownership", "status"],
         json_discriminators(
-            documented_schemas(WORKTREE_MUTATION, &["thread promote"]),
+            documented_schemas(READ_JSON, &["thread ownership status"]),
             &[json_discriminator(
-                Some("thread promote"),
+                Some("thread ownership status"),
+                "output_kind",
+                "thread_ownership",
+            )],
+        ),
+    ),
+    entry(
+        &["thread", "ownership", "claim"],
+        json_discriminators(
+            documented_schemas(REF_MUTATION, &["thread ownership claim"]),
+            &[json_discriminator(
+                Some("thread ownership claim"),
+                "output_kind",
+                "thread_ownership",
+            )],
+        ),
+    ),
+    entry(
+        &["thread", "ownership", "resolve"],
+        json_discriminators(
+            documented_schemas(REF_MUTATION, &["thread ownership resolve"]),
+            &[json_discriminator(
+                Some("thread ownership resolve"),
+                "output_kind",
+                "thread_ownership",
+            )],
+        ),
+    ),
+    entry(
+        &["thread", "checkout"],
+        json_discriminators(
+            documented_schemas(WORKTREE_MUTATION, &["thread checkout"]),
+            &[json_discriminator(
+                Some("thread checkout"),
                 "output_kind",
                 "thread_promote",
             )],
@@ -2872,29 +3084,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 "thread_drop",
             )],
         ),
-    ),
-    entry(
-        &["thread", "approve"],
-        documented_schemas(NETWORK_METADATA_MUTATION, &["thread approve"]),
-    ),
-    entry(
-        &["thread", "approvals"],
-        documented_schemas(READ_JSON, &["thread approvals"]),
-    ),
-    entry(
-        &["thread", "revoke-approval"],
-        json_discriminators(
-            documented_schemas(NETWORK_METADATA_MUTATION, &["thread revoke-approval"]),
-            &[json_discriminator(
-                Some("thread revoke-approval"),
-                "output_kind",
-                "thread_revoke_approval",
-            )],
-        ),
-    ),
-    entry(
-        &["thread", "check-merge"],
-        documented_schemas(READ_JSON, &["thread check-merge"]),
     ),
     entry(
         &["thread", "cleanup"],
@@ -3339,6 +3528,8 @@ fn feature_gated_catalog_entry(
         side_effect_class: side_effect_class(contract).to_string(),
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
+        output_cardinality: output_cardinality(contract).to_string(),
+        retry_semantics: retry_semantics(contract).to_string(),
         json_discriminators: json_discriminators_for_path(path.iter().map(String::as_str)),
         schema_verbs: contract_schema_verbs(contract)
             .map(str::to_string)
@@ -3432,6 +3623,8 @@ fn catalog_entry(
         side_effect_class: side_effect_class(contract).to_string(),
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
+        output_cardinality: output_cardinality(contract).to_string(),
+        retry_semantics: retry_semantics(contract).to_string(),
         json_discriminators: json_discriminators_for_path(path.iter().map(String::as_str)),
         schema_verbs: contract_schema_verbs(contract)
             .map(str::to_string)
@@ -3482,11 +3675,11 @@ fn canonical_action_metadata(
     kind: &str,
 ) -> (Option<Vec<String>>, Option<ActionTemplate>) {
     match (command, kind) {
-        ("adopt", "workflow") => (
+        ("import local", "workflow") => (
             None,
             Some(action_template_from_parts(
-                "heddle adopt --ref <branch>",
-                &["heddle", "adopt", "--ref", "<branch>"],
+                "heddle import local --ref <branch>",
+                &["heddle", "import", "local", "--ref", "<branch>"],
                 &["branch"],
                 true,
             )),
@@ -4122,6 +4315,26 @@ fn runtime_contract(
         surface: contract.surface,
         canonical_command: contract.canonical_command,
         json_kind: contract.json_kind,
+        output_cardinality: output_cardinality(contract),
+        retry_semantics: retry_semantics(contract),
+    }
+}
+
+fn output_cardinality(contract: CommandContract) -> &'static str {
+    match contract.json_kind {
+        "jsonl" | "json_or_jsonl" => "stream",
+        "none" => "none",
+        _ => "one",
+    }
+}
+
+fn retry_semantics(contract: CommandContract) -> &'static str {
+    if !contract.mutates {
+        "safe_replay"
+    } else if contract.supports_op_id {
+        "op_id"
+    } else {
+        "not_idempotent"
     }
 }
 
@@ -4590,7 +4803,15 @@ where
 pub fn command_path(command: &Commands) -> Vec<&'static str> {
     match command {
         Commands::Init(_) => vec![INIT_VERB],
-        Commands::Adopt(_) => vec!["adopt"],
+        Commands::Import(args) => match &args.command {
+            ImportCommands::Local(_) => vec![IMPORT_VERB, "local"],
+            #[cfg(feature = "client")]
+            ImportCommands::Url(_) => vec![IMPORT_VERB, "url"],
+            #[cfg(feature = "client")]
+            ImportCommands::Status(_) => vec![IMPORT_VERB, "status"],
+            #[cfg(feature = "client")]
+            ImportCommands::Retry(_) => vec![IMPORT_VERB, "retry"],
+        },
         Commands::Help { .. } => vec!["help"],
         Commands::Status { .. } => vec!["status"],
         Commands::Watch(_) => vec!["watch"],
@@ -4623,9 +4844,10 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Log(_) => vec!["log"],
         Commands::Show { .. } => vec!["show"],
         Commands::Diff(_) => vec!["diff"],
-        Commands::Discuss { command } => match command {
-            DiscussCommands::Open(_) => vec!["discuss", "open"],
-            DiscussCommands::Append(_) => vec!["discuss", "append"],
+        Commands::Blame(_) => vec!["blame"],
+        Commands::Discuss(args) => match &args.command {
+            DiscussCommands::New(_) => vec!["discuss", "new"],
+            DiscussCommands::Reply(_) => vec!["discuss", "reply"],
             DiscussCommands::Resolve(_) => vec!["discuss", "resolve"],
             DiscussCommands::Reopen(_) => vec!["discuss", "reopen"],
             DiscussCommands::List(_) => vec!["discuss", "list"],
@@ -4635,6 +4857,10 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Query(_) => vec!["query"],
         Commands::Review { command } => match command {
             ReviewCommands::Show(_) => vec!["review", "show"],
+            ReviewCommands::Approve(_) => vec!["review", "approve"],
+            ReviewCommands::List(_) => vec!["review", "list"],
+            ReviewCommands::Revoke(_) => vec!["review", "revoke"],
+            ReviewCommands::Readiness(_) => vec!["review", "readiness"],
             ReviewCommands::Sign(_) => vec!["review", "sign"],
             ReviewCommands::Next(_) => vec!["review", "next"],
             ReviewCommands::Health(_) => vec!["review", "health"],
@@ -4674,12 +4900,13 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             ThreadCommands::Move(_) => vec!["thread", "move"],
             ThreadCommands::Absorb(_) => vec!["thread", "absorb"],
             ThreadCommands::Resolve(_) => vec!["thread", "resolve"],
-            ThreadCommands::Promote(_) => vec!["thread", "promote"],
+            ThreadCommands::Ownership { command } => match command {
+                ThreadOwnershipCommands::Status { .. } => vec!["thread", "ownership", "status"],
+                ThreadOwnershipCommands::Claim { .. } => vec!["thread", "ownership", "claim"],
+                ThreadOwnershipCommands::Resolve { .. } => vec!["thread", "ownership", "resolve"],
+            },
+            ThreadCommands::Checkout(_) => vec!["thread", "checkout"],
             ThreadCommands::Drop(_) => vec!["thread", "drop"],
-            ThreadCommands::Approve(_) => vec!["thread", "approve"],
-            ThreadCommands::Approvals(_) => vec!["thread", "approvals"],
-            ThreadCommands::RevokeApproval(_) => vec!["thread", "revoke-approval"],
-            ThreadCommands::CheckMerge(_) => vec!["thread", "check-merge"],
             ThreadCommands::Cleanup(_) => vec!["thread", "cleanup"],
             ThreadCommands::Collapse(_) => vec!["thread", "collapse"],
             ThreadCommands::Expand(_) => vec!["thread", "expand"],
@@ -4719,6 +4946,10 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             RemoteCommands::Show { .. } => vec!["remote", "show"],
         },
         #[cfg(feature = "client")]
+        Commands::Invite { command, .. } => match command {
+            None => vec!["invite"],
+            Some(crate::cli::AuthInviteCommands::List) => vec!["invite", "list"],
+        },
         Commands::Auth { command } => match command {
             AuthCommands::Login { .. } => vec!["auth", "login"],
             AuthCommands::Logout { .. } => vec!["auth", "logout"],

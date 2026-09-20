@@ -914,7 +914,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     let status_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
         status_text.contains("initialize Heddle with heddle init")
-            && !status_text.contains("connect this branch with heddle adopt"),
+            && !status_text.contains("connect this branch with heddle import local"),
         "unborn status text should describe initialization, not adoption: {status_text}"
     );
     let verify_text = heddle_output(&["verify", "--output", "text"], Some(temp.path()))
@@ -926,7 +926,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     let verify_text = String::from_utf8_lossy(&verify_text.stdout);
     assert!(
         verify_text.contains("initialize Heddle with heddle init")
-            && !verify_text.contains("connect this branch with heddle adopt"),
+            && !verify_text.contains("connect this branch with heddle import local"),
         "unborn verify text should describe initialization, not adoption: {verify_text}"
     );
     let bridge = json(temp.path(), &["status", "--output", "json"]);
@@ -937,7 +937,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     assert_no_legacy_verification_sidecars(&bridge);
     let bridge_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
-        bridge_text.contains("heddle init") && !bridge_text.contains("heddle adopt"),
+        bridge_text.contains("heddle init") && !bridge_text.contains("heddle import local"),
         "unborn status text should not recommend invalid adoption: {bridge_text}"
     );
     let doctor = json(temp.path(), &["doctor", "--output", "json"]);
@@ -945,7 +945,7 @@ fn git_overlay_matrix_plain_git_no_commit_bootstrap_commands() {
     assert_no_legacy_verification_sidecars(&doctor);
 
     let failed_adopt = heddle_output(
-        &["--output", "json", "adopt", "--ref", "trunk"],
+        &["--output", "json", "import", "local", "--ref", "trunk"],
         Some(temp.path()),
     )
     .expect("adopt should run");
@@ -1010,7 +1010,7 @@ fn git_overlay_matrix_plain_git_with_branches_and_tags_recommends_adopt_all() {
         "plain Git probe should explain why all-ref adoption is recommended: {status}"
     );
 
-    heddle(&["adopt"], Some(temp.path())).unwrap();
+    heddle(&["import", "local"], Some(temp.path())).unwrap();
     let verify = json(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["status"], "clean");
     assert_eq!(verify["recommended_action"], Value::Null);
@@ -1045,7 +1045,8 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
         "plain Git status should print one setup line, not duplicate import/setup advice: {status_text}"
     );
     assert!(
-        status_text.contains("heddle init") && !status_text.contains("heddle adopt --ref main"),
+        status_text.contains("heddle init")
+            && !status_text.contains("heddle import local --ref main"),
         "plain Git status should name initialization, not adoption: {status_text}"
     );
 
@@ -1079,7 +1080,7 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
         "direct-backed status should not duplicate setup advice: {status_text}"
     );
     assert!(
-        !status_text.contains("heddle adopt --ref main"),
+        !status_text.contains("heddle import local --ref main"),
         "direct-backed status should not require adoption: {status_text}"
     );
     let workspace = json(temp.path(), &["status", "--output", "json"]);
@@ -1125,7 +1126,7 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
             .iter()
             .all(|command| command
                 .as_str()
-                .is_some_and(|command| !command.contains("heddle adopt"))),
+                .is_some_and(|command| !command.contains("heddle import local"))),
         "clean direct-backed diagnostics should not require adoption: {doctor}"
     );
     let bridge = json(temp.path(), &["status", "--output", "json"]);
@@ -1138,11 +1139,11 @@ fn git_overlay_matrix_verify_tracks_plain_init_import_clean_loop() {
         "initialized-but-unimported status should not recommend retired bridge git init ceremony: {status_text}"
     );
     assert!(
-        !status_text.contains("heddle adopt --ref main"),
+        !status_text.contains("heddle import local --ref main"),
         "status text should not require import for direct-backed refs: {status_text}"
     );
 
-    heddle(&["adopt", "--ref", "main"], Some(temp.path())).unwrap();
+    heddle(&["import", "local", "--ref", "main"], Some(temp.path())).unwrap();
     let verify = json(temp.path(), &["verify", "--output", "json"]);
     assert_eq!(verify["verified"], true);
     assert_eq!(verify["status"], "clean");
@@ -1217,8 +1218,8 @@ fn git_overlay_matrix_adopt_initializes_imports_and_verifies() {
         "status before adopt must be observe-only"
     );
 
-    let adopted = json(temp.path(), &["adopt", "--output", "json"]);
-    assert_eq!(adopted["output_kind"], "adopt");
+    let adopted = json(temp.path(), &["import", "local", "--output", "json"]);
+    assert_eq!(adopted["output_kind"], "import_local");
     assert_eq!(adopted["adopted"], true);
     assert_eq!(adopted["initialized"], true);
     assert_eq!(adopted["branches_synced"], 2);
@@ -1255,7 +1256,7 @@ fn git_overlay_matrix_verify_reads_git_tags_created_after_adoption() {
 
     let adopted = json(
         fixture.path(),
-        &["adopt", "--ref", "v2.0.0", "--output", "json"],
+        &["import", "local", "--ref", "v2.0.0", "--output", "json"],
     );
     assert_eq!(adopted["tags_synced"], 1);
     assert_eq!(adopted["verification"]["verified"], true);
@@ -1272,7 +1273,7 @@ fn git_overlay_matrix_native_adopted_tag_is_stable_when_git_projection_moves() {
     std::fs::write(temp.path().join("tracked.txt"), "two\n").unwrap();
     git_commit_all(temp.path(), "two");
 
-    let adopted = json(temp.path(), &["adopt", "--output", "json"]);
+    let adopted = json(temp.path(), &["import", "local", "--output", "json"]);
     assert_eq!(adopted["adopted"], true);
     let tag_before = json(temp.path(), &["show", "v1.0.0", "--output", "json"]);
     let state_before = tag_before["state_id"]
@@ -1299,7 +1300,10 @@ fn git_overlay_matrix_selective_branch_adopt_surfaces_remaining_tag_import() {
     git_commit_all(temp.path(), "seed");
     git(&["tag", "v1.0.0"], temp.path());
 
-    let adopted = json(temp.path(), &["adopt", "--ref", "main", "--output", "json"]);
+    let adopted = json(
+        temp.path(),
+        &["import", "local", "--ref", "main", "--output", "json"],
+    );
     assert_eq!(adopted["tags_synced"], 0);
     assert_eq!(adopted["verification"]["verified"], true);
     assert_eq!(adopted["verification"]["status"], "clean");
@@ -1334,11 +1338,10 @@ fn git_overlay_matrix_new_branch_at_adopted_tip_verifies_without_setup_loop() {
 
     let status_text = fixture.heddle(&["status", "--output", "text"]).unwrap();
     assert!(
-        status_text.contains("Heddle status for scratch")
-            && status_text.contains("Checkout: Git branch checkout")
+        status_text.contains("scratch")
             && !status_text.contains("Setup needed")
             && !status_text.contains("main checkout")
-            && !status_text.contains("heddle adopt --ref scratch"),
+            && !status_text.contains("heddle import local --ref scratch"),
         "status text should agree with the checked-out Git branch without repeating setup copy: {status_text}"
     );
 
@@ -1846,7 +1849,7 @@ fn git_overlay_matrix_reconcile_prefer_heddle_requires_adoption() {
     assert!(
         envelope["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("heddle adopt")),
+            .is_some_and(|hint| hint.contains("heddle import local")),
         "reconcile hint should require adoption: {stderr}"
     );
 }
@@ -2606,7 +2609,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     assert!(
         status_text.contains("Verdict: clean")
             && status_text.contains("Health: clean")
-            && !status_text.contains("heddle adopt --ref feature/drop-in")
+            && !status_text.contains("heddle import local --ref feature/drop-in")
             && !status_text.contains("Setup needed: Git repo detected")
             && !status_text.contains("Changes not yet saved"),
         "text status should treat direct Git-backed commits as clean: {status_text}"
@@ -2625,7 +2628,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     let verify_text = String::from_utf8_lossy(&verify_text_output.stdout);
     assert!(
         verify_text.contains("Workspace: verified")
-            && !verify_text.contains("heddle adopt --ref feature/drop-in")
+            && !verify_text.contains("heddle import local --ref feature/drop-in")
             && !verify_text.contains("Setup needed: Git repo detected"),
         "verify text should treat direct Git-backed commits as clean: {verify_text}"
     );
@@ -2635,8 +2638,8 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
     assert_eq!(bridge["recommended_action"], Value::Null);
     let bridge_text = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
     assert!(
-        (bridge_text.contains("Verdict: clean") || bridge_text.contains("Health: clean"))
-            && !bridge_text.contains("Recovery: heddle adopt --ref feature/drop-in")
+        (bridge_text.contains("up to date") || bridge_text.contains("feature/drop-in"))
+            && !bridge_text.contains("Recovery: heddle import local --ref feature/drop-in")
             && !bridge_text.contains("Setup needed"),
         "status text should treat direct Git-backed commits as clean: {bridge_text}"
     );
@@ -2705,7 +2708,7 @@ fn git_overlay_matrix_manual_git_commit_after_bootstrap_commands() {
 
 /// Full out-of-band round trip (#534): adopt → plain-git commits → detection
 /// reports the out-of-band commit count → the recommended one-line
-/// `heddle adopt --ref` reconcile → state verified back in sync with the Git
+/// `heddle import local --ref` reconcile → state verified back in sync with the Git
 /// branch SHA untouched.
 #[test]
 fn git_overlay_matrix_manual_git_commits_reconcile_round_trip() {
@@ -2730,7 +2733,14 @@ fn git_overlay_matrix_manual_git_commits_reconcile_round_trip() {
     // Heddle-native state when requested.
     let adopted = json(
         temp.path(),
-        &["adopt", "--ref", "feature/drop-in", "--output", "json"],
+        &[
+            "import",
+            "local",
+            "--ref",
+            "feature/drop-in",
+            "--output",
+            "json",
+        ],
     );
     assert_eq!(
         adopted["verification"]["verified"], true,
@@ -4593,7 +4603,7 @@ fn recovery_dispatch_respects_observe_only_modes_and_adopt_destination() {
     );
 
     let destination_arg = destination.to_string_lossy().into_owned();
-    let adopted = heddle_output(&["adopt", &destination_arg], Some(&current)).unwrap();
+    let adopted = heddle_output(&["import", "local", &destination_arg], Some(&current)).unwrap();
     assert!(
         adopted.status.success(),
         "destination adopt must not recover cwd: {}",
@@ -4622,7 +4632,11 @@ fn failed_adopt_of_nested_git_target_does_not_bootstrap_sidecar() {
     // metadata and auto-bootstrapping a nested sidecar first.
     init_git_repo_with_branch(&nested, "main");
     let nested_arg = nested.to_string_lossy().into_owned();
-    let failed = heddle_output(&["--output", "json", "adopt", &nested_arg], Some(&parent)).unwrap();
+    let failed = heddle_output(
+        &["--output", "json", "import", "local", &nested_arg],
+        Some(&parent),
+    )
+    .unwrap();
     assert!(!failed.status.success(), "unborn nested adopt must fail");
     assert!(
         String::from_utf8_lossy(&failed.stderr).contains("git_history_empty"),
@@ -5183,7 +5197,7 @@ fn git_overlay_matrix_rebase_and_cherry_pick_sequences_remain_coherent() {
             .as_str()
             .is_some_and(|hint| hint.contains("Git-compatible tool that started it")
                 && hint.contains(raw_git_preservation_action())
-                && !hint.contains("heddle adopt --ref <branch>")),
+                && !hint.contains("heddle import local --ref <branch>")),
         "raw Git capture refusal should explain the external sequencer recovery: {stderr}"
     );
     assert!(cherry_repo.path().join(".git/CHERRY_PICK_HEAD").exists());

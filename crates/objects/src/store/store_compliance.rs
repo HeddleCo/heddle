@@ -90,8 +90,10 @@ fn tree_round_trip<S: ObjectStore>(store: &S) {
 }
 
 fn tree_streaming_round_trip<S: ObjectStore>(store: &S) {
-    use crate::error::HeddleError;
-    use crate::object::{TreeEntry, TreePageLimits, TreeStreamError};
+    use crate::{
+        error::HeddleError,
+        object::{TreeEntry, TreePageLimits, TreeStreamError},
+    };
 
     let blob = ContentHash::compute(b"compliance-stream");
     let tree = Tree::from_entries(vec![

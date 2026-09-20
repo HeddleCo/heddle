@@ -1,0 +1,74 @@
+name: Shared verifier Rust and WASM parity
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: owner-authorization-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
+defaults:
+  run:
+    working-directory: crates/capability-verifier
+
+jobs:
+  native-vs-wasm:
+    name: Native Rust vs published WASM binding
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.13.1 --locked
+
+      - name: Build the publishable npm binding
+        run: npm run build
+
+      - name: Verify the npm publish payload
+        run: npm run pack:binding
+
+      - name: Fuzz native Rust and WASM on identical corpora
+        env:
+          OWNER_AUTH_BINDING_READY: "1"
+          OWNER_AUTH_SCRATCH: ${{ runner.temp }}/owner-auth-corpus
+          OWNER_AUTH_TARGET: ${{ runner.temp }}/owner-auth-target
+        run: |
+          while read -r seed; do
+            OWNER_AUTH_CASE_SEED="$seed" \
+              owner-authorization-conformance/run.sh
+          done < owner-authorization-conformance/seeds.txt
+
+      - name: Prove the differential rejects a mismatch
+        env:
+          OWNER_AUTH_BINDING_READY: "1"
+          OWNER_AUTH_FORCE_DIVERGENCE: "1"
+          OWNER_AUTH_FUZZ_CASE_COUNT: "0"
+          OWNER_AUTH_SCRATCH: ${{ runner.temp }}/owner-auth-negative-corpus
+          OWNER_AUTH_TARGET: ${{ runner.temp }}/owner-auth-target
+        run: |
+          set +e
+          output=$(owner-authorization-conformance/run.sh 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [[ $status -eq 0 ]]; then
+            echo "forced divergence unexpectedly passed" >&2
+            exit 1
+          fi
+          grep -F "OWNER_AUTH_DIFFERENTIAL_DIVERGENCE=DETECTED" <<<"$output"

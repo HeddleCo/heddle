@@ -13,14 +13,17 @@ mod auth_login;
 mod auth_login_agent;
 #[cfg(test)]
 mod auth_login_tests;
+mod auth_pairing;
 pub mod auth_requests;
 mod claim_authorization;
 #[cfg(test)]
 mod claim_authorization_tests;
 pub(crate) mod claim_bridge;
+mod claim_native;
 pub mod claim_offer;
 pub(crate) mod credential_file;
 pub(crate) mod device_flow;
+mod device_rpc;
 pub mod hosted;
 mod identity_state;
 pub(crate) mod net_endpoint;
@@ -30,14 +33,13 @@ mod owner_root_tests;
 pub(crate) mod root_mint;
 #[cfg(test)]
 mod root_mint_tests;
+mod source_author;
 pub mod websocket;
 pub mod whoami;
 
-pub use device_flow::{
-    AgentTemplate, credential_is_agent_attenuated, refuse_agent_privileged_grant,
-};
+pub use device_flow::AgentTemplate;
 pub use hosted::{
-    HostedAuthMode, HostedClient, HostedSession, ServerStream, resolve_active_bearer,
-    resolve_hosted_credential,
+    HostedAuthMode, HostedClient, HostedSession, ReviewSnapshot, ServerStream,
+    resolve_active_bearer, resolve_hosted_credential,
 };
 pub use websocket::connect_websocket;

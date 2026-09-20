@@ -3,11 +3,10 @@
 
 use std::fs;
 
+use anyhow::{Result, anyhow};
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::history::RevertOutput;
-
-use anyhow::{Result, anyhow};
 use objects::object::{Attribution, ChangeLineage, ChangeLineageKind, FileChangeSet, Tree};
 use repo::{DiffKind, Repository};
 use verbs::{

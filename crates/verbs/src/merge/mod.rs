@@ -21,7 +21,7 @@ use std::{fs, path::Path};
 
 use anyhow::{Context, Result, anyhow};
 use merge::{
-    ConflictLabels, MergeBlobSource, MergeError, MergeOptions as EngineMergeOptions, MergeStrategy,
+    MergeBlobSource, MergeError, MergeOptions as EngineMergeOptions, MergeStrategy,
     RenameMatcherStats, RenameOptions, SemanticMergeFn, SemanticSimilarityFn,
     detect_renames_between_trees, merge_trees,
 };
@@ -58,6 +58,7 @@ mod worktree_safety;
 
 pub use apply::apply_merged_tree;
 pub use git_commit::{GitCommitInfo, GitCommitPreview};
+pub use merge::ConflictLabels;
 pub use plan::MergePlan;
 pub use relation::{MergeRelation, MergeRelationKind};
 pub use structured::build_conflict_payload;
@@ -1003,7 +1004,7 @@ pub fn merge_thread_into_current_transactional(
                 {
                     Some(report.recommended_action.clone())
                 } else {
-                    Some(land_local_command(&thread.id))
+                    Some(land_local_command(&thread.thread))
                 }
             } else {
                 None
@@ -1597,7 +1598,7 @@ fn merge_preview_message(
     diff_changed_path_count: usize,
 ) -> String {
     let subject = thread
-        .map(|thread| thread.id.as_str())
+        .map(|thread| thread.thread.as_str())
         .unwrap_or(track_name);
     let thread_changed_path_count = thread
         .map(|thread| thread.changed_paths.len())
@@ -1774,6 +1775,7 @@ fn merge_op_targets_state(op: &OpRecord, state: &StateId) -> bool {
         | OpRecord::UndoRecoveryUpdate { .. }
         | OpRecord::StateVisibilitySet { .. }
         | OpRecord::StateVisibilityPromote { .. }
+        | OpRecord::EntryVisibilitySet { .. }
         | OpRecord::HeadUpdate { .. } => false,
     }
 }
@@ -2195,7 +2197,7 @@ fn build_thread_preview_report_with_graph(
     };
     if manual_resolution_current {
         advice.blockers.clear();
-        advice.recommended_action = land_command_for_thread(repo, &thread.id);
+        advice.recommended_action = land_command_for_thread(repo, &thread.thread);
         advice.thread_health = "ready".to_string();
     }
 
@@ -2204,7 +2206,7 @@ fn build_thread_preview_report_with_graph(
     let changed_path_count = all_changed_paths.len();
     let changed_paths = all_changed_paths.into_iter().take(8).collect();
     Ok(ThreadPreviewReport {
-        thread: thread.id.clone(),
+        thread: thread.thread.clone(),
         thread_mode: thread.mode.to_string(),
         thread_state: thread.state.to_string(),
         freshness: thread.freshness.to_string(),
@@ -2326,7 +2328,7 @@ fn merge_output_from_report(input: MergeReportInput<'_>) -> Result<MergeReport> 
         // command. `land` keeps capture, merge, checkpoint, push, and
         // verification in one loop, so the preview does not bounce users back
         // to the lower-level merge apply command.
-        input.thread.as_ref().map(|t| land_local_command(&t.id))
+        input.thread.as_ref().map(|t| land_local_command(&t.thread))
     } else {
         // Clean apply: nothing to do.
         None

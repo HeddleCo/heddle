@@ -272,12 +272,12 @@ fn git_repair_authority_mismatch_advice(
         RepositorySourceAuthority::GitOverlay => RecoveryAdvice::safety_refusal(
             "git_repair_requires_adoption",
             "Git owns source history in this repository",
-            "Run `heddle adopt` before repairing Git from Heddle-native state.",
+            "Run `heddle import local` before repairing Git from Heddle-native state.",
             format!("--prefer {requested} conflicts with git-overlay source authority"),
             "writing Heddle state through to Git would override the authoritative Git checkout",
             "Git refs, Heddle refs, index, remotes, and worktree files were left unchanged",
-            "heddle adopt",
-            vec!["heddle adopt".to_string()],
+            "heddle import local",
+            vec!["heddle import local".to_string()],
         ),
         RepositorySourceAuthority::Native => {
             let import = ref_name.map_or_else(

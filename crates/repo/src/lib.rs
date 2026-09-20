@@ -20,6 +20,7 @@ pub(crate) fn test_state_id() -> objects::object::StateId {
 pub mod actor_presence;
 pub mod agent_task;
 pub mod atomic;
+pub mod checkout_writer;
 mod ci_runner_trust;
 pub mod clone_intent;
 mod collaboration_store;
@@ -28,6 +29,14 @@ mod context_anchor_travel;
 #[cfg(feature = "tree-sitter-symbols")]
 mod context_snapshot_travel;
 pub mod daemon;
+pub mod device_artifacts;
+pub mod device_authority;
+pub mod device_catalog;
+pub mod device_evidence;
+pub mod device_operations;
+pub mod device_page_cursors;
+pub mod device_runs;
+pub mod device_watch;
 #[cfg(feature = "tree-sitter-symbols")]
 mod discussion_anchor_travel;
 #[cfg(feature = "tree-sitter-symbols")]
@@ -38,6 +47,7 @@ mod grant_audience;
 mod hooks;
 pub mod identity;
 pub mod lazy_hydrator;
+pub mod local_metadata;
 mod merge_state;
 pub mod namespace_policy;
 pub mod operation_dedup;
@@ -45,8 +55,15 @@ mod owner_authorization;
 #[cfg(test)]
 mod owner_authorization_tests;
 mod owner_root;
+pub mod reference_projection;
+mod spool_creation;
+pub use spool_creation::{
+    SpoolCreationIntent, admit_fresh_spool_creation, sign_delegated_spool_creation,
+    sign_mint_root_attachment, verify_spool_owner_genesis,
+};
 #[cfg(test)]
 mod owner_root_tests;
+pub mod thread_replication;
 pub use owner_authorization::sign_spool_owner_genesis;
 pub use owner_root::{
     CLAIMABLE_DEFERRED_HUMAN_TTL_SECS, ClaimDeferredHuman, OWNER_TRANSITION_DOMAIN,
@@ -54,6 +71,8 @@ pub use owner_root::{
     genesis_owner_public_key, owner_key_transition_body, registration_binding_nonce,
     require_genesis_matches_seq0, seq0_authority_public_key, sign_agent_claim_binding,
     sign_canonical, sign_claim_deferred_human, sign_claimable_deferred_human_root,
+    sign_current_spool_owner_genesis, sign_custodial_owner_binding, sign_custodial_owner_root,
+    sign_proposed_account_claim, verify_account_owner_observation, verify_spool_owner_observation,
 };
 mod repository;
 mod repository_key_binding;
@@ -64,6 +83,8 @@ mod repository_resolve_for_command;
 mod repository_semantic_index;
 #[cfg(feature = "tree-sitter-symbols")]
 pub use repository_semantic_index::{ParentIndex, SemanticIndexBuilder};
+#[cfg(feature = "tree-sitter-symbols")]
+pub use semantic::parser::ParseBudget as SemanticParseBudget;
 /// Read-only, never-compute semantic-index query primitives. Always compiled,
 /// with no tree-sitter dependency, so a parse-free consumer can read a
 /// persisted index (heddle#1078).
@@ -106,8 +127,9 @@ mod repository_symbol_graph_tests;
 pub(crate) use repository_symbol_graph::SemanticGraphBind;
 mod revision_address;
 pub use repository_state_visibility::{
-    DefaultVisibilityBinding, PutVisibilityOutcome, UNRESOLVED_ANCESTOR_SCOPE,
-    VisibilityCommitKind, VisibilityCommitOutcome, VisibilitySidecarRestore,
+    ContentDisclosureProof, DefaultVisibilityBinding, PutVisibilityOutcome,
+    UNRESOLVED_ANCESTOR_SCOPE, VisibilityCommitKind, VisibilityCommitOutcome,
+    VisibilitySidecarRestore,
 };
 mod session_storage;
 pub mod snapshot_metadata;
@@ -186,11 +208,12 @@ pub use repository::query_history_async;
 pub use repository::{
     BlobHydrator, ChangeMonitorInspection, ChangedPathFilter, ChangedPathFilters,
     CheckoutMaterialization, CommitGraphIndex, CommitGraphInspection, ContextSuggestion,
-    ContextSuggestionTier, DiffKind, GitCheckpointIntent, GitCheckpointIntentPhase,
-    GitCheckpointRecord, GitImportGuidance, GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD,
-    HistoryQuery, HostedConfig, KeyBindingRegistryAnchor, MAJOR_REWRITE_THRESHOLD_PCT,
-    MEDIUM_SUGGESTION_THRESHOLD, MissingBlob, OperationKind, OperationScope, OutputFormat,
-    PackFilesInspection, PartialFetchInspection, ProvenanceConfig, PullPlannerCacheInspection,
+    ContextSuggestionTier, DiffKind, EntryVisibilityBinding, EntryVisibilityMark,
+    GitCheckpointIntent, GitCheckpointIntentPhase, GitCheckpointRecord, GitImportGuidance,
+    GitRemoteTrackingStatus, HIGH_SUGGESTION_THRESHOLD, HistoryQuery, HostedConfig,
+    KeyBindingRegistryAnchor, MAJOR_REWRITE_THRESHOLD_PCT, MEDIUM_SUGGESTION_THRESHOLD,
+    MissingBlob, OperationKind, OperationScope, OutputFormat, PackFilesInspection,
+    PartialFetchInspection, PartialMaterialization, ProvenanceConfig, PullPlannerCacheInspection,
     RefCountsInspection, RepoConfig, RepoRemoteConfig, Repository, RepositoryCapability,
     RepositoryMaintenanceRunReport, RepositoryOperationStatus,
     RepositoryPerformanceInspectionReport, RepositorySourceAuthority, SUGGESTION_WINDOW,

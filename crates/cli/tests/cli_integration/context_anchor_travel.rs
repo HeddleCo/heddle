@@ -29,8 +29,8 @@ fn context_check_follows_a_python_mkdir_rename_after_capture() {
             "set",
             "--path",
             "lib.py",
-            "--scope",
-            "symbol:greet",
+            "--symbol",
+            "greet",
             "--kind",
             "invariant",
             "-m",
@@ -102,4 +102,34 @@ fn context_check_follows_a_python_mkdir_rename_after_capture() {
         items.iter().all(|item| item["target"] != "lib.py"),
         "list must not keep a live annotation on the old path:\n{listed}"
     );
+}
+
+#[test]
+fn context_history_accepts_set_path_argv() {
+    let temp = TempDir::new().unwrap();
+    let dir = temp.path();
+    heddle(&["init"], Some(dir)).unwrap();
+    std::fs::write(dir.join("lib.py"), PYTHON).unwrap();
+    heddle(&["capture", "-m", "seed"], Some(dir)).unwrap();
+    heddle(
+        &[
+            "context",
+            "set",
+            "--path",
+            "lib.py",
+            "-m",
+            "path-shaped note",
+        ],
+        Some(dir),
+    )
+    .unwrap();
+    let history = json(
+        &heddle(
+            &["--output", "json", "context", "history", "--path", "lib.py"],
+            Some(dir),
+        )
+        .unwrap(),
+    );
+    assert_eq!(history["output_kind"], "context_history");
+    assert_eq!(history["revisions"][0]["content"], "path-shaped note");
 }

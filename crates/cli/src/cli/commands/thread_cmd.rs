@@ -387,43 +387,23 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         ThreadCommands::Move(args) => {
             cmd_thread_move(cli, args.from, args.to, args.paths, args.message)
         }
-        ThreadCommands::Absorb(args) => {
-            cmd_thread_absorb(cli, args.thread, args.into, args.message, args.preview)
-        }
+        ThreadCommands::Absorb(args) => cmd_thread_absorb(
+            cli,
+            args.thread,
+            args.into,
+            args.message,
+            args.dry_run.enabled(),
+        ),
         ThreadCommands::Resolve(args) => cmd_thread_resolve(cli, args.thread),
-        ThreadCommands::Promote(args) => {
-            cmd_thread_promote(cli, &repo, &args.thread, args.path, args.force)
+        ThreadCommands::Ownership { command } => {
+            super::thread_ownership_cmd::cmd_thread_ownership(cli, &repo, command)
+        }
+        ThreadCommands::Checkout(args) => {
+            cmd_thread_promote(cli, &repo, &args.thread, Some(args.path), args.force)
         }
         ThreadCommands::Drop(args) => {
             cmd_thread_drop(cli, &repo, &args.thread, args.delete_thread, args.force)
         }
-        #[cfg(feature = "client")]
-        ThreadCommands::Approve(args) => {
-            require_hosted_repo(&repo, "thread approvals")?;
-            super::thread_approval::cmd_thread_approve(cli, args).await
-        }
-        #[cfg(feature = "client")]
-        ThreadCommands::Approvals(args) => {
-            require_hosted_repo(&repo, "thread approvals")?;
-            super::thread_approval::cmd_thread_approvals(cli, args).await
-        }
-        #[cfg(feature = "client")]
-        ThreadCommands::RevokeApproval(args) => {
-            require_hosted_repo(&repo, "thread approvals")?;
-            super::thread_approval::cmd_thread_revoke_approval(cli, args).await
-        }
-        #[cfg(feature = "client")]
-        ThreadCommands::CheckMerge(args) => {
-            require_hosted_repo(&repo, "hosted merge checks")?;
-            super::thread_approval::cmd_thread_check_merge(cli, args).await
-        }
-        #[cfg(not(feature = "client"))]
-        ThreadCommands::Approve(_)
-        | ThreadCommands::Approvals(_)
-        | ThreadCommands::RevokeApproval(_)
-        | ThreadCommands::CheckMerge(_) => Err(anyhow!(
-            "rebuild cli with --features client to use thread approvals"
-        )),
         ThreadCommands::Collapse(args) => super::collapse::cmd_collapse(
             cli,
             &repo,
@@ -434,18 +414,6 @@ pub async fn cmd_thread(cli: &Cli, command: ThreadCommands) -> Result<()> {
         ThreadCommands::Expand(args) => {
             super::expand::cmd_expand(cli, &repo, args.reference.clone())
         }
-    }
-}
-
-#[cfg(feature = "client")]
-fn require_hosted_repo(repo: &Repository, feature: &str) -> Result<()> {
-    if repo.hosted_enabled() {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "{} require a repository linked to a Heddle hosted upstream. Configure [hosted] in .heddle/config.toml or run this in a hosted-enabled repository.",
-            feature
-        ))
     }
 }
 

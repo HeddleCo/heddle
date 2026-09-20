@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     net::Ipv4Addr,
     sync::{Arc, Mutex},
 };
@@ -13,26 +13,13 @@ use api::{
         encode_failure_response, encode_stream_failure, encode_stream_message,
         encode_success_response,
     },
-    heddle::api::v1alpha1::{
-        AnnotatedFile, BlobResponse, CallFailure, CallFailureCode, ContextRevision,
-        CreateGrantRequest, CreateSpoolRequest, DeleteGrantRequest, DeleteSpoolRequest, Discussion,
-        GetBlobRequest, GetContextHistoryPageEnd, GetContextHistoryRequest,
-        GetContextHistoryResponse, GetCurrentUserSpoolRequest, GetDiscussionRequest,
-        GetSpoolRequest, GrantTargetRef, HostedGrant, HostedSpool, ListContextPageEnd,
-        ListContextRequest, ListContextResponse, ListDiscussionsByStateRequest,
-        ListDiscussionsPageEnd, ListDiscussionsResponse, ListGrantsRequest, ListGrantsResponse,
-        ListRefsPageEnd, ListRefsResponse, ListThreadsPageEnd, ListThreadsResponse, PackChunk,
-        PackStreamKind, PromoteSpoolRequest, PromoteSpoolResponse, PullComplete, PullReady,
-        PullServerFrame, PushClientFrame, PushComplete, PushReady, PushRequest, PushServerFrame,
-        RepoEvent, SignedSpoolOwnerGenesis, StateContextEntry, StateId, SubscribeRepoEventsRequest,
-        TransferCheckpoint, TransportMode, UpdateGrantRequest, UpdateSpoolRequest,
-        get_context_history_response, list_context_response, list_discussions_response,
-        list_refs_response, list_threads_response, pull_server_frame, push_client_frame,
-        push_server_frame,
+    heddle::api::{
+        common::{CallFailure, CallFailureCode, StateId},
+        v1alpha2 as v2,
+        v1alpha2::SignedSpoolOwnerGenesis,
     },
     method_descriptor,
 };
-use base64::Engine as _;
 use bytes::Bytes;
 use crypto::Ed25519Signer;
 use iroh::{Endpoint, RelayMode, endpoint::presets};
@@ -40,40 +27,43 @@ use prost::Message;
 use tokio::task::JoinHandle;
 
 use super::{CallContextFactory, HostedClient};
+use crate::legacy_v1::{
+    AnnotatedFile, ContextRevision, Discussion, DiscussionResolution, DiscussionTurn,
+    ListRefsPageEnd, ListRefsResponse, PackChunk, PackStreamKind, PathSymbolRef, PullComplete,
+    PullReady, PullServerFrame, PushClientFrame, PushComplete, PushReady, PushRequest,
+    PushServerFrame, StateContextEntry, TransferCheckpoint, TransportMode, discussion_resolution,
+    list_refs_response, pull_server_frame, push_client_frame, push_server_frame,
+};
 
 const OWNER_GENESIS_FIXTURE_HEX: &str = "0a380a10222222222222222222222222222222221224080112208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c12640a20def88318e44a809464c1022f22230567bae6805d17b1ccfc2bebe5326232c58a1240bfe677c0b6fec8d28e379f584f36dee7258d834222f9b75f61dc75b7db2d836d76d4fb6eaf9e7f561925b2e6882b51eadaf3ec77c565f5b638ad0febfc8cd304";
-const GET_BLOB_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/GetBlob";
-const CREATE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/CreateSpool";
-const DELETE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/DeleteSpool";
-const UPDATE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/UpdateSpool";
-const GET_CURRENT_USER_SPOOL_METHOD: &str =
-    "/heddle.api.v1alpha1.RegistryService/GetCurrentUserSpool";
-const GET_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/GetSpool";
-const PROMOTE_SPOOL_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/PromoteSpool";
-const CREATE_GRANT_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/CreateGrant";
-const LIST_GRANTS_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/ListGrants";
-const UPDATE_GRANT_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/UpdateGrant";
-const DELETE_GRANT_METHOD: &str = "/heddle.api.v1alpha1.RegistryService/DeleteGrant";
-const GET_DISCUSSION_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/GetDiscussion";
-const LIST_BY_STATE_METHOD: &str = "/heddle.api.v1alpha1.CollaborationService/ListByState";
-const LIST_CONTEXT_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/ListContext";
-const GET_CONTEXT_HISTORY_METHOD: &str = "/heddle.api.v1alpha1.RepositoryService/GetContextHistory";
-const SUBSCRIBE_REPO_EVENTS_METHOD: &str =
-    "/heddle.api.v1alpha1.RepositoryService/SubscribeRepoEvents";
+const OBSERVE_COLLABORATION_METHOD: &str =
+    "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration";
 
 #[derive(Default)]
 pub(crate) struct SpoolMutationCapture {
-    pub updates: Vec<UpdateSpoolRequest>,
-    pub deletes: Vec<DeleteSpoolRequest>,
+    pub native_updates: Vec<v2::ReviseSpoolRequest>,
+    pub native_deletes: Vec<v2::DeleteSpoolRequest>,
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct RegistryFixture {
-    pub personal_root: Option<HostedSpool>,
-    pub spools: HashMap<String, HostedSpool>,
-    pub get_spool_requests: Arc<Mutex<Vec<String>>>,
-    pub promote_requests: Arc<Mutex<Vec<PromoteSpoolRequest>>>,
-    pub promote_denial: Option<(CallFailureCode, String)>,
+#[derive(Default)]
+pub(crate) struct ImportSourceCapture {
+    pub requests: Vec<v2::ImportSourceRequest>,
+    pub observations: Vec<v2::ObserveOperationsRequest>,
+}
+
+#[derive(Default)]
+pub(crate) struct CreateSpoolCapture {
+    pub requests: Mutex<Vec<v2::CreateSpoolRequest>>,
+    pub calls: Mutex<Vec<String>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ThreadListingFixture {
+    pub overviews: Vec<v2::ThreadOverview>,
+    pub page_size: usize,
+    pub requests: Arc<Mutex<Vec<v2::ObserveThreadsRequest>>>,
+    pub resolution_failure: Option<CallFailureCode>,
+    pub resolution_requests: Arc<Mutex<Vec<String>>>,
 }
 
 fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
@@ -86,15 +76,9 @@ pub(crate) struct CollaborationFixture {
     pub discussions: HashMap<String, Discussion>,
     pub list: Vec<Discussion>,
     pub hidden: HashMap<String, CallFailureCode>,
-    pub events: Vec<RepoEvent>,
-    pub one_event_per_subscribe: bool,
-    pub unknown_repo_ids: HashSet<String>,
     pub get_requests: Arc<Mutex<Vec<String>>>,
     pub get_request_state_ids: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
     pub list_requests: Arc<Mutex<usize>>,
-    pub subscribe_after: Arc<Mutex<Vec<i64>>>,
-    pub subscribe_repo_ids: Arc<Mutex<Vec<String>>>,
-    pub subscribe_thread: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 #[derive(Clone, Default)]
@@ -104,39 +88,23 @@ pub(crate) struct ContextFixture {
     pub histories: HashMap<String, Vec<ContextRevision>>,
     pub list_requests: Arc<Mutex<usize>>,
     pub history_requests: Arc<Mutex<Vec<String>>>,
+    /// When true, PutContext returns Dedup Conflict for the create nonce.
+    pub put_conflict: bool,
+    pub put_requests: Arc<Mutex<usize>>,
 }
 
 pub async fn start() -> (HostedClient, JoinHandle<()>) {
-    start_inner(
-        None,
-        BlobFixture::default(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
+    start_inner(None, None, None, None, None, None, None, None).await
 }
 
 #[cfg(test)]
-pub(crate) async fn start_with_registry(
-    fixture: RegistryFixture,
-) -> (HostedClient, JoinHandle<()>, RegistryFixture) {
-    let fixture_clone = fixture.clone();
-    let (client, server) = start_inner(
-        None,
-        BlobFixture::default(),
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(fixture),
-    )
-    .await;
-    (client, server, fixture_clone)
+pub(crate) async fn start_with_thread_listing(
+    fixture: ThreadListingFixture,
+) -> (HostedClient, JoinHandle<()>, ThreadListingFixture) {
+    let captured = fixture.clone();
+    let (client, server) =
+        start_inner(None, None, None, None, None, None, None, Some(fixture)).await;
+    (client, server, captured)
 }
 
 #[cfg(test)]
@@ -144,17 +112,8 @@ pub(crate) async fn start_with_collaboration(
     fixture: CollaborationFixture,
 ) -> (HostedClient, JoinHandle<()>, CollaborationFixture) {
     let fixture_clone = fixture.clone();
-    let (client, server) = start_inner(
-        None,
-        BlobFixture::default(),
-        None,
-        None,
-        None,
-        None,
-        Some(fixture),
-        None,
-    )
-    .await;
+    let (client, server) =
+        start_inner(None, None, None, None, None, Some(fixture), None, None).await;
     (client, server, fixture_clone)
 }
 
@@ -163,17 +122,8 @@ pub(crate) async fn start_with_context(
     fixture: ContextFixture,
 ) -> (HostedClient, JoinHandle<()>, ContextFixture) {
     let fixture_clone = fixture.clone();
-    let (client, server) = start_inner(
-        None,
-        BlobFixture::default(),
-        None,
-        None,
-        None,
-        Some(fixture),
-        None,
-        None,
-    )
-    .await;
+    let (client, server) =
+        start_inner(None, None, None, None, Some(fixture), None, None, None).await;
     (client, server, fixture_clone)
 }
 
@@ -183,10 +133,10 @@ pub(crate) async fn start_recording_push()
     let captured = Arc::new(Mutex::new(Vec::new()));
     let (client, server) = start_inner(
         None,
-        BlobFixture::default(),
         None,
         None,
         Some(Arc::clone(&captured)),
+        None,
         None,
         None,
         None,
@@ -196,16 +146,13 @@ pub(crate) async fn start_recording_push()
 }
 
 #[cfg(test)]
-pub(crate) async fn start_recording_create_spool() -> (
-    HostedClient,
-    JoinHandle<()>,
-    Arc<Mutex<Vec<CreateSpoolRequest>>>,
-) {
-    let captured = Arc::new(Mutex::new(Vec::new()));
+pub(crate) async fn start_recording_create_spool()
+-> (HostedClient, JoinHandle<()>, Arc<CreateSpoolCapture>) {
+    let captured = Arc::new(CreateSpoolCapture::default());
     let (client, server) = start_inner(
         None,
-        BlobFixture::default(),
         Some(Arc::clone(&captured)),
+        None,
         None,
         None,
         None,
@@ -225,9 +172,9 @@ pub(crate) async fn start_recording_spool_mutations() -> (
     let captured = Arc::new(Mutex::new(SpoolMutationCapture::default()));
     let (client, server) = start_inner(
         None,
-        BlobFixture::default(),
         None,
         Some(Arc::clone(&captured)),
+        None,
         None,
         None,
         None,
@@ -238,83 +185,24 @@ pub(crate) async fn start_recording_spool_mutations() -> (
 }
 
 #[cfg(test)]
-pub(crate) async fn start_with_remote_state(
-    remote_state: StateId,
-) -> (HostedClient, JoinHandle<()>) {
-    start_inner(
-        Some(PullFixture {
-            remote_state,
-            pack: None,
-        }),
-        BlobFixture::default(),
+pub(crate) async fn start_recording_import_source() -> (
+    HostedClient,
+    JoinHandle<()>,
+    Arc<Mutex<ImportSourceCapture>>,
+) {
+    let captured = Arc::new(Mutex::new(ImportSourceCapture::default()));
+    let (client, server) = start_inner(
         None,
         None,
         None,
         None,
         None,
         None,
-    )
-    .await
-}
-
-#[cfg(test)]
-pub(crate) async fn start_with_pull_pack(
-    remote_state: StateId,
-    pack_data: Vec<u8>,
-    index_data: Vec<u8>,
-) -> (HostedClient, JoinHandle<()>) {
-    start_inner(
-        Some(PullFixture {
-            remote_state,
-            pack: Some((pack_data, index_data)),
-        }),
-        BlobFixture::default(),
-        None,
-        None,
-        None,
-        None,
-        None,
+        Some(Arc::clone(&captured)),
         None,
     )
-    .await
-}
-
-#[cfg(test)]
-pub(crate) async fn start_with_get_blob_contents(
-    blobs: impl IntoIterator<Item = (String, Vec<u8>)>,
-) -> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
-    start_with_get_blob_contents_and_pull(blobs, None).await
-}
-
-#[cfg(test)]
-pub(crate) async fn start_with_get_blob_contents_and_pull_pack(
-    blobs: impl IntoIterator<Item = (String, Vec<u8>)>,
-    remote_state: StateId,
-    pack_data: Vec<u8>,
-    index_data: Vec<u8>,
-) -> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
-    start_with_get_blob_contents_and_pull(
-        blobs,
-        Some(PullFixture {
-            remote_state,
-            pack: Some((pack_data, index_data)),
-        }),
-    )
-    .await
-}
-
-#[cfg(test)]
-async fn start_with_get_blob_contents_and_pull(
-    blobs: impl IntoIterator<Item = (String, Vec<u8>)>,
-    pull: Option<PullFixture>,
-) -> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
-    let requested = Arc::new(Mutex::new(Vec::new()));
-    let fixture = BlobFixture {
-        contents: blobs.into_iter().collect(),
-        requested: Arc::clone(&requested),
-    };
-    let (client, server) = start_inner(pull, fixture, None, None, None, None, None, None).await;
-    (client, server, requested)
+    .await;
+    (client, server, captured)
 }
 
 #[derive(Clone)]
@@ -323,72 +211,33 @@ struct PullFixture {
     pack: Option<(Vec<u8>, Vec<u8>)>,
 }
 
-/// In-memory weft stand-in: a staged pack is unpublished until Push
-/// finishes draining the client stream, then it becomes cloneable.
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct DurableSyncStore {
-    staged: Arc<Mutex<Option<PullFixture>>>,
-    published: Arc<Mutex<Option<PullFixture>>>,
-}
-
-#[cfg(test)]
-impl DurableSyncStore {
-    fn pull_fixture(&self) -> Option<PullFixture> {
-        self.published
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .clone()
-    }
-
-    pub(crate) fn stage(&self, remote_state: StateId, pack_data: Vec<u8>, index_data: Vec<u8>) {
-        *self
-            .staged
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(PullFixture {
-            remote_state,
-            pack: Some((pack_data, index_data)),
-        });
-    }
-
-    fn publish_staged(&self) -> bool {
-        let staged = self
-            .staged
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .take();
-        let Some(fixture) = staged else {
-            return false;
-        };
-        *self
-            .published
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(fixture);
-        true
-    }
-}
-
-#[derive(Clone, Default)]
-struct BlobFixture {
-    contents: HashMap<String, Vec<u8>>,
-    requested: Arc<Mutex<Vec<String>>>,
-}
-
-#[derive(Clone, Default)]
-struct GrantStore {
-    grants: Arc<Mutex<Vec<HostedGrant>>>,
+#[derive(Clone)]
+struct TestServerState {
+    pull: Option<PullFixture>,
+    create_spool: Option<Arc<CreateSpoolCapture>>,
+    spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
+    push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
+    context: Option<ContextFixture>,
+    collaboration: Option<CollaborationFixture>,
+    import_source: Option<Arc<Mutex<ImportSourceCapture>>>,
+    thread_listing: Option<ThreadListingFixture>,
+    server_key: Vec<u8>,
+    owner: v2::OwnerState,
+    grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
+    live_discussions: Arc<Mutex<HashMap<String, Discussion>>>,
+    live_operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn start_inner(
     pull: Option<PullFixture>,
-    blobs: BlobFixture,
-    create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
+    create_spool: Option<Arc<CreateSpoolCapture>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
-    registry: Option<RegistryFixture>,
+    import_source: Option<Arc<Mutex<ImportSourceCapture>>>,
+    thread_listing: Option<ThreadListingFixture>,
 ) -> (HostedClient, JoinHandle<()>) {
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
@@ -399,7 +248,36 @@ async fn start_inner(
         .await
         .unwrap();
     let server_addr = server.addr();
-    let grants = GrantStore::default();
+    let server_key = server.id().as_bytes().to_vec();
+    let signer = Ed25519Signer::generate().unwrap();
+    let recovery = Ed25519Signer::from_seed(&[97; 32]).unwrap();
+    let root = repo::sign_custodial_owner_root(&signer, &recovery, [9; 16], [98; 32]).unwrap();
+    let binding = repo::sign_custodial_owner_binding(&signer, &root, [99; 32]).unwrap();
+    let verified = heddleco_capability_verifier::verify_owner_root(&root).unwrap();
+    let owner = v2::OwnerState {
+        owner: Some(v2::PrincipalRef {
+            id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+        }),
+        root: Some(root),
+        binding: Some(binding),
+        version: verified.state_hash().to_vec(),
+        ..Default::default()
+    };
+    let state = TestServerState {
+        pull,
+        create_spool,
+        spool_mutations,
+        push_requests,
+        context,
+        collaboration,
+        import_source,
+        thread_listing,
+        server_key,
+        owner,
+        grants: Arc::new(Mutex::new(Vec::<v2::GrantRecord>::new())),
+        live_discussions: Arc::new(Mutex::new(HashMap::<String, Discussion>::new())),
+        live_operations: Arc::new(Mutex::new(HashMap::<String, Vec<v2::SignedRecord>>::new())),
+    };
     let server_task = tokio::spawn(async move {
         let connection = server
             .accept()
@@ -408,21 +286,7 @@ async fn start_inner(
             .await
             .unwrap();
         while let Ok((send, recv)) = connection.accept_bi().await {
-            tokio::spawn(serve_call(
-                send,
-                recv,
-                pull.clone(),
-                blobs.clone(),
-                create_spool.clone(),
-                spool_mutations.clone(),
-                push_requests.clone(),
-                context.clone(),
-                collaboration.clone(),
-                registry.clone(),
-                grants.clone(),
-                #[cfg(test)]
-                None,
-            ));
+            tokio::spawn(serve_call(send, recv, state.clone()));
         }
         server.close().await;
     });
@@ -433,7 +297,6 @@ async fn start_inner(
         .bind()
         .await
         .unwrap();
-    let signer = Ed25519Signer::generate().unwrap();
     let context = CallContextFactory::default()
         .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
         .unwrap();
@@ -443,108 +306,26 @@ async fn start_inner(
     (client, server_task)
 }
 
-/// Multi-accept fixture: first client pushes; after bounded close a
-/// fresh client clones the stored pack from the same endpoint address.
-#[cfg(test)]
-pub(crate) async fn start_durable_push_clone() -> (
-    HostedClient,
-    iroh::EndpointAddr,
-    JoinHandle<()>,
-    DurableSyncStore,
-) {
-    let store = DurableSyncStore::default();
-    let server = Endpoint::builder(presets::Minimal)
-        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .bind()
-        .await
-        .unwrap();
-    let server_addr = server.addr();
-    let grants = GrantStore::default();
-    let store_for_server = store.clone();
-    let server_task = tokio::spawn(async move {
-        loop {
-            let Some(incoming) = server.accept().await else {
-                break;
-            };
-            let Ok(connection) = incoming.await else {
-                continue;
-            };
-            let store = store_for_server.clone();
-            let grants = grants.clone();
-            tokio::spawn(async move {
-                while let Ok((send, recv)) = connection.accept_bi().await {
-                    tokio::spawn(serve_call(
-                        send,
-                        recv,
-                        store.pull_fixture(),
-                        BlobFixture::default(),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
-                        grants.clone(),
-                        Some(store.clone()),
-                    ));
-                }
-            });
-        }
-        server.close().await;
-    });
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .bind()
-        .await
-        .unwrap();
-    let signer = Ed25519Signer::generate().unwrap();
-    let context = CallContextFactory::default()
-        .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
-        .unwrap();
-    let client = HostedClient::connect_addr_with_context(endpoint, server_addr.clone(), context)
-        .await
-        .unwrap();
-    (client, server_addr, server_task, store)
-}
-
-#[cfg(test)]
-pub(crate) async fn connect_test_client(server_addr: iroh::EndpointAddr) -> HostedClient {
-    let endpoint = Endpoint::builder(presets::Minimal)
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .bind()
-        .await
-        .unwrap();
-    let signer = Ed25519Signer::generate().unwrap();
-    let context = CallContextFactory::default()
-        .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
-        .unwrap();
-    HostedClient::connect_addr_with_context(endpoint, server_addr, context)
-        .await
-        .unwrap()
-}
-
-#[allow(clippy::too_many_arguments)]
 async fn serve_call(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
-    pull: Option<PullFixture>,
-    blobs: BlobFixture,
-    create_spool: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
-    spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
-    push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
-    context: Option<ContextFixture>,
-    collaboration: Option<CollaborationFixture>,
-    registry: Option<RegistryFixture>,
-    grants: GrantStore,
-    #[cfg(test)] durable: Option<DurableSyncStore>,
+    state: TestServerState,
 ) {
+    let TestServerState {
+        pull,
+        create_spool,
+        spool_mutations,
+        push_requests,
+        context,
+        collaboration,
+        import_source,
+        thread_listing,
+        server_key,
+        owner,
+        grants,
+        live_discussions,
+        live_operations,
+    } = state;
     let mut request = Vec::new();
     let (method, prelude_len) = loop {
         let chunk = recv
@@ -557,39 +338,258 @@ async fn serve_call(
             break (prelude.method.to_string(), consumed);
         }
     };
-    let descriptor = method_descriptor(&method).expect("registered hosted method");
-    match descriptor.streaming {
+    let streaming = method_descriptor(&method)
+        .map(|descriptor| descriptor.streaming)
+        .or_else(|| api::v2::method_descriptor(&method).map(|descriptor| descriptor.streaming))
+        .expect("registered hosted method");
+    if let Some(captured) = &create_spool {
+        captured
+            .calls
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(method.clone());
+    }
+    match streaming {
         StreamingShape::Unary | StreamingShape::ClientStreaming => {
-            if method == CREATE_SPOOL_METHOD {
-                serve_create_spool(&mut send, &mut recv, &mut request, create_spool).await;
-            } else if method == UPDATE_SPOOL_METHOD {
-                serve_update_spool(&mut send, &mut recv, &mut request, spool_mutations).await;
-            } else if method == DELETE_SPOOL_METHOD {
-                serve_delete_spool(&mut send, &mut recv, &mut request, spool_mutations).await;
-            } else if method == GET_CURRENT_USER_SPOOL_METHOD {
-                serve_get_current_user_spool(&mut send, &mut recv, &mut request, registry).await;
-            } else if method == GET_SPOOL_METHOD {
-                serve_get_spool(&mut send, &mut recv, &mut request, registry).await;
-            } else if method == PROMOTE_SPOOL_METHOD {
-                serve_promote_spool(&mut send, &mut recv, &mut request, registry).await;
-            } else if method == CREATE_GRANT_METHOD {
-                serve_create_grant(&mut send, &mut recv, &mut request, &grants).await;
-            } else if method == LIST_GRANTS_METHOD {
-                serve_list_grants(&mut send, &mut recv, &mut request, &grants).await;
-            } else if method == UPDATE_GRANT_METHOD {
-                serve_update_grant(&mut send, &mut recv, &mut request, &grants).await;
-            } else if method == DELETE_GRANT_METHOD {
-                serve_delete_grant(&mut send, &mut recv, &mut request, &grants).await;
-            } else if method == GET_BLOB_METHOD && !blobs.contents.is_empty() {
-                serve_get_blob(&mut send, &mut recv, &mut request, blobs).await;
-            } else if method == GET_DISCUSSION_METHOD {
-                if let Some(collaboration) = collaboration {
-                    serve_get_discussion(&mut send, &mut recv, &mut request, collaboration).await;
-                } else {
-                    send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
+            if method == "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint" {
+                let response = v2::DescribeEndpointResponse {
+                    endpoint: Some(v2::EndpointRef {
+                        kind: v2::EndpointKind::Weft as i32,
+                        public_key: server_key.clone(),
+                    }),
+                    supported_packages: vec!["heddle.api.v1alpha2".into()],
+                    implemented_methods: vec![
+                        "/heddle.api.v1alpha2.WorkspaceService/ResolveResources".into(),
+                        "/heddle.api.v1alpha2.SpoolService/ObserveSpool".into(),
+                        "/heddle.api.v1alpha2.SpoolService/ListSpools".into(),
+                        "/heddle.api.v1alpha2.SpoolService/DeleteSpool".into(),
+                        "/heddle.api.v1alpha2.SpoolService/ReviseSpool".into(),
+                        "/heddle.api.v1alpha2.SpoolService/PromoteSpool".into(),
+                        "/heddle.api.v1alpha2.SpoolService/PutGrant".into(),
+                        "/heddle.api.v1alpha2.SpoolService/RevokeGrant".into(),
+                        "/heddle.api.v1alpha2.ThreadService/ObserveThread".into(),
+                        "/heddle.api.v1alpha2.ThreadService/ObserveThreads".into(),
+                        "/heddle.api.v1alpha2.ThreadService/RecordReview".into(),
+                        "/heddle.api.v1alpha2.IdentityService/ObserveIdentity".into(),
+                        "/heddle.api.v1alpha2.IdentityService/CreateSignupInvitation".into(),
+                        "/heddle.api.v1alpha2.WorkspaceService/ObserveWorkspace".into(),
+                        "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership".into(),
+                        "/heddle.api.v1alpha2.SpoolService/CreateSpool".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/OpenDiscussion".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/AppendTurn".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/ResolveDiscussion".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/PutContext".into(),
+                        "/heddle.api.v1alpha2.IntegrationService/ImportSource".into(),
+                        "/heddle.api.v1alpha2.OperationService/ObserveOperations".into(),
+                        "/heddle.api.v1alpha2.SyncService/Fetch".into(),
+                        "/heddle.api.v1alpha2.SyncService/PublishContent".into(),
+                    ],
+                    default_read_budget: Some(v2::ReadBudget {
+                        max_items: 64,
+                        max_frame_bytes: 65536,
+                        max_snapshot_bytes: 1048576,
+                    }),
+                    max_pending_batch_bytes: 1048576,
+                    ..Default::default()
+                };
+                send.write_chunk(Bytes::from(
+                    encode_success_response(&response.encode_to_vec()).unwrap(),
+                ))
+                .await
+                .unwrap();
+            } else if method == "/heddle.api.v1alpha2.WorkspaceService/ResolveResources" {
+                while let Ok(Some(chunk)) =
+                    recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await
+                {
+                    request.extend_from_slice(&chunk);
+                }
+                let body = decode_request_frame(&request)
+                    .ok()
+                    .and_then(|frame| v2::ResolveResourcesRequest::decode(frame.body).ok())
+                    .expect("native resource selectors");
+                let scoped_handle = body.selectors.len() == 2
+                    && matches!(
+                        body.selectors[1].selector,
+                        Some(v2::resource_selector::Selector::PrincipalHandle(_))
+                    );
+                let spool = v2::SpoolRef {
+                    id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+                };
+                let thread_name = (body.selectors.len() == 1)
+                    .then(|| body.selectors[0].selector.as_ref())
+                    .flatten()
+                    .and_then(|selector| match selector {
+                        v2::resource_selector::Selector::ThreadName(value) => {
+                            Some(value.name.as_str())
+                        }
+                        _ => None,
+                    });
+                let listed_thread = thread_name.and_then(|name| {
+                    thread_listing.as_ref().and_then(|fixture| {
+                        fixture
+                            .overviews
+                            .iter()
+                            .find(|overview| overview.name == name)
+                            .and_then(|overview| overview.r#ref.clone())
+                    })
+                });
+                if let Some(name) = thread_name
+                    && let Some(fixture) = &thread_listing
+                {
+                    fixture
+                        .resolution_requests
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push(name.to_string());
+                }
+                if thread_name.is_some()
+                    && let Some(code) = thread_listing
+                        .as_ref()
+                        .and_then(|fixture| fixture.resolution_failure)
+                {
+                    let failure = CallFailure {
+                        code: code as i32,
+                        message: "thread resolution failed".into(),
+                        error: None,
+                    };
+                    send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
                         .await
                         .unwrap();
+                    send.finish().unwrap();
+                    return;
                 }
+                let mut results = vec![v2::ResourceResolution {
+                    resource: Some(v2::EntityRef {
+                        entity: if let Some(name) = thread_name {
+                            listed_thread
+                                .or_else(|| {
+                                    thread_listing.is_none().then(|| v2::ThreadRef {
+                                        spool: Some(spool.clone()),
+                                        id: Some(v2::ThreadId {
+                                            value: vec![if name == "main" { 4 } else { 3 }; 32],
+                                        }),
+                                    })
+                                })
+                                .map(v2::entity_ref::Entity::Thread)
+                        } else {
+                            Some(v2::entity_ref::Entity::Spool(spool))
+                        },
+                    }),
+                    coverage: v2::Coverage::Complete as i32,
+                    ..Default::default()
+                }];
+                if scoped_handle {
+                    results.push(v2::ResourceResolution {
+                        selection_index: 1,
+                        principal_id: uuid::Uuid::from_bytes([4; 16]).to_string(),
+                        coverage: v2::Coverage::Complete as i32,
+                        ..Default::default()
+                    });
+                }
+                let response = v2::ResolveResourcesResponse { results };
+                send.write_chunk(Bytes::from(
+                    encode_success_response(&response.encode_to_vec()).unwrap(),
+                ))
+                .await
+                .unwrap();
+            } else if method == "/heddle.api.v1alpha2.SpoolService/ListSpools" {
+                serve_native_list_spools(&mut send, &mut recv, &mut request).await;
+            } else if method == "/heddle.api.v1alpha2.SpoolService/DeleteSpool" {
+                serve_native_delete_spool(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    spool_mutations,
+                    server_key,
+                )
+                .await;
+            } else if method == "/heddle.api.v1alpha2.SpoolService/ReviseSpool" {
+                serve_native_revise_spool(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    spool_mutations,
+                    server_key,
+                )
+                .await;
+            } else if method == "/heddle.api.v1alpha2.SpoolService/PromoteSpool" {
+                serve_native_promote_spool(&mut send, &mut recv, &mut request, server_key).await;
+            } else if method == "/heddle.api.v1alpha2.SpoolService/PutGrant" {
+                serve_native_put_grant(&mut send, &mut recv, &mut request, server_key, grants)
+                    .await;
+            } else if method == "/heddle.api.v1alpha2.SpoolService/RevokeGrant" {
+                serve_native_revoke_grant(&mut send, &mut recv, &mut request, server_key, grants)
+                    .await;
+            } else if method == "/heddle.api.v1alpha2.ThreadService/RecordReview" {
+                serve_native_record_review(&mut send, &mut recv, &mut request, server_key).await;
+            } else if method == "/heddle.api.v1alpha2.SpoolService/CreateSpool" {
+                serve_native_create_spool(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    owner,
+                    create_spool,
+                )
+                .await;
+            } else if method == "/heddle.api.v1alpha2.CollaborationService/OpenDiscussion" {
+                serve_open_discussion(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    live_discussions,
+                    live_operations,
+                )
+                .await;
+            } else if method == "/heddle.api.v1alpha2.CollaborationService/AppendTurn" {
+                serve_append_turn(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    live_discussions,
+                    live_operations,
+                )
+                .await;
+            } else if method == "/heddle.api.v1alpha2.CollaborationService/ResolveDiscussion" {
+                serve_resolve_discussion(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    live_discussions,
+                    live_operations,
+                )
+                .await;
+            } else if method == "/heddle.api.v1alpha2.CollaborationService/PutContext" {
+                serve_put_context(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    context.clone(),
+                    live_operations,
+                )
+                .await;
+            } else if method == "/heddle.api.v1alpha2.IdentityService/CreateSignupInvitation" {
+                serve_native_create_signup_invitation(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                )
+                .await;
+            } else if method == "/heddle.api.v1alpha2.IntegrationService/ImportSource" {
+                serve_import_source(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    import_source,
+                )
+                .await;
             } else {
                 send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
                     .await
@@ -597,41 +597,56 @@ async fn serve_call(
             }
         }
         StreamingShape::ServerStreaming => {
-            if method == LIST_CONTEXT_METHOD {
-                if let Some(context) = context {
-                    serve_list_context(&mut send, &mut recv, &mut request, context).await;
-                } else {
-                    let body = terminal_page(&method);
-                    send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-                        .await
-                        .unwrap();
-                }
-            } else if method == GET_CONTEXT_HISTORY_METHOD {
-                if let Some(context) = context {
-                    serve_get_context_history(&mut send, &mut recv, &mut request, context).await;
-                } else {
-                    let body = terminal_page(&method);
-                    send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-                        .await
-                        .unwrap();
-                }
-            } else if method == LIST_BY_STATE_METHOD {
-                if let Some(collaboration) = collaboration {
-                    serve_list_by_state(&mut send, &mut recv, &mut request, collaboration).await;
-                } else {
-                    let body = terminal_page(&method);
-                    send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-                        .await
-                        .unwrap();
-                }
-            } else if method == SUBSCRIBE_REPO_EVENTS_METHOD {
-                if let Some(collaboration) = collaboration {
-                    serve_subscribe_repo_events(&mut send, &mut recv, &mut request, collaboration)
-                        .await;
-                } else {
-                    send.finish().unwrap();
-                    return;
-                }
+            if method == "/heddle.api.v1alpha2.ThreadService/ObserveThread" {
+                serve_native_thread_review(&mut send, &mut recv, &mut request, server_key).await;
+            } else if method == "/heddle.api.v1alpha2.SpoolService/ObserveSpool" {
+                serve_native_spool_observation(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    grants,
+                )
+                .await;
+            } else if method == "/heddle.api.v1alpha2.IdentityService/ObserveIdentity" {
+                serve_native_identity_observation(&mut send, &mut recv, &mut request, server_key)
+                    .await;
+            } else if method == "/heddle.api.v1alpha2.WorkspaceService/ObserveWorkspace" {
+                serve_native_workspace_observation(&mut send, server_key).await;
+            } else if method == "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership" {
+                serve_native_owner_observation(&mut send, server_key, owner).await;
+            } else if method == "/heddle.api.v1alpha2.ThreadService/ObserveThreads" {
+                serve_observe_threads(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key.clone(),
+                    thread_listing,
+                )
+                .await;
+            } else if method == OBSERVE_COLLABORATION_METHOD {
+                serve_observe_collaboration(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key.clone(),
+                    ObserveCollaborationLive {
+                        collaboration,
+                        context,
+                        discussions: live_discussions,
+                        operations: live_operations,
+                    },
+                )
+                .await;
+            } else if method == "/heddle.api.v1alpha2.OperationService/ObserveOperations" {
+                serve_import_operations(
+                    &mut send,
+                    &mut recv,
+                    &mut request,
+                    server_key,
+                    import_source,
+                )
+                .await;
             } else {
                 let body = terminal_page(&method);
                 send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
@@ -640,16 +655,8 @@ async fn serve_call(
             }
         }
         StreamingShape::Bidirectional => {
-            if method == "/heddle.api.v1alpha1.RepoSyncService/Push" {
-                serve_push(
-                    send,
-                    recv,
-                    request.split_off(prelude_len),
-                    push_requests,
-                    #[cfg(test)]
-                    durable,
-                )
-                .await;
+            if method == "/heddle.api.v1alpha2.SyncService/PublishContent" {
+                serve_push(send, recv, request.split_off(prelude_len), push_requests).await;
                 return;
             }
             tokio::spawn(async move {
@@ -669,12 +676,1102 @@ async fn serve_call(
     send.finish().unwrap();
 }
 
+async fn serve_native_list_spools(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ListSpoolsRequest::decode(frame.body).ok())
+        .expect("native ListSpools request");
+    let mut spools = vec![
+        v2::ListedSpool {
+            r#ref: Some(v2::SpoolRef {
+                id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+            }),
+            path_segments: vec!["spool".into(), "acme".into()],
+            is_repo: false,
+            ..Default::default()
+        },
+        v2::ListedSpool {
+            r#ref: Some(v2::SpoolRef {
+                id: uuid::Uuid::from_bytes([3; 16]).to_string(),
+            }),
+            path_segments: vec!["spool".into(), "acme".into(), "notes".into()],
+            is_repo: true,
+            ..Default::default()
+        },
+    ];
+    if body.repos_only {
+        spools.retain(|spool| spool.is_repo);
+    }
+    let response = v2::ListSpoolsResponse { spools };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_native_workspace_observation(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+) {
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let events = [
+        v2::WorkspaceEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 1,
+                body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                    source: Some(source),
+                    binding_digest: vec![8; 32],
+                    accepted_budget: Some(budget),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+        v2::WorkspaceEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 2,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(v2::workspace_event::Payload::Status(v2::SectionStatus {
+                section: "spools".into(),
+                coverage: v2::Coverage::Complete as i32,
+                page: Some(v2::PageInfo {
+                    exhausted: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+        },
+        v2::WorkspaceEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 3,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+    ];
+    for event in events {
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+}
+
+async fn serve_native_owner_observation(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+    owner: v2::OwnerState,
+) {
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let events = [
+        v2::OwnershipEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 1,
+                body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                    source: Some(source),
+                    binding_digest: vec![8; 32],
+                    accepted_budget: Some(budget),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+        v2::OwnershipEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 2,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(v2::ownership_event::Payload::Owner(owner)),
+        },
+        v2::OwnershipEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 3,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+    ];
+    for event in events {
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+}
+
+async fn serve_native_create_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    owner: v2::OwnerState,
+    captured: Option<Arc<CreateSpoolCapture>>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::CreateSpoolRequest::decode(frame.body).ok())
+        .expect("native create Spool request");
+    if let Some(captured) = captured {
+        captured
+            .requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(body.clone());
+    }
+    let genesis = match body.ownership.expect("creation ownership") {
+        v2::create_spool_request::Ownership::OwnerGenesis(genesis) => genesis,
+        v2::create_spool_request::Ownership::CustodialSpool(_) => {
+            panic!("native test server expects owner genesis creation")
+        }
+    };
+    let spool_uuid = genesis
+        .genesis
+        .as_ref()
+        .expect("genesis")
+        .spool_uuid
+        .clone();
+    let response = v2::SpoolMutationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
+        spool: Some(v2::SpoolOverview {
+            r#ref: Some(v2::SpoolRef {
+                id: uuid::Uuid::from_slice(&spool_uuid)
+                    .expect("Spool UUID")
+                    .to_string(),
+            }),
+            parent: body.parent,
+            slug: body.slug.clone(),
+            name: body.display_name.unwrap_or(body.slug),
+            owner_genesis: Some(genesis),
+            version: vec![7; 32],
+            ..Default::default()
+        }),
+        ownership: Some(owner),
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_import_source(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    captured: Option<Arc<Mutex<ImportSourceCapture>>>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ImportSourceRequest::decode(frame.body).ok())
+        .expect("native ImportSource request");
+    if let Some(captured) = captured {
+        captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .requests
+            .push(body.clone());
+    }
+    let operation = v2::RecordRef {
+        spool: body.destination.clone(),
+        id: body.client_operation_id.clone(),
+    };
+    let response = v2::MutationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::PendingOperation(operation)),
+            ..Default::default()
+        }),
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_import_operations(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    captured: Option<Arc<Mutex<ImportSourceCapture>>>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveOperationsRequest::decode(frame.body).ok())
+        .expect("native ObserveOperations request");
+    if let Some(captured) = captured {
+        captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .observations
+            .push(body.clone());
+    }
+    let operation_id = body
+        .client_operation_ids
+        .first()
+        .expect("operation ID filter")
+        .clone();
+    let operation = body
+        .operations
+        .first()
+        .expect("operation reference filter")
+        .clone();
+    let destination = body.spools.first().expect("operation Spool filter").clone();
+    let open = v2::OperationEvent {
+        frame: Some(v2::StreamFrame {
+            sequence: 1,
+            body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                source: Some(v2::EndpointRef {
+                    kind: v2::EndpointKind::Weft as i32,
+                    public_key: server_key,
+                }),
+                binding_digest: vec![19; 32],
+                accepted_budget: Some(v2::ReadBudget {
+                    max_items: 64,
+                    max_frame_bytes: 65536,
+                    max_snapshot_bytes: 1048576,
+                }),
+                ..Default::default()
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&open.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+
+    let states = [
+        (v2::operation_record::State::Queued, 0),
+        (v2::operation_record::State::Running, 8 * 1024 * 1024),
+        (v2::operation_record::State::Running, 16 * 1024 * 1024),
+        (v2::operation_record::State::Completed, 32 * 1024 * 1024),
+    ];
+    let mut cursor = Vec::new();
+    let mut sequence = 1u64;
+    for (index, (state, completed_units)) in states.into_iter().enumerate() {
+        sequence += 1;
+        let event = v2::OperationEvent {
+            frame: Some(v2::StreamFrame {
+                sequence,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: if index == 0 {
+                        v2::StreamDataKind::Snapshot as i32
+                    } else {
+                        v2::StreamDataKind::Upsert as i32
+                    },
+                })),
+            }),
+            payload: Some(v2::operation_event::Payload::Operation(
+                v2::OperationRecord {
+                    r#ref: Some(operation.clone()),
+                    client_operation_id: operation_id.clone(),
+                    state: state as i32,
+                    completed_units,
+                    total_units: Some(32 * 1024 * 1024),
+                    unit: "bytes".into(),
+                    results: (state == v2::operation_record::State::Completed)
+                        .then(|| v2::EntityRef {
+                            entity: Some(v2::entity_ref::Entity::Spool(destination.clone())),
+                        })
+                        .into_iter()
+                        .collect(),
+                    ..Default::default()
+                },
+            )),
+        };
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+
+        sequence += 1;
+        let next_cursor = vec![(index + 1) as u8];
+        let checkpoint = v2::OperationEvent {
+            frame: Some(v2::StreamFrame {
+                sequence,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: next_cursor.clone(),
+                    previous_cursor: cursor,
+                    snapshot_complete: index == 0,
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        };
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&checkpoint.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+        cursor = next_cursor;
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+async fn serve_native_create_signup_invitation(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::CreateSignupInvitationRequest::decode(frame.body).ok())
+        .expect("native signup invitation request");
+    let response = v2::CreateSignupInvitationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
+        invitation: Some(v2::SignupInvitation {
+            r#ref: Some(v2::RecordRef {
+                id: uuid::Uuid::from_bytes([11; 16]).to_string(),
+                ..Default::default()
+            }),
+            bound_email: body
+                .invitation
+                .map(|invitation| invitation.bound_email)
+                .unwrap_or_default(),
+            ..Default::default()
+        }),
+        redemption_secret: b"one-time-invite".to_vec(),
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_native_identity_observation(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveIdentityRequest::decode(frame.body).ok())
+        .expect("native identity observation request");
+    let signup_requested = body.signup_invitations.is_some();
+    let credential_requested = body.include_current_credential;
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let mut events = vec![
+        v2::IdentityEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 1,
+                body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                    source: Some(source),
+                    binding_digest: vec![8; 32],
+                    accepted_budget: Some(budget),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+        v2::IdentityEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 2,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(v2::identity_event::Payload::Identity(v2::PrincipalRecord {
+                id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+                account_id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+                acting_agent_id: "reviewer-1".into(),
+                rooting_tier: v2::RootingTier::SelfRooted as i32,
+                personal_spool: Some(v2::SpoolAddress {
+                    r#ref: Some(v2::SpoolRef {
+                        id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+                    }),
+                    path_segments: vec!["acme".into()],
+                }),
+                ..Default::default()
+            })),
+        },
+        v2::IdentityEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 3,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+    ];
+    if signup_requested {
+        events.insert(
+            2,
+            v2::IdentityEvent {
+                frame: Some(v2::StreamFrame {
+                    sequence: 3,
+                    body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                        kind: v2::StreamDataKind::Snapshot as i32,
+                    })),
+                }),
+                payload: Some(v2::identity_event::Payload::InvitationQuota(
+                    v2::InvitationQuota {
+                        remaining: 2,
+                        ..Default::default()
+                    },
+                )),
+            },
+        );
+        events.insert(
+            3,
+            v2::IdentityEvent {
+                frame: Some(v2::StreamFrame {
+                    sequence: 4,
+                    body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                        kind: v2::StreamDataKind::Snapshot as i32,
+                    })),
+                }),
+                payload: Some(v2::identity_event::Payload::Status(v2::SectionStatus {
+                    section: "signup_invitations".into(),
+                    coverage: v2::Coverage::Complete as i32,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            },
+        );
+    }
+    if credential_requested {
+        events.insert(
+            2,
+            v2::IdentityEvent {
+                frame: Some(v2::StreamFrame {
+                    sequence: 0,
+                    body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                        kind: v2::StreamDataKind::Snapshot as i32,
+                    })),
+                }),
+                payload: Some(v2::identity_event::Payload::CurrentCredential(
+                    v2::CurrentCredentialRecord {
+                        r#ref: Some(v2::RecordRef {
+                            id: uuid::Uuid::from_bytes([12; 16]).to_string(),
+                            ..Default::default()
+                        }),
+                        kind: v2::CredentialKind::Agent as i32,
+                        subject: "agent:reviewer-1".into(),
+                        acting_agent_id: "reviewer-1".into(),
+                        agent_provider: "codex".into(),
+                        agent_model: "gpt".into(),
+                        thread_control_authority: vec![6; 32],
+                        session: Some(v2::SessionRecord {
+                            r#ref: Some(v2::RecordRef {
+                                id: uuid::Uuid::from_bytes([13; 16]).to_string(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )),
+            },
+        );
+    }
+    for (index, event) in events.iter_mut().enumerate() {
+        event.frame.as_mut().expect("identity event frame").sequence = (index + 1) as u64;
+    }
+    for event in events {
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+}
+
+async fn serve_native_thread_review(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveThreadRequest::decode(frame.body).ok())
+        .expect("native review observation request");
+    assert!(body.sections.contains(&(v2::ThreadSection::Review as i32)));
+    let landing_target = body.landing_target.clone();
+    let thread = body.thread.expect("review Thread identity");
+    let revision = v2::RevisionRef {
+        spool: thread.spool.clone(),
+        revision: Some(v2::revision_ref::Revision::State(
+            api::heddle::api::common::StateId { value: vec![5; 32] },
+        )),
+    };
+    let data = |sequence, payload| v2::ThreadEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                kind: v2::StreamDataKind::Snapshot as i32,
+            })),
+        }),
+        payload: Some(payload),
+    };
+    let events = [
+        v2::ThreadEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 1,
+                body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                    source: Some(v2::EndpointRef {
+                        kind: v2::EndpointKind::Weft as i32,
+                        public_key: server_key,
+                    }),
+                    binding_digest: vec![8; 32],
+                    accepted_budget: Some(v2::ReadBudget {
+                        max_items: 64,
+                        max_frame_bytes: 65536,
+                        max_snapshot_bytes: 1048576,
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+        data(
+            2,
+            v2::thread_event::Payload::Comparison(v2::ReviewComparison {
+                source: Some(revision.clone()),
+                base: Some(revision.clone()),
+                policy_version: vec![6; 32],
+            }),
+        ),
+        data(
+            3,
+            v2::thread_event::Payload::Overview(v2::ThreadOverview {
+                r#ref: Some(thread),
+                name: "feature".into(),
+                version: vec![7; 32],
+                review_policy_version: vec![6; 32],
+                source_heads: vec![revision.clone()],
+                base: Some(revision.clone()),
+                readiness: v2::ReviewReadiness::Unknown as i32,
+                landing_assessment: landing_target.map(|target| v2::LandingAssessment {
+                    target: Some(target),
+                    source: Some(revision.clone()),
+                    expected_target: Some(revision.clone()),
+                    policy_version: vec![6; 32],
+                    readiness: v2::ReviewReadiness::Eligible as i32,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        ),
+        data(
+            4,
+            v2::thread_event::Payload::Status(v2::SectionStatus {
+                section: "review".into(),
+                coverage: v2::Coverage::Complete as i32,
+                page: Some(v2::PageInfo {
+                    exhausted: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        ),
+        v2::ThreadEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 5,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+    ];
+    for event in events {
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+}
+
+async fn serve_native_record_review(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::RecordReviewRequest::decode(frame.body).ok())
+        .expect("native signed review request");
+    let operation = body.operation.as_ref().expect("original review signature");
+    thread_api::thread_control::verify(operation).expect("original signature verifies");
+    assert!(body.decision.is_some());
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+async fn serve_native_spool_observation(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let request_body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveSpoolRequest::decode(frame.body).ok())
+        .expect("native Spool observation request");
+    let grants_requested = request_body
+        .sections
+        .contains(&(v2::SpoolSection::Grants as i32));
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let mut events = vec![
+        v2::SpoolEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 1,
+                body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                    source: Some(source),
+                    binding_digest: vec![9; 32],
+                    accepted_budget: Some(budget),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+        v2::SpoolEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 2,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(v2::spool_event::Payload::Spool(v2::SpoolOverview {
+                r#ref: Some(v2::SpoolRef {
+                    id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+                }),
+                version: vec![7; 32],
+                slug: "acme".into(),
+                path_segments: vec!["acme".into()],
+                settings: Some(v2::SpoolSettings::default()),
+                ..Default::default()
+            })),
+        },
+        v2::SpoolEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: 3,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        },
+    ];
+    if grants_requested {
+        events.truncate(1);
+        let records = grants
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        let mut sequence = 2;
+        for grant in records {
+            events.push(v2::SpoolEvent {
+                frame: Some(v2::StreamFrame {
+                    sequence,
+                    body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                        kind: v2::StreamDataKind::Snapshot as i32,
+                    })),
+                }),
+                payload: Some(v2::spool_event::Payload::Grant(grant)),
+            });
+            sequence += 1;
+        }
+        events.push(v2::SpoolEvent {
+            frame: Some(v2::StreamFrame {
+                sequence,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(v2::spool_event::Payload::Status(v2::SectionStatus {
+                section: "grants".into(),
+                coverage: v2::Coverage::Complete as i32,
+                page: Some(v2::PageInfo {
+                    exhausted: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+        });
+        events.push(v2::SpoolEvent {
+            frame: Some(v2::StreamFrame {
+                sequence: sequence + 1,
+                body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                    cursor: vec![1],
+                    snapshot_complete: true,
+                    page: Some(v2::PageInfo {
+                        exhausted: true,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                })),
+            }),
+            ..Default::default()
+        });
+    }
+    for event in events {
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+}
+
+async fn serve_native_revise_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    captured: Option<Arc<Mutex<SpoolMutationCapture>>>,
+    server_key: Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ReviseSpoolRequest::decode(frame.body).ok())
+        .expect("native Spool revision request");
+    if let Some(captured) = captured {
+        captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .native_updates
+            .push(body.clone());
+    }
+    let slug = body.slug.clone().unwrap_or_else(|| "acme".into());
+    let response = v2::SpoolMutationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
+        spool: Some(v2::SpoolOverview {
+            r#ref: body.spool,
+            version: vec![8; 32],
+            slug: slug.clone(),
+            path_segments: vec![slug],
+            name: body.name,
+            settings: body.settings,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_native_promote_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::PromoteSpoolRequest::decode(frame.body).ok())
+        .expect("native Spool promotion request");
+    let response = v2::SpoolMutationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
+        spool: Some(v2::SpoolOverview {
+            r#ref: body.spool,
+            version: vec![8; 32],
+            slug: "acme".into(),
+            path_segments: vec!["acme".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_native_put_grant(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::PutGrantRequest::decode(frame.body).ok())
+        .expect("native PutGrant request");
+    let mut grant = body.grant.expect("grant record");
+    {
+        let mut records = grants.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(existing) = records.iter_mut().find(|row| row.r#ref == grant.r#ref) {
+            assert_eq!(body.expected_version, existing.version);
+            grant.version = vec![2; 32];
+            *existing = grant;
+        } else {
+            assert!(body.expected_version.is_empty());
+            grant.version = vec![1; 32];
+            records.push(grant);
+        }
+    }
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+async fn serve_native_revoke_grant(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::RevokeGrantRequest::decode(frame.body).ok())
+        .expect("native RevokeGrant request");
+    grants
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .retain(|grant| grant.r#ref != body.grant);
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+async fn write_native_grant_receipt(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+    operation_id: String,
+) {
+    let response = v2::MutationResponse {
+        receipt: Some(v2::MutationReceipt {
+            client_operation_id: operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+async fn serve_native_delete_spool(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    captured: Option<Arc<Mutex<SpoolMutationCapture>>>,
+    server_key: Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::DeleteSpoolRequest::decode(frame.body).ok());
+    if let (Some(captured), Some(body)) = (captured.as_ref(), body.as_ref()) {
+        captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .native_deletes
+            .push(body.clone());
+    }
+    let response = v2::MutationResponse {
+        receipt: body.map(|body| v2::MutationReceipt {
+            client_operation_id: body.client_operation_id,
+            endpoint: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                v2::Applied::default(),
+            )),
+            ..Default::default()
+        }),
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
 async fn serve_push(
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     mut buffered: Vec<u8>,
     captured: Option<Arc<Mutex<Vec<PushRequest>>>>,
-    #[cfg(test)] durable: Option<DurableSyncStore>,
 ) {
     let request = loop {
         if let Some((frame, consumed)) = decode_stream_frame(&buffered).unwrap() {
@@ -696,7 +1793,6 @@ async fn serve_push(
         buffered.extend_from_slice(&chunk);
     };
     let advertised = request.objects.clone();
-    let local_state = request.local_state.clone();
     if let Some(captured) = captured {
         captured
             .lock()
@@ -707,7 +1803,6 @@ async fn serve_push(
     let ready = PushServerFrame {
         frame: Some(push_server_frame::Frame::Ready(PushReady {
             want_objects: advertised,
-            ..PushReady::default()
         })),
     }
     .encode_to_vec();
@@ -720,26 +1815,10 @@ async fn serve_push(
         .await
         .is_ok_and(|chunk| chunk.is_some())
     {}
-    let accept = {
-        #[cfg(test)]
-        {
-            durable.as_ref().is_some_and(|store| store.publish_staged()) && local_state.is_some()
-        }
-        #[cfg(not(test))]
-        {
-            false
-        }
-    };
     let complete = PushServerFrame {
         frame: Some(push_server_frame::Frame::Complete(PushComplete {
-            success: accept,
-            new_state: if accept { local_state } else { None },
-            error: if accept {
-                String::new()
-            } else {
-                "test rejection".to_string()
-            },
-            ..PushComplete::default()
+            success: false,
+            error: "test rejection".to_string(),
         })),
     }
     .encode_to_vec();
@@ -749,45 +1828,939 @@ async fn serve_push(
     send.finish().unwrap();
 }
 
+async fn serve_observe_threads(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    fixture: Option<ThreadListingFixture>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let requested = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveThreadsRequest::decode(frame.body).ok())
+        .expect("native ObserveThreads request");
+    if let Some(fixture) = fixture {
+        fixture
+            .requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(requested.clone());
+        let after = requested
+            .page
+            .as_ref()
+            .map(|page| page.after_page.as_slice())
+            .unwrap_or_default();
+        let start = if after.is_empty() {
+            0
+        } else {
+            let bytes: [u8; 4] = after.try_into().expect("test page token");
+            u32::from_be_bytes(bytes) as usize
+        };
+        let page_size = fixture.page_size.max(1);
+        let end = start.saturating_add(page_size).min(fixture.overviews.len());
+        let payloads = fixture.overviews[start..end]
+            .iter()
+            .cloned()
+            .map(v2::thread_list_event::Payload::Thread)
+            .collect();
+        let next_page = if end == fixture.overviews.len() {
+            Vec::new()
+        } else {
+            (end as u32).to_be_bytes().to_vec()
+        };
+        write_thread_list_observation(
+            send,
+            server_key,
+            payloads,
+            next_page,
+            end == fixture.overviews.len(),
+        )
+        .await;
+        return;
+    }
+    let spool = v2::SpoolRef {
+        id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+    };
+    let overviews = ["main", "refs/heads/feature/run"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, name)| v2::ThreadOverview {
+            name: name.into(),
+            r#ref: Some(v2::ThreadRef {
+                spool: Some(spool.clone()),
+                id: Some(v2::ThreadId {
+                    value: vec![if index == 0 { 4 } else { 3 }; 32],
+                }),
+            }),
+            ..Default::default()
+        });
+    let payloads = overviews
+        .map(v2::thread_list_event::Payload::Thread)
+        .collect();
+    write_thread_list_observation(send, server_key, payloads, Vec::new(), true).await;
+}
+
+async fn write_thread_list_observation(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+    payloads: Vec<v2::thread_list_event::Payload>,
+    next_page: Vec<u8>,
+    exhausted: bool,
+) {
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let mut sequence = 1u64;
+    let open = v2::ThreadListEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                source: Some(source),
+                binding_digest: vec![9; 32],
+                accepted_budget: Some(budget),
+                ..Default::default()
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&open.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+    for payload in payloads {
+        sequence += 1;
+        let event = v2::ThreadListEvent {
+            frame: Some(v2::StreamFrame {
+                sequence,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(payload),
+        };
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+    sequence += 1;
+    let checkpoint = v2::ThreadListEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                cursor: vec![1],
+                snapshot_complete: true,
+                page: Some(v2::PageInfo {
+                    next_page,
+                    exhausted,
+                    matching_count: None,
+                }),
+                ..Default::default()
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&checkpoint.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+    sequence += 1;
+    let complete = v2::ThreadListEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Complete(v2::StreamComplete {
+                cursor: vec![1],
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&complete.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
+fn remember_signed_operation(
+    operations: &Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+    discussion_id: &str,
+    signed: Option<v2::SignedRecord>,
+) {
+    let Some(signed) = signed.filter(|record| !record.canonical_record.is_empty()) else {
+        return;
+    };
+    operations
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .entry(discussion_id.to_string())
+        .or_default()
+        .push(signed);
+}
+
+fn signed_operation_id(record: &v2::SignedRecord) -> Option<Vec<u8>> {
+    thread_api::collaboration::verify(record)
+        .ok()
+        .and_then(|operation| operation.id().ok())
+        .map(|id| id.as_bytes().to_vec())
+}
+
+async fn serve_open_discussion(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    live: Arc<Mutex<HashMap<String, Discussion>>>,
+    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::OpenDiscussionRequest::decode(frame.body).ok())
+        .unwrap_or_default();
+    if let Some(discussion) = discussion_from_open(&body) {
+        remember_signed_operation(&operations, &discussion.id, body.signed_operation.clone());
+        live.lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(discussion.id.clone(), discussion);
+    }
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+async fn serve_append_turn(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    live: Arc<Mutex<HashMap<String, Discussion>>>,
+    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::AppendDiscussionRequest::decode(frame.body).ok())
+        .unwrap_or_default();
+    if let Some(id) = body
+        .discussion
+        .as_ref()
+        .map(|reference| reference.id.clone())
+    {
+        remember_signed_operation(&operations, &id, body.signed_operation.clone());
+        let mut live = live.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(discussion) = live.get_mut(&id) {
+            let seq = discussion.turns.len() as u64 + 1;
+            discussion.turns.push(DiscussionTurn {
+                body: body.body.clone(),
+                turn_id: format!("turn-{seq}"),
+                turn_seq: seq,
+                ..Default::default()
+            });
+        }
+    }
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+async fn serve_resolve_discussion(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    live: Arc<Mutex<HashMap<String, Discussion>>>,
+    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ResolveDiscussionRequest::decode(frame.body).ok())
+        .unwrap_or_default();
+    if let Some(id) = body
+        .discussion
+        .as_ref()
+        .map(|reference| reference.id.clone())
+    {
+        let mut live = live.lock().unwrap_or_else(|poison| poison.into_inner());
+        remember_signed_operation(&operations, &id, body.signed_operation.clone());
+        if let Some(discussion) = live.get_mut(&id) {
+            discussion.resolution = Some(DiscussionResolution {
+                state: Some(discussion_resolution::State::Dismissed(
+                    discussion_resolution::Dismissed {
+                        reason: "resolved".into(),
+                    },
+                )),
+            });
+        }
+    }
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+async fn serve_put_context(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    context: Option<ContextFixture>,
+    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::PutContextRequest::decode(frame.body).ok())
+        .unwrap_or_default();
+    if let Some(fixture) = &context {
+        *fixture
+            .put_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) += 1;
+        if fixture.put_conflict {
+            let failure = CallFailure {
+                code: CallFailureCode::FailedPrecondition as i32,
+                message: "operation ID names another command".to_string(),
+                error: None,
+            };
+            send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
+                .await
+                .unwrap();
+            return;
+        }
+    }
+    if let Some(signed) = body.signed_operation.clone()
+        && let Ok(operation) = thread_api::collaboration::verify(&signed)
+        && let objects::object::thread_replication::ThreadOperationBody::Context(bytes) =
+            operation.body
+        && let Ok(record) = objects::object::ContextRevision::decode(&bytes)
+    {
+        remember_signed_operation(&operations, &record.id.to_string(), Some(signed));
+    }
+    write_native_grant_receipt(send, server_key, body.client_operation_id).await;
+}
+
+fn discussion_from_open(request: &v2::OpenDiscussionRequest) -> Option<Discussion> {
+    let signed = request.signed_operation.as_ref()?;
+    if signed.canonical_record.is_empty() {
+        return None;
+    }
+    let operation = thread_api::collaboration::verify(signed).ok().or_else(|| {
+        objects::object::thread_replication::ThreadOperation::decode(&signed.canonical_record).ok()
+    })?;
+    let objects::object::thread_replication::ThreadOperationBody::Discussion(bytes) =
+        operation.body
+    else {
+        return None;
+    };
+    let record = objects::object::CollaborationOperationEnvelope::decode(&bytes)
+        .ok()?
+        .operation;
+    let objects::object::CollaborationOperationBodyV1::Open {
+        title: _,
+        anchor,
+        visibility,
+        turn,
+        thread_ref,
+        ..
+    } = record.body
+    else {
+        return None;
+    };
+    let (file, symbol) = request
+        .anchor
+        .as_ref()
+        .and_then(|anchor| match &anchor.target {
+            Some(v2::collaboration_anchor::Target::Source(source)) => {
+                Some((source.path.clone(), source.symbol_id.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| match anchor {
+            objects::object::CollaborationAnchor::Symbol { path, symbol, .. } => (path, symbol),
+            objects::object::CollaborationAnchor::Path { path, .. } => (path, String::new()),
+            objects::object::CollaborationAnchor::Source { source } => {
+                (source.path, source.symbol_id)
+            }
+            _ => (String::new(), String::new()),
+        });
+    Some(Discussion {
+        id: record.discussion_id.to_string(),
+        anchor: Some(PathSymbolRef { file, symbol }),
+        visibility: match visibility {
+            objects::object::VisibilityTier::Public => "public".into(),
+            objects::object::VisibilityTier::Private { .. } => "private".into(),
+            _ => "internal".into(),
+        },
+        thread_ref: thread_ref.unwrap_or_default(),
+        turns: vec![DiscussionTurn {
+            body: turn.body,
+            turn_id: "turn-open".into(),
+            turn_seq: 1,
+            ..Default::default()
+        }],
+        ..Default::default()
+    })
+}
+
+struct ObserveCollaborationLive {
+    collaboration: Option<CollaborationFixture>,
+    context: Option<ContextFixture>,
+    discussions: Arc<Mutex<HashMap<String, Discussion>>>,
+    operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+}
+
+async fn serve_observe_collaboration(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+    server_key: Vec<u8>,
+    live: ObserveCollaborationLive,
+) {
+    read_request_body(recv, request).await;
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::ObserveCollaborationRequest::decode(frame.body).ok())
+        .unwrap_or_default();
+    if let Some(code) = discussion_failure(&body, live.collaboration.as_ref()) {
+        let failure = CallFailure {
+            code: code as i32,
+            message: "discussion is not visible".to_string(),
+            error: None,
+        };
+        send.write_chunk(Bytes::from(encode_stream_failure(&failure).unwrap()))
+            .await
+            .unwrap();
+        return;
+    }
+    let payloads = observe_payloads(
+        &body,
+        live.collaboration.as_ref(),
+        live.context.as_ref(),
+        &live.discussions,
+        &live.operations,
+    );
+    write_collaboration_observation(send, server_key, payloads).await;
+}
+
+fn discussion_failure(
+    request: &v2::ObserveCollaborationRequest,
+    fixture: Option<&CollaborationFixture>,
+) -> Option<CallFailureCode> {
+    let fixture = fixture?;
+    request.discussions.iter().find_map(|reference| {
+        match fixture.hidden.get(&reference.id).copied() {
+            Some(
+                code @ (CallFailureCode::Unauthenticated
+                | CallFailureCode::Internal
+                | CallFailureCode::Unavailable),
+            ) => Some(code),
+            _ => None,
+        }
+    })
+}
+
+fn observe_payloads(
+    request: &v2::ObserveCollaborationRequest,
+    collaboration: Option<&CollaborationFixture>,
+    context: Option<&ContextFixture>,
+    live: &Arc<Mutex<HashMap<String, Discussion>>>,
+    operations: &Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
+) -> Vec<v2::collaboration_event::Payload> {
+    if !request.discussions.is_empty() {
+        if let Some(fixture) = collaboration {
+            record_get_requests(fixture, request);
+        }
+        let live = live.lock().unwrap_or_else(|poison| poison.into_inner());
+        let operations = operations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        return request
+            .discussions
+            .iter()
+            .filter_map(|reference| {
+                collaboration
+                    .and_then(|fixture| fixture.discussions.get(&reference.id))
+                    .cloned()
+                    .or_else(|| live.get(&reference.id).cloned())
+                    .map(|discussion| {
+                        (
+                            discussion,
+                            operations.get(&reference.id).cloned().unwrap_or_default(),
+                        )
+                    })
+            })
+            .flat_map(|(discussion, signed)| discussion_payloads(&discussion, &signed))
+            .collect();
+    }
+    if !request.contexts.is_empty() {
+        let operations = operations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let native: Vec<_> = request
+            .contexts
+            .iter()
+            .flat_map(|reference| {
+                context_operation_payloads(
+                    operations
+                        .get(&reference.id)
+                        .map(Vec::as_slice)
+                        .unwrap_or(&[]),
+                    request.include_operations,
+                )
+            })
+            .collect();
+        if !native.is_empty() {
+            return native;
+        }
+        if let Some(fixture) = context {
+            fixture
+                .history_requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .extend(
+                    request
+                        .contexts
+                        .iter()
+                        .map(|reference| reference.id.clone()),
+                );
+            return request
+                .contexts
+                .iter()
+                .flat_map(|reference| context_history_payloads(fixture, &reference.id))
+                .collect();
+        }
+        return Vec::new();
+    }
+    if request.annotations.is_some() {
+        let operations = operations
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let native: Vec<_> = operations
+            .values()
+            .flat_map(|records| context_operation_payloads(records, request.include_operations))
+            .collect();
+        if !native.is_empty() {
+            return native;
+        }
+        if let Some(fixture) = context {
+            *fixture
+                .list_requests
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()) += 1;
+            return context_list_payloads(fixture);
+        }
+        return Vec::new();
+    }
+    let live = live.lock().unwrap_or_else(|poison| poison.into_inner());
+    let operations = operations
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some(fixture) = collaboration {
+        *fixture
+            .list_requests
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) += 1;
+        let mut rows = fixture.list.clone();
+        rows.extend(live.values().cloned());
+        return rows
+            .iter()
+            .flat_map(|discussion| {
+                let signed = operations.get(&discussion.id).cloned().unwrap_or_default();
+                discussion_payloads(discussion, &signed)
+            })
+            .collect();
+    }
+    live.iter()
+        .flat_map(|(id, discussion)| {
+            let signed = operations.get(id).cloned().unwrap_or_default();
+            discussion_payloads(discussion, &signed)
+        })
+        .collect()
+}
+
+fn record_get_requests(fixture: &CollaborationFixture, request: &v2::ObserveCollaborationRequest) {
+    let mut gets = fixture
+        .get_requests
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let mut states = fixture
+        .get_request_state_ids
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let state = request.anchors.iter().find_map(anchor_state_bytes);
+    for reference in &request.discussions {
+        gets.push(reference.id.clone());
+        states.push(state.clone());
+    }
+}
+
+fn anchor_state_bytes(anchor: &v2::CollaborationAnchor) -> Option<Vec<u8>> {
+    match anchor.target.as_ref() {
+        Some(v2::collaboration_anchor::Target::Source(source)) => match source
+            .revision
+            .as_ref()
+            .and_then(|revision| revision.revision.as_ref())
+        {
+            Some(v2::revision_ref::Revision::State(id)) => Some(id.value.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn discussion_title(discussion: &Discussion) -> String {
+    if !discussion.thread_id.is_empty() {
+        format!("{}\x1f{}", discussion.thread_ref, discussion.thread_id)
+    } else if !discussion.thread_ref.is_empty() {
+        discussion.thread_ref.clone()
+    } else {
+        dismiss_reason(discussion).unwrap_or_default()
+    }
+}
+
+fn dismiss_reason(discussion: &Discussion) -> Option<String> {
+    match discussion
+        .resolution
+        .as_ref()
+        .and_then(|resolution| resolution.state.as_ref())
+    {
+        Some(discussion_resolution::State::Dismissed(dismissed)) => Some(dismissed.reason.clone()),
+        _ => None,
+    }
+}
+
+fn discussion_payloads(
+    discussion: &Discussion,
+    operations: &[v2::SignedRecord],
+) -> Vec<v2::collaboration_event::Payload> {
+    let id = discussion.id.clone();
+    let (path, symbol) = discussion
+        .anchor
+        .as_ref()
+        .map(|anchor| (anchor.file.clone(), anchor.symbol.clone()))
+        .unwrap_or_default();
+    let status = if discussion.resolution.is_some() {
+        v2::discussion_record::Status::Resolved as i32
+    } else {
+        v2::discussion_record::Status::Open as i32
+    };
+    let audience = match discussion.visibility.as_str() {
+        "public" => v2::Audience::Public as i32,
+        "private" => v2::Audience::Private as i32,
+        _ => v2::Audience::Unspecified as i32,
+    };
+    let signed_ids: Vec<Vec<u8>> = operations.iter().filter_map(signed_operation_id).collect();
+    let turn_causal_ids: Vec<Vec<u8>> = if signed_ids.len() == discussion.turns.len() {
+        signed_ids
+    } else {
+        discussion
+            .turns
+            .iter()
+            .map(|turn| {
+                objects::object::ContentHash::compute(format!("{id}:{}", turn.turn_id).as_bytes())
+                    .as_bytes()
+                    .to_vec()
+            })
+            .collect()
+    };
+    let causal_heads = turn_causal_ids.last().cloned().into_iter().collect();
+    let mut payloads = vec![v2::collaboration_event::Payload::Discussion(
+        v2::DiscussionRecord {
+            r#ref: Some(v2::RecordRef {
+                id: id.clone(),
+                spool: None,
+            }),
+            version: objects::object::ContentHash::compute(id.as_bytes())
+                .as_bytes()
+                .to_vec(),
+            anchor: Some(source_anchor(path, symbol)),
+            title: discussion_title(discussion),
+            status,
+            turn_count: discussion.turns.len() as u64,
+            audience,
+            audience_label: discussion.visibility.clone(),
+            causal_heads,
+            ..Default::default()
+        },
+    )];
+    for (turn, causal_id) in discussion.turns.iter().zip(turn_causal_ids) {
+        payloads.push(v2::collaboration_event::Payload::Turn(v2::DiscussionTurn {
+            r#ref: Some(v2::RecordRef {
+                id: turn.turn_id.clone(),
+                spool: None,
+            }),
+            discussion: Some(v2::RecordRef {
+                id: id.clone(),
+                spool: None,
+            }),
+            body: turn.body.clone(),
+            principal_id: turn.author_name.clone(),
+            created_at: turn.posted_at,
+            causal_id,
+            ..Default::default()
+        }));
+    }
+    payloads.extend(
+        operations
+            .iter()
+            .cloned()
+            .map(v2::collaboration_event::Payload::Operation),
+    );
+    payloads
+}
+
+fn source_anchor(path: String, symbol: String) -> v2::CollaborationAnchor {
+    v2::CollaborationAnchor {
+        target: Some(v2::collaboration_anchor::Target::Source(v2::SourceAnchor {
+            path,
+            symbol_id: symbol,
+            ..Default::default()
+        })),
+    }
+}
+
+fn context_operation_payloads(
+    operations: &[v2::SignedRecord],
+    include_operations: bool,
+) -> Vec<v2::collaboration_event::Payload> {
+    let mut payloads = Vec::new();
+    for signed in operations {
+        let Ok(operation) = thread_api::collaboration::verify(signed) else {
+            continue;
+        };
+        let Ok(causal_id) = operation.id() else {
+            continue;
+        };
+        let objects::object::thread_replication::ThreadOperationBody::Context(bytes) =
+            operation.body
+        else {
+            continue;
+        };
+        let Ok(context) = objects::object::ContextRevision::decode(&bytes) else {
+            continue;
+        };
+        let Ok(anchor) =
+            thread_api::collaboration::anchor_ref(&context.anchor, &context.metadata.scope)
+        else {
+            continue;
+        };
+        payloads.push(v2::collaboration_event::Payload::Context(
+            v2::ContextRecord {
+                r#ref: Some(v2::RecordRef {
+                    spool: Some(v2::SpoolRef {
+                        id: context.metadata.scope.spool.to_string(),
+                    }),
+                    id: context.id.to_string(),
+                }),
+                anchor: Some(anchor),
+                content: context.content.clone(),
+                tags: context
+                    .tags
+                    .iter()
+                    .map(thread_api::collaboration::annotation_tag_ref)
+                    .collect(),
+                principal_id: context.metadata.actor.principal_id.to_string(),
+                causal_id: causal_id.as_bytes().to_vec(),
+                causal_heads: vec![causal_id.as_bytes().to_vec()],
+                version: causal_id.as_bytes().to_vec(),
+                ..Default::default()
+            },
+        ));
+        if include_operations {
+            payloads.push(v2::collaboration_event::Payload::Operation(signed.clone()));
+        }
+    }
+    payloads
+}
+
+fn context_list_payloads(fixture: &ContextFixture) -> Vec<v2::collaboration_event::Payload> {
+    let mut payloads = Vec::new();
+    for file in &fixture.files {
+        for annotation in &file.annotations {
+            payloads.push(v2::collaboration_event::Payload::Context(
+                v2::ContextRecord {
+                    r#ref: Some(v2::RecordRef {
+                        id: annotation.id.clone(),
+                        spool: None,
+                    }),
+                    content: annotation.content.clone(),
+                    principal_id: annotation.attribution.clone(),
+                    tags: annotation
+                        .tags
+                        .iter()
+                        .map(|tag| v2::AnnotationTag {
+                            tag: Some(v2::annotation_tag::Tag::Text(tag.clone())),
+                        })
+                        .collect(),
+                    anchor: Some(source_anchor(file.path.clone(), String::new())),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+    for state in &fixture.states {
+        let path_state = state.state_id.as_ref().map(|id| id.value.clone());
+        for annotation in &state.annotations {
+            let mut record = v2::ContextRecord {
+                r#ref: Some(v2::RecordRef {
+                    id: annotation.id.clone(),
+                    spool: None,
+                }),
+                content: annotation.content.clone(),
+                principal_id: annotation.attribution.clone(),
+                ..Default::default()
+            };
+            if let Some(value) = &path_state {
+                record.anchor = Some(v2::CollaborationAnchor {
+                    target: Some(v2::collaboration_anchor::Target::Source(v2::SourceAnchor {
+                        revision: Some(v2::RevisionRef {
+                            revision: Some(v2::revision_ref::Revision::State(
+                                api::heddle::api::common::StateId {
+                                    value: value.clone(),
+                                },
+                            )),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })),
+                });
+            }
+            payloads.push(v2::collaboration_event::Payload::Context(record));
+        }
+    }
+    payloads
+}
+
+fn context_history_payloads(
+    fixture: &ContextFixture,
+    annotation_id: &str,
+) -> Vec<v2::collaboration_event::Payload> {
+    fixture
+        .histories
+        .get(annotation_id)
+        .into_iter()
+        .flatten()
+        .map(|revision| {
+            v2::collaboration_event::Payload::Context(v2::ContextRecord {
+                r#ref: Some(v2::RecordRef {
+                    id: annotation_id.to_string(),
+                    spool: None,
+                }),
+                content: revision.content.clone(),
+                principal_id: revision.attribution.clone(),
+                causal_id: revision.revision_id.as_bytes().to_vec(),
+                tags: revision
+                    .tags
+                    .iter()
+                    .map(|tag| v2::AnnotationTag {
+                        tag: Some(v2::annotation_tag::Tag::Text(tag.clone())),
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+        })
+        .collect()
+}
+
+async fn write_collaboration_observation(
+    send: &mut iroh::endpoint::SendStream,
+    server_key: Vec<u8>,
+    payloads: Vec<v2::collaboration_event::Payload>,
+) {
+    let source = v2::EndpointRef {
+        kind: v2::EndpointKind::Weft as i32,
+        public_key: server_key,
+    };
+    let budget = v2::ReadBudget {
+        max_items: 64,
+        max_frame_bytes: 65536,
+        max_snapshot_bytes: 1048576,
+    };
+    let mut sequence = 1u64;
+    let open = v2::CollaborationEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Open(v2::StreamOpen {
+                source: Some(source),
+                binding_digest: vec![9; 32],
+                accepted_budget: Some(budget),
+                ..Default::default()
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&open.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+    for payload in payloads {
+        sequence += 1;
+        let event = v2::CollaborationEvent {
+            frame: Some(v2::StreamFrame {
+                sequence,
+                body: Some(v2::stream_frame::Body::Data(v2::StreamData {
+                    kind: v2::StreamDataKind::Snapshot as i32,
+                })),
+            }),
+            payload: Some(payload),
+        };
+        send.write_chunk(Bytes::from(
+            encode_stream_message(&event.encode_to_vec()).unwrap(),
+        ))
+        .await
+        .unwrap();
+    }
+    sequence += 1;
+    let checkpoint = v2::CollaborationEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+                cursor: vec![1],
+                snapshot_complete: true,
+                page: Some(v2::PageInfo {
+                    exhausted: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&checkpoint.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+    sequence += 1;
+    let complete = v2::CollaborationEvent {
+        frame: Some(v2::StreamFrame {
+            sequence,
+            body: Some(v2::stream_frame::Body::Complete(v2::StreamComplete {
+                cursor: vec![1],
+            })),
+        }),
+        ..Default::default()
+    };
+    send.write_chunk(Bytes::from(
+        encode_stream_message(&complete.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
+}
+
 fn terminal_page(method: &str) -> Vec<u8> {
     match method {
-        "/heddle.api.v1alpha1.RepoSyncService/ListRefs" => ListRefsResponse {
+        "/heddle.api.v1alpha2.ThreadService/ObserveThreads" => ListRefsResponse {
             frame: Some(list_refs_response::Frame::PageEnd(ListRefsPageEnd {
                 next_page_token: String::new(),
-                ..ListRefsPageEnd::default()
             })),
-        }
-        .encode_to_vec(),
-        "/heddle.api.v1alpha1.RepositoryService/ListContext" => ListContextResponse {
-            frame: Some(list_context_response::Frame::PageEnd(ListContextPageEnd {
-                next_page_token: String::new(),
-                ..ListContextPageEnd::default()
-            })),
-            states: Vec::new(),
-        }
-        .encode_to_vec(),
-        "/heddle.api.v1alpha1.RepositoryService/GetContextHistory" => GetContextHistoryResponse {
-            frame: Some(get_context_history_response::Frame::PageEnd(
-                GetContextHistoryPageEnd {
-                    next_page_token: String::new(),
-                    ..GetContextHistoryPageEnd::default()
-                },
-            )),
-        }
-        .encode_to_vec(),
-        "/heddle.api.v1alpha1.WorkflowService/ListThreads" => ListThreadsResponse {
-            frame: Some(list_threads_response::Frame::PageEnd(ListThreadsPageEnd {
-                next_page_token: String::new(),
-                ..ListThreadsPageEnd::default()
-            })),
-        }
-        .encode_to_vec(),
-        "/heddle.api.v1alpha1.CollaborationService/ListByState" => ListDiscussionsResponse {
-            frame: Some(list_discussions_response::Frame::PageEnd(
-                ListDiscussionsPageEnd {
-                    next_page_token: String::new(),
-                },
-            )),
         }
         .encode_to_vec(),
         _ => Vec::new(),
@@ -797,7 +2770,7 @@ fn terminal_page(method: &str) -> Vec<u8> {
 fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
     let pull_succeeds = pull.is_some();
     match method {
-        "/heddle.api.v1alpha1.RepoSyncService/Push" => vec![
+        "/heddle.api.v1alpha2.SyncService/PublishContent" => vec![
             PushServerFrame {
                 frame: Some(push_server_frame::Frame::Ready(PushReady::default())),
             }
@@ -806,12 +2779,11 @@ fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
                 frame: Some(push_server_frame::Frame::Complete(PushComplete {
                     success: false,
                     error: "test rejection".to_string(),
-                    ..PushComplete::default()
                 })),
             }
             .encode_to_vec(),
         ],
-        "/heddle.api.v1alpha1.RepoSyncService/Pull" => {
+        "/heddle.api.v1alpha2.SyncService/Fetch" => {
             let remote_state = pull.as_ref().map(|fixture| fixture.remote_state.clone());
             let has_pack = pull.as_ref().is_some_and(|fixture| fixture.pack.is_some());
             let mut responses = vec![
@@ -842,7 +2814,6 @@ fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
                         } else {
                             "test rejection".to_string()
                         },
-                        ..PullComplete::default()
                     })),
                 }
                 .encode_to_vec(),
@@ -853,654 +2824,9 @@ fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
     }
 }
 
-async fn serve_get_current_user_spool(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    registry: Option<RegistryFixture>,
-) {
-    read_request_body(recv, request).await;
-    let _ = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| GetCurrentUserSpoolRequest::decode(frame.body).ok());
-    let response = registry
-        .and_then(|fixture| fixture.personal_root)
-        .unwrap_or_default();
-    send.write_chunk(Bytes::from(
-        encode_success_response(&response.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
-async fn serve_get_spool(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    registry: Option<RegistryFixture>,
-) {
-    read_request_body(recv, request).await;
-    let full_path = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| GetSpoolRequest::decode(frame.body).ok())
-        .map(|body| body.full_path)
-        .unwrap_or_default();
-    let Some(fixture) = registry else {
-        send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
-            .await
-            .unwrap();
-        return;
-    };
-    fixture
-        .get_spool_requests
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(full_path.clone());
-    let Some(spool) = fixture.spools.get(&full_path) else {
-        let failure = CallFailure {
-            code: CallFailureCode::NotFound as i32,
-            message: format!("{full_path} not found"),
-            error: None,
-        };
-        send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
-            .await
-            .unwrap();
-        return;
-    };
-    send.write_chunk(Bytes::from(
-        encode_success_response(&spool.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
-async fn serve_create_grant(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    grants: &GrantStore,
-) {
-    read_request_body(recv, request).await;
-    let body = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| CreateGrantRequest::decode(frame.body).ok());
-    let Some(body) = body else {
-        send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
-            .await
-            .unwrap();
-        return;
-    };
-    let grant = HostedGrant {
-        subject: body.subject,
-        role: body.role,
-        target: body.target,
-    };
-    upsert_grant(grants, grant.clone());
-    send.write_chunk(Bytes::from(
-        encode_success_response(&grant.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
-async fn serve_list_grants(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    grants: &GrantStore,
-) {
-    read_request_body(recv, request).await;
-    let resource = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| ListGrantsRequest::decode(frame.body).ok())
-        .map(|body| body.resource)
-        .unwrap_or_default();
-    let stored = grants
-        .grants
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clone();
-    let listed: Vec<HostedGrant> = stored
-        .into_iter()
-        .filter(|grant| grant_matches_resource(grant, &resource))
-        .collect();
-    let response = ListGrantsResponse { grants: listed };
-    send.write_chunk(Bytes::from(
-        encode_success_response(&response.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
-async fn serve_update_grant(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    grants: &GrantStore,
-) {
-    read_request_body(recv, request).await;
-    let body = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| UpdateGrantRequest::decode(frame.body).ok());
-    let Some(body) = body else {
-        send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
-            .await
-            .unwrap();
-        return;
-    };
-    let grant = HostedGrant {
-        subject: body.subject,
-        role: body.role,
-        target: body.target,
-    };
-    upsert_grant(grants, grant.clone());
-    send.write_chunk(Bytes::from(
-        encode_success_response(&grant.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
-async fn serve_delete_grant(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    grants: &GrantStore,
-) {
-    read_request_body(recv, request).await;
-    let body = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| DeleteGrantRequest::decode(frame.body).ok());
-    if let Some(body) = body {
-        let key = grant_identity_key(&body.subject, body.target.as_ref());
-        grants
-            .grants
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .retain(|grant| grant_identity_key(&grant.subject, grant.target.as_ref()) != key);
-    }
-    send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
-        .await
-        .unwrap();
-}
-
-fn upsert_grant(store: &GrantStore, grant: HostedGrant) {
-    let key = grant_identity_key(&grant.subject, grant.target.as_ref());
-    let mut grants = store
-        .grants
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner());
-    if let Some(existing) = grants
-        .iter_mut()
-        .find(|row| grant_identity_key(&row.subject, row.target.as_ref()) == key)
-    {
-        *existing = grant;
-    } else {
-        grants.push(grant);
-    }
-}
-
-fn grant_identity_key(subject: &str, target: Option<&GrantTargetRef>) -> (String, String, String) {
-    let (namespace, repo) = grant_target_paths(target);
-    (
-        subject.to_string(),
-        namespace.unwrap_or_default(),
-        repo.unwrap_or_default(),
-    )
-}
-
-fn grant_target_paths(target: Option<&GrantTargetRef>) -> (Option<String>, Option<String>) {
-    use api::heddle::api::v1alpha1::grant_target_ref::Target;
-    match target.and_then(|target| target.target.clone()) {
-        Some(Target::NamespacePath(path)) if !path.is_empty() => (Some(path), None),
-        Some(Target::RepoPath(repository)) => (
-            None,
-            super::helpers::repository_ref_path(&repository).map(ToOwned::to_owned),
-        ),
-        _ => (None, None),
-    }
-}
-
-fn grant_matches_resource(grant: &HostedGrant, resource: &str) -> bool {
-    if resource.is_empty() {
-        return true;
-    }
-    // weft `list_manageable_grants` exact-matches the visible path
-    // (`spool/<handle>/<name>`). Stripping `repo:` here hid the CLI sending
-    // `repo:{spool}` while create/delete send the bare path (heddle#1744).
-    let (namespace, repo) = grant_target_paths(grant.target.as_ref());
-    repo.as_deref() == Some(resource) || namespace.as_deref() == Some(resource)
-}
-
-async fn serve_promote_spool(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    registry: Option<RegistryFixture>,
-) {
-    read_request_body(recv, request).await;
-    let body = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| PromoteSpoolRequest::decode(frame.body).ok());
-    if let (Some(fixture), Some(body)) = (registry.as_ref(), body.as_ref()) {
-        fixture
-            .promote_requests
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .push(body.clone());
-        if let Some((code, message)) = fixture.promote_denial.clone() {
-            let failure = CallFailure {
-                code: code as i32,
-                message,
-                error: None,
-            };
-            send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
-                .await
-                .unwrap();
-            return;
-        }
-        let slug = body
-            .full_path
-            .rsplit('/')
-            .next()
-            .unwrap_or_default()
-            .to_string();
-        let promoted = HostedSpool {
-            full_path: format!("spool/{slug}"),
-            kind: "spool".to_string(),
-            is_repo: true,
-            ..HostedSpool::default()
-        };
-        let response = PromoteSpoolResponse {
-            spool: Some(promoted),
-        };
-        send.write_chunk(Bytes::from(
-            encode_success_response(&response.encode_to_vec()).unwrap(),
-        ))
-        .await
-        .unwrap();
-        return;
-    }
-    send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
-        .await
-        .unwrap();
-}
-
-async fn serve_create_spool(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    captured: Option<Arc<Mutex<Vec<CreateSpoolRequest>>>>,
-) {
-    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
-        request.extend_from_slice(&chunk);
-    }
-    let body = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| CreateSpoolRequest::decode(frame.body).ok());
-    if let (Some(captured), Some(body)) = (captured.as_ref(), body.as_ref()) {
-        captured
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .push(body.clone());
-    }
-    let response = match body {
-        Some(request) => HostedSpool {
-            full_path: format!("{}/{}", request.parent_path, request.slug),
-            kind: if request.is_repo {
-                "project".to_string()
-            } else {
-                "namespace".to_string()
-            },
-            is_repo: request.is_repo,
-            display_name: request.display_name.unwrap_or_default(),
-            ..HostedSpool::default()
-        },
-        None => HostedSpool::default(),
-    };
-    send.write_chunk(Bytes::from(
-        encode_success_response(&response.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
-async fn serve_update_spool(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    captured: Option<Arc<Mutex<SpoolMutationCapture>>>,
-) {
-    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
-        request.extend_from_slice(&chunk);
-    }
-    let body = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| UpdateSpoolRequest::decode(frame.body).ok());
-    if let (Some(captured), Some(body)) = (captured.as_ref(), body.as_ref()) {
-        captured
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .updates
-            .push(body.clone());
-    }
-    let response = HostedSpool {
-        full_path: body.map_or_else(String::new, |request| request.full_path),
-        ..HostedSpool::default()
-    };
-    send.write_chunk(Bytes::from(
-        encode_success_response(&response.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
-async fn serve_delete_spool(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    captured: Option<Arc<Mutex<SpoolMutationCapture>>>,
-) {
-    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
-        request.extend_from_slice(&chunk);
-    }
-    let body = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| DeleteSpoolRequest::decode(frame.body).ok());
-    if let (Some(captured), Some(body)) = (captured.as_ref(), body) {
-        captured
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .deletes
-            .push(body);
-    }
-    send.write_chunk(Bytes::from(encode_success_response(&[]).unwrap()))
-        .await
-        .unwrap();
-}
-
-async fn serve_get_blob(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    blobs: BlobFixture,
-) {
-    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
-        request.extend_from_slice(&chunk);
-    }
-    let path = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| GetBlobRequest::decode(frame.body).ok())
-        .map(|body| body.path)
-        .unwrap_or_default();
-    blobs
-        .requested
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(path.clone());
-    let content = blobs.contents.get(&path).cloned().unwrap_or_default();
-    let is_binary = std::str::from_utf8(&content).is_err();
-    let encoded = if is_binary {
-        base64::engine::general_purpose::STANDARD.encode(&content)
-    } else {
-        String::from_utf8(content).unwrap_or_default()
-    };
-    let response = BlobResponse {
-        content: encoded,
-        is_binary,
-        ..Default::default()
-    };
-    send.write_chunk(Bytes::from(
-        encode_success_response(&response.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
 async fn read_request_body(recv: &mut iroh::endpoint::RecvStream, request: &mut Vec<u8>) {
     while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
         request.extend_from_slice(&chunk);
-    }
-}
-
-async fn serve_list_context(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    fixture: ContextFixture,
-) {
-    read_request_body(recv, request).await;
-    let _ = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| ListContextRequest::decode(frame.body).ok());
-    *fixture
-        .list_requests
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) += 1;
-    for file in &fixture.files {
-        let body = ListContextResponse {
-            frame: Some(list_context_response::Frame::Item(file.clone())),
-            states: Vec::new(),
-        }
-        .encode_to_vec();
-        send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-            .await
-            .unwrap();
-    }
-    let end = ListContextResponse {
-        frame: Some(list_context_response::Frame::PageEnd(ListContextPageEnd {
-            next_page_token: String::new(),
-            ..ListContextPageEnd::default()
-        })),
-        states: fixture.states.clone(),
-    }
-    .encode_to_vec();
-    send.write_chunk(Bytes::from(encode_stream_message(&end).unwrap()))
-        .await
-        .unwrap();
-}
-
-async fn serve_get_context_history(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    fixture: ContextFixture,
-) {
-    read_request_body(recv, request).await;
-    let annotation_id = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| GetContextHistoryRequest::decode(frame.body).ok())
-        .map(|body| body.annotation_id)
-        .unwrap_or_default();
-    fixture
-        .history_requests
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(annotation_id.clone());
-    if let Some(revisions) = fixture.histories.get(&annotation_id) {
-        for revision in revisions {
-            let body = GetContextHistoryResponse {
-                frame: Some(get_context_history_response::Frame::Item(revision.clone())),
-            }
-            .encode_to_vec();
-            send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-                .await
-                .unwrap();
-        }
-    }
-    let end = GetContextHistoryResponse {
-        frame: Some(get_context_history_response::Frame::PageEnd(
-            GetContextHistoryPageEnd {
-                next_page_token: String::new(),
-                ..GetContextHistoryPageEnd::default()
-            },
-        )),
-    }
-    .encode_to_vec();
-    send.write_chunk(Bytes::from(encode_stream_message(&end).unwrap()))
-        .await
-        .unwrap();
-}
-
-async fn serve_get_discussion(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    fixture: CollaborationFixture,
-) {
-    read_request_body(recv, request).await;
-    let request = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| GetDiscussionRequest::decode(frame.body).ok());
-    let discussion_id = request
-        .as_ref()
-        .map(|body| body.discussion_id.clone())
-        .unwrap_or_default();
-    let state_id = request.and_then(|body| body.state_id.map(|state| state.value));
-    fixture
-        .get_requests
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(discussion_id.clone());
-    fixture
-        .get_request_state_ids
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(state_id);
-    if let Some(code) = fixture.hidden.get(&discussion_id).copied() {
-        let failure = CallFailure {
-            code: code as i32,
-            message: "discussion is not visible".to_string(),
-            error: None,
-        };
-        send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
-            .await
-            .unwrap();
-        return;
-    }
-    let Some(discussion) = fixture.discussions.get(&discussion_id) else {
-        let failure = CallFailure {
-            code: CallFailureCode::NotFound as i32,
-            message: format!("discussion {discussion_id} not found"),
-            error: None,
-        };
-        send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
-            .await
-            .unwrap();
-        return;
-    };
-    send.write_chunk(Bytes::from(
-        encode_success_response(&discussion.encode_to_vec()).unwrap(),
-    ))
-    .await
-    .unwrap();
-}
-
-async fn serve_list_by_state(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    fixture: CollaborationFixture,
-) {
-    read_request_body(recv, request).await;
-    let _ = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| ListDiscussionsByStateRequest::decode(frame.body).ok());
-    *fixture
-        .list_requests
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner()) += 1;
-    for discussion in &fixture.list {
-        let body = ListDiscussionsResponse {
-            frame: Some(list_discussions_response::Frame::Item(Box::new(
-                discussion.clone(),
-            ))),
-        }
-        .encode_to_vec();
-        send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-            .await
-            .unwrap();
-    }
-    let end = ListDiscussionsResponse {
-        frame: Some(list_discussions_response::Frame::PageEnd(
-            ListDiscussionsPageEnd {
-                next_page_token: String::new(),
-            },
-        )),
-    }
-    .encode_to_vec();
-    send.write_chunk(Bytes::from(encode_stream_message(&end).unwrap()))
-        .await
-        .unwrap();
-}
-
-async fn serve_subscribe_repo_events(
-    send: &mut iroh::endpoint::SendStream,
-    recv: &mut iroh::endpoint::RecvStream,
-    request: &mut Vec<u8>,
-    fixture: CollaborationFixture,
-) {
-    read_request_body(recv, request).await;
-    let subscribe = decode_request_frame(request)
-        .ok()
-        .and_then(|frame| SubscribeRepoEventsRequest::decode(frame.body).ok());
-    let after_event_id = subscribe
-        .as_ref()
-        .map(|body| body.after_event_id)
-        .unwrap_or(0);
-    let repo_id = subscribe
-        .as_ref()
-        .map(|body| body.repo_id.clone())
-        .unwrap_or_default();
-    let thread_scope = subscribe
-        .map(|body| (body.thread, body.thread_id))
-        .unwrap_or_default();
-    fixture
-        .subscribe_after
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(after_event_id);
-    fixture
-        .subscribe_repo_ids
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(repo_id.clone());
-    fixture
-        .subscribe_thread
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .push(thread_scope);
-    if fixture.unknown_repo_ids.contains(&repo_id) {
-        let failure = CallFailure {
-            code: CallFailureCode::NotFound as i32,
-            message: format!("repository {repo_id} not found"),
-            error: None,
-        };
-        send.write_chunk(Bytes::from(encode_stream_failure(&failure).unwrap()))
-            .await
-            .unwrap();
-        return;
-    }
-    let mut matching = fixture
-        .events
-        .into_iter()
-        .filter(|event| event.event_id > after_event_id);
-    if fixture.one_event_per_subscribe {
-        if let Some(event) = matching.next() {
-            send.write_chunk(Bytes::from(
-                encode_stream_message(&event.encode_to_vec()).unwrap(),
-            ))
-            .await
-            .unwrap();
-        }
-    } else {
-        for event in matching {
-            send.write_chunk(Bytes::from(
-                encode_stream_message(&event.encode_to_vec()).unwrap(),
-            ))
-            .await
-            .unwrap();
-        }
     }
 }
 
@@ -1520,43 +2846,4 @@ fn pack_frame(stream_kind: PackStreamKind, data: Vec<u8>) -> Vec<u8> {
         })),
     }
     .encode_to_vec()
-}
-
-#[cfg(test)]
-mod grant_filter_tests {
-    use api::heddle::api::v1alpha1::{
-        GrantTargetRef, HostedGrant, RepositoryRef, grant_target_ref::Target,
-        repository_ref::Reference,
-    };
-
-    use super::{grant_matches_resource, grant_target_paths};
-
-    fn repo_grant(path: &str) -> HostedGrant {
-        HostedGrant {
-            subject: "alice".into(),
-            role: 2,
-            target: Some(GrantTargetRef {
-                target: Some(Target::RepoPath(RepositoryRef {
-                    reference: Some(Reference::CanonicalPath(path.to_string())),
-                })),
-            }),
-        }
-    }
-
-    #[test]
-    fn list_filter_matches_bare_spool_path_only() {
-        let grant = repo_grant("spool/willow-ibis-8e7264/notes");
-        let (namespace, repo) = grant_target_paths(grant.target.as_ref());
-        assert_eq!(namespace, None);
-        assert_eq!(repo.as_deref(), Some("spool/willow-ibis-8e7264/notes"));
-        assert!(grant_matches_resource(
-            &grant,
-            "spool/willow-ibis-8e7264/notes"
-        ));
-        assert!(
-            !grant_matches_resource(&grant, "repo:spool/willow-ibis-8e7264/notes"),
-            "weft exact-matches the visible path; repo: prefix must not match"
-        );
-        assert!(grant_matches_resource(&grant, ""));
-    }
 }

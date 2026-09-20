@@ -210,6 +210,11 @@ pub enum HeddleError {
     Serialization(String),
     #[error("configuration error: {0}")]
     Config(String),
+    /// A checkout attached to a native Thread cannot sign a source operation
+    /// with that Thread's owner key, so capture fails closed. Distinct from
+    /// [`Self::Config`] so callers can tell "no signer" from any other refusal.
+    #[error("native Thread '{thread}' owner signing key is unavailable: {reason}")]
+    NativeSourceSignerUnavailable { thread: String, reason: String },
     #[error("configuration parse error at {path}: {source}")]
     ConfigParse {
         path: std::path::PathBuf,
@@ -260,6 +265,15 @@ pub enum HeddleError {
     InvalidTreeEntry(#[from] TreeError),
     #[error("tree stream error: {0}")]
     TreeStream(TreeStreamError),
+    /// A redacted-tree (HRT1) projection was encountered where a full,
+    /// materializable tree is required — e.g. asked to store, pack, or read an
+    /// `HRT1` body as a `Tree`, or capture over a `PartialTree` whose withheld
+    /// leaves cannot be re-authored. This is a distinct, fail-loud signal (v4
+    /// redactable trees, Fable F): the wire-status mapping is handled by the
+    /// weft serve leg, but the heddle side must never silently drop the
+    /// withheld leaves.
+    #[error("redacted tree: {0}")]
+    RedactedTree(String),
 }
 
 impl From<TreeStreamError> for HeddleError {

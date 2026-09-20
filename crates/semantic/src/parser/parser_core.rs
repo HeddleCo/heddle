@@ -8,10 +8,23 @@ use tree_sitter::{Node, Tree as TSTree};
 
 use super::{
     parser_language::Language,
-    parser_pool::parse_fresh,
+    parser_pool::{parse_fresh, parse_fresh_bounded},
     parser_types::{CallSite, FunctionDef, Import},
     syntax_index::{FunctionRef, ImportRef, SyntaxIndex},
 };
+
+/// Cooperative parser cancellation and a monotonic execution deadline.
+#[derive(Clone)]
+pub struct ParseBudget {
+    pub cancelled: Arc<std::sync::atomic::AtomicBool>,
+    pub deadline: std::time::Instant,
+}
+impl ParseBudget {
+    pub fn interrupted(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+            || std::time::Instant::now() >= self.deadline
+    }
+}
 
 /// A parsed file with its tree-sitter AST and Heddle-owned syntax index.
 #[derive(Debug)]
@@ -29,6 +42,20 @@ impl ParsedFile {
         let source = Arc::<str>::from(source.as_ref());
         let content_hash = ContentHash::compute(source.as_bytes());
         Self::parse_with_hash(source, language, content_hash)
+    }
+
+    pub fn parse_bounded(source: &str, language: Language, budget: &ParseBudget) -> Option<Self> {
+        let tree = parse_fresh_bounded(source.as_bytes(), language, Some(budget))?;
+        if tree.root_node().has_error() || budget.interrupted() {
+            return None;
+        }
+        Some(Self {
+            language,
+            source: Arc::from(source),
+            content_hash: ContentHash::compute(source.as_bytes()),
+            tree,
+            index: OnceLock::new(),
+        })
     }
 
     /// Parse already-owned contents without copying the source string.

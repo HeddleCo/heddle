@@ -560,6 +560,7 @@ mod tests {
             Attribution::human(Principal::new("Ada", "ada@example.com")),
             1,
             CollaborationOperationBodyV1::Open {
+                blocking: false,
                 title: format!("Review {key}"),
                 anchor: CollaborationAnchor::Repository,
                 visibility: VisibilityTier::default(),

@@ -21,6 +21,14 @@ name = "treadle-schema"
 release = false
 
 [[package]]
+name = "heddle-biscuit-verifier"
+release = true
+
+[[package]]
+name = "heddleco-capability-verifier"
+release = true
+
+[[package]]
 name = "heddle-format"
 release = true
 
@@ -77,6 +85,10 @@ name = "heddle-repo"
 release = true
 
 [[package]]
+name = "heddle-thread-api"
+release = true
+
+[[package]]
 name = "heddle-state-review"
 release = true
 
@@ -126,6 +138,10 @@ release = true
 
 [[package]]
 name = "heddle-cli-contract"
+release = true
+
+[[package]]
+name = "weft-client"
 release = true
 
 [[package]]

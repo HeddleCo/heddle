@@ -12,7 +12,7 @@ use super::{
     staging::BuildError,
 };
 use crate::{
-    object::{ContentHash, State, StateId, Tree},
+    object::{ContentHash, State, StateId, Tree, TreeScheme},
     store::{
         HeddleError, ObjectStore,
         pack::{
@@ -122,9 +122,24 @@ fn tree_path_order(
     let mut group_indices = HashMap::<String, usize>::new();
     let mut groups = Vec::<Vec<ContentHash>>::new();
     for state_id in state_order {
+        let tree_hash = states[state_id].tree;
+        if !allowed.contains(&tree_hash) {
+            // V4 HSR1 trees are packed on the native lane, not NPK1. Skipping
+            // them here is required so purge/repack can rewrite packs that only
+            // contain salted capture trees. A missing V3 tree is still an error.
+            match ObjectStore::get_tree(store, &tree_hash)? {
+                Some(tree) if tree.scheme() == TreeScheme::V4Salted => continue,
+                _ => {
+                    return Err(HeddleError::InvalidObject(format!(
+                        "state references tree outside repack snapshot: {tree_hash}"
+                    ))
+                    .into());
+                }
+            }
+        }
         visit_tree(
             store,
-            states[state_id].tree,
+            tree_hash,
             &allowed,
             &mut seen,
             &mut group_indices,

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Context annotation subcommands.
 
+use super::{AuthoredMessageArgs, CodeScopeArgs, DryRunArgs, HistoricalRevisionArgs};
+
 /// Context subcommands.
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum ContextCommands {
@@ -42,17 +44,6 @@ pub enum ContextCommands {
     },
 }
 
-#[derive(Clone, Debug, clap::Args)]
-pub struct ContextTargetArgs {
-    /// File path to annotate/query.
-    #[arg(long, conflicts_with = "state")]
-    pub path: Option<String>,
-
-    /// State/change ID for broader guidance.
-    #[arg(long, conflicts_with = "path")]
-    pub state: Option<String>,
-}
-
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 #[derive(Clone, Debug, clap::Subcommand)]
 pub enum ContextReasonCommands {
@@ -91,20 +82,23 @@ pub struct ContextReasonGitArgs {
     #[arg(long = "opencode-home")]
     pub opencode_home: Option<String>,
 
-    /// Do not write annotations; only report what would happen.
-    #[arg(long)]
-    pub dry_run: bool,
+    #[command(flatten)]
+    pub dry_run: DryRunArgs,
 }
 
 /// Arguments for `heddle context set`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextSetArgs {
-    #[command(flatten)]
-    pub target: ContextTargetArgs,
+    /// File path to annotate (alternative to `--path`).
+    #[arg(value_name = "PATH", conflicts_with = "path")]
+    pub path_positional: Option<String>,
 
-    /// Annotation scope: "file" (default), "symbol:<name>", or "lines:<start>-<end>".
-    #[arg(short, long)]
-    pub scope: Option<String>,
+    #[command(flatten)]
+    pub scope: CodeScopeArgs,
+
+    /// State-level target when `--path` is omitted. Writes always land on HEAD.
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
 
     /// Primary annotation kind: constraint, invariant, or rationale.
     #[arg(
@@ -118,32 +112,31 @@ pub struct ContextSetArgs {
     #[arg(long)]
     pub tag: Vec<String>,
 
-    /// Annotation content (inline).
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
+    #[command(flatten)]
+    pub message: AuthoredMessageArgs,
+}
 
-    /// Read annotation content from a file.
-    #[arg(long)]
-    pub file: Option<std::path::PathBuf>,
+impl ContextSetArgs {
+    /// Effective file path from positional PATH or `--path`.
+    pub fn resolved_path(&self) -> Option<&str> {
+        self.path_positional
+            .as_deref()
+            .or(self.scope.path.as_deref())
+    }
 }
 
 /// Arguments for `heddle context get`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextGetArgs {
     #[command(flatten)]
-    pub target: ContextTargetArgs,
+    pub scope: CodeScopeArgs,
 
-    /// Filter by scope.
-    #[arg(short, long)]
-    pub scope: Option<String>,
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
 
     /// Filter by tag.
     #[arg(long)]
     pub tag: Option<String>,
-
-    /// Read context from an explicit historical ref/state instead of HEAD.
-    #[arg(long)]
-    pub r#ref: Option<String>,
 }
 
 /// Arguments for `heddle context list`.
@@ -157,9 +150,8 @@ pub struct ContextListArgs {
     #[arg(long)]
     pub tag: Option<String>,
 
-    /// Read context from an explicit historical ref/state instead of HEAD.
-    #[arg(long)]
-    pub r#ref: Option<String>,
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
 
     /// Include superseded logical annotations in listings.
     #[arg(long)]
@@ -168,18 +160,28 @@ pub struct ContextListArgs {
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextHistoryArgs {
-    /// Stable logical annotation ID.
-    pub annotation_id: String,
+    /// Stable logical annotation ID. Omit when using `--path` / `--state`.
+    #[arg(required_unless_present_any = ["path", "state"])]
+    pub annotation_id: Option<String>,
 
-    /// Read context from an explicit historical ref/state instead of HEAD.
-    #[arg(long)]
-    pub r#ref: Option<String>,
+    #[command(flatten)]
+    pub scope: CodeScopeArgs,
+
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
 }
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextEditArgs {
-    /// Stable logical annotation ID.
-    pub annotation_id: String,
+    /// Stable logical annotation ID. Omit when using `--path` / `--state`.
+    #[arg(required_unless_present_any = ["path", "state"])]
+    pub annotation_id: Option<String>,
+
+    #[command(flatten)]
+    pub scope: CodeScopeArgs,
+
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
 
     /// Override the annotation kind for the new revision.
     #[arg(long, value_parser = ["constraint", "invariant", "rationale"])]
@@ -189,13 +191,8 @@ pub struct ContextEditArgs {
     #[arg(long)]
     pub tag: Vec<String>,
 
-    /// New revision content (inline).
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-
-    /// Read revision content from a file.
-    #[arg(long)]
-    pub file: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    pub message: AuthoredMessageArgs,
 }
 
 #[derive(Clone, Debug, clap::Args)]
@@ -204,11 +201,10 @@ pub struct ContextSupersedeArgs {
     pub annotation_id: String,
 
     #[command(flatten)]
-    pub target: ContextTargetArgs,
+    pub scope: CodeScopeArgs,
 
-    /// Replacement annotation scope.
-    #[arg(short, long)]
-    pub scope: Option<String>,
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
 
     /// Replacement annotation kind: constraint, invariant, or rationale.
     #[arg(
@@ -222,24 +218,18 @@ pub struct ContextSupersedeArgs {
     #[arg(long)]
     pub tag: Vec<String>,
 
-    /// Replacement annotation content (inline).
-    #[arg(short = 'm', long)]
-    pub message: Option<String>,
-
-    /// Read replacement content from a file.
-    #[arg(long)]
-    pub file: Option<std::path::PathBuf>,
+    #[command(flatten)]
+    pub message: AuthoredMessageArgs,
 }
 
 /// Arguments for `heddle context rm`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextRmArgs {
     #[command(flatten)]
-    pub target: ContextTargetArgs,
+    pub scope: CodeScopeArgs,
 
-    /// Remove only annotations matching this scope.
-    #[arg(short, long)]
-    pub scope: Option<String>,
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
 
     /// Remove all annotations for this target.
     #[arg(long)]
@@ -249,28 +239,21 @@ pub struct ContextRmArgs {
 /// Arguments for `heddle context check`.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextCheckArgs {
-    /// File path to check (checks all annotated files if omitted).
-    #[arg(long)]
-    pub path: Option<String>,
+    #[command(flatten)]
+    pub scope: CodeScopeArgs,
 
-    /// State ID to check broader guidance on.
-    #[arg(long)]
-    pub state: Option<String>,
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
 
     /// Filter by tag.
     #[arg(long)]
     pub tag: Option<String>,
-
-    /// Read context from an explicit historical ref/state instead of HEAD.
-    #[arg(long)]
-    pub r#ref: Option<String>,
 }
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextSuggestArgs {
-    /// Read suggestions from an explicit historical ref/state instead of HEAD.
-    #[arg(long)]
-    pub r#ref: Option<String>,
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
 
     /// Maximum suggestions to print.
     #[arg(short = 'n', long, default_value = "10")]
@@ -279,7 +262,209 @@ pub struct ContextSuggestArgs {
 
 #[derive(Clone, Debug, clap::Args)]
 pub struct ContextAuditArgs {
-    /// Read context from an explicit historical ref/state instead of HEAD.
-    #[arg(long)]
-    pub r#ref: Option<String>,
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::cli::{Cli, Commands, ContextCommands};
+
+    #[test]
+    fn history_and_edit_accept_path_or_id() {
+        match Cli::try_parse_from(["heddle", "context", "history", "ann-1"])
+            .expect("history id")
+            .command
+        {
+            Commands::Context {
+                command: ContextCommands::History(args),
+            } => {
+                assert_eq!(args.annotation_id.as_deref(), Some("ann-1"));
+                assert!(args.scope.path.is_none());
+            }
+            _ => panic!("expected context history"),
+        }
+        match Cli::try_parse_from(["heddle", "context", "history", "--path", "src/auth.rs"])
+            .expect("history path")
+            .command
+        {
+            Commands::Context {
+                command: ContextCommands::History(args),
+            } => {
+                assert!(args.annotation_id.is_none());
+                assert_eq!(args.scope.path.as_deref(), Some("src/auth.rs"));
+            }
+            _ => panic!("expected context history"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "edit",
+            "--path",
+            "src/auth.rs",
+            "-m",
+            "revised",
+        ])
+        .expect("edit path")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Edit(args),
+            } => {
+                assert!(args.annotation_id.is_none());
+                assert_eq!(args.scope.path.as_deref(), Some("src/auth.rs"));
+                assert_eq!(args.message.body.as_deref(), Some("revised"));
+            }
+            _ => panic!("expected context edit"),
+        }
+    }
+
+    #[test]
+    fn context_set_accepts_positional_path_body_and_file() {
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "set",
+            "src/auth.rs",
+            "--body",
+            "keep timing constant",
+        ])
+        .expect("positional path + body")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Set(args),
+            } => {
+                assert_eq!(args.resolved_path(), Some("src/auth.rs"));
+                assert_eq!(args.message.body.as_deref(), Some("keep timing constant"));
+            }
+            _ => panic!("expected context set"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "set",
+            "--path",
+            "src/auth.rs",
+            "--file",
+            "note.md",
+        ])
+        .expect("file body")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Set(args),
+            } => {
+                assert_eq!(args.resolved_path(), Some("src/auth.rs"));
+                assert_eq!(
+                    args.message.file.as_deref(),
+                    Some(std::path::Path::new("note.md"))
+                );
+            }
+            _ => panic!("expected context set"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "heddle",
+                "context",
+                "set",
+                "--path",
+                "src/auth.rs",
+                "--from-file",
+                "note.md",
+            ])
+            .is_err(),
+            "--from-file is not an alias of --file"
+        );
+    }
+
+    #[test]
+    fn context_set_accepts_path_symbol_and_line_together() {
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "set",
+            "--path",
+            "src/auth.rs",
+            "--symbol",
+            "verify",
+            "-m",
+            "keep timing constant",
+        ])
+        .expect("set --path --symbol")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Set(args),
+            } => {
+                assert_eq!(args.resolved_path(), Some("src/auth.rs"));
+                assert_eq!(args.scope.symbol.as_deref(), Some("verify"));
+                assert!(args.scope.line.is_none());
+            }
+            _ => panic!("expected context set"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "set",
+            "--path",
+            "src/auth.rs",
+            "--line",
+            "12",
+            "-m",
+            "guard this row",
+        ])
+        .expect("set --path --line")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Set(args),
+            } => {
+                assert_eq!(args.scope.line, Some(12));
+                assert!(args.scope.symbol.is_none());
+            }
+            _ => panic!("expected context set"),
+        }
+        match Cli::try_parse_from([
+            "heddle",
+            "context",
+            "set",
+            "--path",
+            "src/auth.rs",
+            "--symbol",
+            "verify",
+            "--line",
+            "12",
+            "-m",
+            "both",
+        ])
+        .expect("symbol and line together")
+        .command
+        {
+            Commands::Context {
+                command: ContextCommands::Set(args),
+            } => {
+                assert_eq!(args.scope.symbol.as_deref(), Some("verify"));
+                assert_eq!(args.scope.line, Some(12));
+            }
+            _ => panic!("expected context set"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "heddle",
+                "context",
+                "set",
+                "--path",
+                "src/auth.rs",
+                "--scope",
+                "symbol:verify",
+                "-m",
+                "legacy",
+            ])
+            .is_err(),
+            "hidden --scope alias is removed"
+        );
+    }
 }

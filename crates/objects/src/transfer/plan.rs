@@ -187,12 +187,11 @@ fn object_info_type(object: &ObjectInfo) -> ObjectType {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         object::{ContentHash, StateId},
         transfer::graph::ObjectId,
     };
-
-    use super::*;
 
     fn hash(byte: u8) -> ContentHash {
         ContentHash::from_bytes([byte; 32])

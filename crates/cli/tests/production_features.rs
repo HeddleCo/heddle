@@ -809,13 +809,17 @@ mod blame {
     }
 
     #[test]
-    fn test_blame_root_alias_is_rejected() {
-        let err = heddle(&["blame", "file.txt"], None)
-            .expect_err("removed blame root alias should fail through clap");
+    fn test_blame_root_command_runs() {
+        let temp = TempDir::new().unwrap();
+        heddle(&["init"], Some(temp.path())).unwrap();
+        fs::write(temp.path().join("file.txt"), "line 1\n").unwrap();
+        heddle(&["capture", "-m", "Initial"], Some(temp.path())).unwrap();
+
+        let output = heddle(&["blame", "file.txt"], Some(temp.path()))
+            .expect("heddle blame <path> should run");
         assert!(
-            err.contains("unrecognized subcommand 'blame'")
-                || err.contains("unexpected argument 'blame'"),
-            "clap should reject the removed blame alias: {err}"
+            output.contains("line 1"),
+            "blame should show file content: {output}"
         );
     }
 

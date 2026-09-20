@@ -407,6 +407,7 @@ mod tests {
 
     #[test]
     fn shallow_refetch_does_not_graft_already_present_history() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let source_dir = TempDir::new().unwrap();
         let target_dir = TempDir::new().unwrap();
         let source = Repository::init_default(source_dir.path()).unwrap();
@@ -438,6 +439,7 @@ mod tests {
 
     #[test]
     fn fetch_copies_attachment_history_and_context_objects() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let source_dir = TempDir::new().unwrap();
         let target_dir = TempDir::new().unwrap();
         let source = Repository::init_default(source_dir.path()).unwrap();
@@ -488,6 +490,7 @@ mod tests {
 
     #[test]
     fn fetch_copies_private_visibility_sidecar() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let source_dir = TempDir::new().unwrap();
         let target_dir = TempDir::new().unwrap();
         let source = Repository::init_default(source_dir.path()).unwrap();

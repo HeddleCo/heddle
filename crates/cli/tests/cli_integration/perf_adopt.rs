@@ -136,7 +136,7 @@ impl AdoptPerfFixture {
             .env("HEDDLE_AGENT_MODEL", "adopt-no-mirror-v1")
             .env("HEDDLE_PROFILE", "jsonl")
             .env("NO_COLOR", "1")
-            .args(["adopt", "--output", "json"]);
+            .args(["import", "local", "--output", "json"]);
         if let Some(tmpdir) = std::env::var_os("TMPDIR") {
             command.env("TMPDIR", tmpdir);
         }

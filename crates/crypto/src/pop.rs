@@ -77,9 +77,8 @@ fn field_len(key: &str, value: &str) -> usize {
     key.len() + 1 + utf8_byte_len(value).to_string().len() + 1 + value.len() + 1
 }
 
-#[allow(clippy::needless_as_bytes)]
 fn utf8_byte_len(value: &str) -> usize {
-    value.as_bytes().len()
+    value.len()
 }
 
 #[cfg(test)]
@@ -89,14 +88,15 @@ mod tests {
     const PINNED_TOKEN: &str = "tok-é";
     const PINNED_PROOF_TS: &str = "1700000000";
     const PINNED_METHOD: &str = "POST";
-    const PINNED_PATH: &str = "/heddle.api.v1alpha1.IdentityService/WhoAmI";
+    // Hosted-client bearer PoP signs the live RPC path (`CallContextFactory::bearer_proof`).
+    const PINNED_PATH: &str = "/heddle.api.v1alpha2.IdentityService/ObserveIdentity";
     const PINNED_NONCE: &str = "nøñce";
     const PINNED_CANONICAL: &str = concat!(
         "heddle-bearer-pop-v2\n",
         "token=6:tok-é\n",
         "proof_ts=10:1700000000\n",
         "method=4:POST\n",
-        "path=43:/heddle.api.v1alpha1.IdentityService/WhoAmI\n",
+        "path=52:/heddle.api.v1alpha2.IdentityService/ObserveIdentity\n",
         "nonce=7:nøñce\n",
     );
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use api::{
-    heddle::api::v1alpha1::{
+    heddle::api::common::{
         TreadleCheckClass, TreadleNetworkAccess, TreadlePlatform, TreadleSecretRef,
         TreadleSecretTier, TreadleTrigger, TreadleTriggerKind, treadle_env_entry,
     },
@@ -68,13 +68,11 @@ fn rejects_duplicate_names_across_jobs() {
     let first = argv_check("unit", "/bin/true", &[]);
     let second = argv_check("unit", "/bin/true", &[]);
     let mut definition = definition("local", "alpha", vec![first]);
-    definition
-        .jobs
-        .push(api::heddle::api::v1alpha1::TreadleJob {
-            name: "beta".to_string(),
-            matrix: Vec::new(),
-            checks: vec![second],
-        });
+    definition.jobs.push(api::heddle::api::common::TreadleJob {
+        name: "beta".to_string(),
+        matrix: Vec::new(),
+        checks: vec![second],
+    });
     let (bytes, _) = canonical_definition(&definition).expect("canonical");
     let error = load(&bytes).expect_err("duplicate");
     assert!(matches!(error, ConfigError::DuplicateCheckName { .. }));
@@ -134,7 +132,7 @@ fn trusted_runner_secret_and_full_network_refuse_host_exec() {
     let mut secret_check = argv_check("needs-token", "/bin/true", &[]);
     secret_check
         .env
-        .push(api::heddle::api::v1alpha1::TreadleEnvEntry {
+        .push(api::heddle::api::common::TreadleEnvEntry {
             name: "TOKEN".to_string(),
             source: Some(treadle_env_entry::Source::SecretRef(
                 "registry-token".to_string(),

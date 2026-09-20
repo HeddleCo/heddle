@@ -1,4 +1,4 @@
-use api::heddle::api::v1alpha1::{CallFailure, ErrorDetail};
+use api::heddle::api::common::{CallFailure, ErrorDetail};
 
 /// Failure returned by the native hosted-call module.
 #[derive(Debug, thiserror::Error)]
@@ -21,7 +21,7 @@ pub enum HostedError {
     Framing(String),
     #[error("hosted call failed with {code:?}: {message}")]
     Call {
-        code: api::heddle::api::v1alpha1::CallFailureCode,
+        code: api::heddle::api::common::CallFailureCode,
         message: String,
         error: Option<Box<ErrorDetail>>,
     },

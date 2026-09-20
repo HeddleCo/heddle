@@ -395,7 +395,7 @@ fn adopt_crash_before_authority_flip_preserves_overlay_and_rerun_converges() {
     .expect("clone overlay");
 
     let crashed = heddle_output_with_env(
-        &["adopt"],
+        &["import", "local"],
         Some(&work),
         &[(
             "HEDDLE_FAULT_INJECT",
@@ -412,7 +412,7 @@ fn adopt_crash_before_authority_flip_preserves_overlay_and_rerun_converges() {
     );
     drop(repo);
 
-    heddle(&["adopt"], Some(&work)).expect("rerun adopt");
+    heddle(&["import", "local"], Some(&work)).expect("rerun adopt");
     let repo = Repository::open(&work).expect("open adopted repo");
     assert_eq!(
         repo.source_authority(),

@@ -10,9 +10,12 @@ mod action_struct;
 mod annotated_tag;
 mod audience_tier;
 mod blob;
+pub mod check_evidence;
 pub mod collaboration;
 mod diff;
 mod discussion;
+mod entry_redactions;
+mod entry_visibility;
 mod facet_kind;
 mod frontier_ref;
 mod git_note;
@@ -21,6 +24,7 @@ mod identifiers;
 mod key_binding;
 pub mod manifest;
 mod operation_id;
+pub mod original_boundary_acceptance;
 mod redaction;
 mod risk_signal;
 mod semantic_change;
@@ -30,6 +34,8 @@ mod semantic_index;
 mod semantic_reverse_deps;
 mod session;
 mod source;
+pub mod source_target;
+pub mod source_target_map;
 mod spool_id;
 mod staleness_core;
 mod state_attachment;
@@ -43,6 +49,8 @@ mod structured_conflict;
 #[cfg(test)]
 mod structured_conflict_tests;
 mod suggestion_core;
+pub mod thread_authority_admission;
+pub mod thread_genesis_admission;
 mod timeline;
 mod tree;
 mod tree_canonical;
@@ -65,6 +73,8 @@ pub use discussion::{
     Discussion, DiscussionError, DiscussionId, DiscussionReference, DiscussionReferenceKind,
     DiscussionResolution, DiscussionTurn, DiscussionsBlob, generate_discussion_id,
 };
+pub use entry_redactions::EntryRedactions;
+pub use entry_visibility::{EntryVisibility, EntryVisibilityEntry, EntryVisibilityError};
 pub use facet_kind::{FacetKind, SourceHistoryLaws};
 pub use frontier_ref::{
     GIT_SYNTHETIC_FRONTIER_PREFIX, SYNTHETIC_FRONTIER_PREFIX, SyntheticFrontierName,
@@ -155,18 +165,20 @@ pub use timeline::{
     TimelineToolPayloadMetadata, ToolCallFinishedV1, ToolCallStartedV1,
 };
 pub use tree::{
-    EntryType, FileMode, Tree, TreeDecodeError, TreeEntry, TreeEntryTarget, TreeError,
-    validate_name as validate_tree_entry_name,
+    EntryType, FileMode, PartialTree, PartialTreeLeaf, Tree, TreeDecodeError, TreeEntry,
+    TreeEntryTarget, TreeError, TreeScheme, validate_name as validate_tree_entry_name,
 };
 pub use tree_canonical::{
     TREE_BLOCK_ENCODING_VERSION, TREE_BLOCK_MIN_ENTRIES, TREE_CANONICAL_MAGIC,
     TREE_DELTA_ANCHOR_INTERVAL, TREE_DELTA_ENCODING_VERSION, TREE_DELTA_HEADER_LEN,
     TREE_DELTA_MAGIC, TREE_DELTA_MAX_OPS, TREE_ENCODING_VERSION, TREE_HEADER_LEN,
-    TREE_LEAN_ENCODING_VERSION, TREE_LEAN_MAGIC, TreeDeltaHeader, TreeDeltaOp, TreeHeader,
-    apply_tree_delta, decode_header, decode_lean_prefix, decode_tree_delta,
-    decode_tree_delta_header, decode_tree_delta_header_prefix, decode_tree_delta_ops,
-    decode_tree_delta_ops_prefix, encode_lean_entry, encode_tree_delta, is_canonical_tree,
-    is_delta_tree, is_lean_tree, is_streamable_tree, tree_delta,
+    TREE_LEAN_ENCODING_VERSION, TREE_LEAN_MAGIC, TREE_REDACTED_ENCODING_VERSION,
+    TREE_REDACTED_HEADER_LEN, TREE_REDACTED_MAGIC, TREE_SALTED_ENCODING_VERSION, TREE_SALTED_MAGIC,
+    TreeDeltaHeader, TreeDeltaOp, TreeHeader, apply_tree_delta, decode_header, decode_lean_prefix,
+    decode_redacted_projection, decode_salted_v4, decode_tree_delta, decode_tree_delta_header,
+    decode_tree_delta_header_prefix, decode_tree_delta_ops, decode_tree_delta_ops_prefix,
+    encode_lean_entry, encode_redacted_projection, encode_tree_delta, is_canonical_tree,
+    is_delta_tree, is_lean_tree, is_redacted_tree, is_salted_tree, is_streamable_tree, tree_delta,
 };
 #[cfg(feature = "async-source")]
 pub use tree_diff::diff_trees_visit_async;
@@ -184,3 +196,5 @@ pub use tree_stream::{
 };
 pub use tree_walk::{TreeIntegrityEvent, walk_tree_integrity};
 pub use visibility_tier::VisibilityTier;
+
+pub mod thread_replication;

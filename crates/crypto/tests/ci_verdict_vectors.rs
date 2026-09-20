@@ -7,7 +7,7 @@ use crypto::{
     CI_VERDICT_DOMAIN, CiVerdictBody, Signer, SignerKind, ci_verdict_signing_payload,
     signed_verdict_from_signer,
 };
-use objects::object::{ChangeId, ContentHash};
+use heddle_object_model::object::{ChangeId, ContentHash};
 use serde_json::Value;
 
 fn fixture(name: &str) -> CiVerdictBody {

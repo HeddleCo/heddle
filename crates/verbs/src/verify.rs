@@ -1615,7 +1615,7 @@ pub struct RepositorySetupGuidance {
 pub fn repository_setup_action_kind(action: &str) -> RepositorySetupActionKind {
     if action == "heddle init" {
         RepositorySetupActionKind::Init
-    } else if action.starts_with("heddle adopt") {
+    } else if action.starts_with("heddle import local") {
         RepositorySetupActionKind::Adopt
     } else if action.starts_with("heddle bridge git import") {
         RepositorySetupActionKind::GitImport
@@ -1757,7 +1757,7 @@ mod setup_guidance_tests {
         assert!(guidance.setup_line.contains("heddle init"));
         assert!(guidance.effect.contains("Git commits stay in Git storage"));
 
-        let mut convert = bare_verification_state("needs_import", "heddle adopt --ref main");
+        let mut convert = bare_verification_state("needs_import", "heddle import local --ref main");
         convert.repository_mode = "git-overlay".to_string();
         convert.heddle_initialized = true;
 
@@ -1765,7 +1765,7 @@ mod setup_guidance_tests {
         assert!(
             guidance
                 .setup_line
-                .contains("connect this branch with heddle adopt --ref main")
+                .contains("connect this branch with heddle import local --ref main")
         );
         assert!(guidance.effect.contains("adoption imports Git history"));
     }

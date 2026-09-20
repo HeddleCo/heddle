@@ -61,7 +61,7 @@ use objects::{
     Progress,
     error::{HeddleError, Result},
     lock::{RepoLock, RepositoryLockExt},
-    object::{Attribution, ContentHash, State, StateId, ThreadName, Tree},
+    object::{ContentHash, State, StateId, ThreadName, Tree},
     store::{FsStore, ObjectStore, ShallowInfo},
     sync::RwLockExt,
 };
@@ -90,7 +90,7 @@ pub use repository_maintenance::{
     PullPlannerCacheInspection, RefCountsInspection, RepositoryMaintenanceRunReport,
     RepositoryPerformanceInspectionReport, WorktreeIndexInspection,
 };
-pub use repository_materialization::WarmCanonicalStoreStats;
+pub use repository_materialization::{PartialMaterialization, WarmCanonicalStoreStats};
 pub use repository_partial_fetch::MissingBlob;
 pub use repository_snapshot::{SnapshotExecution, SnapshotProfile};
 pub use repository_thread_materialize::{CheckoutMaterialization, ThreadCaptureOutcome};
@@ -98,8 +98,13 @@ pub use repository_tree::{TreeBuildProfile, WorktreeCompareProfile, WorktreeStat
 pub use repository_worktree_status::{UntrackedSet, UntrackedSubtree, WorktreeStatusDetailed};
 use sley::Repository as SleyRepository;
 
+#[path = "repository_capture_v4.rs"]
+mod repository_capture_v4;
+#[path = "repository_entry_visibility.rs"]
+mod repository_entry_visibility;
 #[path = "repository_snapshot.rs"]
 mod repository_snapshot;
+pub use repository_entry_visibility::{EntryVisibilityBinding, EntryVisibilityMark};
 #[cfg(test)]
 #[path = "repository_tests.rs"]
 mod repository_tests;
@@ -142,7 +147,6 @@ pub use overlay::{
     GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitOverlayShortStatus, GitOverlayTagTip,
 };
 pub use repository_identity::is_synthetic_root;
-use repository_identity::seed_principal;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepositoryCapability {
@@ -210,6 +214,13 @@ where
     /// real, TTY-rendering handle via [`Repository::set_progress`] before
     /// driving an operation. Set-after-construction like `blob_hydrator`.
     progress: RwLock<Progress>,
+    /// Pending per-entry visibility marks (v4 redactable trees) queued by
+    /// [`Repository::mark_entry_visibility`] /
+    /// [`Repository::mark_subtree_visibility`] and drained by the next capture,
+    /// which resolves each path to its leaf hash (after salts are minted) and
+    /// stages an `EntryVisibility` sidecar in the snapshot's own oplog batch.
+    /// Set-after-construction like `progress`.
+    pending_entry_visibility: RwLock<Vec<crate::EntryVisibilityMark>>,
 }
 
 impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> RepositoryLockExt for Repository<R, O, S> {
@@ -257,6 +268,7 @@ impl<R: RefBackend, O: OpLogBackend, S: ObjectStore> Repository<R, O, S> {
             signal_computer: RwLock::new(None),
             git_overlay_repo: RwLock::new(None),
             progress: RwLock::new(Progress::null()),
+            pending_entry_visibility: RwLock::new(Vec::new()),
         }
     }
 
@@ -378,6 +390,17 @@ impl Repository {
                 .namespace
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty())
+            || self.remotes_include_hosted()
+    }
+
+    fn remotes_include_hosted(&self) -> bool {
+        crate::remote::RemoteConfig::open(self)
+            .map(|cfg| {
+                cfg.list()
+                    .iter()
+                    .any(|(_, remote)| crate::remote::url_looks_like_hosted_remote(&remote.url))
+            })
+            .unwrap_or(false)
     }
 
     pub fn current_lane(&self) -> Result<Option<String>> {
@@ -823,14 +846,21 @@ impl Repository {
     pub fn seed_default_thread(&self) -> Result<()> {
         let main_thread = ThreadName::from("main");
         if self.refs.get_thread(&main_thread)?.is_none() {
-            let empty_tree = Tree::new();
-            let tree_hash = self.store.put_tree(&empty_tree)?;
             let state =
-                State::new_snapshot(tree_hash, vec![], Attribution::human(seed_principal()));
+                objects::object::thread_replication::hosted_import::synthetic_initial_base()?;
+            self.store.put_tree(&Tree::new())?;
             self.store.put_state(&state)?;
             self.refs.set_thread(&main_thread, &state.id())?;
         }
 
+        let base = self
+            .refs
+            .get_thread(&main_thread)?
+            .ok_or_else(|| HeddleError::Config("default Thread base disappeared".into()))?;
+        if self.native_thread("main").is_err() {
+            self.create_native_thread("main", base, None, "")
+                .map_err(|error| HeddleError::Config(error.to_string()))?;
+        }
         let manager = crate::ThreadManager::new(self.heddle_dir());
         if manager
             .find_or_materialize_synced_record_by_thread(self, "main", None)?

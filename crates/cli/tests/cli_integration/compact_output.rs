@@ -349,7 +349,15 @@ fn field_study_everyday_verbs_accept_json_compact() {
             "-m",
             "entry point",
         ][..],
-        &["discuss", "open", "main.rs", "main", "first turn"][..],
+        &[
+            "discuss",
+            "--new",
+            "--path",
+            "main.rs",
+            "--symbol",
+            "main",
+            "first turn",
+        ][..],
     ] {
         let compact = compact_json(args, &temp);
         assert!(

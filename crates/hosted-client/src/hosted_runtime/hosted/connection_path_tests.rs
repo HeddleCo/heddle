@@ -7,56 +7,22 @@ use std::{
 use api::{
     HOSTED_ALPN_V1,
     framing::{ResponseFrame, decode_response_frame, encode_request_frame},
-    heddle::api::v1alpha1::{
+    heddle::api::common::{
         CallContext, CallFailureCode, EndpointDescriptor, SignedEndpointDescriptor,
     },
     signing::endpoint_descriptor_bytes,
 };
 use crypto::{Ed25519Signer, Signer};
 use iroh::{Endpoint, RelayMode, endpoint::presets};
-use n0_watcher::Watcher;
 
 use super::{
     DescriptorKeyring, VerifiedEndpointDescriptor,
-    claim_protocol::{CLAIM_ALPN_V1, CLAIM_RESOLVE_METHOD},
+    claim_protocol::{CLAIM_PREPARE_METHOD, NATIVE_ALPN},
     connection::HostedConnection,
 };
 
 const HOSTED_ENDPOINT_CLOSE_P95_BUDGET: Duration = Duration::from_millis(20);
 const DEFAULT_CLOSE_SAMPLE_COUNT: usize = 20;
-
-struct HeddleHomeEnvGuard {
-    previous: Option<std::ffi::OsString>,
-    _home: tempfile::TempDir,
-}
-
-impl HeddleHomeEnvGuard {
-    fn isolated() -> Self {
-        let home = tempfile::TempDir::new().expect("temp Heddle home");
-        let previous = std::env::var_os("HEDDLE_HOME");
-        unsafe {
-            std::env::set_var("HEDDLE_HOME", home.path());
-        }
-        Self {
-            previous,
-            _home: home,
-        }
-    }
-}
-
-impl Drop for HeddleHomeEnvGuard {
-    fn drop(&mut self) {
-        match self.previous.take() {
-            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
-            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
-        }
-    }
-}
-
-fn require_release_build() {
-    #[cfg(debug_assertions)]
-    panic!("hosted endpoint close contract must run with --release");
-}
 
 pub(crate) fn verified_descriptor(
     endpoint_id: iroh::EndpointId,
@@ -93,10 +59,59 @@ pub(crate) fn verified_descriptor(
     keys.verify(&signed, now).unwrap()
 }
 
+struct HeddleHomeEnvGuard {
+    previous: Option<std::ffi::OsString>,
+    _home: tempfile::TempDir,
+}
+
+impl HeddleHomeEnvGuard {
+    fn isolated() -> Self {
+        let home = tempfile::TempDir::new().expect("temp Heddle home");
+        let previous = std::env::var_os("HEDDLE_HOME");
+        unsafe {
+            std::env::set_var("HEDDLE_HOME", home.path());
+        }
+        Self {
+            previous,
+            _home: home,
+        }
+    }
+}
+
+impl Drop for HeddleHomeEnvGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+        }
+    }
+}
+
+fn require_release_build() {
+    #[cfg(debug_assertions)]
+    panic!("hosted endpoint close contract must run with --release");
+}
+
+async fn connect_loopback(address: iroh::EndpointAddr) -> std::sync::Arc<HostedConnection> {
+    let client = Endpoint::builder(presets::Minimal)
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr((Ipv4Addr::LOCALHOST, 0))
+        .unwrap()
+        .bind()
+        .await
+        .unwrap();
+    HostedConnection::connect(client, address).await.unwrap()
+}
+
 #[tokio::test]
 #[ignore = "release-only hosted endpoint close performance contract"]
+// reason: `lock_test_env` is a process-global serialization mutex (payload
+// `()`) held across the whole async scenario so no other test mutates
+// HEDDLE_HOME/credentials concurrently. Each `#[tokio::test]` runs on its own
+// runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 async fn hosted_endpoint_close_release_contract() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
     require_release_build();
@@ -128,16 +143,7 @@ async fn hosted_endpoint_close_release_contract() {
         .bind()
         .await
         .unwrap();
-    let descriptor = verified_descriptor(
-        server.id(),
-        vec![
-            "https://usw1-1.relay.n0.iroh.link.".to_string(),
-            "https://aps1-1.relay.n0.iroh.link.".to_string(),
-            "https://use1-1.relay.n0.iroh.link.".to_string(),
-            "https://euc1-1.relay.n0.iroh.link.".to_string(),
-        ],
-        server.addr().ip_addrs().map(ToString::to_string).collect(),
-    );
+    let server_addr = server.addr();
     let server_task = tokio::spawn(async move {
         for _ in 0..sample_count {
             let connection = server
@@ -153,11 +159,8 @@ async fn hosted_endpoint_close_release_contract() {
 
     let mut close_ms = Vec::with_capacity(sample_count);
     for _ in 0..sample_count {
-        let connection =
-            HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
-                .await
-                .unwrap();
-        let endpoint_observer = connection.local_endpoint().expect("local fixture").clone();
+        let connection = connect_loopback(server_addr.clone()).await;
+        let endpoint_observer = connection.endpoint.clone();
         let close_started = Instant::now();
         if negative_control {
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -200,69 +203,13 @@ fn percentile_ms(sorted_values: &[f64], percentile: usize) -> f64 {
 }
 
 #[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn reachable_direct_address_keeps_the_claim_relay_online() {
-    use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
-
-    let _env_guard = config::credentials::lock_test_env();
-    let _home = HeddleHomeEnvGuard::isolated();
-    let mut relay_config = ServerConfig::default();
-    relay_config.relay = Some(RelayServerConfig::new((Ipv4Addr::LOCALHOST, 0)));
-    let relay = Server::spawn(relay_config).await.unwrap();
-    let relay_url: iroh::RelayUrl = format!("http://{}", relay.http_addr().unwrap())
-        .parse()
-        .unwrap();
-    let server = Endpoint::builder(presets::Minimal)
-        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .bind()
-        .await
-        .unwrap();
-    let descriptor = verified_descriptor(
-        server.id(),
-        vec![relay_url.to_string()],
-        server.addr().ip_addrs().map(ToString::to_string).collect(),
-    );
-    let server_task = tokio::spawn(async move {
-        let connection = server
-            .accept()
-            .await
-            .expect("incoming connection")
-            .await
-            .unwrap();
-        connection.closed().await;
-        server.close().await;
-    });
-
-    let connection =
-        HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
-            .await
-            .unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        connection.local_endpoint().expect("local fixture").online(),
-    )
-    .await
-    .expect("claim listener should register with the signed relay");
-    assert!(
-        !connection
-            .local_endpoint()
-            .expect("local fixture")
-            .home_relay_status()
-            .get()
-            .is_empty(),
-        "a direct hosted path must keep the inbound claim relay initialized"
-    );
-    connection.close().await;
-    server_task.await.unwrap();
-    drop(relay);
-}
-
-#[tokio::test]
+// reason: `lock_test_env` is a process-global serialization mutex (payload
+// `()`) held across the whole async scenario so no other test mutates
+// HEDDLE_HOME/credentials concurrently. Each `#[tokio::test]` runs on its own
+// runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 async fn direct_only_descriptor_uses_the_normal_connection_path() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
     let server = Endpoint::builder(presets::Minimal)
@@ -273,11 +220,7 @@ async fn direct_only_descriptor_uses_the_normal_connection_path() {
         .bind()
         .await
         .unwrap();
-    let descriptor = verified_descriptor(
-        server.id(),
-        Vec::new(),
-        server.addr().ip_addrs().map(ToString::to_string).collect(),
-    );
+    let server_addr = server.addr();
     let server_task = tokio::spawn(async move {
         let connection = server
             .accept()
@@ -289,84 +232,19 @@ async fn direct_only_descriptor_uses_the_normal_connection_path() {
         server.close().await;
     });
 
-    let connection =
-        HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
-            .await
-            .unwrap();
+    let connection = connect_loopback(server_addr).await;
     connection.close().await;
     server_task.await.unwrap();
 }
 
 #[tokio::test]
+// reason: `lock_test_env` is a process-global serialization mutex (payload
+// `()`) held across the whole async scenario so no other test mutates
+// HEDDLE_HOME/credentials concurrently. Each `#[tokio::test]` runs on its own
+// runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
-async fn unreachable_direct_address_falls_back_to_signed_relay() {
-    let _env_guard = config::credentials::lock_test_env();
-    let _home = HeddleHomeEnvGuard::isolated();
-    use iroh_relay::server::{RelayConfig as RelayServerConfig, Server, ServerConfig};
-
-    let mut relay_config = ServerConfig::default();
-    relay_config.relay = Some(RelayServerConfig::new((Ipv4Addr::LOCALHOST, 0)));
-    let relay = Server::spawn(relay_config).await.unwrap();
-    let relay_url: iroh::RelayUrl = format!("http://{}", relay.http_addr().unwrap())
-        .parse()
-        .unwrap();
-    let server = Endpoint::builder(presets::Minimal)
-        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
-        .relay_mode(RelayMode::custom([relay_url.clone()]))
-        .bind_addr((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .bind()
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(5), server.online())
-        .await
-        .expect("server should register with the relay");
-    let descriptor = verified_descriptor(
-        server.id(),
-        vec![relay_url.to_string()],
-        vec!["127.0.0.1:9".to_string()],
-    );
-    let server_task = tokio::spawn(async move {
-        let connection = server
-            .accept()
-            .await
-            .expect("incoming relay connection")
-            .await
-            .unwrap();
-        connection.closed().await;
-        server.close().await;
-    });
-
-    let connection = tokio::time::timeout(
-        Duration::from_secs(5),
-        HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default()),
-    )
-    .await
-    .expect("relay fallback should connect")
-    .unwrap();
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        connection.local_endpoint().expect("local fixture").online(),
-    )
-    .await
-    .expect("client should register with the signed relay");
-    assert!(
-        !connection
-            .local_endpoint()
-            .expect("local fixture")
-            .home_relay_status()
-            .get()
-            .is_empty(),
-        "relay fallback must initialize the signed relay transport"
-    );
-    connection.close().await;
-    server_task.await.unwrap();
-    drop(relay);
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
+async fn hosted_connection_accepts_claim_alpn() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
     let server = Endpoint::builder(presets::Minimal)
@@ -377,11 +255,7 @@ async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
         .bind()
         .await
         .unwrap();
-    let descriptor = verified_descriptor(
-        server.id(),
-        Vec::new(),
-        server.addr().ip_addrs().map(ToString::to_string).collect(),
-    );
+    let server_addr = server.addr();
     let server_task = tokio::spawn(async move {
         let connection = server
             .accept()
@@ -393,13 +267,7 @@ async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
         server.close().await;
     });
 
-    let connection =
-        HostedConnection::connect_verified(&descriptor, &config::ClientConfig::default())
-            .await
-            .unwrap();
-    let persisted = crate::hosted_runtime::agent_node_identity::load_or_create()
-        .expect("persisted agent node identity");
-    assert_eq!(connection.endpoint_id(), persisted.node_id());
+    let connection = connect_loopback(server_addr).await;
 
     let claim_client = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)
@@ -409,14 +277,11 @@ async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
         .await
         .unwrap();
     let claim_connection = claim_client
-        .connect(
-            connection.local_endpoint().expect("local fixture").addr(),
-            CLAIM_ALPN_V1,
-        )
+        .connect(connection.endpoint.addr(), NATIVE_ALPN)
         .await
         .expect("claim ALPN connection");
     let (mut send, mut recv) = claim_connection.open_bi().await.unwrap();
-    let frame = encode_request_frame(CLAIM_RESOLVE_METHOD, &CallContext::default(), b"resolve")
+    let frame = encode_request_frame(CLAIM_PREPARE_METHOD, &CallContext::default(), b"resolve")
         .expect("claim request frame");
     send.write_all(&frame).await.unwrap();
     send.finish().unwrap();
@@ -428,84 +293,5 @@ async fn hosted_connection_uses_persisted_id_and_accepts_claim_alpn() {
 
     claim_client.close().await;
     connection.close().await;
-    server_task.await.unwrap();
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn connect_with_config_falls_back_to_local_when_netd_is_down() {
-    let _env_guard = config::credentials::lock_test_env();
-    let _home = HeddleHomeEnvGuard::isolated();
-    let server = Endpoint::builder(presets::Minimal)
-        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .bind()
-        .await
-        .unwrap();
-    let descriptor = verified_descriptor(
-        server.id(),
-        Vec::new(),
-        server.addr().ip_addrs().map(ToString::to_string).collect(),
-    );
-    let server_task = tokio::spawn(async move {
-        let connection = server
-            .accept()
-            .await
-            .expect("incoming hosted connection")
-            .await
-            .unwrap();
-        connection.closed().await;
-        server.close().await;
-    });
-
-    let config = config::ClientConfig::default().with_server_key("https://api.test.heddle.sh");
-    let client = super::HostedClient::connect_with_config(&descriptor, &config)
-        .await
-        .expect("local connect must succeed after netd fallback");
-    assert!(
-        !client.reused_warm_connection(),
-        "a missing hosted bridge must not report warm reuse"
-    );
-    client.close().await;
-    server_task.await.unwrap();
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn connect_outbound_falls_back_to_local_when_netd_is_down() {
-    let _env_guard = config::credentials::lock_test_env();
-    let _home = HeddleHomeEnvGuard::isolated();
-    let server = Endpoint::builder(presets::Minimal)
-        .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
-        .relay_mode(RelayMode::Disabled)
-        .bind_addr((Ipv4Addr::LOCALHOST, 0))
-        .unwrap()
-        .bind()
-        .await
-        .unwrap();
-    let descriptor = verified_descriptor(
-        server.id(),
-        Vec::new(),
-        server.addr().ip_addrs().map(ToString::to_string).collect(),
-    );
-    let server_task = tokio::spawn(async move {
-        let connection = server
-            .accept()
-            .await
-            .expect("incoming outbound connection")
-            .await
-            .unwrap();
-        connection.closed().await;
-        server.close().await;
-    });
-
-    let config = config::ClientConfig::default().with_server_key("https://api.test.heddle.sh");
-    let client = super::HostedClient::connect_outbound_with_config(&descriptor, &config)
-        .await
-        .expect("outbound local connect must succeed after netd fallback");
-    assert!(!client.reused_warm_connection());
-    client.close().await;
     server_task.await.unwrap();
 }

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 use super::visit_usage;
-use crate::util::budget::ResourceKind;
-use crate::util::line_diff::{
-    LineDiffError, LineDiffLimits, scratch_bytes_for_line_counts, visit_lcs_equal_runs,
+use crate::util::{
+    budget::ResourceKind,
+    line_diff::{
+        LineDiffError, LineDiffLimits, scratch_bytes_for_line_counts, visit_lcs_equal_runs,
+    },
 };
 
 #[test]

@@ -352,22 +352,22 @@ impl RecoveryAdvice {
         Self::invalid_usage(
             "adopt_path_conflict",
             format!(
-                "`heddle adopt` received both a positional path ({positional}) and --repo ({repo_path})"
+                "`heddle import local` received both a positional path ({positional}) and --repo ({repo_path})"
             ),
             "Pass exactly one repository path so adoption targets a single Git worktree.",
-            "heddle adopt <path>",
+            "heddle import local <path>",
         )
     }
 
     pub fn adopt_requires_git_worktree(details: Option<String>) -> Self {
         let error = match details {
-            Some(details) => format!("`heddle adopt` needs a Git worktree: {details}"),
-            None => "`heddle adopt` needs a Git worktree".to_string(),
+            Some(details) => format!("`heddle import local` needs a Git worktree: {details}"),
+            None => "`heddle import local` needs a Git worktree".to_string(),
         };
         Self::safety_refusal(
             "adopt_requires_git_worktree",
             error,
-            "Run `heddle init` for a new native Heddle repository, or run `heddle adopt` from inside a Git worktree.",
+            "Run `heddle init` for a new native Heddle repository, or run `heddle import local` from inside a Git worktree.",
             "the selected path is not a Git worktree",
             "adoption would otherwise initialize mapping metadata for an unknown Git checkout",
             "repository state, refs, metadata, and worktree files were left unchanged",
@@ -377,7 +377,7 @@ impl RecoveryAdvice {
     }
 
     pub fn git_overlay_tip_bind_failed(details: impl Into<String>) -> Self {
-        let primary = "heddle adopt".to_string();
+        let primary = "heddle import local".to_string();
         Self::safety_refusal(
             "git_overlay_tip_bind_failed",
             "Could not bind the active Git tip into Heddle",
@@ -528,7 +528,7 @@ impl RecoveryAdvice {
             "discuss_resolve_missing_dismiss_reason",
             "--reason",
             "dismiss",
-            "heddle discuss resolve <id> --mode dismiss --reason \"...\"",
+            "heddle discuss resolve <id> --dismiss --reason \"...\"",
         )
     }
 
@@ -635,14 +635,14 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "context_annotations_empty",
             "No context annotations in this repository",
-            "Inspect context with `heddle context list`, or add an annotation with `heddle context set --path <path> --scope file -m \"...\"`.",
+            "Inspect context with `heddle context list`, or add an annotation with `heddle context set --path <path> -m \"...\"`.",
             "the current state has no context annotation root",
             "guessing a missing annotation would target metadata that does not exist",
             "no repository objects, refs, metadata, or worktree files were changed",
             "heddle context list",
             vec![
                 "heddle context list".to_string(),
-                "heddle context set --path <path> --scope file -m \"...\"".to_string(),
+                "heddle context set --path <path> -m \"...\"".to_string(),
             ],
         )
     }
@@ -1147,10 +1147,8 @@ impl RecoveryAdvice {
         let pull_without_lazy = format!("heddle pull {source}");
         Self::safety_refusal(
             "local_lazy_pull_unsupported",
-            "Refusing lazy pull from local remote: lazy materialization requires a hosted or network remote",
-            format!(
-                "Run `{pull_without_lazy}` without `--lazy`, or configure a hosted remote and retry lazy pull there."
-            ),
+            "Refusing lazy pull: lazy materialization is not yet supported end to end",
+            format!("Run `{pull_without_lazy}` without `--lazy`."),
             format!("selected remote resolves to local path file://{source}"),
             "lazy pull would leave the worktree depending on on-demand object fetches that the local transport does not provide",
             "repository state was left unchanged",
@@ -1173,6 +1171,24 @@ impl RecoveryAdvice {
             "local Heddle state, Git refs, and worktree files were left unchanged by the failed push result",
             primary_command.clone(),
             vec![primary_command, "heddle verify".to_string()],
+        )
+    }
+
+    /// Missing or unreachable hosted spool on push (resolve miss / no parent).
+    #[cfg(feature = "client")]
+    pub fn hosted_spool_not_found(spool: &str) -> Self {
+        let spool = verbs::redact_internal_hosted_paths(spool);
+        Self::safety_refusal(
+            "hosted_spool_not_found",
+            format!("Hosted spool '{spool}' was not found"),
+            format!(
+                "A host-only push (`heddle push https://<host>`) creates a spool under your personal spool. To push to '{spool}', create the parent first, then retry."
+            ),
+            format!("no reachable hosted spool exists at '{spool}'"),
+            "push needs an existing destination spool, or a parent the caller can create under",
+            "local Heddle state, Git refs, remote configuration, and worktree files were left unchanged",
+            "heddle push".to_string(),
+            vec!["heddle push".to_string(), "heddle whoami".to_string()],
         )
     }
 
@@ -1273,7 +1289,7 @@ impl RecoveryAdvice {
         Self::safety_refusal(
             "grant_denied",
             format!("Cannot manage grants on '{spool}': permission denied"),
-            "Only an owner or admin of this spool can create or delete grants. Check roles with `heddle whoami`.",
+            "A current administrator grant is required to manage this spool's grants. Check access with `heddle whoami`.",
             "the caller does not hold GrantWrite on the spool",
             "no collaborator grant was created or removed",
             "hosted grants and local checkouts were left unchanged",
@@ -1283,37 +1299,16 @@ impl RecoveryAdvice {
     }
 
     #[cfg(feature = "client")]
-    pub fn grant_agent_ceiling(spool: &str, role: &str) -> Self {
-        Self::safety_refusal(
-            "grant_agent_ceiling",
-            format!(
-                "Cannot grant '{role}' on '{spool}': agent sessions cannot grant maintainer, admin, or owner"
-            ),
-            "Grant reader or contributor from this session. Maintainer, admin, and owner require a human-verified session (Tapestry or an unattenuated owner credential).",
-            "the active credential is an attenuated agent session and the requested role is above writer",
-            "no collaborator grant was created",
-            "hosted grants and local checkouts were left unchanged",
-            format!("heddle grant create --spool {spool} --principal <handle> --role contributor"),
-            vec![
-                format!(
-                    "heddle grant create --spool {spool} --principal <handle> --role contributor"
-                ),
-                "heddle whoami".to_string(),
-            ],
-        )
-    }
-
-    #[cfg(feature = "client")]
     pub fn grant_needs_human(spool: &str) -> Self {
         Self::safety_refusal(
             "grant_needs_human",
             format!("Cannot manage grants on '{spool}': human verification required"),
-            "Maintainer, admin, and owner grants require a human-verified session. Agent sessions may grant writer or below (reader, contributor) without WebAuthn.",
+            "This invite-born account still needs a human claim/passkey before grant writes. Run `heddle claim`, then retry.",
             "the server demanded human verification for this grant write",
             "no collaborator grant was created or removed",
             "hosted grants and local checkouts were left unchanged",
-            "heddle whoami".to_string(),
-            vec!["heddle whoami".to_string()],
+            "heddle claim".to_string(),
+            vec!["heddle claim".to_string()],
         )
     }
 
@@ -1640,5 +1635,17 @@ mod tests {
             vec!["heddle pull", "heddle verify"]
         );
         assert!(!advice.hint.contains("git fetch"));
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn hosted_spool_not_found_names_the_spool_and_points_at_host_only_or_parent() {
+        let advice = RecoveryAdvice::hosted_spool_not_found("spool/acme/nested/child");
+        assert_eq!(advice.kind, "hosted_spool_not_found");
+        assert!(advice.error.contains("spool/acme/nested/child"));
+        assert!(advice.hint.contains("host-only"));
+        assert!(advice.hint.contains("personal spool"));
+        assert!(advice.hint.contains("create the parent first"));
+        assert_eq!(advice.primary_command, "heddle push");
     }
 }

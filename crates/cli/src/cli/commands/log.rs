@@ -9,6 +9,20 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
+    CollapsedEntry, LogImportGuidanceOutput, LogOutput, ReflogEntry, ReflogOutput, StateEntry,
+};
+// The wire payloads live in cli-contract so the schema registry registers
+// the real serialization types.
+#[cfg(test)]
+pub use heddle_cli_contract::cli::commands::wire::history::{
+    TimelineActionsOutput, TimelineBranchOutput, TimelineCursorOutput, TimelineNativeOutput,
+};
+pub use heddle_cli_contract::cli::commands::wire::history::{
+    TimelineLogOutput, TimelineStepOutput,
+};
 use repo::{
     ChangedPathFilters, HistoryQuery, Repository, TimelineStore, format_confidence,
     is_synthetic_root,
@@ -32,22 +46,6 @@ use super::{
 use crate::{
     cli::{Cli, should_output_json, style},
     config::UserConfig,
-};
-
-// The wire payloads live in cli-contract so the schema registry registers
-// the real serialization types.
-#[cfg(test)]
-pub use heddle_cli_contract::cli::commands::wire::history::{
-    TimelineActionsOutput, TimelineBranchOutput, TimelineCursorOutput, TimelineNativeOutput,
-};
-pub use heddle_cli_contract::cli::commands::wire::history::{
-    TimelineLogOutput, TimelineStepOutput,
-};
-
-// The wire payloads live in cli-contract so the schema registry registers
-// the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::history::{
-    CollapsedEntry, LogImportGuidanceOutput, LogOutput, ReflogEntry, ReflogOutput, StateEntry,
 };
 
 #[derive(Clone, Debug)]

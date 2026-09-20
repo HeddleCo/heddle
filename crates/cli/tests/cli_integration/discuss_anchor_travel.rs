@@ -77,7 +77,8 @@ fn discuss_views_follow_an_in_file_symbol_rename() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "open", "main.rs", "foo", "review q",
+                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "foo",
+                "review q",
             ],
             Some(temp.path()),
         )
@@ -113,7 +114,8 @@ fn discuss_anchor_stays_rebound_after_a_later_body_edit() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "open", "main.rs", "foo", "review q",
+                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "foo",
+                "review q",
             ],
             Some(temp.path()),
         )
@@ -156,7 +158,8 @@ fn discuss_ambiguous_symbol_rename_requires_attention_without_picking() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "open", "main.rs", "foo", "review q",
+                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "foo",
+                "review q",
             ],
             Some(temp.path()),
         )
@@ -194,7 +197,8 @@ fn discuss_deleted_symbol_becomes_orphaned() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "open", "main.rs", "foo", "review q",
+                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "foo",
+                "review q",
             ],
             Some(temp.path()),
         )
@@ -225,7 +229,8 @@ fn discuss_anchor_still_follows_a_file_rename() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "open", "main.rs", "foo", "review q",
+                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "foo",
+                "review q",
             ],
             Some(temp.path()),
         )
@@ -256,7 +261,8 @@ fn discuss_anchor_still_follows_a_mkdir_rename() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "open", "lib.py", "greet", "review q",
+                "--output", "json", "discuss", "--new", "--path", "lib.py", "--symbol", "greet",
+                "review q",
             ],
             Some(temp.path()),
         )

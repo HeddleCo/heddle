@@ -94,6 +94,14 @@ pub fn run_local_idempotency_if_requested(
         return Err(anyhow!(RecoveryAdvice::op_id_unsupported(command_name)));
     }
 
+    let local_idempotency = crate::cli::commands::command_runtime_contract(command_name)
+        .is_some_and(|contract| {
+            contract.targets_current_repository || contract.uses_bootstrap_op_id_store
+        });
+    if !local_idempotency {
+        return Ok(LocalIdempotencyOutcome::Continue);
+    }
+
     let bootstrap_store = uses_bootstrap_op_id_store(command_name);
     let normalized_args = normalized_argv_for_op_id();
     let bootstrap_scope = if bootstrap_store {
@@ -114,16 +122,23 @@ pub fn run_local_idempotency_if_requested(
             .expect("bootstrap scope should be present for bootstrap store");
         repo_for_eager = None;
         Arc::new(
-            OperationDedupStore::open(bootstrap_op_id_store_dir(scope))
+            OperationDedupStore::open_bootstrap(bootstrap_op_id_store_dir(scope))
                 .context("open bootstrap op-id dedup store")?,
         )
     } else {
         let repo = cli.open_repo()?;
         let bootstrap_scope = bootstrap_op_id_scope_for_root(repo.root().to_path_buf())?;
-        let bootstrap_store =
-            OperationDedupStore::open(bootstrap_op_id_store_dir(&bootstrap_scope))
-                .context("open bootstrap op-id dedup store")?;
-        if let Some(existing) = bootstrap_store.metadata_for(op_id, command_name) {
+        let bootstrap_conflict = {
+            match OperationDedupStore::open_bootstrap_existing(bootstrap_op_id_store_dir(
+                &bootstrap_scope,
+            ))
+            .context("open bootstrap op-id dedup store")?
+            {
+                Some(bootstrap_store) => bootstrap_store.metadata_for(op_id, command_name)?,
+                None => None,
+            }
+        };
+        if let Some(existing) = bootstrap_conflict {
             return Err(anyhow!(RecoveryAdvice::op_id_conflict(
                 command_name,
                 &bootstrap_scope.label,
@@ -171,7 +186,7 @@ pub fn run_local_idempotency_if_requested(
                 .unwrap_or("repository-local .heddle"),
             &normalized_args,
             request_hash,
-            store.metadata_for(op_id, command_name),
+            store.metadata_for(op_id, command_name)?,
         ))),
         DedupOutcome::InFlight => Err(anyhow!(RecoveryAdvice::op_id_in_flight())),
         DedupOutcome::Reserved => {
@@ -337,7 +352,13 @@ struct BootstrapOpIdScope {
 fn bootstrap_op_id_scope(cli: &Cli) -> Result<BootstrapOpIdScope> {
     let root = match &cli.command {
         crate::cli::Commands::Init(args) => args.path.clone().or_else(|| cli.repo.clone()),
-        crate::cli::Commands::Adopt(args) => args.path.clone().or_else(|| cli.repo.clone()),
+        crate::cli::Commands::Import(args) => match &args.command {
+            crate::cli::ImportCommands::Local(local) => {
+                local.path.clone().or_else(|| cli.repo.clone())
+            }
+            #[cfg(feature = "client")]
+            _ => cli.repo.clone(),
+        },
         // Clone destinations normally don't exist yet, so feeding the
         // raw string into the hasher (and relying on the canonicalize
         // fallback) lets two different cwds with `./repo` collide in
@@ -346,7 +367,8 @@ fn bootstrap_op_id_scope(cli: &Cli) -> Result<BootstrapOpIdScope> {
         crate::cli::Commands::Clone(args) => {
             let cwd = std::env::current_dir()
                 .context("resolve current directory for clone op-id scope")?;
-            Some(absolutize_clone_destination(&args.local, &cwd))
+            let local = args.destination_dir().map_err(|err| anyhow::anyhow!(err))?;
+            Some(absolutize_clone_destination(&local, &cwd))
         }
         _ => cli.repo.clone(),
     }

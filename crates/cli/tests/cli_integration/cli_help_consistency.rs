@@ -269,7 +269,7 @@ fn diff_help_explains_git_compatible_patch_headers() {
 }
 
 #[test]
-fn restore_story_is_documented_and_start_requires_path() {
+fn restore_story_is_documented_and_start_defaults_path() {
     let diff = heddle_help(&["diff", "--help"]);
     assert!(
         diff.contains("Heddle does not restore one file")
@@ -296,11 +296,10 @@ fn restore_story_is_documented_and_start_requires_path() {
 
     let start = heddle_help(&["start", "--help"]);
     assert!(
-        start.contains("`--path` is required")
-            && start.contains(".heddle/threads/")
-            && start.contains("`--workspace auto`")
+        start.contains(".heddle/threads/")
+            && !start.contains("`--path` is required")
             && start.contains("heddle thread create"),
-        "start help must say --path is required for omitted and auto workspace: {start}"
+        "start help must say omitted --path defaults under .heddle/threads/: {start}"
     );
 
     let model = heddle_help(&["help", "model"]);
@@ -367,7 +366,7 @@ fn git_concepts_topic_explains_authority_and_current_surface() {
     }
     assert!(
         help.contains("Use `heddle init` to add that sidecar")
-            && help.contains("`heddle adopt`")
+            && help.contains("`heddle import local`")
             && help.contains("one atomic transition")
             && help.contains("makes Heddle the repository authority"),
         "git-concepts topic should distinguish sidecar initialization from adoption: {help}"

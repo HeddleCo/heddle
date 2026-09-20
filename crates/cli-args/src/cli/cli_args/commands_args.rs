@@ -10,6 +10,7 @@ use super::commands_git_projection::SyncCommands;
 /// registry. A second `"init"` literal can still compile; pairing is
 /// checked in tests, not by the type system.
 pub const INIT_VERB: &str = "init";
+pub const IMPORT_VERB: &str = "import";
 
 /// Arguments for the `init` command.
 #[derive(Clone, Debug, clap::Args)]
@@ -53,21 +54,21 @@ impl InitArgs {
     pub const VERB: &'static str = INIT_VERB;
 }
 
-/// Arguments for the `adopt` command.
+/// Arguments for `heddle import local`.
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle adopt                                # adopt all local Git refs into native Heddle storage
-  heddle adopt --ref main                     # adopt one branch or tag
-  heddle adopt ../repo --ref main --ref v1.0  # adopt selected refs in another repo
+  heddle import local                                # import all local Git refs into native Heddle storage
+  heddle import local --ref main                     # import one branch or tag
+  heddle import local ../repo --ref main --ref v1.0  # import selected refs in another repo
 
-Adoption imports Git refs, makes Heddle the source authority, and retains `.git` for explicit Git Projection. Normal Git Overlay setup uses `heddle init` instead.
+Importing locally makes Heddle the source authority and retains `.git` for explicit Git Projection. Normal Git Overlay setup uses `heddle init` instead.
 ")]
-pub struct AdoptArgs {
-    /// Git repository to adopt into native Heddle storage (default: current directory).
+pub struct ImportLocalArgs {
+    /// Git repository to import into native Heddle storage (default: current directory).
     pub path: Option<std::path::PathBuf>,
 
-    /// Git branch or tag to adopt. Repeat for selected refs; omit to adopt all refs.
+    /// Git branch or tag to import. Repeat for selected refs; omit to import all refs.
     #[arg(long = "ref", value_name = "REF")]
     pub refs: Vec<String>,
 }
@@ -569,13 +570,12 @@ pub struct RevertArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle undo --preview      # inspect the most recent operation
-  heddle undo --hard --preview  # preview the worktree rewind --hard would apply
+  heddle undo --dry-run      # inspect the most recent operation
+  heddle undo --hard --dry-run  # preview the worktree rewind --hard would apply
   heddle undo --hard         # roll it back and rewind the worktree
   heddle undo -n 3 --hard    # roll back the last three operations
   heddle undo --recover      # restore the state preserved by the last undo
-  heddle undo --list         # preview undoable operations on this thread
-  heddle undo --dry-run      # show what would change without applying
+  heddle undo --list         # list undoable operations on this thread
 
 Restore:
   `--recover` restores only the last undo's preserved tree as worktree changes.
@@ -623,10 +623,8 @@ pub struct UndoArgs {
     #[arg(long, default_value = "20")]
     pub depth: usize,
 
-    /// Preview operations without undoing. `--dry-run` is an accepted
-    /// alias kept for muscle memory from git/other VCS tooling.
-    #[arg(long, visible_alias = "dry-run")]
-    pub preview: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 
     /// Permit undo to rewind worktree files to the selected operation's prior
     /// state. Without this explicit opt-in, an undo that would rewrite the
@@ -642,7 +640,7 @@ pub struct UndoArgs {
     /// worktree changes. HEAD and the current thread remain unchanged.
     #[arg(
         long,
-        conflicts_with_all = ["steps", "list", "preview", "hard", "redo", "allow_redact_undo"]
+        conflicts_with_all = ["steps", "list", "dry_run", "hard", "redo", "allow_redact_undo"]
     )]
     pub recover: bool,
 
@@ -678,20 +676,19 @@ pub enum WorkspaceModeArg {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle start feature/auth --path ../feature-auth  # create an isolated checkout
-  heddle start scratch --path ../scratch            # place the checkout explicitly
+  heddle start feature/auth                         # checkout under .heddle/threads/
+  heddle start feature/auth --path ../feature-auth  # place the checkout explicitly
   heddle start fix-flake --path ../fix-flake --task 'fix CI flake'
 
-`--path` is required when workspace is omitted or `auto`. Without it, start
-refuses instead of hiding a checkout under `.heddle/threads/<name>/`.
-`--workspace auto` is the same default and still requires `--path`.
-Pass `--path ../<name>`, or an explicit `--workspace solid|materialized|virtualized`
-if you want the managed layout. To stay on this checkout, use
+When `--path` is omitted, start always uses `.heddle/threads/<name>/…` (not
+TTY-gated; the managed layout under the repo). Pass `--path` to choose a
+different directory.
+To stay on this checkout without an isolated tree, use
 `heddle thread create <name>` then `heddle thread switch <name>`.
 
 Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run Git-authority operations through Heddle from the parent Git-overlay repository.
 
-`heddle start <name> --path <dir>` is the one-step form of the advanced split flow: `heddle thread create <name>` creates the ref now, and `heddle thread promote <name> --path <dir>` materializes it later. Use the split form only when you intentionally need ref-first, checkout-later staging.
+`heddle start <name> --path <dir>` is the one-step form of the advanced split flow: `heddle thread create <name>` creates the ref now, and `heddle thread checkout <name> --path <dir>` materializes it later. Use the split form only when you intentionally need ref-first, checkout-later staging.
 
 Advanced (hidden) flags:
   --agent-provider/--agent-model (agent attribution for the registered thread), --parent-thread (delegated child work), --print-cd-path (print only the checkout path for shell wrappers), --daemon/--no-daemon (virtualized-mount ownership), --shared-target/--no-shared-target (workspace-shared cargo target dir; default on for Rust solid/materialized). All are accepted here; they stay out of the flag list to keep everyday help terse.
@@ -704,13 +701,12 @@ pub struct ThreadStartArgs {
     #[arg(long)]
     pub from: Option<String>,
 
-    /// Filesystem path for the isolated checkout. Required so the checkout
-    /// is not hidden under `.heddle/threads/`.
+    /// Filesystem path for the isolated checkout. Defaults under `.heddle/threads/`.
     #[arg(long)]
     pub path: Option<std::path::PathBuf>,
 
-    /// Workspace mode for the thread. Omitted or `auto` requires `--path`
-    /// so the checkout is not hidden under `.heddle/threads/`.
+    /// Workspace mode for the thread. Omitted or `auto` still defaults the
+    /// checkout under `.heddle/threads/` when `--path` is omitted.
     #[arg(long, value_enum)]
     pub workspace: Option<WorkspaceModeArg>,
 
@@ -838,11 +834,8 @@ pub struct ReadyArgs {
     #[arg(long, value_parser = parse_confidence)]
     pub confidence: Option<f32>,
 
-    /// Preview the readiness decision (integration target, conflicts, verify
-    /// verdicts, would-be thread transition) without capturing work or moving
-    /// the thread to Ready/Blocked. No mutation occurs.
-    #[arg(long)]
-    pub dry_run: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 }
 
 /// Arguments for the `sync` command.
@@ -880,11 +873,8 @@ pub struct LandArgs {
     #[arg(long)]
     pub no_squash: bool,
 
-    /// Preview the integration (thread -> target, merge relation, conflicts,
-    /// verify verdicts) without capturing work, syncing, or merging. No
-    /// mutation occurs and no server round-trip is made.
-    #[arg(long)]
-    pub dry_run: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 }
 
 /// Arguments for `thread show`.
@@ -936,17 +926,17 @@ pub struct ThreadRenameArgs {
     pub new: String,
 }
 
-/// Arguments for `thread promote`.
+/// Arguments for `thread checkout`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct ThreadPromoteArgs {
+pub struct ThreadCheckoutArgs {
     /// Thread identifier.
     pub thread: String,
 
-    /// Materialized checkout path.
-    #[arg(long)]
-    pub path: Option<std::path::PathBuf>,
+    /// Working checkout directory for this thread.
+    #[arg(long, required = true)]
+    pub path: std::path::PathBuf,
 
-    /// Discard dirty work in the source checkout while promoting.
+    /// Discard dirty work in the source checkout while creating the new checkout.
     #[arg(long)]
     pub force: bool,
 }
@@ -983,9 +973,8 @@ pub struct ThreadAbsorbArgs {
     #[arg(short = 'm', long)]
     pub message: Option<String>,
 
-    /// Show the absorb preview without applying it.
-    #[arg(long)]
-    pub preview: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 }
 
 /// Arguments for `thread resolve`.
@@ -1008,66 +997,6 @@ pub struct ThreadDropArgs {
     /// Discard uncommitted changes in the thread checkout before dropping it.
     #[arg(short, long)]
     pub force: bool,
-}
-
-/// Arguments for `thread approve` — record an approval for a
-/// `<source> -> <target>` merge against the source thread's
-/// current state.
-#[derive(Clone, Debug, clap::Args)]
-pub struct ThreadApproveArgs {
-    /// Source thread identifier (the change set being merged).
-    pub source: String,
-
-    /// Target thread identifier (where the merge would land).
-    pub target: String,
-
-    /// Optional human note attached to the approval.
-    #[arg(long)]
-    pub note: Option<String>,
-
-    /// Hosted remote name (default: `origin`).
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
-}
-
-/// Arguments for `thread approvals` — list every approval recorded
-/// for `<source> -> <target>`.
-#[derive(Clone, Debug, clap::Args)]
-pub struct ThreadApprovalsArgs {
-    pub source: String,
-    pub target: String,
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
-}
-
-/// Arguments for `thread revoke-approval` — remove a recorded
-/// approval by id.
-#[derive(Clone, Debug, clap::Args)]
-pub struct ThreadRevokeApprovalArgs {
-    /// UUID of the approval row to revoke.
-    pub id: String,
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
-}
-
-/// Arguments for `thread check-merge` — query the merge gate
-/// without recording anything. Returns the unmet requirements.
-#[derive(Clone, Debug, clap::Args)]
-pub struct ThreadCheckMergeArgs {
-    pub source: String,
-    pub target: String,
-
-    /// 'merge' (default), 'force_push', or 'complete'.
-    #[arg(long, default_value = "merge")]
-    pub gated_action: String,
-
-    /// File paths the diff touches, repeat or comma-separate. Empty =
-    /// "we don't know" (every path-conditional policy fires).
-    #[arg(long = "path", value_delimiter = ',')]
-    pub changed_paths: Vec<String>,
-
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
 }
 
 /// Arguments for the `collapse` command.
@@ -1174,11 +1103,8 @@ pub struct PushArgs {
     #[arg(long)]
     pub insecure: bool,
 
-    /// Preview the push plan (target, thread/track ref, state that would be
-    /// published, force status) without pushing, moving refs, capturing work,
-    /// running hooks, or contacting the server for anything beyond read/plan.
-    #[arg(long)]
-    pub dry_run: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 }
 
 impl PushArgs {
@@ -1191,7 +1117,7 @@ impl PushArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Advanced (hidden) flags:
-  --lazy leaves blob content absent by design and hydrates it explicitly later. Hosted/network Heddle remotes only.
+  --lazy is reserved for hosted lazy hydration and is rejected until end-to-end support lands.
 ")]
 pub struct PullArgs {
     #[command(flatten)]
@@ -1201,7 +1127,7 @@ pub struct PullArgs {
     #[arg(short, long)]
     pub local_thread: Option<String>,
 
-    /// Leave blob content absent by design and hydrate it explicitly later.
+    /// Request lazy blobs. Hosted pull currently rejects this planned mode.
     #[arg(long, hide = true)]
     pub lazy: bool,
 }
@@ -1216,32 +1142,32 @@ pub struct PullArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
-  URLs ending in `.git` clone Git repositories; other HTTPS URLs clone hosted Heddle spools. Native clones follow the remote default thread; `--thread` overrides. Git clones check out the selected default branch. Git transport runs through Sley and does not require a Git executable. Never prompts. Full details: `heddle help clone`.
+  `--source git|heddle` selects the protocol; omitted, `.git` URLs are Git and other HTTPS URLs are hosted Heddle. No protocol retry on failure. Convert a local Git checkout with `heddle import local`. Full details: `heddle help clone`.
 
 Advanced/planned flags: see `heddle help clone`.
-
-Examples:
-  heddle clone ../native-repo ./clone                # local native Heddle repository
-  heddle clone https://host/repo ./clone --depth 1   # shallow Heddle clone: tip plus immediate parents
 ")]
 pub struct CloneArgs {
-    /// Remote repository path.
+    /// Remote repository URL or path.
     pub remote: String,
 
-    /// Local directory to clone into.
-    pub local: String,
+    /// Local directory to clone into. Optional when the source has an unambiguous basename.
+    pub local: Option<String>,
+
+    /// Clone protocol (`git` or `heddle`). Failures are not retried on the other protocol.
+    #[arg(long, value_enum, hide_possible_values = true)]
+    pub source: Option<super::CloneSourceArg>,
 
     /// Thread to check out after cloning.
     #[arg(long)]
     pub thread: Option<String>,
 
-    /// Create a shallow clone with the specified depth. `0` means full history.
+    /// Request a history depth. Hosted native clones currently accept only `0` (full history).
     #[arg(long)]
     pub depth: Option<u32>,
 
-    // Hosted/network remotes only. The user-facing exposition lives in the
-    // after-help breadcrumb above and `heddle help clone`.
-    /// Leave blob content absent by design and hydrate it explicitly later.
+    // Planned hosted syntax. The user-facing exposition lives in the after-help
+    // breadcrumb above and `heddle help clone`.
+    /// Request lazy blobs. Hosted native clones currently reject this planned mode.
     #[arg(long, hide = true)]
     pub lazy: bool,
 
@@ -1249,11 +1175,11 @@ pub struct CloneArgs {
     #[arg(long)]
     pub insecure: bool,
 
-    // Only `blob:none` is accepted (a synonym for --lazy on hosted
-    // remotes); git-style filters such as `tree:0` or `blob:limit=…` are
+    // Only the planned `blob:none` spelling is accepted. Git-style filters
+    // such as `tree:0` or `blob:limit=…` are
     // rejected at parse time. See the after-help breadcrumb and `heddle help
     // clone`.
-    /// Partial-clone filter spec (`blob:none` only).
+    /// Request lazy blobs (`blob:none` only). Hosted native clones currently reject it.
     #[arg(long, hide = true, value_name = "SPEC", value_parser = parse_clone_filter_spec)]
     pub filter: Option<String>,
 
@@ -1262,6 +1188,24 @@ pub struct CloneArgs {
     /// Hosted/network remotes only. (Alias: --monorepo.)
     #[arg(long, visible_alias = "monorepo")]
     pub recursive: bool,
+}
+
+impl CloneArgs {
+    /// Destination directory: explicit `DIR`, or a safe basename derived from
+    /// the source. Errors when the basename is missing or ambiguous.
+    pub fn destination_dir(&self) -> Result<String, String> {
+        if let Some(local) = self
+            .local
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(local.to_string());
+        }
+        super::safe_clone_destination_basename(&self.remote).ok_or_else(|| {
+            "clone destination is required when the source has no unambiguous basename; pass a directory".to_string()
+        })
+    }
 }
 
 fn parse_clone_filter_spec(s: &str) -> Result<String, String> {

@@ -1,8 +1,8 @@
 # Live-weft client-flow end-to-end test
 
 `crates/cli/tests/live_weft_client_flow.rs` drives the compiled `heddle`
-binary through real push, pull, and clone operations, then inspects the live
-weft through the production hosted client. It is `#[ignore]` because weft,
+binary through real push, pull, clone, and server-side public-Git import
+operations, then inspects the live weft through the production hosted client. It is `#[ignore]` because weft,
 Postgres, object storage, and authentication are external test dependencies.
 An unset `HEDDLE_E2E_WEFT_URL` also makes an explicitly selected run skip
 cleanly.
@@ -17,6 +17,28 @@ export HEDDLE_E2E_WEFT_URL='https://weft.example.test:443'
 export HEDDLE_CREDENTIAL='/absolute/path/to/live-weft-agent.hcred'
 
 cargo test -p heddle-cli --test live_weft_client_flow -- \
+  --ignored --nocapture --test-threads=1
+```
+
+The import test defaults to `https://github.com/octocat/Hello-World.git`.
+Set `HEDDLE_E2E_PUBLIC_GIT_URL` to use another small public repository. It asks
+weft to fetch the repository with no provider connection, waits for the durable
+operation to complete, clones the resulting spool through Heddle, and compares
+all source files and bytes with a shallow Git checkout of the same HEAD.
+
+`crates/cli/tests/import_source_live.rs` is the stricter import proof. It
+requires a source large enough to produce at least two durable `RUNNING`
+updates and checks that `completed_units` rises before completion. It also
+exercises an unreachable public URL and requires the failure to name
+`RetryImportSource`. Run it with fresh client homes through:
+
+```sh
+export HEDDLE_IMPORT_SOURCE_E2E_SERVER='weft.example.test:443'
+export HEDDLE_IMPORT_SOURCE_E2E_DESTINATION_PREFIX='spool/willow-ibis-8e7264'
+export HEDDLE_IMPORT_SOURCE_E2E_SOURCE_URL='https://github.com/example/public-repo.git'
+export HEDDLE_IMPORT_SOURCE_E2E_SOURCE_DIR='/absolute/path/to/matching-checkout'
+
+cargo test -p heddle-cli --test import_source_live -- \
   --ignored --nocapture --test-threads=1
 ```
 

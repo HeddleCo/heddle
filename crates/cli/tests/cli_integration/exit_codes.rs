@@ -68,7 +68,7 @@ fn adopted_git_overlay() -> TempDir {
     std::fs::write(dir.join("a.txt"), "hello\n").expect("write a.txt");
     git(&["add", "a.txt"], dir);
     git(&["commit", "-qm", "init"], dir);
-    assert_exit(&["adopt"], dir, 0);
+    assert_exit(&["import", "local"], dir, 0);
     temp
 }
 

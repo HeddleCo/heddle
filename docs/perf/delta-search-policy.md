@@ -24,7 +24,7 @@ delta search on regardless of the setting.
 
 For a repository that has not yet been adopted, run `heddle init`, set
 `storage.delta_search.import = true` in `.heddle/config.toml`, and then run
-`heddle adopt`.
+`heddle import local`.
 
 ## Method
 

@@ -18,13 +18,14 @@
 //!   relay),
 //! * a box-scoped endpoint-discovery file advertising that node id,
 //! * a same-uid control socket for `netd status` / `netd stop`,
-//! * a same-uid hosted bridge that caches weft QUIC sessions so
-//!   one-shot CLI verbs reuse descriptor+relay+QUIC,
+//! * a same-uid hosted bridge that caches Weft QUIC sessions for
+//!   one-shot CLI verbs,
 //! * a single-writer guard so two processes never both bind the
 //!   device node id.
 //!
-//! The weft subscription/doorbell (piece 2) is separate. Preview vs
-//! prod home-relay remains the `preview` cargo feature.
+//! What it does NOT own yet: the claim-ALPN router (piece 3 /
+//! heddle#1620) mounts on the endpoint at the seam marked below, and
+//! the weft subscription/doorbell (piece 2) is separate.
 
 use std::{
     os::unix::net::UnixStream,
@@ -82,13 +83,23 @@ pub async fn run_network_daemon() -> Result<()> {
     .await
     .context("binding persistent device endpoint")?;
     let node_id = endpoint.id().to_string();
+    let reachability_endpoint = endpoint.clone();
+    let reachability_home = heddle_home.clone();
+    let reachability = tokio::spawn(async move {
+        if let Err(error) =
+            hosted_client::network::advertise_reachability(reachability_endpoint, reachability_home)
+                .await
+        {
+            tracing::warn!(%error, "device relay advertisement stopped");
+        }
+    });
 
     // ---- PIECE 3 (heddle#1620): mount the claim-ALPN router ----
     // The endpoint is live, relay-reachable, and pinned to the persisted
-    // node id. Mount the persistent `heddle-claim/1` router on it and
+    // node id. Mount the persistent native v2 router on it and
     // serve its owner-root co-sign bridge for the daemon's lifetime.
     //
-    // The daemon drives Resolve / preConsent / promoteConsent inline
+    // The daemon drives native endpoint discovery and claim admission
     // against the file-backed claim state, but it deliberately holds no
     // agent owner-root signer (decision D3): when a browser reaches the
     // owner-root co-sign, the router forwards it over `claim_socket` to a
@@ -101,11 +112,9 @@ pub async fn run_network_daemon() -> Result<()> {
     let claim_router = hosted_client::network::mount_claim_router(endpoint.clone());
     let claim_bridge = tokio::spawn(claim_router.serve_owner_root_bridge(claim_socket.clone()));
 
-    // Warm weft sessions for one-shot CLI verbs. The persistent endpoint
-    // is already relay-homed; the hosted bridge caches the weft QUIC
-    // connection so whoami/push/pull/clone do not pay bind+WSS+handshake
-    // on every process. Relays for those sessions still come from the
-    // signed descriptor, not from stuffing preview+prod into one Custom set.
+    // The persistent endpoint is already relay-homed. Keep one Weft QUIC
+    // session per server and splice foreground v2 RPC streams over a same-uid
+    // UDS, avoiding endpoint bind, relay dial, and QUIC handshake per command.
     let hosted_socket = hosted_client::network::hosted_bridge_socket_path(&heddle_home);
     let hosted_bridge = tokio::spawn(hosted_sessions.serve(hosted_socket.clone()));
 
@@ -151,6 +160,11 @@ pub async fn run_network_daemon() -> Result<()> {
     // keeps its file.
     claim_bridge.abort();
     hosted_bridge.abort();
+    reachability.abort();
+    let _ = reachability.await;
+    if let Err(error) = hosted_client::network::remove_reachability(&heddle_home) {
+        tracing::warn!(%error, "removing device relay advertisement");
+    }
     endpoint.close().await;
     remove_endpoint_if_owned(&endpoint_path, &advertised);
     let _ = std::fs::remove_file(&claim_socket);

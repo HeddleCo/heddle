@@ -35,8 +35,10 @@ use repo::{Repository, RepositoryCapability, discover_heddle_root};
 use serde::Serialize;
 use sley::Repository as SleyRepository;
 
-use super::action_line::print_command;
-use super::next_action::{NextActionValidationContext, write_full_command_json};
+use super::{
+    action_line::print_command,
+    next_action::{NextActionValidationContext, write_full_command_json},
+};
 use crate::cli::{Cli, should_output_json, style};
 
 /// Which annotation surface is asking. Drives wording only; both surfaces
@@ -77,8 +79,10 @@ impl AnnotationSurface {
 
     fn first_step(self) -> &'static str {
         match self {
-            Self::Context => "heddle context set --path <path> --scope file -m \"...\"",
-            Self::Discuss => "heddle discuss open <file> <symbol> '<question>'",
+            Self::Context => "heddle context set --path <path> -m \"...\"",
+            Self::Discuss => {
+                "heddle discuss new --path <path> --symbol <symbol> --body \"<question>\""
+            }
         }
     }
 }

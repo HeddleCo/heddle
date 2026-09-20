@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use objects::{
     lock::RepositoryLockExt,
     object::{
-        Attribution, Blob, ChangeLineage, ContentHash, State, StateAttachment, StateAttachmentBody,
-        StateId, Tree, TreeEntry,
+        Attribution, Blob, ChangeId, ChangeLineage, ContentHash, State, StateAttachment,
+        StateAttachmentBody, StateId, Tree, TreeEntry,
     },
     store::{ObjectStore, SnapshotCommitArtifact, SnapshotCommitDescriptor, TreeWrite},
     worktree::WorktreeStatus,
@@ -22,7 +22,7 @@ use super::{
 };
 use crate::{
     WorktreeIndex,
-    atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute, execute_reconstructible},
+    atomic::{AtomicMutation, RewindLedger, StagedCommit, Tx, execute_reconstructible},
     fsmonitor::{ChangeMonitorSession, ChangeMonitorToken, MonitorStatus},
     thread_manifest::ManifestFile,
     worktree_ignore::WorktreeIgnoreMatcher,
@@ -152,16 +152,35 @@ struct SnapshotMutation<'a> {
     /// sidecar to that before-image if the batch fails to commit, so a rewound
     /// snapshot never leaves its auto-applied tier behind.
     staged_visibility_rewind: Option<(StateId, Option<Vec<u8>>)>,
+    /// The resolved per-entry visibility sidecar (v4 redactable trees) to stage
+    /// in this snapshot's batch, produced from queued `mark_*` calls during
+    /// `stage_snapshot_objects` once salts are minted. `apply` writes it and
+    /// folds an `EntryVisibilitySet` record in; `rewind` restores the before.
+    staged_entry_visibility: Option<objects::object::EntryVisibility>,
+    staged_entry_visibility_rewind: Option<(ChangeId, Option<Vec<u8>>)>,
     prepared_artifact: Option<PreparedSnapshotArtifact>,
     prepared_execution: Option<SnapshotExecution>,
+    /// The pre-v4-conversion (flat V3) worktree tree, kept only to revalidate
+    /// that the worktree did not change between prepare and commit. Revalidation
+    /// is a worktree-identity check and salts are lineage-derived, not
+    /// worktree-derived — so it runs entirely in V3 against this tree, never the
+    /// committed (possibly V4) tree. For a v3 spool this equals the committed
+    /// tree; for a v4 spool it is the flat tree the walker produced.
+    worktree_revalidation_tree: Option<Tree>,
     worktree_revalidation_files: Option<BTreeMap<String, ManifestFile>>,
     worktree_revalidation_cutoff_ns: Option<i64>,
     worktree_monitor_token: Option<ChangeMonitorToken>,
     known_worktree_changes: Option<WorktreeStatus>,
     require_worktree_change: bool,
+    /// Queued per-entry visibility marks for THIS capture. Drained once by the
+    /// public capture call (outside the retry loop) and cloned into each
+    /// attempt's mutation, so a retry that ultimately commits still carries the
+    /// sidecar rather than silently shipping the marked entry unredacted.
+    entry_visibility_marks: Vec<crate::EntryVisibilityMark>,
 }
 
 impl<'a> SnapshotMutation<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         repo: &'a Repository,
         source: SnapshotSource,
@@ -170,6 +189,7 @@ impl<'a> SnapshotMutation<'a> {
         head: Head,
         known_worktree_changes: Option<WorktreeStatus>,
         require_worktree_change: bool,
+        entry_visibility_marks: Vec<crate::EntryVisibilityMark>,
     ) -> Self {
         Self {
             repo,
@@ -179,13 +199,17 @@ impl<'a> SnapshotMutation<'a> {
             head,
             transaction_id: String::new(),
             staged_visibility_rewind: None,
+            staged_entry_visibility: None,
+            staged_entry_visibility_rewind: None,
             prepared_artifact: None,
             prepared_execution: None,
+            worktree_revalidation_tree: None,
             worktree_revalidation_files: None,
             worktree_revalidation_cutoff_ns: None,
             worktree_monitor_token: None,
             known_worktree_changes,
             require_worktree_change,
+            entry_visibility_marks,
         }
     }
 
@@ -281,6 +305,14 @@ impl AtomicMutation for SnapshotMutation<'_> {
             records.push(binding.record);
         }
 
+        // v4 redactable trees: fold the per-entry visibility sidecar into THIS
+        // batch so one `heddle undo` reverts the snapshot AND the sidecar.
+        if let Some(sidecar) = self.staged_entry_visibility.clone() {
+            let binding = self.repo.stage_entry_visibility_binding(&sidecar)?;
+            self.staged_entry_visibility_rewind = Some((sidecar.change_id, binding.prior_sidecar));
+            records.push(binding.record);
+        }
+
         Ok(StagedCommit::new(execution, records))
     }
 
@@ -292,6 +324,12 @@ impl AtomicMutation for SnapshotMutation<'_> {
         if let Some((state, prior)) = self.staged_visibility_rewind.take() {
             self.repo
                 .restore_state_visibility_sidecar(&state, prior)
+                .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?;
+        }
+        // Roll back the entry-visibility sidecar to its before-image too.
+        if let Some((change_id, prior)) = self.staged_entry_visibility_rewind.take() {
+            self.repo
+                .restore_entry_visibility_sidecar(&change_id, prior)
                 .map_err(|e| HeddleError::Io(std::io::Error::other(format!("{e:#}"))))?;
         }
         Ok(())
@@ -326,6 +364,7 @@ impl AtomicMutation for SnapshotMutation<'_> {
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::HeadUpdate { .. } => None,
         }) else {
             return Ok(this_run);
@@ -353,9 +392,15 @@ impl SnapshotMutation<'_> {
         if !matches!(&self.source, SnapshotSource::Worktree) {
             return Ok(true);
         }
-        let execution = self.prepared_execution.as_ref().ok_or_else(|| {
-            HeddleError::Config("snapshot revalidation reached an unprepared mutation".to_string())
-        })?;
+        #[cfg(test)]
+        if take_forced_revalidation_retry() {
+            return Ok(false);
+        }
+        if self.prepared_execution.is_none() {
+            return Err(HeddleError::Config(
+                "snapshot revalidation reached an unprepared mutation".to_string(),
+            ));
+        }
         if let Some(prepared_token) = self.worktree_monitor_token.as_ref() {
             let current = ChangeMonitorSession::prepare(
                 self.repo.root(),
@@ -371,15 +416,26 @@ impl SnapshotMutation<'_> {
         let cutoff_ns = self.worktree_revalidation_cutoff_ns.ok_or_else(|| {
             HeddleError::Config("snapshot preparation omitted its timestamp cutoff".to_string())
         })?;
-        Ok(self
-            .repo
-            .snapshot_worktree_fingerprint(&execution.tree, files, cutoff_ns)?
-            == execution.tree.hash())
+        // Revalidate against the flat V3 tree the walker produced, not the
+        // committed (possibly v4) tree. Worktree identity is scheme-independent;
+        // salts are lineage-derived and irrelevant to "did the worktree change".
+        let revalidation_tree = self.worktree_revalidation_tree.as_ref().ok_or_else(|| {
+            HeddleError::Config("snapshot preparation omitted its revalidation tree".to_string())
+        })?;
+        let walked =
+            self.repo
+                .snapshot_worktree_fingerprint(revalidation_tree, files, cutoff_ns)?;
+        Ok(walked.hash() == revalidation_tree.hash())
     }
 
     fn stage_snapshot_objects(&mut self) -> Result<SnapshotExecution> {
         debug!("Building tree from worktree");
-        let (tree, tree_profile, supplied_blobs) = match &self.source {
+        // Per-entry visibility marks for this capture. Owned by the mutation and
+        // drained ONCE by the caller outside the retry loop (never re-drained
+        // per attempt), so a retried-then-committed attempt still stages the
+        // sidecar instead of silently shipping the marked entry unredacted.
+        let pending_entry_visibility_marks = self.entry_visibility_marks.clone();
+        let (mut tree, tree_profile, mut supplied_blobs) = match &self.source {
             SnapshotSource::Worktree => {
                 let (tree, profile, revalidation_files, blobs, trees, monitor_token) =
                     self.build_worktree_tree()?;
@@ -400,9 +456,38 @@ impl SnapshotMutation<'_> {
                 )),
             ),
         };
-        #[cfg(feature = "tree-sitter-symbols")]
-        let mut supplied_blobs = supplied_blobs;
         debug!(duration_ms = tree_profile.tree_walk_ms, "Tree built");
+
+        // Keep the walker's flat V3 tree for prepare→commit worktree
+        // revalidation, which is scheme-agnostic and must not chase v4 salts.
+        if matches!(&self.source, SnapshotSource::Worktree) {
+            self.worktree_revalidation_tree = Some(tree.clone());
+        }
+
+        // All authored captures use salted commitments. The internal worktree
+        // fingerprint remains flat for revalidation; source trees inherit salts
+        // only from unchanged entries in the first-parent lineage.
+        let parent_root = match self.prev_head {
+            Some(id) => self
+                .repo
+                .store
+                .get_state(&id)?
+                .map(|state| self.repo.store.get_tree(&state.tree))
+                .transpose()?
+                .flatten(),
+            None => None,
+        };
+        let pending_trees = supplied_blobs
+            .as_ref()
+            .map(|(_, trees)| trees.as_slice())
+            .unwrap_or(&[]);
+        let (v4_root, v4_subtrees) =
+            self.repo
+                .v4ify_capture_tree(&tree, pending_trees, parent_root.as_ref())?;
+        tree = v4_root;
+        supplied_blobs
+            .get_or_insert_with(|| (Vec::new(), Vec::new()))
+            .1 = v4_subtrees.into_iter().map(TreeWrite::anchor).collect();
 
         if self.require_worktree_change && matches!(&self.source, SnapshotSource::Worktree) {
             let previous_tree = match self.prev_head {
@@ -631,6 +716,21 @@ impl SnapshotMutation<'_> {
             .filter(|(_, trees)| trees.len() <= 32)
             .map(|(_, trees)| trees.iter().map(|write| write.tree.clone()).collect())
             .unwrap_or_default();
+        // v4 redactable trees: resolve queued `mark_*` paths against the freshly
+        // salted trees (fail loud on an unresolvable path) and stash the sidecar
+        // for `apply` to fold into this snapshot's oplog batch.
+        if !pending_entry_visibility_marks.is_empty() {
+            let subtrees: Vec<Tree> = supplied_blobs
+                .as_ref()
+                .map(|(_, trees)| trees.iter().map(|write| write.tree.clone()).collect())
+                .unwrap_or_default();
+            self.staged_entry_visibility = self.repo.resolve_entry_visibility(
+                state.change_id,
+                &tree,
+                &subtrees,
+                &pending_entry_visibility_marks,
+            )?;
+        }
         if let Some((blobs, trees)) = supplied_blobs {
             let parent_tree = self
                 .prev_head
@@ -746,11 +846,23 @@ impl SnapshotMutation<'_> {
             manifest_context.as_ref().map(|(_, manifest)| manifest),
             self.known_worktree_changes.as_ref(),
         )?;
-        if self.require_worktree_change
-            && baseline_tree
-                .as_ref()
-                .is_some_and(|baseline| output.0.hash() == baseline.hash())
-        {
+        // Whether the incremental walk looks like a no-op vs the parent. The
+        // walker always emits a flat V3 tree; on a v4 spool the baseline is a V4
+        // tree, so comparing the two raw ids is V3-vs-V4 and NEVER equal — which
+        // would skip the authoritative re-walk below and weaken the
+        // `*_if_changed` fail-closed guarantee. Convert the walk output through
+        // the same sticky-salt path before comparing so the check is scheme-
+        // consistent (a genuine no-op reproduces the baseline id; a change or a
+        // failed conversion counts as "changed" and still triggers the re-walk).
+        let looks_unchanged = baseline_tree.as_ref().is_some_and(|baseline| {
+            self.repo
+                .v4ify_capture_tree(&output.0, &output.4, Some(baseline))
+                .map(|(v4_root, _)| v4_root.hash() == baseline.hash())
+                .unwrap_or(false)
+        });
+        if self.require_worktree_change && looks_unchanged {
+            #[cfg(test)]
+            note_authoritative_rewalk();
             // A usable monitor can legitimately have no event yet even though
             // the caller raced a just-written change. `*_if_changed` must fail
             // closed only after an authoritative walk, so retry the apparent
@@ -1049,6 +1161,7 @@ pub(crate) enum SnapshotFault {
     StageBeforeAtomicCommit,
     ArtifactCommitBeforeOplogView,
     AtomicCommitBeforeRefPublish,
+    NativeSourceRecordedBeforeRefPublish,
 }
 
 #[cfg(test)]
@@ -1113,6 +1226,59 @@ fn maybe_snapshot_fault(fault: SnapshotFault) {
     });
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Number of worktree revalidations to force-fail (return "changed") before
+    /// letting the real check run — simulates a prepare→commit race that drives
+    /// the retry loop, so a test can prove queued state (e.g. entry-visibility
+    /// marks) survives a retried-then-committed capture.
+    static FORCE_REVALIDATION_RETRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_forced_revalidation_retries<T>(retries: usize, body: impl FnOnce() -> T) -> T {
+    FORCE_REVALIDATION_RETRIES.with(|c| c.set(retries));
+    let out = body();
+    FORCE_REVALIDATION_RETRIES.with(|c| c.set(0));
+    out
+}
+
+#[cfg(test)]
+fn take_forced_revalidation_retry() -> bool {
+    FORCE_REVALIDATION_RETRIES.with(|c| {
+        let remaining = c.get();
+        if remaining > 0 {
+            c.set(remaining - 1);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Counts entries into the `*_if_changed` authoritative monitor-off re-walk
+    /// branch, so a test can prove it still runs on a v4 spool (the scheme-mixed
+    /// comparison used to skip it).
+    static AUTHORITATIVE_REWALK_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn note_authoritative_rewalk() {
+    AUTHORITATIVE_REWALK_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn authoritative_rewalk_count_reset() {
+    AUTHORITATIVE_REWALK_COUNT.with(|c| c.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn authoritative_rewalk_count() -> usize {
+    AUTHORITATIVE_REWALK_COUNT.with(|c| c.get())
+}
+
 const MAX_HEAD_CHANGE_ATTEMPTS: usize = 16;
 const MAX_HEAD_CONTENTION_BACKOFF_MS: u64 = 32;
 
@@ -1135,7 +1301,7 @@ impl Repository {
         tree: &Tree,
         files: &BTreeMap<String, ManifestFile>,
         racy_cutoff_ns: i64,
-    ) -> Result<ContentHash> {
+    ) -> Result<Tree> {
         let patterns = self.ignore_patterns()?;
         let nested_exclusions = self.nested_thread_worktree_exclusions(&self.root)?;
         let ignore_matcher = WorktreeIgnoreMatcher::new(&patterns)
@@ -1157,11 +1323,7 @@ impl Repository {
         .unwrap_or_default();
         let mut policy =
             SnapshotFingerprintPolicy::new(&self.root, files, racy_cutoff_ns, index, monitor);
-        Ok(
-            walk_worktree(self, &self.root, &ignore_matcher, Some(tree), &mut policy)?
-                .tree
-                .hash(),
-        )
+        Ok(walk_worktree(self, &self.root, &ignore_matcher, Some(tree), &mut policy)?.tree)
     }
 
     /// Create a snapshot of the current worktree.
@@ -1251,6 +1413,31 @@ impl Repository {
         )
     }
 
+    /// Whether this checkout's materialization withheld content. This is an
+    /// indexed-by-root marker lookup, independent of cached trees and sibling
+    /// checkouts. Only completing a full materialization clears the guard.
+    pub fn is_incomplete_checkout(&self) -> Result<bool> {
+        Ok(crate::thread_manifest::is_withheld_checkout(
+            self.heddle_dir(),
+            &std::fs::canonicalize(self.root())?,
+        )?)
+    }
+
+    /// Fail loud if this is a partial clone (P4). Capture cannot re-author a
+    /// tip whose closure withholds leaves the operator never received; doing so
+    /// would drop the withheld entries.
+    fn require_complete_checkout(&self) -> Result<()> {
+        if self.is_incomplete_checkout()? {
+            return Err(HeddleError::RedactedTree(
+                "cannot capture an incomplete checkout: it withholds \
+                 entries that are not materialized, so a capture would silently drop \
+                 them. Materialize a complete checkout before capturing."
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn snapshot_with_attribution_and_lineage(
         &self,
         intent: Option<String>,
@@ -1279,17 +1466,39 @@ impl Repository {
         mut known_worktree_changes: Option<WorktreeStatus>,
         require_worktree_change: bool,
     ) -> Result<SnapshotExecution> {
+        // Receiving full bytes alone cannot turn withheld files into authored
+        // deletions. Capture resumes only after a complete materialization.
+        self.require_complete_checkout()?;
+
         const MAX_WORKTREE_CHANGE_ATTEMPTS: usize = 4;
         let mut worktree_change_attempts = 0;
         let mut head_change_attempts = 0;
+        // Drain queued entry-visibility marks ONCE, outside the retry loop, so a
+        // head-contention or revalidation retry that ultimately commits still
+        // carries the sidecar (draining inside `prepare` per attempt dropped it
+        // on retry and shipped the marked entry unredacted).
+        let entry_visibility_marks = self.take_pending_entry_visibility_marks();
         loop {
             let (head, prev_head) = {
                 let _lock = self
                     .locker()
                     .write()
                     .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
+                self.require_attached_native_source_signer()?;
+                self.require_complete_checkout()?;
 
                 if let Some(merge_state) = self.merge_state_manager().load()? {
+                    // A merge capture builds its own tree and never runs the
+                    // v4 salt/sidecar path, so pending entry-visibility marks
+                    // would silently attach to nothing. Fail loud (re-mark
+                    // after the merge is a fine v1 semantic).
+                    if !entry_visibility_marks.is_empty() {
+                        return Err(HeddleError::Config(
+                            "entry-visibility marks cannot be applied to a merge capture; \
+                             re-mark after the merge completes"
+                                .to_string(),
+                        ));
+                    }
                     let unresolved: Vec<_> = merge_state
                         .conflicts
                         .iter()
@@ -1335,6 +1544,8 @@ impl Repository {
                     let tree = self.store.get_tree(&state.tree)?.ok_or_else(|| {
                         HeddleError::NotFound("merge snapshot tree missing".to_string())
                     })?;
+                    self.record_attached_native_source(state.id())
+                        .map_err(|error| HeddleError::Config(error.to_string()))?;
                     return Ok(SnapshotExecution {
                         state,
                         tree,
@@ -1359,6 +1570,7 @@ impl Repository {
                 head.clone(),
                 known_worktree_changes.clone(),
                 require_worktree_change,
+                entry_visibility_marks.clone(),
             );
             mutation.prepare()?;
 
@@ -1411,6 +1623,21 @@ impl Repository {
             #[cfg(test)]
             maybe_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish);
 
+            // Admit on the native Thread before the ref moves. The Thread is the
+            // authority for admitted revisions and a capture's parents must
+            // already be admitted, so a ref that got ahead of admission (crash
+            // after publish, before record) would wedge every later capture on
+            // "parent has no admitted native operation". The reverse crash leaves
+            // an admitted operation the ref never reached: the retry captures
+            // from the unmoved ref as a sibling, and recording is idempotent when
+            // it reproduces the same State. Covered by
+            // `native_admission_before_ref_publish_survives_a_crash_between_them`.
+            if let Head::Attached { thread } = &head {
+                self.record_native_source(thread.as_ref(), execution.state.id())
+                    .map_err(|error| HeddleError::Config(error.to_string()))?;
+            }
+            #[cfg(test)]
+            maybe_snapshot_fault(SnapshotFault::NativeSourceRecordedBeforeRefPublish);
             let ref_publish_started = std::time::Instant::now();
             reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
             execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
@@ -1477,9 +1704,10 @@ impl Repository {
         confidence: Option<f32>,
         attribution: Attribution,
     ) -> Result<SnapshotExecution> {
-        let authoritative_artifact =
-            matches!(&source, SnapshotSource::SuppliedTreeWithBlobs { .. });
         let mut head_change_attempts = 0;
+        // Drain queued entry-visibility marks ONCE (see the worktree loop) so a
+        // head-contention retry that commits still stages the sidecar.
+        let entry_visibility_marks = self.take_pending_entry_visibility_marks();
         loop {
             let (head, prev_head) = {
                 let _lock = self
@@ -1487,6 +1715,7 @@ impl Repository {
                     .write()
                     .map_err(|e| HeddleError::Io(std::io::Error::other(e.to_string())))?;
                 reject_unresolved_snapshot_merge(self)?;
+                self.require_attached_native_source_signer()?;
                 (self.head_ref()?, self.head()?)
             };
             let mut mutation = SnapshotMutation::new(
@@ -1502,6 +1731,7 @@ impl Repository {
                 head.clone(),
                 None,
                 false,
+                entry_visibility_marks.clone(),
             );
             mutation.prepare()?;
 
@@ -1518,29 +1748,22 @@ impl Repository {
             }
 
             let atomic_execute_started = std::time::Instant::now();
-            let (mut execution, committed_tip) = if authoritative_artifact {
-                let committed =
-                    execute_reconstructible(self, mutation, |mutation, base_head_id, records| {
-                        mutation.install_prepared_artifact(base_head_id, records)
-                    })?;
-                let committed_tip = committed.committed_tip;
-                let mut output = committed.output;
-                if let Some((descriptor, artifact_write_ms)) = committed.artifact {
-                    output.profile.blob_write_ms = artifact_write_ms;
-                    debug!(
-                        pack = %descriptor.pack_name,
-                        path = %descriptor.pack_path.display(),
-                        objects = descriptor.object_ids.len(),
-                        state = %descriptor.artifact.state,
-                        "structured snapshot committed through authoritative pack artifact"
-                    );
-                }
-                (output, committed_tip)
-            } else {
-                let output = execute(self, mutation)?;
-                let committed_tip = self.oplog().head_id()?;
-                (output, committed_tip)
-            };
+            let committed =
+                execute_reconstructible(self, mutation, |mutation, base_head_id, records| {
+                    mutation.install_prepared_artifact(base_head_id, records)
+                })?;
+            let committed_tip = committed.committed_tip;
+            let mut execution = committed.output;
+            if let Some((descriptor, artifact_write_ms)) = committed.artifact {
+                execution.profile.blob_write_ms = artifact_write_ms;
+                debug!(
+                    pack = %descriptor.pack_name,
+                    path = %descriptor.pack_path.display(),
+                    objects = descriptor.object_ids.len(),
+                    state = %descriptor.artifact.state,
+                    "structured snapshot committed through authoritative pack artifact"
+                );
+            }
             execution.profile.atomic_execute_ms = atomic_execute_started.elapsed().as_millis();
 
             objects::fault_inject::maybe_panic_at(
@@ -1549,6 +1772,21 @@ impl Repository {
             #[cfg(test)]
             maybe_snapshot_fault(SnapshotFault::AtomicCommitBeforeRefPublish);
 
+            // Admit on the native Thread before the ref moves. The Thread is the
+            // authority for admitted revisions and a capture's parents must
+            // already be admitted, so a ref that got ahead of admission (crash
+            // after publish, before record) would wedge every later capture on
+            // "parent has no admitted native operation". The reverse crash leaves
+            // an admitted operation the ref never reached: the retry captures
+            // from the unmoved ref as a sibling, and recording is idempotent when
+            // it reproduces the same State. Covered by
+            // `native_admission_before_ref_publish_survives_a_crash_between_them`.
+            if let Head::Attached { thread } = &head {
+                self.record_native_source(thread.as_ref(), execution.state.id())
+                    .map_err(|error| HeddleError::Config(error.to_string()))?;
+            }
+            #[cfg(test)]
+            maybe_snapshot_fault(SnapshotFault::NativeSourceRecordedBeforeRefPublish);
             let ref_publish_started = std::time::Instant::now();
             reconcile_snapshot_ref(self, &head, &execution.state, committed_tip)?;
             execution.profile.ref_publish_ms = ref_publish_started.elapsed().as_millis();
@@ -1625,12 +1863,50 @@ impl Repository {
         fold_default_visibility: bool,
         transaction_id: Option<&str>,
     ) -> Result<State> {
+        self.require_attached_native_source_signer()?;
+        self.require_complete_checkout()?;
+        // Merge capture seals its own salted tree but does not apply queued
+        // sidecar declarations; entry-visibility marks would silently
+        // attach to nothing. Fail loud so they are never dropped (the worktree
+        // locked path already guards before reaching here for its own drained
+        // copy; this covers direct callers of the merge entry points).
+        if !self.take_pending_entry_visibility_marks().is_empty() {
+            return Err(HeddleError::Config(
+                "entry-visibility marks cannot be applied to a merge capture; \
+                 re-mark after the merge completes"
+                    .to_string(),
+            ));
+        }
         let tree = self.build_tree(&self.root)?;
-        let tree_hash = self.store.put_tree(&tree)?;
 
         let first_parent = self
             .head()?
             .ok_or_else(|| HeddleError::NotFound("No current state".to_string()))?;
+
+        // Leg 2.5: on a v4 spool, convert the merge tip through the same
+        // sticky-salt path with parent = the FIRST parent's tree, so entries
+        // unchanged from the first-parent lineage inherit its salts (leaf-stable
+        // across merges — embargo-carry) and new/changed mint fresh. `build_tree`
+        // wrote flat V3 subtrees to the store; conversion resolves them via the
+        // store fallback, produces V4 subtrees, and we persist those. Entry
+        // marks are NOT supported on a merge (guarded above); this converts the
+        // tip tree only.
+        let tree = {
+            let first_parent_tree = self
+                .store
+                .get_state(&first_parent)?
+                .map(|state| self.store.get_tree(&state.tree))
+                .transpose()?
+                .flatten();
+            let (v4_root, v4_subtrees) =
+                self.v4ify_capture_tree(&tree, &[], first_parent_tree.as_ref())?;
+            for subtree in &v4_subtrees {
+                self.store.put_tree(subtree)?;
+            }
+            v4_root
+        };
+        let tree_hash = self.store.put_tree(&tree)?;
+
         let parents = vec![first_parent, *merge_parent];
 
         let mut state = State::new_merge(tree_hash, parents, details.attribution);
@@ -1684,6 +1960,10 @@ impl Repository {
                 supersedes: None,
             })?;
         }
+        // Admit before the ref moves, for the reason given at the worktree
+        // capture sites: a ref ahead of native admission wedges later captures.
+        self.record_attached_native_source(state.id())
+            .map_err(|error| HeddleError::Config(error.to_string()))?;
 
         let head = self.head_ref()?;
         let thread = match &head {

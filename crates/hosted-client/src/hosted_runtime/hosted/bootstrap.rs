@@ -10,7 +10,7 @@ use api::{
         DescriptorSetError, EndpointDescriptorSetDocument, VerifiedEndpoint,
         parse_endpoint_descriptor_set,
     },
-    heddle::api::v1alpha1::{EndpointDescriptor, SignedEndpointDescriptor},
+    heddle::api::common::{EndpointDescriptor, SignedEndpointDescriptor},
     signing::endpoint_descriptor_bytes,
 };
 use config::ClientConfig;
@@ -110,27 +110,17 @@ pub struct VerifiedEndpointDescriptor(EndpointDescriptor);
 
 impl VerifiedEndpointDescriptor {
     pub fn endpoint_addr(&self) -> Result<EndpointAddr> {
-        self.endpoint_addr_with_relays(true)
-    }
-
-    pub(super) fn direct_endpoint_addr(&self) -> Result<EndpointAddr> {
-        self.endpoint_addr_with_relays(false)
-    }
-
-    fn endpoint_addr_with_relays(&self, include_relays: bool) -> Result<EndpointAddr> {
         let endpoint_id: EndpointId = self
             .0
             .endpoint_id
             .parse()
             .map_err(|error| HostedError::InvalidDescriptor(format!("endpoint id: {error}")))?;
         let mut address = EndpointAddr::new(endpoint_id);
-        if include_relays {
-            for relay in &self.0.relay_urls {
-                let relay: RelayUrl = relay.parse().map_err(|error| {
-                    HostedError::InvalidDescriptor(format!("relay URL: {error}"))
-                })?;
-                address = address.with_relay_url(relay);
-            }
+        for relay in &self.0.relay_urls {
+            let relay: RelayUrl = relay
+                .parse()
+                .map_err(|error| HostedError::InvalidDescriptor(format!("relay URL: {error}")))?;
+            address = address.with_relay_url(relay);
         }
         for direct in &self.0.direct_addresses {
             let direct: SocketAddr = direct.parse().map_err(|error| {
@@ -272,6 +262,10 @@ async fn bootstrap_http_client(
     config: &ClientConfig,
 ) -> Result<(Client, reqwest::Url, Option<HeaderValue>)> {
     heddle_perf_contract::record_network_client_initialization();
+    // Library callers (including the lazy worker) do not run the CLI's main.
+    // Reuse ring already selected by this crate, preserving a caller-installed
+    // provider when present; reqwest's no-provider build otherwise panics.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let mut builder = Client::builder()
         .timeout(Duration::from_secs(config.timeout_secs.max(1)))
         .redirect(Policy::none());
@@ -437,6 +431,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_server_name_override_preserves_the_network_target_and_http_authority() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let target = bootstrap_target("https://127.0.0.1:8421/descriptor", Some("localhost"))
             .await
             .unwrap();
@@ -450,6 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn descriptor_bootstrap_consumes_the_configured_ca_bundle_before_network_io() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let config = ClientConfig::default().with_tls_ca_certificate_pem("not a PEM certificate");
         let error = fetch_ephemeral_descriptor_set(
             "https://127.0.0.1:1/.well-known/heddle/iroh-endpoint",
