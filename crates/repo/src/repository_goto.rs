@@ -578,7 +578,7 @@ mod tests {
             repo.worktree_matches_state(&state.id())
                 .expect("clean salted source")
         );
-        fs::write(temp.path().join("src/lib.rs"), b"edited").expect("edit source");
+        fs::write(temp.path().join("src/lib.rs"), b"edited source").expect("edit source");
         assert!(
             !repo
                 .worktree_matches_state(&state.id())
