@@ -34,7 +34,7 @@ getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 heddle-api = { package = "heddle-api", version = "0.31.0-alpha.1" }
-heddleco-capability-verifier = { path = "../capability-verifier", version = "0.20.0" }
+heddleco-capability-verifier = { path = "../capability-verifier" }
 prost-types.workspace = true
 proptest.workspace = true
 
