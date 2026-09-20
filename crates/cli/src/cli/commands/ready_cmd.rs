@@ -60,7 +60,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     }
 
     let repo = Repository::open(start)?;
-    if args.dry_run {
+    if args.dry_run.enabled() {
         return emit_ready_dry_run(cli, &repo, &args);
     }
     let user_config = UserConfig::load_default().unwrap_or_default();

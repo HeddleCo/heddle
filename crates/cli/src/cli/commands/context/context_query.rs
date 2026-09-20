@@ -22,7 +22,7 @@ use super::{
 };
 use crate::cli::{
     Cli,
-    cli_args::ContextGetArgs,
+    cli_args::{ContextGetArgs, split_path_and_revision},
     commands::{
         RecoveryAdvice,
         native_scope::{
@@ -80,8 +80,14 @@ pub async fn cmd_context_get(cli: &Cli, args: &ContextGetArgs) -> Result<()> {
     let Some(repo) = open_for_read(cli, "context_get", false)? else {
         return Ok(());
     };
-    let state_obj = resolve_state(&repo, args.r#ref.as_deref())?;
-    let target = super::resolve_target(&repo, args.target.path.clone(), args.target.state.clone())?;
+    let (file, state_target, historical) =
+        split_path_and_revision(args.scope.path.as_deref(), args.revision.state.as_deref());
+    let state_obj = resolve_state(&repo, historical)?;
+    let target = super::resolve_target(
+        &repo,
+        file.map(str::to_owned),
+        state_target.map(str::to_owned),
+    )?;
     let Some(context_root) = context_root_for_state(&repo, &state_obj)? else {
         return print_context_get(cli, &target, Vec::new());
     };
@@ -89,11 +95,7 @@ pub async fn cmd_context_get(cli: &Cli, args: &ContextGetArgs) -> Result<()> {
     let blob = repo.get_context_blob(&context_root, &target)?;
     let empty = objects::object::ContextBlob::new(vec![]);
     let blob_ref = blob.as_ref().unwrap_or(&empty);
-    let scope_filter = scope_from_flags(
-        args.anchor.symbol.as_deref(),
-        args.anchor.line,
-        args.anchor.scope.as_deref(),
-    )?;
+    let scope_filter = scope_from_flags(args.scope.symbol.as_deref(), args.scope.line, None)?;
     let annotations = filter_annotations(
         &blob_ref.annotations,
         scope_filter.as_ref(),
@@ -102,12 +104,11 @@ pub async fn cmd_context_get(cli: &Cli, args: &ContextGetArgs) -> Result<()> {
     );
 
     let scope_log = args
-        .anchor
+        .scope
         .symbol
         .as_deref()
         .map(|name| format!("symbol:{name}"))
-        .or_else(|| args.anchor.line.map(|line| format!("lines:{line}-{line}")))
-        .or_else(|| args.anchor.scope.clone());
+        .or_else(|| args.scope.line.map(|line| format!("lines:{line}-{line}")));
     let _ = target
         .path()
         .map(|path| log_context_query_if_agent_session(&repo, path, scope_log.as_deref()));

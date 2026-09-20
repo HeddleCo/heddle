@@ -26,9 +26,8 @@ pub struct PromoteArgs {
     #[arg(value_name = "PATH")]
     pub path: String,
 
-    /// Hosted Heddle server. Omit when `PATH` is a URL, or to use the configured default.
-    #[arg(long)]
-    pub server: Option<String>,
+    #[command(flatten)]
+    pub server: super::HostedServerArgs,
 }
 
 /// Offer the current agent-rooted account for a human to claim.
@@ -323,9 +322,8 @@ pub struct GrantCreateArgs {
     #[arg(long, value_enum)]
     pub role: GrantRoleArg,
 
-    /// Hosted Heddle server. Omit when `--spool` is a URL, or to use the configured default.
-    #[arg(long)]
-    pub server: Option<String>,
+    #[command(flatten)]
+    pub server: super::HostedServerArgs,
 }
 
 /// Arguments for `heddle grant list`.
@@ -335,25 +333,23 @@ pub struct GrantListArgs {
     #[arg(long, value_name = "PATH|URL")]
     pub spool: String,
 
-    /// Hosted Heddle server. Omit when `--spool` is a URL, or to use the configured default.
-    #[arg(long)]
-    pub server: Option<String>,
+    #[command(flatten)]
+    pub server: super::HostedServerArgs,
 }
 
 /// Arguments for `heddle grant delete`.
 #[derive(Args, Clone, Debug)]
 pub struct GrantDeleteArgs {
-    /// Principal shown as `ID` by `heddle grant list`.
-    #[arg(value_name = "ID")]
+    /// Grant record ID shown as `GRANT_ID` by `heddle grant list`.
+    #[arg(value_name = "GRANT_ID")]
     pub id: String,
 
     /// Spool the grant is on (`spool/<handle>/<name>`, `<handle>/<name>`, or a hosted URL).
     #[arg(long, value_name = "PATH|URL")]
     pub spool: String,
 
-    /// Hosted Heddle server. Omit when `--spool` is a URL, or to use the configured default.
-    #[arg(long)]
-    pub server: Option<String>,
+    #[command(flatten)]
+    pub server: super::HostedServerArgs,
 }
 
 #[derive(Subcommand, Clone, Debug)]
@@ -531,7 +527,7 @@ mod tests {
             panic!("expected top-level promote");
         };
         assert_eq!(args.path, "spool/willow-ibis-8e7264/notes");
-        assert_eq!(args.server.as_deref(), Some("api.preview.heddle.sh"));
+        assert_eq!(args.server.server.as_deref(), Some("api.preview.heddle.sh"));
         assert!(Cli::try_parse_from(["heddle", "promote"]).is_err());
     }
 
@@ -749,7 +745,7 @@ mod tests {
         assert_eq!(args.principal, "alice");
         assert_eq!(args.role, GrantRoleArg::Writer);
         assert_eq!(args.role.as_resource_role_name(), "writer");
-        assert_eq!(args.server.as_deref(), Some("api.preview.heddle.sh"));
+        assert_eq!(args.server.server.as_deref(), Some("api.preview.heddle.sh"));
     }
 
     #[test]
@@ -771,7 +767,7 @@ mod tests {
             panic!("expected grant list");
         };
         assert_eq!(args.spool, "notes");
-        assert_eq!(args.server.as_deref(), Some("api.preview.heddle.sh"));
+        assert_eq!(args.server.server.as_deref(), Some("api.preview.heddle.sh"));
 
         let delete = Cli::try_parse_from([
             "heddle",

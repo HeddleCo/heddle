@@ -5,9 +5,8 @@ use clap::{Args, Subcommand};
 
 use super::{
     CollapseArgs, ExpandArgs, ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs,
-    ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs,
-    ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs,
-    ThreadShowArgs,
+    ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadCheckoutArgs, ThreadDropArgs, ThreadMoveArgs,
+    ThreadNameArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs,
 };
 
 #[derive(Subcommand, Clone)]
@@ -17,7 +16,7 @@ pub enum ThreadCommands {
 Advanced split form:
   heddle start <name> --path <dir> is the normal one-step isolated-checkout path.
   heddle thread create <name> only creates the thread ref. Pair it later with
-  heddle thread promote <name> --path <dir> when you intentionally need to
+  heddle thread checkout <name> --path <dir> when you intentionally need to
   create the ref now and materialize the checkout later.
 ")]
     Create {
@@ -57,11 +56,9 @@ Advanced split form:
     },
 
     /// Print the on-disk path for a thread. Read-only — no state change,
-    /// no auto-capture. Pair with the shell hook (`heddle shell init`)
-    /// to land in the right directory:
-    ///   eval "$(heddle thread cd X)"
-    /// Or use the shell function directly: `heddle thread cd X` becomes
-    /// `cd <path>` when the hook is installed.
+    /// no auto-capture. Without a shell hook:
+    ///   cd "$(heddle thread cd X)"
+    /// With `heddle shell init`, `heddle thread cd X` becomes `cd <path>`.
     Cd {
         /// Thread identifier.
         name: String,
@@ -97,15 +94,14 @@ Advanced split form:
         command: ThreadOwnershipCommands,
     },
 
-    /// Materialize an existing thread ref at a chosen path.
+    /// Create a working checkout for this thread.
     #[command(after_help = "\
-Advanced split form:
-  heddle start <name> --path <dir> creates the thread ref and isolated checkout
-  in one step. `thread promote` is the second step after
-  `heddle thread create <name>` when you intentionally created the ref first
-  and want to materialize it later.
+`heddle start <name>` is the one-step default: it creates the thread ref and
+isolated checkout together. `thread checkout <name> --path <dir>` is the
+second step after `heddle thread create <name>` when you intentionally
+created the ref first and want to materialize it later.
 ")]
-    Promote(ThreadPromoteArgs),
+    Checkout(ThreadCheckoutArgs),
 
     /// Drop a thread and mark it abandoned.
     #[command(visible_alias = "delete")]

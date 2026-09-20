@@ -367,7 +367,8 @@ fn bootstrap_op_id_scope(cli: &Cli) -> Result<BootstrapOpIdScope> {
         crate::cli::Commands::Clone(args) => {
             let cwd = std::env::current_dir()
                 .context("resolve current directory for clone op-id scope")?;
-            Some(absolutize_clone_destination(&args.local, &cwd))
+            let local = args.destination_dir().map_err(|err| anyhow::anyhow!(err))?;
+            Some(absolutize_clone_destination(&local, &cwd))
         }
         _ => cli.repo.clone(),
     }

@@ -28,10 +28,8 @@ use cli::cli::{
 };
 use cli::{
     cli::{
-        Cli, CloneArgs, Commands, ContextCommands, DaemonCommands, DiffArgs, IntegrationCommands,
-        LogArgs, MaintenanceCommands, NetdCommands, ResolveArgs, RevertArgs, ThreadCommands,
-        UndoArgs,
-        cli_args::LandArgs,
+        Cli, Commands, ContextCommands, DaemonCommands, DiffArgs, IntegrationCommands, LogArgs,
+        MaintenanceCommands, NetdCommands, ResolveArgs, RevertArgs, ThreadCommands, UndoArgs,
         commands::{
             LogCommandOptions, SnapshotAgentOverrides, build_command_catalog, cmd_abort, cmd_adopt,
             cmd_agent, cmd_blame, cmd_capture_split, cmd_clone, cmd_complete, cmd_completions,
@@ -160,7 +158,7 @@ async fn async_main() -> Result<()> {
             if raw_wants_json(&raw) {
                 write_json_stdout(&build_command_catalog())?;
             } else {
-                cli::cli::help::print_help(&Cli::command(), &[])?;
+                cli::cli::help::print_help(&Cli::command(), &[], false)?;
             }
             if profile {
                 emit_command_profile(
@@ -432,14 +430,14 @@ async fn async_main() -> Result<()> {
             cli::cli::ImportCommands::Retry(retry) => cmd_import_retry(&cli, retry.clone()).await,
         },
 
-        Commands::Help { topics } => {
+        Commands::Help { all, topics } => {
             // Curated help printer. No op-id (read-only), no
             // structured output unless explicitly asked to print the
             // command catalog.
             if explicit_json_requested(&cli) {
                 write_json_stdout(&build_command_catalog())
             } else {
-                cli::cli::help::print_help(&Cli::command(), topics).map_err(Into::into)
+                cli::cli::help::print_help(&Cli::command(), topics, *all).map_err(Into::into)
             }
         }
 
@@ -495,25 +493,7 @@ async fn async_main() -> Result<()> {
 
         Commands::Abort => cmd_abort(&cli),
 
-        Commands::Land(LandArgs {
-            thread,
-            threads,
-            message,
-            no_squash,
-            dry_run,
-        }) => {
-            cmd_land(
-                &cli,
-                LandArgs {
-                    thread: thread.clone(),
-                    threads: threads.clone(),
-                    message: message.clone(),
-                    no_squash: *no_squash,
-                    dry_run: *dry_run,
-                },
-            )
-            .await
-        }
+        Commands::Land(args) => cmd_land(&cli, args.clone()).await,
 
         Commands::Ready(args) => cmd_ready(&cli, args.clone()).await,
 
@@ -578,9 +558,12 @@ async fn async_main() -> Result<()> {
 
         Commands::Show { state } => cmd_show(&cli, state.clone()),
 
-        Commands::Blame(args) => {
-            cmd_blame(&cli, args.path.clone(), args.state.clone(), args.context)
-        }
+        Commands::Blame(args) => cmd_blame(
+            &cli,
+            args.path.clone(),
+            args.revision.state.clone(),
+            args.context,
+        ),
 
         Commands::Diff(DiffArgs {
             from,
@@ -619,7 +602,7 @@ async fn async_main() -> Result<()> {
             steps,
             list,
             depth,
-            preview,
+            dry_run,
             hard,
             redo,
             recover,
@@ -628,14 +611,14 @@ async fn async_main() -> Result<()> {
             if *recover {
                 cmd_undo_recover(&cli)
             } else if *redo {
-                cmd_redo(&cli, *steps, *preview)
+                cmd_redo(&cli, *steps, dry_run.enabled())
             } else {
                 cmd_undo(
                     &cli,
                     *steps,
                     *list,
                     *depth,
-                    *preview,
+                    dry_run.enabled(),
                     *hard,
                     *allow_redact_undo,
                 )
@@ -680,7 +663,7 @@ async fn async_main() -> Result<()> {
                 args.force,
                 args.all_threads,
                 args.insecure,
-                args.dry_run,
+                args.dry_run.enabled(),
             )
             .await
         }
@@ -739,50 +722,64 @@ async fn async_main() -> Result<()> {
                     &cli,
                     args.prefix.clone(),
                     args.tag.clone(),
-                    args.r#ref.clone(),
+                    args.revision.state.clone(),
                     args.include_superseded,
                 )
                 .await
             }
             ContextCommands::History(args) => {
+                let (file, state_target, historical) = cli::cli::split_path_and_revision(
+                    args.scope.path.as_deref(),
+                    args.revision.state.as_deref(),
+                );
                 cmd_context_history(
                     &cli,
                     args.annotation_id.clone(),
-                    args.target.path.clone(),
-                    args.target.state.clone(),
-                    args.r#ref.clone(),
+                    file.map(str::to_owned),
+                    state_target.map(str::to_owned),
+                    historical.map(str::to_owned),
                 )
                 .await
             }
             ContextCommands::Edit(args) => {
+                let (file, state_target, _) = cli::cli::split_path_and_revision(
+                    args.scope.path.as_deref(),
+                    args.revision.state.as_deref(),
+                );
                 cmd_context_edit(
                     &cli,
                     args.annotation_id.clone(),
-                    args.target.path.clone(),
-                    args.target.state.clone(),
+                    file.map(str::to_owned),
+                    state_target.map(str::to_owned),
                     args.kind.clone(),
                     args.tag.clone(),
-                    args.message.clone(),
-                    args.file.clone(),
+                    args.message.body.clone(),
+                    args.message.file.clone(),
                 )
                 .await
             }
             ContextCommands::Supersede(args) => cmd_context_supersede(&cli, args).await,
             ContextCommands::Rm(args) => cmd_context_rm(&cli, args).await,
             ContextCommands::Check(args) => {
+                let (file, state_target, historical) = cli::cli::split_path_and_revision(
+                    args.scope.path.as_deref(),
+                    args.revision.state.as_deref(),
+                );
                 cmd_context_check(
                     &cli,
-                    args.path.clone(),
-                    args.state.clone(),
+                    file.map(str::to_owned),
+                    state_target.map(str::to_owned),
                     args.tag.clone(),
-                    args.r#ref.clone(),
+                    historical.map(str::to_owned),
                 )
                 .await
             }
             ContextCommands::Suggest(args) => {
-                cmd_context_suggest(&cli, args.r#ref.clone(), args.limit).await
+                cmd_context_suggest(&cli, args.revision.state.clone(), args.limit).await
             }
-            ContextCommands::Audit(args) => cmd_context_audit(&cli, args.r#ref.clone()).await,
+            ContextCommands::Audit(args) => {
+                cmd_context_audit(&cli, args.revision.state.clone()).await
+            }
             #[cfg(all(feature = "git-overlay", feature = "ingest"))]
             ContextCommands::Reason { command } => match command {
                 cli::cli::cli_args::ContextReasonCommands::Git(args) => cmd_context_reason_git(
@@ -794,7 +791,7 @@ async fn async_main() -> Result<()> {
                     args.claude_home.clone(),
                     args.codex_home.clone(),
                     args.opencode_home.clone(),
-                    args.dry_run,
+                    args.dry_run.enabled(),
                 ),
             },
         },
@@ -834,26 +831,19 @@ async fn async_main() -> Result<()> {
 
         Commands::Maintenance { command } => cmd_maintenance(&cli, command.clone()),
 
-        Commands::Clone(CloneArgs {
-            remote,
-            local,
-            thread,
-            depth,
-            lazy,
-            filter,
-            recursive,
-            insecure,
-        }) => {
+        Commands::Clone(args) => {
+            let local = args.destination_dir().map_err(|err| anyhow::anyhow!(err))?;
             cmd_clone(
                 &cli,
-                remote.clone(),
-                local.clone(),
-                thread.clone(),
-                *depth,
-                *lazy,
-                filter.clone(),
-                *recursive,
-                *insecure,
+                args.remote.clone(),
+                local,
+                args.thread.clone(),
+                args.depth,
+                args.lazy,
+                args.filter.clone(),
+                args.recursive,
+                args.insecure,
+                args.source,
             )
             .await
         }
@@ -1248,7 +1238,7 @@ fn schema_verb_from_raw_path(path: &[String], raw: &[String]) -> String {
 /// below covers each mode and its mutating sibling.
 fn invocation_is_observe_only(command: &Commands) -> bool {
     match command {
-        Commands::Undo(args) => args.list || args.preview,
+        Commands::Undo(args) => args.list || args.dry_run.enabled(),
         Commands::Resolve(args) => args.list,
         Commands::Maintenance {
             command: MaintenanceCommands::Fsck(args),
@@ -1256,11 +1246,11 @@ fn invocation_is_observe_only(command: &Commands) -> bool {
             &args.command,
             Some(cli::cli::FsckCommands::Repair {
                 target: cli::cli::FsckRepairCommands::Git(args)
-            }) if args.preview
+            }) if args.dry_run.enabled()
         ),
         Commands::Thread {
             command: ThreadCommands::Absorb(args),
-        } => args.preview,
+        } => args.dry_run.enabled(),
         Commands::Thread {
             command: ThreadCommands::Cleanup(args),
         } => args.dry_run,
@@ -1273,7 +1263,7 @@ fn invocation_is_observe_only(command: &Commands) -> bool {
                 ContextCommands::Reason {
                     command: cli::cli::cli_args::ContextReasonCommands::Git(args),
                 },
-        } => args.dry_run,
+        } => args.dry_run.enabled(),
         _ => false,
     }
 }
@@ -1327,9 +1317,9 @@ mod tests {
     fn recovery_gate_covers_every_flag_controlled_observe_only_mode_and_mutating_sibling() {
         let cases: &[(&[&str], bool)] = &[
             (&["heddle", "undo", "--list"], true),
-            (&["heddle", "undo", "--preview"], true),
+            (&["heddle", "undo", "--dry-run"], true),
             (&["heddle", "undo"], false),
-            (&["heddle", "undo", "--redo", "--preview"], true),
+            (&["heddle", "undo", "--redo", "--dry-run"], true),
             (&["heddle", "undo", "--redo"], false),
             (&["heddle", "resolve", "--list"], true),
             (&["heddle", "resolve", "--all"], false),
@@ -1340,7 +1330,7 @@ mod tests {
                     "fsck",
                     "repair",
                     "git",
-                    "--preview",
+                    "--dry-run",
                 ],
                 true,
             ),
@@ -1356,7 +1346,7 @@ mod tests {
                 ],
                 false,
             ),
-            (&["heddle", "thread", "absorb", "child", "--preview"], true),
+            (&["heddle", "thread", "absorb", "child", "--dry-run"], true),
             (&["heddle", "thread", "absorb", "child"], false),
             (
                 &["heddle", "thread", "cleanup", "--merged", "--dry-run"],

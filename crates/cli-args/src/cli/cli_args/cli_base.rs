@@ -12,7 +12,7 @@
 //!
 //! | Short | Long(s)                           | Used by                       |
 //! |-------|-----------------------------------|-------------------------------|
-//! | `-m`  | `--message`, `--intent`           | capture, revert, context,     |
+//! | `-m`  | `--message`, `--body`, `--intent` | capture, revert, context,     |
 //! |       |                                   | discuss                       |
 //! | `-n`  | `--limit` (queries),              | log, list, query (limit);     |
 //! |       | `--steps` (undo/redo)             | undo, redo (steps)            |

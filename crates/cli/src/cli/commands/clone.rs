@@ -86,6 +86,47 @@ use crate::{
 
 pub const CLONE_OUTPUT_KIND: &str = "clone";
 
+fn classify_clone_remote_source(
+    parse_result: &Result<RemoteTarget, String>,
+    source: Option<heddle_cli_args::CloneSourceArg>,
+) -> CloneRemoteSource {
+    match (source, parse_result) {
+        (Some(heddle_cli_args::CloneSourceArg::Git), Ok(RemoteTarget::Local(path))) => {
+            CloneRemoteSource::Local {
+                path: path.clone(),
+                has_heddle: false,
+                is_git: true,
+            }
+        }
+        (Some(heddle_cli_args::CloneSourceArg::Git), _) => CloneRemoteSource::Unparsed,
+        (Some(heddle_cli_args::CloneSourceArg::Heddle), Ok(RemoteTarget::Local(path))) => {
+            CloneRemoteSource::Local {
+                path: path.clone(),
+                has_heddle: true,
+                is_git: false,
+            }
+        }
+        (
+            Some(heddle_cli_args::CloneSourceArg::Heddle),
+            Ok(RemoteTarget::Network { repo_path, .. }),
+        ) => CloneRemoteSource::Network {
+            has_repo_path: repo_path.is_some(),
+        },
+        (Some(heddle_cli_args::CloneSourceArg::Heddle), Err(_)) => CloneRemoteSource::Network {
+            has_repo_path: true,
+        },
+        (None, Ok(RemoteTarget::Local(path))) => CloneRemoteSource::Local {
+            path: path.clone(),
+            has_heddle: path.join(".heddle").exists(),
+            is_git: open_repo(path).is_ok(),
+        },
+        (None, Ok(RemoteTarget::Network { repo_path, .. })) => CloneRemoteSource::Network {
+            has_repo_path: repo_path.is_some(),
+        },
+        (None, Err(_)) => CloneRemoteSource::Unparsed,
+    }
+}
+
 /// `output_kind` value carried by the *preliminary* JSON record emitted
 /// by `clone_network` before the final clone payload. Hosted clones
 /// emit two JSON objects on one invocation (connection envelope, then
@@ -174,29 +215,24 @@ pub async fn cmd_clone(
     filter: Option<String>,
     recursive: bool,
     insecure: bool,
+    source: Option<heddle_cli_args::CloneSourceArg>,
 ) -> Result<()> {
     let local_path = PathBuf::from(&local);
 
     // Cheap remote classification for pure planning (parse may resolve DNS
     // / check path existence; no clone FS body or hosted pull yet).
     let parse_result = RemoteTarget::parse(&remote);
-    let remote_source = match &parse_result {
-        Ok(RemoteTarget::Local(path)) => CloneRemoteSource::Local {
-            path: path.clone(),
-            has_heddle: path.join(".heddle").exists(),
-            is_git: open_repo(path).is_ok(),
-        },
-        Ok(RemoteTarget::Network { repo_path, .. }) => CloneRemoteSource::Network {
-            has_repo_path: repo_path.is_some(),
-        },
-        Err(_) => CloneRemoteSource::Unparsed,
-    };
+    let remote_source = classify_clone_remote_source(&parse_result, source);
 
     let plan = plan_clone(
         &ClonePlanOptions {
             remote: remote.clone(),
             local: local_path.clone(),
             thread,
+            protocol: source.map(|source| match source {
+                heddle_cli_args::CloneSourceArg::Git => verbs::CloneProtocol::Git,
+                heddle_cli_args::CloneSourceArg::Heddle => verbs::CloneProtocol::Heddle,
+            }),
             depth,
             lazy,
             filter,
@@ -3247,7 +3283,7 @@ mod tests {
                 other => panic!("unexpected local remote: {other:?}"),
             };
             assert_eq!(
-                verbs::select_clone_mode(url, false, &source).unwrap(),
+                verbs::select_clone_mode(url, false, &source, None).unwrap(),
                 expected,
                 "{url}"
             );
@@ -3257,7 +3293,8 @@ mod tests {
             verbs::select_clone_mode(
                 "heddle://example.com/ns/repo.git",
                 false,
-                &CloneRemoteSource::Unparsed
+                &CloneRemoteSource::Unparsed,
+                None
             )
             .is_err()
         );

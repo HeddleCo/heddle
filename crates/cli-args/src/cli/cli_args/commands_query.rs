@@ -3,16 +3,16 @@
 
 use clap::Args;
 
+use super::HistoricalRevisionArgs;
+
 /// Line-by-line attribution for a tracked file (`heddle blame <path>`).
 #[derive(Clone, Debug, Args)]
 pub struct BlameArgs {
     /// Tracked file to attribute.
     #[arg(value_name = "PATH")]
     pub path: String,
-    /// State to inspect. Accepts short or full state IDs, marker names,
-    /// `HEAD`, `@`, or `HEAD~N`.
-    #[arg(long)]
-    pub state: Option<String>,
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
     /// Include applicable context annotations.
     #[arg(long)]
     pub context: bool,
@@ -75,7 +75,7 @@ mod tests {
         {
             Commands::Blame(args) => {
                 assert_eq!(args.path, "src/auth.rs");
-                assert!(args.state.is_none());
+                assert!(args.revision.state.is_none());
                 assert!(!args.context);
             }
             _ => panic!("expected blame"),
@@ -92,7 +92,7 @@ mod tests {
         .command
         {
             Commands::Blame(args) => {
-                assert_eq!(args.state.as_deref(), Some("HEAD"));
+                assert_eq!(args.revision.state.as_deref(), Some("HEAD"));
                 assert!(args.context);
             }
             _ => panic!("expected blame"),

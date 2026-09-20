@@ -268,7 +268,7 @@ pub async fn cmd_sync(cli: &Cli, args: SyncArgs) -> Result<()> {
 }
 
 pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
-    if args.dry_run {
+    if args.dry_run.enabled() {
         return emit_land_dry_run(cli, &args);
     }
     if !args.threads.is_empty() {

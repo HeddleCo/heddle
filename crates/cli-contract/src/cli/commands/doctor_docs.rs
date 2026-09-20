@@ -1111,7 +1111,7 @@ mod tests {
         let mut issues = Vec::new();
         scan_markdown(
             "test.md",
-            "Use `heddle context set --path src/lib.rs --scope symbol:foo --kind rationale -m note`.",
+            "Use `heddle context set --path src/lib.rs --symbol foo --kind rationale -m note`.",
             &cli(),
             &mut issues,
         );
@@ -1241,7 +1241,7 @@ mod tests {
         scan_markdown(
             "test.md",
             "We use `heddle start <name> --path <dir>` here.\n\
-             Also `heddle context set --path X --scope file --kind rationale -m \"y\"`.\n\
+             Also `heddle context set --path X --kind rationale -m \"y\"`.\n\
              And `heddle thread marker delete failed-build` works fine.\n",
             &cli(),
             &mut issues,

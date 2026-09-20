@@ -3060,7 +3060,7 @@ mod tests {
         assert!(advice.unsafe_condition.contains("dirty Git index"));
         assert_eq!(
             advice.primary_command,
-            "heddle maintenance fsck repair git --prefer heddle --ref feature/git --preview"
+            "heddle maintenance fsck repair git --prefer heddle --ref feature/git --dry-run"
         );
         assert!(advice.preserved.contains("Git checkout was left unchanged"));
     }

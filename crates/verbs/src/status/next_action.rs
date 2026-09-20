@@ -226,7 +226,7 @@ pub fn canonical_git_repair_ref_preview_command(prefer: Option<&str>, ref_name: 
             prefer,
             "--ref",
             ref_name,
-            "--preview",
+            "--dry-run",
         ]),
         None => heddle_action([
             "maintenance",
@@ -235,7 +235,7 @@ pub fn canonical_git_repair_ref_preview_command(prefer: Option<&str>, ref_name: 
             "git",
             "--ref",
             ref_name,
-            "--preview",
+            "--dry-run",
         ]),
     }
 }
