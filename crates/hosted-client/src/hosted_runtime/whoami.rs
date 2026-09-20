@@ -408,6 +408,7 @@ mod tests {
 
     #[test]
     fn native_whoami_keeps_account_actor_and_effective_methods_distinct() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let principal = PrincipalRecord {
             id: "principal-1".into(),
             account_id: "account-1".into(),
@@ -471,6 +472,7 @@ mod tests {
 
     #[test]
     fn capture_actor_from_resolved_maps_user_config() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let actor = luke_actor();
         assert_eq!(actor.name, "Luke");
         assert_eq!(actor.email, "luke@example.com");
@@ -479,6 +481,7 @@ mod tests {
 
     #[test]
     fn without_repo_uses_user_config_when_env_unset() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let _guard = PrincipalEnvGuard::clear();
         let user_config = UserConfig {
             principal: Some(config::config::UserPrincipalConfig {
@@ -495,6 +498,7 @@ mod tests {
 
     #[test]
     fn local_unauthenticated_identity_has_actionable_output() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let resolved = ResolvedHostedCredential {
             mint_root_attachment: None,
             token: None,
@@ -518,6 +522,7 @@ mod tests {
 
     #[test]
     fn biscuit_literal_helper_covers_escaped_values() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         assert_eq!(
             biscuit_string_literals(r#"check if operation($op), $op == "repo.read""#),
             vec!["repo.read".to_string()]
@@ -526,6 +531,7 @@ mod tests {
 
     #[test]
     fn listed_spool_path_is_spool_handle_name() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         assert_eq!(
             listed_spool_path(&["spool".into(), "acme".into(), "notes".into()]),
             Some("spool/acme/notes".into())

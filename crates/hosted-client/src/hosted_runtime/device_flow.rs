@@ -479,6 +479,7 @@ mod tests {
 
     #[test]
     fn templates_name_real_native_operations() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let methods: BTreeSet<&str> = api::v2::ALL_METHODS
             .iter()
             .filter_map(|method| method.path.rsplit('/').next())
@@ -495,6 +496,7 @@ mod tests {
 
     #[test]
     fn template_privilege_ordering_holds() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let reviewer: BTreeSet<String> = AgentTemplate::Reviewer.operations().into_iter().collect();
         let contributor: BTreeSet<String> = AgentTemplate::Contributor
             .operations()
@@ -516,6 +518,7 @@ mod tests {
 
     #[test]
     fn runner_template_can_write_verdicts_but_cannot_write_source() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let runner: BTreeSet<String> = AgentTemplate::Runner.operations().into_iter().collect();
 
         assert_eq!(
@@ -562,6 +565,7 @@ mod tests {
 
     #[test]
     fn pop_delegation_payload_layout_matches_the_versioned_server_contract() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let parent = [0x11; 64];
         let child = [0x22; 32];
         let payload = pop_delegation_payload(&parent, &child);
@@ -583,6 +587,7 @@ mod tests {
 
     #[test]
     fn authenticated_subject_is_unique_authority_owned_and_required() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (authority_token, _, _) = fresh_parent_token();
         assert_eq!(
             authenticated_subject(&authority_token).expect("authority subject"),
@@ -627,6 +632,7 @@ mod tests {
 
     #[test]
     fn effective_pop_key_rejects_a_delegationless_attenuation_block() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().expect("root PoP key");
         let token = Biscuit::builder()
             .fact(r#"user("alice")"#)
@@ -651,6 +657,7 @@ mod tests {
 
     #[test]
     fn effective_pop_key_rejects_duplicate_authority_anchors() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let first = Ed25519Signer::generate().expect("first root PoP key");
         let second = Ed25519Signer::generate().expect("second root PoP key");
         let token = Biscuit::builder()
@@ -672,6 +679,7 @@ mod tests {
 
     #[test]
     fn effective_pop_key_rejects_authority_block_delegations() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().expect("root PoP key");
         let token = Biscuit::builder()
             .fact(r#"user("alice")"#)
@@ -692,6 +700,7 @@ mod tests {
 
     #[test]
     fn every_public_derivation_entrypoint_rejects_the_wrong_parent_signer() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (parent, _root, _parent_pop) = fresh_parent_token();
         let wrong_parent_pop = Ed25519Signer::generate().expect("wrong parent PoP key");
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
@@ -765,6 +774,7 @@ mod tests {
 
     #[test]
     fn attenuate_appends_a_block_with_agent_marker() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (parent, _kp, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let attenuated = time_bounded(
@@ -784,6 +794,7 @@ mod tests {
 
     #[test]
     fn time_bounded_with_past_expiry_still_attenuates() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         // The helper itself doesn't enforce expiry — that's the
         // verifier's job. A past-expiry attenuation builds fine but
         // gets rejected at verify time. This test just guards
@@ -803,6 +814,7 @@ mod tests {
 
     #[test]
     fn read_only_repo_agent_builds_with_op_and_resource_restrictions() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (parent, _kp, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let attenuated = read_only_repo_agent(
@@ -825,6 +837,7 @@ mod tests {
 
     #[test]
     fn operation_values_are_literals_and_cannot_broaden_authority() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (parent, root, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let child = attenuate_for_agent(
@@ -850,6 +863,7 @@ mod tests {
 
     #[test]
     fn accepts_normal_operation_names() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (parent, _kp, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
         attenuate_for_agent(
@@ -869,6 +883,7 @@ mod tests {
 
     #[test]
     fn unscoped_child_inherits_delegated_admin_authority() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (parent, root, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child");
         let child = attenuate_for_agent(
@@ -891,6 +906,7 @@ mod tests {
 
     #[test]
     fn server_rejects_child_after_attenuation_ttl() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (parent, root, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let expires_at = Utc::now() + chrono::Duration::minutes(5);
@@ -924,6 +940,7 @@ mod tests {
 
     #[test]
     fn sub_derivation_intersects_every_operation_block() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (parent, root, root_pop) = fresh_parent_token();
         let parent_agent_pop = Ed25519Signer::generate().expect("parent-agent PoP key");
         let subagent_pop = Ed25519Signer::generate().expect("subagent PoP key");
@@ -1027,6 +1044,7 @@ mod tests {
 
     #[test]
     fn repo_scope_caveat_admits_in_scope_repo_and_rejects_siblings() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (parent, root, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let child = attenuate_for_agent(
@@ -1081,6 +1099,7 @@ mod tests {
 
     #[test]
     fn spool_scope_includes_descendants_and_excludes_siblings() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (parent, root, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
         let child = attenuate_for_agent(

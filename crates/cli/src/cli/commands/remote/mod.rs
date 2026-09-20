@@ -1498,7 +1498,7 @@ async fn push_network_connected(
     };
     let mut discussions = not_attempted();
     let mut context = not_attempted();
-    let mut reviews = not_attempted();
+    let reviews = hosted_review_replication_outcome(repo);
     if result.success {
         discussions = match hosted_client::client::discussion_sync::push_discussions(
             repo,
@@ -1536,10 +1536,9 @@ async fn push_network_connected(
             }
         };
 
-        // Write path for hosted context annotations (heddle context) and review
-        // signatures (heddle review sign) — same seam as discussions. #549
-        // rejects these attachments in the pack, so they only reach the server
-        // over the caller-authenticated RPCs.
+        // Write path for hosted context annotations (`heddle context`) through
+        // the native collaboration service. Native reviews are recorded by the
+        // signed-comparison approval path rather than replaying state signatures.
         context = match hosted_client::client::context_sync::push_context(
             repo,
             client,
@@ -1575,40 +1574,8 @@ async fn push_network_connected(
                 }
             }
         };
-        reviews = match hosted_client::client::review_sync::push_review_signatures(
-            repo, client, &repo_path,
-        )
-        .await
-        {
-            Ok(count) if count > 0 && !should_output_json(options.cli, Some(repo.config())) => {
-                println!(
-                    "{} synced {count} review signature(s) to {}",
-                    style::ok_marker(),
-                    style::dim(&repo_path)
-                );
-                PushReplicationOutcome {
-                    status: "succeeded",
-                    count: Some(count),
-                    error: None,
-                }
-            }
-            Ok(count) => PushReplicationOutcome {
-                status: "succeeded",
-                count: Some(count),
-                error: None,
-            },
-            Err(error) => {
-                let message = format!("{error:#}");
-                eprintln!("{} review sync failed: {message}", style::warn_marker());
-                PushReplicationOutcome {
-                    status: "failed",
-                    count: None,
-                    error: Some(message),
-                }
-            }
-        };
     }
-    let replication_complete = hosted_replication_complete(&discussions, &context, &reviews);
+    let replication_complete = hosted_replication_complete(&discussions, &context);
 
     // CLI maps wire/protobuf transport fields → pure domain fields; core
     // parses success/failure and builds execution facts / outcome.
@@ -1692,7 +1659,7 @@ fn apply_hosted_replication_outcomes(
     context: PushReplicationOutcome,
     reviews: PushReplicationOutcome,
 ) {
-    let complete = hosted_replication_complete(&discussions, &context, &reviews);
+    let complete = hosted_replication_complete(&discussions, &context);
     output.discussions = discussions;
     output.context = context;
     output.reviews = reviews;
@@ -1706,11 +1673,19 @@ fn apply_hosted_replication_outcomes(
 fn hosted_replication_complete(
     discussions: &PushReplicationOutcome,
     context: &PushReplicationOutcome,
-    reviews: &PushReplicationOutcome,
 ) -> bool {
-    [discussions, context, reviews]
+    [discussions, context]
         .iter()
         .all(|outcome| outcome.status == "succeeded")
+}
+
+#[cfg(feature = "client")]
+fn hosted_review_replication_outcome(_repo: &Repository) -> PushReplicationOutcome {
+    PushReplicationOutcome {
+        status: "not_applicable",
+        count: None,
+        error: None,
+    }
 }
 
 /// Push one Heddle state or one authoritative Git mirror over hosted transport.
@@ -2459,18 +2434,14 @@ mod tests {
             error: Some("context unavailable".into()),
         };
         let reviews = PushReplicationOutcome {
-            status: "succeeded",
-            count: Some(1),
+            status: "not_applicable",
+            count: None,
             error: None,
         };
-        assert!(!hosted_replication_complete(
-            &discussions,
-            &context,
-            &reviews
-        ));
+        assert!(!hosted_replication_complete(&discussions, &context));
         assert_eq!(discussions.count, Some(2));
         assert_eq!(context.error.as_deref(), Some("context unavailable"));
-        assert_eq!(reviews.count, Some(1));
+        assert_eq!(reviews.status, "not_applicable");
 
         let temp = TempDir::new().expect("temp repo");
         let repo = Repository::init_default(temp.path()).expect("native repo");
@@ -2499,10 +2470,85 @@ mod tests {
         assert_eq!(output.source.status, "succeeded");
         assert_eq!(output.discussions.status, "succeeded");
         assert_eq!(output.context.status, "failed");
-        assert_eq!(output.reviews.status, "succeeded");
+        assert_eq!(output.reviews.status, "not_applicable");
         assert_eq!(output.outcome.status, "partial");
         assert!(!output.outcome.success);
         assert!(output.outcome.pushed, "source objects did reach the server");
+    }
+
+    #[cfg(feature = "client")]
+    #[tokio::test]
+    async fn valid_local_review_signature_is_not_permanently_rejected_by_hosted_push() {
+        use std::sync::Arc;
+
+        use crypto::{Ed25519Signer, Signer as _};
+        use objects::object::{ReviewKind, ReviewScope, signing_payload};
+        use repo::operation_dedup::OperationDedupStore;
+        use verbs::review::{LocalReviewContext, LocalStateReview, SignReviewRequest};
+
+        let temp = TempDir::new().expect("temp repo");
+        let repo = Repository::init_default(temp.path()).expect("native repo");
+        let mut config = repo.config().clone();
+        config.set_principal("Reviewer", "reviewer@example.com");
+        config
+            .save(&repo.heddle_dir().join("config.toml"))
+            .expect("save reviewer identity");
+        let repo = Arc::new(Repository::open(temp.path()).expect("configured repo"));
+        std::fs::write(temp.path().join("reviewed.txt"), "reviewed\n").expect("write source");
+        let state = repo
+            .snapshot(Some("review target".into()), None)
+            .expect("capture review target")
+            .state_id;
+
+        let signer = Ed25519Signer::generate().expect("review signer");
+        let scope = ReviewScope::WholeChange;
+        let signed_at = chrono::Utc::now().timestamp();
+        let payload = signing_payload(state, ReviewKind::Read, &scope, signed_at, None);
+        let review = LocalStateReview::new(LocalReviewContext::new(
+            Arc::clone(&repo),
+            Arc::new(OperationDedupStore::open(repo.heddle_dir()).expect("review receipts")),
+        ));
+        review
+            .sign_state(SignReviewRequest {
+                state_id: state,
+                kind: ReviewKind::Read,
+                scope,
+                justification: None,
+                algorithm: "ed25519".into(),
+                public_key: signer.public_key().to_vec(),
+                signature: signer.sign(&payload).expect("sign review"),
+                signed_at,
+                client_operation_id: objects::object::OperationId::new().to_string(),
+            })
+            .await
+            .expect("store valid local review");
+
+        assert_eq!(
+            review
+                .list_signatures(state)
+                .expect("review signatures")
+                .len(),
+            1
+        );
+        assert_eq!(
+            hosted_review_replication_outcome(&repo).status,
+            "not_applicable"
+        );
+        assert!(
+            !repo
+                .heddle_dir()
+                .join("collaboration/hosted-review-mirror.json")
+                .exists(),
+            "hosted push must not create the retired rejection mirror"
+        );
+        assert_eq!(
+            review
+                .list_signatures(state)
+                .expect("review after push planning")
+                .len(),
+            1,
+            "the valid local review remains available to the native comparison path"
+        );
     }
 
     #[cfg(feature = "client")]

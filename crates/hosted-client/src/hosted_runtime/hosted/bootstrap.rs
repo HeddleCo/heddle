@@ -431,6 +431,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_server_name_override_preserves_the_network_target_and_http_authority() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let target = bootstrap_target("https://127.0.0.1:8421/descriptor", Some("localhost"))
             .await
             .unwrap();
@@ -444,6 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn descriptor_bootstrap_consumes_the_configured_ca_bundle_before_network_io() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let config = ClientConfig::default().with_tls_ca_certificate_pem("not a PEM certificate");
         let error = fetch_ephemeral_descriptor_set(
             "https://127.0.0.1:1/.well-known/heddle/iroh-endpoint",

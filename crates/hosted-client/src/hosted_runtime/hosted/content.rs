@@ -483,6 +483,7 @@ mod tests {
 
     #[test]
     fn observe_context_events_map_to_revision_ids() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let causal = [7u8; 32];
         let mapped = revision_from_record(&record(
             "aaaaaaaa-bbbb-7ccc-dddd-eeeeeeeeeeee",
@@ -497,6 +498,7 @@ mod tests {
 
     #[test]
     fn context_ids_match_ann_prefix_and_raw_uuid() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let id = "01999999-aaaa-7bbb-cccc-ddddeeeeffff";
         assert!(context_ids_match(id, id));
         assert!(context_ids_match(&format!("ann-{id}"), id));
@@ -505,6 +507,7 @@ mod tests {
 
     #[test]
     fn empty_context_ref_adopts_causal_id() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let causal = [9u8; 32];
         let mapped = annotation_from_record(&ContextRecord {
             causal_id: causal.to_vec(),

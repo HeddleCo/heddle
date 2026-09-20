@@ -63,6 +63,7 @@ impl Drop for IsolatedHome {
 
 #[test]
 fn invite_create_mints_a_claimable_seq0_root_on_the_agent_proof_key() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     let _home = IsolatedHome::new();
     let server = "api.owner-root.test";
     let output = finish_invite_create_from_response(
@@ -92,6 +93,7 @@ fn invite_create_mints_a_claimable_seq0_root_on_the_agent_proof_key() {
 
 #[test]
 fn create_spool_genesis_refuses_a_key_that_is_not_seq0() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     let _home = IsolatedHome::new();
     finish_invite_create_from_response(
         "api.seq0-mismatch.test",
@@ -125,6 +127,7 @@ fn create_spool_genesis_refuses_a_key_that_is_not_seq0() {
 
 #[test]
 fn create_spool_genesis_matches_the_stored_seq0_proof_key() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     let _home = IsolatedHome::new();
     finish_invite_create_from_response(
         "api.seq0-match.test",

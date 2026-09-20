@@ -76,6 +76,7 @@ mod tests {
     /// typed error, never an assertion.
     #[test]
     fn headless_callback_returns_typed_error_and_never_fakes_an_assertion() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let cb = headless_human_signature_callback();
         let result = cb(req_with_action_url(None));
         match result {
@@ -94,6 +95,7 @@ mod tests {
     /// can open it — and the callback still returns a typed error, never an assertion.
     #[test]
     fn headless_callback_includes_action_url_in_typed_error_when_present() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let cb = headless_human_signature_callback();
         let url = "https://app.heddle.sh/verify-action?method=%2Fheddle.api.v1alpha2.SpoolService%2FDeleteSpool&challenge=CHAL";
         let result = cb(req_with_action_url(Some(url.to_string())));

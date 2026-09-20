@@ -214,15 +214,18 @@ async fn exercise(corrupt: bool, truncated: bool) {
 
 #[tokio::test]
 async fn native_hydration_fetches_only_exact_missing_hash() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     exercise(false, false).await;
 }
 
 #[tokio::test]
 async fn native_hydration_rejects_content_that_does_not_hash_to_requested_object() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     exercise(true, false).await;
 }
 
 #[tokio::test]
 async fn native_hydration_requires_selection_completion_before_installing() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     exercise(false, true).await;
 }

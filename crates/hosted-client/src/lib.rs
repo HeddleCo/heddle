@@ -14,6 +14,42 @@ pub mod hosted_runtime;
 pub mod legacy_v1;
 pub mod network;
 
+#[cfg(test)]
+mod test_process_env {
+    //! Shared test gate for process-global credential environment.
+    //!
+    //! Tests that mutate environment variables take the write side; every
+    //! other crate test takes the read side. This keeps unrelated repository
+    //! fixtures parallel without letting them observe a temporary home or
+    //! credential path.
+
+    use std::sync::OnceLock;
+
+    use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+    static LOCK: OnceLock<RwLock<()>> = OnceLock::new();
+
+    fn lock() -> &'static RwLock<()> {
+        LOCK.get_or_init(|| RwLock::new(()))
+    }
+
+    pub async fn shared() -> RwLockReadGuard<'static, ()> {
+        lock().read().await
+    }
+
+    pub async fn exclusive() -> RwLockWriteGuard<'static, ()> {
+        lock().write().await
+    }
+
+    pub fn shared_blocking() -> RwLockReadGuard<'static, ()> {
+        lock().blocking_read()
+    }
+
+    pub fn exclusive_blocking() -> RwLockWriteGuard<'static, ()> {
+        lock().blocking_write()
+    }
+}
+
 /// Register factories needed to reopen CLI-owned lazy hosted repositories.
 #[cfg(feature = "client")]
 pub fn register_hosted_factory() {

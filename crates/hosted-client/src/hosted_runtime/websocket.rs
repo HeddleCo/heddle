@@ -143,6 +143,7 @@ mod tests {
 
     #[test]
     fn server_name_override_preserves_dial_target_and_http_authority() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let mut request = "wss://127.0.0.1:8421/presence/ws"
             .into_client_request()
             .unwrap();
@@ -160,6 +161,7 @@ mod tests {
 
     #[test]
     fn configured_ca_bundle_is_parsed_before_connecting() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let config = ClientConfig::default().with_tls_ca_certificate_pem("not a certificate");
 
         let error = match tls_connector(&config) {

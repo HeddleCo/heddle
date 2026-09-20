@@ -522,6 +522,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn empty_source_bootstrap_round_trips() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let state = StateId::from_bytes([3; 32]);
         let checkpoint = encode_empty_pull_bootstrap(state).expect("encode");
         let decoded = decode_pull_bootstrap(&checkpoint)
@@ -535,6 +536,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn bootstrap_decoder_accepts_structured_empty_metadata() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let payload = rmp_serde::to_vec_named(&(
             true,
             Vec::<Discussion>::new(),
@@ -582,6 +584,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn malformed_advertised_bootstrap_fails_loud() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let error = decode_pull_bootstrap(
             format!(
                 "heddle-markers-v1\nheddle-pull-bootstrap-v1:not-hex\t{}\n",
@@ -595,6 +598,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn api_ref_entry_adopts_thread_id() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let main = StateId::from_bytes([7; 32]);
         let release = StateId::from_bytes([8; 32]);
         let change = objects::object::ChangeId::from_bytes([9; 16]);
@@ -649,6 +653,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn legacy_pull_refs_fold_is_rejected() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let checkpoint = format!(
             "{PULL_REFS_LINE_PREFIX}deadbeef\t{}\n",
             StateId::from_bytes([0; 32]).to_string_full(),
@@ -681,6 +686,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn pull_ready_refs_are_preferred() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let main = StateId::from_bytes([7; 32]);
         let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
         let ready = pull_ready_with_refs(
@@ -705,6 +711,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn pull_ready_empty_refs_defer_to_list_refs() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let ready = pull_ready_with_refs(Vec::new(), "", b"");
         assert!(
             pull_refs_from_ready(&ready)
@@ -716,6 +723,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn pull_ready_rejects_fold_even_when_refs_present() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let main = StateId::from_bytes([7; 32]);
         let checkpoint = format!(
             "{PULL_REFS_LINE_PREFIX}deadbeef\t{}\n",
@@ -736,6 +744,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn folded_synthetic_frontier_is_not_a_thread_or_marker() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let change = objects::object::ChangeId::from_bytes([9; 16]);
         let frontier = objects::object::SyntheticFrontierName::new("main", change)
             .unwrap()
@@ -754,6 +763,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn packed_bootstrap_resolves_the_same_discussion_and_context_domain_content() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().expect("temp repo");
         let repo = Repository::init_default(temp.path()).expect("init repo");
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").expect("write source");
@@ -887,6 +897,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn packed_bootstrap_falls_back_when_context_attachment_is_missing() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state_id) = seed_snapshot();
         let resolved = packed_context_metadata()
             .resolve(&repo, Some(state_id))
@@ -905,6 +916,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn packed_bootstrap_fail_closes_when_context_blob_is_corrupt() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state_id) = seed_snapshot();
         let corrupt_hash = repo
             .store()
@@ -936,6 +948,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn packed_bootstrap_falls_back_when_discussions_attachment_is_missing() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state_id) = seed_snapshot();
         let resolved = packed_metadata()
             .resolve(&repo, Some(state_id))
@@ -960,6 +973,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn packed_bootstrap_falls_back_on_version_skew() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state_id) = seed_snapshot();
         let principal = Principal::new("Ada", "ada@example.com");
         #[derive(serde::Serialize)]
@@ -1003,6 +1017,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn packed_bootstrap_falls_back_on_foreign_named_map_version() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state_id) = seed_snapshot();
         #[derive(serde::Serialize)]
         struct ForeignRoot {
@@ -1040,6 +1055,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn packed_bootstrap_fail_closes_when_discussions_blob_is_corrupt() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state_id) = seed_snapshot();
         let mut discussion = sample_discussion(state_id);
         discussion.id.clear();
@@ -1074,6 +1090,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn packed_bootstrap_fail_closes_when_discussions_blob_is_missing() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state_id) = seed_snapshot();
         let missing = ContentHash::compute(b"not-stored-discussions");
         repo.put_state_attachment(&StateAttachment {
@@ -1098,6 +1115,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn packed_bootstrap_fail_closes_when_discussions_blob_is_truncated_v1() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state_id) = seed_snapshot();
         let valid = DiscussionsBlob::new(vec![sample_discussion(state_id)])
             .encode()
@@ -1123,6 +1141,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn packed_bootstrap_fail_closes_on_empty_named_map() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state_id) = seed_snapshot();
         // MessagePack empty fixmap (`0x80`): map-shaped but not a v2 schema.
         let hash = repo
@@ -1145,6 +1164,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn unpacked_bootstrap_keeps_inline_discussions() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state_id) = seed_snapshot();
         let discussion = sample_discussion(state_id);
         let resolved = PullBootstrapMetadata {
@@ -1163,6 +1183,7 @@ mod pull_bootstrap_tests {
 
     #[test]
     fn hosted_ref_from_api_requires_32_byte_state_id() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let entry = crate::legacy_v1::RefEntry {
             name: "main".to_string(),
             state_id: Some(api::heddle::api::common::StateId { value: vec![0; 8] }),
@@ -1188,16 +1209,13 @@ mod pull_bootstrap_tests {
 #[cfg(test)]
 mod native_exchange_tests {
     use objects::object::{Attribution, Principal};
-    use repo::{
-        ThreadFreshness, ThreadManager, ThreadMode, ThreadRecord, ThreadState,
-        ThreadVerificationSummary,
-    };
+    use repo::ThreadManager;
     use tempfile::TempDir;
     use wire::ProtocolError;
 
     use super::{super::PullMaterialization, *};
 
-    const CLONE_BOOTSTRAP_THREAD: &str = "heddle-clone-bootstrap-v1:";
+    const REMOTE_THREAD: &str = "main";
 
     fn repository(temp: &TempDir) -> (Repository, StateId) {
         let repo = Repository::init_default(temp.path()).unwrap();
@@ -1213,48 +1231,55 @@ mod native_exchange_tests {
         (repo, state)
     }
 
-    fn save_thread_record(
+    async fn native_server(
+        repo: &Repository,
+    ) -> (
+        crate::hosted_runtime::hosted::HostedClient,
+        tokio::task::JoinHandle<()>,
+        std::sync::Arc<
+            std::sync::Mutex<
+                crate::hosted_runtime::hosted::native_exchange_test_server::PublicationCapture,
+            >,
+        >,
+    ) {
+        let thread = repo.native_thread(REMOTE_THREAD).unwrap();
+        let spool = uuid::Uuid::parse_str(&thread.genesis().unwrap().spool).unwrap();
+        crate::hosted_runtime::hosted::native_exchange_test_server::start(
+            spool,
+            REMOTE_THREAD,
+            *thread.thread_id().as_bytes(),
+        )
+        .await
+    }
+
+    async fn publish(
+        client: &mut crate::hosted_runtime::hosted::HostedClient,
         repo: &Repository,
         state: StateId,
-        stable_id: &str,
-        thread: &str,
-    ) -> ThreadRecord {
-        let stored_state = repo.store().get_state(&state).unwrap().unwrap();
-        let now = chrono::Utc::now();
-        let record = ThreadRecord {
-            id: stable_id.to_string(),
-            thread: thread.to_string(),
-            target_thread: None,
-            parent_thread: None,
-            mode: ThreadMode::Solid,
-            state: ThreadState::Active,
-            base_state: state.to_string_full(),
-            base_root: stored_state.tree.to_hex(),
-            current_state: Some(state.to_string_full()),
-            merged_state: None,
-            task: Some("prove first-push identity".to_string()),
-            changed_paths: vec!["tracked.txt".to_string()],
-            impact_categories: Vec::new(),
-            heavy_impact_paths: Vec::new(),
-            promotion_suggested: false,
-            freshness: ThreadFreshness::Current,
-            verification_summary: ThreadVerificationSummary::default(),
-            confidence_summary: Default::default(),
-            integration_policy_result: Default::default(),
-            created_at: now,
-            updated_at: now,
-            ephemeral: None,
-            auto: false,
-            shared_target_dir: None,
-        };
-        ThreadManager::new(repo.heddle_dir())
-            .save_record(&record)
-            .unwrap();
-        record
+    ) {
+        let pushed = client
+            .push_with_expected_head_profiled(
+                repo,
+                "acme/widgets",
+                state,
+                REMOTE_THREAD,
+                false,
+                ExpectedRemoteHead::Missing,
+                format!("publish-{state}"),
+            )
+            .await
+            .unwrap()
+            .0;
+        assert!(
+            pushed.success,
+            "native fixture rejected publication: {pushed:?}"
+        );
+        assert_eq!(pushed.new_state, Some(state));
     }
 
     #[test]
     fn persist_advertised_identity_adopts_api_thread_id() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
         let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
@@ -1292,6 +1317,7 @@ mod native_exchange_tests {
 
     #[test]
     fn persist_advertised_identity_uses_live_refs_when_folded_omit_thread_id() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
         let hosted_id = "019f0000-aaaa-7bbb-8ccc-ddddeeeeffff";
@@ -1335,6 +1361,7 @@ mod native_exchange_tests {
 
     #[tokio::test]
     async fn native_push_without_local_stable_identity_fails_before_sending_request() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let (mut client, server, captured) =
             crate::hosted_runtime::hosted::test_server::start_recording_push().await;
         let source = TempDir::new().unwrap();
@@ -1354,7 +1381,7 @@ mod native_exchange_tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "invalid state: native push target 'missing' has no local thread record with a stable identity"
+            "invalid state: Thread \"missing\" has no native identity"
         );
         assert!(
             captured
@@ -1370,27 +1397,29 @@ mod native_exchange_tests {
 
     #[tokio::test]
     async fn native_push_and_clone_pull_complete_the_real_framed_exchange() {
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        let _process_env_guard = crate::test_process_env::shared().await;
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
-        save_thread_record(&repo, state, "thread-stable-main", "main");
+        let (mut client, server, captured) = native_server(&repo).await;
 
-        assert!(client.list_refs("acme/widgets").await.unwrap().is_empty());
-        let pushed = client
-            .push_with_expected_head_profiled(
-                &repo,
-                "acme/widgets",
-                state,
-                "main",
-                false,
-                ExpectedRemoteHead::Missing,
-                "push-test-op".to_string(),
-            )
-            .await
-            .unwrap()
-            .0;
-        assert!(!pushed.success);
-        assert_eq!(pushed.error.as_deref(), Some("test rejection"));
+        let refs = client.list_refs("acme/widgets").await.unwrap();
+        assert!(refs.is_empty());
+        publish(&mut client, &repo, state).await;
+        let refs = client.list_refs("acme/widgets").await.unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, REMOTE_THREAD);
+        let accepted = captured
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        assert_eq!(
+            accepted.revision.and_then(|revision| revision.revision),
+            Some(api::heddle::api::v1alpha2::revision_ref::Revision::State(
+                api::heddle::api::common::StateId {
+                    value: state.as_bytes().to_vec(),
+                },
+            ))
+        );
 
         let clone = TempDir::new().unwrap();
         let (pulled, cloned_repo) = client
@@ -1403,8 +1432,9 @@ mod native_exchange_tests {
             )
             .await
             .unwrap();
-        assert!(!pulled.success);
-        assert_eq!(pulled.error.as_deref(), Some("test rejection"));
+        assert!(pulled.success);
+        assert_eq!(pulled.final_state, Some(state));
+        assert!(cloned_repo.store().has_state(&state).unwrap());
         assert_eq!(cloned_repo.root(), clone.path());
 
         client.close().await;
@@ -1413,6 +1443,7 @@ mod native_exchange_tests {
 
     #[tokio::test]
     async fn unsupported_hosted_clone_modes_fail_before_local_initialization() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
         let clone = TempDir::new().unwrap();
         let initialized = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1443,35 +1474,46 @@ mod native_exchange_tests {
     }
 
     #[tokio::test]
-    async fn compact_pull_of_a_complete_local_state_publishes_no_synthetic_objects() {
+    async fn compact_pull_of_a_complete_local_state_preserves_the_native_closure() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
-        let remote_state = api::heddle::api::common::StateId {
-            value: state.as_bytes().to_vec(),
-        };
-        let (mut client, server) =
-            crate::hosted_runtime::hosted::test_server::start_with_remote_state(remote_state).await;
+        let before: Vec<_> = wire::enumerate_state_closure(repo.store(), state)
+            .unwrap()
+            .into_iter()
+            .map(|object| (object.id, object.obj_type, object.size, object.delta_base))
+            .collect();
+        let (mut client, server, _) = native_server(&repo).await;
+        publish(&mut client, &repo, state).await;
 
         let received = client
-            .fetch_state(&repo, "acme/widgets", CLONE_BOOTSTRAP_THREAD, state)
+            .fetch_state(&repo, "acme/widgets", REMOTE_THREAD, state)
             .await
             .unwrap();
-        assert_eq!(received, 0);
+        assert_eq!(received, 1);
+        assert!(repo.store().has_state(&state).unwrap());
+        assert_eq!(
+            wire::enumerate_state_closure(repo.store(), state)
+                .unwrap()
+                .into_iter()
+                .map(|object| (object.id, object.obj_type, object.size, object.delta_base))
+                .collect::<Vec<_>>(),
+            before,
+            "fetching a complete state must not synthesize source objects"
+        );
 
         client.close().await;
         server.await.unwrap();
     }
 
     #[tokio::test]
-    async fn complete_local_state_exercises_each_public_pull_mode_without_refetching() {
+    async fn complete_local_state_exercises_each_public_pull_mode() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
-        let remote_state = api::heddle::api::common::StateId {
-            value: state.as_bytes().to_vec(),
-        };
-        let (mut client, server) =
-            crate::hosted_runtime::hosted::test_server::start_with_remote_state(remote_state).await;
-        let bootstrap = CLONE_BOOTSTRAP_THREAD;
+        let (mut client, server, _) = native_server(&repo).await;
+        publish(&mut client, &repo, state).await;
+        let bootstrap = REMOTE_THREAD;
 
         assert!(
             client
@@ -1522,7 +1564,7 @@ mod native_exchange_tests {
                 .hydrate_missing_blobs_for_state(&repo, "acme/widgets", bootstrap, state)
                 .await
                 .unwrap(),
-            0
+            1
         );
 
         client.close().await;
@@ -1531,20 +1573,11 @@ mod native_exchange_tests {
 
     #[tokio::test]
     async fn clone_pull_installs_a_complete_native_pack() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let source = TempDir::new().unwrap();
         let (repo, state) = repository(&source);
-        let objects = wire::enumerate_state_closure(repo.store(), state).unwrap();
-        let pack = wire::build_native_pack(repo.store(), &objects).unwrap();
-        let remote_state = api::heddle::api::common::StateId {
-            value: state.as_bytes().to_vec(),
-        };
-        let (mut client, server) =
-            crate::hosted_runtime::hosted::test_server::start_with_pull_pack(
-                remote_state,
-                pack.pack_data,
-                pack.index_data,
-            )
-            .await;
+        let (mut client, server, _) = native_server(&repo).await;
+        publish(&mut client, &repo, state).await;
         let clone = TempDir::new().unwrap();
 
         let (pulled, cloned_repo) = client

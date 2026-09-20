@@ -463,6 +463,7 @@ mod tests {
 
     #[test]
     fn provider_websocket_url_requires_authenticated_wss() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         validate_websocket_route("wss://iroh.example/direct?ticket=opaque").unwrap();
 
         for invalid in [
@@ -475,6 +476,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_transport_binds_once_and_rejects_unregistered_routes() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let transport = ProviderWebSocketTransport::new(ClientConfig::default());
         assert!(format!("{transport:?}").contains("registered_provider_lanes: 0"));
         let provider = EndpointRef {
@@ -538,6 +540,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_provider_routes_use_v2_endpoint_identity_and_transport_hints() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let transport = ProviderWebSocketTransport::new(ClientConfig::default());
         let _bound = transport.bind().expect("bind provider transport");
         let endpoint_id = iroh_base::SecretKey::generate().public();

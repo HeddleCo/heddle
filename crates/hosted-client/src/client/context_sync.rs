@@ -1278,6 +1278,7 @@ mod tests {
 
     #[test]
     fn scope_round_trips_through_proto() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         for scope in [
             AnnotationScope::File,
             AnnotationScope::Symbol {
@@ -1292,6 +1293,7 @@ mod tests {
 
     #[test]
     fn kind_round_trips_through_proto() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         for kind in [
             AnnotationKind::Constraint,
             AnnotationKind::Invariant,
@@ -1307,6 +1309,7 @@ mod tests {
     // for sA3, materialize Bob's, and neither drop nor duplicate anything.
     #[test]
     fn pull_two_author_revisions_no_loss_no_dup_server_order() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let existing = vec![
             rev("sA1", "alice <>", "v1", 1), // pulled earlier (local id == server id)
             rev("rA3-local", "Alice <a@x>", "v3", 30), // Alice's own, linked to sA3
@@ -1354,6 +1357,7 @@ mod tests {
     // survives at the tail (so a later push still publishes it).
     #[test]
     fn pull_rejects_cross_author_identical_body() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let existing = vec![rev("rLocal", "Alice <a@x>", "lgtm", 5)];
         let server_revs = vec![rev("sBob", "bob <>", "lgtm", 9)];
         let (new_revisions, _links) = reconcile_revisions_pull(
@@ -1379,6 +1383,7 @@ mod tests {
     // (rule i), so pull does not duplicate it.
     #[test]
     fn pull_relinks_our_pushed_revision_after_lost_mirror() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let existing = vec![rev("rMine", "Alice <a@x>", "ship it", 40)];
         let server_revs = vec![rev("sMine", "alice <>", "ship it", 40)];
         let (new_revisions, links) = reconcile_revisions_pull(
@@ -1396,6 +1401,7 @@ mod tests {
 
     #[test]
     fn reconcile_ok_rules() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         // `hosted` is the server-stamped self attribution ("{username} <>"), as
         // `reconcile_revisions_pull` passes it.
         let hosted = Some("alice <>");
@@ -1435,6 +1441,7 @@ mod tests {
     // pulled case, local == server).
     #[test]
     fn supersede_resolves_local_to_server_through_mirror() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let mut mirror = HostedContextMirror::default();
         // Pushed annotation: local uuid differs from the server id.
         get_or_create_entry(&mut mirror, "ns/repo", "local-old").server_id = "srv-old".into();
@@ -1457,6 +1464,7 @@ mod tests {
 
     #[test]
     fn context_without_creation_state_is_an_explicit_incomplete_result() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let revision = AnnotationRevision {
             revision_id: "revision-without-state".into(),
             kind: AnnotationKind::Constraint,
@@ -1481,6 +1489,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_context_pack_fallback_rejects_projection_without_signed_operation() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         use crate::legacy_v1::{AnnotatedFile, ContextAnnotation, ContextRevision};
 
         use crate::hosted_runtime::hosted::{
@@ -1575,6 +1584,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_empty_bootstrap_rejects_projection_without_signed_operation() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         use crate::legacy_v1::{AnnotatedFile, ContextAnnotation};
 
         use crate::hosted_runtime::hosted::test_server::{ContextFixture, start_with_context};
@@ -1641,6 +1651,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_pull_materializes_context_once_and_persists_the_mirror() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -1724,6 +1735,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_context_clears_create_nonce_after_applied_when_history_is_empty() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let (_temp, repo, annotation) = seed_local_context_annotation("do not remove");
         let (client, server) = crate::hosted_runtime::hosted::test_server::start().await;
         let warnings = std::sync::Arc::new(objects::CollectingWarnings::default());
@@ -1764,6 +1776,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_context_adopts_on_dedup_conflict_for_pending_nonce() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         use crate::legacy_v1::ContextRevision;
 
         use crate::hosted_runtime::hosted::test_server::{ContextFixture, start_with_context};
@@ -1823,6 +1836,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_push_pull_preserves_all_context_anchors_provenance_and_edit_scope() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         fn assert_canonical_anchor(authored: &CollaborationAnchor, signed: &SignedRecord) {
             let operation = thread_api::collaboration::verify(signed).unwrap();
             let objects::object::thread_replication::ThreadOperationBody::Context(bytes) =
@@ -2089,6 +2103,7 @@ mod tests {
 
     #[test]
     fn operation_id_conflict_matches_weft_dedup_wording() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         assert!(is_operation_id_conflict(
             &wire::ProtocolError::InvalidState("operation ID names another command".into())
         ));

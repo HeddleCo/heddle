@@ -257,6 +257,7 @@ mod tests {
 
     #[test]
     fn provider_route_validation_reuses_the_fetch_contract() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let route = valid_route();
         validate_routes(std::slice::from_ref(&route)).expect("valid provider Fetch route");
 
@@ -276,6 +277,7 @@ mod tests {
 
     #[test]
     fn preferred_fetch_open_selects_provider_only_when_routes_are_usable() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let open = FetchOpen::default();
         let without_routes = preferred_fetch_open(open.clone(), Vec::new());
         assert_ne!(

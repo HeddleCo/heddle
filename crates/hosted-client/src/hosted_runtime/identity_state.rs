@@ -407,6 +407,7 @@ mod tests {
 
     #[test]
     fn reissue_invalidates_the_previous_secret() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let mut state = state();
         assert!(state.reissue(b"first-secret", 2_000));
         assert!(state.accepts(b"first-secret", 1_000));
@@ -417,6 +418,7 @@ mod tests {
 
     #[test]
     fn owner_root_completion_is_bound_to_the_prepared_browser() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let mut state = state();
         assert!(state.reissue(b"claim-secret", 2_000));
         assert!(state.prepare_browser("human-handle", &[1; 32]));
@@ -428,6 +430,7 @@ mod tests {
 
     #[test]
     fn production_activation_mints_a_persistable_bearer_without_storing_it() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("claim.toml");
         let mut state = state();
@@ -446,6 +449,7 @@ mod tests {
 
     #[test]
     fn prepared_claim_is_bound_to_one_handle_and_nonce() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let mut state = state();
         assert!(state.reissue(b"claim-secret", 2_000));
         assert!(state.prepare("human-handle", &[1; 32]));
@@ -460,6 +464,7 @@ mod tests {
 
     #[test]
     fn shutdown_deactivates_only_its_own_unclaimed_issuance() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let mut state = state();
         assert!(state.reissue(b"first-secret", 2_000));
         let first_hash = state.authorization_hash().to_string();
@@ -475,6 +480,7 @@ mod tests {
 
     #[test]
     fn leftover_remote_web_origin_still_deserializes() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("claim.toml");
         let contents = format!(
@@ -504,6 +510,7 @@ status = \"dormant\"
 
     #[test]
     fn expired_secret_is_rejected_and_not_persisted_in_plaintext() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("claim.toml");
         let mut state = state();

@@ -352,6 +352,7 @@ pub(super) async fn roundtrip(
 // (payload `()`, single per-test runtime — no other task contends, no deadlock).
 #[allow(clippy::await_holding_lock)]
 async fn real_account_rpc_composes_private_views_and_enforces_scoped_mutations() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     use std::{net::Ipv4Addr, sync::Arc};
 
     use crypto::Signer;

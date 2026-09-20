@@ -355,6 +355,7 @@ mod tests {
 
     #[test]
     fn public_source_shape_uses_the_url_as_its_provider_identity() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let url = "https://github.com/octocat/Hello-World.git";
         let source = contract::ProviderRepository {
             connection: None,
@@ -372,6 +373,7 @@ mod tests {
 
     #[test]
     fn canonical_initial_base_fits_the_import_bootstrap_bound() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let state = hosted_import::synthetic_initial_base().expect("stable initial base");
         let bytes = state.encode_current_msgpack().expect("canonical state");
         assert!(bytes.len() <= 4096);
@@ -379,6 +381,7 @@ mod tests {
 
     #[test]
     fn import_source_uses_the_declared_v2_method() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         assert_eq!(
             rpc::IntegrationServiceImportSource::METHOD.path,
             IMPORT_SOURCE
@@ -387,6 +390,7 @@ mod tests {
 
     #[test]
     fn pending_receipt_is_bound_to_the_destination_and_operation() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let operation_id = Uuid::now_v7().to_string();
         let spool = contract::SpoolRef {
             id: Uuid::now_v7().to_string(),
@@ -416,6 +420,7 @@ mod tests {
 
     #[test]
     fn retry_request_uses_the_observed_record_and_version() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let original = contract::OperationRecord {
             r#ref: Some(contract::RecordRef {
                 spool: Some(contract::SpoolRef {
@@ -436,6 +441,7 @@ mod tests {
 
     #[tokio::test]
     async fn import_source_round_trips_request_and_live_operation_updates() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let (mut client, server, captured) =
             crate::hosted_runtime::hosted::test_server::start_recording_import_source().await;
         let source_url = "https://github.com/octocat/Hello-World.git";

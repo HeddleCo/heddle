@@ -548,6 +548,7 @@ mod tests {
 
     #[test]
     fn tracing_off_omits_hosted_trace_context() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let context = CallContextFactory::default()
             .streaming("/heddle.api.v1alpha2.SyncService/Fetch", "off")
             .unwrap();
@@ -557,6 +558,7 @@ mod tests {
     #[cfg(feature = "telemetry")]
     #[test]
     fn active_span_traceparent_is_carried_in_the_iroh_request_prelude() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let provider = SdkTracerProvider::builder().build();
         let subscriber = tracing_subscriber::registry()
             .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("propagation-test")));
@@ -597,6 +599,7 @@ mod tests {
 
     #[test]
     fn shared_canonical_fixture_is_the_client_signing_contract() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let vector: Vector = serde_json::from_str(UNARY_SIGNING_V1_FIXTURE_JSON).unwrap();
         let canonical = signing::unary_bytes(
             &vector.identity,
@@ -610,6 +613,7 @@ mod tests {
 
     #[test]
     fn configured_factory_places_bearer_and_verifiable_request_proof_in_context() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().unwrap();
         let config = ClientConfig::default()
             .with_token(wire::AuthToken::new("token", "alice"))
@@ -649,6 +653,7 @@ mod tests {
 
     #[test]
     fn configured_factory_decodes_a_stored_biscuit_for_the_wire_context() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let authority = biscuit_auth::KeyPair::new();
         let token = biscuit_auth::Biscuit::builder()
             .build(&authority)
@@ -672,6 +677,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_credentials_keep_the_pop_key_without_forwarding_hosted_authority() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         use api::v2::client::Rpc as _;
         use thread_api::transport::Authorize as _;
 
@@ -705,6 +711,7 @@ mod tests {
 
     #[test]
     fn stream_opening_proof_is_bound_to_route_repository_and_identity() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().unwrap();
         let identity = CallContextFactory::device_key_principal(signer.public_key());
         let config = ClientConfig::default()
@@ -740,6 +747,7 @@ mod tests {
 
     #[test]
     fn mint_spool_owner_genesis_requires_the_device_proof_key() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let error = CallContextFactory::default()
             .mint_spool_owner_genesis(
                 uuid::Uuid::now_v7(),
@@ -751,6 +759,7 @@ mod tests {
 
     #[test]
     fn enrolling_device_key_identity_is_lowercase_hex_principal() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().unwrap();
         let identity = CallContextFactory::device_key_principal(signer.public_key());
         assert_eq!(
@@ -786,6 +795,7 @@ mod tests {
 
     #[test]
     fn as_enrolling_device_key_keeps_the_bearer_and_rewrites_request_identity() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().unwrap();
         let factory = CallContextFactory::default()
             .with_bearer_capability(b"agent-root".to_vec())
@@ -812,6 +822,7 @@ mod tests {
 
     #[test]
     fn mint_spool_owner_genesis_uses_the_configured_proof_key_and_a_uuidv7() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().unwrap();
         let factory = CallContextFactory::default()
             .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:test")
@@ -851,6 +862,7 @@ mod tests {
     }
     #[test]
     fn spool_creation_binds_delegated_parent_path_name_and_original_owner() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         use api::heddle::api::v1alpha2 as v2;
         let owner = Ed25519Signer::from_seed(&[83; 32]).expect("owner");
         let agent = Ed25519Signer::from_seed(&[84; 32]).expect("agent");

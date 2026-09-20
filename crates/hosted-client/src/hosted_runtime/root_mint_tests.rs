@@ -12,6 +12,7 @@ use crate::hosted_runtime::{
 
 #[test]
 fn agent_root_is_signed_by_the_same_seed_weft_will_register() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let signer = Ed25519Signer::generate().expect("seed");
     let root = mint_independent_root(IndependentRootMint {
         seed: &signer.to_seed(),
@@ -52,6 +53,7 @@ fn agent_root_is_signed_by_the_same_seed_weft_will_register() {
 
 #[test]
 fn remint_cannot_escape_the_registered_key_session() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let signer = Ed25519Signer::generate().expect("seed");
     let subject = "alice@example.com";
     let first = mint_independent_root(IndependentRootMint {
@@ -103,6 +105,7 @@ fn remint_cannot_escape_the_registered_key_session() {
 
 #[test]
 fn mint_rejects_an_empty_or_injected_subject() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let seed = [7_u8; 32];
     assert!(
         mint_independent_root(IndependentRootMint {
@@ -141,6 +144,7 @@ fn mint_rejects_an_empty_or_injected_subject() {
 
 #[test]
 fn expired_or_missing_local_agent_expiry_needs_refresh() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     assert!(local_agent_credential_needs_refresh(None, Utc::now()));
     assert!(local_agent_credential_needs_refresh(
         Some("2020-01-01T00:00:00+00:00"),
@@ -154,6 +158,7 @@ fn expired_or_missing_local_agent_expiry_needs_refresh() {
 
 #[test]
 fn expired_local_agent_root_remints_the_same_registered_key() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let signer = Ed25519Signer::generate().expect("seed");
     let seed = signer.to_seed();
     let first = mint_agent_root(&seed).expect("first agent root");
@@ -172,6 +177,7 @@ fn expired_local_agent_root_remints_the_same_registered_key() {
 
 #[test]
 fn locally_bound_account_credential_preserves_the_parent_authority() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let signer = Ed25519Signer::generate().expect("owner signer");
     let root = mint_agent_root(&signer.to_seed()).expect("account root");
     let bound = restrict_agent_account_root(&root.token, &signer, root.expires_at)

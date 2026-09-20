@@ -1837,6 +1837,7 @@ mod tests {
 
     #[test]
     fn hosted_auth_has_no_cli_or_process_presentation_dependencies() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let sources = [
             include_str!("auth.rs"),
             include_str!("auth_login.rs"),
@@ -1862,6 +1863,7 @@ mod tests {
 
     #[test]
     fn signup_invite_commands_construct_the_declared_requests() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let create = create_signup_invite_request(
             Some("alice@example.com".to_string()),
             "invite-op".to_string(),
@@ -1878,12 +1880,14 @@ mod tests {
 
     #[test]
     fn validate_browser_url_accepts_https() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         validate_browser_url("https://auth.heddle.sh/device").expect("https ok");
         validate_browser_url("https://auth.heddle.sh/device?code=ABCD-1234").expect("https+query");
     }
 
     #[test]
     fn validate_browser_url_accepts_loopback_http() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         validate_browser_url("http://127.0.0.1:8421/path").expect("loopback http");
         validate_browser_url("http://localhost:8421/device").expect("localhost http");
         validate_browser_url("http://[::1]:8421/path").expect("ipv6 loopback http");
@@ -1891,6 +1895,7 @@ mod tests {
 
     #[test]
     fn validate_browser_url_rejects_injection_and_dangerous_schemes() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         assert!(
             validate_browser_url("https://x.com & calc").is_err(),
             "shell metacharacters must be rejected"
@@ -1904,6 +1909,7 @@ mod tests {
 
     #[test]
     fn validate_browser_url_rejects_percent_and_redirection() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         // `%` enables Windows env-var expansion (`%VAR%`) via `cmd /C start`.
         assert!(
             validate_browser_url("https://evil.com/%USERPROFILE%").is_err(),
@@ -1924,6 +1930,7 @@ mod tests {
 
     #[test]
     fn hosted_tls_trust_advice_names_ca_and_avoids_status() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let advice = hosted_tls_trust_advice("invalid peer certificate: UnknownIssuer");
         let HeddleError::Recovery(details) = advice else {
             panic!("expected recovery details")
@@ -1939,6 +1946,7 @@ mod tests {
 
     #[test]
     fn device_login_mints_the_bearer_from_the_registered_device_key() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let signer = Ed25519Signer::generate().expect("device key");
         let subject = "alice@example.com";
         let root = crate::hosted_runtime::root_mint::mint_independent_root(
@@ -1968,6 +1976,7 @@ mod tests {
 
     #[test]
     fn device_root_honors_returned_expiry_and_rejects_an_already_expired_one() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let future = chrono::Utc::now() + chrono::Duration::hours(6);
         let honored = credential_expiry(Some(&prost_types::Timestamp {
             seconds: future.timestamp(),
@@ -1990,6 +1999,7 @@ mod tests {
 
     #[test]
     fn service_token_preparation_replays_exact_signed_bytes_and_retires_secret() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let directory = tempfile::tempdir().expect("private preparation directory");
         let output = directory.path().join("ci.hcred");
         let put = identity::PutDelegationRequest {
@@ -2071,6 +2081,7 @@ mod tests {
 
     #[test]
     fn private_service_preparation_refuses_oversized_or_public_files() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().expect("private directory");
@@ -2105,6 +2116,7 @@ mod tests {
 
     #[test]
     fn issued_service_token_requires_signed_exact_parent_child_and_expiry() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         use biscuit_auth::{Biscuit, KeyPair, builder::BlockBuilder};
         let root = KeyPair::new();
         let root_key = root.public().to_bytes();
@@ -2300,6 +2312,7 @@ mod tests {
 
     #[test]
     fn service_delegation_signature_binds_canonical_bytes() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let signer = Ed25519Signer::generate().expect("signer");
         let canonical = b"service delegation".to_vec();
         let record = sign_identity_record(
@@ -2332,6 +2345,7 @@ mod tests {
 
     #[test]
     fn authenticated_identity_mutations_cannot_use_a_direct_bearer_interceptor() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let source = include_str!("auth.rs");
         assert!(
             !source.contains(concat!("IdentityService", "Client")),
@@ -2345,6 +2359,7 @@ mod tests {
 
     #[test]
     fn login_and_rotation_never_call_a_weft_mint_rpc() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let source = include_str!("auth.rs");
         assert!(
             !source.contains(concat!("mint", "_biscuit")),
@@ -2358,6 +2373,7 @@ mod tests {
 
     #[test]
     fn trust_replace_refuses_active_explicit_config_without_mutating_the_pin() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             let server = "https://api.example";
             crate::hosted_runtime::hosted::insert_verified_pin(server, "old-id", &[0x11; 32])
@@ -2531,6 +2547,7 @@ mod tests {
 
     #[test]
     fn derive_agent_installs_fresh_pop_child_and_supports_narrower_subderivation() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             let server = "api.S";
             let (parent, private_key_pem, _root) = stored_device_parent();
@@ -2639,6 +2656,7 @@ mod tests {
 
     #[test]
     fn derive_agent_out_writes_one_verifiable_hcred_with_a_fresh_child_key() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             let server = "api.S";
             let (parent, private_key_pem, _root) = stored_device_parent();
@@ -2709,6 +2727,7 @@ mod tests {
 
     #[test]
     fn derive_agent_runner_hcred_is_human_delegated_and_least_privileged() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             let server = "api.S";
             let (parent, parent_private_key_pem, root) = stored_device_parent();
@@ -2807,6 +2826,7 @@ mod tests {
 
     #[test]
     fn derive_agent_can_inherit_or_explicitly_delegate_admin_operations() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         assert_eq!(
             resolve_agent_operations(None, Vec::new()).expect("inherited"),
             None
@@ -2828,6 +2848,7 @@ mod tests {
 
     #[test]
     fn runner_requires_concrete_spool_scopes() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let missing = validate_runner_scopes(Some(AgentTemplate::Runner), &[])
             .err()
             .unwrap_or_else(|| panic!("an unscoped runner must be rejected"));
@@ -2861,6 +2882,7 @@ mod tests {
 
     #[test]
     fn template_expands_to_a_curated_allow_set() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let reviewer = resolve_agent_operations(Some(AgentTemplate::Reviewer), Vec::new())
             .expect("reviewer template resolves")
             .expect("template restrictions");
@@ -2894,6 +2916,7 @@ mod tests {
 
     #[test]
     fn explicit_allow_only_narrows_a_template() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         // `--allow GetState` intersects the reviewer set: result is just GetState.
         let narrowed = resolve_agent_operations(
             Some(AgentTemplate::Reviewer),
@@ -2914,6 +2937,7 @@ mod tests {
 
     #[test]
     fn auth_status_qualifies_a_credential_without_a_proof_key() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let credential = sample_credential();
         let resolved = crate::hosted_runtime::hosted::ResolvedHostedCredential {
             mint_root_attachment: None,
@@ -2940,6 +2964,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_with_missing_credential_file_fails_closed() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         let error = execute(
             AuthOptions::default(),
             AuthCommand::Login {
@@ -2958,6 +2983,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_with_device_credential_file_installs_and_links_identity() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         // `with_isolated_home` guards a process-global env mutation; run the
         // async install on the current thread inside that guard.
         let temp = tempfile::TempDir::new().expect("temp home");
@@ -3042,6 +3068,7 @@ mod tests {
     /// signing identity are removed (heddle#482).
     #[test]
     fn logout_removes_credential_and_device_identity_on_success() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             credentials::store_server_credential("api.S", sample_credential())
                 .expect("store credential");
@@ -3081,6 +3108,7 @@ mod tests {
     /// retry could no longer resolve back to this server.
     #[test]
     fn logout_preserves_credential_when_device_unlink_fails() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             credentials::store_server_credential("api.S", sample_credential())
                 .expect("store credential");
@@ -3115,6 +3143,7 @@ mod tests {
 
     #[test]
     fn pairing_session_signs_as_the_enrolling_subject_key() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let signer = Ed25519Signer::generate().expect("subject key");
         let HostedAuthMode::ProofOnly {
             signing_identity, ..

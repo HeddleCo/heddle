@@ -69,6 +69,7 @@ mod tests {
 
     #[tokio::test]
     async fn shared_idle_clock_enforces_signed_check_only_delegated_expiry() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let key = biscuit_auth::KeyPair::new();
         let expiry = chrono::Utc::now() + chrono::Duration::seconds(2);
         let root = biscuit_auth::Biscuit::builder()

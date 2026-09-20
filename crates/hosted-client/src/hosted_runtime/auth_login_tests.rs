@@ -86,6 +86,7 @@ impl Drop for IsolatedHome {
 
 #[test]
 fn login_path_covers_the_four_locked_routes() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     let reuse = LoginInputs {
         reusable_cred: true,
         node_key_account: true,
@@ -162,6 +163,7 @@ fn store_device_cred(server: &str, expires_at: Option<chrono::DateTime<Utc>>) ->
 
 #[tokio::test]
 async fn login_reuses_a_valid_unexpired_credential_without_minting() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _home = IsolatedHome::new();
     let server = "api.reuse.test";
     let token = store_device_cred(server, Some(Utc::now() + Duration::hours(2)));
@@ -176,6 +178,7 @@ async fn login_reuses_a_valid_unexpired_credential_without_minting() {
 
 #[tokio::test]
 async fn login_reuses_a_credential_that_has_no_stored_expiry() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _home = IsolatedHome::new();
     let server = "api.reuse-no-expiry.test";
     let token = store_device_cred(server, None);
@@ -190,6 +193,7 @@ async fn login_reuses_a_credential_that_has_no_stored_expiry() {
 
 #[tokio::test]
 async fn login_remints_an_expired_node_key_account_without_an_invite() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _home = IsolatedHome::new();
     let server = "api.remint.test";
     let identity = agent_node_identity::load_or_create().expect("node identity");
@@ -232,6 +236,7 @@ async fn login_remints_an_expired_node_key_account_without_an_invite() {
 
 #[tokio::test]
 async fn login_fail_closed_without_browser_permission_invite_or_account() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _home = IsolatedHome::new();
     let error = run_login("api.heddle.sh", LoginPermission::HeadlessOnly, None)
         .await
@@ -253,6 +258,7 @@ async fn login_fail_closed_without_browser_permission_invite_or_account() {
 
 #[tokio::test]
 async fn login_with_invite_does_not_take_the_fail_closed_path() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _home = IsolatedHome::new();
     let _ = rustls::crypto::ring::default_provider().install_default();
     let error = tokio::time::timeout(
@@ -277,6 +283,7 @@ async fn login_with_invite_does_not_take_the_fail_closed_path() {
 
 #[test]
 fn login_invite_create_succeeds_with_a_claim_next_directive() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     let _home = IsolatedHome::new();
     let server = "api.claim-next.test";
     let output = finish_invite_create_from_response(
@@ -313,6 +320,7 @@ fn login_invite_create_succeeds_with_a_claim_next_directive() {
 
 #[tokio::test]
 async fn remint_uses_claim_state_and_uploads_owner_root_at_enrollment() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _home = IsolatedHome::new();
     let server = "api.claim-state.test";
     let identity = agent_node_identity::load_or_create().expect("node identity");
@@ -352,6 +360,7 @@ async fn remint_uses_claim_state_and_uploads_owner_root_at_enrollment() {
 
 #[test]
 fn provisioned_agent_retains_registered_session_and_rejects_changed_key() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     use api::heddle::api::v1alpha2 as v2;
     let _home = IsolatedHome::new();
     let server = "api.native-agent.test";
@@ -406,6 +415,7 @@ fn provisioned_agent_retains_registered_session_and_rejects_changed_key() {
 
 #[test]
 fn provisioning_reuse_recovers_the_original_owner_root_after_local_state_loss() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     use api::heddle::api::v1alpha2 as v2;
     let _home = IsolatedHome::new();
     let server = "api.native-reuse.test";

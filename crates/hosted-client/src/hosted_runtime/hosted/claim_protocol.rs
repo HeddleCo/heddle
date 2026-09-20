@@ -387,6 +387,7 @@ mod budget_tests {
 
     #[test]
     fn retained_capacity_and_failed_promotion_release_exact_permits() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let admission = Arc::new(Semaphore::new(2));
         let streams = Arc::new(Semaphore::new(1));
         let make = || CallBudget {

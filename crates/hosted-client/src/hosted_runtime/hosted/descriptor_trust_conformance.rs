@@ -35,6 +35,7 @@ fn root_public_key() -> [u8; 32] {
 
 #[test]
 fn consumer_path_verifies_the_committed_conformance_vector() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let canonical = api::descriptor_trust::ephemeral_attestation_bytes(
         EPHEMERAL_KEY_ID,
         &hex::decode(EPHEMERAL_PUBLIC_KEY_HEX)
@@ -92,6 +93,7 @@ fn consumer_path_verifies_the_committed_conformance_vector() {
 
 #[test]
 fn wrong_version_document_is_rejected_fail_closed() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let entry = committed_entry();
     for version in [0_u8, 2, 255] {
         let body = serde_json::to_vec(&EndpointDescriptorSetDocument {
@@ -127,6 +129,7 @@ fn wrong_version_document_is_rejected_fail_closed() {
 
 #[test]
 fn served_root_key_id_is_never_the_pin() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let foreign = [0x41; 32];
     let body = serde_json::to_vec(&EndpointDescriptorSetDocument {
         version: 1,

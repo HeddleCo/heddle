@@ -12,6 +12,7 @@ use super::{CallContextFactory, HostedClient};
 
 #[tokio::test]
 async fn native_client_accepts_source_frames_above_legacy_control_limit() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let server = Endpoint::builder(presets::Minimal)
         .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
         .relay_mode(RelayMode::Disabled)

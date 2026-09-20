@@ -342,6 +342,7 @@ mod tests {
     use super::*;
     #[test]
     fn pairing_requires_verified_same_account_current_authority() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let root = Ed25519Signer::from_seed(&[71; 32]).expect("root");
         let recovery = Ed25519Signer::from_seed(&[72; 32]).expect("recovery");
         let signed = repo::sign_custodial_owner_root(&root, &recovery, [9; 16], [5; 32])
@@ -384,6 +385,7 @@ mod tests {
 
     #[tokio::test]
     async fn stalled_pairing_observation_respects_ceremony_deadline() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let error = wait_for_pairing(
             std::time::Duration::from_millis(1),
             std::future::pending::<std::result::Result<(), std::io::Error>>(),
@@ -399,6 +401,7 @@ mod tests {
     }
     #[test]
     fn paired_response_keeps_original_credential_and_rejects_changed_key_or_session() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let root = biscuit_auth::KeyPair::new();
         let subject = Ed25519Signer::from_seed(&[61; 32]).expect("subject");
         let endpoint = Ed25519Signer::from_seed(&[62; 32]).expect("endpoint");

@@ -230,6 +230,7 @@ mod tests {
 
     #[test]
     fn native_auth_failure_maps_without_transport_status_types() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let error = hosted_to_protocol_error(HostedError::Call {
             code: api::heddle::api::common::CallFailureCode::Unauthenticated,
             message: "invalid proof".to_string(),
@@ -246,6 +247,7 @@ mod tests {
 
     #[test]
     fn native_call_failure_preserves_typed_error_detail() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         use api::heddle::api::common::{ConflictDetail, ErrorDetail, ErrorReason, error_detail};
 
         let error = hosted_to_protocol_error(HostedError::Call {
@@ -276,6 +278,7 @@ mod tests {
 
     #[test]
     fn hosted_to_protocol_error_maps_call_codes_without_detail() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         use api::heddle::api::common::CallFailureCode;
 
         assert!(matches!(
@@ -353,6 +356,7 @@ mod tests {
 
     #[test]
     fn remote_failure_detail_maps_every_context_variant() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         use api::heddle::api::common::{
             CapabilityRequirement, ConflictDetail, CursorFailure, ErrorDetail, ErrorReason,
             PolicyDenial, RetryAdvice, error_detail,
@@ -452,6 +456,7 @@ mod tests {
 
     #[test]
     fn every_known_failure_detail_arm_survives_heddles_wire_path() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         use api::heddle::api::common::{
             CapabilityRequirement, ConflictDetail, CursorFailure, ErrorDetail, ErrorReason,
             PolicyDenial, RetryAdvice, UnknownDetail, cursor_failure, error_detail,
@@ -568,6 +573,7 @@ mod tests {
 
     #[test]
     fn stream_failure_round_trips_with_nested_resume_hints() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         use api::{
             framing::{StreamFrame, decode_stream_frame, encode_stream_failure},
             heddle::api::common::{
@@ -666,6 +672,7 @@ mod tests {
 
     #[test]
     fn reopen_retryable_classifier_matches_weft_v2_signals() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         use api::heddle::api::common::CallFailureCode;
         let aborted = |message: &str| CallFailure {
             code: CallFailureCode::Aborted as i32,
@@ -687,6 +694,7 @@ mod tests {
 
     #[test]
     fn parse_proto_state_id_requires_32_bytes() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let state = StateId::from_bytes([0x55; 32]);
         let proto = ProtoStateId {
             value: state.as_bytes().to_vec(),
