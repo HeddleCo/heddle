@@ -22,13 +22,29 @@ use crate::{
     cli::{
         Cli,
         cli_args::{
-            ThreadApprovalsArgs, ThreadApproveArgs, ThreadCheckMergeArgs, ThreadRevokeApprovalArgs,
+            RemoteChoiceArgs, ThreadApprovalsArgs, ThreadApproveArgs, ThreadCheckMergeArgs,
+            ThreadRevokeApprovalArgs,
         },
         should_output_json,
     },
     config::UserConfig,
     remote::{RemoteTarget, resolve_remote_with_key},
 };
+
+fn resolve_review_remote(repo: &Repository, choice: &RemoteChoiceArgs) -> Result<String> {
+    verbs::resolve_default_remote_name(repo, choice.requested()).map_err(|err| {
+        anyhow!(err).context(
+            "pass `--remote <name>` or configure one with `heddle remote set-default <name>`",
+        )
+    })
+}
+
+fn announce_resolved_remote(cli: &Cli, repo: &Repository, remote_name: &str, address: &str) {
+    if should_output_json(cli, Some(repo.config())) {
+        return;
+    }
+    println!("Using remote `{remote_name}` ({address})");
+}
 
 async fn open_hosted_session(
     repo: &Repository,
@@ -292,7 +308,9 @@ fn decision_output(decision: &wire::ReviewDecision, thread_name: &str) -> Result
 
 pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()> {
     let repo = cli.open_repo()?;
-    let (client, address) = open_hosted_session(&repo, &args.remote).await?;
+    let remote_name = resolve_review_remote(&repo, &args.remote_choice)?;
+    let (client, address) = open_hosted_session(&repo, &remote_name).await?;
+    announce_resolved_remote(cli, &repo, &remote_name, &address);
     let id = operation_id(cli)?;
     let (spool, endpoint, principal) = review_scope(&client, &address).await?;
     let mut outbox = ReviewOutbox::open()?;
@@ -410,7 +428,9 @@ pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()
 
 pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Result<()> {
     let repo = cli.open_repo()?;
-    let (client, address) = open_hosted_session(&repo, &args.remote).await?;
+    let remote_name = resolve_review_remote(&repo, &args.remote_choice)?;
+    let (client, address) = open_hosted_session(&repo, &remote_name).await?;
+    announce_resolved_remote(cli, &repo, &remote_name, &address);
     let snapshot = client.observe_review(&address, &args.thread).await;
     client.close().await;
     let rows: Vec<_> = snapshot?
@@ -447,7 +467,9 @@ pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Resul
 pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let id = uuid::Uuid::parse_str(&args.id).context("review ID must be UUID")?;
-    let (client, address) = open_hosted_session(&repo, &args.remote).await?;
+    let remote_name = resolve_review_remote(&repo, &args.remote_choice)?;
+    let (client, address) = open_hosted_session(&repo, &remote_name).await?;
+    announce_resolved_remote(cli, &repo, &remote_name, &address);
     let operation = operation_id(cli)?;
     let (spool, endpoint, principal) = review_scope(&client, &address).await?;
     let mut outbox = ReviewOutbox::open()?;
@@ -587,7 +609,9 @@ pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArg
 
 pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Result<()> {
     let repo = cli.open_repo()?;
-    let (client, address) = open_hosted_session(&repo, &args.remote).await?;
+    let remote_name = resolve_review_remote(&repo, &args.remote_choice)?;
+    let (client, address) = open_hosted_session(&repo, &remote_name).await?;
+    announce_resolved_remote(cli, &repo, &remote_name, &address);
     let snapshot = client
         .observe_landing_assessment(&address, &args.thread, &args.target)
         .await;

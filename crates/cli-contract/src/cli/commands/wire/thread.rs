@@ -163,7 +163,7 @@ pub struct ThreadCaptureSummary {
     pub total: usize,
 }
 
-/// JSON payload for `thread refresh` / `thread drop` / `thread promote`
+/// JSON payload for `thread refresh` / `thread drop` / `thread checkout`
 /// where the whole refreshed record is echoed beside the operator envelope.
 #[derive(Serialize, JsonSchema)]
 pub struct ThreadRecordOutput {

@@ -29,6 +29,7 @@ mod commands_shell;
 mod commands_thread;
 mod commands_visibility;
 mod output_mode;
+mod shared;
 
 pub use cli_base::{Cli, CliContext, should_output_json};
 pub use command_suggestions::{format_unrecognized_suggestion, suggested_command};
@@ -47,7 +48,7 @@ pub use commands_args::{
     IMPORT_VERB, INIT_VERB, ImportLocalArgs, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs,
     ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadAbsorbArgs,
     ThreadApprovalsArgs, ThreadApproveArgs, ThreadCapturesArgs, ThreadCheckMergeArgs,
-    ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadPromoteArgs, ThreadRenameArgs,
+    ThreadCheckoutArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadRenameArgs,
     ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs, ThreadStartArgs, TimelineCommands,
     TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs, TimelineRecordToolArgs,
     TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, UndoArgs,
@@ -64,12 +65,11 @@ pub use commands_client::{
 #[cfg(all(feature = "git-overlay", feature = "ingest"))]
 pub use commands_context::ContextReasonCommands;
 pub use commands_context::{
-    ContextCommands, ContextGetArgs, ContextRmArgs, ContextScopeArgs, ContextSetArgs,
-    ContextSupersedeArgs,
+    ContextCommands, ContextGetArgs, ContextRmArgs, ContextSetArgs, ContextSupersedeArgs,
 };
 pub use commands_discuss::{
-    DiscussArgs, DiscussCommands, DiscussListArgs, DiscussReopenArgs, DiscussResolveArgs,
-    DiscussShowArgs, DiscussWaitArgs, ResolveModeArg,
+    DiscussArgs, DiscussCommands, DiscussListArgs, DiscussNewArgs, DiscussReopenArgs,
+    DiscussReplyArgs, DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs, ResolveModeArg,
 };
 pub use commands_env::{EnvCommands, EnvCreateArgs, EnvListArgs, EnvRunArgs};
 #[cfg(feature = "git-overlay")]
@@ -109,3 +109,7 @@ pub use commands_visibility::{
 };
 pub use config::OutputMode;
 pub use output_mode::CliOutputMode;
+pub use shared::{
+    AuthoredMessageArgs, CloneSourceArg, CodeScopeArgs, DryRunArgs, HistoricalRevisionArgs,
+    HostedServerArgs, RemoteChoiceArgs, safe_clone_destination_basename, split_path_and_revision,
+};

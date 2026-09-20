@@ -67,9 +67,8 @@ pub struct FsckRepairGitArgs {
     #[arg(long, value_parser = ["git", "heddle"])]
     pub prefer: Option<String>,
 
-    /// Show the authority-valid repair without changing refs.
-    #[arg(long)]
-    pub preview: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 }
 
 #[derive(Subcommand)]
@@ -84,13 +83,15 @@ pub enum Commands {
 
     /// Curated, progressive-disclosure help.
     ///
-    /// `heddle help` prints the locked everyday verbs. `heddle help
-    /// <topic>` prints the topic page (e.g. `model`, `daemon`,
-    /// `signals`, `git-concepts`). `heddle help <command path>` falls
-    /// through to that command's `--help` so the printer never
-    /// duplicates clap's per-verb derivation.
+    /// `heddle help` prints the task map. `heddle help --all` prints the
+    /// full command tree. `heddle help <topic>` prints the topic page
+    /// (e.g. `model`, `advanced`, `git-concepts`). `heddle help
+    /// <command path>` falls through to that command's `--help`.
     Help {
-        /// Topic name (`model`, `daemon`, `signals`, …) or command
+        /// Print the full command tree instead of the task map.
+        #[arg(long)]
+        all: bool,
+        /// Topic name (`model`, `advanced`, `git-concepts`, …) or command
         /// path. When omitted, prints the curated default.
         #[arg(value_name = "TOPIC_OR_COMMAND")]
         topics: Vec<String>,
@@ -228,10 +229,10 @@ Examples:
 
     /// Open or resolve discussions anchored to code.
     ///
-    /// `--new` opens a discussion; `--id` replies (parent = latest, or
-    /// `--turn N`). `--path` / `--symbol` / `--line` are the anchor;
-    /// `--file` is a markdown body file. Resolve, reopen, list, show,
-    /// and wait stay subcommands.
+    /// Subcommands: `new`, `reply`, `resolve`, `reopen`, `list`, `show`,
+    /// `wait`. `--path` / `--symbol` / `--line` are the code anchor;
+    /// `--state` is the historical revision; `--body` / `--file` is the
+    /// markdown body.
     ///
     /// Native Heddle only. Discussions live in `.heddle` and travel
     /// over `heddle push` / `heddle pull` to a Heddle remote. They are
@@ -244,11 +245,11 @@ Scope:
   Git Overlay repository arrives with no discussions and no Heddle store.
 
 Examples:
-  heddle discuss --new --path src/lib.rs --symbol greet \"why greet?\"
-  heddle discuss --new --path src/lib.rs --file why.md
-  heddle discuss --id disc-01a0afc6 \"second thought\"
-  heddle discuss --id disc-01a0afc6 --turn 2 \"reply to that turn\"
-  heddle discuss resolve <id> --by-edit --state HEAD
+  heddle discuss new --path src/lib.rs --symbol greet --body \"why greet?\"
+  heddle discuss new --path src/lib.rs --file why.md
+  heddle discuss reply disc-01a0afc6 --body \"second thought\"
+  heddle discuss reply disc-01a0afc6 --turn 2 --body \"reply to that turn\"
+  heddle discuss resolve <id> --mode by-edit --state HEAD
 ")]
     Discuss(DiscussArgs),
 
@@ -576,7 +577,7 @@ Examples:
         command: MaintenanceCommands,
     },
 
-    /// Clone from remote.
+    /// Download an existing repository into a local directory.
     Clone(CloneArgs),
 
     /// Manage repository hooks.

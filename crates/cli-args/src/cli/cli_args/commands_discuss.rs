@@ -1,59 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle discuss` — durable repository collaboration.
 
-use std::path::PathBuf;
-
 use clap::{Args, Subcommand};
 
-/// Write flags plus the remaining discuss subcommands.
-///
-/// `heddle discuss --new …` / `heddle discuss --id …` is the write path.
-/// `list` / `show` / `resolve` / `reopen` / `wait` stay subcommands.
+use super::{AuthoredMessageArgs, CodeScopeArgs, HistoricalRevisionArgs, RemoteChoiceArgs};
+
+/// `heddle discuss` — every action is a subcommand.
 #[derive(Clone, Debug, Args)]
-#[command(args_conflicts_with_subcommands = true)]
 pub struct DiscussArgs {
-    /// Open a new discussion. Exclusive with `--id`.
-    #[arg(long, conflicts_with = "id")]
-    pub new: bool,
-    /// Reply to an existing discussion (short or full `disc-` id). Exclusive with `--new`.
-    #[arg(long, conflicts_with = "new")]
-    pub id: Option<String>,
-    /// Anchor file path.
-    #[arg(long)]
-    pub path: Option<String>,
-    /// Anchor symbol. Requires `--path`.
-    #[arg(long, requires = "path")]
-    pub symbol: Option<String>,
-    /// Anchor line (1-indexed). Requires `--path`.
-    #[arg(long, requires = "path")]
-    pub line: Option<u32>,
-    /// Read the markdown body from a file.
-    #[arg(long, value_name = "PATH")]
-    pub file: Option<PathBuf>,
-    /// Parent turn number (1-indexed). Requires `--id`. Defaults to the latest head.
-    #[arg(long, requires = "id")]
-    pub turn: Option<u32>,
-    /// Human-readable summary. Defaults to the first line of the first turn.
-    #[arg(long)]
-    pub title: Option<String>,
-    /// State the anchor was observed against. Defaults to HEAD.
-    #[arg(long)]
-    pub state: Option<String>,
-    /// Visibility: `public` | `internal` | `team:NAME` | `restricted:LABEL` | `private:LABEL`.
-    #[arg(long)]
-    pub visibility: Option<String>,
-    /// Attach the discussion to a thread ref while keeping its code anchor.
-    #[arg(long, value_name = "REF")]
-    pub thread: Option<String>,
-    /// Turn body (markdown). Alternative to `--file`.
-    #[arg(value_name = "BODY")]
-    pub body: Option<String>,
     #[command(subcommand)]
-    pub command: Option<DiscussCommands>,
+    pub command: DiscussCommands,
 }
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum DiscussCommands {
+    /// Open a new discussion.
+    New(DiscussNewArgs),
+    /// Reply to an existing discussion.
+    Reply(DiscussReplyArgs),
     /// Resolve a discussion.
     Resolve(DiscussResolveArgs),
     /// Reopen a resolved discussion.
@@ -67,65 +31,66 @@ pub enum DiscussCommands {
 }
 
 #[derive(Clone, Debug, Args)]
-#[command(group(
-    clap::ArgGroup::new("resolution")
-        .required(true)
-        .args(["mode", "into_annotation", "dismiss", "by_edit"])
-))]
+pub struct DiscussNewArgs {
+    #[command(flatten)]
+    pub scope: CodeScopeArgs,
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
+    #[command(flatten)]
+    pub message: AuthoredMessageArgs,
+    /// Human-readable summary. Defaults to the first line of the first turn.
+    #[arg(long)]
+    pub title: Option<String>,
+    /// Visibility: `public` | `internal` | `team:NAME` | `restricted:LABEL` | `private:LABEL`.
+    #[arg(long)]
+    pub visibility: Option<String>,
+    /// Attach the discussion to a thread ref while keeping its code anchor.
+    #[arg(long, value_name = "REF")]
+    pub thread: Option<String>,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct DiscussReplyArgs {
+    /// Discussion id (short or full `disc-` id).
+    #[arg(value_name = "ID")]
+    pub discussion_id: String,
+    #[command(flatten)]
+    pub message: AuthoredMessageArgs,
+    /// Parent turn number (1-indexed). Defaults to the latest head.
+    #[arg(long)]
+    pub turn: Option<u32>,
+}
+
+#[derive(Clone, Debug, Args)]
 pub struct DiscussResolveArgs {
     /// Discussion id (short or full `disc-` id).
     #[arg(value_name = "ID")]
     pub discussion_id: String,
-    /// Resolution kind: `by-edit` or `dismiss`.
+    /// Resolution kind: `by-edit`, `dismiss`, or `into-annotation`.
     #[arg(long, value_enum)]
-    pub mode: Option<ResolveModeArg>,
-    /// Shorthand for `--mode dismiss`. Still requires `--reason`.
-    #[arg(long, conflicts_with_all = ["mode", "by_edit", "into_annotation"])]
-    pub dismiss: bool,
-    /// Shorthand for `--mode by-edit`.
-    #[arg(long = "by-edit", conflicts_with_all = ["mode", "dismiss", "into_annotation"])]
-    pub by_edit: bool,
-    /// Resolve by creating a real context annotation (`context set`) and linking it.
-    #[arg(long, requires = "body")]
-    pub into_annotation: bool,
+    pub mode: ResolveModeArg,
     /// For `by-edit`: state containing the edit (defaults to HEAD).
-    #[arg(long)]
-    pub state: Option<String>,
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
     /// For `dismiss`: non-empty reason.
     #[arg(long)]
     pub reason: Option<String>,
-    /// For `--into-annotation`: annotation content.
-    #[arg(long, requires = "into_annotation")]
-    pub body: Option<String>,
-    /// For `--into-annotation`: constraint, invariant, or rationale (defaults to rationale).
-    #[arg(
-        long,
-        value_parser = ["constraint", "invariant", "rationale"],
-        requires = "into_annotation"
-    )]
+    /// For `into-annotation`: annotation content (`--body` or `--file`).
+    #[command(flatten)]
+    pub message: AuthoredMessageArgs,
+    /// For `into-annotation`: constraint, invariant, or rationale (defaults to rationale).
+    #[arg(long, value_parser = ["constraint", "invariant", "rationale"])]
     pub kind: Option<String>,
-    /// For `--into-annotation`: annotation tag (can be repeated).
-    #[arg(long, requires = "into_annotation")]
+    /// For `into-annotation`: annotation tag (can be repeated).
+    #[arg(long)]
     pub tag: Vec<String>,
-}
-
-impl DiscussResolveArgs {
-    /// Effective `--mode`, including `--dismiss` / `--by-edit` shorthands.
-    pub fn resolved_mode(&self) -> Option<ResolveModeArg> {
-        if self.dismiss {
-            Some(ResolveModeArg::Dismiss)
-        } else if self.by_edit {
-            Some(ResolveModeArg::ByEdit)
-        } else {
-            self.mode.clone()
-        }
-    }
 }
 
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum ResolveModeArg {
     ByEdit,
     Dismiss,
+    IntoAnnotation,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -138,15 +103,11 @@ pub struct DiscussReopenArgs {
 
 #[derive(Clone, Debug, Args)]
 pub struct DiscussListArgs {
+    #[command(flatten)]
+    pub scope: CodeScopeArgs,
     /// Filter by the state named in the discussion anchor.
-    #[arg(long)]
-    pub state: Option<String>,
-    /// Filter by anchored file path.
-    #[arg(long)]
-    pub path: Option<String>,
-    /// Filter by anchored symbol. Requires `--path`.
-    #[arg(long, requires = "path")]
-    pub symbol: Option<String>,
+    #[command(flatten)]
+    pub revision: HistoricalRevisionArgs,
     /// Status filter: `open`, `resolved`, `conflicted`, or `all`.
     #[arg(long, default_value = "open")]
     pub status: String,
@@ -164,9 +125,8 @@ pub struct DiscussWaitArgs {
     /// Resume after this hosted event id. Defaults to the persisted watermark.
     #[arg(long)]
     pub after: Option<i64>,
-    /// Hosted remote that owns the event cursor. Defaults to the repository default.
-    #[arg(long)]
-    pub remote: Option<String>,
+    #[command(flatten)]
+    pub remote_choice: RemoteChoiceArgs,
     /// Restrict the subscription to this thread name.
     #[arg(long)]
     pub thread: Option<String>,
@@ -189,95 +149,109 @@ mod tests {
     }
 
     #[test]
-    fn write_path_parses_new_and_id() {
+    fn writes_are_subcommands() {
         let opened = discuss(
             Cli::try_parse_from([
                 "heddle",
                 "discuss",
-                "--new",
+                "new",
                 "--path",
                 "src/lib.rs",
                 "--symbol",
                 "greet",
+                "--body",
                 "why greet?",
             ])
-            .expect("discuss --new"),
+            .expect("discuss new"),
         );
-        assert!(opened.new);
-        assert!(opened.id.is_none());
-        assert_eq!(opened.path.as_deref(), Some("src/lib.rs"));
-        assert_eq!(opened.symbol.as_deref(), Some("greet"));
-        assert_eq!(opened.body.as_deref(), Some("why greet?"));
-        assert!(opened.command.is_none());
+        match opened.command {
+            DiscussCommands::New(args) => {
+                assert_eq!(args.scope.path.as_deref(), Some("src/lib.rs"));
+                assert_eq!(args.scope.symbol.as_deref(), Some("greet"));
+                assert_eq!(args.message.body.as_deref(), Some("why greet?"));
+            }
+            _ => panic!("expected discuss new"),
+        }
 
         let reply = discuss(
             Cli::try_parse_from([
                 "heddle",
                 "discuss",
-                "--id",
+                "reply",
                 "disc-01a0afc6",
+                "--body",
                 "second thought",
             ])
-            .expect("discuss --id"),
+            .expect("discuss reply"),
         );
-        assert!(!reply.new);
-        assert_eq!(reply.id.as_deref(), Some("disc-01a0afc6"));
-        assert_eq!(reply.body.as_deref(), Some("second thought"));
-        assert!(reply.turn.is_none());
+        match reply.command {
+            DiscussCommands::Reply(args) => {
+                assert_eq!(args.discussion_id, "disc-01a0afc6");
+                assert_eq!(args.message.body.as_deref(), Some("second thought"));
+                assert!(args.turn.is_none());
+            }
+            _ => panic!("expected discuss reply"),
+        }
 
         let threaded = discuss(
             Cli::try_parse_from([
                 "heddle",
                 "discuss",
-                "--id",
+                "reply",
                 "disc-01a0afc6",
                 "--turn",
                 "2",
+                "--body",
                 "reply to that turn",
             ])
-            .expect("discuss --id --turn"),
+            .expect("discuss reply --turn"),
         );
-        assert_eq!(threaded.turn, Some(2));
-        assert_eq!(threaded.body.as_deref(), Some("reply to that turn"));
+        match threaded.command {
+            DiscussCommands::Reply(args) => {
+                assert_eq!(args.turn, Some(2));
+                assert_eq!(args.message.body.as_deref(), Some("reply to that turn"));
+            }
+            _ => panic!("expected discuss reply"),
+        }
 
         let from_file = discuss(
             Cli::try_parse_from([
                 "heddle",
                 "discuss",
-                "--new",
+                "new",
                 "--path",
                 "src/lib.rs",
                 "--file",
                 "why.md",
             ])
-            .expect("discuss --file body"),
+            .expect("discuss new --file"),
         );
-        assert_eq!(
-            from_file.file.as_deref(),
-            Some(std::path::Path::new("why.md"))
-        );
-        assert!(from_file.body.is_none());
+        match from_file.command {
+            DiscussCommands::New(args) => {
+                assert_eq!(
+                    args.message.file.as_deref(),
+                    Some(std::path::Path::new("why.md"))
+                );
+                assert!(args.message.body.is_none());
+            }
+            _ => panic!("expected discuss new"),
+        }
     }
 
     #[test]
-    fn new_and_id_are_exclusive() {
-        assert!(
-            Cli::try_parse_from([
+    fn write_modes_on_parent_are_gone() {
+        for argv in [
+            [
                 "heddle",
                 "discuss",
                 "--new",
-                "--id",
-                "disc-01a0afc6",
-                "body",
-            ])
-            .is_err(),
-            "--new and --id must conflict"
-        );
-    }
-
-    #[test]
-    fn open_turn_and_append_are_not_commands() {
-        for argv in [
+                "--path",
+                "src/lib.rs",
+                "--body",
+                "x",
+            ]
+            .as_slice(),
+            ["heddle", "discuss", "--id", "disc-01a0afc6", "--body", "x"].as_slice(),
             [
                 "heddle",
                 "discuss",
@@ -287,82 +261,63 @@ mod tests {
                 "why greet?",
             ]
             .as_slice(),
-            ["heddle", "discuss", "turn", "disc-id", "body"].as_slice(),
-            ["heddle", "discuss", "append", "disc-id", "body"].as_slice(),
         ] {
             assert!(
                 Cli::try_parse_from(argv).is_err(),
-                "{argv:?} must not parse as a discuss subcommand"
+                "{argv:?} must not parse"
             );
         }
     }
 
     #[test]
-    fn show_and_resolve_take_an_id_not_file_symbol() {
-        let shown = discuss(
-            Cli::try_parse_from(["heddle", "discuss", "show", "disc-id"]).expect("show id"),
-        );
-        match shown.command {
-            Some(DiscussCommands::Show(args)) => {
-                assert_eq!(args.discussion_id, "disc-id");
-            }
-            _ => panic!("expected discuss show"),
-        }
-        assert!(
-            Cli::try_parse_from(["heddle", "discuss", "show", "src/auth.rs", "verify"]).is_err(),
-            "FILE SYMBOL must not parse as discuss show"
-        );
+    fn resolve_uses_mode_only() {
         let resolved = discuss(
             Cli::try_parse_from([
-                "heddle",
-                "discuss",
-                "resolve",
-                "disc-id",
-                "--dismiss",
-                "--reason",
-                "done",
+                "heddle", "discuss", "resolve", "disc-id", "--mode", "dismiss", "--reason", "done",
             ])
-            .expect("resolve id"),
+            .expect("resolve --mode dismiss"),
         );
         match resolved.command {
-            Some(DiscussCommands::Resolve(args)) => {
-                assert_eq!(args.discussion_id, "disc-id");
-            }
-            _ => panic!("expected discuss resolve"),
-        }
-    }
-
-    #[test]
-    fn resolve_dismiss_and_by_edit_shorthands_set_mode() {
-        let dismiss = discuss(
-            Cli::try_parse_from([
-                "heddle",
-                "discuss",
-                "resolve",
-                "disc-id",
-                "--dismiss",
-                "--reason",
-                "done",
-            ])
-            .expect("dismiss shorthand"),
-        );
-        match dismiss.command {
-            Some(DiscussCommands::Resolve(args)) => {
-                assert!(matches!(
-                    args.resolved_mode(),
-                    Some(ResolveModeArg::Dismiss)
-                ));
+            DiscussCommands::Resolve(args) => {
+                assert!(matches!(args.mode, ResolveModeArg::Dismiss));
                 assert_eq!(args.reason.as_deref(), Some("done"));
             }
             _ => panic!("expected discuss resolve"),
         }
-        let by_edit = discuss(
-            Cli::try_parse_from(["heddle", "discuss", "resolve", "disc-id", "--by-edit"])
-                .expect("by-edit shorthand"),
+        assert!(
+            Cli::try_parse_from([
+                "heddle",
+                "discuss",
+                "resolve",
+                "disc-id",
+                "--dismiss",
+                "--reason",
+                "done",
+            ])
+            .is_err(),
+            "--dismiss synonym is removed"
         );
-        match by_edit.command {
-            Some(DiscussCommands::Resolve(args)) => {
-                assert!(matches!(args.resolved_mode(), Some(ResolveModeArg::ByEdit)));
+        assert!(
+            Cli::try_parse_from(["heddle", "discuss", "resolve", "disc-id", "--by-edit"]).is_err(),
+            "--by-edit synonym is removed"
+        );
+        let into = discuss(
+            Cli::try_parse_from([
+                "heddle",
+                "discuss",
+                "resolve",
+                "disc-id",
+                "--mode",
+                "into-annotation",
+                "--body",
+                "keep this",
+            ])
+            .expect("resolve into-annotation"),
+        );
+        match into.command {
+            DiscussCommands::Resolve(args) => {
+                assert!(matches!(args.mode, ResolveModeArg::IntoAnnotation));
+                assert_eq!(args.message.body.as_deref(), Some("keep this"));
             }
             _ => panic!("expected discuss resolve"),
         }
@@ -375,8 +330,8 @@ mod tests {
                 .expect("list --path"),
         );
         match listed.command {
-            Some(DiscussCommands::List(args)) => {
-                assert_eq!(args.path.as_deref(), Some("src/lib.rs"));
+            DiscussCommands::List(args) => {
+                assert_eq!(args.scope.path.as_deref(), Some("src/lib.rs"));
             }
             _ => panic!("expected discuss list"),
         }

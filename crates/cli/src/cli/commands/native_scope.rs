@@ -80,7 +80,9 @@ impl AnnotationSurface {
     fn first_step(self) -> &'static str {
         match self {
             Self::Context => "heddle context set --path <path> -m \"...\"",
-            Self::Discuss => "heddle discuss --new --path <path> --symbol <symbol> \"<question>\"",
+            Self::Discuss => {
+                "heddle discuss new --path <path> --symbol <symbol> --body \"<question>\""
+            }
         }
     }
 }

@@ -1247,7 +1247,7 @@ pub async fn cmd_agent_ready(cli: &Cli, args: crate::cli::cli_args::AgentReadyAr
             thread: Some(plan.thread),
             message: plan.message,
             confidence: plan.confidence,
-            dry_run: false,
+            dry_run: crate::cli::cli_args::DryRunArgs::default(),
         },
     )
     .await

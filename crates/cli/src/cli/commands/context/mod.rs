@@ -280,12 +280,16 @@ pub(crate) fn scope_from_flags(
     ) {
         (Some(name), None, None) => Ok(Some(symbol_scope(name)?)),
         (None, Some(n), None) => Ok(Some(line_scope(n, n)?)),
+        (Some(name), Some(n), None) => Ok(Some(AnnotationScope::Symbol {
+            name: name.to_string(),
+            resolved_lines: Some((n, n)),
+        })),
         (None, None, Some(raw)) => Ok(Some(parse_scope(Some(raw))?)),
         (None, None, None) => Ok(None),
         _ => Err(anyhow!(RecoveryAdvice::invalid_usage(
             "context_scope_conflict",
-            "--symbol, --line, and --scope are mutually exclusive",
-            "Pass exactly one of `--symbol <name>`, `--line <n>`, or the deprecated `--scope` alias.",
+            "--scope cannot combine with --symbol or --line",
+            "Pass `--symbol <name>` and/or `--line <n>`.",
             "heddle context set --path <path> --symbol <name> -m \"...\"",
         ))),
     }
@@ -536,7 +540,16 @@ mod tests {
             other => panic!("expected deprecated scope alias, got {other:?}"),
         }
         assert!(scope_from_flags(None, None, None).unwrap().is_none());
-        assert!(scope_from_flags(Some("verify"), Some(12), None).is_err());
+        match scope_from_flags(Some("verify"), Some(12), None).unwrap() {
+            Some(AnnotationScope::Symbol {
+                name,
+                resolved_lines: Some((start, end)),
+            }) => {
+                assert_eq!(name, "verify");
+                assert_eq!((start, end), (12, 12));
+            }
+            other => panic!("expected symbol pinned to a line, got {other:?}"),
+        }
         assert_eq!(
             scope_from_flags_or_file(None, None, None).unwrap(),
             AnnotationScope::File

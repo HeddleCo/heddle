@@ -41,8 +41,8 @@ use super::{
 use crate::{
     cli::{
         cli_args::{
-            Cli, DiscussArgs, DiscussCommands, DiscussListArgs, DiscussReopenArgs,
-            DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs, ResolveModeArg,
+            Cli, DiscussArgs, DiscussCommands, DiscussListArgs, DiscussNewArgs, DiscussReopenArgs,
+            DiscussReplyArgs, DiscussResolveArgs, DiscussShowArgs, DiscussWaitArgs, ResolveModeArg,
         },
         should_output_json,
     },
@@ -56,48 +56,48 @@ pub async fn run(cli: &Cli, args: &DiscussArgs) -> Result<()> {
     // Mutating subcommands still bootstrap: overlay discussions are allowed,
     // they are just local, and `emit_locality_notice_once` says so.
     let repo = match &args.command {
-        Some(DiscussCommands::List(_) | DiscussCommands::Show(_)) => {
-            match open_annotation_store(cli)? {
-                AnnotationStore::Present(repo) => *repo,
-                AnnotationStore::Absent(absent) => {
-                    let output_kind = match &args.command {
-                        Some(DiscussCommands::Show(_)) => "discuss_show",
-                        _ => "discuss_list",
-                    };
-                    let with_items = matches!(args.command, Some(DiscussCommands::List(_)));
-                    return report_absent_store(
-                        cli,
-                        AnnotationSurface::Discuss,
-                        output_kind,
-                        with_items,
-                        &absent,
-                    );
-                }
+        DiscussCommands::List(_) | DiscussCommands::Show(_) => match open_annotation_store(cli)? {
+            AnnotationStore::Present(repo) => *repo,
+            AnnotationStore::Absent(absent) => {
+                let output_kind = match &args.command {
+                    DiscussCommands::Show(_) => "discuss_show",
+                    _ => "discuss_list",
+                };
+                let with_items = matches!(args.command, DiscussCommands::List(_));
+                return report_absent_store(
+                    cli,
+                    AnnotationSurface::Discuss,
+                    output_kind,
+                    with_items,
+                    &absent,
+                );
             }
-        }
+        },
         #[cfg(feature = "client")]
-        Some(DiscussCommands::Wait(wait_args)) => {
+        DiscussCommands::Wait(wait_args) => {
             let repo = cli.open_repo().context("open Heddle repository")?;
             return run_wait(cli, &repo, wait_args).await;
         }
         #[cfg(not(feature = "client"))]
-        Some(DiscussCommands::Wait(_)) => {
+        DiscussCommands::Wait(_) => {
             return Err(anyhow!(RecoveryAdvice::network_feature_unavailable(
                 "discuss wait"
             )));
         }
-        _ => cli.open_repo().context("open Heddle repository")?,
+        DiscussCommands::New(_)
+        | DiscussCommands::Reply(_)
+        | DiscussCommands::Resolve(_)
+        | DiscussCommands::Reopen(_) => cli.open_repo().context("open Heddle repository")?,
     };
     let store = CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
     match &args.command {
-        None => run_write(cli, &repo, &store, args),
-        Some(DiscussCommands::Resolve(resolve_args)) => {
-            run_resolve(cli, &repo, &store, resolve_args)
-        }
-        Some(DiscussCommands::Reopen(reopen_args)) => run_reopen(cli, &repo, &store, reopen_args),
-        Some(DiscussCommands::List(list_args)) => run_list(cli, &repo, &store, list_args),
-        Some(DiscussCommands::Show(show_args)) => run_show(cli, &store, show_args),
-        Some(DiscussCommands::Wait(_)) => unreachable!("wait returns before opening the store"),
+        DiscussCommands::New(new_args) => run_new(cli, &repo, &store, new_args),
+        DiscussCommands::Reply(reply_args) => run_reply(cli, &repo, &store, reply_args),
+        DiscussCommands::Resolve(resolve_args) => run_resolve(cli, &repo, &store, resolve_args),
+        DiscussCommands::Reopen(reopen_args) => run_reopen(cli, &repo, &store, reopen_args),
+        DiscussCommands::List(list_args) => run_list(cli, &repo, &store, list_args),
+        DiscussCommands::Show(show_args) => run_show(cli, &store, show_args),
+        DiscussCommands::Wait(_) => unreachable!("wait returns before opening the store"),
     }
 }
 
@@ -113,46 +113,45 @@ impl CompactProjection for DiscussionWriteOutput {
     }
 }
 
-fn run_write(
+fn run_new(
     cli: &Cli,
     repo: &repo::Repository,
     store: &CollaborationStore,
-    args: &DiscussArgs,
+    args: &DiscussNewArgs,
 ) -> Result<()> {
-    match (args.new, args.id.as_deref()) {
-        (true, None) => open_discussion(
-            cli,
-            repo,
-            store,
-            OpenSpec {
-                path: args.path.as_deref(),
-                symbol: args.symbol.as_deref(),
-                line: args.line,
-                body: args.body.as_deref(),
-                body_file: args.file.as_deref(),
-                title: args.title.as_deref(),
-                state: args.state.as_deref(),
-                visibility: args.visibility.as_deref(),
-                thread: args.thread.as_deref(),
-            },
-            &["discuss"],
-        ),
-        (false, Some(id)) => append_turn(
-            &DiscussWrite { cli, repo, store },
-            id,
-            args.body.as_deref(),
-            args.file.as_deref(),
-            args.turn,
-            &["discuss"],
-        ),
-        (false, None) => Err(anyhow!(RecoveryAdvice::invalid_usage(
-            "discuss_write_selector_required",
-            "discuss needs --new or --id",
-            "Open with `heddle discuss --new --path <path> …` or reply with `heddle discuss --id <id> …`.",
-            "heddle discuss --new --path src/lib.rs --symbol greet \"why greet?\"",
-        ))),
-        (true, Some(_)) => unreachable!("clap rejects --new with --id"),
-    }
+    open_discussion(
+        cli,
+        repo,
+        store,
+        OpenSpec {
+            path: args.scope.path.as_deref(),
+            symbol: args.scope.symbol.as_deref(),
+            line: args.scope.line,
+            body: args.message.body.as_deref(),
+            body_file: args.message.file.as_deref(),
+            title: args.title.as_deref(),
+            state: args.revision.state.as_deref(),
+            visibility: args.visibility.as_deref(),
+            thread: args.thread.as_deref(),
+        },
+        &["discuss", "new"],
+    )
+}
+
+fn run_reply(
+    cli: &Cli,
+    repo: &repo::Repository,
+    store: &CollaborationStore,
+    args: &DiscussReplyArgs,
+) -> Result<()> {
+    append_turn(
+        &DiscussWrite { cli, repo, store },
+        &args.discussion_id,
+        args.message.body.as_deref(),
+        args.message.file.as_deref(),
+        args.turn,
+        &["discuss", "reply"],
+    )
 }
 
 struct DiscussWrite<'a> {
@@ -184,9 +183,9 @@ fn open_discussion(
     let Some(path) = path else {
         return Err(anyhow!(RecoveryAdvice::invalid_usage(
             "discuss_path_required",
-            "discuss --new requires --path",
+            "discuss new requires --path",
             "Pass `--path <file>` (and optionally `--symbol` / `--line`) to anchor the discussion.",
-            "heddle discuss --new --path src/lib.rs --symbol greet \"why greet?\"",
+            "heddle discuss new --path src/lib.rs --symbol greet --body \"why greet?\"",
         )));
     };
     let body = read_body(spec.body, spec.body_file)?;
@@ -287,7 +286,7 @@ fn read_body(body: Option<&str>, file: Option<&Path>) -> Result<String> {
                     "discuss_body_required",
                     "discussion body must not be empty",
                     "Pass a non-empty markdown body or `--file` pointing at a non-empty file.",
-                    "heddle discuss --new --path src/lib.rs --file why.md",
+                    "heddle discuss new --path src/lib.rs --file why.md",
                 )));
             }
             Ok(trimmed.to_string())
@@ -295,14 +294,14 @@ fn read_body(body: Option<&str>, file: Option<&Path>) -> Result<String> {
         (Some(_), Some(_)) => Err(anyhow!(RecoveryAdvice::invalid_usage(
             "discuss_body_conflict",
             "pass the body as an argument or `--file`, not both",
-            "Use a positional markdown body or `--file <path>`.",
-            "heddle discuss --new --path src/lib.rs --file why.md",
+            "Use `--body <text>` or `--file <path>`.",
+            "heddle discuss new --path src/lib.rs --file why.md",
         ))),
         (None, None) => Err(anyhow!(RecoveryAdvice::invalid_usage(
             "discuss_body_required",
             "discussion body is required",
-            "Pass a markdown body argument or `--file <path>`.",
-            "heddle discuss --new --path src/lib.rs \"why greet?\"",
+            "Pass `--body <text>` or `--file <path>`.",
+            "heddle discuss new --path src/lib.rs --body \"why greet?\"",
         ))),
     }
 }
@@ -313,11 +312,11 @@ fn run_resolve(
     store: &CollaborationStore,
     args: &DiscussResolveArgs,
 ) -> Result<()> {
-    let resolution = match (args.resolved_mode(), args.into_annotation) {
-        (Some(ResolveModeArg::ByEdit), false) => CollaborationResolution::AddressedByState {
-            state_id: resolve_state(repo, args.state.as_deref())?,
+    let resolution = match args.mode {
+        ResolveModeArg::ByEdit => CollaborationResolution::AddressedByState {
+            state_id: resolve_state(repo, args.revision.state.as_deref())?,
         },
-        (Some(ResolveModeArg::Dismiss), false) => CollaborationResolution::Dismissed {
+        ResolveModeArg::Dismiss => CollaborationResolution::Dismissed {
             reason: args
                 .reason
                 .as_deref()
@@ -326,17 +325,9 @@ fn run_resolve(
                 .ok_or_else(|| anyhow!(RecoveryAdvice::discuss_resolve_missing_dismiss_reason()))?
                 .to_string(),
         },
-        (None, true) => {
+        ResolveModeArg::IntoAnnotation => {
             let discussion_id = resolve_discussion_id(store, &args.discussion_id)?.to_string();
             resolve_into_context_annotation(repo, store, args, discussion_id.as_str())?
-        }
-        _ => {
-            return Err(anyhow!(RecoveryAdvice::invalid_usage(
-                "discuss_resolve_mode_required",
-                "discuss resolve needs a resolution mode",
-                "Pass `--dismiss --reason ...`, `--by-edit`, `--mode dismiss|by-edit`, or `--into-annotation`.",
-                "heddle discuss resolve disc-01a0afc6 --dismiss --reason done",
-            )));
         }
     };
     write_descendant(
@@ -370,13 +361,7 @@ fn resolve_into_context_annotation(
         .unwrap_or("rationale")
         .parse::<AnnotationKind>()
         .map_err(|error| anyhow!(error))?;
-    let content = args
-        .body
-        .as_deref()
-        .map(str::trim)
-        .filter(|body| !body.is_empty())
-        .ok_or_else(|| anyhow!(RecoveryAdvice::discuss_into_annotation_body_required()))?
-        .to_string();
+    let content = read_body(args.message.body.as_deref(), args.message.file.as_deref())?;
     let tags = args.tag.clone();
     let annotation_id = {
         let _lock = repo.locker().write().map_err(|error| anyhow!("{error}"))?;
@@ -500,7 +485,7 @@ fn parent_operation_ids(
             "discuss_turn_invalid",
             "--turn is 1-indexed and must be at least 1",
             "Pass `--turn N` using the turn number from `heddle discuss show`.",
-            "heddle discuss --id disc-01a0afc6 --turn 1 \"reply\"",
+            "heddle discuss reply disc-01a0afc6 --turn 1 --body \"reply\"",
         )));
     }
     let index = usize::try_from(turn).unwrap_or(usize::MAX) - 1;
@@ -525,7 +510,7 @@ fn run_list(
     store: &CollaborationStore,
     args: &DiscussListArgs,
 ) -> Result<()> {
-    if args.symbol.is_some() && args.path.is_none() {
+    if args.scope.symbol.is_some() && args.scope.path.is_none() {
         return Err(anyhow!("discuss list --symbol requires --path"));
     }
     if !matches!(
@@ -538,6 +523,7 @@ fn run_list(
         ));
     }
     let state_filter = args
+        .revision
         .state
         .as_deref()
         .map(|value| resolve_state(repo, Some(value)))
@@ -588,7 +574,7 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
     use super::remote::resolve_default_remote_name;
     use crate::remote::{RemoteTarget, resolve_remote_with_key_and_insecure};
 
-    let remote_name = resolve_default_remote_name(repo, args.remote.as_deref())?;
+    let remote_name = resolve_default_remote_name(repo, args.remote_choice.requested())?;
     let (target, server_key, insecure) =
         resolve_remote_with_key_and_insecure(repo, Some(&remote_name))?;
     let (authority, repo_path) = match target {
@@ -923,10 +909,10 @@ fn matches_filters(
     };
     status_matches
         && state.is_none_or(|state| anchor_state(&discussion.anchor) == Some(state))
-        && args.path.as_ref().is_none_or(|path| {
+        && args.scope.path.as_ref().is_none_or(|path| {
             anchor_path(&discussion.anchor).is_some_and(|candidate| candidate == path)
         })
-        && args.symbol.as_ref().is_none_or(|symbol| {
+        && args.scope.symbol.as_ref().is_none_or(|symbol| {
             matches!(&discussion.anchor, CollaborationAnchor::Symbol { symbol: candidate, .. } if candidate == symbol)
         })
 }

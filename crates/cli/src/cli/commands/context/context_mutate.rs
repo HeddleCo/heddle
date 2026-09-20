@@ -22,7 +22,7 @@ use super::{
 use crate::{
     cli::{
         Cli,
-        cli_args::{ContextRmArgs, ContextSetArgs, ContextSupersedeArgs},
+        cli_args::{ContextRmArgs, ContextSetArgs, ContextSupersedeArgs, split_path_and_revision},
         commands::{
             RecoveryAdvice,
             compact::{CompactOutput, CompactProjection},
@@ -152,21 +152,27 @@ pub(crate) fn find_annotation_resolved_from_discussion(
 /// Set a context annotation on a file path or state target.
 pub async fn cmd_context_set(cli: &Cli, args: &ContextSetArgs) -> Result<()> {
     let repo = cli.open_repo()?;
+    let (file, state_target, historical) =
+        split_path_and_revision(args.resolved_path(), args.revision.state.as_deref());
+    if historical.is_some() {
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "context_set_state_is_target",
+            "context set writes to HEAD; --state selects a state target and cannot combine with --path",
+            "Pass `--path <file>` or `--state <id>`, not both.",
+            "heddle context set --path src/auth.rs -m \"...\"",
+        )));
+    }
     let target = resolve_target(
         &repo,
-        args.resolved_path().map(str::to_owned),
-        args.target.state.clone(),
+        file.map(str::to_owned),
+        state_target.map(str::to_owned),
     )?;
-    let scope = scope_from_flags_or_file(
-        args.anchor.symbol.as_deref(),
-        args.anchor.line,
-        args.anchor.scope.as_deref(),
-    )?;
+    let scope = scope_from_flags_or_file(args.scope.symbol.as_deref(), args.scope.line, None)?;
     target.validate_scope(&scope)?;
     let kind = parse_kind(Some(&args.kind))?;
-    plan_annotation_content_source(args.message.is_some(), args.file.is_some())
+    plan_annotation_content_source(args.message.body.is_some(), args.message.file.is_some())
         .map_err(|err| anyhow!(content_source_advice(err)))?;
-    let content = read_annotation_content(args.message.clone(), args.file.clone())?;
+    let content = read_annotation_content(args.message.body.clone(), args.message.file.clone())?;
 
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
     let written =
@@ -280,9 +286,9 @@ pub async fn cmd_context_edit(
 
 pub async fn cmd_context_supersede(cli: &Cli, args: &ContextSupersedeArgs) -> Result<()> {
     let repo = cli.open_repo()?;
-    plan_annotation_content_source(args.message.is_some(), args.file.is_some())
+    plan_annotation_content_source(args.message.body.is_some(), args.message.file.is_some())
         .map_err(|err| anyhow!(content_source_advice(err)))?;
-    let content = read_annotation_content(args.message.clone(), args.file.clone())?;
+    let content = read_annotation_content(args.message.body.clone(), args.message.file.clone())?;
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
     let head_state = resolve_state(&repo, None)?;
     let context_root = context_root_for_state(&repo, &head_state)?
@@ -295,22 +301,22 @@ pub async fn cmd_context_supersede(cli: &Cli, args: &ContextSupersedeArgs) -> Re
     let original_annotation = original_blob.annotations[index].clone();
     let original_revision = original_annotation.current_revision().cloned().unwrap();
 
-    let target = if supersede_reuses_original_target(
-        args.target.path.as_deref(),
-        args.target.state.as_deref(),
-    ) {
+    let (file, state_target, _) =
+        split_path_and_revision(args.scope.path.as_deref(), args.revision.state.as_deref());
+    let target = if supersede_reuses_original_target(file, state_target) {
         original_target.clone()
     } else {
-        resolve_target(&repo, args.target.path.clone(), args.target.state.clone())?
+        resolve_target(
+            &repo,
+            file.map(str::to_owned),
+            state_target.map(str::to_owned),
+        )?
     };
-    let replacement_scope = match scope_from_flags(
-        args.anchor.symbol.as_deref(),
-        args.anchor.line,
-        args.anchor.scope.as_deref(),
-    )? {
-        Some(scope) => scope,
-        None => original_annotation.scope.clone(),
-    };
+    let replacement_scope =
+        match scope_from_flags(args.scope.symbol.as_deref(), args.scope.line, None)? {
+            Some(scope) => scope,
+            None => original_annotation.scope.clone(),
+        };
     target.validate_scope(&replacement_scope)?;
     let replacement_scope = resolve_scope_at_target(&repo, &target, replacement_scope)?;
     let kind = parse_kind(Some(&args.kind))?;
@@ -384,7 +390,13 @@ pub async fn cmd_context_rm(cli: &Cli, args: &ContextRmArgs) -> Result<()> {
             );
         }
     };
-    let target = resolve_target(&repo, args.target.path.clone(), args.target.state.clone())?;
+    let (file, state_target, _) =
+        split_path_and_revision(args.scope.path.as_deref(), args.revision.state.as_deref());
+    let target = resolve_target(
+        &repo,
+        file.map(str::to_owned),
+        state_target.map(str::to_owned),
+    )?;
 
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
     let head_state = resolve_state(&repo, None)?;
@@ -396,7 +408,7 @@ pub async fn cmd_context_rm(cli: &Cli, args: &ContextRmArgs) -> Result<()> {
             "heddle context list",
         )));
     };
-    plan_context_rm(args.all, args.anchor.is_set()).map_err(|err| match err {
+    plan_context_rm(args.all, args.scope.is_set()).map_err(|err| match err {
         ContextRmPlanError::ScopeRequired => anyhow!(RecoveryAdvice::invalid_usage(
             err.kind(),
             "Specify --symbol, --line, or --all to remove annotations",
@@ -407,11 +419,7 @@ pub async fn cmd_context_rm(cli: &Cli, args: &ContextRmArgs) -> Result<()> {
     let scope_filter = if args.all {
         None
     } else {
-        scope_from_flags(
-            args.anchor.symbol.as_deref(),
-            args.anchor.line,
-            args.anchor.scope.as_deref(),
-        )?
+        scope_from_flags(args.scope.symbol.as_deref(), args.scope.line, None)?
     };
 
     let new_context_root =

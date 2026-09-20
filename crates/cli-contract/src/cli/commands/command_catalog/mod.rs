@@ -86,6 +86,10 @@ pub struct CommandCatalogEntry {
     pub side_effect_class: String,
     pub first_run_behavior: String,
     pub json_kind: String,
+    /// Declared output framing: `one`, `stream`, or `none`.
+    pub output_cardinality: String,
+    /// Declared mutation retry: `safe_replay`, `op_id`, or `not_idempotent`.
+    pub retry_semantics: String,
     pub json_discriminators: Vec<CommandJsonDiscriminator>,
     pub schema_verbs: Vec<String>,
     pub documented_schema_verbs: Vec<String>,
@@ -380,6 +384,8 @@ pub struct CommandRuntimeContract {
     pub surface: &'static str,
     pub canonical_command: Option<&'static str>,
     pub json_kind: &'static str,
+    pub output_cardinality: &'static str,
+    pub retry_semantics: &'static str,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2165,20 +2171,27 @@ const CONTRACTS: &[CommandContractEntry] = &[
             20,
         ),
     ),
+    entry(&["discuss"], front_door(GROUP, 170)),
     entry(
-        &["discuss"],
-        front_door(
-            json_discriminators(
-                documented_schemas(
-                    compact_json(METADATA_MUTATION),
-                    &["discuss", "discuss --new", "discuss --id"],
-                ),
-                &[
-                    json_discriminator(Some("discuss"), "output_kind", "discuss_open"),
-                    json_discriminator(Some("discuss --id"), "output_kind", "discuss_turn"),
-                ],
-            ),
-            170,
+        &["discuss", "new"],
+        json_discriminators(
+            documented_schemas(compact_json(METADATA_MUTATION), &["discuss new"]),
+            &[json_discriminator(
+                Some("discuss new"),
+                "output_kind",
+                "discuss_open",
+            )],
+        ),
+    ),
+    entry(
+        &["discuss", "reply"],
+        json_discriminators(
+            documented_schemas(compact_json(METADATA_MUTATION), &["discuss reply"]),
+            &[json_discriminator(
+                Some("discuss reply"),
+                "output_kind",
+                "discuss_turn",
+            )],
         ),
     ),
     entry(
@@ -3010,11 +3023,11 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["thread", "promote"],
+        &["thread", "checkout"],
         json_discriminators(
-            documented_schemas(WORKTREE_MUTATION, &["thread promote"]),
+            documented_schemas(WORKTREE_MUTATION, &["thread checkout"]),
             &[json_discriminator(
-                Some("thread promote"),
+                Some("thread checkout"),
                 "output_kind",
                 "thread_promote",
             )],
@@ -3497,6 +3510,8 @@ fn feature_gated_catalog_entry(
         side_effect_class: side_effect_class(contract).to_string(),
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
+        output_cardinality: output_cardinality(contract).to_string(),
+        retry_semantics: retry_semantics(contract).to_string(),
         json_discriminators: json_discriminators_for_path(path.iter().map(String::as_str)),
         schema_verbs: contract_schema_verbs(contract)
             .map(str::to_string)
@@ -3590,6 +3605,8 @@ fn catalog_entry(
         side_effect_class: side_effect_class(contract).to_string(),
         first_run_behavior: first_run_behavior(contract).to_string(),
         json_kind: contract.json_kind.to_string(),
+        output_cardinality: output_cardinality(contract).to_string(),
+        retry_semantics: retry_semantics(contract).to_string(),
         json_discriminators: json_discriminators_for_path(path.iter().map(String::as_str)),
         schema_verbs: contract_schema_verbs(contract)
             .map(str::to_string)
@@ -4280,6 +4297,26 @@ fn runtime_contract(
         surface: contract.surface,
         canonical_command: contract.canonical_command,
         json_kind: contract.json_kind,
+        output_cardinality: output_cardinality(contract),
+        retry_semantics: retry_semantics(contract),
+    }
+}
+
+fn output_cardinality(contract: CommandContract) -> &'static str {
+    match contract.json_kind {
+        "jsonl" | "json_or_jsonl" => "stream",
+        "none" => "none",
+        _ => "one",
+    }
+}
+
+fn retry_semantics(contract: CommandContract) -> &'static str {
+    if !contract.mutates {
+        "safe_replay"
+    } else if contract.supports_op_id {
+        "op_id"
+    } else {
+        "not_idempotent"
     }
 }
 
@@ -4791,12 +4828,13 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Diff(_) => vec!["diff"],
         Commands::Blame(_) => vec!["blame"],
         Commands::Discuss(args) => match &args.command {
-            None => vec!["discuss"],
-            Some(DiscussCommands::Resolve(_)) => vec!["discuss", "resolve"],
-            Some(DiscussCommands::Reopen(_)) => vec!["discuss", "reopen"],
-            Some(DiscussCommands::List(_)) => vec!["discuss", "list"],
-            Some(DiscussCommands::Show(_)) => vec!["discuss", "show"],
-            Some(DiscussCommands::Wait(_)) => vec!["discuss", "wait"],
+            DiscussCommands::New(_) => vec!["discuss", "new"],
+            DiscussCommands::Reply(_) => vec!["discuss", "reply"],
+            DiscussCommands::Resolve(_) => vec!["discuss", "resolve"],
+            DiscussCommands::Reopen(_) => vec!["discuss", "reopen"],
+            DiscussCommands::List(_) => vec!["discuss", "list"],
+            DiscussCommands::Show(_) => vec!["discuss", "show"],
+            DiscussCommands::Wait(_) => vec!["discuss", "wait"],
         },
         Commands::Query(_) => vec!["query"],
         Commands::Review { command } => match command {
@@ -4845,7 +4883,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 ThreadOwnershipCommands::Claim { .. } => vec!["thread", "ownership", "claim"],
                 ThreadOwnershipCommands::Resolve { .. } => vec!["thread", "ownership", "resolve"],
             },
-            ThreadCommands::Promote(_) => vec!["thread", "promote"],
+            ThreadCommands::Checkout(_) => vec!["thread", "checkout"],
             ThreadCommands::Drop(_) => vec!["thread", "drop"],
             ThreadCommands::Approve(_) => vec!["thread", "approve"],
             ThreadCommands::Approvals(_) => vec!["thread", "approvals"],

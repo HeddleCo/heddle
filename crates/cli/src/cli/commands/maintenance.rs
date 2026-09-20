@@ -60,7 +60,7 @@ pub fn cmd_maintenance(cli: &Cli, command: MaintenanceCommands) -> Result<()> {
                 None => cmd_fsck(cli, args.full, args.thorough, args.provenance, args.git),
                 Some(FsckCommands::Repair { target }) => match target {
                     FsckRepairCommands::Git(args) => {
-                        cmd_fsck_repair_git(cli, args.ref_name, args.prefer, args.preview)
+                        cmd_fsck_repair_git(cli, args.ref_name, args.prefer, args.dry_run.enabled())
                     }
                 },
             };

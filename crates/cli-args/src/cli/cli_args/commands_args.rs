@@ -570,13 +570,12 @@ pub struct RevertArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Examples:
-  heddle undo --preview      # inspect the most recent operation
-  heddle undo --hard --preview  # preview the worktree rewind --hard would apply
+  heddle undo --dry-run      # inspect the most recent operation
+  heddle undo --hard --dry-run  # preview the worktree rewind --hard would apply
   heddle undo --hard         # roll it back and rewind the worktree
   heddle undo -n 3 --hard    # roll back the last three operations
   heddle undo --recover      # restore the state preserved by the last undo
-  heddle undo --list         # preview undoable operations on this thread
-  heddle undo --dry-run      # show what would change without applying
+  heddle undo --list         # list undoable operations on this thread
 
 Restore:
   `--recover` restores only the last undo's preserved tree as worktree changes.
@@ -624,10 +623,8 @@ pub struct UndoArgs {
     #[arg(long, default_value = "20")]
     pub depth: usize,
 
-    /// Preview operations without undoing. `--dry-run` is an accepted
-    /// alias kept for muscle memory from git/other VCS tooling.
-    #[arg(long, visible_alias = "dry-run")]
-    pub preview: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 
     /// Permit undo to rewind worktree files to the selected operation's prior
     /// state. Without this explicit opt-in, an undo that would rewrite the
@@ -643,7 +640,7 @@ pub struct UndoArgs {
     /// worktree changes. HEAD and the current thread remain unchanged.
     #[arg(
         long,
-        conflicts_with_all = ["steps", "list", "preview", "hard", "redo", "allow_redact_undo"]
+        conflicts_with_all = ["steps", "list", "dry_run", "hard", "redo", "allow_redact_undo"]
     )]
     pub recover: bool,
 
@@ -691,7 +688,7 @@ To stay on this checkout without an isolated tree, use
 
 Isolated checkouts are Heddle-managed working directories. They do not contain a .git directory; use Heddle commands inside them, and run Git-authority operations through Heddle from the parent Git-overlay repository.
 
-`heddle start <name> --path <dir>` is the one-step form of the advanced split flow: `heddle thread create <name>` creates the ref now, and `heddle thread promote <name> --path <dir>` materializes it later. Use the split form only when you intentionally need ref-first, checkout-later staging.
+`heddle start <name> --path <dir>` is the one-step form of the advanced split flow: `heddle thread create <name>` creates the ref now, and `heddle thread checkout <name> --path <dir>` materializes it later. Use the split form only when you intentionally need ref-first, checkout-later staging.
 
 Advanced (hidden) flags:
   --agent-provider/--agent-model (agent attribution for the registered thread), --parent-thread (delegated child work), --print-cd-path (print only the checkout path for shell wrappers), --daemon/--no-daemon (virtualized-mount ownership), --shared-target/--no-shared-target (workspace-shared cargo target dir; default on for Rust solid/materialized). All are accepted here; they stay out of the flag list to keep everyday help terse.
@@ -837,11 +834,8 @@ pub struct ReadyArgs {
     #[arg(long, value_parser = parse_confidence)]
     pub confidence: Option<f32>,
 
-    /// Preview the readiness decision (integration target, conflicts, verify
-    /// verdicts, would-be thread transition) without capturing work or moving
-    /// the thread to Ready/Blocked. No mutation occurs.
-    #[arg(long)]
-    pub dry_run: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 }
 
 /// Arguments for the `sync` command.
@@ -879,11 +873,8 @@ pub struct LandArgs {
     #[arg(long)]
     pub no_squash: bool,
 
-    /// Preview the integration (thread -> target, merge relation, conflicts,
-    /// verify verdicts) without capturing work, syncing, or merging. No
-    /// mutation occurs and no server round-trip is made.
-    #[arg(long)]
-    pub dry_run: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 }
 
 /// Arguments for `thread show`.
@@ -935,17 +926,17 @@ pub struct ThreadRenameArgs {
     pub new: String,
 }
 
-/// Arguments for `thread promote`.
+/// Arguments for `thread checkout`.
 #[derive(Clone, Debug, clap::Args)]
-pub struct ThreadPromoteArgs {
+pub struct ThreadCheckoutArgs {
     /// Thread identifier.
     pub thread: String,
 
-    /// Materialized checkout path.
-    #[arg(long)]
-    pub path: Option<std::path::PathBuf>,
+    /// Working checkout directory for this thread.
+    #[arg(long, required = true)]
+    pub path: std::path::PathBuf,
 
-    /// Discard dirty work in the source checkout while promoting.
+    /// Discard dirty work in the source checkout while creating the new checkout.
     #[arg(long)]
     pub force: bool,
 }
@@ -982,9 +973,8 @@ pub struct ThreadAbsorbArgs {
     #[arg(short = 'm', long)]
     pub message: Option<String>,
 
-    /// Show the absorb preview without applying it.
-    #[arg(long)]
-    pub preview: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 }
 
 /// Arguments for `thread resolve`.
@@ -1019,17 +1009,16 @@ pub struct ThreadApproveArgs {
     #[arg(long)]
     pub note: Option<String>,
 
-    /// Hosted remote name (default: `origin`).
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
+    #[command(flatten)]
+    pub remote_choice: super::RemoteChoiceArgs,
 }
 
 /// Arguments for `thread approvals` — list decisions for one Thread.
 #[derive(Clone, Debug, clap::Args)]
 pub struct ThreadApprovalsArgs {
     pub thread: String,
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
+    #[command(flatten)]
+    pub remote_choice: super::RemoteChoiceArgs,
 }
 
 /// Arguments for `thread revoke-approval` — remove a recorded
@@ -1041,8 +1030,8 @@ pub struct ThreadRevokeApprovalArgs {
 
     /// UUID of the approval row to revoke.
     pub id: String,
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
+    #[command(flatten)]
+    pub remote_choice: super::RemoteChoiceArgs,
 }
 
 /// Arguments for `thread readiness` — inspect the Thread's current review state.
@@ -1054,8 +1043,8 @@ pub struct ThreadCheckMergeArgs {
     /// Target Thread receiving the landing.
     pub target: String,
 
-    #[arg(long, default_value = "origin")]
-    pub remote: String,
+    #[command(flatten)]
+    pub remote_choice: super::RemoteChoiceArgs,
 }
 
 /// Arguments for the `collapse` command.
@@ -1162,11 +1151,8 @@ pub struct PushArgs {
     #[arg(long)]
     pub insecure: bool,
 
-    /// Preview the push plan (target, thread/track ref, state that would be
-    /// published, force status) without pushing, moving refs, capturing work,
-    /// running hooks, or contacting the server for anything beyond read/plan.
-    #[arg(long)]
-    pub dry_run: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 }
 
 impl PushArgs {
@@ -1204,20 +1190,20 @@ pub struct PullArgs {
 #[derive(Clone, Debug, clap::Args)]
 #[command(after_help = "\
 Behavior:
-  URLs ending in `.git` clone Git repositories; other HTTPS URLs clone hosted Heddle spools. Native clones follow the remote default thread; `--thread` overrides. Git clones check out the selected default branch. Git transport runs through Sley and does not require a Git executable. Never prompts. Full details: `heddle help clone`.
+  `--source git|heddle` selects the protocol; omitted, `.git` URLs are Git and other HTTPS URLs are hosted Heddle. No protocol retry on failure. Convert a local Git checkout with `heddle import local`. Full details: `heddle help clone`.
 
 Advanced/planned flags: see `heddle help clone`.
-
-Examples:
-  heddle clone ../native-repo ./clone                # local native Heddle repository
-  heddle clone https://host/repo ./clone             # hosted Heddle spool
 ")]
 pub struct CloneArgs {
-    /// Remote repository path.
+    /// Remote repository URL or path.
     pub remote: String,
 
-    /// Local directory to clone into.
-    pub local: String,
+    /// Local directory to clone into. Optional when the source has an unambiguous basename.
+    pub local: Option<String>,
+
+    /// Clone protocol (`git` or `heddle`). Failures are not retried on the other protocol.
+    #[arg(long, value_enum, hide_possible_values = true)]
+    pub source: Option<super::CloneSourceArg>,
 
     /// Thread to check out after cloning.
     #[arg(long)]
@@ -1250,6 +1236,24 @@ pub struct CloneArgs {
     /// Hosted/network remotes only. (Alias: --monorepo.)
     #[arg(long, visible_alias = "monorepo")]
     pub recursive: bool,
+}
+
+impl CloneArgs {
+    /// Destination directory: explicit `DIR`, or a safe basename derived from
+    /// the source. Errors when the basename is missing or ambiguous.
+    pub fn destination_dir(&self) -> Result<String, String> {
+        if let Some(local) = self
+            .local
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(local.to_string());
+        }
+        super::safe_clone_destination_basename(&self.remote).ok_or_else(|| {
+            "clone destination is required when the source has no unambiguous basename; pass a directory".to_string()
+        })
+    }
 }
 
 fn parse_clone_filter_spec(s: &str) -> Result<String, String> {
