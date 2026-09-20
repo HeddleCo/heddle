@@ -113,8 +113,6 @@ env:
     weft-client
     heddle-hosted-client
     heddle-agent-relay
-    heddle-cli
-    heddle-devtools
 
 jobs:
   validate-publish:
