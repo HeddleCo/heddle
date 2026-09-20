@@ -41,7 +41,6 @@ mod fetch_tests;
 #[cfg(test)]
 mod inventory_tests;
 mod land;
-mod land_stack;
 mod observe;
 mod operations;
 mod ownership;
@@ -128,8 +127,6 @@ pub(crate) const METHODS: &[&str] = &[
     "/heddle.api.v1alpha2.ThreadService/SetAudiencePolicy",
     "/heddle.api.v1alpha2.ThreadService/SetRetentionPolicy",
     "/heddle.api.v1alpha2.ThreadService/RecordReview",
-    "/heddle.api.v1alpha2.ThreadService/LandThread",
-    "/heddle.api.v1alpha2.ThreadService/LandStack",
     "/heddle.api.v1alpha2.SyncService/ReplicateThread",
     "/heddle.api.v1alpha2.SyncService/Fetch",
     "/heddle.api.v1alpha2.SyncService/PublishContent",
@@ -276,12 +273,6 @@ impl DeviceRpc {
         if method.ends_with("/ResolveOwnershipConflict") {
             return self.resolve_ownership_conflict(session, body);
         }
-        if method.ends_with("/LandThread") {
-            return self.land_thread(session, LandThreadRequest::decode(body)?);
-        }
-        if method.ends_with("/LandStack") {
-            return self.land_stack(session, LandStackRequest::decode(body)?);
-        }
         if method.ends_with("/CancelOperation") {
             return self.cancel_operation(session, body);
         }
@@ -419,10 +410,6 @@ fn request_spool(method: &str, body: &[u8]) -> Result<uuid::Uuid> {
             .decision
             .and_then(|p| p.thread)
             .and_then(|t| t.spool)),
-        "LandThread" => scope!(LandThreadRequest, |r: LandThreadRequest| r
-            .thread
-            .and_then(|t| t.spool)),
-        "LandStack" => scope!(LandStackRequest, |r: LandStackRequest| r.spool),
         "ReadContent" => scope!(ReadContentRequest, |r: ReadContentRequest| r
             .revision
             .and_then(|r| r.spool)),

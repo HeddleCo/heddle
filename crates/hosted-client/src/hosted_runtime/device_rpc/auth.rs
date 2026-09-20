@@ -723,21 +723,6 @@ fn signed_unmaterialized_source_visible(
     Ok(true)
 }
 
-/// The signed floor is used when authoring an integration. It cannot be
-/// reconstructed from local sidecars alone after a metadata-only import.
-pub(super) fn source_visibility_floor(
-    repository: &repo::Repository,
-    replica: &repo::thread_replication::ThreadReplica,
-    principal: uuid::Uuid,
-    agent: Option<&str>,
-    revision: objects::object::StateId,
-) -> Result<Option<objects::object::VisibilityTier>> {
-    Ok(
-        source_content_projection(repository, replica, principal, agent, revision)?
-            .map(|(_, tier)| tier),
-    )
-}
-
 fn source_content_projection(
     repository: &repo::Repository,
     replica: &repo::thread_replication::ThreadReplica,

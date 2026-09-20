@@ -653,50 +653,6 @@ impl DeviceRpc {
             }],
             ..Default::default()
         });
-        let landing_method = "/heddle.api.v1alpha2.ThreadService/LandThread";
-        overview.actions.push(ActionAvailability {
-            method: landing_method.into(),
-            endpoint: Some(self.endpoint()),
-            target: Some(EntityRef {
-                entity: Some(entity_ref::Entity::Thread(reference.clone())),
-            }),
-            implemented: true,
-            authorized: permits(landing_method),
-            observed_versions: vec![ExpectedVersion {
-                resource: Some(EntityRef {
-                    entity: Some(entity_ref::Entity::Policy(RecordRef {
-                        spool: reference.spool.clone(),
-                        id: "device-thread-landing-policy".into(),
-                    })),
-                }),
-                version: super::land::thread_policy_version(repository)?
-                    .as_bytes()
-                    .to_vec(),
-            }],
-            ..Default::default()
-        });
-        let stack_method = "/heddle.api.v1alpha2.ThreadService/LandStack";
-        overview.actions.push(ActionAvailability {
-            method: stack_method.into(),
-            endpoint: Some(self.endpoint()),
-            target: Some(EntityRef {
-                entity: reference.spool.clone().map(entity_ref::Entity::Spool),
-            }),
-            implemented: true,
-            authorized: permits(stack_method),
-            observed_versions: vec![ExpectedVersion {
-                resource: Some(EntityRef {
-                    entity: Some(entity_ref::Entity::Policy(RecordRef {
-                        spool: reference.spool.clone(),
-                        id: "device-thread-landing-policy".into(),
-                    })),
-                }),
-                version: super::land::thread_policy_version(repository)?
-                    .as_bytes()
-                    .to_vec(),
-            }],
-            ..Default::default()
-        });
         if let Some(parent) = view.genesis.parent {
             let parent_replica = ThreadReplica::open(repository.heddle_dir(), parent)?;
             if parent_replica.genesis()?.spool == view.genesis.spool
