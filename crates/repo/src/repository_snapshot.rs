@@ -1632,8 +1632,10 @@ impl Repository {
             // from the unmoved ref as a sibling, and recording is idempotent when
             // it reproduces the same State. Covered by
             // `native_admission_before_ref_publish_survives_a_crash_between_them`.
-            self.record_attached_native_source(execution.state.id())
-                .map_err(|error| HeddleError::Config(error.to_string()))?;
+            if let Head::Attached { thread } = &head {
+                self.record_native_source(thread.as_ref(), execution.state.id())
+                    .map_err(|error| HeddleError::Config(error.to_string()))?;
+            }
             #[cfg(test)]
             maybe_snapshot_fault(SnapshotFault::NativeSourceRecordedBeforeRefPublish);
             let ref_publish_started = std::time::Instant::now();
@@ -1779,8 +1781,10 @@ impl Repository {
             // from the unmoved ref as a sibling, and recording is idempotent when
             // it reproduces the same State. Covered by
             // `native_admission_before_ref_publish_survives_a_crash_between_them`.
-            self.record_attached_native_source(execution.state.id())
-                .map_err(|error| HeddleError::Config(error.to_string()))?;
+            if let Head::Attached { thread } = &head {
+                self.record_native_source(thread.as_ref(), execution.state.id())
+                    .map_err(|error| HeddleError::Config(error.to_string()))?;
+            }
             #[cfg(test)]
             maybe_snapshot_fault(SnapshotFault::NativeSourceRecordedBeforeRefPublish);
             let ref_publish_started = std::time::Instant::now();

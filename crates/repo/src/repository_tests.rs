@@ -1398,13 +1398,7 @@ fn structured_snapshot_keeps_reconstructible_ref_watermark_at_durable_floor() {
             .unwrap()
             .state
             .id();
-        assert_eq!(
-            fs::read_to_string(temp_dir.path().join(".heddle/refs/threads/main"))
-                .unwrap()
-                .trim(),
-            latest.to_string_full(),
-            "the success path must publish the canonical thread ref"
-        );
+        assert_eq!(repo.head().unwrap(), Some(latest));
     }
 
     assert_eq!(
