@@ -154,8 +154,8 @@ release = true
 
 [[package]]
 name = "heddle-cli"
-release = true
+release = false
 
 [[package]]
 name = "heddle-devtools"
-release = true
+release = false
