@@ -24,7 +24,6 @@ This index covers Heddle's top-level reference docs. Start an agent at `heddle h
 - [Portable Thread control admission](device-thread-controls.md): Native Thread metadata uses an independent causal register for name, intent,
 - [Heddle CLI exit codes](exit-codes.md): The CLI follows BSD sysexits.h so codes mean the same thing to humans, init
 - [.heddleignore](heddleignore.md): .heddleignore is heddle's per-repo file for telling heddle capture,
-- [Heddle JSON output schemas](json-schemas.md): This document is the canonical reference for every CLI verb that emits
 - [Local metadata storage](local-metadata.md): Heddle's v2 mutable Thread and Run state shares metadata.sqlite3 under the
 - [Heddle personas](personas.md): This doc names the three personas heddle's OSS quality is evaluated against. Each round of "persona eval" walks current heddle main from each persona's persp...
 - [CLI trace export](telemetry.md): Heddle can export command traces to an OpenTelemetry collector. The default

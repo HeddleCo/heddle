@@ -88,3 +88,7 @@ required-features = ["iroh", "replication"]
 [[test]]
 name = "transport_observation"
 required-features = ["iroh", "replication"]
+
+[[test]]
+name = "reopen_retry"
+required-features = ["replication"]
