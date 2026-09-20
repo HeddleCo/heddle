@@ -964,22 +964,20 @@ Run `heddle help --output json` to inspect the public command surface, and
 or Git Projection state problems.
 "#;
 
-const REVIEW_TOPIC: &str = "Review surface — `heddle review show | sign | next | health`.\n\
+const REVIEW_TOPIC: &str = "Hosted Thread review — `heddle review show | approve | list | revoke | readiness`.\n\
 \n\
-`show <state>`    — render the review payload (summary, agent narrative,\n\
-                    in-budget signals, anchored discussions).\n\
-                    `--all-signals` also surfaces hidden ones.\n\
-`sign <state>`    — submit a `read | agent_preview | agent_co_review`\n\
-                    signature. `--symbols file:symbol` scopes to\n\
-                    specific symbols; default is the whole change.\n\
-`next`            — show the next locally discoverable review item, or explain\n\
-                    why none is available.\n\
-`health [--window N]`\n\
-                  — per-module signal fire-rate over the last N states.\n\
+`show [THREAD]`\n\
+                  — show the exact source and target comparison.\n\
+`approve [THREAD] [-m MESSAGE]`\n\
+                  — sign that exact comparison with your configured identity.\n\
+`list [THREAD]`   — list signed review decisions.\n\
+`revoke <REVIEW_ID> --thread THREAD`\n\
+                  — revoke one of your signed approvals.\n\
+`readiness [THREAD] --into TARGET`\n\
+                  — check the exact comparison and landing requirements.\n\
 \n\
-Tick budget: at most 3 signals per state by default. Priority:\n\
-invariant_adjacency > self_flagged_uncertainty > pattern_deviation >\n\
-novelty > test_reachability.\n";
+Pass `--remote NAME` to choose a remote. Without it, Heddle uses the configured\n\
+default remote and fails when none is configured.\n";
 
 const DISCUSS_TOPIC: &str = "`heddle discuss new | reply | resolve | reopen | list | show | wait`\n\
 \n\

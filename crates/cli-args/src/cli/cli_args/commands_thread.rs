@@ -4,9 +4,9 @@
 use clap::{Args, Subcommand};
 
 use super::{
-    CollapseArgs, ExpandArgs, ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs,
-    ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadCheckoutArgs, ThreadDropArgs, ThreadMoveArgs,
-    ThreadNameArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs, ThreadShowArgs,
+    CollapseArgs, ExpandArgs, ThreadAbsorbArgs, ThreadCapturesArgs, ThreadCheckoutArgs,
+    ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadRenameArgs, ThreadResolveArgs,
+    ThreadShowArgs,
 };
 
 #[derive(Subcommand, Clone)]
@@ -106,19 +106,6 @@ created the ref first and want to materialize it later.
     /// Drop a thread and mark it abandoned.
     #[command(visible_alias = "delete")]
     Drop(ThreadDropArgs),
-
-    /// Record a signed approval for the Thread's current comparison.
-    Approve(ThreadApproveArgs),
-
-    /// List review decisions recorded for a Thread.
-    Approvals(ThreadApprovalsArgs),
-
-    /// Revoke your previously recorded approval by its ID.
-    RevokeApproval(ThreadRevokeApprovalArgs),
-
-    /// Inspect current Thread readiness and requirements. Read-only.
-    #[command(name = "readiness")]
-    CheckMerge(ThreadCheckMergeArgs),
 
     /// Sweep merged, stale auto-created, or abandoned threads.
     #[command(

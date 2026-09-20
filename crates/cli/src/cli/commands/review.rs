@@ -4,189 +4,55 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
-use objects::object::{
-    Discussion, DiscussionResolution, ReviewKind, ReviewScope, StateId, SymbolAnchor,
-};
+use objects::object::{ReviewKind, ReviewScope, StateId, SymbolAnchor};
 use repo::{HistoryQuery, operation_dedup::OperationDedupStore};
-use verbs::{
-    resolve_last_turn_base,
-    review::{
-        LocalReviewContext, LocalStateReview, ReviewSignal, ReviewSignalKind,
-        ReviewSignalVisibility, SignReviewRequest, get_repo_signal_health,
-    },
+use verbs::review::{
+    LocalReviewContext, LocalStateReview, SignReviewRequest, get_repo_signal_health,
 };
 
 use super::{
     advice::RecoveryAdvice,
-    history_target::{resolve_state_id, resolve_state_id_bytes},
+    history_target::resolve_state_id_bytes,
     next_action::{NextActionValidationContext, write_full_command_json},
 };
 use crate::cli::{
-    cli_args::{
-        Cli, DiffBaseArg, ReviewCommands, ReviewHealthArgs, ReviewNextArgs, ReviewShowArgs,
-        ReviewSignArgs,
-    },
+    cli_args::{Cli, ReviewCommands, ReviewHealthArgs, ReviewNextArgs, ReviewSignArgs},
     should_output_json,
 };
-
-const AGENT_GLYPH: &str = "※";
-const HUMAN_GLYPH: &str = "✓";
 
 // The review wire payloads live in cli-contract so the schema registry
 // registers the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
-    DiscussionView, HealthEntry, NextStateView, ReviewHealthOutput, ReviewNextOutput,
-    ReviewShowOutput, ReviewSignOutput, SignalView, SignatureView,
+    HealthEntry, NextStateView, ReviewHealthOutput, ReviewNextOutput, ReviewSignOutput,
 };
 
 pub async fn run(cli: &Cli, command: &ReviewCommands) -> Result<()> {
     match command {
-        ReviewCommands::Show(args) => run_show(cli, args).await,
+        #[cfg(feature = "client")]
+        ReviewCommands::Show(args) => super::thread_approval::cmd_review_show(cli, args).await,
+        #[cfg(feature = "client")]
+        ReviewCommands::Approve(args) => {
+            super::thread_approval::cmd_review_approve(cli, args).await
+        }
+        #[cfg(feature = "client")]
+        ReviewCommands::List(args) => super::thread_approval::cmd_review_list(cli, args).await,
+        #[cfg(feature = "client")]
+        ReviewCommands::Revoke(args) => super::thread_approval::cmd_review_revoke(cli, args).await,
+        #[cfg(feature = "client")]
+        ReviewCommands::Readiness(args) => {
+            super::thread_approval::cmd_review_readiness(cli, args).await
+        }
+        #[cfg(not(feature = "client"))]
+        ReviewCommands::Show(_)
+        | ReviewCommands::Approve(_)
+        | ReviewCommands::List(_)
+        | ReviewCommands::Revoke(_)
+        | ReviewCommands::Readiness(_) => Err(anyhow!(
+            "rebuild cli with --features client to use hosted Thread review"
+        )),
         ReviewCommands::Sign(args) => run_sign(cli, args).await,
         ReviewCommands::Next(args) => run_next(cli, args).await,
         ReviewCommands::Health(args) => run_health(cli, args).await,
-    }
-}
-
-async fn run_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
-    let review = open_local_review(cli)?;
-    let state_id = resolve_state(cli, args.state.as_deref())?;
-    let base_state_id = match args.base {
-        Some(DiffBaseArg::LastTurn) => {
-            let repo = cli.open_repo()?;
-            Some(resolve_last_turn_base(&repo, state_id)?)
-        }
-        None => None,
-    };
-    let payload = review.get_review_payload_from(state_id, args.all_signals, base_state_id)?;
-    let stored_signatures = review.list_signatures(state_id)?;
-
-    let signatures: Vec<SignatureView> = stored_signatures
-        .iter()
-        .map(|stored| {
-            let signature = &stored.signature;
-            let kind = signature.kind;
-            let is_agent = matches!(kind, ReviewKind::AgentPreview | ReviewKind::AgentCoReview);
-            let (scope_kind, scope_symbols) = match &signature.scope {
-                ReviewScope::WholeChange => ("whole_change".to_string(), Vec::new()),
-                ReviewScope::Symbols(symbols) => (
-                    "symbols".to_string(),
-                    symbols
-                        .iter()
-                        .map(|sym| format!("{}:{}", sym.file, sym.symbol))
-                        .collect(),
-                ),
-            };
-            SignatureView {
-                actor_name: signature.actor.name_lossy().into_owned(),
-                actor_email: signature.actor.email_lossy().into_owned(),
-                kind: kind.as_str().to_string(),
-                glyph: if is_agent { AGENT_GLYPH } else { HUMAN_GLYPH },
-                is_agent,
-                signed_at_secs: signature.signed_at,
-                scope_kind,
-                scope_symbols,
-            }
-        })
-        .collect();
-
-    let output = ReviewShowOutput {
-        output_kind: "review_show",
-        state_id: payload.state_id.to_string_full(),
-        base: args.base.map(|base| base.as_str().to_string()),
-        headline: payload.summary.headline,
-        agent_narrative: payload.agent_narrative,
-        files_changed: payload.summary.files_changed,
-        in_budget_signals: payload.in_budget_signals.iter().map(signal_view).collect(),
-        all_signals: payload.all_signals.iter().map(signal_view).collect(),
-        discussions: payload.discussions.iter().map(discussion_view).collect(),
-        signing_kinds: payload
-            .signing_kinds
-            .into_iter()
-            .map(|kind| kind.as_str().to_string())
-            .collect(),
-        signatures,
-    };
-    if should_output_json(cli, None) {
-        write_full_command_json(
-            &output,
-            NextActionValidationContext::without_repo(&["review", "show"]),
-        )?;
-    } else {
-        render_text(&output, args.all_signals);
-    }
-    Ok(())
-}
-
-fn render_text(out: &ReviewShowOutput, all_signals: bool) {
-    println!("review of state {}", out.state_id);
-    if let Some(base) = &out.base {
-        println!("  base: {base}");
-    }
-    if !out.headline.is_empty() {
-        println!("  {}", out.headline);
-    }
-    if let Some(narrative) = &out.agent_narrative
-        && !narrative.is_empty()
-    {
-        println!("\n  agent narrative:");
-        for line in narrative.lines() {
-            println!("    {line}");
-        }
-    }
-    if !out.in_budget_signals.is_empty() {
-        println!("\n  signals (in budget):");
-        for s in &out.in_budget_signals {
-            println!("    ▸ [{}] {}:{} — {}", s.kind, s.file, s.symbol, s.reason);
-        }
-    }
-    if all_signals && !out.all_signals.is_empty() {
-        println!("\n  signals (all):");
-        for s in &out.all_signals {
-            let marker = if s.visibility == "hidden" {
-                "·"
-            } else {
-                "▸"
-            };
-            println!(
-                "    {marker} [{}] {}:{} — {} [{}]",
-                s.kind, s.file, s.symbol, s.reason, s.visibility
-            );
-        }
-    }
-    if !out.discussions.is_empty() {
-        println!("\n  discussions:");
-        for d in &out.discussions {
-            let mut suffix = String::new();
-            if d.body_changed_since_open {
-                suffix.push_str(" [body changed]");
-            }
-            if d.anchor_ambiguous {
-                suffix.push_str(" [ambiguous anchor]");
-            }
-            if d.orphaned {
-                suffix.push_str(" [orphaned]");
-            }
-            println!(
-                "    {} ({}) {}:{}{}",
-                d.id, d.status, d.file, d.symbol, suffix
-            );
-        }
-    }
-    if !out.signatures.is_empty() {
-        println!("\n  signatures:");
-        for s in &out.signatures {
-            println!(
-                "    {} {} <{}> [{}]",
-                s.glyph, s.actor_name, s.actor_email, s.kind
-            );
-        }
-    }
-    if !out.signing_kinds.is_empty() {
-        println!(
-            "\n  available signing kinds: {}",
-            out.signing_kinds.join(", ")
-        );
     }
 }
 
@@ -391,58 +257,6 @@ fn open_local_review(cli: &Cli) -> Result<LocalStateReview> {
     let dedup = OperationDedupStore::open(repo.heddle_dir()).context("open dedup store")?;
     let inner = LocalReviewContext::new(Arc::new(repo), Arc::new(dedup));
     Ok(LocalStateReview::new(inner))
-}
-
-fn signal_view(signal: &ReviewSignal) -> SignalView {
-    SignalView {
-        kind: match signal.kind {
-            ReviewSignalKind::DiffSummary => "diff_summary",
-            ReviewSignalKind::Risk(kind) => kind.as_str(),
-        }
-        .to_string(),
-        file: signal.anchor.file.clone(),
-        symbol: signal.anchor.symbol.clone().unwrap_or_default(),
-        reason: signal.reason.clone(),
-        producer: signal.producer.module.clone(),
-        visibility: match signal.visibility {
-            ReviewSignalVisibility::Visible => "visible",
-            ReviewSignalVisibility::Hidden => "hidden",
-        }
-        .to_string(),
-    }
-}
-
-fn discussion_view(discussion: &Discussion) -> DiscussionView {
-    let status = match &discussion.resolution {
-        DiscussionResolution::Open => "open",
-        DiscussionResolution::ResolvedIntoAnnotation { .. } => "resolved_into_annotation",
-        DiscussionResolution::ResolvedByEdit { .. } => "resolved_by_edit",
-        DiscussionResolution::Dismissed { .. } => "dismissed",
-    }
-    .to_string();
-    DiscussionView {
-        id: discussion.id.clone(),
-        file: discussion.anchor.file.clone(),
-        symbol: discussion.anchor.symbol.clone(),
-        status,
-        body_changed_since_open: discussion.body_changed_since_open,
-        anchor_ambiguous: discussion.anchor_ambiguous,
-        orphaned: discussion.orphaned,
-    }
-}
-
-fn resolve_state(cli: &Cli, explicit: Option<&str>) -> Result<StateId> {
-    let repo = cli.open_repo()?;
-    if let Some(s) = explicit {
-        // Routes through the canonical resolver so short/full IDs and
-        // marker names all work — matches `heddle log --output json` output.
-        return resolve_state_id(&repo, s);
-    }
-    let head = repo
-        .head()
-        .context("read HEAD")?
-        .ok_or_else(|| anyhow!(RecoveryAdvice::repository_no_head_capture_first("review")))?;
-    Ok(head)
 }
 
 fn review_mine_only_principal_required_advice() -> RecoveryAdvice {

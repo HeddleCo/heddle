@@ -2727,7 +2727,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
     entry(
         &["review", "show"],
         json_discriminators(
-            documented_schemas(READ_JSON, &["review show"]),
+            documented_schemas(
+                CommandContract {
+                    network_io: true,
+                    ..READ_JSON
+                },
+                &["review show"],
+            ),
             &[json_discriminator(
                 Some("review show"),
                 "output_kind",
@@ -2736,37 +2742,72 @@ const CONTRACTS: &[CommandContractEntry] = &[
         ),
     ),
     entry(
-        &["review", "sign"],
+        &["review", "approve"],
+        documented_schemas(NETWORK_METADATA_MUTATION, &["review approve"]),
+    ),
+    entry(
+        &["review", "list"],
+        documented_schemas(
+            CommandContract {
+                network_io: true,
+                ..READ_JSON
+            },
+            &["review list"],
+        ),
+    ),
+    entry(
+        &["review", "revoke"],
         json_discriminators(
+            documented_schemas(NETWORK_METADATA_MUTATION, &["review revoke"]),
+            &[json_discriminator(
+                Some("review revoke"),
+                "output_kind",
+                "review_revoke",
+            )],
+        ),
+    ),
+    entry(
+        &["review", "readiness"],
+        documented_schemas(
+            CommandContract {
+                network_io: true,
+                ..READ_JSON
+            },
+            &["review readiness"],
+        ),
+    ),
+    entry(
+        &["review", "sign"],
+        hidden(json_discriminators(
             documented_schemas(METADATA_MUTATION, &["review sign"]),
             &[json_discriminator(
                 Some("review sign"),
                 "output_kind",
                 "review_sign",
             )],
-        ),
+        )),
     ),
     entry(
         &["review", "next"],
-        json_discriminators(
+        hidden(json_discriminators(
             documented_schemas(READ_JSON, &["review next"]),
             &[json_discriminator(
                 Some("review next"),
                 "output_kind",
                 "review_next",
             )],
-        ),
+        )),
     ),
     entry(
         &["review", "health"],
-        json_discriminators(
+        hidden(json_discriminators(
             documented_schemas(READ_JSON, &["review health"]),
             &[json_discriminator(
                 Some("review health"),
                 "output_kind",
                 "review_health",
             )],
-        ),
+        )),
     ),
     entry(&["semantic"], GROUP),
     entry(
@@ -3043,29 +3084,6 @@ const CONTRACTS: &[CommandContractEntry] = &[
                 "thread_drop",
             )],
         ),
-    ),
-    entry(
-        &["thread", "approve"],
-        documented_schemas(NETWORK_METADATA_MUTATION, &["thread approve"]),
-    ),
-    entry(
-        &["thread", "approvals"],
-        documented_schemas(READ_JSON, &["thread approvals"]),
-    ),
-    entry(
-        &["thread", "revoke-approval"],
-        json_discriminators(
-            documented_schemas(NETWORK_METADATA_MUTATION, &["thread revoke-approval"]),
-            &[json_discriminator(
-                Some("thread revoke-approval"),
-                "output_kind",
-                "thread_revoke_approval",
-            )],
-        ),
-    ),
-    entry(
-        &["thread", "readiness"],
-        documented_schemas(READ_JSON, &["thread readiness"]),
     ),
     entry(
         &["thread", "cleanup"],
@@ -4839,6 +4857,10 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         Commands::Query(_) => vec!["query"],
         Commands::Review { command } => match command {
             ReviewCommands::Show(_) => vec!["review", "show"],
+            ReviewCommands::Approve(_) => vec!["review", "approve"],
+            ReviewCommands::List(_) => vec!["review", "list"],
+            ReviewCommands::Revoke(_) => vec!["review", "revoke"],
+            ReviewCommands::Readiness(_) => vec!["review", "readiness"],
             ReviewCommands::Sign(_) => vec!["review", "sign"],
             ReviewCommands::Next(_) => vec!["review", "next"],
             ReviewCommands::Health(_) => vec!["review", "health"],
@@ -4885,10 +4907,6 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
             },
             ThreadCommands::Checkout(_) => vec!["thread", "checkout"],
             ThreadCommands::Drop(_) => vec!["thread", "drop"],
-            ThreadCommands::Approve(_) => vec!["thread", "approve"],
-            ThreadCommands::Approvals(_) => vec!["thread", "approvals"],
-            ThreadCommands::RevokeApproval(_) => vec!["thread", "revoke-approval"],
-            ThreadCommands::CheckMerge(_) => vec!["thread", "readiness"],
             ThreadCommands::Cleanup(_) => vec!["thread", "cleanup"],
             ThreadCommands::Collapse(_) => vec!["thread", "collapse"],
             ThreadCommands::Expand(_) => vec!["thread", "expand"],
