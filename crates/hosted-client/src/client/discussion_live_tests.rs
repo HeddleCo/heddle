@@ -118,6 +118,7 @@ fn resolved_event(event_id: i64, discussion_id: &str) -> RepoEvent {
 
 #[test]
 fn discussion_event_types_are_recognized_and_others_are_not() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     assert!(is_discussion_event(&RepoEvent {
         event_type: "discussion.opened".into(),
         ..RepoEvent::default()
@@ -143,6 +144,7 @@ fn discussion_event_types_are_recognized_and_others_are_not() {
 
 #[test]
 fn payload_parser_pins_the_weft_flat_doorbell_shape() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let event = RepoEvent {
         event_type: "turn.appended".into(),
         payload_json: serde_json::json!({
@@ -179,6 +181,7 @@ fn payload_parser_pins_the_weft_flat_doorbell_shape() {
 
 #[test]
 fn subscribe_request_filters_to_discussion_event_types() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let request = subscribe_request("repo-1", 7, "main", "thread-main");
     assert_eq!(request.repo_id, "repo-1");
     assert_eq!(request.after_event_id, 7);
@@ -192,6 +195,7 @@ fn subscribe_request_filters_to_discussion_event_types() {
 
 #[test]
 fn paired_thread_scope_requires_both_name_and_stable_id() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     assert_eq!(
         paired_thread_scope("", "").unwrap(),
         (String::new(), String::new())
@@ -206,6 +210,7 @@ fn paired_thread_scope_requires_both_name_and_stable_id() {
 
 #[test]
 fn cursor_round_trips_per_repo() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let temp = TempDir::new().unwrap();
     let cursor = DiscussionEventCursor {
         after_event_id: 41,
@@ -222,6 +227,7 @@ fn cursor_round_trips_per_repo() {
 
 #[tokio::test]
 async fn opened_and_appended_events_materialize_distinct_turns_and_advance_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -303,6 +309,7 @@ async fn opened_and_appended_events_materialize_distinct_turns_and_advance_water
 
 #[tokio::test]
 async fn resolved_event_writes_a_local_resolution() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -345,6 +352,7 @@ async fn resolved_event_writes_a_local_resolution() {
 
 #[tokio::test]
 async fn missing_discussion_id_is_skipped_and_still_advances_the_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
     let event = RepoEvent {
@@ -367,6 +375,7 @@ async fn missing_discussion_id_is_skipped_and_still_advances_the_watermark() {
 
 #[tokio::test]
 async fn unknown_event_types_are_ignored_without_touching_the_op_log() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
     let event = RepoEvent {
@@ -394,6 +403,7 @@ async fn unknown_event_types_are_ignored_without_touching_the_op_log() {
 
 #[tokio::test]
 async fn bootstrap_marks_the_cursor_then_live_events_append() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let head = repo.head().unwrap().unwrap();
     let bootstrap = vec![objects::object::Discussion {
@@ -461,6 +471,7 @@ async fn bootstrap_marks_the_cursor_then_live_events_append() {
 // adopt-then-doorbell is `discussion_sync::tests::doorbell_after_adopt_does_not_duplicate_the_first_turn`.
 #[tokio::test]
 async fn replaying_opened_after_bootstrap_does_not_duplicate_the_first_turn() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let head = repo.head().unwrap().unwrap();
     let bootstrap = vec![objects::object::Discussion {
@@ -591,6 +602,7 @@ fn proto_dismissed_discussion(
 
 #[tokio::test]
 async fn doorbell_payload_fetches_get_discussion_and_materializes() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -638,6 +650,7 @@ async fn doorbell_payload_fetches_get_discussion_and_materializes() {
 
 #[tokio::test]
 async fn get_discussion_permission_denied_is_skipped_and_advances_the_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture
@@ -682,6 +695,7 @@ async fn get_discussion_permission_denied_is_skipped_and_advances_the_watermark(
 
 #[tokio::test]
 async fn get_discussion_not_found_is_skipped_and_advances_the_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture
@@ -710,6 +724,7 @@ async fn get_discussion_not_found_is_skipped_and_advances_the_watermark() {
 
 #[tokio::test]
 async fn bootstrap_none_rejects_projection_without_signed_operation() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let fixture = CollaborationFixture {
         list: vec![proto_discussion(
@@ -745,6 +760,7 @@ async fn bootstrap_none_rejects_projection_without_signed_operation() {
 
 #[tokio::test]
 async fn fat_append_without_mirror_fetches_instead_of_opening_at_turn_two() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -796,6 +812,7 @@ async fn fat_append_without_mirror_fetches_instead_of_opening_at_turn_two() {
 
 #[test]
 fn event_payload_is_doorbell_identity_not_turn_content() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let event = appended_event(2, "disc-unknown", "second turn", "turn-2", 2);
     let payload = parse_event_payload(&event);
     assert_eq!(payload.discussion_id.as_deref(), Some("disc-unknown"));
@@ -804,6 +821,7 @@ fn event_payload_is_doorbell_identity_not_turn_content() {
 
 #[test]
 fn opened_without_state_id_is_a_doorbell() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let event = RepoEvent {
         event_type: "discussion.opened".into(),
         payload_json: serde_json::json!({
@@ -825,6 +843,7 @@ fn opened_without_state_id_is_a_doorbell() {
 
 #[test]
 fn principals_do_not_share_a_cursor_slot() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let temp = TempDir::new().unwrap();
     let alice = DiscussionCursorScope {
         repo_path: "acme/widgets".into(),
@@ -857,6 +876,7 @@ fn principals_do_not_share_a_cursor_slot() {
 
 #[test]
 fn filtered_cursor_slot_does_not_share_the_unfiltered_watermark() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let temp = TempDir::new().unwrap();
     let filtered = DiscussionCursorScope {
         repo_path: "acme/widgets".into(),
@@ -878,6 +898,7 @@ fn filtered_cursor_slot_does_not_share_the_unfiltered_watermark() {
 
 #[test]
 fn authority_scoped_cursor_does_not_inherit_the_legacy_repo_path_slot() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let temp = TempDir::new().unwrap();
     let legacy = DiscussionEventCursor {
         after_event_id: 7,
@@ -900,6 +921,7 @@ fn authority_scoped_cursor_does_not_inherit_the_legacy_repo_path_slot() {
 
 #[tokio::test]
 async fn filtered_wait_does_not_advance_the_unfiltered_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -942,6 +964,7 @@ async fn filtered_wait_does_not_advance_the_unfiltered_watermark() {
 
 #[tokio::test]
 async fn get_discussion_is_called_with_the_event_state_id() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -985,6 +1008,7 @@ async fn get_discussion_is_called_with_the_event_state_id() {
 
 #[tokio::test]
 async fn incomplete_open_without_anchor_doorbell_fetches() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1027,6 +1051,7 @@ async fn incomplete_open_without_anchor_doorbell_fetches() {
 
 #[tokio::test]
 async fn incomplete_resolve_without_resolution_doorbell_fetches() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1079,6 +1104,7 @@ async fn incomplete_resolve_without_resolution_doorbell_fetches() {
 
 #[tokio::test]
 async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let head = repo.head().unwrap().unwrap();
     let bootstrap = vec![objects::object::Discussion {
@@ -1171,6 +1197,7 @@ async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
 
 #[tokio::test]
 async fn get_discussion_unauthenticated_does_not_advance_the_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture
@@ -1203,6 +1230,7 @@ async fn get_discussion_unauthenticated_does_not_advance_the_watermark() {
 
 #[tokio::test]
 async fn opened_without_state_id_fetches_get_discussion() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1262,6 +1290,7 @@ fn proto_coordination_discussion(id: &str, turns: &[(&str, &str, u64)]) -> Proto
 
 #[tokio::test]
 async fn coordination_doorbell_advances_watermark_and_does_not_fail_loop() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1331,6 +1360,7 @@ async fn coordination_doorbell_advances_watermark_and_does_not_fail_loop() {
 
 #[tokio::test]
 async fn opened_event_never_applies_without_get_discussion() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let (mut client, server, fixture) =
         crate::hosted_runtime::hosted::test_server::start_with_collaboration(
@@ -1379,6 +1409,7 @@ async fn opened_event_never_applies_without_get_discussion() {
 
 #[tokio::test]
 async fn dismissed_empty_reason_is_skipped_and_advances_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1426,6 +1457,7 @@ async fn dismissed_empty_reason_is_skipped_and_advances_watermark() {
 
 #[tokio::test]
 async fn discussion_bodies_keep_leading_and_trailing_whitespace() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let padded = "  keep padding  ";
     let mut fixture = CollaborationFixture::default();
@@ -1473,6 +1505,7 @@ async fn discussion_bodies_keep_leading_and_trailing_whitespace() {
 
 #[tokio::test]
 async fn empty_anchor_get_discussion_uses_repository_and_advances() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut proto = proto_discussion("disc-empty-anchor", &[("turn-open", "repo wide", 1)]);
     proto.anchor = Some(PathSymbolRef {
@@ -1536,6 +1569,7 @@ fn proto_discussion_on_thread(
 
 #[tokio::test]
 async fn thread_scoped_bootstrap_rejects_projection_without_signed_operation() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let foo = proto_discussion_on_thread("disc-foo", "foo", &[("turn-foo", "from foo", 1)]);
     let bar = proto_discussion_on_thread("disc-bar", "bar", &[("turn-bar", "from bar", 1)]);
 
@@ -1579,6 +1613,7 @@ async fn thread_scoped_bootstrap_rejects_projection_without_signed_operation() {
 
 #[tokio::test]
 async fn thread_scoped_pull_fold_bootstrap_stays_repo_wide() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let head = repo.head().unwrap().unwrap();
     let bootstrap = vec![
@@ -1669,6 +1704,7 @@ fn seed_repo_without_head() -> (TempDir, Repository) {
 
 #[tokio::test]
 async fn local_materialization_error_does_not_advance_the_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo_without_head();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1702,6 +1738,7 @@ async fn local_materialization_error_does_not_advance_the_watermark() {
 
 #[tokio::test]
 async fn bootstrap_without_head_does_not_mark_the_cursor_bootstrapped() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo_without_head();
     let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
     bootstrap_discussions(&repo, &mut client, "acme/widgets", None)
@@ -1720,6 +1757,7 @@ async fn bootstrap_without_head_does_not_mark_the_cursor_bootstrapped() {
 
 #[tokio::test]
 async fn alice_skipping_a_restricted_event_does_not_advance_bob() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture
@@ -1773,6 +1811,7 @@ async fn alice_skipping_a_restricted_event_does_not_advance_bob() {
 
 #[tokio::test]
 async fn renamed_thread_projection_without_signed_operation_is_incomplete() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let mut renamed = proto_discussion_on_thread(
         "disc-renamed",
         "old-name",
@@ -1812,6 +1851,7 @@ async fn renamed_thread_projection_without_signed_operation_is_incomplete() {
 
 #[test]
 fn concurrent_cursor_saves_do_not_clobber_other_slots() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let temp = TempDir::new().unwrap();
     let heddle_dir = temp.path().to_path_buf();
     let threads: Vec<_> = (0..8)
@@ -1852,6 +1892,7 @@ fn concurrent_cursor_saves_do_not_clobber_other_slots() {
 
 #[test]
 fn wait_reconnect_backoff_is_bounded() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let first = wait_reconnect_backoff(0).expect("first reconnect waits");
     let second = wait_reconnect_backoff(1).expect("second reconnect waits longer");
     assert!(second > first);

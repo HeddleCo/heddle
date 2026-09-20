@@ -1004,6 +1004,7 @@ mod cursor_tests {
 
     #[test]
     fn hidden_only_scan_budget_resumes_to_later_visible_record() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let rows = [(1u32, false), (2, false), (3, true)];
         let fetch = |after: Option<&u32>| -> Result<Vec<(u32, bool)>> {
             Ok(rows

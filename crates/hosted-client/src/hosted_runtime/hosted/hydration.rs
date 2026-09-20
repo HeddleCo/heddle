@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread,
     time::Duration,
 };
@@ -56,12 +56,15 @@ pub struct LazyHostedHydrator {
     /// call so a `pull --lazy` that advances the thread tip is honored
     /// without rewriting `lazy-hydrator.toml`.
     local_thread: String,
-    bridge: OnceLock<HydrationBridge>,
-    /// Held during first-use bridge construction so the connect + spawn
-    /// sequence is atomic — N concurrent first-time callers see exactly
-    /// one bridge built and shared, rather than N runtimes / N clients
-    /// racing via separate `OnceLock::set` calls (the round-2 bug).
-    init_lock: Mutex<()>,
+    /// The mutex makes the first connect and every request one explicit state
+    /// transition. The worker already serializes hydration requests, so holding
+    /// this guard while awaiting its reply does not reduce concurrency.
+    bridge: Mutex<HydrationState>,
+}
+
+enum HydrationState {
+    Uninitialized,
+    Ready(HydrationBridge),
 }
 
 impl LazyHostedHydrator {
@@ -76,39 +79,60 @@ impl LazyHostedHydrator {
             repo_path: repo_path.into(),
             remote_thread: remote_thread.into(),
             local_thread: local_thread.into(),
-            bridge: OnceLock::new(),
-            init_lock: Mutex::new(()),
+            bridge: Mutex::new(HydrationState::Uninitialized),
         }
     }
 
-    fn ensure_bridge(&self) -> objects::error::Result<&HydrationBridge> {
-        if let Some(bridge) = self.bridge.get() {
-            return Ok(bridge);
-        }
-        // Serialize first-time construction so the runtime, client, and
-        // worker thread are installed as one atomic unit.
-        let _guard = self.init_lock.lock().unwrap_or_else(|poison| {
-            // Prior initializer panicked. The bridge is either set (good)
-            // or absent (caller will retry). Either way clearing the
-            // poison and continuing is correct — we re-check `bridge.get`
-            // below.
-            poison.into_inner()
-        });
-        if let Some(bridge) = self.bridge.get() {
-            return Ok(bridge);
-        }
-
-        let bridge = HydrationBridge::connect(&self.endpoint)?;
-        // The init_lock guarantees no race: `set` must succeed here.
-        self.bridge.set(bridge).map_err(|_| {
-            HeddleError::Config(
-                "lazy hosted hydrator: bridge slot already filled under init_lock — \
-                     this indicates a logic bug in LazyHostedHydrator"
-                    .to_string(),
-            )
-        })?;
-        Ok(self.bridge.get().expect("just set under init_lock"))
+    fn bridge_state(&self) -> objects::error::Result<std::sync::MutexGuard<'_, HydrationState>> {
+        self.bridge.lock().map_err(|_| {
+            HeddleError::Config("lazy hosted hydrator: bridge state lock was poisoned".to_string())
+        })
     }
+}
+
+impl HydrationState {
+    fn hydrate(
+        &mut self,
+        endpoint: &str,
+        repo: &Repository,
+        repo_path: &str,
+        remote_thread: &str,
+        target_state: StateId,
+        hash: ContentHash,
+    ) -> objects::error::Result<()> {
+        match self {
+            Self::Ready(bridge) => {
+                hydrate_from_bridge(bridge, repo, repo_path, remote_thread, target_state, hash)
+            }
+            Self::Uninitialized => {
+                let bridge = HydrationBridge::connect(endpoint)?;
+                let result = hydrate_from_bridge(
+                    &bridge,
+                    repo,
+                    repo_path,
+                    remote_thread,
+                    target_state,
+                    hash,
+                );
+                *self = Self::Ready(bridge);
+                result
+            }
+        }
+    }
+}
+
+fn hydrate_from_bridge(
+    bridge: &HydrationBridge,
+    repo: &Repository,
+    repo_path: &str,
+    remote_thread: &str,
+    target_state: StateId,
+    hash: ContentHash,
+) -> objects::error::Result<()> {
+    bridge
+        .hydrate(repo, repo_path, remote_thread, target_state, hash)
+        .map(|_count| ())
+        .map_err(|err| HeddleError::Io(std::io::Error::other(err.to_string())))
 }
 
 impl BlobHydrator for LazyHostedHydrator {
@@ -137,17 +161,14 @@ impl BlobHydrator for LazyHostedHydrator {
             }
         };
 
-        let bridge = self.ensure_bridge()?;
-        bridge
-            .hydrate(
-                repo,
-                &self.repo_path,
-                &self.remote_thread,
-                target_state,
-                *hash,
-            )
-            .map(|_count| ())
-            .map_err(|err| HeddleError::Io(std::io::Error::other(err.to_string())))
+        self.bridge_state()?.hydrate(
+            &self.endpoint,
+            repo,
+            &self.repo_path,
+            &self.remote_thread,
+            target_state,
+            *hash,
+        )
     }
 }
 
@@ -161,8 +182,8 @@ impl BlobHydrator for LazyHostedHydrator {
 /// `#[tokio::main]` async context: the worker's runtime is private, so the
 /// nested `block_on` happens entirely off the caller's runtime.
 struct HydrationBridge {
-    tx: Option<mpsc::Sender<HydrateMessage>>,
-    /// Joined after the sender is dropped so the worker can close its client.
+    tx: mpsc::Sender<HydrateMessage>,
+    /// Joined after shutdown is sent so the worker can close its client.
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -175,6 +196,7 @@ enum HydrateMessage {
         hash: ContentHash,
         reply: mpsc::SyncSender<Result<usize, ProtocolError>>,
     },
+    Shutdown,
 }
 
 impl HydrationBridge {
@@ -289,6 +311,7 @@ impl HydrationBridge {
                                 .await;
                                 let _ = reply.send(result);
                             }
+                            HydrateMessage::Shutdown => break,
                         }
                     }
                     client.close().await;
@@ -303,7 +326,7 @@ impl HydrationBridge {
         // wedge the sync read path.
         match ready_rx.recv_timeout(DEFAULT_HOSTED_HYDRATION_TIMEOUT) {
             Ok(Ok(())) => Ok(Self {
-                tx: Some(tx),
+                tx,
                 worker: Some(worker),
             }),
             Ok(Err(err)) => Err(err),
@@ -351,8 +374,6 @@ impl HydrationBridge {
         // the worker returns the hosted result for this request.
         let (reply_tx, reply_rx) = mpsc::sync_channel::<Result<usize, ProtocolError>>(1);
         self.tx
-            .as_ref()
-            .expect("hydration bridge sender is present until drop")
             .send(HydrateMessage::Run {
                 repo,
                 repo_path: repo_path.to_string(),
@@ -386,7 +407,7 @@ impl HydrationBridge {
 
 impl Drop for HydrationBridge {
     fn drop(&mut self) {
-        self.tx.take();
+        let _ = self.tx.send(HydrateMessage::Shutdown);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -525,12 +546,13 @@ mod tests {
                                 std::io::Error::other("simulated offline endpoint"),
                             )));
                         }
+                        super::HydrateMessage::Shutdown => break,
                     }
                 }
             })
             .expect("spawn test worker");
         HydrationBridge {
-            tx: Some(tx),
+            tx,
             worker: Some(worker),
         }
     }
@@ -545,11 +567,10 @@ mod tests {
             "main",
             local_thread,
         );
-        hydrator
-            .bridge
-            .set(offline_bridge())
-            .map_err(|_| ())
-            .expect("set bridge");
+        {
+            let mut state = hydrator.bridge.lock().expect("bridge state");
+            *state = super::HydrationState::Ready(offline_bridge());
+        }
         hydrator
     }
 
@@ -559,6 +580,7 @@ mod tests {
     /// outer runtime's thread) this would have panicked.
     #[test]
     fn hydrate_safe_from_tokio_main_context() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -592,6 +614,7 @@ mod tests {
     /// threads (the future FFI / library-embedder path).
     #[test]
     fn hydrate_safe_from_blocking_context() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo) = temp_repo();
         let hydrator = offline_lazy_hydrator("main");
         let blake3 = Blob::new(b"placeholder".to_vec()).hash();
@@ -609,6 +632,7 @@ mod tests {
     /// it received.
     #[test]
     fn hydrate_after_thread_advance_uses_new_state() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         // Build an inspecting bridge: instead of running real RPCs it
         // records the StateId on each request and replies with an
         // "io error: simulated". That lets us verify the bridge saw the
@@ -632,18 +656,19 @@ mod tests {
                                 std::io::Error::other("simulated"),
                             )));
                         }
+                        super::HydrateMessage::Shutdown => break,
                     }
                 }
             })
             .expect("spawn inspect worker");
         let bridge = HydrationBridge {
-            tx: Some(tx),
+            tx,
             worker: Some(worker),
         };
 
         let hydrator =
             LazyHostedHydrator::new("ignored.example.test:443", "org/acme/repo", "main", "main");
-        hydrator.bridge.set(bridge).map_err(|_| ()).expect("set");
+        *hydrator.bridge.lock().expect("bridge state") = super::HydrationState::Ready(bridge);
 
         let (_temp, repo) = temp_repo();
         let first_tip = repo
@@ -680,6 +705,7 @@ mod tests {
     /// drop it and treat every miss as "hydrate the whole tip".
     #[test]
     fn hydrate_forwards_requested_hash_not_the_whole_tip() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let recorded: Arc<std::sync::Mutex<Vec<ContentHash>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded_for_worker = Arc::clone(&recorded);
@@ -693,17 +719,18 @@ mod tests {
                             recorded_for_worker.lock().unwrap().push(hash);
                             let _ = reply.send(Ok(1));
                         }
+                        super::HydrateMessage::Shutdown => break,
                     }
                 }
             })
             .expect("spawn hash inspect worker");
         let bridge = HydrationBridge {
-            tx: Some(tx),
+            tx,
             worker: Some(worker),
         };
         let hydrator =
             LazyHostedHydrator::new("ignored.example.test:443", "org/acme/repo", "main", "main");
-        hydrator.bridge.set(bridge).map_err(|_| ()).expect("set");
+        *hydrator.bridge.lock().expect("bridge state") = super::HydrationState::Ready(bridge);
 
         let (_temp, repo) = temp_repo();
         let first = Blob::new(b"only-this-blob".to_vec()).hash();
@@ -721,10 +748,11 @@ mod tests {
     /// concurrent first-time callers raced two separate `OnceLock::set`
     /// calls (runtime + inner) and could end up storing an inner whose
     /// `Handle` referenced a runtime that was dropped by the losing
-    /// thread. Now there's a single OnceLock + an init_lock, so all
-    /// callers observe exactly one bridge.
+    /// thread. The explicit `HydrationState` transition is serialized by one
+    /// mutex, so all callers observe exactly one bridge.
     #[test]
     fn concurrent_first_use_no_race() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         const N: usize = 8;
         let (_temp, repo) = temp_repo();
         let repo = Arc::new(repo);
@@ -761,6 +789,7 @@ mod tests {
 
     #[test]
     fn hydrate_times_out_when_worker_never_replies() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo) = temp_repo();
         let target = repo
             .refs()
@@ -778,13 +807,14 @@ mod tests {
                         let _ = release_rx.recv();
                         drop(reply);
                     }
+                    Ok(super::HydrateMessage::Shutdown) => {}
                     Err(_) => {}
                 }
                 let _ = done_tx.send(());
             })
             .expect("spawn stalling worker");
         let bridge = HydrationBridge {
-            tx: Some(tx),
+            tx,
             worker: Some(worker),
         };
 
@@ -821,6 +851,7 @@ mod tests {
     /// future refactor leaks the worker forever.
     #[test]
     fn dropping_bridge_shuts_worker_down() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let bridge = offline_bridge();
         // Pull the worker handle out via a Drop-detecting wrapper isn't
         // possible without restructuring; instead we observe that
@@ -837,6 +868,7 @@ mod tests {
     /// borrowed pointer whose lifetime is erased across the mpsc channel.
     #[test]
     fn hydration_message_carries_send_owned_repo_handle() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         fn assert_send_static<T: Send + 'static>(_: &T) {}
         let (_temp, repo) = temp_repo();
         let (reply, _recv) = mpsc::sync_channel::<Result<usize, wire::ProtocolError>>(1);
@@ -853,6 +885,7 @@ mod tests {
 
     #[test]
     fn hydration_bridge_does_not_reintroduce_raw_repo_pointer() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let source = include_str!("hydration.rs");
         let raw_wrapper = ["Repo", "Ptr"].concat();
         let raw_repo_pointer = ["*const ", "Repository"].concat();
@@ -874,6 +907,7 @@ mod tests {
     /// network for a state we don't have.
     #[test]
     fn hydrate_returns_config_error_when_local_thread_missing() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo) = temp_repo();
         // Pre-set the bridge so `ensure_bridge` would succeed if reached —
         // that way a failure here proves the early-return fired before the
@@ -900,6 +934,7 @@ mod tests {
     /// outbound DNS.
     #[test]
     fn ensure_bridge_propagates_dns_failure() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo) = temp_repo();
         // Note: no `offline_lazy_hydrator` — this constructor leaves
         // `bridge` empty so the first `hydrate()` exercises the real
@@ -922,7 +957,7 @@ mod tests {
             "error must identify the DNS-resolution failure; got: {msg}"
         );
         // Repeat the call — second attempt must also fail-fast (no
-        // half-initialized bridge cached on disk / in OnceLock).
+        // half-initialized bridge cached in `HydrationState`).
         let err2 = hydrator
             .hydrate(&repo, &blake3)
             .expect_err("second call must also fail rather than reuse a partial bridge");
@@ -953,6 +988,7 @@ mod register_factory_tests {
 
     #[test]
     fn register_hosted_factory_installs_factory_for_kind_hosted() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         register_hosted_factory();
         assert!(
@@ -963,6 +999,7 @@ mod register_factory_tests {
 
     #[test]
     fn registered_factory_builds_adapter_for_hosted_section() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         register_hosted_factory();
         let factory =
@@ -984,6 +1021,7 @@ mod register_factory_tests {
 
     #[test]
     fn registered_factory_errors_when_hosted_section_absent() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         register_hosted_factory();
         let factory = lookup_factory(KIND_HOSTED).expect("factory present");
@@ -1018,6 +1056,7 @@ mod connect_path_tests {
     //! first lazy hydrate even though the rotation data is on disk.
     #[test]
     fn lazy_hosted_connect_opens_session_through_rotating_seam() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let source = include_str!("hydration.rs");
         assert!(
             source.contains("HostedSession::build(&user_config, Some(endpoint.to_string()))"),
@@ -1041,6 +1080,7 @@ mod config_persistence_tests {
 
     #[test]
     fn lazy_hydrator_config_round_trip_preserves_hostname() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().expect("temp");
         let heddle = temp.path().join(".heddle");
         // The persisted endpoint MUST be the hostname spec, not a

@@ -1748,6 +1748,7 @@ mod tests {
     // unlinked (so push will still publish it). Body equality alone never links.
     #[test]
     fn reconcile_rejects_identical_body_across_authors() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         // A's own unpushed "lgtm" (local principal "alice", not yet on server).
         let available = vec![local("lgtm", "alice", "alice@x", true, 111)];
         // B pushed "lgtm" (server stamped it "bob"); our hosted username is "alice".
@@ -1763,6 +1764,7 @@ mod tests {
     // hosted username on the server) reconciles.
     #[test]
     fn reconcile_links_turn_we_pushed() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let available = vec![local("ship it", "alice-local", "alice@x", true, 111)];
         let st = server("ship it", "alice", "", 9); // server stamped our hosted username
         assert_eq!(reconcile(&available, &st, Some("alice")), Some(0));
@@ -1772,6 +1774,7 @@ mod tests {
     // author + posted_at verbatim) reconciles.
     #[test]
     fn reconcile_links_turn_we_pulled() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let available = vec![local("+1", "bob", "bob@x", false, 7000)]; // occurred = 7 * 1000
         let st = server("+1", "bob", "bob@x", 7);
         assert_eq!(reconcile(&available, &st, Some("alice")), Some(0));
@@ -1785,6 +1788,7 @@ mod tests {
     // otherwise weft dedup conflicts on turn 3 and turns 3..N are dropped.
     #[test]
     fn legacy_imported_multi_turn_op_has_distinct_identities_and_keys() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = tempfile::TempDir::new().unwrap();
         let store = CollaborationStore::open(temp.path()).unwrap();
         let discussion_id: DiscussionRecordId =
@@ -1850,6 +1854,7 @@ mod tests {
 
     #[test]
     fn discussion_sync_state_prefers_the_pulled_tip_over_head() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -1869,6 +1874,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_discussion_sync_uses_against_before_head_is_published() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let temp = TempDir::new().unwrap();
         let repo = Repository::init(temp.path()).unwrap();
         let tree = Tree::new();
@@ -1935,6 +1941,7 @@ mod tests {
 
     #[tokio::test]
     async fn clone_empty_bootstrap_observes_and_materializes_discussions() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let temp = TempDir::new().unwrap();
         let repo = Repository::init(temp.path()).unwrap();
         let tree = Tree::new();
@@ -2013,6 +2020,7 @@ mod tests {
     // F3: no local principal ⇒ turns are NOT treated as ours (fail closed).
     #[test]
     fn collect_local_turns_fails_closed_without_self_principal() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = tempfile::TempDir::new().unwrap();
         let store = CollaborationStore::open(temp.path()).unwrap();
         let discussion_id = DiscussionRecordId::generate();
@@ -2050,6 +2058,7 @@ mod tests {
 
     #[test]
     fn unsupported_anchor_is_an_explicit_incomplete_result() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         let error = validate_replicable_anchor(
@@ -2066,6 +2075,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_pull_materializes_discussion_once_and_persists_the_mirror() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2130,6 +2140,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_discussion_opens_and_appends_native_operations() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2198,6 +2209,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_push_pull_preserves_path_line_symbol_and_repository_discussions() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let source_dir = TempDir::new().unwrap();
         let source = Repository::init_default(source_dir.path()).unwrap();
         std::fs::write(source_dir.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2422,6 +2434,7 @@ mod tests {
 
     #[test]
     fn wait_thread_filter_matches_name_or_stamped_id() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let mut discussion = hosted("disc-1", "first", "turn-1", HostedResolution::Open);
         discussion.thread_ref = Some("foo".to_string());
         assert!(discussion_matches_wait_thread(
@@ -2456,6 +2469,7 @@ mod tests {
 
     #[test]
     fn competing_hosted_resolution_is_recorded_not_unchanged() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2551,6 +2565,7 @@ mod tests {
 
     #[test]
     fn pushed_into_annotation_echo_does_not_conflict() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2639,6 +2654,7 @@ mod tests {
 
     #[test]
     fn pushed_real_annotation_echo_keeps_local_context_id() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2726,6 +2742,7 @@ mod tests {
 
     #[test]
     fn concurrent_apply_does_not_drop_turn_links() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
@@ -2775,6 +2792,7 @@ mod tests {
 
     #[test]
     fn adopt_or_derive_local_id_adopts_valid_disc_and_derives_legacy() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         // A valid `disc-<UUIDv7>` on the wire is adopted verbatim (client-sovereign).
         let minted = DiscussionRecordId::generate();
         assert_eq!(adopt_or_derive_local_id(&minted.to_string()), minted);
@@ -2826,6 +2844,7 @@ mod tests {
     // minted a fresh UUIDv7 per clone, so neither held.
     #[tokio::test]
     async fn pull_adopts_the_originators_disc_id_so_clones_agree() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let originator = DiscussionRecordId::generate();
         let wire_id = originator.to_string();
 
@@ -2875,6 +2894,7 @@ mod tests {
     // resume rather than write a second `Open` root (materialize rejects two roots).
     #[tokio::test]
     async fn pull_resumes_when_oplog_has_it_but_mirror_is_missing() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let (_temp, repo, state) = seed_repo_with_state();
         let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
         // This discussion already exists in the op-log under its own id, with the
@@ -2943,6 +2963,7 @@ mod tests {
     // producing disjoint `co-…` id sets.
     #[tokio::test]
     async fn two_clones_agree_on_turn_op_ids() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         // One server-side discussion, addressed by the originator's id and
         // pinned to a single server `opened_against_state` — identical for every
         // clone (the server sends the same value everywhere), so the Open op's
@@ -3000,6 +3021,7 @@ mod tests {
     // resolve-op cases that previously escaped it via wall-clock now_ms().)
     #[tokio::test]
     async fn two_clones_agree_on_open_op_for_realistic_hosted_turn() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate().to_string();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut op_id_sets = Vec::new();
@@ -3044,6 +3066,7 @@ mod tests {
     // deterministic 0. RED before the fix (disjoint co- ids), GREEN after.
     #[tokio::test]
     async fn two_clones_agree_on_open_op_when_posted_at_is_zero() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate().to_string();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut op_id_sets = Vec::new();
@@ -3087,6 +3110,7 @@ mod tests {
     // server turn `posted_at` (`resolution_ms`). RED before the fix, GREEN after.
     #[tokio::test]
     async fn two_clones_agree_on_resolve_op() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate().to_string();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut op_id_sets = Vec::new();
@@ -3134,6 +3158,7 @@ mod tests {
     // the retry would mint a fresh `CollabOpId` and double the op count.
     #[test]
     fn rederived_turn_op_key_dedupes_on_retry() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (_temp, repo, state) = seed_repo_with_state();
         let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
         let discussion_id = DiscussionRecordId::generate();
@@ -3189,6 +3214,7 @@ mod tests {
     // this is the hosted-clone path against an originator who opened locally.
     #[tokio::test]
     async fn originator_adopts_hosted_open_op_so_clone_agrees() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let hosted_snapshot = {
@@ -3311,6 +3337,7 @@ mod tests {
     // parent pointers stay hosted-canonical.
     #[tokio::test]
     async fn originator_adopts_hosted_open_and_append_so_clone_agrees() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
@@ -3436,6 +3463,7 @@ mod tests {
     // AppendTurn echo is the full discussion, so both local ops adopt.
     #[tokio::test]
     async fn push_echo_adopt_uses_full_discussion() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
@@ -3569,6 +3597,7 @@ mod tests {
     // A last-turn-only echo must not retire the unpublished prefix.
     #[test]
     fn partial_push_echo_does_not_under_adopt() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let wire_id = DiscussionRecordId::generate();
         let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
         let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
@@ -3659,6 +3688,7 @@ mod tests {
     // matches a fresh clone of the same snapshot.
     #[tokio::test]
     async fn pull_adopts_originator_local_open_to_match_clone() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
@@ -3775,6 +3805,7 @@ mod tests {
     // or duplicate the first turn. Adopt-in-isolation tests never hit this.
     #[tokio::test]
     async fn doorbell_after_adopt_does_not_duplicate_the_first_turn() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
         let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);

@@ -481,6 +481,7 @@ mod tests {
 
     #[test]
     fn unchanged_frames_skip_projection_and_committed_change_rechecks() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (sender, mut changes) = tokio::sync::watch::channel(1u64);
         changes.borrow_and_update();
         let authority = CountingAuthority::default();

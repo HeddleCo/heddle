@@ -215,6 +215,7 @@ fn sign_request(
 
 #[tokio::test]
 async fn native_claim_requires_exact_browser_possession_and_active_secret() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let fixture = Fixture::new();
     let (authorization, _, _) = StoredClaimAuthorization::new();
     let request = fixture.prepare();
@@ -272,6 +273,7 @@ async fn native_claim_requires_exact_browser_possession_and_active_secret() {
 
 #[tokio::test]
 async fn native_claim_preserves_root_and_replays_exact_receipts_after_restart() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let fixture = Fixture::new();
     let prepare_body = fixture.prepare().encode_to_vec();
     let prepare_bytes = fixture
@@ -410,6 +412,7 @@ impl ClaimHandler for Foreground {
 }
 #[tokio::test]
 async fn native_claim_crosses_real_iroh_with_typed_endpoint_discovery() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let fixture = Fixture::new();
     let endpoint = Endpoint::builder(presets::Minimal)
         .relay_mode(RelayMode::Disabled)

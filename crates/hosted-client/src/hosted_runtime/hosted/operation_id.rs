@@ -97,6 +97,7 @@ mod tests {
 
     #[test]
     fn caller_uuid_is_scoped_per_method_and_stable_for_retries() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let caller = uuid::Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef).to_string();
         let open = ClientOperationId::caller_or_fresh(OPEN, caller.clone());
         let again = ClientOperationId::caller_or_fresh(OPEN, caller.clone());

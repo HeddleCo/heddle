@@ -175,6 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn expires_without_observers_and_stops_with_daemon() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let home = tempfile::tempdir().expect("device home");
         let root = tempfile::tempdir().expect("owned store");
         let directory = root.path().join(".heddle");

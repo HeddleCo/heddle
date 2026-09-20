@@ -70,6 +70,7 @@ async fn connect_loopback(address: iroh::EndpointAddr) -> std::sync::Arc<HostedC
 // runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 async fn hosted_endpoint_close_release_contract() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
     require_release_build();
@@ -167,6 +168,7 @@ fn percentile_ms(sorted_values: &[f64], percentile: usize) -> f64 {
 // runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 async fn direct_only_descriptor_uses_the_normal_connection_path() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
     let server = Endpoint::builder(presets::Minimal)
@@ -201,6 +203,7 @@ async fn direct_only_descriptor_uses_the_normal_connection_path() {
 // runtime, so nothing else contends for the guard and it cannot deadlock.
 #[allow(clippy::await_holding_lock)]
 async fn hosted_connection_accepts_claim_alpn() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
     let _env_guard = config::credentials::lock_test_env();
     let _home = HeddleHomeEnvGuard::isolated();
     let server = Endpoint::builder(presets::Minimal)

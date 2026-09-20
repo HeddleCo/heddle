@@ -419,6 +419,7 @@ mod tests {
 
     #[test]
     fn public_mint_root_evidence_survives_hcred_and_keystore_conversion() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (mut credential, _) = sample_verified();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../capability-verifier/tests/fixtures/mint_root_attachment_v1.json"
@@ -443,6 +444,7 @@ mod tests {
 
     #[test]
     fn round_trips_write_then_load() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agent.hcred");
         let (credential, _signer) = sample_verified();
@@ -462,6 +464,7 @@ mod tests {
 
     #[test]
     fn refuses_to_overwrite_existing_path() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agent.hcred");
         let (credential, _signer) = sample_verified();
@@ -472,6 +475,7 @@ mod tests {
 
     #[test]
     fn debug_redacts_secret_material() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let (credential, _signer) = sample_verified();
         let rendered = format!("{credential:?}");
         assert!(rendered.contains("<redacted>"));
@@ -487,6 +491,7 @@ mod tests {
 
     #[test]
     fn rejects_tampered_proof_key() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agent.hcred");
         let (mut credential, _signer) = sample_verified();
@@ -500,6 +505,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_subject() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agent.hcred");
         let (mut credential, _signer) = sample_verified();
@@ -511,6 +517,7 @@ mod tests {
 
     #[test]
     fn rejects_expired_token() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agent.hcred");
         let signer = Ed25519Signer::generate().expect("proof key");
@@ -533,6 +540,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_format() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agent.hcred");
         let (credential, _signer) = sample_verified();
@@ -546,6 +554,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_version() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agent.hcred");
         let (credential, _signer) = sample_verified();
@@ -559,6 +568,7 @@ mod tests {
 
     #[test]
     fn rejects_oversized_file() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agent.hcred");
         // A file past the 64 KiB cap is rejected before any parse/verify.
@@ -579,6 +589,7 @@ mod tests {
 
     #[test]
     fn rejects_control_chars_in_server_field() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agent.hcred");
         let (mut credential, _signer) = sample_verified();
@@ -596,6 +607,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn rejects_group_readable_file() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("agent.hcred");

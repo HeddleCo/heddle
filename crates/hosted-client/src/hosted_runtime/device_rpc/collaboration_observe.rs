@@ -626,6 +626,7 @@ mod source_target_tests {
 
     #[test]
     fn original_anchor_collects_target_without_changing_coordinates() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let reference = SourceTargetReference {
             target: ContentHash::from_bytes([9; 32]),
             binding: SourceTargetBinding::ViewedThread,

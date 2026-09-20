@@ -458,6 +458,7 @@ mod tests {
 
     #[test]
     fn claim_link_uses_the_origin_node_and_bearer_secret() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let origin = normalized_web_origin("https://heddle.example:8443/").expect("origin");
         assert_eq!(
             claim_link(
@@ -476,6 +477,7 @@ mod tests {
 
     #[test]
     fn claim_link_refuses_a_non_origin_base() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         for invalid in [
             "heddle.example",
             "ftp://heddle.example",
@@ -494,6 +496,7 @@ mod tests {
 
     #[test]
     fn explicit_https_origin_wins_even_when_cross_site() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         assert_eq!(
             resolve_web_origin(
                 Some("https://explicit.example:8443/"),
@@ -507,6 +510,7 @@ mod tests {
 
     #[test]
     fn saas_api_falls_back_to_app_heddle_sh() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         assert_eq!(
             resolve_web_origin(None, None, "api.heddle.sh").expect("saas default"),
             HEDDLE_SAAS_CLAIM_ORIGIN
@@ -520,6 +524,7 @@ mod tests {
 
     #[test]
     fn self_hosted_without_a_bound_origin_refuses_the_saas_default() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let error = resolve_web_origin(None, None, "api.acme.example")
             .expect_err("self-hosted must not fall back to SaaS");
         let message = error.to_string();
@@ -535,6 +540,7 @@ mod tests {
 
     #[test]
     fn bound_server_advertised_origin_is_accepted() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         assert_eq!(
             resolve_web_origin(None, Some("https://app.acme.example/"), "api.acme.example")
                 .expect("same registrable domain"),
@@ -554,6 +560,7 @@ mod tests {
 
     #[test]
     fn leftover_unbound_web_origin_cannot_become_a_claim_link() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         for advertised in [
             "https://evil.com",
             "http://evil.com",
@@ -584,6 +591,7 @@ mod tests {
 
     #[test]
     fn string_suffix_is_not_a_registrable_domain_bind() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let error = resolve_web_origin(None, Some("https://evil.com"), "api.notevil.com")
             .expect_err("ends-with is not a bind");
         assert!(
@@ -594,6 +602,7 @@ mod tests {
 
     #[test]
     fn claim_link_refuses_http_even_when_explicit() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         for invalid in ["http://evil.example", "http://app.heddle.sh"] {
             let error =
                 resolve_web_origin(Some(invalid), None, "api.heddle.sh").expect_err("http origin");

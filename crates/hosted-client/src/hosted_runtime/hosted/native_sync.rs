@@ -1360,6 +1360,7 @@ mod tests {
 
     #[test]
     fn concurrent_source_heads_never_select_a_winner_by_wire_order() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let spool = SpoolRef {
             id: Uuid::from_u128(1).to_string(),
         };
@@ -1397,6 +1398,7 @@ mod tests {
 
     #[tokio::test]
     async fn thread_listing_follows_pages_until_main_and_requested_name_are_observed() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         let spool = SpoolRef {
             id: Uuid::from_bytes([2; 16]).to_string(),
         };
@@ -1524,6 +1526,7 @@ mod tests {
 
     #[test]
     fn land_shaped_tip_requires_hosted_source_ancestry() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let (_dir, repo, replica, signer, spool, owner, authority) = hosted_like_replica();
         let base = replica.genesis().expect("genesis").base;
         let main_tip = snapshot(&repo, vec![base], "main");
@@ -1621,6 +1624,7 @@ mod tests {
 
     #[test]
     fn start_thread_submits_existing_native_genesis_without_inventing_identity() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let isolated = native_repo();
         let repo = &isolated.repo;
         let main = repo.native_thread("main").expect("main");
@@ -1671,6 +1675,7 @@ mod tests {
 
     #[test]
     fn start_thread_preserves_child_parent_and_rejects_dropping_it() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let isolated = native_repo();
         let repo = &isolated.repo;
         let main = repo.native_thread("main").expect("main");
@@ -1721,6 +1726,7 @@ mod tests {
 
     #[test]
     fn start_thread_rejects_account_authority_on_local_key_genesis() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let isolated = native_repo();
         let repo = &isolated.repo;
         let main = repo.native_thread("main").expect("main");
@@ -1743,6 +1749,7 @@ mod tests {
 
     #[test]
     fn hosted_push_starts_same_spool_child_after_parent() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let isolated = native_repo();
         let repo = &isolated.repo;
         let main = repo.native_thread("main").expect("main");

@@ -253,12 +253,14 @@ mod tests {
 
     #[test]
     fn server_matching_ignores_supported_schemes_only() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         assert!(server_keys_match("https://api.heddle.sh", "api.heddle.sh"));
         assert!(!server_keys_match("api.heddle.sh", "other.heddle.sh"));
     }
 
     #[test]
     fn inline_credential_contents_are_rejected() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|_| {
             unsafe { std::env::set_var("HEDDLE_CREDENTIAL", "{\"format\":\"heddle-credential\"}") };
             let error = credential_env_path().expect_err("inline contents must not be accepted");
@@ -268,6 +270,7 @@ mod tests {
 
     #[test]
     fn env_credential_resolves_and_is_not_renewable() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|home| {
             let path = home.join("agent.hcred");
             write_sample_hcred(&path, "api.heddle.test", "alice");
@@ -285,6 +288,7 @@ mod tests {
 
     #[test]
     fn env_server_mismatch_never_falls_back_to_keystore() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|home| {
             config::credentials::store_server_credential(
                 "api.target.test",
@@ -313,6 +317,7 @@ mod tests {
 
     #[test]
     fn unreadable_env_credential_never_falls_back_to_keystore() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|home| {
             config::credentials::store_server_credential(
                 "api.target.test",
@@ -336,6 +341,7 @@ mod tests {
 
     #[test]
     fn hosted_subject_derives_handle_and_optional_email() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         assert_eq!(
             super::principal_from_hosted_subject("luke@example.com"),
             ("luke".to_string(), "luke@example.com".to_string())
@@ -351,6 +357,7 @@ mod tests {
 
     #[test]
     fn hosted_account_principal_reads_stored_login() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|_| {
             config::credentials::store_server_credential(
                 "api.heddle.test",

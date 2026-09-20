@@ -980,6 +980,7 @@ mod metadata_source_tests {
 
     #[test]
     fn missing_source_state_needs_all_signed_original_and_ancestor_floors() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let directory = tempfile::tempdir().expect("source fixture directory");
         let repository = repo::Repository::init_default(directory.path()).expect("repository");
         let seed_id = repository.head().expect("head").expect("canonical seed");

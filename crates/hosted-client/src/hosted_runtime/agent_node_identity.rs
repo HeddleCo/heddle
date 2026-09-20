@@ -161,6 +161,7 @@ mod tests {
 
     #[test]
     fn clean_agent_home_is_created_on_first_load() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().expect("temp dir");
         let home = temp.path().join("new-heddle-home");
         let path = home.join(IDENTITY_FILE);
@@ -176,6 +177,7 @@ mod tests {
 
     #[test]
     fn node_id_survives_independent_loads() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().expect("temp dir");
         let path = temp.path().join(IDENTITY_FILE);
 
@@ -191,6 +193,7 @@ mod tests {
 
     #[test]
     fn node_id_is_the_same_lower_hex_ed25519_public_key_used_for_consent() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().expect("temp dir");
         let identity = load_or_create_at(&temp.path().join(IDENTITY_FILE)).expect("identity");
         let signer = crypto::Ed25519Signer::from_seed(&identity.secret_key().to_bytes())
@@ -207,6 +210,7 @@ mod tests {
 
     #[test]
     fn concurrent_first_loads_choose_one_identity() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().expect("temp dir");
         let path = Arc::new(temp.path().join(IDENTITY_FILE));
         let barrier = Arc::new(Barrier::new(8));
@@ -230,6 +234,7 @@ mod tests {
 
     #[test]
     fn corrupt_identity_is_refused_without_replacement() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().expect("temp dir");
         let path = temp.path().join(IDENTITY_FILE);
         let identity = load_or_create_at(&path).expect("mint identity");
@@ -251,6 +256,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn exposed_identity_is_refused() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         use std::os::unix::fs::PermissionsExt;
 
         let temp = TempDir::new().expect("temp dir");
@@ -266,6 +272,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn persisted_identity_is_private() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         use std::os::unix::fs::PermissionsExt;
 
         let temp = TempDir::new().expect("temp dir");

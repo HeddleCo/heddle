@@ -189,6 +189,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_connect_closes_the_client_endpoint() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let server = Endpoint::builder(presets::Minimal)
             .alpns(vec![b"not-heddle".to_vec()])
             .relay_mode(RelayMode::Disabled)
@@ -229,6 +230,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_connection_is_reused_by_cryptographic_endpoint_id() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let server = Endpoint::builder(presets::Minimal)
             .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
             .relay_mode(RelayMode::Disabled)

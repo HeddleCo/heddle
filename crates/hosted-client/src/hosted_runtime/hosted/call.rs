@@ -455,6 +455,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_an_open_server_stream_stops_the_remote_response_sender() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let server = Endpoint::builder(presets::Minimal)
             .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
             .relay_mode(RelayMode::Disabled)

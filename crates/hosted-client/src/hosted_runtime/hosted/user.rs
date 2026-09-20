@@ -1054,6 +1054,7 @@ mod tests {
 
     #[tokio::test]
     async fn personal_spool_comes_from_native_identity_observation() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
         let personal = client
             .get_current_user_spool()
@@ -1070,6 +1071,7 @@ mod tests {
 
     #[tokio::test]
     async fn spool_list_comes_from_native_list_spools_unary() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
         let all = client.list_spools(false).await.expect("v2 Spool list");
         let paths: Vec<_> = all
@@ -1100,6 +1102,7 @@ mod tests {
 
     #[tokio::test]
     async fn promote_spool_uses_native_versioned_mutation() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
         let original = client
             .get_spool("acme")
@@ -1117,6 +1120,7 @@ mod tests {
 
     #[tokio::test]
     async fn native_review_observation_feeds_original_signed_record() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         use objects::object::{ContentHash, StateId};
         use thread_api::thread_control::{Author, Control, PreparedControl, Review, ReviewKind};
 
@@ -1180,6 +1184,7 @@ mod tests {
 
     #[tokio::test]
     async fn administration_facade_builds_and_dispatches_every_native_request() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         let _home = IsolatedHeddleHome::new();
         let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
 
@@ -1283,6 +1288,7 @@ mod tests {
 
     #[tokio::test]
     async fn namespace_and_repository_mutations_use_spool_requests() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         let (mut client, server, captured) =
             crate::hosted_runtime::hosted::test_server::start_recording_spool_mutations().await;
 
@@ -1331,6 +1337,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_spool_sends_device_key_signed_uuidv7_owner_genesis() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         use crypto::Ed25519Signer;
         use sha2::{Digest, Sha256};
 
@@ -1344,6 +1351,7 @@ mod tests {
         assert_eq!(created.full_path, "cedar-jay-9dce33/spool-d");
 
         let request = captured
+            .requests
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .pop()
@@ -1386,12 +1394,13 @@ mod tests {
 
     #[tokio::test]
     async fn create_spool_provision_sequence_excludes_owner_root_ceremony() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         use crypto::{Ed25519Signer, Signer as _};
 
         let _home = IsolatedHeddleHome::new();
-        let (mut client, server, calls, signer_pem) =
-            crate::hosted_runtime::auth_login_agent::test_support::start_recording_client().await;
-        let signer = Ed25519Signer::from_pem(&signer_pem).expect("test signer");
+        let (mut client, server, captured) =
+            crate::hosted_runtime::hosted::test_server::start_recording_create_spool().await;
+        let signer = Ed25519Signer::generate().expect("test signer");
         let mut state = crate::hosted_runtime::identity_state::ClaimState::new(
             "api.provision.test".to_string(),
             uuid::Uuid::parse_str("7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28").expect("account id"),
@@ -1411,9 +1420,17 @@ mod tests {
         server.await.expect("recording server");
 
         assert_eq!(
-            *calls.lock().unwrap_or_else(|poison| poison.into_inner()),
-            ["/heddle.api.v1alpha2.SpoolService/CreateSpool"],
-            "auto-provision must issue CreateSpool without BootstrapOwnerRoot"
+            *captured
+                .calls
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner()),
+            [
+                "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint",
+                "/heddle.api.v1alpha2.WorkspaceService/ResolveResources",
+                "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership",
+                "/heddle.api.v1alpha2.SpoolService/CreateSpool",
+            ],
+            "auto-provision must resolve its parent and current owner, then create without BootstrapOwnership"
         );
     }
 }

@@ -51,6 +51,12 @@ pub(crate) struct ImportSourceCapture {
     pub observations: Vec<v2::ObserveOperationsRequest>,
 }
 
+#[derive(Default)]
+pub(crate) struct CreateSpoolCapture {
+    pub requests: Mutex<Vec<v2::CreateSpoolRequest>>,
+    pub calls: Mutex<Vec<String>>,
+}
+
 #[derive(Clone)]
 pub(crate) struct ThreadListingFixture {
     pub overviews: Vec<v2::ThreadOverview>,
@@ -140,12 +146,9 @@ pub(crate) async fn start_recording_push()
 }
 
 #[cfg(test)]
-pub(crate) async fn start_recording_create_spool() -> (
-    HostedClient,
-    JoinHandle<()>,
-    Arc<Mutex<Vec<v2::CreateSpoolRequest>>>,
-) {
-    let captured = Arc::new(Mutex::new(Vec::new()));
+pub(crate) async fn start_recording_create_spool()
+-> (HostedClient, JoinHandle<()>, Arc<CreateSpoolCapture>) {
+    let captured = Arc::new(CreateSpoolCapture::default());
     let (client, server) = start_inner(
         None,
         Some(Arc::clone(&captured)),
@@ -202,48 +205,6 @@ pub(crate) async fn start_recording_import_source() -> (
     (client, server, captured)
 }
 
-#[cfg(test)]
-pub(crate) async fn start_with_remote_state(
-    remote_state: StateId,
-) -> (HostedClient, JoinHandle<()>) {
-    start_inner(
-        Some(PullFixture {
-            remote_state,
-            pack: None,
-        }),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-}
-
-#[cfg(test)]
-pub(crate) async fn start_with_pull_pack(
-    remote_state: StateId,
-    pack_data: Vec<u8>,
-    index_data: Vec<u8>,
-) -> (HostedClient, JoinHandle<()>) {
-    start_inner(
-        Some(PullFixture {
-            remote_state,
-            pack: Some((pack_data, index_data)),
-        }),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-}
-
 #[derive(Clone)]
 struct PullFixture {
     remote_state: StateId,
@@ -253,7 +214,7 @@ struct PullFixture {
 #[derive(Clone)]
 struct TestServerState {
     pull: Option<PullFixture>,
-    create_spool: Option<Arc<Mutex<Vec<v2::CreateSpoolRequest>>>>,
+    create_spool: Option<Arc<CreateSpoolCapture>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
     context: Option<ContextFixture>,
@@ -270,7 +231,7 @@ struct TestServerState {
 #[allow(clippy::too_many_arguments)]
 async fn start_inner(
     pull: Option<PullFixture>,
-    create_spool: Option<Arc<Mutex<Vec<v2::CreateSpoolRequest>>>>,
+    create_spool: Option<Arc<CreateSpoolCapture>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
     push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
     context: Option<ContextFixture>,
@@ -381,6 +342,13 @@ async fn serve_call(
         .map(|descriptor| descriptor.streaming)
         .or_else(|| api::v2::method_descriptor(&method).map(|descriptor| descriptor.streaming))
         .expect("registered hosted method");
+    if let Some(captured) = &create_spool {
+        captured
+            .calls
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(method.clone());
+    }
     match streaming {
         StreamingShape::Unary | StreamingShape::ClientStreaming => {
             if method == "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint" {
@@ -414,6 +382,8 @@ async fn serve_call(
                         "/heddle.api.v1alpha2.CollaborationService/PutContext".into(),
                         "/heddle.api.v1alpha2.IntegrationService/ImportSource".into(),
                         "/heddle.api.v1alpha2.OperationService/ObserveOperations".into(),
+                        "/heddle.api.v1alpha2.SyncService/Fetch".into(),
+                        "/heddle.api.v1alpha2.SyncService/PublishContent".into(),
                     ],
                     default_read_budget: Some(v2::ReadBudget {
                         max_items: 64,
@@ -882,7 +852,7 @@ async fn serve_native_create_spool(
     request: &mut Vec<u8>,
     server_key: Vec<u8>,
     owner: v2::OwnerState,
-    captured: Option<Arc<Mutex<Vec<v2::CreateSpoolRequest>>>>,
+    captured: Option<Arc<CreateSpoolCapture>>,
 ) {
     while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
         request.extend_from_slice(&chunk);
@@ -893,6 +863,7 @@ async fn serve_native_create_spool(
         .expect("native create Spool request");
     if let Some(captured) = captured {
         captured
+            .requests
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .push(body.clone());

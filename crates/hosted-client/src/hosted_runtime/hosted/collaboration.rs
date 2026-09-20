@@ -1106,6 +1106,7 @@ mod tests {
 
     #[test]
     fn discussion_id_accepts_disc_prefix_and_raw_uuidv7() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let id = DiscussionRecordId::generate();
         assert_eq!(parse_discussion_id(&id.to_string()).unwrap(), id);
         let raw = id.to_string().trim_start_matches("disc-").to_string();
@@ -1114,6 +1115,7 @@ mod tests {
 
     #[test]
     fn discussion_parent_ids_are_sorted_unique_heads() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let discussion = HostedDiscussion {
             causal_heads: vec![vec![2; 32], vec![1; 32], vec![2; 32], vec![]],
             turns: vec![HostedDiscussionTurn {
@@ -1153,6 +1155,7 @@ mod tests {
 
     #[test]
     fn missing_observe_page_is_filled() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let mut request = ObserveCollaborationRequest::default();
         ensure_observe_page(&mut request);
         assert_eq!(
@@ -1316,6 +1319,7 @@ mod tests {
 
     #[test]
     fn parallel_open_reconstruction_diffs_only_on_symbol_vs_source_anchor() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         // Pre-fix construction: sign `Anchor::Symbol`, put `anchor_ref(Symbol)`
         // (a Source) on the request. Title/body/blocking/audience already match.
         let scope = proof_scope();
@@ -1373,6 +1377,7 @@ mod tests {
 
     #[test]
     fn open_discussion_request_fields_match_signed_record() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let scope = proof_scope();
         let file = "src/main.rs";
         let symbol = "run";
@@ -1421,6 +1426,7 @@ mod tests {
 
     #[test]
     fn parallel_context_reconstruction_drops_supersedes_and_symbol_anchor() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let scope = proof_scope();
         let superseded = Uuid::from_u128(11);
         let context = ContextRevision {
@@ -1474,6 +1480,7 @@ mod tests {
 
     #[test]
     fn put_context_draft_fields_match_signed_revision() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let scope = proof_scope();
         let (anchor, _) = canonical_anchor(
             Anchor::Symbol {
@@ -1513,6 +1520,7 @@ mod tests {
 
     #[test]
     fn native_discussion_open_preserves_every_supported_anchor_and_authored_evidence() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let scope = proof_scope();
         let state = StateId::from_bytes([9; 32]);
         let anchors = vec![
@@ -1592,6 +1600,7 @@ mod tests {
 
     #[test]
     fn native_context_edit_preserves_anchor_scope_creation_state_and_time() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let scope = proof_scope();
         let state = StateId::from_bytes([9; 32]);
         let (anchor, _) = canonical_anchor(
@@ -1654,6 +1663,7 @@ mod tests {
 
     #[tokio::test]
     async fn requested_scope_failure_never_retargets_main() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         use crate::hosted_runtime::hosted::test_server;
         use api::heddle::api::common::CallFailureCode;
 

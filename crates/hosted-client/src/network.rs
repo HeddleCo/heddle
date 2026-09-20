@@ -177,6 +177,7 @@ mod tests {
 
     #[test]
     fn default_relay_mode_is_heddle_custom_for_this_build_flavor() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let mode = default_relay_mode();
         assert!(
             matches!(mode, RelayMode::Custom(_)),
