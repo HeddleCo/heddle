@@ -1,19 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use api::heddle::api::v1alpha1::{
-    CallFailureCode, Discussion as ProtoDiscussion, DiscussionKind, DiscussionTurn as ProtoTurn,
-    PathSymbolRef, RepoEvent, RepoEventKind, StateId as ProtoStateId, discussion_resolution,
+use crate::legacy_v1::{
+    Discussion as ProtoDiscussion, DiscussionKind, DiscussionResolution,
+    DiscussionTurn as ProtoTurn, PathSymbolRef, RepoEvent, RepoEventKind, discussion_resolution,
 };
+use api::heddle::api::common::{CallFailureCode, StateId as ProtoStateId};
 use objects::object::{Attribution, CollaborationAnchor, Principal};
 use repo::{CollaborationStore, Repository};
 use tempfile::TempDir;
 
 use super::{
-    DiscussionCursorScope, DiscussionEventConsumer, DiscussionEventCursor, DiscussionEventOutcome,
-    audience_cursor_scope, bootstrap_discussions, bootstrap_discussions_scoped,
-    consume_discussion_event, consume_discussion_event_scoped, is_discussion_event, load_cursor,
-    load_scoped_cursor, paired_thread_scope, parse_event_payload, save_cursor, save_scoped_cursor,
-    subscribe_request, wait_reconnect_backoff,
+    DiscussionCursorScope, DiscussionEventCursor, DiscussionEventOutcome, audience_cursor_scope,
+    bootstrap_discussions, bootstrap_discussions_scoped, consume_discussion_event,
+    consume_discussion_event_scoped, is_discussion_event, load_cursor, load_scoped_cursor,
+    paired_thread_scope, parse_event_payload, save_cursor, save_scoped_cursor, subscribe_request,
+    wait_reconnect_backoff,
 };
 use crate::{client::HostedClient, hosted_runtime::hosted::test_server::CollaborationFixture};
 
@@ -117,6 +118,7 @@ fn resolved_event(event_id: i64, discussion_id: &str) -> RepoEvent {
 
 #[test]
 fn discussion_event_types_are_recognized_and_others_are_not() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     assert!(is_discussion_event(&RepoEvent {
         event_type: "discussion.opened".into(),
         ..RepoEvent::default()
@@ -142,6 +144,7 @@ fn discussion_event_types_are_recognized_and_others_are_not() {
 
 #[test]
 fn payload_parser_pins_the_weft_flat_doorbell_shape() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let event = RepoEvent {
         event_type: "turn.appended".into(),
         payload_json: serde_json::json!({
@@ -178,6 +181,7 @@ fn payload_parser_pins_the_weft_flat_doorbell_shape() {
 
 #[test]
 fn subscribe_request_filters_to_discussion_event_types() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let request = subscribe_request("repo-1", 7, "main", "thread-main");
     assert_eq!(request.repo_id, "repo-1");
     assert_eq!(request.after_event_id, 7);
@@ -191,6 +195,7 @@ fn subscribe_request_filters_to_discussion_event_types() {
 
 #[test]
 fn paired_thread_scope_requires_both_name_and_stable_id() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     assert_eq!(
         paired_thread_scope("", "").unwrap(),
         (String::new(), String::new())
@@ -205,6 +210,7 @@ fn paired_thread_scope_requires_both_name_and_stable_id() {
 
 #[test]
 fn cursor_round_trips_per_repo() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let temp = TempDir::new().unwrap();
     let cursor = DiscussionEventCursor {
         after_event_id: 41,
@@ -221,6 +227,7 @@ fn cursor_round_trips_per_repo() {
 
 #[tokio::test]
 async fn opened_and_appended_events_materialize_distinct_turns_and_advance_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -251,7 +258,7 @@ async fn opened_and_appended_events_materialize_distinct_turns_and_advance_water
             .unwrap_or_else(|poison| poison.into_inner())
             .as_slice(),
         ["disc-live-1"],
-        "opened must GetDiscussion even with a fat payload"
+        "opened must ObserveCollaboration even with a fat payload"
     );
     assert!(matches!(
         opened,
@@ -302,6 +309,7 @@ async fn opened_and_appended_events_materialize_distinct_turns_and_advance_water
 
 #[tokio::test]
 async fn resolved_event_writes_a_local_resolution() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -344,6 +352,7 @@ async fn resolved_event_writes_a_local_resolution() {
 
 #[tokio::test]
 async fn missing_discussion_id_is_skipped_and_still_advances_the_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
     let event = RepoEvent {
@@ -366,6 +375,7 @@ async fn missing_discussion_id_is_skipped_and_still_advances_the_watermark() {
 
 #[tokio::test]
 async fn unknown_event_types_are_ignored_without_touching_the_op_log() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
     let event = RepoEvent {
@@ -393,6 +403,7 @@ async fn unknown_event_types_are_ignored_without_touching_the_op_log() {
 
 #[tokio::test]
 async fn bootstrap_marks_the_cursor_then_live_events_append() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let head = repo.head().unwrap().unwrap();
     let bootstrap = vec![objects::object::Discussion {
@@ -460,6 +471,7 @@ async fn bootstrap_marks_the_cursor_then_live_events_append() {
 // adopt-then-doorbell is `discussion_sync::tests::doorbell_after_adopt_does_not_duplicate_the_first_turn`.
 #[tokio::test]
 async fn replaying_opened_after_bootstrap_does_not_duplicate_the_first_turn() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let head = repo.head().unwrap().unwrap();
     let bootstrap = vec![objects::object::Discussion {
@@ -566,7 +578,6 @@ fn proto_discussion(id: &str, turns: &[(&str, &str, u64)]) -> ProtoDiscussion {
                     seconds: 1_700_000_000,
                     nanos: 0,
                 }),
-                ..ProtoTurn::default()
             })
             .collect(),
         ..ProtoDiscussion::default()
@@ -579,7 +590,7 @@ fn proto_dismissed_discussion(
     reason: &str,
 ) -> ProtoDiscussion {
     let mut discussion = proto_discussion(id, turns);
-    discussion.resolution = Some(api::heddle::api::v1alpha1::DiscussionResolution {
+    discussion.resolution = Some(DiscussionResolution {
         state: Some(discussion_resolution::State::Dismissed(
             discussion_resolution::Dismissed {
                 reason: reason.to_string(),
@@ -591,6 +602,7 @@ fn proto_dismissed_discussion(
 
 #[tokio::test]
 async fn doorbell_payload_fetches_get_discussion_and_materializes() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -638,6 +650,7 @@ async fn doorbell_payload_fetches_get_discussion_and_materializes() {
 
 #[tokio::test]
 async fn get_discussion_permission_denied_is_skipped_and_advances_the_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture
@@ -682,6 +695,7 @@ async fn get_discussion_permission_denied_is_skipped_and_advances_the_watermark(
 
 #[tokio::test]
 async fn get_discussion_not_found_is_skipped_and_advances_the_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture
@@ -709,7 +723,8 @@ async fn get_discussion_not_found_is_skipped_and_advances_the_watermark() {
 }
 
 #[tokio::test]
-async fn bootstrap_none_hits_list_by_state() {
+async fn bootstrap_none_rejects_projection_without_signed_operation() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let fixture = CollaborationFixture {
         list: vec![proto_discussion(
@@ -721,27 +736,23 @@ async fn bootstrap_none_hits_list_by_state() {
     let (mut client, server, fixture) =
         crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
 
-    let cursor = bootstrap_discussions(&repo, &mut client, "acme/widgets", None)
+    let error = bootstrap_discussions(&repo, &mut client, "acme/widgets", None)
         .await
-        .unwrap();
-    assert!(cursor.bootstrapped);
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("omitted their signed operations"),
+        "projection-only discussion must be an explicit incomplete result: {error:#}"
+    );
     assert_eq!(
         *fixture
             .list_requests
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()),
-        1
+        2
     );
 
     let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let discussion = store
-        .materialize()
-        .unwrap()
-        .discussions
-        .into_values()
-        .next()
-        .unwrap();
-    assert_eq!(discussion.turns[0].1.body, "from list");
+    assert!(store.materialize().unwrap().discussions.is_empty());
 
     client.close().await;
     server.await.unwrap();
@@ -749,6 +760,7 @@ async fn bootstrap_none_hits_list_by_state() {
 
 #[tokio::test]
 async fn fat_append_without_mirror_fetches_instead_of_opening_at_turn_two() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -798,62 +810,9 @@ async fn fat_append_without_mirror_fetches_instead_of_opening_at_turn_two() {
     server.await.unwrap();
 }
 
-#[tokio::test]
-async fn consume_next_resumes_after_the_stream_ends() {
-    let (_temp, repo) = seed_repo();
-    let mut fixture = CollaborationFixture {
-        one_event_per_subscribe: true,
-        events: vec![
-            doorbell(1, "discussion.opened", "disc-live", "turn-open", 1),
-            doorbell(2, "turn.appended", "disc-live", "turn-append", 2),
-        ],
-        ..CollaborationFixture::default()
-    };
-    fixture.discussions.insert(
-        "disc-live".to_string(),
-        proto_discussion(
-            "disc-live",
-            &[
-                ("turn-open", "first turn", 1),
-                ("turn-append", "second turn", 2),
-            ],
-        ),
-    );
-    let (mut client, server, fixture) =
-        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
-
-    let mut consumer = DiscussionEventConsumer::new(&repo, &mut client, "acme/widgets");
-    let mut subscription = consumer.start(None).await.unwrap();
-
-    let (first, _) = consumer.consume_next(&mut subscription).await.unwrap();
-    assert_eq!(first.event_id, 1);
-    let (second, _) = consumer.consume_next(&mut subscription).await.unwrap();
-    assert_eq!(second.event_id, 2);
-    assert_eq!(
-        fixture
-            .subscribe_after
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_slice(),
-        [0, 1]
-    );
-
-    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let discussion = store
-        .materialize()
-        .unwrap()
-        .discussions
-        .into_values()
-        .next()
-        .unwrap();
-    assert_eq!(discussion.turns.len(), 2);
-
-    client.close().await;
-    server.await.unwrap();
-}
-
 #[test]
 fn event_payload_is_doorbell_identity_not_turn_content() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let event = appended_event(2, "disc-unknown", "second turn", "turn-2", 2);
     let payload = parse_event_payload(&event);
     assert_eq!(payload.discussion_id.as_deref(), Some("disc-unknown"));
@@ -862,6 +821,7 @@ fn event_payload_is_doorbell_identity_not_turn_content() {
 
 #[test]
 fn opened_without_state_id_is_a_doorbell() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let event = RepoEvent {
         event_type: "discussion.opened".into(),
         payload_json: serde_json::json!({
@@ -883,6 +843,7 @@ fn opened_without_state_id_is_a_doorbell() {
 
 #[test]
 fn principals_do_not_share_a_cursor_slot() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let temp = TempDir::new().unwrap();
     let alice = DiscussionCursorScope {
         repo_path: "acme/widgets".into(),
@@ -915,6 +876,7 @@ fn principals_do_not_share_a_cursor_slot() {
 
 #[test]
 fn filtered_cursor_slot_does_not_share_the_unfiltered_watermark() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let temp = TempDir::new().unwrap();
     let filtered = DiscussionCursorScope {
         repo_path: "acme/widgets".into(),
@@ -936,6 +898,7 @@ fn filtered_cursor_slot_does_not_share_the_unfiltered_watermark() {
 
 #[test]
 fn authority_scoped_cursor_does_not_inherit_the_legacy_repo_path_slot() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let temp = TempDir::new().unwrap();
     let legacy = DiscussionEventCursor {
         after_event_id: 7,
@@ -958,6 +921,7 @@ fn authority_scoped_cursor_does_not_inherit_the_legacy_repo_path_slot() {
 
 #[tokio::test]
 async fn filtered_wait_does_not_advance_the_unfiltered_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1000,6 +964,7 @@ async fn filtered_wait_does_not_advance_the_unfiltered_watermark() {
 
 #[tokio::test]
 async fn get_discussion_is_called_with_the_event_state_id() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1043,6 +1008,7 @@ async fn get_discussion_is_called_with_the_event_state_id() {
 
 #[tokio::test]
 async fn incomplete_open_without_anchor_doorbell_fetches() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1085,6 +1051,7 @@ async fn incomplete_open_without_anchor_doorbell_fetches() {
 
 #[tokio::test]
 async fn incomplete_resolve_without_resolution_doorbell_fetches() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1137,6 +1104,7 @@ async fn incomplete_resolve_without_resolution_doorbell_fetches() {
 
 #[tokio::test]
 async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let head = repo.head().unwrap().unwrap();
     let bootstrap = vec![objects::object::Discussion {
@@ -1228,38 +1196,8 @@ async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
 }
 
 #[tokio::test]
-async fn thread_scoped_subscribe_request_carries_thread_id() {
-    let (_temp, repo) = seed_repo();
-    let fixture = CollaborationFixture {
-        events: vec![opened_event(1, "disc-1", "hello", "turn-1")],
-        ..CollaborationFixture::default()
-    };
-    let (mut client, server, fixture) =
-        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
-
-    let mut consumer = DiscussionEventConsumer::new(&repo, &mut client, "acme/widgets")
-        .with_thread("feature/run", "thr-stable");
-    let mut subscription = consumer.start(None).await.unwrap();
-    // start() can return before the server records the request body.
-    // consume_next waits for the first event, which is written only after
-    // serve_subscribe_repo_events has stored the paired thread fields.
-    let (event, _) = consumer.consume_next(&mut subscription).await.unwrap();
-    assert_eq!(event.event_id, 1);
-    assert_eq!(
-        fixture
-            .subscribe_thread
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_slice(),
-        [("feature/run".to_string(), "thr-stable".to_string())]
-    );
-
-    client.close().await;
-    server.await.unwrap();
-}
-
-#[tokio::test]
 async fn get_discussion_unauthenticated_does_not_advance_the_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture
@@ -1292,6 +1230,7 @@ async fn get_discussion_unauthenticated_does_not_advance_the_watermark() {
 
 #[tokio::test]
 async fn opened_without_state_id_fetches_get_discussion() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1343,7 +1282,6 @@ fn proto_coordination_discussion(id: &str, turns: &[(&str, &str, u64)]) -> Proto
                     seconds: 1_700_000_000,
                     nanos: 0,
                 }),
-                ..ProtoTurn::default()
             })
             .collect(),
         ..ProtoDiscussion::default()
@@ -1352,6 +1290,7 @@ fn proto_coordination_discussion(id: &str, turns: &[(&str, &str, u64)]) -> Proto
 
 #[tokio::test]
 async fn coordination_doorbell_advances_watermark_and_does_not_fail_loop() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1421,6 +1360,7 @@ async fn coordination_doorbell_advances_watermark_and_does_not_fail_loop() {
 
 #[tokio::test]
 async fn opened_event_never_applies_without_get_discussion() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let (mut client, server, fixture) =
         crate::hosted_runtime::hosted::test_server::start_with_collaboration(
@@ -1450,7 +1390,7 @@ async fn opened_event_never_applies_without_get_discussion() {
             .unwrap_or_else(|poison| poison.into_inner())
             .as_slice(),
         ["disc-fat"],
-        "opened must always GetDiscussion"
+        "opened must always ObserveCollaboration"
     );
     let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
     assert!(
@@ -1469,6 +1409,7 @@ async fn opened_event_never_applies_without_get_discussion() {
 
 #[tokio::test]
 async fn dismissed_empty_reason_is_skipped_and_advances_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1516,6 +1457,7 @@ async fn dismissed_empty_reason_is_skipped_and_advances_watermark() {
 
 #[tokio::test]
 async fn discussion_bodies_keep_leading_and_trailing_whitespace() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let padded = "  keep padding  ";
     let mut fixture = CollaborationFixture::default();
@@ -1563,6 +1505,7 @@ async fn discussion_bodies_keep_leading_and_trailing_whitespace() {
 
 #[tokio::test]
 async fn empty_anchor_get_discussion_uses_repository_and_advances() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut proto = proto_discussion("disc-empty-anchor", &[("turn-open", "repo wide", 1)]);
     proto.anchor = Some(PathSymbolRef {
@@ -1583,7 +1526,7 @@ async fn empty_anchor_get_discussion_uses_repository_and_advances() {
         &doorbell(85, "discussion.opened", "disc-empty-anchor", "turn-open", 1),
     )
     .await
-    .expect("empty-anchor GetDiscussion must not fail-loop");
+    .expect("empty-anchor ObserveCollaboration must not fail-loop");
     assert!(
         outcome.applied() || matches!(outcome, DiscussionEventOutcome::Skipped { .. }),
         "expected applied or skipped, got {outcome:?}"
@@ -1625,7 +1568,8 @@ fn proto_discussion_on_thread(
 }
 
 #[tokio::test]
-async fn thread_scoped_bootstrap_does_not_import_another_thread_ref() {
+async fn thread_scoped_bootstrap_rejects_projection_without_signed_operation() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let foo = proto_discussion_on_thread("disc-foo", "foo", &[("turn-foo", "from foo", 1)]);
     let bar = proto_discussion_on_thread("disc-bar", "bar", &[("turn-bar", "from bar", 1)]);
 
@@ -1643,47 +1587,25 @@ async fn thread_scoped_bootstrap_does_not_import_another_thread_ref() {
         thread_id: "thr-foo".into(),
         ..DiscussionCursorScope::default()
     };
-    bootstrap_discussions_scoped(&repo_scoped, &mut client, "acme/widgets", &scoped, None)
-        .await
-        .unwrap();
+    let error =
+        bootstrap_discussions_scoped(&repo_scoped, &mut client, "acme/widgets", &scoped, None)
+            .await
+            .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("omitted their signed operations"),
+        "projection-only discussion must be an explicit incomplete result: {error:#}"
+    );
     assert_eq!(
         *fixture
             .list_requests
             .lock()
             .unwrap_or_else(|poison| poison.into_inner()),
-        1,
-        "thread-scoped wait must reuse ListByState, not a second list RPC"
+        2,
+        "native originals and the legacy projection are observed separately"
     );
 
     let scoped_store = CollaborationStore::open(repo_scoped.heddle_dir()).unwrap();
-    let scoped_discussions = scoped_store.materialize().unwrap().discussions;
-    assert_eq!(
-        scoped_discussions.len(),
-        1,
-        "wait --thread foo must not materialize bar-thread discussions"
-    );
-    let only = scoped_discussions.into_values().next().unwrap();
-    assert_eq!(only.thread_ref.as_deref(), Some("foo"));
-    assert_eq!(only.turns[0].1.body, "from foo");
-
-    let (_temp_all, repo_all) = seed_repo();
-    bootstrap_discussions(&repo_all, &mut client, "acme/widgets", None)
-        .await
-        .unwrap();
-    let all_store = CollaborationStore::open(repo_all.heddle_dir()).unwrap();
-    let mut bodies: Vec<_> = all_store
-        .materialize()
-        .unwrap()
-        .discussions
-        .into_values()
-        .map(|discussion| discussion.turns[0].1.body.clone())
-        .collect();
-    bodies.sort();
-    assert_eq!(
-        bodies,
-        ["from bar".to_string(), "from foo".to_string()],
-        "unfiltered wait still imports every thread at HEAD"
-    );
+    assert!(scoped_store.materialize().unwrap().discussions.is_empty());
 
     client.close().await;
     server.await.unwrap();
@@ -1691,6 +1613,7 @@ async fn thread_scoped_bootstrap_does_not_import_another_thread_ref() {
 
 #[tokio::test]
 async fn thread_scoped_pull_fold_bootstrap_stays_repo_wide() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let head = repo.head().unwrap().unwrap();
     let bootstrap = vec![
@@ -1781,6 +1704,7 @@ fn seed_repo_without_head() -> (TempDir, Repository) {
 
 #[tokio::test]
 async fn local_materialization_error_does_not_advance_the_watermark() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo_without_head();
     let mut fixture = CollaborationFixture::default();
     fixture.discussions.insert(
@@ -1814,6 +1738,7 @@ async fn local_materialization_error_does_not_advance_the_watermark() {
 
 #[tokio::test]
 async fn bootstrap_without_head_does_not_mark_the_cursor_bootstrapped() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo_without_head();
     let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
     bootstrap_discussions(&repo, &mut client, "acme/widgets", None)
@@ -1832,6 +1757,7 @@ async fn bootstrap_without_head_does_not_mark_the_cursor_bootstrapped() {
 
 #[tokio::test]
 async fn alice_skipping_a_restricted_event_does_not_advance_bob() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut fixture = CollaborationFixture::default();
     fixture
@@ -1884,7 +1810,8 @@ async fn alice_skipping_a_restricted_event_does_not_advance_bob() {
 }
 
 #[tokio::test]
-async fn thread_scoped_bootstrap_matches_stable_thread_id_after_rename() {
+async fn renamed_thread_projection_without_signed_operation_is_incomplete() {
+    let _process_env_guard = crate::test_process_env::shared().await;
     let mut renamed = proto_discussion_on_thread(
         "disc-renamed",
         "old-name",
@@ -1906,21 +1833,17 @@ async fn thread_scoped_bootstrap_matches_stable_thread_id_after_rename() {
         thread_id: "thr-stable".into(),
         ..DiscussionCursorScope::default()
     };
-    bootstrap_discussions_scoped(&repo, &mut client, "acme/widgets", &scoped, None)
+    let error = bootstrap_discussions_scoped(&repo, &mut client, "acme/widgets", &scoped, None)
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("omitted their signed operations"),
+        "projection-only discussion must be an explicit incomplete result: {error:#}"
+    );
 
     let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
     let discussions = store.materialize().unwrap().discussions;
-    assert_eq!(
-        discussions.len(),
-        1,
-        "stable thread_id must keep the renamed discussion and drop the other thread"
-    );
-    assert_eq!(
-        discussions.into_values().next().unwrap().turns[0].1.body,
-        "still this thread"
-    );
+    assert!(discussions.is_empty());
 
     client.close().await;
     server.await.unwrap();
@@ -1928,6 +1851,7 @@ async fn thread_scoped_bootstrap_matches_stable_thread_id_after_rename() {
 
 #[test]
 fn concurrent_cursor_saves_do_not_clobber_other_slots() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let temp = TempDir::new().unwrap();
     let heddle_dir = temp.path().to_path_buf();
     let threads: Vec<_> = (0..8)
@@ -1968,6 +1892,7 @@ fn concurrent_cursor_saves_do_not_clobber_other_slots() {
 
 #[test]
 fn wait_reconnect_backoff_is_bounded() {
+    let _process_env_guard = crate::test_process_env::shared_blocking();
     let first = wait_reconnect_backoff(0).expect("first reconnect waits");
     let second = wait_reconnect_backoff(1).expect("second reconnect waits longer");
     assert!(second > first);
@@ -1979,67 +1904,4 @@ fn wait_reconnect_backoff_is_bounded() {
         wait_reconnect_backoff(7),
         Some(std::time::Duration::from_millis(6_400))
     );
-}
-
-#[tokio::test]
-async fn stale_repo_uuid_not_found_resubscribes_via_path() {
-    let (_temp, repo) = seed_repo();
-    let mut fixture = CollaborationFixture {
-        unknown_repo_ids: ["dead-uuid".to_string()].into(),
-        events: vec![opened_event(1, "disc-live", "hello", "turn-1")],
-        ..CollaborationFixture::default()
-    };
-    fixture.discussions.insert(
-        "disc-live".to_string(),
-        proto_discussion("disc-live", &[("turn-1", "hello", 1)]),
-    );
-    let (mut client, server, fixture) =
-        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
-
-    let scope = audience_cursor_scope(&client, "acme/widgets");
-    save_scoped_cursor(
-        repo.heddle_dir(),
-        &scope,
-        &DiscussionEventCursor {
-            after_event_id: 99,
-            repo_id: "dead-uuid".into(),
-            bootstrapped: true,
-        },
-    )
-    .unwrap();
-
-    let mut consumer = DiscussionEventConsumer::new(&repo, &mut client, "acme/widgets");
-    let mut subscription = consumer.start(None).await.unwrap();
-    let (event, _) = consumer
-        .consume_next(&mut subscription)
-        .await
-        .expect("stale UUID NotFound must recover via repo_path");
-    assert_eq!(event.event_id, 1);
-    assert_eq!(
-        fixture
-            .subscribe_repo_ids
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_slice(),
-        ["dead-uuid", "acme/widgets"],
-        "second subscribe must use the path, not the dead UUID"
-    );
-    assert_eq!(
-        fixture
-            .subscribe_after
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_slice(),
-        [99, 0],
-        "recovery resets the watermark before the path subscribe"
-    );
-
-    let cursor = load_scoped_cursor(repo.heddle_dir(), &scope).unwrap();
-    assert_ne!(
-        cursor.repo_id, "dead-uuid",
-        "the dead UUID must not stay in the slot"
-    );
-
-    client.close().await;
-    server.await.unwrap();
 }

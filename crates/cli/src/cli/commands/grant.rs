@@ -1,32 +1,31 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `heddle grant` — create, list, and delete spool collaborator grants.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result, anyhow};
+use api::heddle::api::v1alpha2::{GrantRecord, ResourceRole};
 use heddle_cli_contract::cli::commands::wire::auth::{
     GrantCreateOutput, GrantDeleteOutput, GrantListOutput, GrantRowOutput,
 };
 use hosted_client::hosted_runtime::{
     auth::resolve_server,
-    hosted::{
-        HostedAuthMode, HostedClient, HostedSession, canonicalize_spool_path,
-        resolve_hosted_credential,
-    },
-    refuse_agent_privileged_grant,
+    hosted::{HostedAuthMode, HostedClient, HostedSession, canonicalize_spool_path},
 };
-use repo::GrantRole;
-use wire::{HostedGrantInfo, ProtocolError};
+use wire::ProtocolError;
 
 use super::{
     advice::RecoveryAdvice,
     next_action::{NextActionValidationContext, write_full_command_json},
 };
 use crate::{
+    Repository,
     cli::{
         Cli, CliContext, GrantCommands, GrantCreateArgs, GrantDeleteArgs, GrantListArgs,
         should_output_json, style,
     },
     config::UserConfig,
-    remote::RemoteTarget,
+    remote::{RemoteTarget, resolve_remote_with_key},
 };
 
 pub async fn cmd_grant(cli: &Cli, command: GrantCommands) -> Result<()> {
@@ -38,8 +37,7 @@ pub async fn cmd_grant(cli: &Cli, command: GrantCommands) -> Result<()> {
 }
 
 async fn cmd_grant_create(cli: &Cli, args: GrantCreateArgs) -> Result<()> {
-    let (server, spool) = resolve_grant_spool(&args.spool, args.server.as_deref())?;
-    refuse_privileged_agent_grant(&server, &spool, args.role.as_grant_role())?;
+    let (server, spool) = resolve_grant_spool(cli, &args.spool, args.server.as_deref())?;
     let mut session = hosted_connect(&server).await?;
     let result = create_connected(
         cli,
@@ -47,7 +45,7 @@ async fn cmd_grant_create(cli: &Cli, args: GrantCreateArgs) -> Result<()> {
         &server,
         &spool,
         &args.principal,
-        args.role.as_hosted_role_name(),
+        args.role.as_resource_role_name(),
     )
     .await;
     session.close().await;
@@ -55,7 +53,7 @@ async fn cmd_grant_create(cli: &Cli, args: GrantCreateArgs) -> Result<()> {
 }
 
 async fn cmd_grant_list(cli: &Cli, args: GrantListArgs) -> Result<()> {
-    let (server, spool) = resolve_grant_spool(&args.spool, args.server.as_deref())?;
+    let (server, spool) = resolve_grant_spool(cli, &args.spool, args.server.as_deref())?;
     let mut session = hosted_connect(&server).await?;
     let result = list_connected(cli, &mut session, &server, &spool).await;
     session.close().await;
@@ -63,7 +61,7 @@ async fn cmd_grant_list(cli: &Cli, args: GrantListArgs) -> Result<()> {
 }
 
 async fn cmd_grant_delete(cli: &Cli, args: GrantDeleteArgs) -> Result<()> {
-    let (server, spool) = resolve_grant_spool(&args.spool, args.server.as_deref())?;
+    let (server, spool) = resolve_grant_spool(cli, &args.spool, args.server.as_deref())?;
     let mut session = hosted_connect(&server).await?;
     let result = delete_connected(cli, &mut session, &server, &spool, &args.id).await;
     session.close().await;
@@ -88,31 +86,6 @@ async fn hosted_connect(server: &str) -> Result<HostedClient> {
         .map_err(|err| map_grant_error("", &err))
 }
 
-fn refuse_privileged_agent_grant(server: &str, spool: &str, role: GrantRole) -> Result<()> {
-    let resolved = resolve_hosted_credential(Some(server))?;
-    let Some(token) = resolved.token.as_ref() else {
-        return Ok(());
-    };
-    if refuse_agent_privileged_grant(&token.id, role) {
-        return Err(anyhow!(RecoveryAdvice::grant_agent_ceiling(
-            spool,
-            role_display_name(role)
-        )));
-    }
-    Ok(())
-}
-
-fn role_display_name(role: GrantRole) -> &'static str {
-    match role {
-        GrantRole::Reader => "reader",
-        GrantRole::Developer => "contributor",
-        GrantRole::Maintainer => "maintainer",
-        GrantRole::Admin => "admin",
-        GrantRole::Owner => "owner",
-        GrantRole::Unspecified => "unspecified",
-    }
-}
-
 async fn create_connected(
     cli: &Cli,
     client: &mut HostedClient,
@@ -125,7 +98,7 @@ async fn create_connected(
         .create_grant(principal, role, None, Some(spool), cli.operation_id_wire())
         .await
         .map_err(|err| map_grant_error(spool, &err))?;
-    let row = grant_row(&created, spool);
+    let row = grant_row(&created, spool)?;
     if should_output_json(cli, None) {
         write_full_command_json(
             &GrantCreateOutput {
@@ -159,7 +132,7 @@ async fn list_grant_rows(client: &mut HostedClient, spool: &str) -> Result<Vec<G
         .list_grants(Some(spool))
         .await
         .map_err(|err| map_grant_error(spool, &err))?;
-    Ok(grants.iter().map(|grant| grant_row(grant, spool)).collect())
+    grants.iter().map(|grant| grant_row(grant, spool)).collect()
 }
 
 async fn list_connected(
@@ -183,7 +156,7 @@ async fn list_connected(
     } else if rows.is_empty() {
         println!("No grants on {}.", style::bold(spool));
         super::action_line::print_next(&format!(
-            "heddle grant create --spool {spool} --principal <handle> --role contributor"
+            "heddle grant create --spool {spool} --principal <handle> --role writer"
         ));
     } else {
         println!("ID\tROLE\tSPOOL");
@@ -230,22 +203,53 @@ async fn delete_connected(
     Ok(())
 }
 
-fn grant_row(grant: &HostedGrantInfo, fallback_spool: &str) -> GrantRowOutput {
-    let spool = grant
-        .repo_path
-        .as_deref()
-        .or(grant.namespace_path.as_deref())
-        .unwrap_or(fallback_spool)
-        .to_string();
-    GrantRowOutput {
-        id: grant.subject.clone(),
-        principal: grant.subject.clone(),
-        role: grant.role.clone(),
-        spool,
+fn grant_row(grant: &GrantRecord, spool: &str) -> Result<GrantRowOutput> {
+    let reference = grant
+        .r#ref
+        .as_ref()
+        .ok_or_else(|| anyhow!("grant has no stable record ID"))?;
+    let role = match ResourceRole::try_from(grant.role) {
+        Ok(ResourceRole::Reader) => "reader",
+        Ok(ResourceRole::Writer) => "writer",
+        Ok(ResourceRole::Administrator) => "administrator",
+        _ => return Err(anyhow!("grant has an unknown resource role")),
+    };
+    let principal = match grant.principal.as_ref() {
+        Some(summary) if summary.id == grant.principal_id && !summary.handle.is_empty() => {
+            summary.handle.clone()
+        }
+        _ => grant.principal_id.clone(),
+    };
+    Ok(GrantRowOutput {
+        id: reference.id.clone(),
+        principal,
+        role: role.into(),
+        spool: spool.into(),
+    })
+}
+
+fn grant_repo_start(cli: &Cli) -> Option<PathBuf> {
+    cli.repo_path()
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+}
+
+fn resolve_remote_spool(start: &Path, name: &str) -> Option<(String, String)> {
+    let repo = Repository::open(start).ok()?;
+    let (target, _) = resolve_remote_with_key(&repo, Some(name)).ok()?;
+    match target {
+        RemoteTarget::Network {
+            authority,
+            repo_path: Some(repo_path),
+        } => {
+            let full_path = canonicalize_spool_path(&repo_path).ok()?;
+            Some((authority, full_path))
+        }
+        _ => None,
     }
 }
 
-fn resolve_grant_spool(spool: &str, server: Option<&str>) -> Result<(String, String)> {
+fn resolve_grant_spool(cli: &Cli, spool: &str, server: Option<&str>) -> Result<(String, String)> {
     if spool.starts_with("https://") {
         match RemoteTarget::parse(spool) {
             Ok(RemoteTarget::Network {
@@ -259,6 +263,18 @@ fn resolve_grant_spool(spool: &str, server: Option<&str>) -> Result<(String, Str
                 return Err(anyhow!(RecoveryAdvice::grant_spool_required()));
             }
         }
+    }
+    if !spool.contains('/')
+        && let Some(start) = grant_repo_start(cli)
+        && let Some((authority, full_path)) = resolve_remote_spool(&start, spool)
+    {
+        let server = match server {
+            Some(server) => {
+                resolve_server(Some(server)).context("resolve hosted server for grant")?
+            }
+            None => authority,
+        };
+        return Ok((server, full_path));
     }
     let server = resolve_server(server).context("resolve hosted server for grant")?;
     let full_path = canonicalize_spool_path(spool).map_err(anyhow::Error::new)?;
@@ -277,11 +293,7 @@ fn map_grant_error(spool: &str, err: &ProtocolError) -> anyhow::Error {
         _ => "",
     };
     let lower = message.to_ascii_lowercase();
-    let advice = if lower.contains("cannot grant maintainer, admin, or owner")
-        || lower.contains("cannot grant admin or owner")
-    {
-        RecoveryAdvice::grant_agent_ceiling(spool, "maintainer, admin, or owner")
-    } else if is_human_verification_required(&lower) {
+    let advice = if is_human_verification_required(&lower) {
         RecoveryAdvice::grant_needs_human(spool)
     } else if matches!(
         err,
@@ -314,14 +326,30 @@ fn is_human_verification_required(lowered_message: &str) -> bool {
 mod tests {
     use std::{ffi::OsString, sync::MutexGuard};
 
+    use api::heddle::api::v1alpha2::{GrantRecord, ResourceRole};
     use clap::Parser;
     use wire::ProtocolError;
 
     use super::{
-        create_connected, grant_row, is_human_verification_required, list_grant_rows,
-        map_grant_error, resolve_grant_spool,
+        create_connected, delete_connected, grant_row, is_human_verification_required,
+        list_grant_rows, map_grant_error, resolve_grant_spool,
     };
-    use crate::cli::Cli;
+    use crate::{
+        Repository,
+        cli::Cli,
+        remote::{Remote, RemoteConfig},
+    };
+
+    fn grant_cli() -> Cli {
+        Cli::parse_from([
+            "heddle",
+            "--quiet",
+            "grant",
+            "list",
+            "--spool",
+            "spool/me/notes",
+        ])
+    }
 
     struct IsolatedHeddleHome {
         _guard: MutexGuard<'static, ()>,
@@ -370,19 +398,12 @@ mod tests {
             "--principal",
             "alice",
             "--role",
-            "contributor",
+            "writer",
         ]);
 
-        create_connected(
-            &cli,
-            &mut client,
-            "test.invalid",
-            spool,
-            "alice",
-            "contributor",
-        )
-        .await
-        .expect("create grant on the production path");
+        create_connected(&cli, &mut client, "test.invalid", spool, "alice", "writer")
+            .await
+            .expect("create grant on the production path");
 
         let rows = list_grant_rows(&mut client, spool)
             .await
@@ -392,10 +413,20 @@ mod tests {
             1,
             "owner list must return the created grant: {rows:?}"
         );
-        assert_eq!(rows[0].id, "alice");
+        assert!(uuid::Uuid::parse_str(&rows[0].id).is_ok());
         assert_eq!(rows[0].principal, "alice");
-        assert_eq!(rows[0].role, "developer");
+        assert_eq!(rows[0].role, "writer");
         assert_eq!(rows[0].spool, spool);
+
+        delete_connected(&cli, &mut client, "test.invalid", spool, &rows[0].id)
+            .await
+            .expect("revoke by stable grant ID");
+        assert!(
+            list_grant_rows(&mut client, spool)
+                .await
+                .expect("post-revoke list")
+                .is_empty()
+        );
 
         client.close().await;
         server.await.unwrap();
@@ -403,7 +434,9 @@ mod tests {
 
     #[test]
     fn url_target_takes_host_and_canonical_path() {
+        let cli = grant_cli();
         let (server, path) = resolve_grant_spool(
+            &cli,
             "https://api.preview.heddle.sh/willow-ibis-8e7264/notes",
             None,
         )
@@ -414,7 +447,8 @@ mod tests {
 
     #[test]
     fn hosted_url_without_spool_path_is_typed_usage() {
-        let err = resolve_grant_spool("https://api.preview.heddle.sh/", None)
+        let cli = grant_cli();
+        let err = resolve_grant_spool(&cli, "https://api.preview.heddle.sh/", None)
             .expect_err("URL without a spool path");
         let advice = err
             .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
@@ -424,27 +458,66 @@ mod tests {
 
     #[test]
     fn canonical_spool_path_is_not_a_hostname() {
-        let (server, path) =
-            resolve_grant_spool("spool/pine-yak-87fa33/repo", Some("api.preview.heddle.sh"))
-                .expect("canonical path");
+        let cli = grant_cli();
+        let (server, path) = resolve_grant_spool(
+            &cli,
+            "spool/pine-yak-87fa33/repo",
+            Some("api.preview.heddle.sh"),
+        )
+        .expect("canonical path");
         assert_eq!(server, "api.preview.heddle.sh");
         assert_eq!(path, "spool/pine-yak-87fa33/repo");
     }
 
     #[test]
-    fn grant_row_uses_subject_as_delete_id() {
+    fn remote_name_resolves_to_the_hosted_spool_path() {
+        let temp = tempfile::TempDir::new().expect("repo");
+        let repo = Repository::init_default(temp.path()).expect("init");
+        RemoteConfig::open(&repo)
+            .expect("open remotes")
+            .add(
+                "origin",
+                Remote {
+                    url: "https://127.0.0.1:8421/willow-ibis-8e7264/notes".into(),
+                    insecure: false,
+                },
+            )
+            .expect("add origin");
+        let cli = Cli::parse_from([
+            "heddle",
+            "--quiet",
+            "--repo",
+            temp.path().to_str().expect("utf-8 repo path"),
+            "grant",
+            "list",
+            "--spool",
+            "origin",
+        ]);
+        let (server, path) = resolve_grant_spool(&cli, "origin", None).expect("resolve origin");
+        assert_eq!(server, "127.0.0.1:8421");
+        assert_eq!(path, "spool/willow-ibis-8e7264/notes");
+    }
+
+    #[test]
+    fn grant_row_uses_stable_record_id_for_deletion() {
         let row = grant_row(
-            &wire::HostedGrantInfo {
-                subject: "alice".into(),
-                role: "developer".into(),
-                namespace_path: None,
-                repo_path: Some("spool/me/notes".into()),
+            &GrantRecord {
+                r#ref: Some(api::heddle::api::v1alpha2::RecordRef {
+                    spool: Some(api::heddle::api::v1alpha2::SpoolRef {
+                        id: uuid::Uuid::from_bytes([2; 16]).to_string(),
+                    }),
+                    id: uuid::Uuid::from_bytes([3; 16]).to_string(),
+                }),
+                principal_id: uuid::Uuid::from_bytes([4; 16]).to_string(),
+                role: ResourceRole::Writer as i32,
+                ..Default::default()
             },
-            "fallback",
-        );
-        assert_eq!(row.id, "alice");
-        assert_eq!(row.principal, "alice");
-        assert_eq!(row.role, "developer");
+            "spool/me/notes",
+        )
+        .expect("native grant row");
+        assert_eq!(row.id, uuid::Uuid::from_bytes([3; 16]).to_string());
+        assert_eq!(row.principal, uuid::Uuid::from_bytes([4; 16]).to_string());
+        assert_eq!(row.role, "writer");
         assert_eq!(row.spool, "spool/me/notes");
     }
 
@@ -461,7 +534,7 @@ mod tests {
     #[test]
     fn human_verification_is_not_swallowed_as_a_generic_failure() {
         assert!(is_human_verification_required(
-            "user verification required for /heddle.api.v1alpha1.RegistryService/CreateGrant"
+            "user verification required for /heddle.api.v1alpha2.SpoolService/PutGrant"
         ));
         let err = ProtocolError::AuthorizationFailed(
             "user verification required for CreateGrant: use a client with a WebAuthn authenticator"
@@ -472,19 +545,39 @@ mod tests {
             .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
             .expect("advice");
         assert_eq!(advice.kind, "grant_needs_human");
+        assert_eq!(advice.primary_command, "heddle claim");
+        assert_eq!(advice.recovery_commands, vec!["heddle claim".to_string()]);
+        assert!(
+            !advice.primary_command.contains("whoami"),
+            "unclaimed agents must not be sent to whoami: {}",
+            advice.primary_command
+        );
+        assert!(
+            advice.hint.contains("heddle claim"),
+            "hint must name the claim path: {}",
+            advice.hint
+        );
     }
 
     #[test]
-    fn agent_admin_refuse_from_the_hosted_client_is_the_ceiling() {
-        let err = ProtocolError::AuthorizationFailed(
-            "agent sessions cannot grant maintainer, admin, or owner; those roles require human verification"
-                .into(),
+    fn grant_needs_human_next_envelope_points_at_claim() {
+        let advice = crate::cli::commands::RecoveryAdvice::grant_needs_human("spool/alice/notes");
+        assert_eq!(advice.kind, "grant_needs_human");
+        assert_eq!(advice.primary_command, "heddle claim");
+        assert_eq!(advice.recovery_commands, vec!["heddle claim".to_string()]);
+        assert!(
+            advice.error.contains("human verification required"),
+            "error must keep the human-verification why: {}",
+            advice.error
         );
-        let mapped = map_grant_error("spool/alice/notes", &err);
-        let advice = mapped
-            .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
-            .expect("advice");
-        assert_eq!(advice.kind, "grant_agent_ceiling");
+        assert!(
+            !advice
+                .recovery_commands
+                .iter()
+                .any(|c| c.contains("whoami")),
+            "Next envelope must not suggest whoami: {:?}",
+            advice.recovery_commands
+        );
     }
 
     #[test]

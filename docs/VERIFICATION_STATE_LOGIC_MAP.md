@@ -58,7 +58,7 @@ A clean verification report means all applicable dimensions agree:
 | Machine contract | Command catalog, JSON error envelopes, op-id metadata, schema introspection, docs drift, and schema coverage agree. `available_with_doc_gaps` is currently non-blocking. | `machine_contract_gaps` / `schema_gaps`, command contract drift, schema validation failures. |
 | Generated and ignored artifacts | Heddle auto-ignores only its own `.heddle/` metadata. Everything else is ignored only when the repo explicitly says so. In Git-overlay mode, `.gitignore` is the preferred source of ignored-worktree truth; `.heddleignore` is reserved for Heddle-specific or native-Heddle excludes. | Unignored generated output is ordinary worktree dirt; large captures/deletions require explicit force; redaction/purge flows must name the ignore file that Heddle will actually consult. |
 | Persona/output contract | TTY text is human-facing, piped/explicit JSON is machine-facing, and both carry the same next action semantics. | Prose on JSON stdout, missing error envelopes, stale help/schema metadata, narrow/no-color output that hides the action. |
-| Clone/adoption | Git checkout and Heddle mapping agree after clone/adoption. | Clone verification blocked by any verification blocker above. |
+| Clone/adoption | Git checkout and Heddle mapping agree after clone/importion. | Clone verification blocked by any verification blocker above. |
 
 ## Precedence
 
@@ -76,7 +76,7 @@ repair and ready work from being hidden by `heddle push`.
 flowchart TD
     A["Command asks for repository verification"] --> B{"Plain Git without .heddle?"}
     B -- yes --> C{"Git HEAD has commits?"}
-    C -- yes --> D["needs_init: exact heddle adopt command; observe-only"]
+    C -- yes --> D["needs_init: exact heddle import local command; observe-only"]
     C -- no --> E["needs_init/no_commits: initialize with heddle init; observe-only"]
     B -- no --> F{"Git overlay enabled?"}
     F -- no --> G["Native Heddle proof"]
@@ -108,7 +108,7 @@ flowchart TD
 | Command family | Gate |
 |---|---|
 | Observe-only commands | `status`, strict `verify`, `doctor`, `thread list/show`, `log`, `show`, `diff`, `help`, and `schemas` may probe plain Git, but must not create `.heddle`, write refs, or change `git status --short`. Blocked `verify` exits nonzero and carries the proof in the JSON error envelope. |
-| First-run adoption | `adopt` is the guided path that initializes Heddle, imports Git branch tips, and returns post-adoption verification. Plain Git with one active branch recommends `heddle adopt --ref <branch>`; multi-ref repos may recommend `heddle adopt`; unborn Git recommends `heddle init`. `init` leaves project files untouched, may protect only Heddle metadata with local Git excludes in Git-overlay mode, does not install `.heddleignore`, does not add broad generated-noise patterns, and exposes `needs_import` until adoption/import completes. |
+| First-run adoption | `import local` is the guided path that initializes Heddle, imports Git branch tips, and returns post-adoption verification. Plain Git with one active branch recommends `heddle import local --ref <branch>`; multi-ref repos may recommend `heddle import local`; unborn Git recommends `heddle init`. `init` leaves project files untouched, may protect only Heddle metadata with local Git excludes in Git-overlay mode, does not install `.heddleignore`, does not add broad generated-noise patterns, and exposes `needs_import` until adoption/import completes. |
 | Active branch import | Mutating commands that could capture, checkpoint, move refs, materialize work, or claim up-to-date must refuse while the active Git branch needs import or mapping repair. |
 | Side-branch import | Missing side-branch tips are surfaced as available import work, but do not make the current checkout unverified and must not replace the active repair action. |
 | Tag import and marker agreement | Git tags visible to the checkout must map to Heddle markers. Missing markers report `tags_need_import`; disagreeing or unmapped markers report `tag_marker_mismatch`. Both are current hard blockers because tag names are user-facing refs, not optional side-branch hints. |
@@ -176,7 +176,7 @@ the new behavior.
   active Git branch advances outside Heddle (`git_branch_advanced`), the report
   states how far it moved ("N out-of-band git commits detected", with an
   `out_of_band_commit_count` detail) and the recovery is the one-line manual
-  `heddle adopt --ref <branch>`. Auto-reconcile-on-read is deliberately not
+  `heddle import local --ref <branch>`. Auto-reconcile-on-read is deliberately not
   implemented: observe-only read paths (`status`, `verify`, `doctor`,
   `status`) must not mutate repository state, and the explicit
   adoption/repair step keeps an auditable record of when external Git history entered

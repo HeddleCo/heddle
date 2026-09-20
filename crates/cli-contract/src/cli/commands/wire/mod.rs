@@ -37,8 +37,8 @@ pub use agent::{
 pub use auth::{
     AgentAccountCreatedOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, CaptureActor,
     GrantCreateOutput, GrantDeleteOutput, GrantListOutput, GrantRowOutput, HumanPromotionDirective,
-    PromoteOutput, ServiceTokenOutput, SignupInviteCreatedOutput,
-    SignupInviteListOutput, SignupInviteOutput, WhoamiIdentity, WhoamiOutput, WhoamiRole,
+    PromoteOutput, ServiceTokenOutput, SignupInviteCreatedOutput, SignupInviteListOutput,
+    SignupInviteOutput, WhoamiIdentity, WhoamiOutput,
 };
 pub use bridge::{
     ExportGitOutput, ExportedRefOutput, ImportGitOutput, IntegrationStatusOutput,
@@ -70,10 +70,14 @@ pub use operator::{
 pub use ready::{
     ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary, ready_blocked_by_missing_intent,
 };
-pub use remote::{AdoptOutput, CloneOutput, PullOutput, PushOutput, RemoteMutationOutput};
+pub use remote::{
+    AdoptOutput, CloneOutput, ImportOperationOutput, ImportRetryOutput, PullOutput, PushOutput,
+    PushReplicationOutcome, RemoteMutationOutput,
+};
 pub use thread::{
     ApprovalOutput, ApprovalRevokeOutput, DroppedThread, EligibilityOutput, FskitReadinessReport,
-    SkippedThread, ThreadAbsorbOutput, ThreadCaptureOutput, ThreadCaptureSummary,
-    ThreadCleanupOutput, ThreadCurrentOutput, ThreadListImportGuidanceOutput, ThreadListOutput,
-    ThreadOpOutput, ThreadRecordOutput, ThreadResolveOutput, ThreadShowOutput, UnmetOutput,
+    ReviewComparisonOutput, SkippedThread, ThreadAbsorbOutput, ThreadCaptureOutput,
+    ThreadCaptureSummary, ThreadCleanupOutput, ThreadCurrentOutput, ThreadListImportGuidanceOutput,
+    ThreadListOutput, ThreadOpOutput, ThreadOwnershipOutput, ThreadRecordOutput,
+    ThreadResolveOutput, ThreadShowOutput, UnmetOutput,
 };

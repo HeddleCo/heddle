@@ -29,8 +29,10 @@ use verbs::daemon_plan::{
     daemon_unexpected_response_kind,
 };
 
-use super::super::next_action::{NextActionValidationContext, write_full_command_json};
-use super::client::{rpc, sweep_stale_mounts};
+use super::{
+    super::next_action::{NextActionValidationContext, write_full_command_json},
+    client::{rpc, sweep_stale_mounts},
+};
 use crate::cli::{Cli, commands::advice::RecoveryAdvice, should_output_json};
 
 #[derive(Debug, Serialize)]

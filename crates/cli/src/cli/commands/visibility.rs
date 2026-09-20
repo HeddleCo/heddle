@@ -9,18 +9,20 @@
 //!
 //! Respects `--output json` via `should_output_json`.
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use objects::object::{StateVisibility, VisibilityTier};
 use repo::{Repository, VisibilityCommitKind};
 use serde::Serialize;
 use verbs::visibility_tier_label;
 
-use super::history_target::resolve_state_id as resolve_state;
-use super::next_action::{write_full_command_json, NextActionValidationContext};
+use super::{
+    history_target::resolve_state_id as resolve_state,
+    next_action::{NextActionValidationContext, write_full_command_json},
+};
 use crate::cli::{
-    should_output_json, Cli, VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs,
-    VisibilitySetArgs, VisibilityShowArgs,
+    Cli, VisibilityCommands, VisibilityListArgs, VisibilityPromoteArgs, VisibilitySetArgs,
+    VisibilityShowArgs, should_output_json,
 };
 
 pub fn cmd_visibility(cli: &Cli, command: VisibilityCommands) -> Result<()> {
@@ -154,7 +156,7 @@ fn cmd_visibility_promote(cli: &Cli, repo: &Repository, args: VisibilityPromoteA
 }
 
 fn cmd_visibility_show(cli: &Cli, repo: &Repository, args: VisibilityShowArgs) -> Result<()> {
-    let state = resolve_state(repo, &args.state)?;
+    let state = resolve_state(repo, args.state.as_deref().unwrap_or("HEAD"))?;
     let blob = repo.get_state_visibility_for_state(&state)?;
     let effective = blob.latest()?;
     let tier = effective

@@ -8,6 +8,7 @@
 #![cfg(feature = "client")]
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -21,12 +22,84 @@ use repo::{Repository, remote::RemoteTarget};
 use tempfile::TempDir;
 
 const WEFT_URL_ENV: &str = "HEDDLE_E2E_WEFT_URL";
+const PUBLIC_GIT_URL_ENV: &str = "HEDDLE_E2E_PUBLIC_GIT_URL";
 const NAMED_THREAD: &str = "client-flow-e2e";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdvertisedThread {
     state: StateId,
     id: String,
+}
+
+/// Exercises public Git fetch in the real weft executor, then reads the
+/// imported source back through the production hosted clone path.
+#[tokio::test]
+#[ignore = "requires a live weft; see docs/testing/live-weft-client-flow.md"]
+async fn real_import_source_fetches_public_git_and_clones_round_trip() -> Result<()> {
+    let Some(endpoint) = std::env::var_os(WEFT_URL_ENV) else {
+        eprintln!("skipping live-weft source import: {WEFT_URL_ENV} is unset");
+        return Ok(());
+    };
+    let endpoint = endpoint
+        .into_string()
+        .map_err(|_| anyhow!("{WEFT_URL_ENV} must be valid UTF-8"))?;
+    let authority = authority_only_endpoint(&endpoint)?;
+    let source_url = std::env::var(PUBLIC_GIT_URL_ENV)
+        .unwrap_or_else(|_| "https://github.com/octocat/Hello-World.git".to_string());
+
+    let temp = TempDir::new().context("create source-import e2e root")?;
+    let expected = temp.path().join("expected-git");
+    let expected_text = path_text(&expected, "expected Git checkout")?;
+    run_git(
+        temp.path(),
+        &["clone", "--quiet", "--depth=1", &source_url, &expected_text],
+    )?;
+
+    let mut client = connect_client(&endpoint, &authority).await?;
+    let personal = client
+        .get_current_user_spool()
+        .await
+        .context("resolve authenticated user's personal spool")?;
+    client.close().await;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock is before the Unix epoch")?
+        .as_nanos();
+    let destination = format!(
+        "{}/import-source-e2e-{}-{nonce}",
+        personal.full_path,
+        std::process::id()
+    );
+    let remote_url = format!("{}/{destination}", endpoint.trim_end_matches('/'));
+    let output = run_heddle(
+        temp.path(),
+        &[
+            "import",
+            "url",
+            &source_url,
+            "--to",
+            &remote_url,
+            "--thread",
+            "main",
+        ],
+    )?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let terminal: serde_json::Value =
+        serde_json::from_str(&stdout).context("decode finite source-import result")?;
+    ensure!(
+        terminal.get("output_kind").and_then(|value| value.as_str()) == Some("import_operation")
+            && terminal.get("state").and_then(|value| value.as_str()) == Some("completed")
+            && terminal.get("terminal").and_then(|value| value.as_bool()) == Some(true),
+        "source import did not emit a completed terminal event: {terminal}"
+    );
+
+    let cloned = temp.path().join("cloned-import");
+    clone_thread(temp.path(), &remote_url, &cloned, Some("main"))?;
+    ensure!(
+        file_snapshot(&expected)? == file_snapshot(&cloned)?,
+        "fresh hosted clone did not match files and content at the public Git HEAD"
+    );
+    Ok(())
 }
 
 /// Exercises the complete native client lifecycle against a real weft.
@@ -310,6 +383,62 @@ fn run_heddle(cwd: &Path, args: &[&str]) -> Result<Output> {
         .with_context(|| format!("run heddle {args:?} in {}", cwd.display()))?;
     ensure_command_succeeded(args, &output)?;
     Ok(output)
+}
+
+fn run_git(cwd: &Path, args: &[&str]) -> Result<Output> {
+    let output = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .with_context(|| format!("run git {args:?} in {}", cwd.display()))?;
+    ensure!(
+        output.status.success(),
+        "git {args:?} failed with {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(output)
+}
+
+fn file_snapshot(root: &Path) -> Result<BTreeMap<PathBuf, Vec<u8>>> {
+    fn visit(root: &Path, current: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) -> Result<()> {
+        for entry in fs::read_dir(current)
+            .with_context(|| format!("read source tree directory {}", current.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            let relative = path
+                .strip_prefix(root)
+                .with_context(|| format!("derive relative path for {}", path.display()))?;
+            if relative
+                .components()
+                .next()
+                .is_some_and(|part| part.as_os_str() == ".git" || part.as_os_str() == ".heddle")
+            {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.is_dir() {
+                visit(root, &path, files)?;
+            } else if metadata.file_type().is_symlink() {
+                files.insert(
+                    relative.to_path_buf(),
+                    fs::read_link(&path)?
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .to_vec(),
+                );
+            } else if metadata.is_file() {
+                files.insert(relative.to_path_buf(), fs::read(&path)?);
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files)?;
+    Ok(files)
 }
 
 fn ensure_command_succeeded(args: &[&str], output: &Output) -> Result<()> {

@@ -2,8 +2,7 @@
 //! Real wire payloads for the history-reading verbs (`show`, `log`,
 //! reflog/timeline, `thread expand`, markers, blame, revert).
 
-use repo::Repository;
-use repo::{TimelineNavigationSnapshot, TimelineNavigationStep};
+use repo::{Repository, TimelineNavigationSnapshot, TimelineNavigationStep};
 use schemars::JsonSchema;
 use serde::Serialize;
 

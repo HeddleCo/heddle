@@ -189,7 +189,7 @@ impl ExternalObjectSource for GitOverlayObjectSource {
         for child in children {
             let name = String::from_utf8(child.name.as_bytes().to_vec()).map_err(|_| {
                 HeddleError::Config(format!(
-                    "Git tree {git_sha} has a non-UTF-8 entry; run `heddle adopt --lossy` to import it explicitly"
+                    "Git tree {git_sha} has a non-UTF-8 entry; run `heddle import local --lossy` to import it explicitly"
                 ))
             })?;
             let entry = match child.mode {

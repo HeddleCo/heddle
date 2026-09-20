@@ -147,7 +147,6 @@ pub struct AuthTrustOutput {
 pub struct ServiceTokenOutput {
     pub output_kind: &'static str,
     pub name: String,
-    pub namespace: String,
     pub scope: String,
     /// Absolute path of the `.hcred` credential file written with mode 0600.
     /// The token and proof key never appear on stdout or in JSON.
@@ -160,21 +159,18 @@ pub struct ServiceTokenOutput {
 pub struct SignupInviteCreatedOutput {
     pub output_kind: &'static str,
     pub invite_id: String,
-    /// The server returns this code only on surfaces where it may be shown.
-    pub invite_code: String,
-    pub allowance_remaining: u32,
+    /// One-time bearer material, returned only by the creation response.
+    pub redemption_secret: String,
+    pub allowance_remaining: Option<u32>,
 }
 
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "AuthSignupInviteSchema")]
 pub struct SignupInviteOutput {
-    /// Present because `ListSignupInvites` includes it. Clients must not derive
-    /// or fabricate invite codes from IDs or other metadata.
-    pub invite_code: String,
+    pub invite_id: String,
     pub status: String,
-    pub created_at: Option<String>,
-    pub consumed: bool,
-    pub consumed_at: Option<String>,
+    pub bound_email: Option<String>,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -182,7 +178,7 @@ pub struct SignupInviteOutput {
 pub struct SignupInviteListOutput {
     pub output_kind: &'static str,
     pub invites: Vec<SignupInviteOutput>,
-    pub allowance_remaining: u32,
+    pub allowance_remaining: Option<u32>,
 }
 
 // ---- whoami ----------------------------------------------------------------
@@ -209,10 +205,10 @@ pub struct WhoamiOutput {
     pub source: String,
     /// Locally verified subject, present even when the server is unreachable.
     pub subject: Option<String>,
-    /// The server answered `WhoAmI` — the hosted identity below is authoritative.
+    /// The server answered native `ObserveIdentity` with the current credential.
     pub reachable: bool,
-    /// `root` (full-authority device/human token), `agent` (an offline-derived,
-    /// attenuated delegation), or `service-account`. `None` when unauthenticated.
+    /// Locally inferred credential class, replaced by the observed v2 class
+    /// when the server is reachable. `None` when unauthenticated.
     pub token_kind: Option<String>,
     /// Resource scopes the delegation chain restricts this token to. Empty ⇒
     /// full resource authority.
@@ -228,34 +224,27 @@ pub struct WhoamiOutput {
     pub proof_key_available: bool,
     /// Server-authoritative identity, present only when `reachable`.
     pub identity: Option<WhoamiIdentity>,
+    /// Grant-reachable hosted paths as `spool/<handle>/<name>`.
+    /// Empty when unauthenticated, unreachable, or ListSpools was unavailable.
+    pub spools: Vec<String>,
     pub recommended_action: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[schemars(rename = "WhoamiIdentitySchema")]
 pub struct WhoamiIdentity {
-    pub subject: String,
-    pub actor_subject: String,
-    pub is_staff: bool,
-    pub is_service_account: bool,
-    pub is_biscuit: bool,
-    pub session_id: String,
-    pub amr: Vec<String>,
-    /// The scope string the server records for this credential.
-    pub server_scope: String,
-    pub credential_id: String,
-    pub device_id: Option<String>,
+    pub principal_id: String,
+    pub account_id: String,
+    pub handle: Option<String>,
+    pub acting_agent_id: Option<String>,
+    pub rooting_tier: String,
+    pub credential_id: Option<String>,
+    pub credential_subject: String,
+    pub credential_kind: String,
+    pub session_id: Option<String>,
+    pub authentication_methods: Vec<String>,
     pub agent_provider: Option<String>,
     pub agent_model: Option<String>,
-    /// Resource roles the caller holds directly (UI gating only; the server
-    /// enforces effective, inherited roles on each RPC).
-    pub roles: Vec<WhoamiRole>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-#[schemars(rename = "WhoamiRoleSchema")]
-pub struct WhoamiRole {
-    pub resource_path: String,
-    pub resource_kind: String,
-    pub role: String,
+    /// Verified method hints from the current credential observation.
+    pub available_actions: Vec<String>,
 }

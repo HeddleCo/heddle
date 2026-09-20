@@ -5,7 +5,7 @@ use std::{
     process::{Command, Output},
 };
 
-use api::heddle::api::v1alpha1::{
+use api::heddle::api::common::{
     TreadleCheck, TreadleCheckClass, TreadleDefinition, TreadleNetworkAccess, TreadlePlatform,
 };
 use ci_config::{

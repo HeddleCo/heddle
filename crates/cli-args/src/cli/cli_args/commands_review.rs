@@ -1,33 +1,84 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle review` — internal state review surface (R7).
+//! `heddle review` — signed Thread comparison review workflow.
 
 use clap::{Args, Subcommand, ValueEnum};
 
-use super::DiffBaseArg;
+use super::RemoteChoiceArgs;
 
 #[derive(Clone, Debug, Subcommand)]
 pub enum ReviewCommands {
-    /// Render the review payload for a state.
+    /// Show the exact source and target comparison for a Thread.
     Show(ReviewShowArgs),
-    /// Submit a review signature on a state.
+    /// Approve the exact source and target comparison shown for this thread, using your configured signing identity.
+    #[command(
+        about = "Approve the exact source and target comparison shown for this thread, using your configured signing identity."
+    )]
+    Approve(ReviewApproveArgs),
+    /// List signed review decisions for a Thread.
+    List(ReviewListArgs),
+    /// Revoke one of your signed approvals.
+    Revoke(ReviewRevokeArgs),
+    /// Check whether a Thread's exact comparison is ready to land into a target.
+    Readiness(ReviewReadinessArgs),
+    /// Submit a low-level review signature on a state.
+    #[command(hide = true)]
     Sign(ReviewSignArgs),
     /// Walk to the next pending review when review selection is configured.
+    #[command(hide = true)]
     Next(ReviewNextArgs),
     /// Per-module signal health over a rolling window.
+    #[command(hide = true)]
     Health(ReviewHealthArgs),
 }
 
 #[derive(Clone, Debug, Args)]
 pub struct ReviewShowArgs {
-    /// State to review. Defaults to HEAD.
-    pub state: Option<String>,
-    /// Select the change-list base. `last-turn` uses the first capture in the
-    /// live harness session on this thread.
-    #[arg(long, value_enum)]
-    pub base: Option<DiffBaseArg>,
-    /// Include hidden signals beyond the in-budget set.
-    #[arg(long)]
-    pub all_signals: bool,
+    /// Thread to review. Defaults to the current Thread.
+    pub thread: Option<String>,
+    #[command(flatten)]
+    pub remote_choice: RemoteChoiceArgs,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ReviewApproveArgs {
+    /// Thread to approve. Defaults to the current Thread.
+    pub thread: Option<String>,
+    /// Human note attached to the approval.
+    #[arg(short = 'm', long)]
+    pub message: Option<String>,
+    #[command(flatten)]
+    pub remote_choice: RemoteChoiceArgs,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ReviewListArgs {
+    /// Thread whose review decisions to list. Defaults to the current Thread.
+    pub thread: Option<String>,
+    #[command(flatten)]
+    pub remote_choice: RemoteChoiceArgs,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ReviewRevokeArgs {
+    /// UUID of the approval to revoke.
+    #[arg(value_name = "REVIEW_ID")]
+    pub review_id: String,
+    /// Thread containing the approval.
+    #[arg(long, value_name = "THREAD")]
+    pub thread: String,
+    #[command(flatten)]
+    pub remote_choice: RemoteChoiceArgs,
+}
+
+#[derive(Clone, Debug, Args)]
+pub struct ReviewReadinessArgs {
+    /// Source Thread to assess. Defaults to the current Thread.
+    pub thread: Option<String>,
+    /// Target Thread that would receive the source.
+    #[arg(long, value_name = "TARGET")]
+    pub into: String,
+    #[command(flatten)]
+    pub remote_choice: RemoteChoiceArgs,
 }
 
 #[derive(Clone, Debug, Args)]
@@ -75,12 +126,11 @@ impl SignKindArg {
         }
     }
 
-    pub fn as_proto(&self) -> api::heddle::api::v1alpha1::ReviewKind {
-        use api::heddle::api::v1alpha1::ReviewKind;
+    pub fn as_proto(&self) -> objects::object::ReviewKind {
         match self {
-            Self::Read => ReviewKind::Read,
-            Self::AgentPreview => ReviewKind::AgentPreview,
-            Self::AgentCoReview => ReviewKind::AgentCoReview,
+            Self::Read => objects::object::ReviewKind::Read,
+            Self::AgentPreview => objects::object::ReviewKind::AgentPreview,
+            Self::AgentCoReview => objects::object::ReviewKind::AgentCoReview,
         }
     }
 }

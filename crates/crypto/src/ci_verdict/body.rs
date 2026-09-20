@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use objects::object::ContentHash;
+use heddle_object_model::object::ContentHash;
 use serde::{Deserialize, Serialize};
 
 use super::body_details::{Execution, LogRef, Outcome, Repro};

@@ -6,7 +6,7 @@ use crypto::{
     SIGNED_VERDICT_FORMAT_VERSION, SignedVerdict, SignedVerdictError, Signer, SignerError,
     SignerKind, ci_verdict_signing_payload, signed_verdict_from_signer,
 };
-use objects::object::{ChangeId, ContentHash};
+use heddle_object_model::object::{ChangeId, ContentHash};
 use serde_json::Value;
 
 fn verification_failed(result: Result<(), SignedVerdictError>) -> bool {

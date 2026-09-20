@@ -395,10 +395,19 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             }
         }
         let repair_mapped_objects = !descriptor_commits.is_empty();
+        let mut remapped_commits = descriptor_commits.clone();
+        if self.options.root_parent.is_some() {
+            remapped_commits.clear();
+            for commit in &commits {
+                if let Some(state) = self.map.get_commit(&commit.sha)? {
+                    remapped_commits.push((commit.sha.clone(), state));
+                }
+            }
+        }
 
         self.map.begin_append_batch()?;
         let write_result = (|| -> crate::Result<PackedImportStats> {
-            for (git_sha, _) in &descriptor_commits {
+            for (git_sha, _) in &remapped_commits {
                 self.map.remove_commit(git_sha)?;
             }
             let builder = ImportPackBuilder::new(
@@ -476,17 +485,17 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             }
         };
 
-        let mut descriptor_state_remaps = Vec::new();
-        for (git_sha, old_state) in &descriptor_commits {
+        let mut state_remaps = Vec::new();
+        for (git_sha, old_state) in &remapped_commits {
             if let Some(new_state) = self.map.get_commit(git_sha)?
                 && new_state != *old_state
             {
-                descriptor_state_remaps.push((*old_state, new_state));
+                state_remaps.push((*old_state, new_state));
             }
         }
 
         let ref_stats = RefEmitter::new(self.refs, self.store, self.map)
-            .with_state_remaps(descriptor_state_remaps)
+            .with_state_remaps(state_remaps)
             .emit(&heads)
             .await?;
         info!(
@@ -957,7 +966,9 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             return Ok(cid);
         }
 
-        let mut parents = Vec::with_capacity(commit.parents.len());
+        let mut parents = Vec::with_capacity(
+            commit.parents.len() + usize::from(self.options.root_parent.is_some()),
+        );
         for p in &commit.parents {
             match self.map.get_commit(p)? {
                 Some(cid) => parents.push(cid),
@@ -976,6 +987,11 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
                     ParentMapPolicy::OrphanUnmapped => {}
                 },
             }
+        }
+        if commit.parents.is_empty()
+            && let Some(root_parent) = self.options.root_parent
+        {
+            parents.push(root_parent);
         }
 
         let state = state_from_commit(commit, tree, parents, git_lossy)?;
@@ -1115,7 +1131,7 @@ pub fn import_git_into_scoped_with_options_and_progress(
 /// For ordinary Git commits the tip is translated as a Heddle root because its
 /// Git parents have not been mapped. A portable Heddle export note instead
 /// preserves its embedded source State and parent identities exactly; a later
-/// full [`import_git_into`] / `heddle adopt` validates and materializes that
+/// full [`import_git_into`] / `heddle import local` validates and materializes that
 /// graph. The mapping always records the real Git OID for later export.
 ///
 /// Returns the mapped Heddle state id for `git_sha`. Idempotent when the tip

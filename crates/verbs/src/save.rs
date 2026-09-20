@@ -445,8 +445,12 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
     }
     let preflight_ms = preflight_started.elapsed().as_millis();
     let attribution_started = Instant::now();
-    let resolved_attribution =
-        resolve_capture_attribution(repo, ctx.principal_fallback(), &options.agent)?;
+    let resolved_attribution = resolve_capture_attribution(
+        repo,
+        ctx.principal_fallback(),
+        ctx.hosted_principal(),
+        &options.agent,
+    )?;
     let harness_session_id = resolved_attribution
         .attribution
         .agent
@@ -585,9 +589,13 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
 fn resolve_capture_attribution(
     repo: &Repository,
     principal_fallback: Option<(&str, &str)>,
+    hosted_principal: Option<(&str, &str)>,
     options: &CaptureAgentOptions,
 ) -> Result<CaptureAttribution> {
-    let resolved_principal = crate::resolve_principal(repo, principal_fallback)?;
+    let resolved_principal = crate::apply_hosted_principal_fallback(
+        crate::resolve_principal(repo, principal_fallback)?,
+        hosted_principal,
+    );
     let principal_source = resolved_principal.source.unwrap_or("unknown").to_string();
     let principal = resolved_principal.principal;
     if crate::principal_lacks_accountable_identity(
@@ -710,7 +718,7 @@ pub fn resolve_capture_author(
     principal_fallback: Option<(&str, &str)>,
     options: &CaptureAgentOptions,
 ) -> Result<Attribution> {
-    resolve_capture_attribution(repo, principal_fallback, options)
+    resolve_capture_attribution(repo, principal_fallback, None, options)
         .map(|resolved| resolved.attribution)
 }
 
@@ -1179,13 +1187,13 @@ pub fn complete_current_thread_manual_resolution(repo: &Repository) -> Result<Op
         conflicts_resolved_manually: true,
     };
     thread.updated_at = Utc::now();
-    let thread_id = thread.id.clone();
+    let thread_name = thread.thread.clone();
     let target = thread.target_thread.clone();
     crate::save_thread_update(repo, &manager, &thread, before, current_state)?;
 
     Ok(Some(manual_resolution_land_action(
         repo,
-        &thread_id,
+        &thread_name,
         target.as_deref(),
     )))
 }
@@ -1383,6 +1391,26 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     let (previous_state, previous_state_profile) =
         repo.current_state_for_worktree_status_profiled()?;
     let previous_state_ms = previous_state_started.elapsed().as_millis();
+    let native_thread_name = match repo.head_ref()? {
+        refs::Head::Attached { thread } => Some(thread.to_string()),
+        refs::Head::Detached { .. } => None,
+    };
+    if let (Some(name), Some(previous)) = (native_thread_name.as_deref(), previous_state.as_ref())
+        && repo.native_thread(name).is_err()
+    {
+        repo.create_native_thread(name, previous.state_id, None, "")?;
+    }
+    let actor = format!("cli:{}", std::process::id());
+    let _checkout_writer = match native_thread_name.as_deref() {
+        Some(name) => match repo.native_thread(name) {
+            Ok(replica) => Some(repo.acquire_checkout_writer(replica.thread_id(), &actor)?),
+            Err(_) => None,
+        },
+        None => match repo::thread_replication::checkout::ThreadCheckout::open(repo.root()) {
+            Ok(checkout) => Some(repo.acquire_checkout_writer(checkout.binding.thread, &actor)?),
+            Err(_) => None,
+        },
+    };
     let has_current = previous_state.is_some();
     let mut created_new_state = false;
     let mut snapshot_profile = SnapshotProfile::default();
@@ -1530,6 +1558,23 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
             .unwrap_or_else(|| format!("Checkpoint {}", state.state_id.short())),
     };
 
+    if created_new_state && let Some(name) = native_thread_name.as_deref() {
+        if repo.native_thread(name).is_err() {
+            repo.create_native_thread(
+                name,
+                previous_state
+                    .as_ref()
+                    .map(|previous| previous.state_id)
+                    .unwrap_or(state.state_id),
+                None,
+                "",
+            )?;
+        }
+        let genesis_base = repo.native_thread(name)?.genesis()?.base;
+        if state.state_id != genesis_base && !state.parents.is_empty() {
+            repo.record_native_capture(name, state.state_id)?;
+        }
+    }
     let signature_lookup_started = Instant::now();
     let signed = repo.get_state_signature(&state.id())?.is_some();
     let signature_lookup_ms = signature_lookup_started.elapsed().as_millis();

@@ -3,13 +3,12 @@
 //! `start`, thread refresh/drop/promote, cleanup, resolve, absorb, and the
 //! approval verbs).
 
+use heddle_cli_render::cli::render::RepositoryContextInfo;
 use schemars::JsonSchema;
 use serde::Serialize;
-
-use heddle_cli_render::cli::render::RepositoryContextInfo;
+use verbs::{ActionTemplate, AvailableGitRef, RepositoryVerificationState, ThreadSummary};
 
 use super::operator::OperatorCommandOutput;
-use verbs::{ActionTemplate, AvailableGitRef, RepositoryVerificationState, ThreadSummary};
 
 /// FSKit readiness detail surfaced by `start --workspace virtualized` on
 /// macOS when the CLI took an FSKit-specific decision.
@@ -79,6 +78,19 @@ pub struct ThreadShowOutput {
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
     pub recovery_commands: Vec<String>,
+}
+
+/// Explicit native Thread ownership status and transitions.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "ThreadOwnershipSchema")]
+pub struct ThreadOwnershipOutput {
+    pub output_kind: &'static str,
+    pub thread: String,
+    pub status: &'static str,
+    pub owner: Option<String>,
+    pub claim_ids: Vec<String>,
+    pub winning_claim: Option<String>,
+    pub resolution_id: Option<String>,
 }
 
 fn serialize_empty_action_as_null<S>(
@@ -151,7 +163,7 @@ pub struct ThreadCaptureSummary {
     pub total: usize,
 }
 
-/// JSON payload for `thread refresh` / `thread drop` / `thread promote`
+/// JSON payload for `thread refresh` / `thread drop` / `thread checkout`
 /// where the whole refreshed record is echoed beside the operator envelope.
 #[derive(Serialize, JsonSchema)]
 pub struct ThreadRecordOutput {
@@ -238,48 +250,61 @@ pub struct ThreadAbsorbOutput {
     pub message: String,
 }
 
-/// One approval row (`thread approve`, `thread approvals`,
-/// `thread check-merge`).
+/// Exact hosted comparison shown by `review show`.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "ReviewComparisonSchema")]
+pub struct ReviewComparisonOutput {
+    pub output_kind: &'static str,
+    pub thread: String,
+    pub source_revision: String,
+    pub target_revision: String,
+    pub policy_version: String,
+    pub decision_count: usize,
+}
+
+/// One native signed review decision (`review approve`, `review list`).
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadApprovalSchema")]
 pub struct ApprovalOutput {
     pub id: String,
-    pub repo_path: String,
-    pub source_thread: String,
-    pub target_thread: String,
-    pub source_state: String,
-    pub approver_user_id: String,
-    pub note: String,
-    pub approved_at: u64,
+    pub thread: String,
+    pub source_revision: String,
+    pub base_revision: String,
+    pub policy_version: String,
+    pub principal_id: String,
+    pub kind: String,
+    pub explanation: String,
     pub expires_at: u64,
 }
 
-/// One unmet merge-eligibility requirement.
+/// One native readiness requirement.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadMergeRequirementSchema")]
 pub struct UnmetOutput {
-    pub policy_id: String,
+    pub policy_id: Option<String>,
     pub kind: String,
-    pub group_id: String,
-    pub reason: String,
-    pub needed: u32,
-    pub have: u32,
+    pub explanation: String,
+    pub recovery_method: String,
 }
 
-/// JSON payload for `thread check-merge`.
+/// JSON payload for `review readiness`.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadMergeEligibilitySchema")]
 pub struct EligibilityOutput {
-    pub allowed: bool,
-    pub unmet: Vec<UnmetOutput>,
-    pub valid_approvals: Vec<ApprovalOutput>,
+    pub thread: String,
+    pub target: String,
+    pub source_revision: String,
+    pub target_revision: String,
+    pub policy_version: String,
+    pub readiness: String,
+    pub requirements: Vec<UnmetOutput>,
 }
 
-/// JSON payload for `thread revoke-approval`.
+/// JSON payload for `review revoke`.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadRevokeApprovalSchema")]
 pub struct ApprovalRevokeOutput {
     pub output_kind: &'static str,
     pub id: String,
-    pub deleted: bool,
+    pub revoked: bool,
 }

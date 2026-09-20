@@ -13,11 +13,10 @@
 //! then call `emit(&cli, repo.config(), &output)` from the handler.
 
 use anyhow::Result;
+use heddle_cli_args::{Cli, should_output_json};
 use repo::{Repository, Thread, ThreadManager};
 use schemars::JsonSchema;
 use serde::Serialize;
-
-use heddle_cli_args::{Cli, should_output_json};
 
 pub mod fsck;
 pub mod query;

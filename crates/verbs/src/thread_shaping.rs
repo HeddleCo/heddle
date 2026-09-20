@@ -111,15 +111,15 @@ pub fn capture_split(
         &target_repo,
         Some(
             opts.intent
-                .unwrap_or_else(|| format!("Split paths from {}", current.id)),
+                .unwrap_or_else(|| format!("Split paths from {}", current.thread)),
         ),
     )?;
 
     restore_paths_from_state(repo, repo.head()?, &moved_paths)?;
 
     Ok(ThreadMoveOutput {
-        from_thread: current.id,
-        to_thread: target.id,
+        from_thread: current.thread,
+        to_thread: target.thread,
         moved_paths,
         source_state_id: None,
         target_state_id: target_snapshot,
@@ -166,7 +166,7 @@ pub fn thread_move(
         Some(
             opts.message
                 .clone()
-                .unwrap_or_else(|| format!("Move paths from {}", source.id)),
+                .unwrap_or_else(|| format!("Move paths from {}", source.thread)),
         ),
     )?;
 
@@ -175,13 +175,13 @@ pub fn thread_move(
         &source_repo,
         Some(
             opts.message
-                .unwrap_or_else(|| format!("Move paths to {}", target.id)),
+                .unwrap_or_else(|| format!("Move paths to {}", target.thread)),
         ),
     )?;
 
     Ok(ThreadMoveOutput {
-        from_thread: source.id,
-        to_thread: target.id,
+        from_thread: source.thread,
+        to_thread: target.thread,
         moved_paths,
         source_state_id: Some(source_snapshot),
         target_state_id: target_snapshot,

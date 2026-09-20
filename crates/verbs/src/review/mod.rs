@@ -150,6 +150,7 @@ where
             let message = service
                 .dedup
                 .metadata_for(op_id, verb)
+                .map_err(|err| LocalReviewError::internal(format!("dedup metadata failed: {err}")))?
                 .filter(|existing| existing.verb != verb)
                 .map_or(
                     "client_operation_id reused with a different request body",

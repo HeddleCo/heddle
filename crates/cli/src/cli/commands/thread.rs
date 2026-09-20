@@ -102,9 +102,6 @@ pub fn cmd_start(cli: &Cli, args: ThreadStartArgs) -> Result<()> {
     // Pure option preflight (name + path isolation flags) before materialization.
     let start_plan = plan_thread_start(&thread_start_options_from_args(&args))
         .map_err(|ThreadPlanError::InvalidName(err)| anyhow!(thread_name_invalid_advice(&err)))?;
-    if start_would_hide_checkout(&args) {
-        return Err(anyhow!(start_requires_explicit_path_advice(&args.name)));
-    }
     if start_plan.requires_clean_worktree {
         ensure_worktree_clean(&repo, "start thread")?;
     }
@@ -493,7 +490,7 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
         )?;
     } else if output.threads.is_empty() && output.available_git_refs.is_empty() {
         println!("No threads");
-    } else {
+    } else if cli.verbose > 0 {
         println!(
             "{} {} {}",
             style::bold("Threads"),
@@ -528,8 +525,13 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
                 print_optional(&hint.recommended_command);
             }
         }
-        render_thread_sections(&output.threads, cli.verbose > 0);
-        render_available_git_refs(&output.available_git_refs, cli.verbose > 0);
+        render_thread_sections(&output.threads, true);
+        render_available_git_refs(&output.available_git_refs, true);
+    } else {
+        if !output.threads.is_empty() {
+            print!("{}", format_compact_thread_list(&output.threads));
+        }
+        render_available_git_refs(&output.available_git_refs, false);
     }
     let render_ms = render_start.elapsed().as_millis();
 
@@ -578,6 +580,75 @@ pub(crate) fn cmd_thread_list(cli: &Cli, repo: &Repository, args: ThreadListArgs
 
 type ThreadSectionPredicate = fn(&ThreadSummary) -> bool;
 type ThreadSection = (&'static str, ThreadSectionPredicate);
+
+fn format_compact_thread_list(threads: &[ThreadSummary]) -> String {
+    let name_width = threads
+        .iter()
+        .map(|thread| thread.name.len())
+        .max()
+        .unwrap_or(0);
+    let mut rows = Vec::new();
+    for thread in threads.iter().filter(|thread| thread.is_current) {
+        rows.push(format_compact_thread_row(thread, name_width));
+    }
+    for thread in threads.iter().filter(|thread| !thread.is_current) {
+        rows.push(format_compact_thread_row(thread, name_width));
+    }
+    if rows.is_empty() {
+        return String::new();
+    }
+    rows.join("\n") + "\n"
+}
+
+fn format_compact_thread_row(entry: &ThreadSummary, name_width: usize) -> String {
+    let marker = if entry.is_current { "*" } else { " " };
+    let name = format!("{:<name_width$}", entry.name);
+    let mut cols = vec![format!("{marker} {name}")];
+    if let Some(state) = entry
+        .current_state
+        .as_deref()
+        .filter(|state| !state.is_empty())
+    {
+        cols.push(style::state_id(state));
+    }
+    if let Some(location) = compact_thread_location(entry) {
+        cols.push(location);
+    }
+    if let Some(ahead) = compact_ahead_suffix(entry) {
+        cols.push(ahead);
+    }
+    cols.join("  ")
+}
+
+fn compact_thread_location(entry: &ThreadSummary) -> Option<String> {
+    if entry.is_current {
+        return Some("this checkout".to_string());
+    }
+    entry
+        .path
+        .as_deref()
+        .or(entry.execution_path.as_deref())
+        .filter(|path| !path.trim().is_empty())
+        .map(compact_checkout_path)
+}
+
+fn compact_checkout_path(path: &str) -> String {
+    if let Some(index) = path.find(".heddle/threads/") {
+        return path[index..].to_string();
+    }
+    path.to_string()
+}
+
+fn compact_ahead_suffix(entry: &ThreadSummary) -> Option<String> {
+    if entry.coordination_status != CoordinationStatus::Ahead {
+        return None;
+    }
+    let parent = entry
+        .parent_thread
+        .as_deref()
+        .or(entry.target_thread.as_deref())?;
+    Some(format!("ahead of {parent}"))
+}
 
 fn render_thread_sections(threads: &[ThreadSummary], verbose: bool) {
     let sections: [ThreadSection; 5] = [
@@ -648,7 +719,7 @@ fn render_available_git_refs(refs: &[AvailableGitRef], verbose: bool) {
     }
     println!(
         "  {}",
-        style::dim("adopt when you want to work on this branch in Heddle")
+        style::dim("run `heddle import local` when you want to work on this branch in Heddle")
     );
     if !verbose && refs.len() > visible_count {
         let remaining = refs.len() - visible_count;
@@ -850,6 +921,7 @@ pub(crate) fn thread_name_invalid_advice(err: &ThreadIdError) -> RecoveryAdvice 
 }
 
 /// Refuse a user-facing `start` that would hide the checkout under `.heddle/threads/`.
+#[allow(dead_code)] // retained for recovery/docs; start defaults under .heddle/threads/
 pub(crate) fn start_requires_explicit_path_advice(name: &str) -> RecoveryAdvice {
     let primary = format!("heddle start {name} --path ../{name}");
     RecoveryAdvice::invalid_usage(
@@ -956,9 +1028,11 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
             style::warn("note"),
         );
     }
-    // Pure path layout: explicit `--path` for solid/materialized, managed
-    // default otherwise. Virtualized always uses the managed layout so a
-    // user-named directory is never shadowed by a kernel mount.
+    // Pure path layout: omitted `--path` always defaults to the managed
+    // checkout under `.heddle/threads/<encoded>/<repo-name>` (not TTY-gated).
+    // Virtualized mounts must stay on that layout so a user-named directory is
+    // never shadowed by a kernel mount; solid/materialized share it so the
+    // omission default is one layout. Explicit `--path` still wins.
     let path_plan = plan_checkout_path(
         &thread_mode,
         args.path.clone(),
@@ -1083,8 +1157,19 @@ pub(crate) fn start_thread(repo: &Repository, args: ThreadStartArgs) -> Result<T
     // the record's creation instant: the idempotency key folds it, and a
     // crash-retry reuses it from this still-Active record (heddle#356 cid
     // 3335052848 / 3335586969).
+    let native_parent = args
+        .parent_thread
+        .as_deref()
+        .or(current_target_thread.as_deref())
+        .filter(|name| repo.native_thread(name).is_ok());
+    let native_thread = repo.create_native_thread(
+        &args.name,
+        base_state,
+        native_parent,
+        args.task.as_deref().unwrap_or(""),
+    )?;
     let thread_state = Thread {
-        id: args.name.clone(),
+        id: native_thread.thread_id().to_hex(),
         thread: args.name.clone(),
         target_thread: current_target_thread.clone(),
         parent_thread: args.parent_thread.clone(),
@@ -1519,6 +1604,7 @@ fn requested_workspace(args: &ThreadStartArgs) -> WorkspaceModeArg {
 
 /// Omitted workspace and `--workspace auto` are the same default: without
 /// `--path` they hide the checkout under `.heddle/threads/`.
+#[allow(dead_code)] // start defaults under .heddle/threads/ instead of refusing
 fn start_would_hide_checkout(args: &ThreadStartArgs) -> bool {
     args.path.is_none() && matches!(requested_workspace(args), WorkspaceModeArg::Auto)
 }
@@ -1616,8 +1702,12 @@ pub(crate) fn cmd_thread_create(
     };
     let thread_manager = ThreadManager::new(repo.heddle_dir());
     let now = Utc::now();
+    let native_parent = target_thread
+        .as_deref()
+        .filter(|name| repo.native_thread(name).is_ok());
+    let native_thread = repo.create_native_thread(&name, current, native_parent, "")?;
     let thread_state = Thread {
-        id: name.clone(),
+        id: native_thread.thread_id().to_hex(),
         thread: name.clone(),
         target_thread,
         parent_thread: None,
@@ -2490,8 +2580,8 @@ pub(crate) fn cmd_thread_rename(
     old: String,
     new: String,
 ) -> Result<()> {
-    // Renaming persists a new thread id, so the destination name is a
-    // user/external creation boundary too — reject an unsafe name here.
+    // Names change while the original signed Thread identity remains stable.
+    // The destination remains an external naming boundary.
     // (heddle#464 close-the-class.)
     ThreadId::new(new.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
     let old_tn = ThreadName::new(&old);
@@ -2540,6 +2630,13 @@ pub(crate) fn cmd_thread_rename(
     }
 
     repo.commit_and_publish(records, &updates)?;
+    repo.rename_native_thread(&old, &new)?;
+    let manager = ThreadManager::new(repo.heddle_dir());
+    if let Some(mut record) = manager.find_by_thread(&old)? {
+        record.thread = new.clone();
+        record.updated_at = Utc::now();
+        manager.save(&record)?;
+    }
 
     let output = thread_op_output(
         "thread_rename",
@@ -2796,6 +2893,136 @@ pub(crate) fn find_active_thread_entry(
 mod tests {
     use super::*;
 
+    fn compact_thread_entry(
+        name: &str,
+        state: &str,
+        is_current: bool,
+        path: Option<&str>,
+        parent: Option<&str>,
+        ahead: bool,
+    ) -> ThreadSummary {
+        ThreadSummary {
+            name: name.into(),
+            operation: None,
+            remote_tracking: None,
+            base_state: parent.map(|_| "hs-parent".into()),
+            base_root: None,
+            current_state: Some(state.into()),
+            path: path.map(str::to_string),
+            execution_path: path.map(str::to_string),
+            session_id: None,
+            heddle_session_id: None,
+            actor: None,
+            harness: None,
+            thinking_level: None,
+            native_actor_key: None,
+            native_parent_actor_key: None,
+            probe_source: None,
+            probe_confidence: None,
+            usage_summary: None,
+            last_progress_at: None,
+            last_activity_at: None,
+            report_flush_state: None,
+            attach_reason: None,
+            thread_mode: Some(ThreadMode::Materialized),
+            thread_state: Some(ThreadState::Active),
+            freshness: Some(ThreadFreshness::Current),
+            visibility: "attached checkout".into(),
+            target_thread: parent.map(str::to_string),
+            parent_thread: parent.map(str::to_string),
+            child_threads: vec![],
+            sibling_threads: vec![],
+            stack_depth: 0,
+            stale_from_parent: false,
+            task: None,
+            task_assignment_id: None,
+            task_summary: None,
+            changed_paths: vec![],
+            promotion_suggested: false,
+            impact_categories: vec![],
+            heavy_impact_paths: vec![],
+            verification_summary: Default::default(),
+            confidence_summary: Default::default(),
+            integration_policy_result: Default::default(),
+            coordination_status: if ahead {
+                CoordinationStatus::Ahead
+            } else {
+                CoordinationStatus::Clean
+            },
+            is_current,
+            is_isolated: path.is_some() && !is_current,
+            thread_health: "clean".into(),
+            blockers: vec![],
+            recommended_action: String::new(),
+            recommended_action_template: None,
+            git_branch_tip: None,
+            history_imported: true,
+            auto: false,
+            shared_target_dir: None,
+        }
+    }
+
+    #[test]
+    fn compact_thread_list_marks_current_and_omits_this_checkout_path() {
+        let text = format_compact_thread_list(&[
+            compact_thread_entry("main", "hs-r98tkewc", true, Some("/tmp/repo"), None, false),
+            compact_thread_entry(
+                "feature",
+                "hs-r98tkewc",
+                false,
+                Some("/tmp/repo/.heddle/threads/feature/repo"),
+                None,
+                false,
+            ),
+        ]);
+        assert!(
+            text.contains("* main")
+                && text.contains("hs-r98tkewc")
+                && text.contains("this checkout"),
+            "current row should mark * and this checkout: {text}"
+        );
+        assert!(
+            text.contains("feature") && text.contains(".heddle/threads/feature/repo"),
+            "other threads should show a cd path when it is not this checkout: {text}"
+        );
+        for leaked in [
+            "Threads in",
+            "Repository:",
+            "no dedicated checkout",
+            "●",
+            "sync: current",
+        ] {
+            assert!(
+                !text.contains(leaked),
+                "compact thread list must not include {leaked:?}: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_thread_list_reports_ahead_of_parent() {
+        let text = format_compact_thread_list(&[compact_thread_entry(
+            "feature",
+            "hs-abc",
+            false,
+            Some("/tmp/repo/.heddle/threads/feature/repo"),
+            Some("main"),
+            true,
+        )]);
+        assert!(
+            text.contains("feature")
+                && text.contains("hs-abc")
+                && text.contains(".heddle/threads/feature/repo")
+                && text.contains("ahead of main")
+                && !text.contains("1 capture"),
+            "ahead rows should name the parent: {text}"
+        );
+        assert!(
+            !text.contains("* "),
+            "non-current rows must not use *: {text}"
+        );
+    }
+
     #[test]
     fn thread_workspace_label_pairs_modes_without_main() {
         assert_eq!(
@@ -2833,7 +3060,7 @@ mod tests {
         assert!(advice.unsafe_condition.contains("dirty Git index"));
         assert_eq!(
             advice.primary_command,
-            "heddle maintenance fsck repair git --prefer heddle --ref feature/git --preview"
+            "heddle maintenance fsck repair git --prefer heddle --ref feature/git --dry-run"
         );
         assert!(advice.preserved.contains("Git checkout was left unchanged"));
     }

@@ -227,6 +227,7 @@ mod tests {
         let bootstrapped = AtomicBool::new(false);
         let bootstrap = |repo: &Repository| {
             bootstrapped.store(true, Ordering::SeqCst);
+            repo.seed_default_thread()?;
             repo.snapshot(Some("bootstrap".into()), None).map(|_| ())
         };
         let policy = ResolvePolicy {

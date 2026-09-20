@@ -6,8 +6,7 @@
 //! check the documented UDS path uses. Fail closed when credentials
 //! cannot be read or the peer uid differs.
 
-use std::os::unix::io::AsRawFd;
-use std::os::unix::net::UnixStream;
+use std::os::unix::{io::AsRawFd, net::UnixStream};
 
 use objects::error::HeddleError;
 

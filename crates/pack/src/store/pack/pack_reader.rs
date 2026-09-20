@@ -188,6 +188,98 @@ impl<'a> PackReader<'a> {
         self.index.ids()
     }
 
+    /// Verify a complete, explicitly selected source revision before publishing
+    /// the received pack. History, provenance, attachments and child-spool data
+    /// are separate disclosure lanes. This does not confer Thread authority.
+    pub fn validate_source_closure(
+        &self,
+        selected: &crate::object::State,
+        max_objects: usize,
+        max_decoded_bytes: u64,
+    ) -> Result<Vec<PackObjectId>> {
+        self.validate_source_closure_with_metadata(
+            selected,
+            &[],
+            None,
+            max_objects,
+            max_decoded_bytes,
+        )
+    }
+    pub fn validate_source_closure_with_metadata(
+        &self,
+        selected: &crate::object::State,
+        references: &[crate::object::source_target::capture::ReferenceProof],
+        visibility: Option<&crate::object::thread_replication::CaptureVisibility>,
+        max_objects: usize,
+        max_decoded_bytes: u64,
+    ) -> Result<Vec<PackObjectId>> {
+        self.validate_source_layout(max_objects, max_decoded_bytes)?;
+        super::source_pack::validate(self, selected, max_decoded_bytes, references, visibility)
+    }
+
+    /// Validate a fetched visible source closure while preserving partial-tree
+    /// proofs. This never authorizes publication as complete source. The caller
+    /// separately verifies original signatures and the selected Thread.
+    pub fn validate_visible_source_closure(
+        &self,
+        selected: &crate::object::State,
+        max_objects: usize,
+        max_decoded_bytes: u64,
+    ) -> Result<super::VisibleSourceClosure> {
+        self.validate_source_layout(max_objects, max_decoded_bytes)?;
+        super::source_pack::validate_disclosure(self, selected, max_decoded_bytes, &[], None, true)
+    }
+
+    fn validate_source_layout(&self, max_objects: usize, max_decoded_bytes: u64) -> Result<()> {
+        let entries = self.index.entries()?;
+        if entries.is_empty() || entries.len() > max_objects {
+            return Err(StoreError::InvalidObject(
+                "source pack object budget exceeded".into(),
+            ));
+        }
+        // Retaining the original bytes requires accounting for every physical
+        // record, including records an incomplete index would otherwise hide.
+        let (_, mut next, end) = verify_supported_container_layout(self.data.as_slice())?;
+        let offsets = entries
+            .iter()
+            .map(|entry| entry.offset)
+            .collect::<BTreeSet<_>>();
+        let mut decoded = 0_u64;
+        for offset in offsets {
+            if checked_index_offset(offset)? != next {
+                return Err(StoreError::InvalidObject(
+                    "source pack has unindexed or overlapping records".into(),
+                ));
+            }
+            let header = decode_tagged_entry_header(self.content_from(next)?)?;
+            decoded = decoded
+                .checked_add(header.uncompressed_size as u64)
+                .ok_or_else(|| StoreError::InvalidObject("source pack size overflow".into()))?;
+            if decoded > max_decoded_bytes {
+                return Err(StoreError::InvalidObject(
+                    "source pack decoded byte budget exceeded".into(),
+                ));
+            }
+            next = next
+                .checked_add(header.header_len)
+                .and_then(|n| n.checked_add(header.compressed_size))
+                .ok_or_else(|| {
+                    StoreError::InvalidObject("source pack record length overflow".into())
+                })?;
+            if next > end {
+                return Err(StoreError::InvalidObject(
+                    "source pack record exceeds container".into(),
+                ));
+            }
+        }
+        if next != end {
+            return Err(StoreError::InvalidObject(
+                "source pack has unindexed trailing records".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Compute this pack's root-spool-scoped logical identity.
     ///
     /// Every logical object is decoded so delta and compact-frame physical

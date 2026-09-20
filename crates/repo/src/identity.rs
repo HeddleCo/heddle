@@ -24,6 +24,10 @@
 //! key is embedded in the state and verification recomputes the content hash,
 //! so it needs neither the private key nor any registry.
 
+pub mod source_author;
+#[cfg(test)]
+mod test_isolation;
+
 use std::path::{Path, PathBuf};
 
 use crypto::{Ed25519Signer, Signer, SignerError};
@@ -67,14 +71,24 @@ pub struct DeviceIdentity {
 /// `./.heddle`. Mirrors the credential store location so the device identity
 /// sits beside `credentials.toml`. `HEDDLE_HOME` exists primarily as a test
 /// and power-user override; production resolves to `$HOME/.heddle`.
+///
+/// Unit tests (`cfg(test)`) ignore the process-global env and use a per-test
+/// tempdir so the device catalog cannot leak across the suite (heddle#1766).
 pub fn heddle_home_dir() -> PathBuf {
-    if let Some(explicit) = heddle_home_override() {
-        return explicit;
+    #[cfg(test)]
+    {
+        test_isolation::heddle_home_dir()
     }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".heddle")
+    #[cfg(not(test))]
+    {
+        if let Some(explicit) = heddle_home_override() {
+            return explicit;
+        }
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".heddle")
+    }
 }
 
 /// Explicit non-empty `HEDDLE_HOME` override, when configured.
@@ -290,7 +304,7 @@ fn reject_insecure_identity(path: &Path) -> std::io::Result<()> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error))
 }
 
-fn load_local(path: &Path) -> std::io::Result<Option<LocalIdentity>> {
+pub(crate) fn load_local(path: &Path) -> std::io::Result<Option<LocalIdentity>> {
     // Refuse an exposed private key before reading its bytes — fail closed
     // rather than sign with a key any local user could have copied.
     reject_insecure_identity(path)?;

@@ -4,9 +4,8 @@
 use clap::{Args, Subcommand};
 
 use super::{
-    CollapseArgs, ExpandArgs, ThreadAbsorbArgs, ThreadApprovalsArgs, ThreadApproveArgs,
-    ThreadCapturesArgs, ThreadCheckMergeArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs,
-    ThreadPromoteArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadRevokeApprovalArgs,
+    CollapseArgs, ExpandArgs, ThreadAbsorbArgs, ThreadCapturesArgs, ThreadCheckoutArgs,
+    ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs, ThreadRenameArgs, ThreadResolveArgs,
     ThreadShowArgs,
 };
 
@@ -17,7 +16,7 @@ pub enum ThreadCommands {
 Advanced split form:
   heddle start <name> --path <dir> is the normal one-step isolated-checkout path.
   heddle thread create <name> only creates the thread ref. Pair it later with
-  heddle thread promote <name> --path <dir> when you intentionally need to
+  heddle thread checkout <name> --path <dir> when you intentionally need to
   create the ref now and materialize the checkout later.
 ")]
     Create {
@@ -57,11 +56,9 @@ Advanced split form:
     },
 
     /// Print the on-disk path for a thread. Read-only — no state change,
-    /// no auto-capture. Pair with the shell hook (`heddle shell init`)
-    /// to land in the right directory:
-    ///   eval "$(heddle thread cd X)"
-    /// Or use the shell function directly: `heddle thread cd X` becomes
-    /// `cd <path>` when the hook is installed.
+    /// no auto-capture. Without a shell hook:
+    ///   cd "$(heddle thread cd X)"
+    /// With `heddle shell init`, `heddle thread cd X` becomes `cd <path>`.
     Cd {
         /// Thread identifier.
         name: String,
@@ -91,32 +88,24 @@ Advanced split form:
     /// Guide a blocked or stale thread toward its next clean state.
     Resolve(ThreadResolveArgs),
 
-    /// Materialize an existing thread ref at a chosen path.
+    /// Inspect or explicitly transfer a Thread's native ownership.
+    Ownership {
+        #[command(subcommand)]
+        command: ThreadOwnershipCommands,
+    },
+
+    /// Create a working checkout for this thread.
     #[command(after_help = "\
-Advanced split form:
-  heddle start <name> --path <dir> creates the thread ref and isolated checkout
-  in one step. `thread promote` is the second step after
-  `heddle thread create <name>` when you intentionally created the ref first
-  and want to materialize it later.
+`heddle start <name>` is the one-step default: it creates the thread ref and
+isolated checkout together. `thread checkout <name> --path <dir>` is the
+second step after `heddle thread create <name>` when you intentionally
+created the ref first and want to materialize it later.
 ")]
-    Promote(ThreadPromoteArgs),
+    Checkout(ThreadCheckoutArgs),
 
     /// Drop a thread and mark it abandoned.
     #[command(visible_alias = "delete")]
     Drop(ThreadDropArgs),
-
-    /// Record a merge approval for `<source> -> <target>`.
-    Approve(ThreadApproveArgs),
-
-    /// List approvals recorded for `<source> -> <target>`.
-    Approvals(ThreadApprovalsArgs),
-
-    /// Revoke a previously recorded approval by id.
-    RevokeApproval(ThreadRevokeApprovalArgs),
-
-    /// Check whether `<source> -> <target>` would merge under
-    /// the repo's branch-protection policies. Read-only.
-    CheckMerge(ThreadCheckMergeArgs),
 
     /// Sweep merged, stale auto-created, or abandoned threads.
     #[command(
@@ -150,6 +139,61 @@ Examples:
         #[command(subcommand)]
         command: ThreadMarkerCommands,
     },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum ThreadOwnershipCommands {
+    /// Show the local owner or the complete signed conflict.
+    Status { thread: Option<String> },
+    /// Explicitly transfer a local-key Thread to the currently authorized account.
+    Claim { thread: Option<String> },
+    /// Original local owner chooses one accepted claim; the current account accepts.
+    Resolve {
+        thread: Option<String>,
+        /// Full claim ID shown by `heddle thread ownership status`.
+        #[arg(long)]
+        claim: String,
+    },
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use clap::Parser;
+
+    use super::*;
+    use crate::cli::cli_args::{Cli, Commands};
+
+    #[test]
+    fn ownership_commands_select_named_or_current_thread_and_require_explicit_winner() {
+        let status = Cli::try_parse_from(["heddle", "thread", "ownership", "status"])
+            .expect("current Thread status");
+        assert!(matches!(
+            status.command,
+            Commands::Thread {
+                command: ThreadCommands::Ownership {
+                    command: ThreadOwnershipCommands::Status { thread: None }
+                }
+            }
+        ));
+        let resolve = Cli::try_parse_from([
+            "heddle",
+            "thread",
+            "ownership",
+            "resolve",
+            "feature",
+            "--claim",
+            "ab12",
+        ])
+        .expect("named Thread and explicit claim");
+        assert!(
+            matches!(resolve.command, Commands::Thread { command: ThreadCommands::Ownership {
+            command: ThreadOwnershipCommands::Resolve { thread: Some(_), claim }
+        } } if claim == "ab12")
+        );
+        assert!(
+            Cli::try_parse_from(["heddle", "thread", "ownership", "resolve", "feature"]).is_err()
+        );
+    }
 }
 
 #[derive(Subcommand, Clone)]

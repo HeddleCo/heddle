@@ -2,15 +2,14 @@
 //! Show command.
 
 use anyhow::Result;
-use repo::{Repository, format_confidence};
-use verbs::status::next_action::canonical_git_import_ref_command;
-
 // The wire payloads live in cli-contract so the schema registry registers
 // the real serialization types.
 pub use heddle_cli_contract::cli::commands::wire::history::{
     ShowAgentInfo as AgentInfo, ShowImportGuidanceOutput, ShowOutput,
     ShowPrincipalInfo as PrincipalInfo, ShowVerificationInfo as VerificationInfo,
 };
+use repo::{Repository, format_confidence};
+use verbs::status::next_action::canonical_git_import_ref_command;
 
 use super::{
     action_line::{print_next_step, print_next_step_dim},

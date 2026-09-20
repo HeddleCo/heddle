@@ -185,7 +185,7 @@ fn now_unix_millis() -> Result<i64> {
 mod tests {
     use api::{
         descriptor_trust::{EntryReject, VerifiedEndpoint},
-        heddle::api::v1alpha1::EndpointDescriptor,
+        heddle::api::common::EndpointDescriptor,
     };
 
     use super::{
@@ -215,12 +215,14 @@ mod tests {
 
     #[test]
     fn empty_set_fails_closed_as_unavailable() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let error = fail_if_none_trusted(&[], &[]).unwrap_err();
         assert!(matches!(error, HostedError::EndpointDescriptorUnavailable));
     }
 
     #[test]
     fn all_window_rejects_fail_as_outside_window() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let error = fail_if_none_trusted(
             &[],
             &[
@@ -238,6 +240,7 @@ mod tests {
 
     #[test]
     fn unattested_or_invalid_signature_fails_closed_as_invalid_signature() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let error = fail_if_none_trusted(&[], &[EntryReject::Unattested]).unwrap_err();
         assert!(matches!(error, HostedError::InvalidDescriptorSignature));
         let error =
@@ -247,6 +250,7 @@ mod tests {
 
     #[test]
     fn region_preference_does_not_drop_remote_entries() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let hel = verified("hel", [0x11; 32]);
         let sjc = verified("sjc", [0x22; 32]);
         let trusted = [sjc, hel];
@@ -259,6 +263,7 @@ mod tests {
 
     #[test]
     fn descriptor_bootstrap_is_https_and_well_known() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         assert_eq!(
             descriptor_url("https://weft.example:8421"),
             "https://weft.example:8421/.well-known/heddle/iroh-endpoint"
@@ -271,6 +276,7 @@ mod tests {
 
     #[test]
     fn descriptor_bootstrap_urls_preserve_hostname_authority() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
         let canonical = canonical_server_authority("api-staging.heddle.sh").unwrap();
         assert_eq!(
             descriptor_url(&canonical),
@@ -285,6 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn half_config_refuses_before_network_io() {
+        let _process_env_guard = crate::test_process_env::shared().await;
         let error = super::resolve_and_verify_endpoint_descriptor(
             "weft.example:8421",
             &config::ClientConfig {

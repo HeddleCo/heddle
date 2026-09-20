@@ -11,8 +11,8 @@
 //!    that ListByState snapshot by `thread_ref` / wire `thread_id` before
 //!    apply; clone/pull pull-fold stays repo-wide.
 //! 2. Subscribe from the persisted client watermark (`after_event_id`).
-//! 3. Treat every live event as a doorbell. `GetDiscussion` is the authorized
-//!    snapshot; event JSON never supplies discussion or turn contents.
+//! 3. Treat every live event as a doorbell. `ObserveCollaboration` is the
+//!    authorized snapshot; event JSON never supplies discussion or turn contents.
 //! 4. Persist the watermark after apply, skip, or ignore — not after apply Err.
 //!
 //! Fail-closed on visibility: the server already filters emission by audience.
@@ -28,7 +28,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use api::heddle::api::v1alpha1::CallFailureCode;
+use api::heddle::api::common::CallFailureCode;
 use objects::{
     fs_atomic::write_file_atomic,
     lock::RepoLock,
@@ -268,7 +268,7 @@ pub fn save_scoped_cursor(
 /// True when this event is a discussion doorbell or payload.
 pub fn is_discussion_event(event: &RepoEvent) -> bool {
     DISCUSSION_EVENT_TYPES.contains(&event.event_type.as_str())
-        || event.kind == api::heddle::api::v1alpha1::RepoEventKind::DiscussionTurn as i32
+        || event.kind == crate::legacy_v1::RepoEventKind::DiscussionTurn as i32
 }
 
 /// Subscribe request for the discussion live tail.
@@ -516,7 +516,7 @@ struct EventPayload {
 
 fn parse_event_payload(event: &RepoEvent) -> EventPayload {
     // Doorbell identity only. Opened/resolved never reconstruct a
-    // HostedDiscussion from this JSON — GetDiscussion is the snapshot.
+    // HostedDiscussion from this JSON — ObserveCollaboration is the snapshot.
     let value = if event.payload_json.trim().is_empty() {
         serde_json::Value::Object(serde_json::Map::new())
     } else {
@@ -555,7 +555,7 @@ fn parse_state_id(value: &serde_json::Value) -> Option<StateId> {
     None
 }
 
-fn proto_state_id(state: &api::heddle::api::v1alpha1::StateId) -> Option<StateId> {
+fn proto_state_id(state: &api::heddle::api::common::StateId) -> Option<StateId> {
     StateId::try_from_slice(&state.value).ok()
 }
 

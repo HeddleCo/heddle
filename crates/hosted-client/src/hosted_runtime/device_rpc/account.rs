@@ -1,0 +1,119 @@
+//! Account-level device routes are admitted before any exact-Spool dispatcher.
+use std::sync::{Arc, Weak};
+
+use anyhow::{Context, Result};
+use api::heddle::api::{
+    common::{CallContext, CallFailureCode},
+    v1alpha2::*,
+};
+use prost::Message;
+
+use super::{
+    DeviceRpc, account_auth, account_feed::AccountFeed, failure, stream::ObservationAuthority,
+};
+pub(super) const METHODS: &[&str] = &[
+    "/heddle.api.v1alpha2.SearchService/Search",
+    "/heddle.api.v1alpha2.OperationService/ObserveOperations",
+    "/heddle.api.v1alpha2.EvidenceService/VerifyEvidence",
+    "/heddle.api.v1alpha2.WorkspaceService/ObserveWorkspace",
+    "/heddle.api.v1alpha2.WorkspaceService/ResolveResources",
+    "/heddle.api.v1alpha2.WorkspaceService/SetBookmark",
+    "/heddle.api.v1alpha2.SpoolService/ObserveSpool",
+    "/heddle.api.v1alpha2.SpoolService/ListSpools",
+    "/heddle.api.v1alpha2.SpoolService/CreateSpool",
+    "/heddle.api.v1alpha2.SpoolService/ReviseSpool",
+    "/heddle.api.v1alpha2.SpoolService/DeleteSpool",
+    "/heddle.api.v1alpha2.SpoolService/SetSpoolMount",
+    "/heddle.api.v1alpha2.SpoolService/RemoveSpoolMount",
+    "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
+    "/heddle.api.v1alpha2.IdentityService/IntrospectCredential",
+    "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership",
+    "/heddle.api.v1alpha2.ThreadService/ObserveThreads",
+];
+impl DeviceRpc {
+    pub(super) fn account_feed(&self) -> Result<Arc<AccountFeed>> {
+        let mut slot = self
+            .account_feed
+            .lock()
+            .map_err(|_| anyhow::anyhow!("account feed guard poisoned"))?;
+        if let Some(feed) = Weak::upgrade(&slot) {
+            return Ok(feed);
+        }
+        let feed = Arc::new(AccountFeed::new(&self.home)?);
+        *slot = Arc::downgrade(&feed);
+        Ok(feed)
+    }
+    pub(super) async fn serve_account(
+        &self,
+        method: &str,
+        context: &CallContext,
+        body: &[u8],
+        mut send: iroh::endpoint::SendStream,
+        budget: &mut super::super::hosted::claim_protocol::CallBudget,
+    ) -> Result<()> {
+        let descriptor = api::v2::method_descriptor(method).context("account method")?;
+        let prepared = (|| -> Result<_> {
+            let mut session = account_auth::authorize(&self.home, descriptor, context, body)?;
+            let catalog = repo::device_catalog::store::Catalog::read(&self.home)?;
+            let paths = catalog
+                .as_ref()
+                .map(|c| c.registrations())
+                .transpose()?
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.capability_path);
+            session.bind_scopes(paths)?;
+            session.finish_admission(&self.home)?;
+            Ok(session)
+        })();
+        let session = match prepared {
+            Ok(session) => session,
+            Err(error) => {
+                let failure = failure(CallFailureCode::Unauthenticated, error);
+                let bytes = if descriptor.streaming == api::StreamingShape::ServerStreaming {
+                    api::framing::encode_stream_failure(&failure)?
+                } else {
+                    api::framing::encode_failure_response(&failure)?
+                };
+                send.write_all(&bytes).await?;
+                send.finish()?;
+                return Ok(());
+            }
+        };
+        if descriptor.streaming == api::StreamingShape::ServerStreaming {
+            budget.retain().map_err(anyhow::Error::msg)?;
+            if method.ends_with("/Search") {
+                return self.search_local(session, body, send).await;
+            }
+            if method.ends_with("/ObserveOperations") {
+                return self.observe_operations(&session, body, send).await;
+            }
+            return self.observe_account(&session, method, body, send).await;
+        }
+        let result = if method.ends_with("/VerifyEvidence") {
+            self.verify_local_evidence(&session, body)
+        } else if method.ends_with("/ResolveResources") {
+            self.resolve_local_resources(&session, &ResolveResourcesRequest::decode(body)?)
+                .map(|r| r.encode_to_vec())
+        } else if method.ends_with("/ListSpools") {
+            self.list_local_spools(&session, &ListSpoolsRequest::decode(body)?)
+                .map(|r| r.encode_to_vec())
+        } else {
+            self.account_command(&session, method, body)
+        };
+        let result = result.and_then(|response| {
+            session.check_current(&self.home)?;
+            Ok(response)
+        });
+        let bytes = match result {
+            Ok(response) => api::framing::encode_success_response(&response)?,
+            Err(error) => api::framing::encode_failure_response(&failure(
+                CallFailureCode::FailedPrecondition,
+                error,
+            ))?,
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(30), send.write_all(&bytes)).await??;
+        send.finish()?;
+        Ok(())
+    }
+}

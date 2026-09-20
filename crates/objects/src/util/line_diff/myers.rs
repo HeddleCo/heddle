@@ -2,12 +2,14 @@
 //! Exact linear-space Myers. Heuristic approximation is not used; if the
 //! search cannot finish inside the work budget it returns BudgetExceeded.
 
-use super::super::budget::{BudgetExceeded, ResourceBudget, ResourceKind};
-use super::emit::{EqualEmit, emit_slid};
-use super::myers_search::{common_prefix, common_suffix, find_middle_snake};
-use super::scan::LineOff;
-use super::scratch::{ConquerJob, JOB_EQUAL, JOB_RANGE};
-use super::{EqualRun, LineDiffError};
+use super::{
+    super::budget::{BudgetExceeded, ResourceBudget, ResourceKind},
+    EqualRun, LineDiffError,
+    emit::{EqualEmit, emit_slid},
+    myers_search::{common_prefix, common_suffix, find_middle_snake},
+    scan::LineOff,
+    scratch::{ConquerJob, JOB_EQUAL, JOB_RANGE},
+};
 
 #[derive(Clone, Copy)]
 pub(super) struct LineView<'a> {

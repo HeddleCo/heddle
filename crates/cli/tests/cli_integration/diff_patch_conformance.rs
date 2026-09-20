@@ -1893,7 +1893,7 @@ fn status_same_path_regular_to_symlink_splits_not_modified() {
 /// Set up a git-overlay repo whose git branch has advanced past the heddle
 /// import (so `heddle diff` trusts the git worktree status), then capture the
 /// four renders of `mutate`'s worktree change plus the `--patch` oracle. `pre`
-/// is committed BEFORE `heddle adopt`, so its blobs/modes live in heddle's
+/// is committed BEFORE `heddle import local`, so its blobs/modes live in heddle's
 /// imported head tree where rename detection resolves them; the advancing
 /// commit is unrelated content so it never appears in the worktree diff.
 #[cfg(unix)]
@@ -1905,7 +1905,7 @@ fn git_overlay_status_renders(pre: &[Entry], mutate: impl Fn(&Path)) -> (StatusR
     }
     git(h.path(), &["add", "-A"]);
     git(h.path(), &["commit", "-q", "-m", "seed"]);
-    heddle(&["adopt"], Some(h.path())).unwrap();
+    heddle(&["import", "local"], Some(h.path())).unwrap();
     // Advance the git branch past the import with an UNRELATED commit so heddle
     // flips to trusting the git-overlay worktree status (`git_branch_advanced`).
     write_entry(h.path(), &normal("unrelated_advance.txt", "advance\n"));

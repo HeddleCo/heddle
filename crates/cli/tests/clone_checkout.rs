@@ -109,14 +109,16 @@ fn assert_checked_out_thread(clone: &Path, expected: &str) {
 
     let list_text = heddle(&["thread", "list"], clone);
     assert!(
-        list_text.contains("Current"),
-        "thread list text must have a Current section:\n{list_text}"
+        list_text.contains(&format!("* {expected}")) || list_text.contains("* main"),
+        "thread list text must mark the current checkout:\n{list_text}"
     );
     assert!(
-        !(list_text.contains("Other threads")
-            && !list_text.contains("Current")
-            && list_text.contains(expected)),
-        "default thread must not be listed only under Other threads:\n{list_text}"
+        list_text.contains("this checkout"),
+        "current thread should say this checkout:\n{list_text}"
+    );
+    assert!(
+        !list_text.contains("Other threads"),
+        "default thread list should not hide the current thread under Other threads:\n{list_text}"
     );
 
     let head = std::fs::read_to_string(clone.join(".heddle").join("HEAD"))

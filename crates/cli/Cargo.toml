@@ -42,6 +42,7 @@ merge.workspace = true
 api = { workspace = true }
 config.workspace = true
 hosted-client.workspace = true
+thread_api = { package = "heddle-thread-api", path = "../thread-api" }
 heddle-cli-args.workspace = true
 heddle-cli-contract.workspace = true
 heddle-cli-render.workspace = true
@@ -59,6 +60,7 @@ oplog.workspace = true
 wire.workspace = true
 refs.workspace = true
 repo.workspace = true
+rusqlite.workspace = true
 heddle-env-store.workspace = true
 semantic = { workspace = true, optional = true }
 notify.workspace = true
@@ -196,6 +198,7 @@ preview = ["hosted-client/preview"]
 # compiled as a fallback.
 ingest = ["heddle-cli-args/ingest", "heddle-cli-contract/ingest"]
 semantic = [
+    "hosted-client/semantic",
     "dep:semantic",
     "heddle-cli-args/semantic",
     "heddle-cli-contract/semantic",

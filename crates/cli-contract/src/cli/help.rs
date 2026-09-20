@@ -25,11 +25,11 @@ pub fn everyday_verbs() -> Vec<&'static str> {
 /// Head-of-list contract: the locked everyday verbs lead `heddle help`,
 /// ordered by contract help_rank. Everything else on the screen follows
 /// ranked by the same key. Umbrella nouns do not count as one; this is
-/// display order, not a fold of the live parser to these 23.
+/// display order, not a fold of the live parser to this curated surface.
 pub const LOCKED_EVERYDAY_VERBS: &[&str] = &[
-    "init", "clone", "status", "diff", "capture", "start", "ready", "land", "undo", "pull", "push",
-    "resolve", "continue", "log", "show", "query", "review", "discuss", "context", "whoami",
-    "daemon", "doctor", "help",
+    "init", "clone", "import", "status", "diff", "capture", "start", "ready", "land", "undo",
+    "pull", "push", "resolve", "continue", "log", "show", "query", "review", "discuss", "context",
+    "whoami", "daemon", "doctor", "help",
 ];
 
 /// The ranked first-screen list. Head: the locked everyday verbs in
@@ -71,6 +71,33 @@ fn probed_source_authority() -> repo::RepositorySourceAuthority {
     }
 }
 
+fn write_verb_line(
+    out: &mut String,
+    catalog: &crate::cli::commands::CommandCatalogOutput,
+    name: &str,
+) {
+    use std::fmt::Write;
+    let blurb = catalog_summary(catalog, name);
+    if blurb.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "  {name:<12}  {blurb}");
+}
+
+fn write_task_group(
+    out: &mut String,
+    catalog: &crate::cli::commands::CommandCatalogOutput,
+    title: &str,
+    verbs: &[&str],
+) {
+    use std::fmt::Write;
+    let _ = writeln!(out, "{title}");
+    for name in verbs {
+        write_verb_line(out, catalog, name);
+    }
+    let _ = writeln!(out);
+}
+
 fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthority) {
     use std::fmt::Write;
 
@@ -82,24 +109,33 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
 
     let _ = writeln!(out, "Heddle — agent-native version control");
     let _ = writeln!(out);
-    for name in ranked_help_roots(&catalog) {
-        let blurb = catalog_summary(&catalog, name);
-        if blurb.is_empty() {
-            continue;
-        }
-        let _ = writeln!(out, "  {:<12}  {}", name, blurb);
-    }
-    let _ = writeln!(out);
+    write_task_group(&mut *out, &catalog, "Start", &["init", "import", "clone"]);
+    write_task_group(
+        &mut *out,
+        &catalog,
+        "Daily",
+        &[
+            "status", "diff", "capture", "start", "ready", "land", "undo",
+        ],
+    );
+    write_task_group(
+        &mut *out,
+        &catalog,
+        "Share",
+        &["push", "pull", "review", "discuss", "context"],
+    );
+    write_task_group(
+        &mut *out,
+        &catalog,
+        "Recover",
+        &["resolve", "continue", "doctor"],
+    );
     let _ = writeln!(out, "Save: heddle init -> {capture}");
     let _ = writeln!(
         out,
-        "Isolated work: heddle start <name> --path ../<name> -> {capture} -> heddle ready -> heddle land"
+        "Isolated work: heddle start <name> -> {capture} -> heddle ready -> heddle land"
     );
     let _ = writeln!(out);
-    let _ = writeln!(
-        out,
-        "Start here: `heddle init`, `heddle clone`, or `heddle capture`."
-    );
     let _ = writeln!(
         out,
         "Tab-complete: `heddle completions bash` (also zsh, fish)."
@@ -128,12 +164,25 @@ fn write_first_screen(out: &mut String, authority: repo::RepositorySourceAuthori
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "Run `heddle help model` for the short mental model, \
-         or `heddle help <topic>` for a topic page (e.g. `git-concepts`, \
-         `git-overlay`, \
-         `threads`, `daemon`, `signals`, `git-projection`, `operation-ids`, \
-         `remotes`, `output-formats`, `ignore`/`heddleignore`, `git-dependencies`, \
-         `visibility`)."
+        "Topics: `heddle help <topic>` (model, git-concepts, threads, remotes, \
+         clone, discuss, advanced, output-formats, visibility)."
+    );
+    let _ = writeln!(out, "Full command tree: `heddle help --all`.");
+}
+
+fn write_full_tree(out: &mut String) {
+    use std::fmt::Write;
+
+    let catalog = crate::cli::commands::build_command_catalog();
+    let _ = writeln!(out, "Heddle — full command tree");
+    let _ = writeln!(out);
+    for name in ranked_help_roots(&catalog) {
+        write_verb_line(out, &catalog, name);
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(
+        out,
+        "Task map: `heddle help`. Advanced (daemon/netd/maintenance/hook/agent): `heddle help advanced`."
     );
 }
 
@@ -154,8 +203,8 @@ fn catalog_summary(catalog: &crate::cli::commands::CommandCatalogOutput, verb: &
 /// All output goes to stdout (this is help, not diagnostic). Returns
 /// `Ok(())` even for unknown topics; the printer surfaces the
 /// suggestion text rather than erroring.
-pub fn print_help(cmd: &clap::Command, topic: &[String]) -> std::io::Result<()> {
-    crate::cli::render::write_stdout(&render_help(cmd, topic))
+pub fn print_help(cmd: &clap::Command, topic: &[String], all: bool) -> std::io::Result<()> {
+    crate::cli::render::write_stdout(&render_help(cmd, topic, all))
         .map_err(|err| std::io::Error::other(err.to_string()))
 }
 
@@ -164,8 +213,8 @@ pub fn print_help(cmd: &clap::Command, topic: &[String]) -> std::io::Result<()> 
 /// [`print_help`] is a thin `write_stdout(&render_help(..))` wrapper over
 /// this, so the bytes are identical. Extracted so in-process tests can
 /// assert on help prose without spawning the binary (HeddleCo/heddle#381).
-pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
-    render_help_for_authority(cmd, topic, probed_source_authority())
+pub fn render_help(cmd: &clap::Command, topic: &[String], all: bool) -> String {
+    render_help_for_authority(cmd, topic, all, probed_source_authority())
 }
 
 /// Render curated help for an explicit source authority.
@@ -175,11 +224,13 @@ pub fn render_help(cmd: &clap::Command, topic: &[String]) -> String {
 pub fn render_help_for_authority(
     cmd: &clap::Command,
     topic: &[String],
+    all: bool,
     authority: repo::RepositorySourceAuthority,
 ) -> String {
     use std::fmt::Write;
     let mut out = String::new();
     match topic {
+        [] if all => write_full_tree(&mut out),
         [] => write_first_screen(&mut out, authority),
         [name] if topic_text(name).is_some() => {
             if let Some(text) = topic_text(name) {
@@ -237,7 +288,7 @@ pub fn render_direct_help_for_raw(cmd: &clap::Command, raw: &[String]) -> Option
                 subcommand.render_help().to_string()
             }
         }
-        None => render_help(cmd, &path),
+        None => render_help(cmd, &path, false),
     })
 }
 
@@ -480,7 +531,7 @@ pub fn render_for_args(args: &[&str]) -> Option<String> {
     // clap-driven help that exits during parse; serve them too since they
     // render the curated everyday surface.)
     if raw.is_empty() || raw == ["--help"] || raw == ["-h"] || raw == ["help"] {
-        return Some(render_help(&command, &[]));
+        return Some(render_help(&command, &[], false));
     }
 
     // `heddle <path> --help` pre-parse direct help (e.g. `clone --help`,
@@ -492,10 +543,10 @@ pub fn render_for_args(args: &[&str]) -> Option<String> {
     // `capture --help-agent` reveal: clap owns the parse, so every global
     // spelling it accepts is handled natively.
     if let Ok(cli) = Cli::try_parse_from(std::iter::once("heddle".to_string()).chain(raw.clone()))
-        && let Commands::Help { topics } = &cli.command
+        && let Commands::Help { all, topics } = &cli.command
     {
         // `heddle help <topics>` — curated topic / command-path help.
-        return Some(render_help(&command, topics));
+        return Some(render_help(&command, topics, *all));
     }
     if let Ok(cli) = Cli::try_parse_from(std::iter::once("heddle".to_string()).chain(raw.clone()))
         && let Commands::Capture(args) = &cli.command
@@ -528,6 +579,7 @@ pub fn topic_text(topic: &str) -> Option<&'static str> {
         "git-projection" | "git-projections" | "footer" | "notes" => GIT_PROJECTION_TOPIC,
         "signals" | "risk-signals" => SIGNALS_TOPIC,
         "visibility" | "audience" => VISIBILITY_TOPIC,
+        "advanced" => ADVANCED_TOPIC,
         _ => return None,
     })
 }
@@ -577,11 +629,24 @@ agent-flags` for capture attribution overrides.
 // `heddle clone --help` keeps the signature + flags + a one-screen
 // summary; this topic carries the full default-thread fallback chain and
 // --depth exposition that used to bloat the after-help (heddle#652).
-const CLONE_TOPIC: &str = r#"Cloning — Git Overlay and native Heddle repositories.
+const CLONE_TOPIC: &str = r#"Cloning — download an existing repository into a local directory.
 
-    heddle clone <remote> <dir> [--thread <name>] [--depth <n>]
+    heddle clone <remote> [<dir>] [--source git|heddle] [--thread <name>]
 
 Run `heddle clone --help` for the flag list.
+
+# Protocol
+
+- `--source git` clones through Git overlay (Sley). `--source heddle` clones a
+  hosted or native Heddle repository. When `--source` is omitted, URLs ending
+  in `.git` select Git and other HTTPS URLs select hosted Heddle.
+- The chosen protocol is not retried as the other on failure.
+- Convert a local Git checkout into native Heddle with `heddle import local`.
+
+# Destination
+
+`<dir>` is optional only when the source has an unambiguous basename
+(last path segment, `.git` suffix stripped). Pass `<dir>` otherwise.
 
 # Repository authority
 
@@ -592,28 +657,25 @@ Run `heddle clone --help` for the flag list.
   to override.
 - Clone never prompts.
 
-# Shallow clones (--depth)
-
---depth 0 (the default) clones full history. --depth N fetches only the
-tip plus N generations of ancestry (--depth 1: the tip plus its immediate parents),
-so `heddle log` stops at the depth boundary; history older than that is
-not present locally — re-clone at a greater --depth (or --depth 0) to
-obtain it.
-
-Depth controls native Heddle history extent only — how many states the clone fetches —
-and says nothing about object contents. Whether a state's blobs are
-present locally or fetched lazily is a separate concern that `--depth`
-never governs. Git Overlay clones ingest full history and reject partial-history
-options. Advanced/planned flags `--lazy` and `--filter blob:none`
-skip blob content and hydrate it on demand for hosted/network Heddle
-remotes; local clone paths reject them today.
-
 A bare hosted name (`https://host/notes`) clones your personal copy
 `spool/<handle>/notes` when it exists, otherwise the root `spool/notes`.
 `heddle promote` moves a personal spool to that root.
 
 See `heddle help threads` for the thread model and `heddle help remotes`
 for remote management.
+"#;
+
+const ADVANCED_TOPIC: &str = r#"Advanced commands — daemon, network daemon, maintenance, hooks, and agents.
+
+These stay off the first-screen task map. `heddle help --all` lists every root.
+
+  daemon        FUSE mount-daemon control plane (`serve` | `status` | `stop`).
+  netd          Hosted network daemon control plane.
+  maintenance   Rebuildable performance sidecars (fsck, gc, oplog, …).
+  hook          Repository hook install/list/uninstall.
+  agent         Reservation and one-shot orchestration API.
+
+Related: `heddle help daemon`, `heddle help agent-flags`.
 "#;
 
 const AGENT_FLAGS_TOPIC: &str = r#"Agent automation flags for `heddle capture`.
@@ -679,7 +741,7 @@ Everyday verbs:
     heddle status
     heddle diff
     heddle capture -m "..."
-    heddle start <name> --path ../<name>
+    heddle start <name>
     heddle ready
     heddle land
     heddle undo
@@ -723,7 +785,7 @@ uses an ephemeral Git repository when it needs to translate native state; it
 does not retain a second object warehouse in `.heddle/git`.
 
 Use `heddle init` to add that sidecar to an existing Git checkout. Use
-`heddle adopt` when you want one atomic transition that imports source history,
+`heddle import local` when you want one atomic transition that imports source history,
 makes Heddle the repository authority, and enables the full native feature set.
 
 Common mappings:
@@ -742,7 +804,7 @@ Common mappings:
 Heddle intentionally does not reproduce the full Git command surface. An
 optional Git-compatible client can perform unsupported Git operations against
 the same `.git`; it is not a Heddle dependency. Explicit `bridge git import`,
-`bridge git export`, and `sync git` translate data between authorities. After `heddle adopt`,
+`bridge git export`, and `sync git` translate data between authorities. After `heddle import local`,
 the retained `.git` is an explicit Git Projection adapter; it no longer selects
 repository source authority.
 "#;
@@ -793,14 +855,14 @@ identically. The mode only controls bytes-on-disk semantics.\n\
 \n\
 # Isolated checkout path\n\
 \n\
-- Use `heddle start <name> --path <dir>` when you want an isolated\n\
-  checkout. It creates the thread ref and materializes the checkout in\n\
-  one step. `--path` is required when workspace is omitted or `auto`; without it\n\
-  start refuses instead of hiding a checkout under `.heddle/threads/<name>/`.\n\
+- Use `heddle start <name>` for an isolated checkout under\n\
+  `.heddle/threads/<name>/…`, or pass `--path <dir>` to place it elsewhere.\n\
+  It creates the thread ref and materializes the checkout in one step.\n\
+  Omitted `--path` always defaults under `.heddle/threads/` (not TTY-gated).\n\
 - To stay on this checkout, use `heddle thread create <name>` then\n\
   `heddle thread switch <name>`.\n\
 - Advanced split form: `heddle thread create <name>` creates only the\n\
-  ref, and `heddle thread promote <name> --path <dir>` materializes it\n\
+  ref, and `heddle thread checkout <name> --path <dir>` materializes it\n\
   later. Use this only when you intentionally need to create the ref\n\
   now and materialize the checkout later.\n\
 - `--workspace` on `heddle start` selects byte storage for that checkout;\n\
@@ -856,8 +918,8 @@ returns a typed conflict.\n\
 advertise `persists_op_id: true` and can save a generated id across an\n\
 interrupted retry loop. Commands with `op_id_behavior: none` reject --op-id.\n\
 \n\
-The dedup store is file-backed locally (`.heddle/state/operation_dedup.bin`,\n\
-rmp-serde, 7-day default retention) and Postgres-backed in hosted deployments.\n\
+The dedup store uses local SQLite (`.heddle/metadata.sqlite3`,\n\
+7-day completed-receipt retention) and Postgres in hosted deployments.\n\
 \n\
 Without an id, dedup is bypassed and the call executes normally. For the\n\
 authoritative per-command contract, use `heddle help --output json`.\n";
@@ -906,48 +968,49 @@ Run `heddle help --output json` to inspect the public command surface, and
 or Git Projection state problems.
 "#;
 
-const REVIEW_TOPIC: &str = "Review surface — `heddle review show | sign | next | health`.\n\
+const REVIEW_TOPIC: &str = "Hosted Thread review — `heddle review show | approve | list | revoke | readiness`.\n\
 \n\
-`show <state>`    — render the review payload (summary, agent narrative,\n\
-                    in-budget signals, anchored discussions).\n\
-                    `--all-signals` also surfaces hidden ones.\n\
-`sign <state>`    — submit a `read | agent_preview | agent_co_review`\n\
-                    signature. `--symbols file:symbol` scopes to\n\
-                    specific symbols; default is the whole change.\n\
-`next`            — show the next locally discoverable review item, or explain\n\
-                    why none is available.\n\
-`health [--window N]`\n\
-                  — per-module signal fire-rate over the last N states.\n\
+`show [THREAD]`\n\
+                  — show the exact source and target comparison.\n\
+`approve [THREAD] [-m MESSAGE]`\n\
+                  — sign that exact comparison with your configured identity.\n\
+`list [THREAD]`   — list signed review decisions.\n\
+`revoke <REVIEW_ID> --thread THREAD`\n\
+                  — revoke one of your signed approvals.\n\
+`readiness [THREAD] --into TARGET`\n\
+                  — check the exact comparison and landing requirements.\n\
 \n\
-Tick budget: at most 3 signals per state by default. Priority:\n\
-invariant_adjacency > self_flagged_uncertainty > pattern_deviation >\n\
-novelty > test_reachability.\n";
+Pass `--remote NAME` to choose a remote. Without it, Heddle uses the configured\n\
+default remote and fails when none is configured.\n";
 
-const DISCUSS_TOPIC: &str = "`heddle discuss open | append | resolve | reopen | list | show | wait`\n\
+const DISCUSS_TOPIC: &str = "`heddle discuss new | reply | resolve | reopen | list | show | wait`\n\
 \n\
 Scope: native Heddle only. Discussions are stored in `.heddle` and travel over\n\
 `heddle push` / `heddle pull` to a Heddle remote. They are deliberately not\n\
 projected into Git — not into `refs/notes/*`, not into a tracked file — so\n\
 `git push` and `git clone` do not carry them. In Git Overlay mode discussions\n\
-still work; they are local to that working copy, and `heddle discuss open`\n\
+still work; they are local to that working copy, and `heddle discuss new`\n\
 says so once. A clone with no `.heddle` reports that no store is present\n\
 rather than reporting zero discussions.\n\
 \n\
 Discussions are stable records in the repository collaboration log. Turns,\n\
 resolutions, and reopenings append immutable operations; concurrent turns\n\
-converge without rewriting source history. Symbol anchors record the state,\n\
-file, and symbol where the discussion began:\n\
+converge without rewriting source history. `--path` / `--symbol` / `--line`\n\
+record the file and selector; `--state` is the historical revision:\n\
 \n\
+- `discuss new --path <file> --symbol <sym> --body \"<text>\"`  open a discussion.\n\
+- `discuss new --path <file> --file <markdown>`                body from a file.\n\
+- `discuss reply <id> --body \"<text>\"`                        reply; parent = latest.\n\
+- `discuss reply <id> --turn N --body \"<text>\"`               reply to that turn.\n\
 - `resolve <id> --mode by-edit`          with `--state` (defaults to HEAD).\n\
   Records that a subsequent edit addressed the discussion.\n\
 - `resolve <id> --mode dismiss`          requires non-empty `--reason`.\n\
-- `resolve <id> --into-annotation --body <text>` creates and links a context\n\
-  annotation; `--kind` defaults to rationale and `--tag` is repeatable.\n\
+- `resolve <id> --mode into-annotation --body <text>` creates and links a\n\
+  context annotation; `--kind` defaults to rationale and `--tag` is repeatable.\n\
 - `reopen <id> --reason <text>`          compensates a prior resolution.\n\
 \n\
-`open` accepts either `<file> <symbol> <body>` or the equivalent named\n\
-`--file`, `--symbol`, and `--body` flags. `--thread <ref>` additionally attaches\n\
-the symbol-anchored discussion to a thread; it does not replace the anchor.\n\
+`--body` is inline markdown; `--file` is a markdown body file. `--thread <ref>`\n\
+additionally attaches the discussion to a thread; it does not replace the anchor.\n\
 \n\
 Visibility: `--visibility public|internal|team:NAME|restricted:LABEL|private:LABEL`.\n\
 Empty visibility uses the configured discussion visibility policy.\n\
@@ -986,13 +1049,13 @@ Save and synchronize ordinary work:
 
 Isolate risky work:
 
-    heddle start <name> --path ../<name>
-    cd ../<name>
-    heddle capture -m "..."
+    heddle start <name>                       # checkout under .heddle/threads/
+    heddle capture -m "..."                   # inside that checkout
     heddle ready
-    cd -
-    heddle land --thread <name>
+    heddle land --thread <name>               # from the parent repo
     heddle push
+
+Or place the checkout explicitly: `heddle start <name> --path ../<name>`.
 
 Recover or prove state:
 
@@ -1002,7 +1065,7 @@ Recover or prove state:
 State-specific recovery:
 
     Worktree has unsaved edits: heddle capture -m "..."
-    Move atomically to the full Native Heddle feature set: heddle adopt --ref <branch>
+    Move atomically to the full Native Heddle feature set: heddle import local --ref <branch>
 "#;
 
 const GIT_PROJECTION_TOPIC: &str = r#"Git Projection — translate between Native Heddle and Git.
@@ -1014,7 +1077,7 @@ operates on that repository directly and normal operation never reads or creates
 
 Move an existing Git repository to Native Heddle atomically:
 
-    heddle adopt --ref <branch>
+    heddle import local --ref <branch>
 
 Translate explicitly without changing source authority:
 
@@ -1150,6 +1213,7 @@ mod tests {
             "clone",
             "visibility",
             "audience",
+            "advanced",
         ] {
             assert!(topic_text(topic).is_some(), "{topic}");
         }
@@ -1173,19 +1237,19 @@ mod tests {
         }
     }
 
-    /// Regression: heddle#150. Commands referenced in inline tips and
-    /// error messages must remain discoverable on the ranked screen.
+    /// Commands referenced in inline tips stay discoverable on `--all`.
     #[test]
-    fn ranked_screen_lists_tip_referenced_commands() {
+    fn help_all_lists_tip_referenced_commands() {
         use clap::CommandFactory;
         let cmd = crate::cli::cli_args::Cli::command();
-        let help = render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::Native);
+        let help =
+            render_help_for_authority(&cmd, &[], true, repo::RepositorySourceAuthority::Native);
         for verb in ["abort", "shell"] {
             assert!(
                 help.lines()
                     .any(|line| line.trim_start().starts_with(&format!("{verb}  "))),
                 "`{verb}` is referenced in user-facing tips but is not \
-                 advertised by `heddle help`"
+                 advertised by `heddle help --all`"
             );
         }
     }
@@ -1196,7 +1260,8 @@ mod tests {
     fn first_screen_teaches_capture_as_the_save() {
         use clap::CommandFactory;
         let cmd = crate::cli::cli_args::Cli::command();
-        let help = render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::Native);
+        let help =
+            render_help_for_authority(&cmd, &[], false, repo::RepositorySourceAuthority::Native);
         assert!(
             help.contains("heddle capture -m"),
             "default first screen still teaches capture: {help}"
@@ -1217,7 +1282,8 @@ mod tests {
     fn first_screen_mentions_completions() {
         use clap::CommandFactory;
         let cmd = crate::cli::cli_args::Cli::command();
-        let help = render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::Native);
+        let help =
+            render_help_for_authority(&cmd, &[], false, repo::RepositorySourceAuthority::Native);
         assert!(
             help.contains("heddle completions"),
             "first screen must name the public completions verb: {help}"
@@ -1232,8 +1298,12 @@ mod tests {
     fn first_screen_does_not_teach_capture_then_commit_on_overlay() {
         use clap::CommandFactory;
         let cmd = crate::cli::cli_args::Cli::command();
-        let help =
-            render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::GitOverlay);
+        let help = render_help_for_authority(
+            &cmd,
+            &[],
+            false,
+            repo::RepositorySourceAuthority::GitOverlay,
+        );
         assert!(
             help.contains("Save: heddle init -> heddle capture -m \"...\""),
             "overlay first screen still teaches capture as the save: {help}"
@@ -1248,22 +1318,46 @@ mod tests {
         );
     }
 
-    /// heddle#1458. First screen is the locked everyday surface: the ~23
-    /// verbs, no `help advanced`, no capture-then-commit, no default
-    /// `land --thread`, no leftover nearby `verify`.
+    /// First screen is a task map, not the full verb dump.
     #[test]
-    fn first_screen_is_the_locked_everyday_surface() {
+    fn first_screen_is_the_task_map() {
         use clap::CommandFactory;
         let cmd = crate::cli::cli_args::Cli::command();
-        let catalog = crate::cli::commands::build_command_catalog();
         for authority in [
             repo::RepositorySourceAuthority::Native,
             repo::RepositorySourceAuthority::GitOverlay,
         ] {
-            let help = render_help_for_authority(&cmd, &[], authority);
+            let help = render_help_for_authority(&cmd, &[], false, authority);
+            for heading in ["Start", "Daily", "Share", "Recover"] {
+                assert!(help.contains(heading), "task map missing {heading}: {help}");
+            }
+            for verb in [
+                "init", "import", "clone", "status", "diff", "capture", "start", "ready", "land",
+                "undo", "push", "pull", "review", "discuss", "context", "resolve", "continue",
+                "doctor",
+            ] {
+                assert!(
+                    help.lines()
+                        .any(|line| line.trim_start().starts_with(&format!("{verb}  "))
+                            || line.trim_start().starts_with(&format!("{verb}\t"))),
+                    "task map must list `{verb}`: {help}"
+                );
+            }
+            for buried in ["daemon", "netd", "maintenance", "hook", "agent"] {
+                assert!(
+                    !help
+                        .lines()
+                        .any(|line| line.trim_start().starts_with(&format!("{buried}  "))),
+                    "first screen must not list advanced `{buried}`: {help}"
+                );
+            }
             assert!(
-                !help.contains("heddle help advanced"),
-                "first screen must not point at `help advanced`: {help}"
+                help.contains("heddle help --all"),
+                "first screen points at the full tree: {help}"
+            );
+            assert!(
+                help.contains("heddle help") && help.contains("advanced"),
+                "first screen points at the advanced topic: {help}"
             );
             assert!(
                 !help.contains("land --thread"),
@@ -1273,24 +1367,6 @@ mod tests {
                 !help.contains("-> heddle commit"),
                 "first screen must not teach capture then commit: {help}"
             );
-            assert!(
-                !help.contains("Nearby:") && !help.contains("`heddle verify`"),
-                "first screen must not park verify as a nearby leftover: {help}"
-            );
-            for verb in LOCKED_EVERYDAY_VERBS {
-                let Some(entry) = catalog.command_by_display(verb) else {
-                    continue;
-                };
-                if entry.summary.is_empty() {
-                    continue;
-                }
-                assert!(
-                    help.lines()
-                        .any(|line| line.trim_start().starts_with(&format!("{verb}  "))
-                            || line.trim_start().starts_with(&format!("{verb}\t"))),
-                    "first screen must list everyday verb `{verb}`: {help}"
-                );
-            }
         }
     }
 
@@ -1422,7 +1498,7 @@ mod tests {
 
         let projection = topic_text("git-projection").expect("git-projection topic should exist");
         assert!(projection.contains("It is not Git Overlay"));
-        assert!(projection.contains("heddle adopt --ref <branch>"));
+        assert!(projection.contains("heddle import local --ref <branch>"));
         assert!(projection.contains("heddle bridge git export --destination"));
         assert!(projection.contains("normal operation never reads or creates"));
         assert!(projection.contains("`.heddle/git`"));
@@ -1636,16 +1712,16 @@ mod tests {
         assert!(config.contains("Principal resolution (highest first)"));
     }
 
-    /// The ranked first screen is exhaustive: every non-hidden root in
+    /// `heddle help --all` is exhaustive: every non-hidden root in
     /// the contract table renders (unless feature-gated out of this
-    /// build), and the locked everyday head keeps its rank order ahead
-    /// of the ranked tail.
+    /// build).
     #[test]
-    fn first_screen_ranks_locked_head_then_every_remaining_root() {
+    fn help_all_lists_every_visible_root() {
         use clap::CommandFactory;
         let cmd = crate::cli::cli_args::Cli::command();
         let catalog = crate::cli::commands::build_command_catalog();
-        let help = render_help_for_authority(&cmd, &[], repo::RepositorySourceAuthority::Native);
+        let help =
+            render_help_for_authority(&cmd, &[], true, repo::RepositorySourceAuthority::Native);
 
         let listed: Vec<&str> = help
             .lines()
@@ -1666,26 +1742,7 @@ mod tests {
             let display: &str = &entry.display;
             assert!(
                 listed.contains(&display),
-                "non-hidden root `{display}` must render on `heddle help`: {help}"
-            );
-        }
-
-        // Head-of-list: the LAST locked verb's rank must not exceed any
-        // tail verb rendered after it... simpler invariant: every locked
-        // verb appears before every non-locked one.
-        let positions: Vec<usize> = LOCKED_EVERYDAY_VERBS
-            .iter()
-            .filter_map(|verb| listed.iter().position(|name| name == verb))
-            .collect();
-        if let (Some(first_tail), Some(last_head)) = (
-            listed
-                .iter()
-                .position(|name| !LOCKED_EVERYDAY_VERBS.contains(name)),
-            positions.last(),
-        ) {
-            assert!(
-                *last_head < first_tail,
-                "locked everyday head must precede the ranked tail: {listed:?}"
+                "non-hidden root `{display}` must render on `heddle help --all`: {help}"
             );
         }
     }

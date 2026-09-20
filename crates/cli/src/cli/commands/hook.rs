@@ -5,11 +5,12 @@ use std::io::{self, IsTerminal, Read};
 
 use anyhow::{Context, Result, anyhow};
 use repo::{Hook, HookManager};
-
 use serde::Serialize;
 
-use super::advice::RecoveryAdvice;
-use super::next_action::{NextActionValidationContext, write_full_command_json};
+use super::{
+    advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
+};
 use crate::cli::{Cli, HookCommands, HookInstallSource, should_output_json};
 
 #[derive(Serialize)]
@@ -94,7 +95,7 @@ pub fn cmd_hook(cli: &Cli, command: HookCommands) -> Result<()> {
 
         HookCommands::Events { event } => {
             // Print the static local event catalog. Hook events are private
-            // Heddle behavior, not part of the shared v1alpha1 API.
+            // Heddle behavior, not part of the shared public API.
             let catalog: &[(&str, &str)] = &[
                 (
                     "pre_capture",

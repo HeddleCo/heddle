@@ -60,7 +60,7 @@ fn git(args: &[&str], path: &std::path::Path) {
 }
 
 fn heddle_adopt(path: &std::path::Path) {
-    heddle(&["adopt"], Some(path)).unwrap();
+    heddle(&["import", "local"], Some(path)).unwrap();
 }
 
 /// Pipe a patch into `git <args>` (e.g. `["apply", "--check"]`) run in
@@ -268,10 +268,10 @@ fn test_cli_adopt_human_progress_and_json_cleanliness() {
     init_git_repo(human.path());
     seed_git_history(human.path(), 3);
 
-    let output = heddle(&["--output", "text", "adopt"], Some(human.path())).unwrap();
+    let output = heddle(&["--output", "text", "import", "local"], Some(human.path())).unwrap();
     assert!(
         output.contains("Importing Git history:")
-            && output.contains("adopted the Git repository into Heddle-native source storage")
+            && output.contains("imported the Git repository into Heddle-native source storage")
             && output.contains("Git Projection: retained for explicit import/export/sync")
             && output.contains("Git commits inspected: 3")
             && output.contains("New Heddle states: 3"),
@@ -281,7 +281,7 @@ fn test_cli_adopt_human_progress_and_json_cleanliness() {
     let json = TempDir::new().unwrap();
     init_git_repo(json.path());
     seed_git_history(json.path(), 3);
-    let output = heddle_output(&["--output", "json", "adopt"], Some(json.path()))
+    let output = heddle_output(&["--output", "json", "import", "local"], Some(json.path()))
         .expect("json adopt should run");
     assert!(output.status.success());
     let stdout = str::from_utf8(&output.stdout).unwrap();
@@ -290,7 +290,7 @@ fn test_cli_adopt_human_progress_and_json_cleanliness() {
         "json adopt stdout should not include human progress: {stdout}"
     );
     let parsed = json_stdout(&output, "adopt json");
-    assert_eq!(parsed["output_kind"], "adopt");
+    assert_eq!(parsed["output_kind"], "import_local");
     assert_eq!(parsed["status"], "completed");
 }
 
@@ -303,12 +303,12 @@ fn test_cli_adopt_tag_output_does_not_claim_branch_adoption() {
     git(&["tag", "v1.0.0"], temp.path());
 
     let output = heddle(
-        &["--output", "text", "adopt", "--ref", "v1.0.0"],
+        &["--output", "text", "import", "local", "--ref", "v1.0.0"],
         Some(temp.path()),
     )
     .unwrap();
     assert!(
-        output.contains("adopted the Git repository into Heddle-native source storage")
+        output.contains("imported the Git repository into Heddle-native source storage")
             && output.contains("Imported refs: v1.0.0")
             && output.contains("Branches ready: 0")
             && output.contains("Tags ready: 1"),
@@ -335,7 +335,14 @@ fn test_cli_adopt_partial_divergence_failure_preserves_state_and_one_recovery() 
     git_commit_all(temp.path(), "git side");
 
     let output = heddle_output(
-        &["--output", "json", "adopt", "--ref", "feature/drop-in"],
+        &[
+            "--output",
+            "json",
+            "import",
+            "local",
+            "--ref",
+            "feature/drop-in",
+        ],
         Some(temp.path()),
     )
     .expect("diverged adopt should run and fail");
@@ -346,7 +353,8 @@ fn test_cli_adopt_partial_divergence_failure_preserves_state_and_one_recovery() 
         "json failure should not include human progress on stdout: {stdout}"
     );
     let stderr = str::from_utf8(&output.stderr).unwrap();
-    let envelope: Value = serde_json::from_str(stderr.trim()).unwrap_or_else(|err| {
+    let envelope_line = stderr.lines().last().unwrap_or_default();
+    let envelope: Value = serde_json::from_str(envelope_line).unwrap_or_else(|err| {
         panic!("adopt failure should emit JSON recovery advice: {err}; stderr={stderr}")
     });
     assert_eq!(

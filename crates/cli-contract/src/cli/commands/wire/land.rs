@@ -3,9 +3,9 @@
 
 use schemars::JsonSchema;
 use serde::Serialize;
+use verbs::RepositoryVerificationState;
 
 use super::operator::OperatorCommandOutput;
-use verbs::RepositoryVerificationState;
 
 /// JSON payload for `heddle sync`.
 #[derive(Serialize, JsonSchema)]

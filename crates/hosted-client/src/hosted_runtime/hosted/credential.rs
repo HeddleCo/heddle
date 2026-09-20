@@ -31,6 +31,7 @@ impl CredentialSource {
 }
 
 pub struct ResolvedHostedCredential {
+    pub mint_root_attachment: Option<Vec<u8>>,
     pub token: Option<AuthToken>,
     pub proof_key_pem: Option<String>,
     pub(crate) renewable: Option<RenewableAuthorityCredential>,
@@ -96,6 +97,7 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
             );
         }
         return Ok(ResolvedHostedCredential {
+            mint_root_attachment: verified.mint_root_attachment,
             token: Some(AuthToken::new(verified.token, "hcred-env")),
             proof_key_pem: Some(verified.proof_key_pem),
             renewable: None,
@@ -111,6 +113,7 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
     {
         let renewable = RenewableAuthorityCredential::from_stored(&credential);
         return Ok(ResolvedHostedCredential {
+            mint_root_attachment: credential.mint_root_attachment,
             token: Some(AuthToken::new(credential.token, "credential-store")),
             proof_key_pem: credential.private_key_pem,
             renewable,
@@ -122,6 +125,7 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
     }
 
     Ok(ResolvedHostedCredential {
+        mint_root_attachment: None,
         token: None,
         proof_key_pem: None,
         renewable: None,
@@ -135,6 +139,40 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
 pub fn resolve_active_bearer() -> Result<Option<AuthToken>> {
     let server = credentials::default_server()?;
     Ok(resolve_hosted_credential(server.as_deref())?.token)
+}
+
+/// Derive a capture principal from a locally stored hosted account.
+///
+/// Name is the hosted handle / account subject. Email is the subject when it
+/// looks like an address; otherwise a noreply address derived from that same
+/// handle so Git overlay commits still have an accountable identity.
+pub fn hosted_account_principal() -> Option<(String, String)> {
+    let server = credentials::default_server().ok().flatten().or_else(|| {
+        credentials::load_credentials()
+            .ok()
+            .and_then(|store| store.servers.keys().next().cloned())
+    });
+    let resolved = resolve_hosted_credential(server.as_deref()).ok()?;
+    let subject = resolved
+        .subject
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(principal_from_hosted_subject(subject))
+}
+
+pub fn principal_from_hosted_subject(subject: &str) -> (String, String) {
+    let subject = subject.trim();
+    if let Some((local, domain)) = subject.split_once('@')
+        && !local.is_empty()
+        && !domain.is_empty()
+    {
+        return (local.to_string(), subject.to_string());
+    }
+    (
+        subject.to_string(),
+        format!("{subject}@users.noreply.heddle.sh"),
+    )
 }
 
 pub(crate) fn server_keys_match(left: &str, right: &str) -> bool {
@@ -173,6 +211,7 @@ mod tests {
         crate::hosted_runtime::credential_file::write_credential_file(
             path,
             &crate::hosted_runtime::credential_file::VerifiedCredential {
+                mint_root_attachment: None,
                 server: server.to_string(),
                 kind: crate::hosted_runtime::credential_file::CredentialKind::Device,
                 subject: subject.to_string(),
@@ -214,12 +253,14 @@ mod tests {
 
     #[test]
     fn server_matching_ignores_supported_schemes_only() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         assert!(server_keys_match("https://api.heddle.sh", "api.heddle.sh"));
         assert!(!server_keys_match("api.heddle.sh", "other.heddle.sh"));
     }
 
     #[test]
     fn inline_credential_contents_are_rejected() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|_| {
             unsafe { std::env::set_var("HEDDLE_CREDENTIAL", "{\"format\":\"heddle-credential\"}") };
             let error = credential_env_path().expect_err("inline contents must not be accepted");
@@ -229,6 +270,7 @@ mod tests {
 
     #[test]
     fn env_credential_resolves_and_is_not_renewable() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|home| {
             let path = home.join("agent.hcred");
             write_sample_hcred(&path, "api.heddle.test", "alice");
@@ -246,10 +288,12 @@ mod tests {
 
     #[test]
     fn env_server_mismatch_never_falls_back_to_keystore() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|home| {
             config::credentials::store_server_credential(
                 "api.target.test",
                 config::credentials::ServerCredential {
+                    mint_root_attachment: None,
                     token: "keystore-token".to_string(),
                     subject: "human".to_string(),
                     device_id: None,
@@ -273,10 +317,12 @@ mod tests {
 
     #[test]
     fn unreadable_env_credential_never_falls_back_to_keystore() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|home| {
             config::credentials::store_server_credential(
                 "api.target.test",
                 config::credentials::ServerCredential {
+                    mint_root_attachment: None,
                     token: "keystore-token".to_string(),
                     subject: "human".to_string(),
                     device_id: None,
@@ -290,6 +336,46 @@ mod tests {
 
             resolve_hosted_credential(Some("api.target.test"))
                 .expect_err("unreadable explicit credential must be a hard error");
+        });
+    }
+
+    #[test]
+    fn hosted_subject_derives_handle_and_optional_email() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        assert_eq!(
+            super::principal_from_hosted_subject("luke@example.com"),
+            ("luke".to_string(), "luke@example.com".to_string())
+        );
+        assert_eq!(
+            super::principal_from_hosted_subject("luke"),
+            (
+                "luke".to_string(),
+                "luke@users.noreply.heddle.sh".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn hosted_account_principal_reads_stored_login() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        with_isolated_env(|_| {
+            config::credentials::store_server_credential(
+                "api.heddle.test",
+                config::credentials::ServerCredential {
+                    mint_root_attachment: None,
+                    token: "token".to_string(),
+                    subject: "luke@example.com".to_string(),
+                    device_id: None,
+                    credential_id: None,
+                    private_key_pem: None,
+                    expires_at: None,
+                },
+            )
+            .expect("store hosted login");
+            assert_eq!(
+                super::hosted_account_principal(),
+                Some(("luke".to_string(), "luke@example.com".to_string()))
+            );
         });
     }
 }

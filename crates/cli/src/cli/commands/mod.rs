@@ -81,6 +81,7 @@ mod thread;
 mod thread_approval;
 mod thread_cmd;
 mod thread_landing;
+mod thread_ownership_cmd;
 mod thread_shaping;
 mod timeline_cmd;
 mod undo;
@@ -99,6 +100,7 @@ pub use agent_cmd::{
     agent_api_schema, cmd_agent_capture, cmd_agent_heartbeat, cmd_agent_list, cmd_agent_ready,
     cmd_agent_release, cmd_agent_reserve,
 };
+pub use blame::cmd_blame;
 #[cfg(feature = "ci")]
 pub use ci::cmd_ci;
 #[cfg(feature = "client")]
@@ -164,6 +166,8 @@ pub use purge::cmd_purge;
 pub use query::run as cmd_query;
 pub use ready_cmd::cmd_ready;
 pub use redact::cmd_redact;
+#[cfg(feature = "client")]
+pub use remote::{cmd_import_retry, cmd_import_status, cmd_import_url};
 pub use remote::{cmd_pull, cmd_push, cmd_remote};
 pub use resolve::cmd_resolve;
 pub use revert::cmd_revert;

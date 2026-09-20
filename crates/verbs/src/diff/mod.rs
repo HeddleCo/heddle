@@ -1552,6 +1552,63 @@ pub fn compute_tree_diff(
     Ok(output)
 }
 
+/// Diff two already-authorized, visible-only tree projections. The caller
+/// owns the visibility decision; this function retains the normal line,
+/// type-change, and rename pipeline without reopening hidden source trees.
+pub fn compute_projected_tree_diff(
+    repo: &Repository,
+    from_tree: &Tree,
+    to_tree: &Tree,
+    from_label: impl Into<String>,
+    to_label: impl Into<String>,
+    unified: usize,
+) -> Result<DiffReport> {
+    let from_hash = repo.store().put_tree(from_tree)?;
+    let to_hash = repo.store().put_tree(to_tree)?;
+    let changes = repo.diff_trees(&from_hash, &to_hash)?;
+    let file_changes: Vec<FileChange> = changes
+        .iter()
+        .map(|change| {
+            build_state_change(
+                repo,
+                Some(from_tree),
+                to_tree,
+                &change.path,
+                &change.kind.to_string(),
+                change.kind,
+                unified,
+            )
+        })
+        .collect();
+    let file_changes = sort_changes_by_path(file_changes);
+    let file_changes = expand_type_changes(
+        repo,
+        Some(from_tree),
+        Some(to_tree),
+        file_changes,
+        true,
+        unified,
+    )?;
+    let file_changes = detect_clear_renames(
+        repo,
+        Some(from_tree),
+        Some(to_tree),
+        file_changes,
+        true,
+        unified,
+    )?;
+    let mut output = DiffReport::new(
+        Some(from_label.into()),
+        Some(to_label.into()),
+        file_changes,
+        None,
+        None,
+        None,
+    );
+    populate_patch_text(&mut output);
+    Ok(output)
+}
+
 fn strip_line_hunks(changes: Vec<FileChange>) -> Vec<FileChange> {
     changes
         .into_iter()

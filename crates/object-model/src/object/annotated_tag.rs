@@ -2,7 +2,8 @@
 //! Byte-exact annotated Git tag objects stored in Heddle's native CAS.
 
 use serde::{Deserialize, Serialize};
-use sley::{GitObjectType, ObjectFormat as GitObjectFormat, ObjectId as GitObjectId, TagObject};
+use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
+use sley_object::{ObjectType as GitObjectType, Tag as TagObject};
 use thiserror::Error;
 
 use super::{ContentHash, StateId};

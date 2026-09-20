@@ -27,37 +27,36 @@ fn materialized_start_writes_base_state_files() {
 }
 
 #[test]
-fn top_level_start_without_path_refuses_hidden_checkout() {
+fn top_level_start_without_path_defaults_under_heddle_threads() {
     let main = setup_repo("hello.txt", "world");
 
-    let err = heddle(
-        &["--output", "json", "start", "feature/default-visible"],
+    let started = heddle(
+        &["--output", "json", "start", "feature/default-managed"],
         Some(main.path()),
     )
-    .expect_err("start without --path must refuse a hidden checkout");
+    .expect("start without --path should default under .heddle/threads/");
+    let leaf = main.path().file_name().unwrap();
+    let checkout = main
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("feature%2Fdefault-managed")
+        .join(leaf);
     assert!(
-        err.contains("start without --path")
-            && err.contains(".heddle/threads/")
-            && err
-                .contains("heddle start feature/default-visible --path ../feature/default-visible"),
-        "start without --path must name the hidden checkout and the --path recovery: {err}"
+        checkout.join(".heddle").exists(),
+        "default checkout should materialize under .heddle/threads/: {started}"
     );
     assert!(
-        !main.path().join(".heddle/threads").join("feature").exists()
-            && !main
-                .path()
-                .join(".heddle/threads")
-                .join("default-visible")
-                .exists(),
-        "refusing start must not create a hidden checkout"
+        !main.path().join("feature").join("default-managed").exists(),
+        "default start must not land at ./feature/default-managed"
     );
 }
 
 #[test]
-fn top_level_start_workspace_auto_without_path_refuses_hidden_checkout() {
+fn top_level_start_workspace_auto_without_path_defaults_under_heddle_threads() {
     let main = setup_repo("hello.txt", "world");
 
-    let err = heddle(
+    let started = heddle(
         &[
             "--output",
             "json",
@@ -68,17 +67,21 @@ fn top_level_start_workspace_auto_without_path_refuses_hidden_checkout() {
         ],
         Some(main.path()),
     )
-    .expect_err("start --workspace auto without --path must refuse a hidden checkout");
+    .expect("start --workspace auto without --path should default under .heddle/threads/");
+    let leaf = main.path().file_name().unwrap();
+    let checkout = main
+        .path()
+        .join(".heddle")
+        .join("threads")
+        .join("feature%2Fsearch")
+        .join(leaf);
     assert!(
-        err.contains("start without --path")
-            && err.contains(".heddle/threads/")
-            && err.contains("heddle start feature/search --path ../feature/search"),
-        "start --workspace auto must name the hidden checkout and the --path recovery: {err}"
+        checkout.join(".heddle").exists(),
+        "auto workspace default checkout should materialize under .heddle/threads/: {started}"
     );
     assert!(
-        !main.path().join(".heddle/threads").join("feature").exists()
-            && !main.path().join(".heddle/threads").join("search").exists(),
-        "refusing --workspace auto must not create a hidden checkout"
+        !main.path().join("feature").join("search").exists(),
+        "auto workspace default must not land at ./feature/search"
     );
 }
 
@@ -134,7 +137,13 @@ fn thread_promote_preserves_thread_identity() {
     .unwrap();
 
     let v: Value = serde_json::from_str(&out).unwrap();
-    assert_eq!(v["thread"]["id"].as_str(), Some("feature/promote-me"));
+    assert_eq!(v["thread"]["thread"].as_str(), Some("feature/promote-me"));
+    assert_eq!(
+        v["thread"]["id"].as_str().map(str::len),
+        Some(64),
+        "native thread id is the genesis content-hash, not the display name: {v}"
+    );
+    assert_ne!(v["thread"]["id"].as_str(), Some("feature/promote-me"));
     assert_eq!(v["thread"]["mode"].as_str(), Some("solid"));
     assert!(thread_dir.path().join(".heddle").join("HEAD").exists());
 }

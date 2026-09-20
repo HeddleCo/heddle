@@ -268,7 +268,10 @@ fn thread_cleanup_merged_dry_run_reports_without_dropping() {
     assert!(after_with_auto.iter().any(|n| n == "feat/active"));
     let repo_for_manager = Repository::open(temp.path()).unwrap();
     let manager = ThreadManager::new(repo_for_manager.heddle_dir());
-    let merged_after = manager.load("feat/done").unwrap().expect("still on disk");
+    let merged_after = manager
+        .load_id_or_name("feat/done")
+        .unwrap()
+        .expect("still on disk");
     assert!(matches!(merged_after.state, ThreadState::Merged));
 }
 
@@ -307,7 +310,7 @@ fn thread_cleanup_merged_drops_matching_threads() {
     let repo = Repository::open(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
     let dropped = manager
-        .load("feat/done")
+        .load_id_or_name("feat/done")
         .unwrap()
         .expect("record still exists (we only mark Abandoned, not delete)");
     assert!(
@@ -327,7 +330,10 @@ fn thread_cleanup_merged_drops_matching_threads() {
         !default_view.iter().any(|name| name == "feat/done"),
         "cleaned merged thread should disappear from the default thread list; got {default_view:?}"
     );
-    let still_active = manager.load("feat/active").unwrap().expect("loads");
+    let still_active = manager
+        .load_id_or_name("feat/active")
+        .unwrap()
+        .expect("loads");
     assert!(
         matches!(still_active.state, ThreadState::Active),
         "non-merged thread must be left alone; got {:?}",
@@ -377,11 +383,11 @@ fn thread_cleanup_auto_filters_by_age() {
 
     let repo = Repository::open(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
-    let old_auto = manager.load("auto/old").unwrap().expect("loads");
+    let old_auto = manager.load_id_or_name("auto/old").unwrap().expect("loads");
     assert!(matches!(old_auto.state, ThreadState::Abandoned));
-    let new_auto = manager.load("auto/new").unwrap().expect("loads");
+    let new_auto = manager.load_id_or_name("auto/new").unwrap().expect("loads");
     assert!(matches!(new_auto.state, ThreadState::Active));
-    let explicit = manager.load("explicit").unwrap().expect("loads");
+    let explicit = manager.load_id_or_name("explicit").unwrap().expect("loads");
     assert!(
         matches!(explicit.state, ThreadState::Active),
         "explicit threads must never be swept by --auto, regardless of age"
@@ -486,13 +492,19 @@ fn thread_cleanup_skips_active_thread() {
 
     let repo = Repository::open(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
-    let active_after = manager.load("auto/active").unwrap().expect("loads");
+    let active_after = manager
+        .load_id_or_name("auto/active")
+        .unwrap()
+        .expect("loads");
     assert!(
         matches!(active_after.state, ThreadState::Active),
         "active thread must survive cleanup; got {:?}",
         active_after.state
     );
-    let passive_after = manager.load("auto/passive").unwrap().expect("loads");
+    let passive_after = manager
+        .load_id_or_name("auto/passive")
+        .unwrap()
+        .expect("loads");
     assert!(
         matches!(passive_after.state, ThreadState::Abandoned),
         "passive thread should be dropped; got {:?}",

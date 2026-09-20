@@ -3,6 +3,12 @@
 
 use anyhow::Result;
 use chrono::Utc;
+// The ready wire payload lives in cli-contract so the schema registry
+// registers the real serialization type.
+pub(crate) use heddle_cli_contract::cli::commands::wire::ready_blocked_by_missing_intent;
+pub(crate) use heddle_cli_contract::cli::commands::wire::{
+    ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary,
+};
 use objects::object::Tree;
 use repo::{Repository, ThreadFreshness, ThreadState};
 use verbs::{
@@ -44,13 +50,6 @@ use crate::{
     config::UserConfig,
 };
 
-// The ready wire payload lives in cli-contract so the schema registry
-// registers the real serialization type.
-pub(crate) use heddle_cli_contract::cli::commands::wire::ready_blocked_by_missing_intent;
-pub(crate) use heddle_cli_contract::cli::commands::wire::{
-    ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary,
-};
-
 pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let start = cli.repo.as_ref().unwrap_or(&cwd);
@@ -61,7 +60,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     }
 
     let repo = Repository::open(start)?;
-    if args.dry_run {
+    if args.dry_run.enabled() {
         return emit_ready_dry_run(cli, &repo, &args);
     }
     let user_config = UserConfig::load_default().unwrap_or_default();
@@ -159,7 +158,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
             .collect::<Vec<_>>();
         let message = format!(
             "Thread '{}' cannot run readiness checks until repository verification is restored: {}",
-            thread.id, preflight_trust.summary
+            thread.thread, preflight_trust.summary
         );
         let output = ReadyOutput {
             operator: OperatorCommandOutput {
@@ -188,7 +187,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
             let dirty_paths = worktree_dirty_paths(repo, &status_options)?;
             let output = missing_ready_capture_intent_output(
                 repo,
-                Some(&thread.id),
+                Some(&thread.thread),
                 dirty_paths,
                 preflight_trust,
             )?;
@@ -202,7 +201,10 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
             .load(&thread.id)?
             .or_else(|| current_thread(repo).ok().flatten())
             .ok_or_else(|| {
-                anyhow::anyhow!(thread_not_found_advice(&thread.id, "ready after capture"))
+                anyhow::anyhow!(thread_not_found_advice(
+                    &thread.thread,
+                    "ready after capture"
+                ))
             })?;
         captured = true;
     }
@@ -263,21 +265,21 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     {
         report.thread_health = "ready".to_string();
         report.recommended_action =
-            land_action_for_ready(repo, &thread.id, cli.repo.as_deref(), &cwd);
+            land_action_for_ready(repo, &thread.thread, cli.repo.as_deref(), &cwd);
         report.refresh_recommended_action_metadata();
     }
 
     let message = if decision.already_ready {
-        format!("Thread '{}' is already ready", thread.id)
+        format!("Thread '{}' is already ready", thread.thread)
     } else if decision.ready_without_target {
         format!(
             "Thread '{}' is clean; no integration target is configured",
-            thread.id
+            thread.thread
         )
     } else if thread.state == ThreadState::Ready {
-        format!("Thread '{}' is ready to integrate", thread.id)
+        format!("Thread '{}' is ready to integrate", thread.thread)
     } else {
-        format!("Thread '{}' is blocked", thread.id)
+        format!("Thread '{}' is blocked", thread.thread)
     };
     let operation = repo.operation_status()?;
     let remote_tracking = repo.git_remote_tracking_status()?;
@@ -292,14 +294,19 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     );
     let recommended_action = contextual_thread_action(
         repo,
-        &thread.id,
+        &thread.thread,
         thread.target_thread.as_deref(),
         &recommended_action,
     );
     let report_action_selected = report_recommended_action
         .as_deref()
         .map(|action| {
-            contextual_thread_action(repo, &thread.id, thread.target_thread.as_deref(), action)
+            contextual_thread_action(
+                repo,
+                &thread.thread,
+                thread.target_thread.as_deref(),
+                action,
+            )
         })
         .is_some_and(|action| action == recommended_action);
     if report_action_selected
@@ -327,7 +334,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     };
     operator.block_success_claim_if_verification_blocked(
         &trust,
-        format!("Thread '{}' readiness", thread.id),
+        format!("Thread '{}' readiness", thread.thread),
         VerificationClaimPolicy::strict().allow_matching_workflow_action(),
     );
     if !matches!(operator.status.as_str(), "blocked" | "failed")
@@ -409,7 +416,10 @@ fn emit_ready_dry_run(cli: &Cli, repo: &Repository, args: &ReadyArgs) -> Result<
 
     let mut dry = DryRunPlan::new(
         "ready",
-        format!("evaluate thread '{}' for integration readiness", thread.id),
+        format!(
+            "evaluate thread '{}' for integration readiness",
+            thread.thread
+        ),
     );
 
     if repo.current_state()?.is_none() {
@@ -448,7 +458,7 @@ fn emit_ready_dry_run(cli: &Cli, repo: &Repository, args: &ReadyArgs) -> Result<
     };
 
     dry.integrations.push(IntegrationPreview {
-        thread: thread.id.clone(),
+        thread: thread.thread.clone(),
         target: thread.target_thread.clone(),
         merge_relation: report.merge_relation.clone(),
         freshness: report.freshness.clone(),
@@ -472,7 +482,7 @@ fn emit_ready_dry_run(cli: &Cli, repo: &Repository, args: &ReadyArgs) -> Result<
         detail: if decision.has_integration_target {
             format!(
                 "{} vs {}: {}",
-                thread.id,
+                thread.thread,
                 thread.target_thread.as_deref().unwrap_or("(none)"),
                 report.merge_relation
             )
@@ -503,6 +513,7 @@ fn write_ready_output(cli: &Cli, repo: &Repository, output: &ReadyOutput) -> Res
         output,
         should_output_json(cli, Some(repo.config())),
         output_is_compact(cli),
+        cli.verbose > 0,
         NextActionValidationContext::new(&["ready"], repo.capability()),
     )
 }
@@ -512,6 +523,7 @@ fn write_ready_output_without_repo(cli: &Cli, output: &ReadyOutput) -> Result<()
         output,
         should_output_json(cli, None),
         output_is_compact(cli),
+        cli.verbose > 0,
         NextActionValidationContext::without_repo(&["ready"]),
     )
 }
@@ -531,12 +543,14 @@ fn write_ready_output_inner(
     output: &ReadyOutput,
     json: bool,
     compact: bool,
+    verbose: bool,
     context: NextActionValidationContext<'_>,
 ) -> Result<()> {
     if json {
         write_command_json(output, compact, context)?;
     } else {
         let missing_intent = ready_blocked_by_missing_intent(output);
+        let blocked = output.operator.status == "blocked";
         if !missing_intent {
             let marker = if output.operator.status == "completed" {
                 style::ok_marker()
@@ -545,7 +559,15 @@ fn write_ready_output_inner(
             };
             println!("{marker} {}", output.operator.message);
         }
-        if !output.trust.verified && !missing_intent {
+        if blocked && !verbose {
+            // Conflict/blocked ready→land: one human line + Next; jargon under -v/JSON.
+            if let Some(recommended_action) =
+                non_empty_action(output.operator.recommended_action.as_deref())
+            {
+                println!();
+                print_next(recommended_action);
+            }
+        } else if !output.trust.verified && !missing_intent {
             write_trust_blocked_setup(output.operator.recommended_action.as_deref());
         } else {
             write_preview_report(output, output.operator.recommended_action.as_deref());

@@ -255,6 +255,11 @@ impl ProviderPackWriter {
 }
 
 impl CompletedProviderPack {
+    /// Validated native pack and index paths, retained by this completed spool.
+    pub fn artifact_paths(&self) -> (&Path, &Path) {
+        (&self.pack_path, &self.index_path)
+    }
+
     /// Atomically install a fully validated provider pack into the object store.
     pub fn install_into(&mut self, store: &impl ObjectStore) -> Result<Vec<PackObjectId>> {
         store

@@ -22,12 +22,12 @@ object database instead of copying the tip into Heddle's native object store.
 It creates a worktree bootstrap state only for an empty or unborn Git checkout.
 Descriptor-backed states are included in object-store state enumeration, so a
 short state ID printed by `log` or `show` resolves before full adoption. When
-`heddle adopt` later imports the reachable history, it replaces any lazy
+`heddle import local` later imports the reachable history, it replaces any lazy
 parentless commit identity inside the SHA-map transaction and emits the mapped
 state/tree/blob closure into native storage before changing source authority.
 
 If the Git tip exists but cannot be bound, the command returns
-`git_overlay_tip_bind_failed` and recommends the explicit `heddle adopt`
+`git_overlay_tip_bind_failed` and recommends the explicit `heddle import local`
 recovery path. It does not fall back to a parentless bootstrap state.
 
 Key implementation:
@@ -206,7 +206,7 @@ conflict markers, rename rebuilds, and nested-tree reconstruction.
 
 - Peer fan-in is serial pairwise land, not a CRDT merge.
 - Lazy tip binding imports one commit identity; full-history adoption remains
-  the explicit `heddle adopt` workflow.
+  the explicit `heddle import local` workflow.
 - Source-thread capture and refresh performed before land are not part of the
   checkpoint rollback batch.
 - Sibling restack failures are reported rather than made transactional with the

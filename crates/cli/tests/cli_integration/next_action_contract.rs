@@ -62,7 +62,7 @@ fn setup_current_blocked_thread(name: &str) -> (TempDir, TempDir, String) {
     let repo = Repository::open(main.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
     let mut thread = manager
-        .load(name)
+        .load_id_or_name(name)
         .unwrap()
         .expect("managed thread should have a record");
     thread.state = ThreadState::Blocked;
@@ -702,7 +702,7 @@ fn sync_detached_head_managed_thread_without_target_is_not_noop() {
 
     let manager = ThreadManager::new(Repository::open(repo.path()).unwrap().heddle_dir());
     let thread = manager
-        .load("feature/no-target")
+        .load_id_or_name("feature/no-target")
         .unwrap()
         .expect("managed thread should have a record");
     assert!(

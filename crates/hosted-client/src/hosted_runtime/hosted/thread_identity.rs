@@ -1,79 +1,266 @@
-use api::heddle::api::v1alpha1::{ListThreadsRequest, ThreadOrder, list_threads_response::Frame};
+//! Human addresses resolve once; every subsequent command carries stable IDs.
+use api::heddle::api::v1alpha2 as contract;
+use thread_api::rpc;
 use wire::ProtocolError;
 
-use super::{HostedClient, helpers::hosted_to_protocol_error};
+use super::HostedClient;
 
 impl HostedClient {
-    pub async fn require_thread_id(
+    pub(super) async fn resolve_principal_id(
         &self,
-        repo_path: &str,
-        thread_name: &str,
+        handle_or_id: &str,
+        spool: &contract::SpoolRef,
     ) -> Result<String, ProtocolError> {
-        let mut page_token = String::new();
-        loop {
-            let request = ListThreadsRequest {
-                repo_path: super::helpers::repository_ref(repo_path),
-                page_size: api::MAX_PAGE_SIZE,
-                page_token: page_token.clone(),
-                states: Vec::new(),
-                query: thread_name.to_string(),
-                order: ThreadOrder::NameAsc as i32,
-            };
-            let mut stream = self
-                .routes()
-                .list_threads(&request)
-                .await
-                .map_err(hosted_to_protocol_error)?;
-            let mut found = None;
-            let mut next_page_token = None;
-            while let Some(response) = stream.next().await.map_err(hosted_to_protocol_error)? {
-                match response.frame {
-                    Some(Frame::Item(item)) if item.name == thread_name => {
-                        if item.thread_id.is_empty() {
-                            return Err(ProtocolError::InvalidState(format!(
-                                "hosted thread '{thread_name}' is missing its stable identity"
-                            )));
-                        }
-                        match found.as_deref() {
-                            Some(existing) if existing != item.thread_id => {
-                                return Err(ProtocolError::InvalidState(format!(
-                                    "hosted thread name '{thread_name}' resolves to multiple identities"
-                                )));
-                            }
-                            None => found = Some(item.thread_id),
-                            _ => {}
-                        }
-                    }
-                    Some(Frame::Item(_)) => {}
-                    Some(Frame::PageEnd(page_end)) => {
-                        next_page_token = Some(page_end.next_page_token);
-                    }
-                    None => {
-                        return Err(ProtocolError::InvalidState(
-                            "ListThreads emitted an empty frame".to_string(),
-                        ));
-                    }
-                }
-            }
-            let next_page_token = next_page_token.ok_or_else(|| {
-                ProtocolError::InvalidState(
-                    "ListThreads ended without a terminal page frame".to_string(),
-                )
+        if let Ok(id) = uuid::Uuid::parse_str(handle_or_id) {
+            return Ok(id.to_string());
+        }
+        let remote = self.native().await.map_err(native_error)?;
+        let response = remote
+            .api
+            .call::<rpc::WorkspaceServiceResolveResources>(&contract::ResolveResourcesRequest {
+                selectors: vec![
+                    contract::ResourceSelector {
+                        selector: Some(contract::resource_selector::Selector::Resource(
+                            contract::EntityRef {
+                                entity: Some(contract::entity_ref::Entity::Spool(spool.clone())),
+                            },
+                        )),
+                    },
+                    contract::ResourceSelector {
+                        selector: Some(contract::resource_selector::Selector::PrincipalHandle(
+                            handle_or_id.to_owned(),
+                        )),
+                    },
+                ],
+                budget: None,
+            })
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        let mut results = response.results.into_iter();
+        let scope = results.next().ok_or_else(|| {
+            ProtocolError::InvalidState("principal resolution omitted Spool scope".into())
+        })?;
+        let result = results.next().ok_or_else(|| {
+            ProtocolError::ObjectNotFound("principal handle did not resolve".into())
+        })?;
+        if results.next().is_some()
+            || scope.selection_index != 0
+            || scope.coverage != contract::Coverage::Complete as i32
+            || !scope.principal_id.is_empty()
+            || scope
+                .resource
+                .as_ref()
+                .and_then(|value| value.entity.as_ref())
+                != Some(&contract::entity_ref::Entity::Spool(spool.clone()))
+            || result.selection_index != 1
+            || result.coverage != contract::Coverage::Complete as i32
+            || result.resource.is_some()
+        {
+            return Err(ProtocolError::InvalidState(
+                "principal resolution was incomplete or ambiguous".into(),
+            ));
+        }
+        Ok(uuid::Uuid::parse_str(&result.principal_id)
+            .map_err(native_error)?
+            .to_string())
+    }
+
+    pub(super) async fn native_spool_overview(
+        &self,
+        address: &str,
+    ) -> Result<contract::SpoolOverview, ProtocolError> {
+        let spool = self.resolve_spool_ref(address).await?;
+        let remote = self.native().await.map_err(native_error)?;
+        let mut observation = remote
+            .observe::<rpc::SpoolServiceObserveSpool>(
+                contract::ObserveSpoolRequest {
+                    spool: Some(spool.clone()),
+                    sections: vec![contract::SpoolSection::Overview as i32],
+                    observe: Some(contract::ObserveOptions {
+                        mode: contract::ObservationMode::Once as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(native_error)?;
+        let batch = observation
+            .next_commit()
+            .await
+            .map_err(native_error)?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState("spool observation ended without a checkpoint".into())
             })?;
-            if let Some(thread_id) = found {
-                return Ok(thread_id);
+        let mut overviews = batch.changes.into_iter().filter_map(|change| match change {
+            contract::spool_event::Payload::Spool(overview) => Some(overview),
+            _ => None,
+        });
+        let overview = overviews
+            .next()
+            .ok_or_else(|| ProtocolError::InvalidState("spool overview unavailable".into()))?;
+        if overview.r#ref.as_ref() != Some(&spool)
+            || overviews.next().is_some()
+            || overview.version.is_empty()
+        {
+            return Err(ProtocolError::InvalidState(
+                "spool observation identity or version is inconsistent".into(),
+            ));
+        }
+        Ok(overview)
+    }
+    pub async fn resolve_spool_ref(
+        &self,
+        address: &str,
+    ) -> Result<contract::SpoolRef, ProtocolError> {
+        if let Ok(id) = uuid::Uuid::parse_str(address) {
+            return Ok(contract::SpoolRef { id: id.to_string() });
+        }
+        let remote = self.native().await.map_err(native_error)?;
+        let response = remote
+            .api
+            .call::<rpc::WorkspaceServiceResolveResources>(&contract::ResolveResourcesRequest {
+                selectors: vec![contract::ResourceSelector {
+                    selector: Some(contract::resource_selector::Selector::SpoolAddress(
+                        address.into(),
+                    )),
+                }],
+                budget: None,
+            })
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        match resolved_entity(response)? {
+            contract::entity_ref::Entity::Spool(spool) => {
+                uuid::Uuid::parse_str(&spool.id).map_err(native_error)?;
+                Ok(spool)
             }
-            if next_page_token.is_empty() {
-                return Err(ProtocolError::ObjectNotFound(format!(
-                    "hosted thread '{thread_name}'"
-                )));
-            }
-            if next_page_token == page_token {
-                return Err(ProtocolError::InvalidState(
-                    "ListThreads returned a repeated page token".to_string(),
-                ));
-            }
-            page_token = next_page_token;
+            _ => Err(ProtocolError::InvalidState(
+                "spool resolution returned another resource type".into(),
+            )),
         }
     }
+
+    pub async fn resolve_thread_ref(
+        &self,
+        spool_address: &str,
+        name_or_id: &str,
+    ) -> Result<contract::ThreadRef, ProtocolError> {
+        let spool = self.resolve_spool_ref(spool_address).await?;
+        if name_or_id.len() == 64
+            && let Ok(value) = hex::decode(name_or_id)
+        {
+            return Ok(contract::ThreadRef {
+                spool: Some(spool),
+                id: Some(contract::ThreadId { value }),
+            });
+        }
+        let remote = self.native().await.map_err(native_error)?;
+        let response = remote
+            .api
+            .call::<rpc::WorkspaceServiceResolveResources>(&contract::ResolveResourcesRequest {
+                selectors: vec![contract::ResourceSelector {
+                    selector: Some(contract::resource_selector::Selector::ThreadName(
+                        contract::ThreadNameSelector {
+                            spool: Some(spool.clone()),
+                            name: name_or_id.to_string(),
+                        },
+                    )),
+                }],
+                budget: None,
+            })
+            .await
+            .map_err(super::helpers::native_client_error)?;
+        let resolved = resolved_entity(response)?;
+        let contract::entity_ref::Entity::Thread(reference) = resolved else {
+            return Err(ProtocolError::InvalidState(
+                "Thread name resolution returned another resource type".into(),
+            ));
+        };
+        if reference.spool.as_ref() != Some(&spool)
+            || reference.id.as_ref().is_none_or(|id| id.value.len() != 32)
+        {
+            return Err(ProtocolError::InvalidState(
+                "Thread name resolution returned an inconsistent identity".into(),
+            ));
+        }
+        Ok(reference)
+    }
+
+    pub(super) async fn current_owner_state(&self) -> Result<contract::OwnerState, ProtocolError> {
+        let remote = self.native().await.map_err(native_error)?;
+        let mut observation = remote
+            .observe::<rpc::OwnerAuthorizationServiceObserveOwnership>(
+                contract::ObserveOwnershipRequest {
+                    observe: Some(contract::ObserveOptions {
+                        mode: contract::ObservationMode::Once as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .map_err(native_error)?;
+        let batch = observation
+            .next_commit()
+            .await
+            .map_err(native_error)?
+            .ok_or_else(|| {
+                ProtocolError::InvalidState(
+                    "ownership observation ended without a checkpoint".into(),
+                )
+            })?;
+        let mut owners = batch.changes.into_iter().filter_map(|change| match change {
+            contract::ownership_event::Payload::Owner(owner) => Some(owner),
+            _ => None,
+        });
+        let owner = owners.next().ok_or_else(|| {
+            ProtocolError::InvalidState("current owner history unavailable".into())
+        })?;
+        if owners.next().is_some() {
+            return Err(ProtocolError::InvalidState(
+                "ownership observation returned ambiguous identity".into(),
+            ));
+        }
+        Ok(owner)
+    }
+
+    pub async fn require_thread_id(
+        &self,
+        spool_address: &str,
+        name_or_id: &str,
+    ) -> Result<String, ProtocolError> {
+        let thread = self.resolve_thread_ref(spool_address, name_or_id).await?;
+        let id = thread
+            .id
+            .ok_or_else(|| ProtocolError::InvalidState("Thread identity absent".into()))?;
+        Ok(hex::encode(id.value))
+    }
+}
+
+fn resolved_entity(
+    response: contract::ResolveResourcesResponse,
+) -> Result<contract::entity_ref::Entity, ProtocolError> {
+    let mut results = response.results.into_iter();
+    let resolved = results
+        .next()
+        .ok_or_else(|| ProtocolError::ObjectNotFound("resource resolution is absent".into()))?;
+    if results.next().is_some() || resolved.selection_index != 0 {
+        return Err(ProtocolError::InvalidState(
+            "resource resolution differs from requested selection".into(),
+        ));
+    }
+    if resolved.coverage != contract::Coverage::Complete as i32 {
+        return Err(ProtocolError::ObjectNotFound(
+            "resource is unavailable or ambiguous".into(),
+        ));
+    }
+    resolved.resource.and_then(|r| r.entity).ok_or_else(|| {
+        ProtocolError::InvalidState("complete resource resolution has no identity".into())
+    })
+}
+
+fn native_error(error: impl std::fmt::Display) -> ProtocolError {
+    ProtocolError::InvalidState(error.to_string())
 }

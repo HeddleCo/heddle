@@ -1,0 +1,7 @@
+/target/
+/owner-authorization-conformance/native-verifier/target/
+/npm/dist/*
+!/npm/dist/.npmignore
+/npm/*.tgz
+/*.tgz
+Cargo.lock

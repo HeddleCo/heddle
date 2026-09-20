@@ -5,8 +5,10 @@
 //! fresh DEK; the DEK is wrapped to an X25519 recipient. Encryption keys are
 //! never derived from a signing seed.
 
-use aes_gcm::aead::{Aead, KeyInit, Payload};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::{
+    Aes256Gcm, Key, Nonce,
+    aead::{Aead, KeyInit, Payload},
+};
 use hkdf::Hkdf;
 use sha2::Sha256;
 use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
@@ -257,7 +259,9 @@ pub fn wrap_dek(
 ) -> Result<WrappedDek, AeadError> {
     let ephemeral = SoftwareRecipientSecret::generate()?;
     let ephemeral_public = ephemeral.public_key();
-    let shared = ephemeral.0.diffie_hellman(&PublicKey::from(*recipient_public));
+    let shared = ephemeral
+        .0
+        .diffie_hellman(&PublicKey::from(*recipient_public));
     let wrap_key = wrap_key_from_shared(&shared, &ephemeral_public, recipient_public)?;
     let mut nonce = [0u8; NONCE_LEN];
     fill_random(&mut nonce)?;

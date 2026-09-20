@@ -5,6 +5,7 @@
 //! `heddle-merge` crate so it can be used by non-semantic CLI builds.
 
 pub mod analysis;
+pub mod behavior;
 pub mod cache;
 pub mod cross_file_resolution;
 pub mod diff;

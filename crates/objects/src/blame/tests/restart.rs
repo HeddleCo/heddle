@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::path::Path;
 
+use super::fixture::{put_state_with_file, put_state_with_files, store};
 use crate::blame::{
     BlameFrontierGroup, BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
     BlameTarget, advance_file_blame_slice, blame_file, finalize_file_provenance,
     prepare_file_blame,
 };
-
-use super::fixture::{put_state_with_file, put_state_with_files, store};
 
 #[test]
 fn serialized_frontier_finishes_with_same_provenance() {

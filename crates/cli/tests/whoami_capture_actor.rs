@@ -73,9 +73,18 @@ fn whoami_reports_init_principal_then_unauthenticated_hosted() {
         .expect("run status");
     assert_success(&status, "status");
     assert!(
-        output_text(&status).contains("Luke <luke@example.com> from user_config"),
-        "status must show the init principal:\n{}",
+        output_text(&status).contains("main") && output_text(&status).contains("native"),
+        "compact status must name the initialized thread:\n{}",
         output_text(&status)
+    );
+    let status_verbose = isolated_command(&repo, &home, &["-v", "status"])
+        .output()
+        .expect("run verbose status");
+    assert_success(&status_verbose, "status -v");
+    assert!(
+        output_text(&status_verbose).contains("Luke <luke@example.com> from user_config"),
+        "verbose status must show the init principal:\n{}",
+        output_text(&status_verbose)
     );
 
     let whoami = isolated_command(&repo, &home, &["whoami"])

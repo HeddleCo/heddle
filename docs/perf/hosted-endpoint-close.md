@@ -28,9 +28,9 @@ mid-close). Process exit is no longer gated on `wait_all_draining`.
 
 When `heddle netd serve` is running, hosted verbs reuse the daemon's
 persistent endpoint and a cached weft QUIC connection. Close of a
-proxied handle does not drain weft. If that process opened a provider
-(CAS) connection, it bound a local ephemeral endpoint; close starts a
-bounded drain of that endpoint only.
+proxied handle does not drain weft. The v2 client uses a local ephemeral
+endpoint for its loopback UDS adapter and any provider (CAS) dials;
+close starts a bounded drain of that local endpoint only.
 
 Preview vs prod relays stay the `preview` cargo feature. Hosted
 connections still take their relay list from the signed descriptor.
@@ -40,7 +40,7 @@ connections still take their relay list from the signed descriptor.
 Measured on 2026-08-04 at `fb5d4b7c` using rustc 1.97.0's optimized
 release profile on Linux x86_64 (AMD Ryzen 7 7700, 8 cores/16 threads).
 Each sample established a loopback connection over the hosted ALPN
-through `HostedConnection::connect_verified`; endpoint setup and
+through `HostedConnection::connect`; endpoint setup and
 compilation were outside the timed window. The timer covered only the
 shared hosted-operation teardown.
 
@@ -68,10 +68,9 @@ error logs and fails if the literal #1143
 `Endpoint dropped without calling Endpoint::close` message appears. The
 test refuses to run as a debug-build gate.
 
-Unit tests in `connection.rs` fail closed if close again blocks ≥~1 s
-on a local fixture after the QUIC session is already LocallyClosed, if
-a 1 s injected drain is not returned from early, and if a drain that
-outlives the 20 ms bound is aborted instead of completing after detach.
+Unit tests in `connection.rs` fail if close blocks on a local fixture
+after the QUIC session is already locally closed, or if an injected
+80 ms drain is aborted instead of completing after the 20 ms detach.
 
 ```sh
 TMPDIR=/home/scratch HEDDLE_HOSTED_CLOSE_NEGATIVE_CONTROL=latency \

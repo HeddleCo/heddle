@@ -54,6 +54,7 @@ fn store_credential(token: &str, subject: &str, proof_key_pem: Option<String>) {
     credentials::store_server_credential(
         SERVER,
         credentials::ServerCredential {
+            mint_root_attachment: None,
             token: token.to_string(),
             subject: subject.to_string(),
             device_id: None,
@@ -69,6 +70,7 @@ fn write_hcred(path: &Path, subject: &str, token: &str, proof_key_pem: &str) {
     crate::hosted_runtime::credential_file::write_credential_file(
         path,
         &crate::hosted_runtime::credential_file::VerifiedCredential {
+            mint_root_attachment: None,
             server: SERVER.to_string(),
             kind: crate::hosted_runtime::credential_file::CredentialKind::Device,
             subject: subject.to_string(),
@@ -99,7 +101,11 @@ fn build_session(user_config: &UserConfig) -> anyhow::Result<HostedSession> {
 fn whoami_context(session: &HostedSession) -> SignedCallContext {
     CallContextFactory::from_client_config(session.client_config())
         .expect("session config must be a valid call context")
-        .unary("/heddle.api.v1alpha1.IdentityService/WhoAmI", &[], "")
+        .unary(
+            "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
+            &[],
+            "",
+        )
         .expect("build WhoAmI context")
 }
 
@@ -150,6 +156,7 @@ fn with_isolated_env<T>(run: impl FnOnce(&Path) -> T) -> T {
 
 #[test]
 fn environment_credential_attaches_matching_proof() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|home| {
         let signer = Ed25519Signer::generate().expect("env proof key");
         let pem = signer.to_pem().expect("env PEM");
@@ -173,6 +180,7 @@ fn environment_credential_attaches_matching_proof() {
 
 #[test]
 fn credential_store_root_attaches_matching_proof() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
         let signer = Ed25519Signer::generate().expect("root proof key");
         let pem = signer.to_pem().expect("root PEM");
@@ -189,6 +197,7 @@ fn credential_store_root_attaches_matching_proof() {
 
 #[test]
 fn credential_store_derived_child_attaches_matching_leaf_key() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
         let parent = Ed25519Signer::generate().expect("parent proof key");
         let child = Ed25519Signer::generate().expect("child proof key");
@@ -204,6 +213,7 @@ fn credential_store_derived_child_attaches_matching_leaf_key() {
 
 #[test]
 fn pop_bound_service_account_attaches_matching_proof() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
         let signer = Ed25519Signer::generate().expect("service-account key");
         let pem = signer.to_pem().expect("service-account PEM");
@@ -220,6 +230,7 @@ fn pop_bound_service_account_attaches_matching_proof() {
 
 #[test]
 fn configured_key_attaches_matching_proof() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|home| {
         let signer = Ed25519Signer::generate().expect("configured proof key");
         let pem = signer.to_pem().expect("configured PEM");
@@ -235,6 +246,7 @@ fn configured_key_attaches_matching_proof() {
 
 #[test]
 fn same_host_identity_attaches_matching_root_key() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
         let signer = Ed25519Signer::generate().expect("device key");
         let pem = signer.to_pem().expect("device PEM");
@@ -250,6 +262,7 @@ fn same_host_identity_attaches_matching_root_key() {
 
 #[test]
 fn pop_bound_credential_store_token_without_key_fails_before_connect() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
         store_credential(
             &mint_pop_token("alice", &Ed25519Signer::generate().expect("unused key")),
@@ -270,6 +283,7 @@ fn pop_bound_credential_store_token_without_key_fails_before_connect() {
 
 #[test]
 fn same_host_identity_does_not_satisfy_a_derived_child() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
         let parent = Ed25519Signer::generate().expect("parent device key");
         let child = Ed25519Signer::generate().expect("child leaf key");
@@ -293,6 +307,7 @@ fn same_host_identity_does_not_satisfy_a_derived_child() {
 
 #[test]
 fn credential_store_mismatched_key_fails_locally() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
         let bound = Ed25519Signer::generate().expect("bound key");
         let other = Ed25519Signer::generate().expect("other key");
@@ -314,6 +329,7 @@ fn credential_store_mismatched_key_fails_locally() {
 
 #[test]
 fn configured_key_mismatch_fails_locally() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|home| {
         let bound = Ed25519Signer::generate().expect("bound key");
         let other = Ed25519Signer::generate().expect("other key");
@@ -333,6 +349,7 @@ fn configured_key_mismatch_fails_locally() {
 
 #[test]
 fn unbound_biscuit_without_pop_key_keeps_token_only_behavior() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
         store_credential(&mint_unbound_token("legacy-sa"), "legacy-sa", None);
 
@@ -343,6 +360,7 @@ fn unbound_biscuit_without_pop_key_keeps_token_only_behavior() {
 
 #[test]
 fn opaque_unbound_bearer_keeps_token_only_behavior() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
         store_credential("not-a-biscuit", "opaque", None);
 
@@ -353,6 +371,7 @@ fn opaque_unbound_bearer_keeps_token_only_behavior() {
 
 #[test]
 fn unauthenticated_session_has_no_bearer() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
         let session = build_session(&UserConfig::default()).expect("unauthenticated session");
         assert!(session.client_config().token.is_none());

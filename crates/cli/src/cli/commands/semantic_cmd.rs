@@ -13,8 +13,10 @@ use semantic::analysis::{
 use serde::Serialize;
 use verbs::semantic_plan::{HotEventKindToken, human_hot_event_kind, map_hot_event_kind};
 
-use super::next_action::{NextActionValidationContext, write_full_command_json};
-use super::snapshot::ensure_current_state;
+use super::{
+    next_action::{NextActionValidationContext, write_full_command_json},
+    snapshot::ensure_current_state,
+};
 use crate::{
     cli::{Cli, HotEventKindArg, HotSpotKeyArg, SemanticCommands, should_output_json},
     config::UserConfig,

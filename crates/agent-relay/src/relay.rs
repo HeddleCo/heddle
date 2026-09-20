@@ -224,11 +224,20 @@ pub fn relay_harness_event(
     event: &str,
     payload: &str,
 ) -> Result<()> {
-    let mut runtime = init_harness_runtime(bridge, repo)?;
     let (json, warning) = parse_relay_payload(payload);
     if let Some(warning) = warning {
         eprintln!("{}", style::warn(&warning));
     }
+    #[cfg(feature = "client")]
+    if harness == "claude-code" && matches!(event, "PreToolUse" | "PermissionRequest") {
+        return crate::device_runs::claude_tool_edge(
+            repo,
+            event,
+            &json,
+            &mut std::io::stdout().lock(),
+        );
+    }
+    let mut runtime = init_harness_runtime(bridge, repo)?;
     runtime.relay(harness, event, &json)
 }
 
@@ -340,6 +349,15 @@ fn relay_codex(runtime: &mut HarnessBridgeRuntime, _event: &str, payload: &Value
 }
 
 fn relay_claude(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value) -> Result<()> {
+    #[cfg(feature = "client")]
+    if matches!(event, "PreToolUse" | "PermissionRequest") {
+        return crate::device_runs::claude_tool_edge(
+            &runtime.repo,
+            event,
+            payload,
+            &mut std::io::stdout().lock(),
+        );
+    }
     let metadata = map_from_pairs([
         ("session_id", value_string(payload, &["session_id"])),
         ("agent_id", value_string(payload, &["agent_id"])),
@@ -497,16 +515,43 @@ fn relay_claude(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value
             ) {
                 tracing::debug!(?err, "heddle UserPromptSubmit segment rotation failed");
             }
+            #[cfg(feature = "client")]
+            crate::device_runs::claude_controls(
+                &runtime.repo,
+                &opened.heddle_session_id,
+                event,
+                || Ok(None),
+                &mut std::io::stdout().lock(),
+            )?;
+        }
+        #[cfg(feature = "client")]
+        "PermissionRequest" => {
+            crate::run_permissions::claude_permission(
+                &runtime.repo,
+                &opened.heddle_session_id,
+                payload,
+                &mut std::io::stdout().lock(),
+            )?;
         }
         "PreToolUse" => {
             runtime.update_progress(UpdateProgressParams {
-                heddle_session_id: opened.heddle_session_id,
+                heddle_session_id: opened.heddle_session_id.clone(),
                 harness: Some("claude-code".to_string()),
                 status: Some("PreToolUse".to_string()),
                 touched_paths: csv_from_value(metadata.get("touched_paths")),
                 probe_metadata: metadata,
                 ..UpdateProgressParams::default()
             })?;
+            #[cfg(feature = "client")]
+            if crate::device_runs::claude_controls(
+                &runtime.repo,
+                &opened.heddle_session_id,
+                event,
+                || claude_hook::pre_tool_use_context(&runtime.repo, payload),
+                &mut std::io::stdout().lock(),
+            )? {
+                return Ok(());
+            }
             if let Err(err) = claude_hook::handle_pre_tool_use(&runtime.repo, payload) {
                 tracing::debug!(?err, "heddle PreToolUse context inject skipped");
             }
@@ -1692,8 +1737,11 @@ impl HarnessBridgeRuntime {
                 .ok_or_else(|| anyhow!("registry entry disappeared during update"));
         }
 
-        if client_instance_id.is_none() && probe.native_actor_key.is_some() {
+        if client_instance_id.is_none()
+            && let Some(native_actor_key) = probe.native_actor_key.as_deref()
+        {
             let (entry, _) = registry.find_or_create_active_entry(
+                native_actor_key,
                 |entry| {
                     claude_actor_compatible(entry, probe, self.repo.root())
                         && entry.native_actor_key == probe.native_actor_key
@@ -1866,6 +1914,8 @@ impl HarnessBridgeRuntime {
         report: &SessionReportEnvelope,
         status: ActorPresenceStatus,
     ) -> Result<()> {
+        #[cfg(feature = "client")]
+        crate::device_runs::publish(&self.repo, report, &status)?;
         let registry = ActorPresenceStore::new(self.repo.heddle_dir());
         let entry = if let Some(agent_session_id) = &report.agent_session_id {
             registry.update_entry(agent_session_id, |entry| {

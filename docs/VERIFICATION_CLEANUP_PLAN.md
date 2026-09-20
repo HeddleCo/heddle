@@ -34,7 +34,7 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 - `PlainGitImportHint` is deleted as a null-only sidecar; public `status` and `doctor` JSON no longer emits legacy `git_overlay_import_hint` sidecars. Internal callers may still compute import-hint data for text/advice until the core verification migration absorbs it.
 - Useful observe-only plain-Git context belongs in a shared core `PlainGitProbe`: root, active branch, dirty/index summary, commit/ref shape, and recommended setup action.
-- Existing committed plain-Git repositories recommend `heddle adopt --ref <branch>` or `heddle adopt`; unborn Git recommends `heddle init`.
+- Existing committed plain-Git repositories recommend `heddle import local --ref <branch>` or `heddle import local`; unborn Git recommends `heddle init`.
 
 ### Public JSON And Actions
 
@@ -70,10 +70,10 @@ Use the glossary terms in `CONTEXT.md` exactly.
 
 - The persistent `.heddle/git` Bridge Mirror is removed from the current runtime.
 - No current-format flow creates or reads `.heddle/git`.
-- Public `bridge git` commands are retired in favor of `adopt`, `import git`, `export git`, and top-level remote verbs routed by remote capability.
+- Public `bridge git` commands are retired in favor of `import local`, `import git`, `export git`, and top-level remote verbs routed by remote capability.
 - `bridge git init` is removed; it exists to initialize the persistent mirror that the target model deletes.
 - Legacy bridge status is removed from public UX; useful diagnostics move into `verify`, `fsck`, import/export dry-runs, or explicit diagnostics.
-- `import git` becomes `import git`; `export git` becomes `export git`. `adopt` remains the friendly existing-checkout onboarding path.
+- `import git` becomes `import git`; `export git` becomes `export git`. `import local` remains the friendly existing-checkout onboarding path.
 - `bridge git push` / `pull` are removed in favor of top-level `push` / `pull`; `bridge git sync` is removed in favor of `sync git` for explicit bidirectional Git projection.
 - `export git` must require an explicit destination or named remote target. It must not create hidden repo-local Git state.
 - `import git` and `export git` expose their current JSON contracts without restoring bridge-git UX.
@@ -136,7 +136,7 @@ migration, reporting, and maintenance are deleted.
 - `verify` proves and recommends; it must not mutate Git Projection Mapping or Raw Git Object Residuals unless an explicit repair mode is requested.
 - `fsck` owns integrity checks and repair flows for Git Projection Mapping and Raw Git Object Residuals.
 - The Git repair mode may synthesize missing Git Projection Mapping only when a Heddle state match or Git note/provenance link proves the mapping unambiguously. It must not guess.
-- Opposite-direction repair is refused without mutation and points to `adopt` or `import git`, which make the authority change or import explicit.
+- Opposite-direction repair is refused without mutation and points to `import local` or `import git`, which make the authority change or import explicit.
 - The Git repair mode never consults `.heddle/git`; old repositories are converted offline before this runtime opens them.
 - Metadata-only Git repair is allowed in dirty worktrees. Any repair that would write real `.git` refs, index, or worktree state requires clean verification or explicit confirmation.
 - Normal user output should not expose Git Projection Mapping internals. Verbose, fsck, import/export dry-run, and diagnostics can.
@@ -188,7 +188,7 @@ migration, reporting, and maintenance are deleted.
 
 Keep these tests until their replacement track has landed:
 
-- Plain-Git observe/adopt/init loop tests; they protect the `init` versus `adopt` split.
+- Plain-Git observe/adopt/init loop tests; they protect the `init` versus `import local` split.
 - Negative regressions proving no current-format flow creates `.heddle/git`.
 - Machine-contract integration tests; they become proof that core receives command-catalog coverage rather than hardcoded counters.
 - Checkpoint guidance tests; `checkpoint` is an advanced primitive, not legacy.

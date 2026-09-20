@@ -19,24 +19,31 @@ pub(crate) mod helpers;
 pub(crate) mod hosted_bridge;
 mod human;
 mod hydration;
-mod methods;
+mod import_source;
+#[cfg(test)]
+mod native_exchange_test_server;
+mod native_hydration;
+#[cfg(test)]
+mod native_hydration_tests;
+mod native_provider;
+mod native_sync;
+#[cfg(test)]
+mod native_transport_tests;
 pub(crate) mod operation_id;
-mod provider_pull;
 mod provider_transport;
-pub(crate) use provider_transport::ProviderWebSocketTransport;
 mod resolver;
 mod session;
 #[cfg(test)]
 mod session_tests;
 mod spool_path;
-mod state_review;
 mod sync;
 #[cfg(test)]
 mod test_https;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_server;
 mod thread_identity;
-mod thread_metadata;
+mod thread_review;
+pub use thread_review::ReviewSnapshot;
 mod user;
 
 #[cfg(test)]
@@ -46,7 +53,7 @@ mod descriptor_trust_conformance;
 
 use std::sync::Arc;
 
-use api::heddle::api::v1alpha1::CallContext;
+use api::heddle::api::common::CallContext;
 pub use bootstrap::{
     DescriptorKeyring, VerifiedEndpointDescriptor, fetch_descriptor_key_document,
     fetch_ephemeral_descriptor_set,
@@ -59,7 +66,10 @@ pub use context::CallContextFactory;
 #[cfg(test)]
 pub(crate) use credential::CredentialSource;
 pub(crate) use credential::server_keys_match;
-pub use credential::{ResolvedHostedCredential, resolve_active_bearer, resolve_hosted_credential};
+pub use credential::{
+    ResolvedHostedCredential, hosted_account_principal, principal_from_hosted_subject,
+    resolve_active_bearer, resolve_hosted_credential,
+};
 use crypto::{Ed25519Signer, Signer as _};
 pub use descriptor_trust::{
     DescriptorTrustSource, canonical_server_authority, replace_descriptor_trust, trust_report,
@@ -69,8 +79,8 @@ pub(crate) use descriptor_trust::{descriptor_trust_path, insert_verified_pin};
 pub use error::HostedError;
 pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 pub use hydration::register_hosted_factory;
+pub use import_source::{ImportOperationStart, ImportSourceStart};
 use iroh::{Endpoint, EndpointAddr};
-pub use methods::HostedRoutes;
 use objects::{NoopWarnings, Warning, WarningSink};
 use prost::Message;
 pub use session::{HostedAuthMode, HostedSession};
@@ -82,7 +92,7 @@ pub use spool_path::{
 pub(crate) use sync::PullBootstrapMetadata;
 pub use sync::{
     HostedRefEntry, PullBootstrapRefs, advertised_user_thread_id, decode_pull_bootstrap,
-    hosted_ref_from_api, persist_advertised_thread_identity,
+    encode_empty_pull_bootstrap, hosted_ref_from_api, persist_advertised_thread_identity,
     persist_advertised_thread_identity_with_live_fallback, pull_refs_from_ready,
     reject_legacy_pull_refs_fold,
 };
@@ -152,12 +162,6 @@ pub enum PullMaterialization {
     Lazy,
 }
 
-impl PullMaterialization {
-    pub(crate) fn allows_partial_fetch(self) -> bool {
-        matches!(self, Self::Lazy)
-    }
-}
-
 /// Quiet embeddable Iroh Adapter for one terminating Weft application endpoint.
 ///
 /// Domain operations return data and emit structured observations through
@@ -166,7 +170,6 @@ impl PullMaterialization {
 pub struct HostedClient {
     connection: Arc<HostedConnection>,
     context: CallContextFactory,
-    transport: helpers::HostedTransportPolicy,
     on_human_signature: Option<HumanSignatureCallback>,
     warnings: Arc<dyn WarningSink>,
     server_key: Option<String>,
@@ -178,7 +181,6 @@ impl std::fmt::Debug for HostedClient {
             .debug_struct("HostedClient")
             .field("connection", &self.connection)
             .field("context", &self.context)
-            .field("transport", &self.transport)
             .field(
                 "has_human_signature_callback",
                 &self.on_human_signature.is_some(),
@@ -188,43 +190,69 @@ impl std::fmt::Debug for HostedClient {
 }
 
 impl HostedClient {
-    pub fn routes(&self) -> HostedRoutes<'_> {
-        HostedRoutes::new(self)
+    /// Discover the native contract once, then retain this typed client for the
+    /// command. Connection, descriptor trust and credentials come from the same
+    /// assembled session; no legacy request/response is translated here.
+    pub async fn native(
+        &self,
+    ) -> anyhow::Result<
+        thread_api::Remote<
+            thread_api::transport::IrohTransport<thread_api::credentials::Credentials>,
+        >,
+    > {
+        let credentials = self.context.native_credentials()?;
+        let timeout = self.context.progress_timeout();
+        let transport = || {
+            thread_api::transport::IrohTransport::new(
+                self.connection.connection.clone(),
+                credentials.clone(),
+                api::framing::MAX_CONTROL_BODY,
+                timeout,
+            )
+        };
+        let description = self
+            .connection
+            .native_description
+            .get_or_try_init(|| async {
+                // Session connect seeds this from weft_client::HostedClient
+                // (Remote::discover). Tests that inject a raw Iroh connection
+                // still discover here.
+                let remote = thread_api::Remote::discover(
+                    transport()?,
+                    *self.connection.connection.remote_id().as_bytes(),
+                    api::heddle::api::v1alpha2::EndpointKind::Weft,
+                )
+                .await?;
+                Ok::<_, anyhow::Error>(remote.description)
+            })
+            .await?
+            .clone();
+        Ok(thread_api::Remote {
+            api: api::v2::client::Client::new(
+                transport()?,
+                description.implemented_methods.clone(),
+            ),
+            description,
+        })
+    }
+
+    pub(crate) fn claim_authority_token(&self) -> &[u8] {
+        self.context.bearer_capability()
     }
 
     pub(crate) fn claim_proof_signer(&self) -> Option<&crypto::Ed25519Signer> {
         self.context.proof_signer()
     }
 
-    pub(crate) fn enrolling_device_context(&self) -> Result<CallContextFactory> {
-        self.context.as_enrolling_device_key()
-    }
-
     pub async fn connect(descriptor: &VerifiedEndpointDescriptor) -> Result<Self> {
-        let config = ClientConfig::default();
-        Ok(Self {
-            connection: HostedConnection::connect_verified(descriptor, &config).await?,
-            context: CallContextFactory::default(),
-            transport: helpers::HostedTransportPolicy::from_client_config(&config),
-            on_human_signature: None,
-            warnings: Arc::new(NoopWarnings),
-            server_key: None,
-        })
+        Self::connect_weft(descriptor, &ClientConfig::default()).await
     }
 
     pub async fn connect_with_config(
         descriptor: &VerifiedEndpointDescriptor,
         config: &ClientConfig,
     ) -> Result<Self> {
-        let context = CallContextFactory::from_client_config(config)?;
-        Ok(Self {
-            connection: connect_preferred(descriptor, config, false).await?,
-            context,
-            transport: helpers::HostedTransportPolicy::from_client_config(config),
-            on_human_signature: None,
-            warnings: Arc::new(NoopWarnings),
-            server_key: config.server_key.clone(),
-        })
+        Self::connect_preferred(descriptor, config).await
     }
 
     /// Connect for outbound calls only, on an ephemeral endpoint node id
@@ -232,39 +260,85 @@ impl HostedClient {
     /// node id. Used by `heddle claim`, whose inbound claim serving is the
     /// daemon's job while this client only makes authenticated weft calls
     /// (BeginWebAuthnRegistration, BootstrapOwnerRoot, RegisterPublicKey).
+    ///
+    /// `weft_client::HostedClient` always binds an ephemeral node id, so this
+    /// shares the v2 discovery path with [`Self::connect_with_config`].
     pub(crate) async fn connect_outbound_with_config(
         descriptor: &VerifiedEndpointDescriptor,
         config: &ClientConfig,
     ) -> Result<Self> {
-        let context = CallContextFactory::from_client_config(config)?;
-        Ok(Self {
-            connection: connect_preferred(descriptor, config, true).await?,
-            context,
-            transport: helpers::HostedTransportPolicy::from_client_config(config),
-            on_human_signature: None,
-            warnings: Arc::new(NoopWarnings),
-            server_key: config.server_key.clone(),
-        })
+        Self::connect_preferred(descriptor, config).await
     }
 
-    /// Connect through a running `heddle netd` warm weft session when the
-    /// hosted bridge socket is present. Falls back to the caller if netd
-    /// is not serving.
+    async fn connect_preferred(
+        descriptor: &VerifiedEndpointDescriptor,
+        config: &ClientConfig,
+    ) -> Result<Self> {
+        #[cfg(unix)]
+        if let Some(server) = config.server_key.as_deref() {
+            match Self::connect_via_netd(server, config).await {
+                Ok(client) => return Ok(client),
+                Err(error) => {
+                    tracing::debug!(%error, "netd hosted bridge unavailable; connecting locally");
+                }
+            }
+        }
+        Self::connect_weft(descriptor, config).await
+    }
+
+    /// Connect through netd's warm Weft session, then run v2 discovery over
+    /// the local Iroh-to-UDS adapter before returning the client.
     #[cfg(unix)]
     pub(crate) async fn connect_via_netd(server: &str, config: &ClientConfig) -> Result<Self> {
         let context = CallContextFactory::from_client_config(config)?;
-        Ok(Self {
+        let client = Self {
             connection: HostedConnection::connect_via_netd(server, config).await?,
             context,
-            transport: helpers::HostedTransportPolicy::from_client_config(config),
+            on_human_signature: None,
+            warnings: Arc::new(NoopWarnings),
+            server_key: config.server_key.clone(),
+        };
+        client.native().await.map_err(HostedError::transport)?;
+        Ok(client)
+    }
+
+    /// Whether this client attached to a Weft QUIC session already cached by
+    /// the running network daemon.
+    pub fn reused_warm_connection(&self) -> bool {
+        self.connection.reused_warm()
+    }
+
+    /// Connect through [`weft_client::HostedClient`] so v2 discovery
+    /// (`Remote::discover`) happens on the same Iroh session used for later
+    /// native calls.
+    async fn connect_weft(
+        descriptor: &VerifiedEndpointDescriptor,
+        config: &ClientConfig,
+    ) -> Result<Self> {
+        let context = CallContextFactory::from_client_config(config)?;
+        let credential = context.native_credentials()?;
+        let weft = weft_client::HostedClient::connect_endpoint(
+            descriptor.endpoint_addr()?,
+            credential,
+            context.progress_timeout(),
+            config.tls_ca_certificate_pem.as_deref(),
+        )
+        .await
+        .map_err(HostedError::transport)?;
+        let description = weft.remote.description.clone();
+        let (_remote, endpoint, connection) = weft.into_parts();
+        Ok(Self {
+            connection: HostedConnection::from_discovered(
+                endpoint,
+                connection,
+                config,
+                description,
+            ),
+            context,
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
         })
-    }
-
-    pub fn reused_warm_connection(&self) -> bool {
-        self.connection.reused_warm()
     }
 
     /// Direct-address constructor for conformance tests and explicit local endpoints.
@@ -272,7 +346,6 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context: CallContextFactory::default(),
-            transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: None,
@@ -288,7 +361,6 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context,
-            transport: helpers::HostedTransportPolicy::from_client_config(config),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: config.server_key.clone(),
@@ -303,7 +375,6 @@ impl HostedClient {
         Ok(Self {
             connection: HostedConnection::connect(endpoint, address).await?,
             context,
-            transport: helpers::HostedTransportPolicy::from_client_config(&ClientConfig::default()),
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),
             server_key: None,
@@ -332,14 +403,6 @@ impl HostedClient {
     /// Gracefully close the native connection and its owning Iroh endpoint.
     pub async fn close(self) {
         self.connection.close().await;
-    }
-
-    /// Hold the next spawned shutdown future so close hits the 20ms
-    /// detach bound. Test-only: proves content already received is
-    /// still durable after the caller returns.
-    #[cfg(test)]
-    pub(crate) fn hold_next_close_for_test(duration: std::time::Duration) {
-        connection::hold_next_shutdown_for_test(duration);
     }
 
     pub(super) async fn auto_rotate_if_needed(
@@ -384,6 +447,7 @@ impl HostedClient {
             }
         };
         let updated = config::credentials::ServerCredential {
+            mint_root_attachment: credential.mint_root_attachment,
             token: root.token.clone(),
             subject: root.subject,
             device_id: credential.device_id,
@@ -391,6 +455,11 @@ impl HostedClient {
             private_key_pem: Some(private_key_pem),
             expires_at: Some(root.expires_at.to_rfc3339()),
         };
+        if let Err(error) = crate::hosted_runtime::source_author::retain(&server_key, &updated) {
+            tracing::warn!(
+                "credential rotation: failed to retain original device authority: {error}"
+            );
+        }
         if let Err(error) = config::credentials::store_server_credential(&server_key, updated) {
             tracing::warn!("credential rotation: failed to persist credential: {error}");
         }
@@ -443,7 +512,7 @@ impl HostedClient {
         match call::unary_encoded(&self.connection, method, &signed.context, encoded).await {
             Ok(response) => Ok(response),
             Err(HostedError::Call {
-                code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
+                code: api::heddle::api::common::CallFailureCode::Unauthenticated,
                 message,
                 error: Some(error),
             }) if api::human_verification_challenge(&error).is_some() => {
@@ -453,7 +522,7 @@ impl HostedClient {
                     .canonical()
                     .ok_or(HostedError::SigningIdentityRequired)?;
                 let callback = self.on_human_signature.as_ref().ok_or(HostedError::Call {
-                    code: api::heddle::api::v1alpha1::CallFailureCode::Unauthenticated,
+                    code: api::heddle::api::common::CallFailureCode::Unauthenticated,
                     message,
                     error: Some(error),
                 })?;
@@ -465,13 +534,13 @@ impl HostedClient {
                     action_url: (!challenge.action_url.is_empty()).then_some(challenge.action_url),
                 })
                 .map_err(|error| HostedError::Call {
-                    code: api::heddle::api::v1alpha1::CallFailureCode::PermissionDenied,
+                    code: api::heddle::api::common::CallFailureCode::PermissionDenied,
                     message: error.to_string(),
                     error: None,
                 })?;
                 let context = signed.with_human_verification(
                     assertion.signature,
-                    api::heddle::api::v1alpha1::HumanVerification {
+                    api::heddle::api::common::HumanVerification {
                         client_data_json: assertion.client_data_json,
                         authenticator_data: assertion.authenticator_data,
                         user_handle: assertion.user_handle.unwrap_or_default(),
@@ -494,19 +563,6 @@ impl HostedClient {
         Response: Message + Default,
     {
         let context = self.context.streaming(method, client_operation_id)?;
-        call::server_stream(self.connection.clone(), method, &context, request).await
-    }
-
-    pub(super) async fn call_long_lived_server_stream<Request, Response>(
-        &self,
-        method: &str,
-        request: &Request,
-    ) -> Result<ServerStream<Response>>
-    where
-        Request: Message,
-        Response: Message + Default,
-    {
-        let context = self.context.long_lived_streaming(method, "")?;
         call::server_stream(self.connection.clone(), method, &context, request).await
     }
 
@@ -559,29 +615,5 @@ impl HostedClient {
         Response: Message + Default,
     {
         call::bidirectional(self.connection.clone(), method, context).await
-    }
-}
-
-async fn connect_preferred(
-    descriptor: &VerifiedEndpointDescriptor,
-    config: &ClientConfig,
-    outbound: bool,
-) -> Result<Arc<HostedConnection>> {
-    #[cfg(unix)]
-    if let Some(server) = config.server_key.as_deref() {
-        match HostedConnection::connect_via_netd(server, config).await {
-            Ok(connection) => return Ok(connection),
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "netd hosted bridge unavailable; connecting locally"
-                );
-            }
-        }
-    }
-    if outbound {
-        HostedConnection::connect_verified_outbound(descriptor, config).await
-    } else {
-        HostedConnection::connect_verified(descriptor, config).await
     }
 }

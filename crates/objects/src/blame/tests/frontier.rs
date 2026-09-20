@@ -1,18 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
-use std::cell::Cell;
-use std::path::Path;
-
-use crate::blame::{
-    BlameLineMap, BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
-    advance_file_blame_slice, prepare_file_blame,
-};
-use crate::object::{
-    Attribution, Blob, ContentHash, ObjectSource, Principal, State, StateId, Tree,
-};
-use crate::store::ObjectStore;
-use crate::util::ResourceKind;
+use std::{cell::Cell, path::Path};
 
 use super::fixture::{put_state_with_file, store};
+use crate::{
+    blame::{
+        BlameLineMap, BlamePreparation, BlameSliceAdvance, BlameSliceError, BlameSliceLimits,
+        advance_file_blame_slice, prepare_file_blame,
+    },
+    object::{Attribution, Blob, ContentHash, ObjectSource, Principal, State, StateId, Tree},
+    store::ObjectStore,
+    util::ResourceKind,
+};
 
 struct ProbeBeforeLoad {
     inner: crate::store::InMemoryStore,

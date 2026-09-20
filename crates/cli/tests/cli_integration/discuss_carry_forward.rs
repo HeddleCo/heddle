@@ -23,7 +23,8 @@ fn open(temp: &TempDir) -> Value {
     json(
         &heddle(
             &[
-                "--output", "json", "discuss", "open", "main.rs", "main", "review q",
+                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "main",
+                "review q",
             ],
             Some(temp.path()),
         )
@@ -63,7 +64,7 @@ fn append_writes_a_new_collaboration_operation() {
 
     let appended = json(
         &heddle(
-            &["--output", "json", "discuss", "append", id, "second"],
+            &["--output", "json", "discuss", "--id", id, "second"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -74,6 +75,41 @@ fn append_writes_a_new_collaboration_operation() {
         appended["discussion"]["turns"][1]["body"].as_str(),
         Some("second")
     );
+}
+
+#[test]
+fn reply_and_show_accept_short_id() {
+    let temp = setup();
+    let opened = open(&temp);
+    let full_id = opened["discussion"]["id"].as_str().unwrap();
+    let short = format!("disc-{}", &full_id.trim_start_matches("disc-")[..8]);
+    let appended = json(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "discuss",
+                "--id",
+                &short,
+                "from short id",
+            ],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        appended["discussion"]["turns"][1]["body"].as_str(),
+        Some("from short id")
+    );
+    let shown = json(
+        &heddle(
+            &["--output", "json", "discuss", "show", &short],
+            Some(temp.path()),
+        )
+        .unwrap(),
+    );
+    assert_eq!(shown["discussion"]["turns"].as_array().unwrap().len(), 2);
+    assert_eq!(shown["discussion"]["id"].as_str(), Some(full_id));
 }
 
 #[test]

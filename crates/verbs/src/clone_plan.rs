@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pure clone and adopt planning.
 //!
-//! Owns decision logic shared by `heddle clone` and `heddle adopt`:
+//! Owns decision logic shared by `heddle clone` and `heddle import local`:
 //! - destination path validation and absolute-resolution policy
 //! - remote mode selection (local path vs network hosted vs git-overlay URL)
 //! - security preflight flag assembly (no network I/O)
@@ -40,6 +40,16 @@ pub struct ClonePlanOptions {
     pub recursive: bool,
     /// CLI `--insecure`: allow cleartext to non-loopback hosts on network paths.
     pub insecure: bool,
+    /// Explicit `--source git|heddle`. When set, mode selection does not
+    /// fall back to the other protocol on failure.
+    pub protocol: Option<CloneProtocol>,
+}
+
+/// Explicit clone protocol from `--source`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloneProtocol {
+    Git,
+    Heddle,
 }
 
 /// Cheap facts the CLI gathers before planning (no clone network/FS body).
@@ -374,7 +384,11 @@ pub fn select_clone_mode(
     remote: &str,
     recursive: bool,
     source: &CloneRemoteSource,
+    protocol: Option<CloneProtocol>,
 ) -> Result<CloneMode, ClonePlanError> {
+    if let Some(protocol) = protocol {
+        return select_explicit_clone_protocol(remote, recursive, source, protocol);
+    }
     match source {
         CloneRemoteSource::Local {
             path,
@@ -416,6 +430,46 @@ pub fn select_clone_mode(
                 })
             }
         }
+    }
+}
+
+fn select_explicit_clone_protocol(
+    remote: &str,
+    recursive: bool,
+    source: &CloneRemoteSource,
+    protocol: CloneProtocol,
+) -> Result<CloneMode, ClonePlanError> {
+    match protocol {
+        CloneProtocol::Git => {
+            if recursive {
+                return Err(ClonePlanError::MonorepoRequiresHosted {
+                    remote: remote.to_string(),
+                });
+            }
+            match source {
+                CloneRemoteSource::Local { path, .. } => Ok(CloneMode::LocalGitOverlay {
+                    remote_path: path.clone(),
+                }),
+                CloneRemoteSource::Network { .. } | CloneRemoteSource::Unparsed => {
+                    Ok(CloneMode::GitOverlayUrl)
+                }
+            }
+        }
+        CloneProtocol::Heddle => match source {
+            CloneRemoteSource::Local { path, .. } => {
+                if recursive {
+                    return Err(ClonePlanError::MonorepoRequiresHosted {
+                        remote: remote.to_string(),
+                    });
+                }
+                Ok(CloneMode::LocalHeddle {
+                    remote_path: path.clone(),
+                })
+            }
+            CloneRemoteSource::Network { .. } | CloneRemoteSource::Unparsed => {
+                Ok(CloneMode::NetworkHosted { recursive })
+            }
+        },
     }
 }
 
@@ -507,7 +561,12 @@ pub fn plan_clone(
 ) -> Result<ClonePlan, ClonePlanError> {
     validate_clone_destination(&options.local, facts.destination_exists)?;
 
-    let mode = select_clone_mode(&options.remote, options.recursive, &facts.remote_source)?;
+    let mode = select_clone_mode(
+        &options.remote,
+        options.recursive,
+        &facts.remote_source,
+        options.protocol,
+    )?;
     let depth = normalize_clone_depth(options.depth);
     validate_clone_mode_options(&mode, depth, options.lazy, options.filter.as_deref())?;
 
@@ -1368,6 +1427,7 @@ mod tests {
             filter: None,
             recursive: false,
             insecure: false,
+            protocol: None,
         }
     }
 

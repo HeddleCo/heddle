@@ -189,9 +189,11 @@ fn status_and_stop_round_trip() {
 
     let status = run(home.path(), &["netd", "status", "--output", "json"]);
     assert!(status.status.success(), "status must succeed");
-    let status_json: Value =
-        serde_json::from_slice(&status.stdout).expect("status emits JSON");
-    assert_eq!(status_json.get("running").and_then(Value::as_bool), Some(true));
+    let status_json: Value = serde_json::from_slice(&status.stdout).expect("status emits JSON");
+    assert_eq!(
+        status_json.get("running").and_then(Value::as_bool),
+        Some(true)
+    );
     assert_eq!(
         status_json.get("node_id").and_then(Value::as_str),
         Some(node_id.as_str()),

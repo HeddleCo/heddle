@@ -1,0 +1,4 @@
+# Generated dist is intentionally gitignored but is the package payload.
+!dist/
+!dist/**
+/*.tgz

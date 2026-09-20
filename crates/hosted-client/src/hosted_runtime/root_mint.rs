@@ -1,7 +1,7 @@
 //! Client-side independent-root Biscuit mint.
 //!
 //! One ceremony: the caller's Ed25519 seed is the Biscuit authority key and
-//! the request-proof key. Device login, rotation, and `CreateAgentAccount`
+//! the request-proof key. Device login, rotation, and `ProvisionAccount`
 //! call this. Weft only registers the public key.
 //!
 //! `session()` is the RevokeSession id. It is never a caller-chosen random
@@ -45,7 +45,7 @@ pub(crate) struct IndependentRootMint<'a> {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// Mint a root from an existing seed. `CreateAgentAccount` uses the persisted
+/// Mint a root from an existing seed. `ProvisionAccount` uses the persisted
 /// Iroh node seed so the claim signer and the authority key stay the same key.
 pub(crate) fn mint_independent_root(mint: IndependentRootMint<'_>) -> Result<IndependentRoot> {
     validate_root_string("subject", mint.subject)?;

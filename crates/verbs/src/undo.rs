@@ -183,7 +183,7 @@ pub fn plan_redo_batches(repo: &Repository, steps: usize) -> Result<UndoPlan> {
     })
 }
 
-/// Pure mode preflight: `--list` and `--preview` are mutually exclusive.
+/// Pure mode preflight: `--list` and `--dry-run` are mutually exclusive.
 pub fn validate_undo_list_preview_modes(list: bool, preview: bool) -> Result<(), HeddleError> {
     if list && preview {
         Err(undo_mode_conflict())
@@ -204,20 +204,20 @@ pub fn require_nonempty_history(
     }
 }
 
-/// Shared advice: `undo --list` combined with `--preview`.
+/// Shared advice: `undo --list` combined with `--dry-run`.
 pub fn undo_mode_conflict() -> HeddleError {
     HeddleError::recovery(
         RecoveryDetails::safety_refusal(
             "undo_mode_conflict",
-            "Use either --list or --preview, not both",
-            "Run `heddle undo --list` to inspect history, or `heddle undo --preview` to preview the next undo.",
-            "--list and --preview are mutually exclusive undo modes",
+            "Use either --list or --dry-run, not both",
+            "Run `heddle undo --list` to inspect history, or `heddle undo --dry-run` to preview the next undo.",
+            "--list and --dry-run are mutually exclusive undo modes",
             "combining them would make the command output ambiguous between history listing and undo preview",
             "repository state was left unchanged",
         )
         .with_recovery_commands(vec![
             "heddle undo --list".to_string(),
-            "heddle undo --preview".to_string(),
+            "heddle undo --dry-run".to_string(),
         ]),
     )
 }

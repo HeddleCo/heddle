@@ -134,6 +134,12 @@ impl DiscussionRecordId {
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
         Self(Uuid::from_bytes(bytes))
     }
+
+    /// Short text id: `disc-` plus the first UUID group (8 hex chars).
+    pub fn to_string_short(&self) -> String {
+        let hyphenated = self.0.to_string();
+        format!("disc-{}", &hyphenated[..8])
+    }
 }
 
 impl fmt::Display for DiscussionRecordId {
@@ -272,6 +278,10 @@ mod tests {
         let text = a.to_string();
         assert!(text.starts_with("disc-"));
         assert_eq!(text.parse::<DiscussionRecordId>().unwrap(), a);
+        let short = a.to_string_short();
+        assert!(short.starts_with("disc-"));
+        assert_eq!(short.len(), "disc-".len() + 8);
+        assert!(text.starts_with(&short));
     }
 
     #[test]

@@ -1,49 +1,37 @@
 //! Hosted authentication operations and typed outcomes.
 
-use std::{collections::BTreeSet, path::Path};
+use std::{collections::BTreeSet, io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha1::{
-    CreateDeviceAuthorizationRequest, CreateServiceAccountRequest, CreateSignupInviteRequest,
-    DeviceAuthorizationEvent, DeviceAuthorizationResponse, DeviceAuthorizationStatus,
-    ExchangeDeviceAuthorizationRequest, IssueServiceAccountCredentialRequest,
-    ListSignupInvitesRequest, SignupInviteOwnerStatus, SignupInviteSummary,
-    WaitForDeviceAuthorizationRequest,
-};
+use api::heddle::api::v1alpha2 as identity;
+use base64::Engine;
 use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
 use objects::{HeddleError, RecoveryDetails};
-use sha2::{Digest, Sha256};
+use prost::Message;
+use serde::{Deserialize, Serialize};
 
 use super::{
     auth_requests::{AuthCommand, AuthOptions, AuthTrustCommand},
     credential_file::{self, CredentialKind, CredentialProvenance, VerifiedCredential},
     device_flow::{
-        AgentAttenuation, AgentTemplate, CI_VERDICT_WRITE_ACTION, SAFE_AGENT_OPERATIONS,
-        attenuate_for_agent, effective_pop_public_key_hex,
+        AgentAttenuation, AgentTemplate, CI_VERDICT_WRITE_ACTION, attenuate_for_agent,
+        effective_pop_public_key_hex,
     },
     hosted::{
-        CallContextFactory, HostedAuthMode, HostedClient, HostedError, HostedSession,
-        ResolvedHostedCredential, operation_id::ClientOperationId, resolve_hosted_credential,
+        CallContextFactory, HostedAuthMode, HostedClient, HostedSession, ResolvedHostedCredential,
+        operation_id::ClientOperationId, resolve_hosted_credential,
     },
 };
 
 const SERVICE_TOKEN_TTL_DAYS: u32 = 30;
 const SERVICE_TOKEN_TTL_SECS: i64 = SERVICE_TOKEN_TTL_DAYS as i64 * 24 * 3600;
-const ISSUE_SA_PROOF_DOMAIN: &[u8] = b"heddle-sa-credential-issue-v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AuthEvent {
-    DeviceAuthorizationReady {
-        verification_uri: String,
-        user_code: String,
-    },
-    BrowserOpenRequested {
-        url: String,
-    },
-    BrowserUrlRejected {
-        reason: String,
-    },
+    PairingReady { verification_uri: String },
+    BrowserOpenRequested { url: String },
+    BrowserUrlRejected { reason: String },
     WaitingForAuthorization,
 }
 
@@ -124,23 +112,23 @@ pub struct AuthTrust {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignupInviteCreated {
     pub invite_id: String,
-    pub invite_code: String,
-    pub allowance_remaining: u32,
+    /// Shown once from the mutation result; list views never recreate it.
+    pub redemption_secret: String,
+    pub allowance_remaining: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignupInvite {
-    pub invite_code: String,
+    pub invite_id: String,
     pub status: String,
-    pub created_at: Option<String>,
-    pub consumed: bool,
-    pub consumed_at: Option<String>,
+    pub bound_email: Option<String>,
+    pub expires_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignupInviteList {
     pub invites: Vec<SignupInvite>,
-    pub allowance_remaining: u32,
+    pub allowance_remaining: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -156,7 +144,7 @@ pub struct DerivedAgent {
     pub parent_source: String,
     pub expires_at: String,
     pub template: Option<AgentTemplate>,
-    pub allowed_operations: Vec<String>,
+    pub allowed_operations: Option<Vec<String>>,
     pub scopes: Vec<String>,
     pub rendered_scope: Option<String>,
     pub destination: AgentCredentialDestination,
@@ -165,7 +153,6 @@ pub struct DerivedAgent {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceTokenCreated {
     pub name: String,
-    pub namespace: String,
     pub scope: String,
     pub credential_path: String,
     pub expires_in_days: u32,
@@ -231,17 +218,17 @@ pub async fn execute(
         .map(AuthOutcome::AgentDerived),
         AuthCommand::CreateServiceToken {
             name,
-            namespace,
+            scope,
             server,
             out,
-        } => create_service_token(&options, server.as_deref(), name, namespace, out.as_deref())
+        } => create_service_token(&options, server.as_deref(), name, scope, out.as_deref())
             .await
             .map(AuthOutcome::ServiceTokenCreated),
     }
 }
 
-const CREATE_SIGNUP_INVITE_METHOD: &str = "heddle.api.v1alpha1.IdentityService/CreateSignupInvite";
-const SIGNUP_INVITE_PAGE_SIZE: u32 = 200;
+const CREATE_SIGNUP_INVITE_METHOD: &str =
+    "heddle.api.v1alpha2.IdentityService/CreateSignupInvitation";
 
 async fn auth_invite(
     options: &AuthOptions,
@@ -287,68 +274,85 @@ async fn create_signup_invite_connected(
         .await
         .map_err(|error| anyhow::anyhow!("create_signup_invite failed: {error}"))?;
 
+    let invite_id = response
+        .invitation
+        .as_ref()
+        .and_then(|invite| invite.r#ref.as_ref())
+        .context("created signup invitation has no identity")?
+        .id
+        .clone();
+    let redemption_secret = String::from_utf8(response.redemption_secret)
+        .context("signup invitation redemption secret is not UTF-8")?;
+    anyhow::ensure!(
+        !redemption_secret.is_empty(),
+        "signup invitation has no redemption secret"
+    );
+    // The mutation's one-time secret must be returned even if the separate
+    // read-side quota observation becomes unavailable immediately afterward.
+    let allowance_remaining = auth_client.signup_invitation_quota().await.ok();
     Ok(SignupInviteCreated {
-        invite_id: response.invite_id,
-        invite_code: response.invite_code,
-        allowance_remaining: response.allowance_remaining,
+        invite_id,
+        redemption_secret,
+        allowance_remaining,
     })
 }
 
 fn create_signup_invite_request(
     recipient_email: Option<String>,
     client_operation_id: String,
-) -> CreateSignupInviteRequest {
-    CreateSignupInviteRequest {
-        recipient_email,
+) -> api::heddle::api::v1alpha2::CreateSignupInvitationRequest {
+    api::heddle::api::v1alpha2::CreateSignupInvitationRequest {
         client_operation_id,
+        invitation: Some(api::heddle::api::v1alpha2::SignupInvitation {
+            bound_email: recipient_email.unwrap_or_default(),
+            ..Default::default()
+        }),
     }
 }
 
 async fn list_signup_invites_connected(auth_client: &mut HostedClient) -> Result<SignupInviteList> {
-    let mut page_token = String::new();
-    let mut seen_page_tokens = BTreeSet::new();
-    let mut invites = Vec::new();
-    let allowance_remaining = loop {
-        let response = auth_client
-            .list_signup_invites(list_signup_invites_request(page_token))
-            .await
-            .map_err(|error| anyhow::anyhow!("list_signup_invites failed: {error}"))?;
-        invites.extend(response.invites.into_iter().map(signup_invite_output));
-        if response.next_page_token.is_empty() {
-            break response.allowance_remaining;
-        }
-        if !seen_page_tokens.insert(response.next_page_token.clone()) {
-            bail!("list_signup_invites returned a repeated page token");
-        }
-        page_token = response.next_page_token;
-    };
-
+    let (records, allowance_remaining) = auth_client
+        .list_signup_invitations()
+        .await
+        .map_err(|error| anyhow::anyhow!("list_signup_invitations failed: {error}"))?;
     Ok(SignupInviteList {
-        invites,
-        allowance_remaining,
+        invites: records
+            .into_iter()
+            .map(signup_invite_output)
+            .collect::<Result<_>>()?,
+        allowance_remaining: Some(allowance_remaining),
     })
 }
 
-fn list_signup_invites_request(page_token: String) -> ListSignupInvitesRequest {
-    ListSignupInvitesRequest {
-        page_size: SIGNUP_INVITE_PAGE_SIZE,
-        page_token,
-    }
-}
-
-fn signup_invite_output(invite: SignupInviteSummary) -> SignupInvite {
-    let status = match SignupInviteOwnerStatus::try_from(invite.status) {
-        Ok(SignupInviteOwnerStatus::Open) => "open",
-        Ok(SignupInviteOwnerStatus::Consumed) => "consumed",
-        Ok(SignupInviteOwnerStatus::Unspecified) | Err(_) => "unknown",
+fn signup_invite_output(
+    invite: api::heddle::api::v1alpha2::SignupInvitation,
+) -> Result<SignupInvite> {
+    let invite_id = invite
+        .r#ref
+        .as_ref()
+        .context("invitation identity missing")?
+        .id
+        .clone();
+    uuid::Uuid::parse_str(&invite_id).context("invalid invitation identity")?;
+    let status = if invite.revoked {
+        "revoked"
+    } else if invite.redeemed {
+        "redeemed"
+    } else if invite
+        .expires_at
+        .as_ref()
+        .is_some_and(|expiry| expiry.seconds <= chrono::Utc::now().timestamp())
+    {
+        "expired"
+    } else {
+        "open"
     };
-    SignupInvite {
-        invite_code: invite.invite_code,
-        status: status.to_string(),
-        created_at: invite.created_at.as_ref().and_then(format_proto_timestamp),
-        consumed: invite.consumed,
-        consumed_at: invite.consumed_at.as_ref().and_then(format_proto_timestamp),
-    }
+    Ok(SignupInvite {
+        invite_id,
+        status: status.into(),
+        bound_email: (!invite.bound_email.is_empty()).then_some(invite.bound_email),
+        expires_at: invite.expires_at.as_ref().and_then(format_proto_timestamp),
+    })
 }
 
 fn format_proto_timestamp(timestamp: &prost_types::Timestamp) -> Option<String> {
@@ -491,7 +495,7 @@ pub(crate) fn derive_agent(
         AgentAttenuation {
             agent_id: agent_id.clone(),
             expires_at,
-            allowed_operations: Some(allowed_operations.clone()),
+            allowed_operations: allowed_operations.clone(),
             // W3 (weft#644): the server injects a `resource("repo", <path>)`
             // fact per request, so emit the ENFORCEABLE resource caveat. A
             // `namespace:` scope is encoded client-side as a repo-path prefix
@@ -522,10 +526,11 @@ pub(crate) fn derive_agent(
                     .map(|(kind, path)| format!("{kind}:{path}"))
                     .collect()
             }),
-            allowed_operations: Some(allowed_operations.clone()),
+            allowed_operations: allowed_operations.clone(),
             agent_id: Some(agent_id.clone()),
         };
         let verified = VerifiedCredential {
+            mint_root_attachment: parent.mint_root_attachment.clone(),
             server: server.to_string(),
             kind: CredentialKind::Agent,
             subject: metadata.subject.clone(),
@@ -558,6 +563,7 @@ pub(crate) fn derive_agent(
     credentials::store_server_credential(
         server,
         ServerCredential {
+            mint_root_attachment: parent.mint_root_attachment,
             token: child_token,
             subject: parent.subject.unwrap_or(metadata.subject),
             device_id: None,
@@ -595,48 +601,37 @@ fn rendered_agent_scope(
     Some(tokens.join(" "))
 }
 
-/// Resolve the final operation ceiling for a derived agent.
-///
-/// The base set is the template's curated subset (when `--template` is given)
-/// or the full [`SAFE_AGENT_OPERATIONS`] ceiling otherwise. An explicit
-/// `--allow` may only *narrow* that base: every requested operation must be a
-/// member of the base set, and the result is their intersection. This keeps
-/// `--template` pure sugar over `--allow` — it can never widen the ceiling.
+/// Templates and explicit allowlists narrow inherited authority. No hidden
+/// catalog strips admin or identity work from a human-derived agent.
 fn resolve_agent_operations(
     template: Option<AgentTemplate>,
     requested: Vec<String>,
-) -> Result<Vec<String>> {
-    let base: BTreeSet<String> = match template {
-        Some(template) => template.operations().into_iter().collect(),
-        None => SAFE_AGENT_OPERATIONS
-            .iter()
-            .map(|operation| (*operation).to_string())
-            .collect(),
-    };
-
+) -> Result<Option<Vec<String>>> {
+    let preset =
+        template.map(|template| template.operations().into_iter().collect::<BTreeSet<_>>());
     if requested.is_empty() {
-        return Ok(base.into_iter().collect());
+        return Ok(preset.map(|operations| operations.into_iter().collect()));
     }
-
     let mut selected = BTreeSet::new();
     for operation in requested {
-        if !base.contains(&operation) {
-            let ceiling = match template {
-                Some(template) => format!("the {:?} template's operation set", template.as_str()),
-                None => "the safe agent operation ceiling".to_string(),
-            };
+        if preset
+            .as_ref()
+            .is_some_and(|allowed| !allowed.contains(&operation))
+        {
             bail!(
-                "operation {operation:?} is outside {ceiling}; --allow can only narrow the {} set",
-                if template.is_some() {
-                    "template"
-                } else {
-                    "default"
-                }
+                "operation {operation:?} is outside the selected template; --allow can only narrow it"
             );
+        }
+        if !api::v2::ALL_METHODS
+            .iter()
+            .any(|method| method.path.rsplit('/').next() == Some(operation.as_str()))
+            && operation != super::device_flow::CI_VERDICT_WRITE_OPERATION
+        {
+            bail!("unknown v2 operation {operation:?}");
         }
         selected.insert(operation);
     }
-    Ok(selected.into_iter().collect())
+    Ok(Some(selected.into_iter().collect()))
 }
 
 fn parse_agent_scopes(scopes: Vec<String>) -> Result<Vec<(String, String)>> {
@@ -782,6 +777,9 @@ pub(crate) fn install_credential_file(path: &Path) -> Result<String> {
             .map_err(|error| anyhow::anyhow!("credential proof key is invalid: {error}"))?;
         repo::identity::link_device_key(signer.public_key(), &proof_key_pem, &server)
             .with_context(|| format!("registering device identity for {server}"))?;
+        let stored = credentials::get_server_credential(&server)?
+            .context("installed device credential missing")?;
+        super::source_author::retain(&server, &stored)?;
     }
 
     Ok(subject)
@@ -892,141 +890,13 @@ pub(crate) fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetada
     })
 }
 
-/// Authenticate via device authorization flow.
+/// Pair with the user's browser-derived capability through native v2.
 pub(crate) async fn login_browser(
     server: &str,
     open_browser: bool,
     on_event: &mut impl FnMut(AuthEvent) -> Result<()>,
 ) -> Result<AuthLoginOutcome> {
-    // 1. Generate Ed25519 keypair for device binding.
-    let signer = Ed25519Signer::generate()
-        .map_err(|e| anyhow::anyhow!("failed to generate keypair: {e}"))?;
-    let public_key_bytes = signer.public_key().to_vec();
-    let private_key_pem = signer
-        .to_pem()
-        .map_err(|e| anyhow::anyhow!("failed to export private key: {e}"))?;
-
-    // 2. Connect as the enrolling device key. weft#2047 requires a Tier-1
-    // request PoP by this key on CreateDeviceAuthorization; an unsigned
-    // session is rejected with no fallback.
-    let mut auth_client = connect_enrolling_device_client(server, &signer).await?;
-
-    // 3. Create device authorization.
-    let hostname = std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("HOST"))
-        .unwrap_or_else(|_| "heddle-cli".to_string());
-
-    let response: Result<DeviceAuthorizationResponse> = auth_client
-        .routes()
-        .create_device_authorization(&create_device_authorization_request(
-            hostname,
-            &public_key_bytes,
-        ))
-        .await
-        .map_err(|error| anyhow::anyhow!("create_device_authorization failed: {error}"));
-    let response = match response {
-        Ok(response) => response,
-        Err(error) => {
-            auth_client.close().await;
-            return Err(error);
-        }
-    };
-
-    let verification_uri = &response.verification_uri;
-    let user_code = &response.user_code;
-    let device_code = &response.device_code;
-
-    // 4. Hand instructions to the embedding Adapter.
-    if let Err(error) = on_event(AuthEvent::DeviceAuthorizationReady {
-        verification_uri: verification_uri.clone(),
-        user_code: user_code.clone(),
-    }) {
-        auth_client.close().await;
-        return Err(error);
-    }
-
-    // 5. Attempt to open browser. The verification URI is server-controlled,
-    // so validate scheme/host (and reject shell metacharacters) before
-    // spawning a browser helper — especially on Windows where `cmd /C start`
-    // would otherwise interpret the URL.
-    if open_browser {
-        let encoded_code = percent_encode_query_component(user_code);
-        let url = format!("{verification_uri}?code={encoded_code}");
-        match validate_browser_url(&url) {
-            Ok(()) => {
-                if let Err(error) = on_event(AuthEvent::BrowserOpenRequested { url }) {
-                    auth_client.close().await;
-                    return Err(error);
-                }
-            }
-            Err(err) => {
-                if let Err(error) = on_event(AuthEvent::BrowserUrlRejected {
-                    reason: err.to_string(),
-                }) {
-                    auth_client.close().await;
-                    return Err(error);
-                }
-            }
-        }
-    }
-
-    // 6. Poll for approval.
-    if let Err(error) = on_event(AuthEvent::WaitingForAuthorization) {
-        auth_client.close().await;
-        return Err(error);
-    }
-
-    let registered = poll_for_approval(
-        &mut auth_client,
-        device_code,
-        &public_key_bytes,
-        &signer,
-        response.expires_at,
-    )
-    .await;
-    auth_client.close().await;
-    let registered = registered?;
-    let expires_at = device_root_expiry(registered.expires_at.as_ref())?;
-    let root = crate::hosted_runtime::root_mint::mint_independent_root(
-        crate::hosted_runtime::root_mint::IndependentRootMint {
-            seed: &signer.to_seed(),
-            subject: &registered.subject,
-            ttl: crate::hosted_runtime::root_mint::ACCOUNT_ROOT_TTL,
-            credential_id: (!registered.credential_id.is_empty())
-                .then_some(registered.credential_id.as_str()),
-            session_id: (!registered.session_id.is_empty())
-                .then_some(registered.session_id.as_str()),
-            expires_at,
-        },
-    )?;
-
-    // 7. Store the client-minted root. Weft registered the public key; it
-    // does not mint or remint the bearer.
-    let credential = ServerCredential {
-        token: root.token,
-        subject: root.subject.clone(),
-        device_id: None,
-        credential_id: root.credential_id.clone(),
-        private_key_pem: Some(root.private_key_pem),
-        expires_at: Some(root.expires_at.to_rfc3339()),
-    };
-
-    credentials::store_server_credential(server, credential)?;
-
-    // Reconcile the local signing identity with the device key (heddle#482):
-    // record the device key as the machine's active signing identity so
-    // subsequent captures sign with it (it supersedes any per-repo local key;
-    // states already signed by a local key keep verifying). Best-effort — a
-    // failure here just leaves captures signing with the local key.
-    if let Err(error) = repo::identity::link_device_key(&public_key_bytes, &private_key_pem, server)
-    {
-        tracing::warn!(%error, "could not record device signing identity; captures will use the per-repo local key");
-    }
-
-    Ok(AuthLoginOutcome::Authenticated {
-        subject: root.subject,
-        credential_saved: true,
-    })
+    super::auth_pairing::login(server, open_browser, on_event).await
 }
 
 /// Remove stored credentials.
@@ -1100,7 +970,7 @@ fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> Auth
 // Create service token
 // ---------------------------------------------------------------------------
 
-/// Create a namespace-scoped service token for CI/ephemeral runners.
+/// Create an explicitly scoped service delegation for CI/ephemeral runners.
 ///
 /// Emits a single self-verifying `.hcred` credential file. The token and proof
 /// key never touch stdout or the JSON contract — only the credential path,
@@ -1109,17 +979,18 @@ async fn create_service_token(
     options: &AuthOptions,
     server: Option<&str>,
     name: String,
-    namespace: String,
+    scope: String,
     out: Option<&Path>,
 ) -> Result<ServiceTokenCreated> {
     let server = resolve_server(server)?;
-    let scope = format!("repo:{namespace}/*");
 
     // Resolve (and fail-fast reject an existing) credential path BEFORE any
     // server round trip, so a name collision doesn't strand a created service
     // account with no locally-written credential.
-    let credential_path = resolve_service_account_credential_path(&name, out);
-    if std::fs::symlink_metadata(&credential_path).is_ok() {
+    let credential_path = resolve_service_token_credential_path(&name, out);
+    if std::fs::symlink_metadata(&credential_path).is_ok()
+        && std::fs::symlink_metadata(PreparedServiceToken::path(&credential_path)).is_err()
+    {
         bail!(
             "credential destination {} already exists; choose a new --out path",
             credential_path.display()
@@ -1127,7 +998,7 @@ async fn create_service_token(
     }
 
     // Select and validate the exact active bearer + matching device proof key
-    // before generating the new service-account key.
+    // before generating the new service delegation key.
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build(
         &user_config,
@@ -1140,7 +1011,6 @@ async fn create_service_token(
         &mut auth_client,
         server,
         name,
-        namespace,
         scope,
         credential_path,
     )
@@ -1154,80 +1024,363 @@ async fn create_service_token_connected(
     auth_client: &mut HostedClient,
     server: String,
     name: String,
-    namespace: String,
     scope: String,
     credential_path: std::path::PathBuf,
 ) -> Result<ServiceTokenCreated> {
-    let create_operation_id = ClientOperationId::caller_or_fresh(
-        "heddle.api.v1alpha1.IdentityService/CreateServiceAccount",
-        options.operation_id().unwrap_or_default(),
-    );
-    let issue_operation_id = ClientOperationId::for_required_method(
-        "heddle.api.v1alpha1.IdentityService/IssueServiceAccountCredential",
-        create_operation_id.to_wire(),
-    )?;
+    let requested_operation_id = options.operation_id().unwrap_or_default();
+    let (principal, _) = auth_client
+        .observe_current_identity()
+        .await
+        .context("observing the active account for service delegation")?;
+    let parent_signer = auth_client
+        .claim_proof_signer()
+        .context("service delegation requires the active credential proof key")?;
+    let parent_token_b64 = std::str::from_utf8(auth_client.claim_authority_token())
+        .context("active credential is not a base64 Biscuit")?;
+    let effective_key = effective_pop_public_key_hex(parent_token_b64)?;
+    if !effective_key.eq_ignore_ascii_case(&hex::encode(parent_signer.public_key())) {
+        bail!("active credential proof key does not match its effective Biscuit key");
+    }
+    let parent_raw = base64::engine::general_purpose::URL_SAFE
+        .decode(parent_token_b64)
+        .context("decoding the exact active parent Biscuit")?;
+    let remote = auth_client.native().await?;
+    let inspection = remote
+        .api
+        .call::<thread_api::rpc::IdentityServiceIntrospectCredential>(
+            &identity::IntrospectCredentialRequest {
+                biscuit: parent_raw.clone(),
+            },
+        )
+        .await
+        .context("introspecting active parent credential")?;
+    let parent_expiry = inspection.expires_at.as_ref().map(|value| value.seconds);
+    let root_key = inspection
+        .authority
+        .context("parent credential has no verified root attachment")?
+        .root_public_key;
+    if root_key.len() != 32 {
+        bail!("parent credential root key is invalid");
+    }
 
-    // Generate a fresh Ed25519 keypair for the service account credential.
-    let signer = Ed25519Signer::generate()
-        .map_err(|e| anyhow::anyhow!("failed to generate keypair: {e}"))?;
-    let public_key_bytes = signer.public_key().to_vec();
-    let private_key_pem = signer
-        .to_pem()
-        .map_err(|e| anyhow::anyhow!("failed to export service-account private key: {e}"))?;
-
-    // 1. Create the service account.
-    let sa_response = auth_client
-        .create_service_account(CreateServiceAccountRequest {
-            subject: name.clone(),
-            display_name: name.clone(),
+    let parent_digest = hex::encode(blake3::hash(&parent_raw).as_bytes());
+    let now = current_unix_timestamp_i64()?;
+    if let Some(done) = PreparedServiceToken::with_lock(&credential_path, |path| {
+        let Some(mut prior) = PreparedServiceToken::load(path)? else {
+            return Ok(None);
+        };
+        prior.check_binding(
+            &server,
+            &principal.account_id,
+            &name,
+            &scope,
+            &credential_path,
+            requested_operation_id,
+            &parent_digest,
+        )?;
+        if std::fs::symlink_metadata(&credential_path).is_err() {
+            if prior.completed_digest.is_some() {
+                bail!("completed service credential file is missing; use a new --out path");
+            }
+            return Ok(None);
+        }
+        let bytes =
+            std::fs::read(&credential_path).context("reading completed service credential")?;
+        let digest = hex::encode(blake3::hash(&bytes).as_bytes());
+        if prior
+            .completed_digest
+            .as_ref()
+            .is_some_and(|value| value != &digest)
+        {
+            bail!("completed service credential has changed; refusing operation replay");
+        }
+        let credential = credential_file::load_credential_file(&credential_path)
+            .context("verifying completed service credential")?;
+        if credential.server != server
+            || credential.kind != CredentialKind::Service
+            || credential
+                .provenance
+                .as_ref()
+                .and_then(|value| value.scopes.as_ref())
+                != Some(&vec![scope.clone()])
+        {
+            bail!("credential destination does not match prepared service delegation");
+        }
+        if prior.completed_digest.is_none() {
+            if credential.proof_key_pem != prior.child_key_pem {
+                bail!("credential destination does not match prepared child key");
+            }
+            prior.complete(digest, path)?;
+        }
+        Ok(Some(ServiceTokenCreated {
+            name: name.clone(),
             scope: scope.clone(),
+            credential_path: credential_path.display().to_string(),
+            expires_in_days: u32::try_from((prior.expiry - now).max(0) / (24 * 3600))?,
+        }))
+    })? {
+        return Ok(done);
+    }
+    let prepared = PreparedServiceToken::with_lock(&credential_path, |path| {
+        if let Some(prior) = PreparedServiceToken::load(path)? {
+            prior.check_binding(
+                &server,
+                &principal.account_id,
+                &name,
+                &scope,
+                &credential_path,
+                requested_operation_id,
+                &parent_digest,
+            )?;
+            return Ok(prior);
+        }
+        let create_operation_id = ClientOperationId::caller_or_fresh(
+            "heddle.api.v1alpha2.IdentityService/PutDelegation",
+            requested_operation_id,
+        );
+        let signer = Ed25519Signer::generate().context("generating service credential key")?;
+        let child_key = signer.public_key().to_vec();
+        let child_key_pem = signer
+            .to_pem()
+            .context("exporting service credential key")?;
+        let requested_expiry = now
+            .checked_add(SERVICE_TOKEN_TTL_SECS)
+            .context("service credential expiry overflow")?;
+        let expiry = parent_expiry.map_or(requested_expiry, |parent| parent.min(requested_expiry));
+        if expiry <= now + 1 {
+            bail!("active parent credential expires too soon to issue a service credential");
+        }
+        let delegation_id = uuid::Uuid::now_v7().to_string();
+        let reference = identity::RecordRef {
+            spool: None,
+            id: delegation_id.clone(),
+        };
+        let statement = api::v2::identity_management::DelegationStatement {
+            account_id: principal.account_id.clone(),
+            delegation_id,
+            label: name.clone(),
+            kind: identity::delegation_record::Kind::Service as i32,
+            root_public_key: root_key.clone(),
+            subject_public_key: child_key.clone(),
+            endpoint_public_key: Vec::new(),
+            scope: scope.clone(),
+            expires_at_unix_seconds: expiry,
+            parent_credential_digest: blake3::hash(&parent_raw).as_bytes().to_vec(),
+        };
+        let canonical = statement.encode().context("encoding service delegation")?;
+        let record = identity::DelegationRecord {
+            r#ref: Some(reference),
+            label: name.clone(),
+            kind: identity::delegation_record::Kind::Service as i32,
+            subject: Some(identity::RootAttachment {
+                root_public_key: root_key.clone(),
+                subject_public_key: child_key,
+                ..Default::default()
+            }),
+            delegation: Some(sign_identity_record(
+                api::v2::identity_management::DELEGATION,
+                canonical,
+                parent_signer,
+            )?),
+            ..Default::default()
+        };
+        let put = identity::PutDelegationRequest {
             client_operation_id: create_operation_id.to_wire(),
-        })
+            delegation: Some(record),
+            ..Default::default()
+        };
+        let prepared = PreparedServiceToken {
+            format: PreparedServiceToken::FORMAT.to_owned(),
+            server: server.clone(),
+            account_id: principal.account_id.clone(),
+            name: name.clone(),
+            scope: scope.clone(),
+            output_path_hex: hex::encode(credential_path.as_os_str().as_encoded_bytes()),
+            operation_id: create_operation_id.to_wire(),
+            parent_digest: parent_digest.clone(),
+            child_key_pem,
+            put_hex: hex::encode(put.encode_to_vec()),
+            issue_hex: None,
+            completed_digest: None,
+            expiry,
+        };
+        prepared.store(path)?;
+        Ok(prepared)
+    })?;
+    let put = identity::PutDelegationRequest::decode(
+        hex::decode(&prepared.put_hex)
+            .context("decoding prepared delegation bytes")?
+            .as_slice(),
+    )
+    .context("decoding prepared delegation request")?;
+    let reference = put
+        .delegation
+        .as_ref()
+        .and_then(|record| record.r#ref.clone())
+        .context("prepared service delegation omitted its reference")?;
+    let delegation_id = reference.id.clone();
+    let signer = Ed25519Signer::from_pem(&prepared.child_key_pem)
+        .context("recovering prepared service credential key")?;
+    let child_key = signer.public_key().to_vec();
+    let expiry = prepared.expiry;
+    if expiry <= now + 1 {
+        bail!("prepared service credential has expired; use a new --out path");
+    }
+    let response = remote
+        .api
+        .call::<thread_api::rpc::IdentityServicePutDelegation>(&put)
         .await
-        .map_err(|error| anyhow::anyhow!("create_service_account failed: {error}"))?;
-
-    tracing::info!(
-        service_account_id = %sa_response.service_account_id,
-        subject = %sa_response.subject,
-        "service account created"
-    );
-
-    // 2. Issue a credential (token) for the service account.
-    let credential_request = IssueServiceAccountCredentialRequest {
-        service_account_id: sa_response.service_account_id,
-        public_key: public_key_bytes,
-        scope: scope.clone(),
-        // CLI-issued tokens retain their pre-TTL behaviour: 30-day
-        // expiry from the server's default (applied when ttl_secs == 0
-        // in the handler is "never expires", so pass 30 days here
-        // explicitly to preserve prior semantics).
-        ttl_secs: Some(prost_types::Duration {
-            seconds: SERVICE_TOKEN_TTL_SECS,
-            nanos: 0,
-        }),
-        client_operation_id: issue_operation_id.to_wire(),
-        proof_timestamp_seconds: 0,
-        proof_signature: Vec::new(),
+        .context("creating native service delegation")?;
+    let receipt = response
+        .receipt
+        .context("service delegation receipt absent")?;
+    if receipt.client_operation_id != put.client_operation_id
+        || receipt.endpoint != remote.description.endpoint
+    {
+        bail!("service delegation receipt does not match the requested operation");
+    }
+    let applied = match receipt.outcome {
+        Some(identity::mutation_receipt::Outcome::Applied(value)) => value,
+        _ => bail!("service delegation was not applied"),
     };
-    let credential_request = issue_service_account_credential_request(credential_request, &signer)?;
-    let issued = auth_client
-        .issue_service_account_credential(credential_request)
+    let version = applied.resulting_versions.iter()
+        .find(|item| item.resource.as_ref().is_some_and(|resource|
+            matches!(&resource.entity, Some(identity::entity_ref::Entity::Delegation(value)) if value == &reference)))
+        .context("service delegation receipt omitted its resulting version")?
+        .version.clone();
+    let issue = PreparedServiceToken::with_lock(&credential_path, |path| {
+        let mut current = PreparedServiceToken::load(path)?
+            .context("prepared service delegation disappeared before issuance")?;
+        current.check_binding(
+            &server,
+            &principal.account_id,
+            &name,
+            &scope,
+            &credential_path,
+            &prepared.operation_id,
+            &parent_digest,
+        )?;
+        if let Some(encoded) = &current.issue_hex {
+            let request = identity::IssueDelegationCredentialRequest::decode(
+                hex::decode(encoded)
+                    .context("decoding prepared issuance bytes")?
+                    .as_slice(),
+            )
+            .context("decoding prepared issuance request")?;
+            if request.expected_delegation_version != version {
+                bail!("prepared issuance no longer matches accepted delegation version");
+            }
+            return Ok(request);
+        }
+        let issue_operation_id = ClientOperationId::for_required_method(
+            "heddle.api.v1alpha2.IdentityService/IssueDelegationCredential",
+            prepared.operation_id.clone(),
+        )?;
+        let mut issue = identity::IssueDelegationCredentialRequest {
+            client_operation_id: issue_operation_id.to_wire(),
+            delegation: Some(reference.clone()),
+            proof_public_key: child_key.clone(),
+            scope: String::new(),
+            expires_at: Some(prost_types::Timestamp {
+                seconds: expiry,
+                nanos: 0,
+            }),
+            expected_delegation_version: version,
+            ..Default::default()
+        };
+        let intent = api::v2::identity_management::issuance(&principal.account_id, &issue)
+            .context("encoding service credential issuance")?;
+        issue.subject_possession = Some(sign_identity_record(
+            api::v2::identity_management::ISSUE_POSSESSION,
+            intent.clone(),
+            &signer,
+        )?);
+        let child: &[u8; 32] = child_key
+            .as_slice()
+            .try_into()
+            .context("generated child key must be 32 bytes")?;
+        let transfer = parent_signer
+            .sign(
+                &biscuit_verifier::key_delegation::statement(parent_token_b64, child)
+                    .context("encoding proof-key transfer")?,
+            )
+            .context("signing proof-key transfer")?;
+        if transfer.len() != 64 {
+            bail!("proof-key transfer signature is not Ed25519");
+        }
+        let mut authority = intent;
+        authority.extend_from_slice(&transfer);
+        issue.authority_proof = Some(sign_identity_record(
+            api::v2::identity_management::ISSUE_AUTHORITY,
+            authority,
+            parent_signer,
+        )?);
+        current.issue_hex = Some(hex::encode(issue.encode_to_vec()));
+        current.store(path)?;
+        Ok(issue)
+    })?;
+    let response = remote
+        .api
+        .call::<thread_api::rpc::IdentityServiceIssueDelegationCredential>(&issue)
         .await
-        .map_err(|error| anyhow::anyhow!("issue_service_account_credential failed: {error}"))?;
-
-    // Re-derive the subject from the issued token so the written credential is
-    // self-consistent (`load_credential_file` re-checks this on every read).
-    let subject = crate::hosted_runtime::device_flow::authenticated_subject(&issued.token)
-        .context("reading the issued service token's authenticated subject")?;
-    let expires_at =
-        (chrono::Utc::now() + chrono::Duration::seconds(SERVICE_TOKEN_TTL_SECS)).to_rfc3339();
-
+        .with_context(|| format!(
+            "issuing native service credential for delegation {}; no credential file was written",
+            delegation_id,
+        ))?;
+    let receipt = response
+        .receipt
+        .context("service credential issuance receipt absent")?;
+    if receipt.client_operation_id != issue.client_operation_id
+        || receipt.endpoint != remote.description.endpoint
+        || !matches!(
+            receipt.outcome,
+            Some(identity::mutation_receipt::Outcome::Applied(_))
+        )
+    {
+        bail!("service credential issuance was not applied to the requested endpoint");
+    }
+    let credential = response
+        .credential
+        .context("service credential issuance result absent")?;
+    let issued = match credential.outcome {
+        Some(identity::credential_result::Outcome::Issued(value)) => value,
+        _ => bail!("service credential issuance did not return an issued token"),
+    };
+    if issued.kind != identity::CredentialKind::Service as i32
+        || issued.proof_public_key != child_key
+        || issued.biscuit.is_empty()
+        || issued.subject.trim().is_empty()
+        || issued
+            .expires_at
+            .as_ref()
+            .is_none_or(|value| value.seconds != expiry)
+    {
+        bail!("issued service credential does not match the requested child, class or lifetime");
+    }
+    let token = verify_issued_service_biscuit(
+        &parent_raw,
+        &issued.biscuit,
+        &root_key,
+        &child_key,
+        expiry,
+        &scope,
+        &delegation_id,
+    )?;
+    let subject = crate::hosted_runtime::device_flow::authenticated_subject(&token)
+        .context("verifying issued service credential subject")?;
+    if subject != issued.subject {
+        bail!("issued service credential subject mismatch");
+    }
+    let expires_at = chrono::DateTime::from_timestamp(expiry, 0)
+        .context("issued service credential expiry outside supported range")?
+        .to_rfc3339();
     let verified = VerifiedCredential {
+        mint_root_attachment: None,
         server: server.clone(),
         kind: CredentialKind::Service,
         subject,
-        token: issued.token,
-        proof_key_pem: private_key_pem,
+        token,
+        proof_key_pem: prepared.child_key_pem.clone(),
         expires_at: Some(expires_at),
         credential_id: None,
         provenance: Some(CredentialProvenance {
@@ -1235,23 +1388,54 @@ async fn create_service_token_connected(
             ..CredentialProvenance::default()
         }),
     };
-    credential_file::write_credential_file(&credential_path, &verified)?;
+    match credential_file::write_credential_file(&credential_path, &verified) {
+        Ok(()) => {}
+        Err(error) if std::fs::symlink_metadata(&credential_path).is_ok() => {
+            let existing = credential_file::load_credential_file(&credential_path)
+                .context("verifying concurrently completed service credential")?;
+            if existing.server != verified.server
+                || existing.kind != verified.kind
+                || existing.subject != verified.subject
+                || existing.token != verified.token
+                || existing.proof_key_pem != verified.proof_key_pem
+                || existing.expires_at != verified.expires_at
+            {
+                return Err(error).context("credential destination contains a different token");
+            }
+        }
+        Err(error) => return Err(error),
+    }
+    PreparedServiceToken::with_lock(&credential_path, |path| {
+        let mut current = PreparedServiceToken::load(path)?
+            .context("service-token preparation missing after credential write")?;
+        current.check_binding(
+            &server,
+            &principal.account_id,
+            &name,
+            &scope,
+            &credential_path,
+            &prepared.operation_id,
+            &parent_digest,
+        )?;
+        let bytes = std::fs::read(&credential_path)?;
+        current.complete(hex::encode(blake3::hash(&bytes).as_bytes()), path)
+    })?;
     let credential_path_display = credential_path.display().to_string();
 
     Ok(ServiceTokenCreated {
         name,
-        namespace,
         scope,
         credential_path: credential_path_display,
-        expires_in_days: SERVICE_TOKEN_TTL_DAYS,
+        expires_in_days: u32::try_from((expiry - now) / (24 * 3600))
+            .context("service credential lifetime exceeds supported days")?,
     })
 }
 
-/// Resolve where to write the service-account `.hcred` credential.
+/// Resolve where to write the service-token `.hcred` credential.
 ///
 /// Prefers an explicit `--out` path; otherwise writes under
-/// `<heddle_home>/service-accounts/<sanitized-name>.hcred`.
-fn resolve_service_account_credential_path(name: &str, out: Option<&Path>) -> std::path::PathBuf {
+/// `<heddle_home>/service-tokens/<sanitized-name>.hcred`.
+fn resolve_service_token_credential_path(name: &str, out: Option<&Path>) -> std::path::PathBuf {
     if let Some(path) = out {
         return path.to_path_buf();
     }
@@ -1266,67 +1450,205 @@ fn resolve_service_account_credential_path(name: &str, out: Option<&Path>) -> st
         })
         .collect();
     if safe.is_empty() {
-        safe = "service-account".to_string();
+        safe = "service-token".to_string();
     }
     repo::identity::heddle_home_dir()
-        .join("service-accounts")
+        .join("service-tokens")
         .join(format!("{safe}.hcred"))
 }
 
-fn issue_service_account_credential_request(
-    request: IssueServiceAccountCredentialRequest,
-    signer: &Ed25519Signer,
-) -> Result<IssueServiceAccountCredentialRequest> {
-    let timestamp = current_unix_timestamp_i64()?;
-    issue_service_account_credential_request_at(request, signer, timestamp)
+/// Private, versioned preparation beside the credential destination. The
+/// original signed bytes are retained across process restarts; a retry never
+/// silently signs a different body under the same operation ID.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreparedServiceToken {
+    format: String,
+    server: String,
+    account_id: String,
+    name: String,
+    scope: String,
+    output_path_hex: String,
+    operation_id: String,
+    parent_digest: String,
+    child_key_pem: String,
+    put_hex: String,
+    issue_hex: Option<String>,
+    completed_digest: Option<String>,
+    expiry: i64,
 }
 
-fn issue_service_account_credential_request_at(
-    mut request: IssueServiceAccountCredentialRequest,
-    signer: &Ed25519Signer,
-    timestamp: i64,
-) -> Result<IssueServiceAccountCredentialRequest> {
-    let signature = issue_service_account_credential_signature(
-        signer,
-        timestamp,
-        &request.service_account_id,
-        &request.public_key,
-    )?;
-    request.proof_timestamp_seconds = timestamp;
-    request.proof_signature = signature;
-    Ok(request)
+impl PreparedServiceToken {
+    const FORMAT: &'static str = "heddle.service-token-preparation.v2";
+
+    fn path(output: &Path) -> std::path::PathBuf {
+        let mut name = output.as_os_str().to_os_string();
+        name.push(".pending");
+        std::path::PathBuf::from(name)
+    }
+
+    fn with_lock<T>(output: &Path, action: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+        let path = Self::path(output);
+        if let Some(parent) = path.parent() {
+            objects::fs_atomic::create_private_dir_all(parent)?;
+        }
+        let lock = objects::lock::RepoLock::at(path.with_extension("pending.lock"));
+        let _guard = lock.write().map_err(|error| anyhow::anyhow!(error))?;
+        action(&path)
+    }
+
+    fn load(path: &Path) -> Result<Option<Self>> {
+        let file = match credential_file::open_credential_file_checked(path) {
+            Ok(file) => file,
+            Err(error)
+                if error
+                    .root_cause()
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        file.take(256 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("reading {}", path.display()))?;
+        if bytes.len() > 256 * 1024 {
+            bail!("service-token preparation exceeds private storage bound");
+        }
+        let prepared: Self =
+            serde_json::from_slice(&bytes).context("decoding private service-token preparation")?;
+        if prepared.format != Self::FORMAT {
+            bail!("unsupported service-token preparation format");
+        }
+        Ok(Some(prepared))
+    }
+
+    fn store(&self, path: &Path) -> Result<()> {
+        let bytes = serde_json::to_vec(self).context("encoding service-token preparation")?;
+        if bytes.len() > 256 * 1024 {
+            bail!("service-token preparation exceeds private storage bound");
+        }
+        objects::fs_atomic::write_file_atomic_secret(path, &bytes)?;
+        Ok(())
+    }
+
+    fn complete(&mut self, digest: String, path: &Path) -> Result<()> {
+        self.child_key_pem.clear();
+        self.put_hex.clear();
+        self.issue_hex = None;
+        self.completed_digest = Some(digest);
+        self.store(path)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_binding(
+        &self,
+        server: &str,
+        account: &str,
+        name: &str,
+        scope: &str,
+        output: &Path,
+        operation: &str,
+        parent_digest: &str,
+    ) -> Result<()> {
+        if self.server != server
+            || self.account_id != account
+            || self.name != name
+            || self.scope != scope
+            || self.output_path_hex != hex::encode(output.as_os_str().as_encoded_bytes())
+            || (!operation.is_empty() && self.operation_id != operation)
+            || self.parent_digest != parent_digest
+        {
+            bail!(
+                "service-token destination is bound to a different account, parent credential or command; choose a new --out path"
+            );
+        }
+        Ok(())
+    }
 }
 
-fn issue_service_account_credential_signature(
-    signer: &Ed25519Signer,
-    timestamp: i64,
-    service_account_id: &str,
-    public_key: &[u8],
-) -> Result<Vec<u8>> {
-    let canonical = derive_issue_service_account_credential_canonical(
-        timestamp,
-        service_account_id,
-        public_key,
-    );
-    signer
-        .sign(&canonical)
-        .map_err(|e| anyhow::anyhow!("failed to sign service-account proof: {e}"))
+fn verify_issued_service_biscuit(
+    parent_raw: &[u8],
+    issued_raw: &[u8],
+    root_key: &[u8],
+    child_key: &[u8],
+    expiry: i64,
+    scope: &str,
+    delegation_id: &str,
+) -> Result<String> {
+    let root = biscuit_auth::PublicKey::from_bytes(root_key, biscuit_auth::Algorithm::Ed25519)
+        .context("invalid verified parent Biscuit root key")?;
+    let parent = biscuit_auth::Biscuit::from(parent_raw, root)
+        .context("active parent Biscuit signature failed local verification")?;
+    let root = biscuit_auth::PublicKey::from_bytes(root_key, biscuit_auth::Algorithm::Ed25519)
+        .context("invalid verified issued Biscuit root key")?;
+    let issued = biscuit_auth::Biscuit::from(issued_raw, root)
+        .context("issued service Biscuit signature failed local verification")?;
+    if issued.block_count() != parent.block_count() + 1 {
+        bail!("issued service credential must append exactly one block to its parent");
+    }
+    let boundary = chrono::DateTime::from_timestamp(expiry, 0)
+        .context("issued service credential expiry outside supported range")?;
+    heddleco_capability_verifier::service_scope::verify_service_child_ceiling(
+        &issued,
+        scope,
+        delegation_id,
+        boundary,
+    )
+    .context("verifying signed service scope ceiling")?;
+    let parent_token = base64::engine::general_purpose::URL_SAFE.encode(parent_raw);
+    let token = base64::engine::general_purpose::URL_SAFE.encode(issued_raw);
+    biscuit_verifier::key_delegation::require_descendant(&parent_token, &token)
+        .context("issued service credential discarded parent restrictions")?;
+    let effective = biscuit_verifier::facts::verify_proof_key_lineage(&issued)
+        .context("issued service credential proof-key lineage failed")?;
+    if !effective.eq_ignore_ascii_case(&hex::encode(child_key)) {
+        bail!("issued service credential does not delegate possession to the requested child");
+    }
+    let now = chrono::Utc::now();
+    biscuit_verifier::authorize_at_with_extra_facts(
+        &issued,
+        "ObserveIdentity",
+        now,
+        None,
+        &[],
+        None,
+        &[],
+    )
+    .context("issued service credential is not currently usable")?;
+    if biscuit_verifier::authorize_at_with_extra_facts(
+        &issued,
+        "ObserveIdentity",
+        boundary,
+        None,
+        &[],
+        None,
+        &[],
+    )
+    .is_ok()
+    {
+        bail!("issued service credential is not bounded by the requested expiry");
+    }
+    Ok(token)
 }
 
-fn derive_issue_service_account_credential_canonical(
-    timestamp: i64,
-    service_account_id: &str,
-    public_key: &[u8],
-) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(ISSUE_SA_PROOF_DOMAIN);
-    hasher.update([0u8]);
-    hasher.update(timestamp.to_be_bytes());
-    hasher.update([0u8]);
-    hasher.update(service_account_id.as_bytes());
-    hasher.update([0u8]);
-    hasher.update(public_key);
-    hasher.finalize().into()
+fn sign_identity_record(
+    format: &str,
+    canonical_record: Vec<u8>,
+    signer: &Ed25519Signer,
+) -> Result<identity::SignedRecord> {
+    let message = api::v2::identity_management::signing_bytes(format, &canonical_record)
+        .context("encoding identity signature domain")?;
+    Ok(identity::SignedRecord {
+        format: format.to_owned(),
+        canonical_record,
+        signatures: vec![identity::RecordSignature {
+            public_key: signer.public_key().to_vec(),
+            signature: signer.sign(&message).context("signing identity record")?,
+        }],
+    })
 }
 
 fn current_unix_timestamp_i64() -> Result<i64> {
@@ -1352,12 +1674,7 @@ pub fn resolve_server(explicit: Option<&str>) -> Result<String> {
     Ok("api.heddle.sh".to_string())
 }
 
-/// Connect the device-authorization login flow as the enrolling device key.
-///
-/// CreateDeviceAuthorization is possession-first (weft#2047): the request
-/// proof identity is `principal:device-key:<lowercase-hex>`. The proto field
-/// on this RPC remains `device_public_key` (heddle-api 0.26 has no
-/// `device_proof_public_key` on CreateDeviceAuthorizationRequest).
+/// Connect pairing with the enrolling subject key before account approval.
 fn enrolling_device_auth_mode(signer: &Ed25519Signer) -> Result<HostedAuthMode> {
     Ok(HostedAuthMode::ProofOnly {
         proof_key_pem: signer
@@ -1367,19 +1684,7 @@ fn enrolling_device_auth_mode(signer: &Ed25519Signer) -> Result<HostedAuthMode> 
     })
 }
 
-fn create_device_authorization_request(
-    device_name: impl Into<String>,
-    public_key: &[u8],
-) -> CreateDeviceAuthorizationRequest {
-    CreateDeviceAuthorizationRequest {
-        device_name: device_name.into(),
-        device_public_key: public_key.to_vec(),
-        scope: "repo:*".to_string(),
-        client_operation_id: String::new(),
-    }
-}
-
-async fn connect_enrolling_device_client(
+pub(super) async fn connect_enrolling_device_client(
     server: &str,
     signer: &Ed25519Signer,
 ) -> Result<HostedClient> {
@@ -1421,133 +1726,7 @@ fn hosted_tls_trust_advice(message: &str) -> HeddleError {
     )
 }
 
-/// Wait until the device code is approved, then register the device public
-/// key. The caller mints the root locally; Weft does not return a bearer.
-async fn poll_for_approval(
-    client: &mut HostedClient,
-    device_code: &str,
-    public_key: &[u8],
-    signer: &Ed25519Signer,
-    expires_at: Option<prost_types::Timestamp>,
-) -> Result<RegisteredDevice> {
-    let proof_bytes = device_authorization_signature(device_code, signer)?;
-
-    let expires_at_secs = expires_at
-        .as_ref()
-        .map(|t| t.seconds.max(0) as u64)
-        .unwrap_or(0);
-    let wait_budget = std::time::Duration::from_secs(
-        expires_at_secs
-            .saturating_sub(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-            )
-            .max(30),
-    );
-    let deadline = std::time::Instant::now() + wait_budget;
-
-    let mut events = client
-        .routes()
-        .wait_for_device_authorization(&WaitForDeviceAuthorizationRequest {
-            device_code: device_code.to_string(),
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("wait_for_device_authorization failed: {error}"))?;
-
-    loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if remaining.is_zero() {
-            return Err(device_authorization_wait_timeout(wait_budget));
-        }
-
-        let event =
-            wait_for_device_authorization_event(events.next(), remaining, wait_budget).await?;
-
-        match event.map(|status| status.status()) {
-            Some(DeviceAuthorizationStatus::Pending) => continue,
-            Some(DeviceAuthorizationStatus::Approved) => break,
-            Some(DeviceAuthorizationStatus::Expired) => {
-                bail!("Authorization expired before approval. Please try again.");
-            }
-            Some(status) => bail!("Unexpected device authorization status: {status:?}"),
-            None => bail!("Device authorization ended before approval. Please try again."),
-        }
-    }
-
-    exchange_device_authorization(client, device_code, public_key, proof_bytes).await
-}
-
-async fn wait_for_device_authorization_event(
-    event: impl std::future::Future<
-        Output = std::result::Result<Option<DeviceAuthorizationEvent>, HostedError>,
-    >,
-    remaining: std::time::Duration,
-    wait_budget: std::time::Duration,
-) -> Result<Option<DeviceAuthorizationEvent>> {
-    tokio::time::timeout(remaining, event)
-        .await
-        .map_err(|_| device_authorization_wait_timeout(wait_budget))?
-        .map_err(|error| device_authorization_wait_stream_error(error, wait_budget))
-}
-
-fn device_authorization_wait_timeout(wait_budget: std::time::Duration) -> anyhow::Error {
-    anyhow::anyhow!(
-        "device authorization approval wait exceeded its {}s authorization-expiry budget; please run `heddle auth login` again",
-        wait_budget.as_secs()
-    )
-}
-
-fn device_authorization_wait_stream_error(
-    error: HostedError,
-    wait_budget: std::time::Duration,
-) -> anyhow::Error {
-    if matches!(
-        error,
-        HostedError::Call {
-            code: api::heddle::api::v1alpha1::CallFailureCode::DeadlineExceeded,
-            ..
-        }
-    ) {
-        return anyhow::anyhow!(
-            "device authorization approval stream returned DeadlineExceeded before its {}s authorization-expiry budget elapsed: {error}",
-            wait_budget.as_secs()
-        );
-    }
-    anyhow::anyhow!("device authorization approval stream failed: {error}")
-}
-
-async fn exchange_device_authorization(
-    client: &mut HostedClient,
-    device_code: &str,
-    public_key: &[u8],
-    proof: Vec<u8>,
-) -> Result<RegisteredDevice> {
-    let inner = client
-        .routes()
-        .exchange_device_authorization(&ExchangeDeviceAuthorizationRequest {
-            device_code: device_code.to_string(),
-            device_public_key: public_key.to_vec(),
-            proof,
-        })
-        .await
-        .map_err(|error| anyhow::anyhow!("device authorization failed: {error}"))?;
-
-    let subject = if inner.subject.is_empty() {
-        format!("device:{}", hex::encode(public_key))
-    } else {
-        inner.subject
-    };
-    Ok(RegisteredDevice {
-        subject,
-        credential_id: inner.credential_id,
-        session_id: inner.session_id,
-        expires_at: inner.expires_at,
-    })
-}
-
-fn device_root_expiry(
+pub(super) fn credential_expiry(
     expires_at: Option<&prost_types::Timestamp>,
 ) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
     let Some(expires_at) = expires_at else {
@@ -1563,20 +1742,6 @@ fn device_root_expiry(
         bail!("device authorization returned an expired credential");
     }
     Ok(Some(expires_at))
-}
-
-fn device_authorization_signature(device_code: &str, signer: &Ed25519Signer) -> Result<Vec<u8>> {
-    signer
-        .sign(format!("device:{device_code}").as_bytes())
-        .map_err(|e| anyhow::anyhow!("failed to sign proof: {e}"))
-}
-
-/// Public-key registration result. The bearer is minted locally.
-struct RegisteredDevice {
-    subject: String,
-    credential_id: String,
-    session_id: String,
-    expires_at: Option<prost_types::Timestamp>,
 }
 
 /// Validate a URL before emitting a browser-open request to the caller.
@@ -1663,23 +1828,6 @@ fn is_loopback_browser_host(host: &str) -> bool {
     }
 }
 
-/// Percent-encode a query component using the unreserved set (RFC 3986).
-fn percent_encode_query_component(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => {
-                use std::fmt::Write as _;
-                let _ = write!(out, "%{b:02X}");
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1689,6 +1837,7 @@ mod tests {
 
     #[test]
     fn hosted_auth_has_no_cli_or_process_presentation_dependencies() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let sources = [
             include_str!("auth.rs"),
             include_str!("auth_login.rs"),
@@ -1714,26 +1863,31 @@ mod tests {
 
     #[test]
     fn signup_invite_commands_construct_the_declared_requests() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let create = create_signup_invite_request(
             Some("alice@example.com".to_string()),
             "invite-op".to_string(),
         );
-        assert_eq!(create.recipient_email.as_deref(), Some("alice@example.com"));
+        assert_eq!(
+            create
+                .invitation
+                .as_ref()
+                .map(|invite| invite.bound_email.as_str()),
+            Some("alice@example.com")
+        );
         assert_eq!(create.client_operation_id, "invite-op");
-
-        let list = list_signup_invites_request("next-page".to_string());
-        assert_eq!(list.page_size, 200);
-        assert_eq!(list.page_token, "next-page");
     }
 
     #[test]
     fn validate_browser_url_accepts_https() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         validate_browser_url("https://auth.heddle.sh/device").expect("https ok");
         validate_browser_url("https://auth.heddle.sh/device?code=ABCD-1234").expect("https+query");
     }
 
     #[test]
     fn validate_browser_url_accepts_loopback_http() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         validate_browser_url("http://127.0.0.1:8421/path").expect("loopback http");
         validate_browser_url("http://localhost:8421/device").expect("localhost http");
         validate_browser_url("http://[::1]:8421/path").expect("ipv6 loopback http");
@@ -1741,6 +1895,7 @@ mod tests {
 
     #[test]
     fn validate_browser_url_rejects_injection_and_dangerous_schemes() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         assert!(
             validate_browser_url("https://x.com & calc").is_err(),
             "shell metacharacters must be rejected"
@@ -1754,6 +1909,7 @@ mod tests {
 
     #[test]
     fn validate_browser_url_rejects_percent_and_redirection() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         // `%` enables Windows env-var expansion (`%VAR%`) via `cmd /C start`.
         assert!(
             validate_browser_url("https://evil.com/%USERPROFILE%").is_err(),
@@ -1773,14 +1929,8 @@ mod tests {
     }
 
     #[test]
-    fn percent_encode_query_component_encodes_reserved() {
-        assert_eq!(percent_encode_query_component("ABCD-1234"), "ABCD-1234");
-        assert_eq!(percent_encode_query_component("a b"), "a%20b");
-        assert_eq!(percent_encode_query_component("x&y"), "x%26y");
-    }
-
-    #[test]
     fn hosted_tls_trust_advice_names_ca_and_avoids_status() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let advice = hosted_tls_trust_advice("invalid peer certificate: UnknownIssuer");
         let HeddleError::Recovery(details) = advice else {
             panic!("expected recovery details")
@@ -1796,6 +1946,7 @@ mod tests {
 
     #[test]
     fn device_login_mints_the_bearer_from_the_registered_device_key() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let signer = Ed25519Signer::generate().expect("device key");
         let subject = "alice@example.com";
         let root = crate::hosted_runtime::root_mint::mint_independent_root(
@@ -1825,8 +1976,9 @@ mod tests {
 
     #[test]
     fn device_root_honors_returned_expiry_and_rejects_an_already_expired_one() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let future = chrono::Utc::now() + chrono::Duration::hours(6);
-        let honored = device_root_expiry(Some(&prost_types::Timestamp {
+        let honored = credential_expiry(Some(&prost_types::Timestamp {
             seconds: future.timestamp(),
             nanos: 0,
         }))
@@ -1835,108 +1987,365 @@ mod tests {
         assert!((honored - future).num_seconds().abs() <= 1);
 
         let past = chrono::Utc::now() - chrono::Duration::hours(1);
-        let error = device_root_expiry(Some(&prost_types::Timestamp {
+        let error = credential_expiry(Some(&prost_types::Timestamp {
             seconds: past.timestamp(),
             nanos: 0,
         }))
-        .expect_err("expired server expiry must fail closed");
+        .err()
+        .unwrap_or_else(|| panic!("expired server expiry must fail closed"));
         assert!(error.to_string().contains("expired credential"));
-        assert!(device_root_expiry(None).expect("omitted expiry").is_none());
+        assert!(credential_expiry(None).expect("omitted expiry").is_none());
     }
 
     #[test]
-    fn device_authorization_signature_signs_device_code_challenge() {
-        let signer = Ed25519Signer::generate().expect("signer");
-        let signature =
-            device_authorization_signature("device-123", &signer).expect("device proof");
+    fn service_token_preparation_replays_exact_signed_bytes_and_retires_secret() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        let directory = tempfile::tempdir().expect("private preparation directory");
+        let output = directory.path().join("ci.hcred");
+        let put = identity::PutDelegationRequest {
+            client_operation_id: uuid::Uuid::new_v4().to_string(),
+            delegation: Some(identity::DelegationRecord {
+                label: "ci".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let signed_put = put.encode_to_vec();
+        let prepared = PreparedServiceToken {
+            format: PreparedServiceToken::FORMAT.into(),
+            server: "example.invalid".into(),
+            account_id: uuid::Uuid::new_v4().to_string(),
+            name: "ci".into(),
+            scope: "spool:heddle/platform read write".into(),
+            output_path_hex: hex::encode(output.as_os_str().as_encoded_bytes()),
+            operation_id: put.client_operation_id.clone(),
+            parent_digest: "parent-digest".into(),
+            child_key_pem: "private child key".into(),
+            put_hex: hex::encode(&signed_put),
+            issue_hex: Some(hex::encode(b"exact signed issue bytes")),
+            completed_digest: None,
+            expiry: 1_900_000_000,
+        };
+        PreparedServiceToken::with_lock(&output, |path| prepared.store(path))
+            .expect("durable preparation");
+        let mut replay = PreparedServiceToken::with_lock(&output, |path| {
+            PreparedServiceToken::load(path).map(|value| value.expect("prepared state"))
+        })
+        .expect("load private preparation");
+        replay
+            .check_binding(
+                "example.invalid",
+                &prepared.account_id,
+                "ci",
+                &prepared.scope,
+                &output,
+                &prepared.operation_id,
+                "parent-digest",
+            )
+            .expect("same command resumes");
+        assert_eq!(
+            hex::decode(&replay.put_hex).expect("prepared Put"),
+            signed_put
+        );
+        assert_eq!(
+            hex::decode(replay.issue_hex.as_deref().expect("prepared Issue"))
+                .expect("prepared Issue bytes"),
+            b"exact signed issue bytes"
+        );
+        assert!(
+            replay
+                .check_binding(
+                    "example.invalid",
+                    &prepared.account_id,
+                    "ci",
+                    "spool:other read",
+                    &output,
+                    &prepared.operation_id,
+                    "parent-digest"
+                )
+                .is_err()
+        );
+        PreparedServiceToken::with_lock(&output, |path| {
+            replay.complete("credential-digest".into(), path)
+        })
+        .expect("retire private preparation");
+        let done = PreparedServiceToken::with_lock(&output, |path| {
+            PreparedServiceToken::load(path).map(|value| value.expect("completed state"))
+        })
+        .expect("load completed receipt");
+        assert!(done.child_key_pem.is_empty());
+        assert!(done.put_hex.is_empty());
+        assert!(done.issue_hex.is_none());
+        assert_eq!(done.completed_digest.as_deref(), Some("credential-digest"));
+    }
 
-        Ed25519Signer::verify_with_public_key(
-            b"device:device-123",
-            signer.public_key(),
-            &signature,
+    #[test]
+    fn private_service_preparation_refuses_oversized_or_public_files() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().expect("private directory");
+        let output = directory.path().join("oversized.hcred");
+        let pending = PreparedServiceToken::path(&output);
+        std::fs::write(&pending, vec![b' '; 256 * 1024 + 1])
+            .expect("oversized preparation fixture");
+        #[cfg(unix)]
+        {
+            std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o600))
+                .expect("private mode");
+        }
+        let oversized = PreparedServiceToken::load(&pending)
+            .err()
+            .unwrap_or_else(|| panic!("oversized preparation must fail"));
+        assert!(
+            oversized
+                .to_string()
+                .contains("exceeds private storage bound")
+        );
+        #[cfg(unix)]
+        {
+            std::fs::write(&pending, b"{}").expect("small public fixture");
+            std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o644))
+                .expect("public mode");
+            let public = PreparedServiceToken::load(&pending)
+                .err()
+                .unwrap_or_else(|| panic!("public preparation must fail"));
+            assert!(public.to_string().contains("group/other-accessible"));
+        }
+    }
+
+    #[test]
+    fn issued_service_token_requires_signed_exact_parent_child_and_expiry() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        use biscuit_auth::{Biscuit, KeyPair, builder::BlockBuilder};
+        let root = KeyPair::new();
+        let root_key = root.public().to_bytes();
+        let parent_signer =
+            Ed25519Signer::from_seed(&root.private().to_bytes()).expect("root proof key");
+        let child_signer = Ed25519Signer::generate().expect("child proof key");
+        let child_key = child_signer.public_key().to_vec();
+        let parent = Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("subject")
+            .fact(r#"session("parent-session")"#)
+            .expect("session")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(&root_key)).as_str())
+            .expect("parent proof key")
+            .build(&root)
+            .expect("parent Biscuit")
+            .to_base64()
+            .expect("parent token");
+        let child: &[u8; 32] = child_key.as_slice().try_into().expect("child key size");
+        let transfer = parent_signer
+            .sign(
+                &biscuit_verifier::key_delegation::statement(&parent, child)
+                    .expect("transfer statement"),
+            )
+            .expect("signed transfer");
+        let transfer: &[u8; 64] = transfer.as_slice().try_into().expect("transfer size");
+        let expiry = (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp();
+        let restriction = BlockBuilder::new()
+            .check(
+                format!(
+                    "check if time($now), $now < {}",
+                    chrono::DateTime::from_timestamp(expiry, 0)
+                        .expect("expiry")
+                        .to_rfc3339()
+                )
+                .as_str(),
+            )
+            .expect("expiry restriction");
+        let valid = biscuit_verifier::key_delegation::append(&parent, child, transfer, restriction)
+            .expect("valid service child");
+        let parent_raw = base64::engine::general_purpose::URL_SAFE
+            .decode(&parent)
+            .expect("parent bytes");
+        let valid_raw = base64::engine::general_purpose::URL_SAFE
+            .decode(&valid)
+            .expect("child bytes");
+        verify_issued_service_biscuit(
+            &parent_raw,
+            &valid_raw,
+            &root_key,
+            &child_key,
+            expiry,
+            "",
+            "test",
         )
-        .expect("signature must verify against device challenge");
+        .expect("signed exact child accepted");
+        let broadened = match verify_issued_service_biscuit(
+            &parent_raw,
+            &valid_raw,
+            &root_key,
+            &child_key,
+            expiry,
+            "thread:write",
+            "test",
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("time-only child must not masquerade as requested Thread scope"),
+        };
+        assert!(broadened.to_string().contains("scope ceiling"));
+        let mut scoped = heddleco_capability_verifier::service_scope::service_attenuation(
+            "thread:write",
+            "test",
+            chrono::DateTime::from_timestamp(expiry, 0).expect("expiry"),
+        )
+        .expect("canonical scope")
+        .block()
+        .expect("scope block");
+        scoped.facts.retain(|fact| fact.predicate.name != "agent");
+        let scoped_token =
+            biscuit_verifier::key_delegation::append(&parent, child, transfer, scoped)
+                .expect("scoped child");
+        let scoped_raw = base64::engine::general_purpose::URL_SAFE
+            .decode(&scoped_token)
+            .expect("scoped bytes");
+        verify_issued_service_biscuit(
+            &parent_raw,
+            &scoped_raw,
+            &root_key,
+            &child_key,
+            expiry,
+            "thread:write",
+            "test",
+        )
+        .expect("signed exact Thread scope accepted");
+        let wrong_child = Ed25519Signer::generate().expect("different child");
+        let wrong_child_error = verify_issued_service_biscuit(
+            &parent_raw,
+            &valid_raw,
+            &root_key,
+            wrong_child.public_key(),
+            expiry,
+            "",
+            "test",
+        )
+        .err()
+        .unwrap_or_else(|| panic!("wrong child must fail"));
+        assert!(wrong_child_error.to_string().contains("requested child"));
+        let wrong_root = KeyPair::new();
+        let wrong_root_error = verify_issued_service_biscuit(
+            &parent_raw,
+            &valid_raw,
+            &wrong_root.public().to_bytes(),
+            &child_key,
+            expiry,
+            "",
+            "test",
+        )
+        .err()
+        .unwrap_or_else(|| panic!("wrong root must fail"));
+        assert!(wrong_root_error.to_string().contains("signature"));
+        let unbounded =
+            biscuit_verifier::key_delegation::append(&parent, child, transfer, BlockBuilder::new())
+                .expect("unbounded sibling child");
+        let unbounded_raw = base64::engine::general_purpose::URL_SAFE
+            .decode(&unbounded)
+            .expect("unbounded child bytes");
+        let unbounded_error = verify_issued_service_biscuit(
+            &parent_raw,
+            &unbounded_raw,
+            &root_key,
+            &child_key,
+            expiry,
+            "",
+            "test",
+        )
+        .err()
+        .unwrap_or_else(|| panic!("missing child expiry must fail"));
+        assert!(unbounded_error.to_string().contains("scope ceiling"));
+        let sibling_parent = Biscuit::builder()
+            .fact(r#"user("alice")"#)
+            .expect("sibling subject")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(&root_key)).as_str())
+            .expect("sibling proof key")
+            .fact(r#"session("another")"#)
+            .expect("sibling session")
+            .build(&root)
+            .expect("sibling parent")
+            .to_base64()
+            .expect("sibling token");
+        let sibling_transfer = parent_signer
+            .sign(
+                &biscuit_verifier::key_delegation::statement(&sibling_parent, child)
+                    .expect("sibling transfer statement"),
+            )
+            .expect("sibling transfer signature");
+        let sibling_transfer: &[u8; 64] = sibling_transfer
+            .as_slice()
+            .try_into()
+            .expect("sibling signature size");
+        let sibling = biscuit_verifier::key_delegation::append(
+            &sibling_parent,
+            child,
+            sibling_transfer,
+            BlockBuilder::new()
+                .check(
+                    format!(
+                        "check if time($now), $now < {}",
+                        chrono::DateTime::from_timestamp(expiry, 0)
+                            .expect("expiry")
+                            .to_rfc3339()
+                    )
+                    .as_str(),
+                )
+                .expect("sibling expiry restriction"),
+        )
+        .expect("sibling child");
+        let sibling_raw = base64::engine::general_purpose::URL_SAFE
+            .decode(&sibling)
+            .expect("sibling bytes");
+        let sibling_error = verify_issued_service_biscuit(
+            &parent_raw,
+            &sibling_raw,
+            &root_key,
+            &child_key,
+            expiry,
+            "",
+            "test",
+        )
+        .err()
+        .unwrap_or_else(|| panic!("sibling root token must fail"));
+        assert!(sibling_error.to_string().contains("discarded parent"));
+    }
+
+    #[test]
+    fn service_delegation_signature_binds_canonical_bytes() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        let signer = Ed25519Signer::generate().expect("signer");
+        let canonical = b"service delegation".to_vec();
+        let record = sign_identity_record(
+            api::v2::identity_management::DELEGATION,
+            canonical.clone(),
+            &signer,
+        )
+        .expect("signed record");
+        let message = api::v2::identity_management::signing_bytes(&record.format, &canonical)
+            .expect("signature domain");
+        Ed25519Signer::verify_with_public_key(
+            &message,
+            signer.public_key(),
+            &record.signatures[0].signature,
+        )
+        .expect("original statement verifies");
+        let mut changed = canonical;
+        changed.push(b'!');
+        let changed_message = api::v2::identity_management::signing_bytes(&record.format, &changed)
+            .expect("changed signature domain");
         assert!(
             Ed25519Signer::verify_with_public_key(
-                b"device:other",
+                &changed_message,
                 signer.public_key(),
-                &signature,
+                &record.signatures[0].signature,
             )
-            .is_err(),
-            "signature must commit to the device code",
+            .is_err()
         );
-    }
-
-    #[tokio::test]
-    async fn device_authorization_timeout_names_stage_and_budget() {
-        let wait_budget = std::time::Duration::from_secs(42);
-        let error = wait_for_device_authorization_event(
-            std::future::pending::<
-                std::result::Result<Option<DeviceAuthorizationEvent>, HostedError>,
-            >(),
-            std::time::Duration::from_millis(1),
-            wait_budget,
-        )
-        .await
-        .expect_err("the deliberately stalled authorization wait must time out");
-
-        assert_eq!(
-            error.to_string(),
-            "device authorization approval wait exceeded its 42s authorization-expiry budget; please run `heddle auth login` again"
-        );
-    }
-
-    #[test]
-    fn early_remote_deadline_names_stage_and_budget() {
-        let error = device_authorization_wait_stream_error(
-            HostedError::Call {
-                code: api::heddle::api::v1alpha1::CallFailureCode::DeadlineExceeded,
-                message: "call deadline has elapsed".to_string(),
-                error: None,
-            },
-            std::time::Duration::from_secs(600),
-        );
-
-        assert!(error.to_string().contains(
-            "device authorization approval stream returned DeadlineExceeded before its 600s authorization-expiry budget elapsed"
-        ));
-    }
-
-    #[test]
-    fn issue_service_account_request_attaches_pop_fields() {
-        let signer = Ed25519Signer::generate().expect("signer");
-        let public_key = signer.public_key().to_vec();
-        let request = IssueServiceAccountCredentialRequest {
-            service_account_id: "sa-123".to_string(),
-            public_key: public_key.clone(),
-            scope: "repo:heddle/platform/*".to_string(),
-            ttl_secs: Some(prost_types::Duration {
-                seconds: SERVICE_TOKEN_TTL_SECS,
-                nanos: 0,
-            }),
-            client_operation_id: "op-1".to_string(),
-            proof_timestamp_seconds: 0,
-            proof_signature: Vec::new(),
-        };
-
-        let timestamp = 1_700_000_000;
-        let request = issue_service_account_credential_request_at(request, &signer, timestamp)
-            .expect("request with proof");
-
-        assert_eq!(request.proof_timestamp_seconds, timestamp);
-        let signature = &request.proof_signature;
-        let canonical =
-            derive_issue_service_account_credential_canonical(timestamp, "sa-123", &public_key);
-        Ed25519Signer::verify_with_public_key(&canonical, &public_key, signature)
-            .expect("proof must be signed by the new service-account key");
-
-        assert_eq!(request.service_account_id, "sa-123");
-        assert_eq!(request.public_key, public_key);
-        assert_eq!(request.scope, "repo:heddle/platform/*");
     }
 
     #[test]
     fn authenticated_identity_mutations_cannot_use_a_direct_bearer_interceptor() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let source = include_str!("auth.rs");
         assert!(
             !source.contains(concat!("IdentityService", "Client")),
@@ -1949,27 +2358,8 @@ mod tests {
     }
 
     #[test]
-    fn issue_service_account_canonical_commits_to_each_field() {
-        let public_key = vec![0xAA; 32];
-        let base =
-            derive_issue_service_account_credential_canonical(1_700_000_000, "sa-1", &public_key);
-
-        assert_ne!(
-            base,
-            derive_issue_service_account_credential_canonical(1_700_000_001, "sa-1", &public_key,),
-        );
-        assert_ne!(
-            base,
-            derive_issue_service_account_credential_canonical(1_700_000_000, "sa-2", &public_key,),
-        );
-        assert_ne!(
-            base,
-            derive_issue_service_account_credential_canonical(1_700_000_000, "sa-1", &[0xBB; 32],),
-        );
-    }
-
-    #[test]
     fn login_and_rotation_never_call_a_weft_mint_rpc() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let source = include_str!("auth.rs");
         assert!(
             !source.contains(concat!("mint", "_biscuit")),
@@ -1983,6 +2373,7 @@ mod tests {
 
     #[test]
     fn trust_replace_refuses_active_explicit_config_without_mutating_the_pin() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             let server = "https://api.example";
             crate::hosted_runtime::hosted::insert_verified_pin(server, "old-id", &[0x11; 32])
@@ -2018,7 +2409,9 @@ mod tests {
                 }
             }
 
-            let error = result.expect_err("explicit trust must control replacement");
+            let error = result
+                .err()
+                .unwrap_or_else(|| panic!("explicit trust must control replacement"));
             assert!(
                 error
                     .to_string()
@@ -2064,6 +2457,7 @@ mod tests {
 
     fn sample_credential() -> ServerCredential {
         ServerCredential {
+            mint_root_attachment: None,
             token: "tkn".to_string(),
             subject: "dev".to_string(),
             device_id: None,
@@ -2097,6 +2491,7 @@ mod tests {
             .expect("encode parent");
         (
             ServerCredential {
+                mint_root_attachment: None,
                 token,
                 subject: "alice".to_string(),
                 device_id: Some("device-root".to_string()),
@@ -2152,6 +2547,7 @@ mod tests {
 
     #[test]
     fn derive_agent_installs_fresh_pop_child_and_supports_narrower_subderivation() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             let server = "api.S";
             let (parent, private_key_pem, _root) = stored_device_parent();
@@ -2162,7 +2558,7 @@ mod tests {
                 Some("agent-parent".to_string()),
                 3600,
                 vec!["repo:acme/heddle".to_string()],
-                vec!["Push".to_string()],
+                vec!["PublishContent".to_string()],
                 None,
                 None,
             )
@@ -2210,7 +2606,7 @@ mod tests {
                 Some("agent-child".to_string()),
                 600,
                 vec!["repo:acme/heddle/subtree".to_string()],
-                vec!["Push".to_string()],
+                vec!["PublishContent".to_string()],
                 None,
                 None,
             )
@@ -2248,17 +2644,19 @@ mod tests {
                 Some("agent-widening".to_string()),
                 300,
                 vec!["repo:acme".to_string()],
-                vec!["Push".to_string()],
+                vec!["PublishContent".to_string()],
                 None,
                 None,
             )
-            .expect_err("subagent scope widening must be rejected");
+            .err()
+            .unwrap_or_else(|| panic!("subagent scope widening must be rejected"));
             assert!(error.to_string().contains("would widen"));
         });
     }
 
     #[test]
     fn derive_agent_out_writes_one_verifiable_hcred_with_a_fresh_child_key() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             let server = "api.S";
             let (parent, private_key_pem, _root) = stored_device_parent();
@@ -2270,7 +2668,7 @@ mod tests {
                 Some("agent-export".to_string()),
                 3600,
                 vec!["repo:acme/heddle".to_string()],
-                vec!["Push".to_string()],
+                vec!["PublishContent".to_string()],
                 None,
                 Some(&out),
             )
@@ -2297,7 +2695,7 @@ mod tests {
             );
             assert_eq!(
                 provenance.allowed_operations.as_deref(),
-                Some(["Push".to_string()].as_slice())
+                Some(["PublishContent".to_string()].as_slice())
             );
 
             let child_signer =
@@ -2317,17 +2715,19 @@ mod tests {
                 Some("agent-export-again".to_string()),
                 3600,
                 vec!["repo:acme/heddle".to_string()],
-                vec!["Push".to_string()],
+                vec!["PublishContent".to_string()],
                 None,
                 Some(&out),
             )
-            .expect_err("an existing credential file must not be overwritten");
+            .err()
+            .unwrap_or_else(|| panic!("an existing credential file must not be overwritten"));
             assert!(error.to_string().contains("already exists"));
         });
     }
 
     #[test]
     fn derive_agent_runner_hcred_is_human_delegated_and_least_privileged() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             let server = "api.S";
             let (parent, parent_private_key_pem, root) = stored_device_parent();
@@ -2396,7 +2796,7 @@ mod tests {
                 .as_deref(),
                 Some("spool:org/acme ci-verdict:write")
             );
-            for forbidden in ["Push", "UpdateRef", "CreateSpool", "spool:write"] {
+            for forbidden in ["PublishContent", "LandThread", "CreateSpool", "spool:write"] {
                 assert!(
                     !operations.iter().any(|operation| operation == forbidden),
                     "runner .hcred must not carry source-write operation {forbidden}"
@@ -2425,42 +2825,49 @@ mod tests {
     }
 
     #[test]
-    fn derive_agent_allow_flag_cannot_select_unsafe_operations() {
+    fn derive_agent_can_inherit_or_explicitly_delegate_admin_operations() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        assert_eq!(
+            resolve_agent_operations(None, Vec::new()).expect("inherited"),
+            None
+        );
         for operation in [
-            "CreateServiceAccount",
-            "IssueServiceAccountCredential",
+            "CreateSignupInvitation",
             "DeleteSpool",
-            "CreateSignupInvite",
-            "ListSignupInvites",
+            "RevokeSession",
+            "PutGrant",
+            "BootstrapOwnership",
         ] {
-            let error = resolve_agent_operations(None, vec![operation.to_string()])
-                .expect_err("unsafe operation must be outside CLI ceiling");
-            assert!(
-                error
-                    .to_string()
-                    .contains("outside the safe agent operation ceiling")
+            assert_eq!(
+                resolve_agent_operations(None, vec![operation.into()]).expect("explicit authority"),
+                Some(vec![operation.into()])
             );
         }
+        assert!(resolve_agent_operations(None, vec!["InventedOperation".into()]).is_err());
     }
 
     #[test]
     fn runner_requires_concrete_spool_scopes() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let missing = validate_runner_scopes(Some(AgentTemplate::Runner), &[])
-            .expect_err("an unscoped runner must be rejected");
+            .err()
+            .unwrap_or_else(|| panic!("an unscoped runner must be rejected"));
         assert!(missing.to_string().contains("requires at least one"));
 
         let wrong_kind = validate_runner_scopes(
             Some(AgentTemplate::Runner),
             &[("repo".to_string(), "org/acme".to_string())],
         )
-        .expect_err("a repo-scoped runner must be rejected");
+        .err()
+        .unwrap_or_else(|| panic!("a repo-scoped runner must be rejected"));
         assert!(wrong_kind.to_string().contains("is not a spool"));
 
         let wildcard = validate_runner_scopes(
             Some(AgentTemplate::Runner),
             &[("spool".to_string(), "*".to_string())],
         )
-        .expect_err("a wildcard runner must be rejected");
+        .err()
+        .unwrap_or_else(|| panic!("a wildcard runner must be rejected"));
         assert!(wildcard.to_string().contains("concrete spool path"));
 
         validate_runner_scopes(
@@ -2475,53 +2882,65 @@ mod tests {
 
     #[test]
     fn template_expands_to_a_curated_allow_set() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let reviewer = resolve_agent_operations(Some(AgentTemplate::Reviewer), Vec::new())
-            .expect("reviewer template resolves");
-        assert!(reviewer.contains(&"GetState".to_string()));
-        assert!(reviewer.contains(&"Pull".to_string()));
+            .expect("reviewer template resolves")
+            .expect("template restrictions");
+        assert!(reviewer.contains(&"ReadContent".to_string()));
+        assert!(reviewer.contains(&"Fetch".to_string()));
         // Reviewer grants no writes / ref moves.
-        assert!(!reviewer.contains(&"Push".to_string()));
-        assert!(!reviewer.contains(&"UpdateRef".to_string()));
-        assert!(!reviewer.contains(&"SetContext".to_string()));
+        assert!(!reviewer.contains(&"PublishContent".to_string()));
+        assert!(!reviewer.contains(&"LandThread".to_string()));
+        assert!(!reviewer.contains(&"PutContext".to_string()));
 
         let contributor = resolve_agent_operations(Some(AgentTemplate::Contributor), Vec::new())
-            .expect("contributor template resolves");
-        assert!(contributor.contains(&"Push".to_string()));
-        assert!(contributor.contains(&"SetContext".to_string()));
+            .expect("contributor template resolves")
+            .expect("template restrictions");
+        assert!(contributor.contains(&"PublishContent".to_string()));
+        assert!(contributor.contains(&"PutContext".to_string()));
         assert!(contributor.contains(&"OpenDiscussion".to_string()));
-        assert!(!contributor.contains(&"CreateSignupInvite".to_string()));
-        assert!(!contributor.contains(&"ListSignupInvites".to_string()));
+        assert!(!contributor.contains(&"CreateSignupInvitation".to_string()));
+        assert!(contributor.contains(&"ObserveIdentity".to_string()));
 
         let ci = resolve_agent_operations(Some(AgentTemplate::CiLanding), Vec::new())
-            .expect("ci-landing template resolves");
-        assert!(ci.contains(&"Push".to_string()));
-        assert!(ci.contains(&"UpdateRef".to_string()));
-        assert!(ci.contains(&"Pull".to_string()));
+            .expect("ci-landing template resolves")
+            .expect("template restrictions");
+        assert!(ci.contains(&"PublishContent".to_string()));
+        assert!(ci.contains(&"LandThread".to_string()));
+        assert!(ci.contains(&"ReadContent".to_string()));
         // CI landing grants no collaboration writes.
         assert!(!ci.contains(&"OpenDiscussion".to_string()));
-        assert!(!ci.contains(&"SetContext".to_string()));
-        assert!(!ci.contains(&"CreateSignupInvite".to_string()));
+        assert!(!ci.contains(&"PutContext".to_string()));
+        assert!(!ci.contains(&"CreateSignupInvitation".to_string()));
     }
 
     #[test]
     fn explicit_allow_only_narrows_a_template() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         // `--allow GetState` intersects the reviewer set: result is just GetState.
-        let narrowed =
-            resolve_agent_operations(Some(AgentTemplate::Reviewer), vec!["GetState".to_string()])
-                .expect("narrowing within the template is allowed");
-        assert_eq!(narrowed, vec!["GetState".to_string()]);
+        let narrowed = resolve_agent_operations(
+            Some(AgentTemplate::Reviewer),
+            vec!["ReadContent".to_string()],
+        )
+        .expect("narrowing within the template is allowed");
+        assert_eq!(narrowed, Some(vec!["ReadContent".to_string()]));
 
         // `--allow Push` is outside the reviewer set, so it cannot widen it.
-        let error =
-            resolve_agent_operations(Some(AgentTemplate::Reviewer), vec!["Push".to_string()])
-                .expect_err("a template cannot be widened by --allow");
+        let error = resolve_agent_operations(
+            Some(AgentTemplate::Reviewer),
+            vec!["PublishContent".to_string()],
+        )
+        .err()
+        .unwrap_or_else(|| panic!("a template cannot be widened by --allow"));
         assert!(error.to_string().contains("outside"));
     }
 
     #[test]
     fn auth_status_qualifies_a_credential_without_a_proof_key() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         let credential = sample_credential();
         let resolved = crate::hosted_runtime::hosted::ResolvedHostedCredential {
+            mint_root_attachment: None,
             token: Some(wire::AuthToken::new(credential.token, "credential-store")),
             proof_key_pem: credential.private_key_pem,
             renewable: None,
@@ -2545,6 +2964,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_with_missing_credential_file_fails_closed() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         let error = execute(
             AuthOptions::default(),
             AuthCommand::Login {
@@ -2556,12 +2976,14 @@ mod tests {
             |_| Ok(()),
         )
         .await
-        .expect_err("a missing credential file must fail");
+        .err()
+        .unwrap_or_else(|| panic!("a missing credential file must fail"));
         assert!(error.to_string().contains("opening credential file"));
     }
 
     #[tokio::test]
     async fn login_with_device_credential_file_installs_and_links_identity() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
         // `with_isolated_home` guards a process-global env mutation; run the
         // async install on the current thread inside that guard.
         let temp = tempfile::TempDir::new().expect("temp home");
@@ -2596,6 +3018,7 @@ mod tests {
             credential_file::write_credential_file(
                 &path,
                 &VerifiedCredential {
+                    mint_root_attachment: None,
                     server: server.to_string(),
                     kind: CredentialKind::Device,
                     subject: "alice".to_string(),
@@ -2645,6 +3068,7 @@ mod tests {
     /// signing identity are removed (heddle#482).
     #[test]
     fn logout_removes_credential_and_device_identity_on_success() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             credentials::store_server_credential("api.S", sample_credential())
                 .expect("store credential");
@@ -2684,6 +3108,7 @@ mod tests {
     /// retry could no longer resolve back to this server.
     #[test]
     fn logout_preserves_credential_when_device_unlink_fails() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_home(|| {
             credentials::store_server_credential("api.S", sample_credential())
                 .expect("store credential");
@@ -2717,44 +3142,18 @@ mod tests {
     }
 
     #[test]
-    fn device_authorization_session_signs_as_the_enrolling_device_key() {
-        use api::signing;
-        use prost::Message;
-
-        let signer = Ed25519Signer::generate().expect("device key");
-        match enrolling_device_auth_mode(&signer).expect("auth mode") {
-            HostedAuthMode::ProofOnly {
-                signing_identity, ..
-            } => {
-                assert_eq!(
-                    signing_identity,
-                    CallContextFactory::device_key_principal(signer.public_key())
-                );
-            }
-            _ => panic!("CreateDeviceAuthorization must use ProofOnly"),
-        }
-        let request = create_device_authorization_request("laptop", signer.public_key());
-        assert_eq!(request.device_public_key, signer.public_key());
-        assert_eq!(request.device_name, "laptop");
-        let encoded = request.encode_to_vec();
-        let signed = CallContextFactory::default()
-            .with_enrolling_device_key_pem(&signer.to_pem().expect("pem"))
-            .expect("factory")
-            .unary(
-                "/heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
-                &encoded,
-                "",
-            )
-            .expect("sign");
-        let proof = signed.context.request_proof.expect("request proof");
-        let canonical = signing::unary_bytes(
-            &proof.signing_identity,
-            "/heddle.api.v1alpha1.IdentityService/CreateDeviceAuthorization",
-            proof.timestamp_millis,
-            &proof.nonce,
-            &encoded,
+    fn pairing_session_signs_as_the_enrolling_subject_key() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        let signer = Ed25519Signer::generate().expect("subject key");
+        let HostedAuthMode::ProofOnly {
+            signing_identity, ..
+        } = enrolling_device_auth_mode(&signer).expect("proof-only session")
+        else {
+            panic!("pairing must use subject possession")
+        };
+        assert_eq!(
+            signing_identity,
+            CallContextFactory::device_key_principal(signer.public_key())
         );
-        Ed25519Signer::verify_with_public_key(&canonical, signer.public_key(), &proof.signature)
-            .expect("weft-verifiable enrollment PoP");
     }
 }

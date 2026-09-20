@@ -11,7 +11,7 @@ Heddle is a **local-first, agent-native version control system** shipped as the 
 
 | User | Primary surface |
 |------|-----------------|
-| Human developers | CLI: `status`, `adopt`, `capture`, `start`, `land`, `verify`, `diff`, `log` |
+| Human developers | CLI: `status`, `import local`, `capture`, `start`, `land`, `verify`, `diff`, `log` |
 | Coding agents / harnesses | Machine-readable JSON (`--output json` / auto), command catalog, op-id replay, harness integrations |
 | Embedders (library) | `heddle-core` facade: typed ops returning `*Report` / `Result`, no process control or render |
 | Hosted products | The v1alpha1 cutover target is the public `heddle-api` contract owned by `HeddleCo/api`; Heddle, Weft, and Tapestry remain separately gated consumers |
@@ -30,7 +30,7 @@ delivery (CLI / future daemon / tests)
 1. **Local-first** — useful without a hosted account; no required network for core VCS.
 2. **Agent-native** — durable threads, attribution (principal + agent), retryable ops (`--op-id`), disposable attempts (`try`, isolated `start --path`).
 3. **Git Overlay** — active Git reads/writes use the checkout’s real `.git`; Heddle metadata lives under `.heddle`.
-4. **Byte-identical Git round-trip** — for public history, adopt/import → export reproduces identical commit/tree/blob/tag SHAs and `git fsck --full` clean (oracle: `roundtrip_fidelity`, git projection engine tests).
+4. **Byte-identical Git round-trip** — for public history, import local/import → export reproduces identical commit/tree/blob/tag SHAs and `git fsck --full` clean (oracle: `roundtrip_fidelity`, git projection engine tests).
 5. **No runtime `git` executable dependency** for public Git-overlay workflows — Git-format identity and operations via **Sley** (native engine). Tests/fixtures may shell out to `git`.
 6. **Verification-first CLI** — Repository Verification State drives status/doctor/verify advice; mutating commands fail closed when verification is degraded/blocked.
 7. **Machine contracts** — stable JSON fields, explicit nulls, command catalog + the runtime schema registry as source of truth (`heddle <command> --schema`).

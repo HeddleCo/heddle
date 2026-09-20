@@ -27,7 +27,28 @@ struct RuntimeContractParseSample {
 // and Git projection grouping rows.
 const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["abort"], &["abort"]),
-    sample(&["adopt"], &["adopt"]),
+    sample(&["import", "local"], &["import", "local"]),
+    #[cfg(feature = "client")]
+    sample(
+        &["import", "url"],
+        &[
+            "import",
+            "url",
+            "https://github.com/acme/widget.git",
+            "--to",
+            "acme/widget",
+        ],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["import", "status"],
+        &["import", "status", "operation-1", "--to", "acme/widget"],
+    ),
+    #[cfg(feature = "client")]
+    sample(
+        &["import", "retry"],
+        &["import", "retry", "operation-1", "--to", "acme/widget"],
+    ),
     #[cfg(feature = "ci")]
     sample(&["ci", "run"], &["ci", "run", "--local"]),
     sample(
@@ -135,6 +156,10 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     #[cfg(feature = "client")]
     sample(&["auth", "invite", "list"], &["auth", "invite", "list"]),
     #[cfg(feature = "client")]
+    sample(&["invite"], &["invite", "--email", "alice@example.com"]),
+    #[cfg(feature = "client")]
+    sample(&["invite", "list"], &["invite", "list"]),
+    #[cfg(feature = "client")]
     sample(
         &["auth", "trust", "show"],
         &["auth", "trust", "show", "--server", "api.heddle.test"],
@@ -175,7 +200,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "auth",
             "create-service-token",
             "github-ci-main",
-            "--namespace",
+            "--scope",
             "heddle/platform",
         ],
     ),
@@ -196,7 +221,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "--principal",
             "alice",
             "--role",
-            "contributor",
+            "writer",
         ],
     ),
     #[cfg(feature = "client")]
@@ -229,6 +254,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
         &["context", "reason", "git"],
         &["context", "reason", "git", "--path", "."],
     ),
+    sample(&["blame"], &["blame", "src/lib.rs"]),
     sample(&["capture"], &["capture"]),
     sample(&["clone"], &["clone", "remote", "local"]),
     sample(
@@ -266,12 +292,21 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     sample(&["netd", "stop"], &["netd", "stop"]),
     sample(&["diff"], &["diff"]),
     sample(
-        &["discuss", "open"],
-        &["discuss", "open", "src/lib.rs", "symbol", "body"],
+        &["discuss", "new"],
+        &[
+            "discuss",
+            "new",
+            "--path",
+            "src/lib.rs",
+            "--symbol",
+            "symbol",
+            "--body",
+            "body",
+        ],
     ),
     sample(
-        &["discuss", "append"],
-        &["discuss", "append", "discussion-1", "body"],
+        &["discuss", "reply"],
+        &["discuss", "reply", "discussion-1", "--body", "reply"],
     ),
     sample(
         &["discuss", "resolve"],
@@ -302,7 +337,7 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
             "git",
             "--ref",
             "main",
-            "--preview",
+            "--dry-run",
         ],
     ),
     sample(
@@ -473,28 +508,39 @@ const RUNTIME_CONTRACT_PARSE_SAMPLES: &[RuntimeContractParseSample] = &[
     ),
     sample(&["thread", "absorb"], &["thread", "absorb", "feature"]),
     sample(&["thread", "resolve"], &["thread", "resolve", "feature"]),
-    sample(&["thread", "promote"], &["thread", "promote", "feature"]),
-    sample(&["thread", "drop"], &["thread", "drop", "feature"]),
     sample(
-        &["thread", "approve"],
-        &["thread", "approve", "source", "target"],
+        &["thread", "ownership", "status"],
+        &["thread", "ownership", "status"],
     ),
     sample(
-        &["thread", "approvals"],
-        &["thread", "approvals", "source", "target"],
+        &["thread", "ownership", "claim"],
+        &["thread", "ownership", "claim"],
     ),
     sample(
-        &["thread", "revoke-approval"],
+        &["thread", "ownership", "resolve"],
+        &["thread", "ownership", "resolve", "--claim", "claim-1"],
+    ),
+    sample(&["review", "approve"], &["review", "approve", "feature"]),
+    sample(&["review", "list"], &["review", "list", "feature"]),
+    sample(
+        &["review", "revoke"],
         &[
-            "thread",
-            "revoke-approval",
+            "review",
+            "revoke",
             "00000000-0000-0000-0000-000000000000",
+            "--thread",
+            "feature",
         ],
     ),
     sample(
-        &["thread", "check-merge"],
-        &["thread", "check-merge", "source", "target"],
+        &["review", "readiness"],
+        &["review", "readiness", "feature", "--into", "main"],
     ),
+    sample(
+        &["thread", "checkout"],
+        &["thread", "checkout", "feature", "--path", "../feature"],
+    ),
+    sample(&["thread", "drop"], &["thread", "drop", "feature"]),
     sample(&["thread", "cleanup"], &["thread", "cleanup", "--merged"]),
     sample(&["thread", "marker", "list"], &["thread", "marker", "list"]),
     sample(
@@ -584,7 +630,7 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
         "heddle clone <local-path> <path>",
         "heddle clone /tmp/source <path> --thread main",
         "heddle bridge git import --path <full-git-repo> --ref <ref>",
-        "heddle thread promote main",
+        "heddle thread checkout main --path ../main",
         "heddle thread resolve main",
         "heddle auth login --invite <code>",
     ] {
@@ -597,8 +643,8 @@ fn recommended_actions_parse_through_clap_or_registered_placeholders() {
             "heddle bridge git import --ref main",
             "heddle bridge git import --ref origin/main",
             "heddle ready --thread origin/main",
-            "heddle maintenance fsck repair git --ref main --preview",
-            "heddle maintenance fsck repair git --prefer heddle --ref main --preview",
+            "heddle maintenance fsck repair git --ref main --dry-run",
+            "heddle maintenance fsck repair git --prefer heddle --ref main --dry-run",
         ] {
             validate_recommended_action(action)
                 .unwrap_or_else(|err| panic!("expected `{action}` to validate: {err}"));
@@ -867,7 +913,6 @@ fn leading_dash_thread_breadcrumbs_pass_validation() {
         repo::RecommendedAction::Sync,
         repo::RecommendedAction::Ready,
         repo::RecommendedAction::Land,
-        repo::RecommendedAction::Promote,
     ] {
         if let Some(cmd) = action.command("-foo") {
             validate_recommended_action(&cmd).unwrap_or_else(|err| {
@@ -875,6 +920,9 @@ fn leading_dash_thread_breadcrumbs_pass_validation() {
             });
         }
     }
+    validate_recommended_action("heddle thread checkout --path ../x -- -foo").unwrap_or_else(
+        |err| panic!("live checkout breadcrumb must validate for a leading-dash id: {err}"),
+    );
 }
 
 #[test]
@@ -1047,7 +1095,12 @@ fn json_compact_runtime_contract_is_projection_or_rejection() {
         "context set".to_string(),
         "continue".to_string(),
         "diff".to_string(),
-        "discuss open".to_string(),
+        "discuss new".to_string(),
+        "discuss reply".to_string(),
+        "import local".to_string(),
+        "import retry".to_string(),
+        "import status".to_string(),
+        "import url".to_string(),
         "land".to_string(),
         "log".to_string(),
         "ready".to_string(),
@@ -1267,7 +1320,6 @@ fn command_contract_metadata_is_internally_consistent() {
                     && !contract.writes_metadata
                     && !contract.writes_config
                     && !contract.writes_hooks
-                    && !contract.network_io
                     && !contract.daemon_process
                     && !contract.object_gc
                     && !contract.external_command
@@ -1442,8 +1494,8 @@ fn sidecar_only_effect_sets_exclude_refs() {
         &["agent", "task", "create"],
         &["agent", "task", "update"],
         &["context", "reason", "git"],
-        &["discuss", "open"],
-        &["discuss", "append"],
+        &["discuss", "new"][..],
+        &["discuss", "reply"],
         &["discuss", "resolve"],
         &["discuss", "reopen"],
         &["review", "sign"],
@@ -1635,7 +1687,7 @@ fn sync_git_adopt_note_is_authority_neutral() {
     assert_eq!(
         contract.canonical_note,
         Some(
-            "Use adopt to initialize Heddle from an existing Git repository and import its history."
+            "Use import local to initialize Heddle from an existing Git repository and import its history."
         )
     );
 }
@@ -1786,7 +1838,10 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // snake-cased display paths — see the overrides documented in
             // tests/cli_integration/output_kind_invariant.rs.
             "abort",
-            "adopt",
+            "import local",
+            "import url",
+            "import status",
+            "import retry",
             "agent capture",
             "agent ready",
             "agent task create",
@@ -1806,6 +1861,8 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "auth status",
             "auth invite",
             "auth invite list",
+            "invite",
+            "invite list",
             // heddle#1130: descriptor-trust inspection and explicit
             // compare-and-swap replacement emit stable trust records.
             "auth trust show",
@@ -1846,9 +1903,10 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "netd status",
             "netd stop",
             "daemon stop",
+            "blame",
             "diff",
-            "discuss open",
-            "discuss append",
+            "discuss new",
+            "discuss reply",
             "discuss resolve",
             "discuss reopen",
             "discuss list",
@@ -1887,6 +1945,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "resolve",
             "revert",
             "review show",
+            "review revoke",
             "review sign",
             "review next",
             "review health",
@@ -1911,9 +1970,11 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             "thread rename",
             "thread refresh",
             "thread resolve",
-            "thread promote",
+            "thread ownership status",
+            "thread ownership claim",
+            "thread ownership resolve",
+            "thread checkout",
             "thread drop",
-            "thread revoke-approval",
             "thread cleanup",
             "thread marker list",
             "thread marker create",
@@ -2237,13 +2298,27 @@ fn catalog_option_lookup_includes_globals_and_finite_values() {
     let context_set_options = catalog
         .options_for_path(&["context".to_string(), "set".to_string()])
         .expect("context set should be cataloged");
-    let scope = context_set_options
+    let symbol = context_set_options
         .iter()
-        .find(|option| option.long.as_deref() == Some("scope"))
-        .expect("context set --scope should be cataloged");
+        .find(|option| option.long.as_deref() == Some("symbol"))
+        .expect("context set --symbol should be cataloged");
     assert!(
-        scope.possible_values.is_empty(),
-        "context scope accepts open-ended values like symbol:<name>"
+        !symbol.hidden,
+        "context set --symbol is the explicit scope flag"
+    );
+    let line = context_set_options
+        .iter()
+        .find(|option| option.long.as_deref() == Some("line"))
+        .expect("context set --line should be cataloged");
+    assert!(
+        !line.hidden,
+        "context set --line is the explicit scope flag"
+    );
+    assert!(
+        context_set_options
+            .iter()
+            .all(|option| option.long.as_deref() != Some("scope")),
+        "context set has no deprecated --scope alias"
     );
     let kind = context_set_options
         .iter()
@@ -2273,7 +2348,7 @@ fn catalog_option_lookup_includes_globals_and_finite_values() {
         .find(|option| option.long.as_deref() == Some("prefer"))
         .expect("fsck repair git --prefer should be cataloged");
     assert_eq!(prefer.possible_values, vec!["git", "heddle"]);
-    for expected in ["ref", "preview"] {
+    for expected in ["ref", "dry-run"] {
         assert!(
             repair_options
                 .iter()
@@ -2317,6 +2392,7 @@ fn command_contract_table_drives_help_tiers() {
             "capture", "everyday", "native", "everyday", None, None, false,
         ),
         ("query", "everyday", "native", "everyday", None, None, false),
+        ("blame", "everyday", "native", "everyday", None, None, false),
         (
             "review", "everyday", "native", "everyday", None, None, false,
         ),
@@ -2344,7 +2420,7 @@ fn command_contract_table_drives_help_tiers() {
             false,
         ),
         (
-            "thread promote",
+            "thread checkout",
             "advanced",
             "native",
             "advanced",
@@ -2461,6 +2537,37 @@ fn parsed_command_runtime_contract_exposes_catalog_fields() {
     assert_eq!(runtime.help_visibility, entry.help_visibility);
     assert_eq!(runtime.help_rank, entry.help_rank);
     assert_eq!(runtime.surface, entry.surface);
+    assert_eq!(runtime.output_cardinality, entry.output_cardinality);
+    assert_eq!(runtime.retry_semantics, entry.retry_semantics);
+}
+
+#[test]
+fn declared_output_framing_matches_json_kind() {
+    let catalog = build_command_catalog();
+    for entry in &catalog.commands {
+        let expected = match entry.json_kind.as_str() {
+            "jsonl" | "json_or_jsonl" => "stream",
+            "none" => "none",
+            _ => "one",
+        };
+        assert_eq!(
+            entry.output_cardinality, expected,
+            "`{}` output_cardinality must match json_kind {}",
+            entry.display, entry.json_kind
+        );
+        let expected_retry = if !entry.mutates {
+            "safe_replay"
+        } else if entry.supports_op_id {
+            "op_id"
+        } else {
+            "not_idempotent"
+        };
+        assert_eq!(
+            entry.retry_semantics, expected_retry,
+            "`{}` retry_semantics must follow mutates/op_id",
+            entry.display
+        );
+    }
 }
 
 #[test]
@@ -2481,7 +2588,7 @@ fn op_id_persistence_reads_contract_table() {
         ("review sign", false, "repository"),
         ("status", false, "none"),
         ("init", false, "bootstrap"),
-        ("adopt", false, "bootstrap"),
+        ("import local", false, "bootstrap"),
         ("clone", false, "bootstrap"),
     ] {
         let entry = catalog
@@ -2524,6 +2631,8 @@ fn feature_gated_command_roots_are_catalog_owned() {
     // listed here.
     assert_eq!(
         feature_gated_command_roots(),
-        &["auth", "ci", "claim", "grant", "promote", "whoami"]
+        &[
+            "auth", "ci", "claim", "grant", "invite", "promote", "whoami"
+        ]
     );
 }

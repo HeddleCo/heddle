@@ -91,7 +91,7 @@ fn checkout_is_thread(repo: &repo::Repository, thread_id: &str) -> bool {
     super::thread_cmd::current_thread(repo)
         .ok()
         .flatten()
-        .is_some_and(|thread| thread.id == thread_id)
+        .is_some_and(|thread| thread.id == thread_id || thread.thread == thread_id)
 }
 
 #[cfg(test)]

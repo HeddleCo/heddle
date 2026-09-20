@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Compact line maps and finalized origin ranges.
 
-use crate::object::Origin;
-use crate::util::EqualRun;
-
 use super::types::{BlameFrontierRecord, BlameLineMap, BlameSliceError, OriginRange};
+use crate::{object::Origin, util::EqualRun};
 
 pub(super) fn identity_mapping(line_count: u32) -> Vec<BlameLineMap> {
     if line_count == 0 {

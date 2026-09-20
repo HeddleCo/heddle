@@ -549,15 +549,19 @@ fn timeline_cursor_matches_recovery(
 
 fn dirty_status_paths(status: &WorktreeStatusDetailed) -> Vec<String> {
     let mut paths = BTreeSet::new();
-    paths.extend(status.modified.iter().map(display_path));
-    paths.extend(status.deleted.iter().map(display_path));
-    paths.extend(status.untracked.flatten_paths().iter().map(display_path));
+    paths.extend(status.modified.iter().map(|p| display_path(p)));
+    paths.extend(status.deleted.iter().map(|p| display_path(p)));
+    paths.extend(
+        status
+            .untracked
+            .flatten_paths()
+            .iter()
+            .map(|p| display_path(p)),
+    );
     paths.into_iter().collect()
 }
 
-// Used as a fn-value over `&PathBuf` items, so the signature can't take `&Path`.
-#[allow(clippy::ptr_arg)]
-fn display_path(path: &PathBuf) -> String {
+fn display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
@@ -693,7 +697,7 @@ fn collect_entry_paths(
             collect_entry_paths(repo, &rel_path.join(child.name()), child, out)?;
         }
     } else {
-        out.insert(display_path(&rel_path.to_path_buf()));
+        out.insert(display_path(rel_path));
     }
     Ok(())
 }

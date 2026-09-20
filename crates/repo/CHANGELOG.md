@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- *(deps)* consume the Heddle-hosted capability verifier 0.20.0
+  (heddle-api 0.31.0-alpha.1)
 - *(deps)* adopt heddleco-capability-verifier 0.19.0 (heddle-api 0.30.0)
 
 ## [0.15.3](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.15.2...heddle-repo-v0.15.3) - 2026-08-28

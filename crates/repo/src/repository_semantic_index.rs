@@ -77,8 +77,17 @@ struct BuiltEntry {
 /// source is unchanged and memoizing per source-blob so each unique blob is
 /// parsed at most once. `parse_count` is exposed for tests that assert the
 /// prune-without-reparse invariant.
+///
+/// Work and output allowances apply to the lifetime of this builder, including
+/// repeated root builds. Flushing pending bytes does not reset accounting or
+/// memoized allocations; create a fresh builder for an independent analysis.
 pub struct SemanticIndexBuilder<'store, S: ObjectStore> {
     store: &'store S,
+    budget: Option<semantic::parser::ParseBudget>,
+    work_entries: usize,
+    work_bytes: usize,
+    output_limit: Option<usize>,
+    pending_bytes: usize,
     source_blobs: Option<&'store HashMap<ContentHash, &'store [u8]>>,
     source_trees: Option<&'store HashMap<ContentHash, &'store Tree>>,
     extractor_version: u32,
@@ -101,6 +110,11 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
     pub fn new(store: &'store S, extractor_version: u32) -> Self {
         Self {
             store,
+            budget: None,
+            work_entries: 0,
+            work_bytes: 0,
+            output_limit: None,
+            pending_bytes: 0,
             source_blobs: None,
             source_trees: None,
             extractor_version,
@@ -109,6 +123,39 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             pending: Vec::new(),
             parse_count: 0,
         }
+    }
+
+    /// Bound RPC analysis independently of historical capture/backfill work.
+    pub fn with_budget(mut self, budget: semantic::parser::ParseBudget) -> Self {
+        self.budget = Some(budget);
+        self.output_limit.get_or_insert(15 * 1024 * 1024);
+        self
+    }
+    /// Bound lifetime canonical output independently of input size. The encoder
+    /// checks the remaining allowance before growing each node's buffer;
+    /// flushing a completed root does not replenish this allowance.
+    pub fn with_output_limit(mut self, bytes: usize) -> Self {
+        self.output_limit = Some(bytes);
+        self
+    }
+
+    fn check_work(&self) -> Result<()> {
+        if self
+            .budget
+            .as_ref()
+            .is_some_and(|budget| budget.interrupted())
+        {
+            return Err(HeddleError::InvalidObject(
+                "semantic analysis interrupted".into(),
+            ));
+        }
+        if self.budget.is_some() && (self.work_entries > 4096 || self.work_bytes > 32 * 1024 * 1024)
+        {
+            return Err(HeddleError::InvalidObject(
+                "semantic analysis source work budget exceeded".into(),
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn with_source_objects(
@@ -133,6 +180,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         parent: Option<&ParentIndex>,
     ) -> Result<(SemanticIndexRoot, ContentHash)> {
         let (root, root_hash, pending) = self.build_root_deferred(tree, parent)?;
+        self.check_work()?;
         self.store.put_blobs_packed(pending)?;
         Ok((root, root_hash))
     }
@@ -160,7 +208,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             node_hash,
             digest,
         );
-        let root_hash = self.put_node(root.encode()?);
+        let root_hash = self.put_node(&root)?;
         Ok((root, root_hash, std::mem::take(&mut self.pending)))
     }
 
@@ -186,8 +234,11 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
                 "semantic index tree exceeds max depth {MAX_SEMANTIC_TREE_DEPTH}"
             )));
         }
+        self.work_entries = self.work_entries.saturating_add(tree.len());
+        self.check_work()?;
         let mut entries = Vec::with_capacity(tree.len());
         for entry in tree.entries() {
+            self.check_work()?;
             let name = entry.name();
             let built = match entry.target() {
                 TreeEntryTarget::Tree { hash } => self.build_dir(name, *hash, parent, depth)?,
@@ -216,7 +267,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             });
         }
         let (node, digest) = SemanticTreeNode::new(entries);
-        let node_hash = self.put_node(node.encode()?);
+        let node_hash = self.put_node(&node)?;
         Ok((node_hash, digest))
     }
 
@@ -355,10 +406,22 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         let Some(blob) = blob else {
             return Ok(opaque);
         };
+        self.work_bytes = self.work_bytes.saturating_add(blob.size());
+        self.check_work()?;
         if blob.size() > SEMANTIC_FILE_BUDGET_BYTES {
             return Ok(opaque);
         }
-        let Some(extracted) = extract_semantic_file(blob.content(), language) else {
+        let extracted = match &self.budget {
+            Some(budget) => semantic::semantic_index::extract_semantic_file_bounded(
+                blob.content(),
+                language,
+                budget,
+            )
+            .map_err(|error| HeddleError::InvalidObject(error.to_string()))?,
+            None => extract_semantic_file(blob.content(), language),
+        };
+        self.check_work()?;
+        let Some(extracted) = extracted else {
             // Unsupported/parse-fail → opaque.
             return Ok(opaque);
         };
@@ -384,7 +447,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
             },
         );
         let digest = node.semantic_digest;
-        let node_hash = self.put_node(node.encode()?);
+        let node_hash = self.put_node(&node)?;
         Ok(BuiltEntry {
             kind: SemanticEntryKind::File,
             node: node_hash,
@@ -394,10 +457,54 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
 
     /// Queue an encoded node blob for the end-of-build pack flush, returning its
     /// content hash (identical to what `put_blob` would assign).
-    fn put_node(&mut self, bytes: Vec<u8>) -> ContentHash {
+    fn put_node(&mut self, node: &impl serde::Serialize) -> Result<ContentHash> {
+        self.check_work()?;
+        let remaining = self
+            .output_limit
+            .unwrap_or(usize::MAX)
+            .saturating_sub(self.pending_bytes);
+        let mut writer = SemanticNodeWriter {
+            bytes: Vec::new(),
+            remaining,
+            exceeded: false,
+        };
+        let encoded =
+            node.serialize(&mut rmp_serde::Serializer::new(&mut writer).with_struct_map());
+        if writer.exceeded {
+            return Err(HeddleError::InvalidObject(
+                "semantic analysis output budget exceeded".into(),
+            ));
+        }
+        encoded.map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+        let bytes = writer.bytes;
         let hash = ContentHash::compute_typed("blob", &bytes);
+        self.pending_bytes = self.pending_bytes.saturating_add(bytes.len());
         self.pending.push((hash, bytes));
-        hash
+        Ok(hash)
+    }
+}
+
+/// A canonical node is encoded directly into its remaining output allowance.
+/// Reject before extending the byte buffer, not after materializing a node.
+struct SemanticNodeWriter {
+    bytes: Vec<u8>,
+    remaining: usize,
+    exceeded: bool,
+}
+impl std::io::Write for SemanticNodeWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.remaining {
+            self.exceeded = true;
+            return Err(std::io::Error::other(
+                "semantic analysis output budget exceeded",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        self.remaining = self.remaining.saturating_sub(bytes.len());
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -607,6 +714,83 @@ impl Repository {
         Ok(Some(self.load_index_root(&root_hash)?))
     }
 
+    /// Build only this exact State, with no ancestor backfill or network work.
+    pub fn analyze_semantic_index(
+        &self,
+        state_id: StateId,
+        budget: semantic::parser::ParseBudget,
+    ) -> Result<SemanticIndexRoot> {
+        self.analyze_semantic_index_with_admission(state_id, budget, || Ok(()))
+    }
+    pub fn analyze_semantic_index_with_admission(
+        &self,
+        state_id: StateId,
+        budget: semantic::parser::ParseBudget,
+        before_publish: impl FnOnce() -> Result<()>,
+    ) -> Result<SemanticIndexRoot> {
+        let state = self
+            .store()
+            .get_state(&state_id)?
+            .ok_or_else(|| HeddleError::NotFound("analysis source State".into()))?;
+        let tree = self
+            .store()
+            .get_tree(&state.tree)?
+            .ok_or_else(|| HeddleError::NotFound("analysis source tree".into()))?;
+        // Inspect lengths before decoding any source blob. A stored large object
+        // must not allocate outside the RPC budget merely to decide it is opaque.
+        let mut pending = vec![state.tree];
+        let mut visited = std::collections::BTreeSet::new();
+        let mut bytes = 0u64;
+        let mut entries = 0usize;
+        while let Some(hash) = pending.pop() {
+            if !visited.insert(hash) {
+                continue;
+            }
+            if budget.interrupted() {
+                return Err(HeddleError::InvalidObject(
+                    "semantic analysis interrupted".into(),
+                ));
+            }
+            let directory = self
+                .store()
+                .get_tree(&hash)?
+                .ok_or_else(|| HeddleError::NotFound("analysis source directory".into()))?;
+            entries = entries.saturating_add(directory.len());
+            if entries > 4096 {
+                return Err(HeddleError::InvalidObject(
+                    "semantic analysis source work budget exceeded".into(),
+                ));
+            }
+            for entry in directory.entries() {
+                if let Some(child) = entry.tree_hash() {
+                    pending.push(child);
+                }
+                if let Some(blob) = entry.blob_hash() {
+                    let length =
+                        objects::store::ObjectSource::decoded_blob_len(self.store(), &blob)?
+                            .ok_or_else(|| HeddleError::NotFound("analysis source blob".into()))?;
+                    bytes = bytes.saturating_add(length);
+                    if bytes > 32 * 1024 * 1024 {
+                        return Err(HeddleError::InvalidObject(
+                            "semantic analysis source byte budget exceeded".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        let mut builder =
+            SemanticIndexBuilder::new(self.store(), EXTRACTOR_VERSION).with_budget(budget.clone());
+        let (root, root_hash) = builder.build_root(&tree, None)?;
+        if budget.interrupted() {
+            return Err(HeddleError::InvalidObject(
+                "semantic analysis interrupted".into(),
+            ));
+        }
+        before_publish()?;
+        self.attach_semantic_index(&state_id, &state, root_hash)?;
+        Ok(root)
+    }
+
     /// Rebuild a state's index from scratch with NO parent reuse — guaranteeing
     /// a complete, self-contained node closure independent of any pruned or
     /// broken parent nodes — and supersede the prior attachment. The recovery
@@ -796,6 +980,105 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn bounded_analysis_rejects_source_work_before_loading_or_publishing() {
+        let (_temp, repository) = repo();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let budget = semantic::parser::ParseBudget {
+            cancelled: cancelled.clone(),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(10),
+        };
+        let mut tree = Tree::new();
+        for index in 0..4097 {
+            tree.insert(
+                TreeEntry::file(
+                    format!("{index}.rs"),
+                    ContentHash::from_bytes([19; 32]),
+                    false,
+                )
+                .expect("entry"),
+            );
+        }
+        let error = SemanticIndexBuilder::new(repository.store(), EXTRACTOR_VERSION)
+            .with_budget(budget.clone())
+            .build_root(&tree, None)
+            .expect_err("entry bound");
+        assert!(
+            error.to_string().contains("source work budget exceeded"),
+            "must reject at the work bound: {error}"
+        );
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+        let state = repository.head().expect("head").expect("initial source");
+        let before = repository
+            .latest_state_attachment(&state, StateAttachmentKind::SemanticIndex)
+            .expect("prior")
+            .map(|a| a.id());
+        let error = repository
+            .analyze_semantic_index(state, budget)
+            .expect_err("cancelled before execution");
+        assert!(error.to_string().contains("interrupted"));
+        assert_eq!(
+            before,
+            repository
+                .latest_state_attachment(&state, StateAttachmentKind::SemanticIndex)
+                .expect("after")
+                .map(|a| a.id()),
+            "cancelled analysis cannot publish an attachment"
+        );
+    }
+
+    #[test]
+    fn bounded_analysis_encodes_canonical_nodes_with_cumulative_output_limit() {
+        let store = objects::store::InMemoryStore::new();
+        let (node, _) = SemanticTreeNode::new(vec![SemanticTreeEntry {
+            name: "a.rs".into(),
+            kind: SemanticEntryKind::Opaque,
+            node: ContentHash::from_bytes([23; 32]),
+            semantic_digest: ContentHash::from_bytes([23; 32]),
+        }]);
+        let canonical = node.encode().expect("canonical bytes");
+        let mut builder = SemanticIndexBuilder::new(&store, EXTRACTOR_VERSION)
+            .with_output_limit(canonical.len() * 2 - 1);
+        let hash = builder.put_node(&node).expect("first node fits");
+        assert_eq!(hash, ContentHash::compute_typed("blob", &canonical));
+        assert_eq!(
+            builder.pending[0].1, canonical,
+            "encoder retains exact canonical representation"
+        );
+        let error = builder
+            .put_node(&node)
+            .expect_err("second node exceeds total output allowance");
+        assert!(
+            error.to_string().contains("output budget exceeded"),
+            "{error}"
+        );
+        assert_eq!(builder.pending.len(), 1, "failed node is never queued");
+        assert_eq!(builder.pending_bytes, canonical.len());
+        assert!(
+            store.get_blob(&hash).expect("lookup").is_none(),
+            "no node is published during bounded assembly"
+        );
+    }
+
+    #[test]
+    fn bounded_analysis_writer_rejects_before_buffer_growth() {
+        use std::io::Write;
+        let mut writer = SemanticNodeWriter {
+            bytes: Vec::new(),
+            remaining: 7,
+            exceeded: false,
+        };
+        writer.write_all(b"small").expect("within allowance");
+        let capacity = writer.bytes.capacity();
+        let expanded = vec![0; 1 << 20];
+        let error = writer
+            .write_all(&expanded)
+            .expect_err("reject before growing buffer");
+        assert!(error.to_string().contains("output budget exceeded"));
+        assert_eq!(writer.bytes, b"small");
+        assert_eq!(writer.bytes.capacity(), capacity);
+    }
 
     /// Attach `root_hash` as the (superseding) SemanticIndex on `state_id`.
     fn attach(repo: &Repository, state_id: &StateId, root_hash: ContentHash) {

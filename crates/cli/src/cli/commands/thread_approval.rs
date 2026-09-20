@@ -1,47 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle thread approve` / `approvals` / `revoke-approval` /
-//! `check-merge` — record and inspect merge approvals against the
-//! hosted server's policies.
-//!
-//! Each subcommand:
-//! 1. Opens the local repo to read the source thread's current state.
-//! 2. Resolves the named remote to a hosted address + repo_path.
-//! 3. Calls the corresponding RPC and renders the result.
-//!
-//! These commands are server-only operations, but the source-state
-//! lookup happens locally — that's how the gate distinguishes a
-//! fresh approval from a stale one across pushes.
-
+//! Signed decisions and readiness for one native Thread.
 #![cfg(feature = "client")]
 
-use anyhow::{Context, Result, anyhow};
-use api::heddle::api::v1alpha1::{RepositoryRef, StateId as ApiStateId, repository_ref::Reference};
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use api::heddle::api::v1alpha2 as wire;
+use crypto::{Ed25519Signer, Signer};
 use heddle_cli_args::CliContext as _;
-// The approval wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{
-    ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, UnmetOutput,
+    ApprovalOutput, ApprovalRevokeOutput, EligibilityOutput, ReviewComparisonOutput, UnmetOutput,
 };
-use hosted_client::client::{HostedAuthMode, HostedClient};
-use objects::object::ThreadName;
+use hosted_client::client::{HostedAuthMode, HostedClient, ReviewSnapshot};
+use objects::object::{ContentHash, StateId, thread_replication::SourceAuthor};
 use repo::Repository;
-use verbs::approval_plan::{
-    EligibilitySummary, approval_recorded_message, approval_revoked_message,
-    approvals_empty_message, approvals_header, eligibility_allowed_message,
-    eligibility_approvals_counted_message, eligibility_blocked_message, format_unix_secs_display,
-    format_unix_secs_label, plan_eligibility_summary, short_state_id, state_id_bytes_to_string,
-    timestamp_secs_u64, unmet_requirement_line,
-};
+use thread_api::thread_control::{Author, Control, PreparedControl, Review, ReviewKind};
+#[path = "review_outbox.rs"]
+mod review_outbox;
+use review_outbox::{ReviewOutbox, StoredReview};
 
-use super::{
-    RecoveryAdvice,
-    next_action::{NextActionValidationContext, write_full_command_json},
-};
+use super::next_action::{NextActionValidationContext, write_full_command_json};
 use crate::{
     cli::{
         Cli,
         cli_args::{
-            ThreadApprovalsArgs, ThreadApproveArgs, ThreadCheckMergeArgs, ThreadRevokeApprovalArgs,
+            RemoteChoiceArgs, ReviewApproveArgs, ReviewListArgs, ReviewReadinessArgs,
+            ReviewRevokeArgs, ReviewShowArgs,
         },
         should_output_json,
     },
@@ -49,306 +31,712 @@ use crate::{
     remote::{RemoteTarget, resolve_remote_with_key},
 };
 
-fn ts_secs(ts: &Option<prost_types::Timestamp>) -> u64 {
-    timestamp_secs_u64(ts.as_ref().map(|t| t.seconds))
+fn resolve_review_remote(repo: &Repository, choice: &RemoteChoiceArgs) -> Result<String> {
+    verbs::resolve_default_remote_name(repo, choice.requested()).map_err(|err| {
+        anyhow!(err).context(
+            "pass `--remote <name>` or configure one with `heddle remote set-default <name>`",
+        )
+    })
 }
 
-fn repository_ref_string(repository: Option<RepositoryRef>) -> String {
-    match repository.and_then(|repository| repository.reference) {
-        Some(Reference::HostedId(id) | Reference::CanonicalPath(id)) => id,
-        None => String::new(),
+fn require_hosted_repo(repo: &Repository) -> Result<()> {
+    ensure!(
+        repo.hosted_enabled(),
+        "Thread review requires a repository linked to a Heddle hosted upstream. Configure [hosted] in .heddle/config.toml or run this in a hosted-enabled repository."
+    );
+    Ok(())
+}
+
+fn resolve_review_thread(
+    repo: &Repository,
+    requested: Option<String>,
+    command: &'static str,
+) -> Result<String> {
+    super::thread_cmd::resolve_thread_name_or_current(
+        repo,
+        requested,
+        command,
+        format!("heddle {command} <THREAD>"),
+    )
+}
+
+fn announce_resolved_remote(cli: &Cli, repo: &Repository, remote_name: &str, address: &str) {
+    if should_output_json(cli, Some(repo.config())) {
+        return;
     }
+    println!("Using remote `{remote_name}` ({address})");
 }
 
-fn api_state_id_string(state_id: &Option<ApiStateId>) -> String {
-    state_id
-        .as_ref()
-        .map(|state_id| state_id_bytes_to_string(&state_id.value))
-        .unwrap_or_default()
-}
-
-/// Resolve the named remote and its repo_path. Errors if the remote
-/// is local (approvals are a hosted-server concept) or has no path.
 async fn open_hosted_session(
     repo: &Repository,
     remote_name: &str,
 ) -> Result<(HostedClient, String)> {
     let (target, server_key) = resolve_remote_with_key(repo, Some(remote_name))?;
-    let (authority, repo_path) = match target {
+    let (authority, address) = match target {
         RemoteTarget::Network {
             authority,
             repo_path,
         } => (
             authority,
-            repo_path.context("hosted remote must include a repository path")?,
+            repo_path.context("hosted remote must include a Spool address")?,
         ),
         RemoteTarget::Local(_) => {
-            return Err(anyhow!(RecoveryAdvice::safety_refusal(
-                "hosted_remote_required",
-                format!("approvals require a hosted remote; remote '{remote_name}' is local"),
-                "Configure a hosted remote or retry against one that resolves to a network target.",
-                format!("remote '{remote_name}' is local, but approvals run on the hosted server"),
-                "running locally would imply a hosted approval policy change that no server recorded",
-                "no hosted request was sent and local repository state was left unchanged",
-                "heddle remote list",
-                vec!["heddle remote list".to_string()],
-            )));
+            bail!("Thread review requires a hosted remote; choose one with `heddle remote list`")
         }
     };
-
-    let user_config = UserConfig::load_default()?;
-    // Authenticated thread-workflow RPCs are proof-of-possession gated, so use
-    // CredentialFallback (resolves the credential store's proof key) rather
-    // than a token-only ConfigToken session.
+    let config = UserConfig::load_default()?;
     let client = HostedClient::open_session(
         &authority,
-        &user_config,
+        &config,
         server_key,
         HostedAuthMode::CredentialFallback,
     )
     .await?
     .with_human_signature_callback(hosted_client::client::headless_human_signature_callback());
-    Ok((client, repo_path))
+    Ok((client, address))
 }
 
-/// Read a thread's head state. The head is what the gate pins
-/// approvals against — push a new state and `stale_on_update`
-/// will invalidate the prior approval.
-fn thread_head_state(repo: &Repository, thread: &str) -> Result<String> {
-    repo.refs()
-        .get_thread(&ThreadName::new(thread))?
-        .map(|state_id| state_id.to_string())
-        .ok_or_else(|| anyhow!("thread '{thread}' has no head state"))
+fn revision_state(revision: &wire::RevisionRef) -> Result<StateId> {
+    let Some(wire::revision_ref::Revision::State(state)) = &revision.revision else {
+        bail!("review comparison requires an exact state revision")
+    };
+    let bytes: [u8; 32] = state
+        .value
+        .as_slice()
+        .try_into()
+        .context("review revision must contain 32 bytes")?;
+    Ok(StateId::from_bytes(bytes))
 }
 
-pub async fn cmd_thread_approve(cli: &Cli, args: ThreadApproveArgs) -> Result<()> {
-    let repo = cli.open_repo()?;
-    let source_state = thread_head_state(&repo, &args.source)?;
-    let (mut client, repo_path) = open_hosted_session(&repo, &args.remote).await?;
-    let approval = client
-        .approve_thread(
-            &repo_path,
-            &args.source,
-            &args.target,
-            &source_state,
-            args.note.as_deref(),
-            cli.operation_id_wire(),
-        )
-        .await;
-    client.close().await;
-    let approval = approval?;
+struct ReviewComparison {
+    source: StateId,
+    base: StateId,
+    policy: ContentHash,
+}
 
-    if should_output_json(cli, Some(repo.config())) {
-        let out = ApprovalOutput {
-            id: approval.id,
-            repo_path: repository_ref_string(approval.repo_path),
-            source_thread: approval.source_thread,
-            target_thread: approval.target_thread,
-            source_state: api_state_id_string(&approval.source_state),
-            approver_user_id: approval.approver_user_id,
-            note: approval.note,
-            approved_at: ts_secs(&approval.approved_at),
-            expires_at: ts_secs(&approval.expires_at),
-        };
-        write_full_command_json(
-            &out,
-            NextActionValidationContext::without_repo(&["thread", "approve"]),
-        )?;
+fn comparison(snapshot: &ReviewSnapshot) -> Result<ReviewComparison> {
+    let value = snapshot.comparison.as_ref().context(
+        "current review comparison is unavailable; publish one accepted source head, then retry",
+    )?;
+    let thread = snapshot
+        .overview
+        .r#ref
+        .as_ref()
+        .context("Thread identity absent")?;
+    let source = value.source.as_ref().context("comparison source absent")?;
+    let base = value.base.as_ref().context("comparison base absent")?;
+    ensure!(
+        source.spool == thread.spool && base.spool == thread.spool,
+        "review comparison belongs to another Spool"
+    );
+    let bytes: [u8; 32] = value
+        .policy_version
+        .as_slice()
+        .try_into()
+        .context("review policy version must contain 32 bytes")?;
+    ensure!(
+        value.policy_version == snapshot.overview.review_policy_version,
+        "review policy changed during observation; retry"
+    );
+    Ok(ReviewComparison {
+        source: revision_state(source)?,
+        base: revision_state(base)?,
+        policy: ContentHash::from_bytes(bytes),
+    })
+}
+
+fn current_author(spool: &wire::SpoolRef) -> Result<(Ed25519Signer, SourceAuthor)> {
+    let home = repo::identity::heddle_home_dir();
+    let device = repo::identity::load_device(&repo::identity::device_identity_path())?
+        .context("current device signing key unavailable; pair or enroll this device")?;
+    let signer = Ed25519Signer::from_pem(&device.private_key_pem)?;
+    let publisher: [u8; 32] = signer
+        .public_key()
+        .try_into()
+        .context("device signing key must be Ed25519")?;
+    let spool_id = uuid::Uuid::parse_str(&spool.id).context("Spool ID must be UUID")?;
+    let author = repo::identity::source_author::load(&home, &publisher, spool_id)?;
+    ensure!(
+        matches!(&author, SourceAuthor::Account { spool, .. } if *spool == spool_id),
+        "this device has no current account author proof for the Spool; refresh or enroll it"
+    );
+    Ok((signer, author))
+}
+
+fn sign_decision(
+    snapshot: &ReviewSnapshot,
+    kind: ReviewKind,
+    comparison: ReviewComparison,
+    explanation: String,
+    revokes: Option<uuid::Uuid>,
+    operation_id: uuid::Uuid,
+) -> Result<wire::RecordReviewRequest> {
+    let ReviewComparison {
+        source,
+        base,
+        policy,
+    } = comparison;
+    let spool = snapshot
+        .overview
+        .r#ref
+        .as_ref()
+        .and_then(|thread| thread.spool.as_ref())
+        .context("Thread has no Spool identity")?;
+    let (signer, author) = current_author(spool)?;
+    let SourceAuthor::Account {
+        actor, authority, ..
+    } = author
+    else {
+        bail!("current account author proof unavailable")
+    };
+    let prepared = PreparedControl::sign(
+        &snapshot.overview,
+        Control::Review(Review {
+            id: operation_id,
+            source,
+            target: base,
+            policy_version: policy,
+            kind,
+            explanation,
+            revokes,
+            expires_at_unix_seconds: None,
+            coverage: None,
+        }),
+        Author {
+            account: actor.principal_id,
+            agent_id: actor.agent_id.as_deref(),
+            authority_envelope: &authority,
+        },
+        operation_id,
+        chrono::Utc::now().timestamp_millis(),
+        &signer,
+    )?;
+    Ok(prepared.record_review()?)
+}
+
+fn operation_id(cli: &Cli) -> Result<uuid::Uuid> {
+    let requested = cli.operation_id_wire();
+    if requested.is_empty() {
+        Ok(uuid::Uuid::now_v7())
     } else {
-        println!(
-            "{}",
-            approval_recorded_message(&args.source, &args.target, &source_state)
+        uuid::Uuid::parse_str(&requested).context("--op-id must be a UUID")
+    }
+}
+
+async fn review_scope(
+    client: &HostedClient,
+    address: &str,
+) -> Result<(wire::SpoolRef, Vec<u8>, String)> {
+    let spool = client.resolve_spool_ref(address).await?;
+    let (_, author) = current_author(&spool)?;
+    let SourceAuthor::Account { actor, .. } = author else {
+        bail!("current account author proof unavailable")
+    };
+    let endpoint = client
+        .native()
+        .await?
+        .description
+        .endpoint
+        .context("hosted endpoint identity absent")?
+        .public_key;
+    ensure!(endpoint.len() == 32, "hosted endpoint key is invalid");
+    Ok((spool, endpoint, actor.principal_id.to_string()))
+}
+
+fn stored_reference(
+    decision: &wire::ReviewDecision,
+    spool: &wire::SpoolRef,
+) -> Result<wire::ThreadRef> {
+    let reference = decision
+        .thread
+        .as_ref()
+        .context("stored decision has no Thread")?;
+    ensure!(
+        reference.spool.as_ref() == Some(spool),
+        "stored review belongs to another Spool"
+    );
+    Ok(reference.clone())
+}
+
+fn replay_matches(
+    request: &wire::RecordReviewRequest,
+    reference: &wire::ThreadRef,
+    principal: &str,
+    kind: wire::review_decision::Kind,
+    revokes: Option<uuid::Uuid>,
+    note: Option<&str>,
+) -> Result<()> {
+    let decision = request
+        .decision
+        .as_ref()
+        .context("stored review decision absent")?;
+    ensure!(
+        decision.thread.as_ref() == Some(reference) && decision.principal_id == principal,
+        "operation ID belongs to another Thread or principal"
+    );
+    ensure!(
+        decision.kind == kind as i32,
+        "operation ID belongs to another review action"
+    );
+    ensure!(
+        decision.revokes.as_ref().map(|r| r.id.as_str())
+            == revokes.as_ref().map(|id| id.to_string()).as_deref(),
+        "operation ID names another revoked review"
+    );
+    if let Some(note) = note {
+        ensure!(
+            decision.explanation == note,
+            "operation ID names another review note"
         );
-        println!("  approval id: {}", approval.id);
-        let exp_secs = ts_secs(&approval.expires_at);
-        if exp_secs > 0 {
-            println!("  expires at:  {}", format_unix_secs_label(exp_secs));
-        }
-        if !approval.note.is_empty() {
-            println!("  note:        {}", approval.note);
-        }
     }
     Ok(())
 }
 
-pub async fn cmd_thread_approvals(cli: &Cli, args: ThreadApprovalsArgs) -> Result<()> {
-    let repo = cli.open_repo()?;
-    let (mut client, repo_path) = open_hosted_session(&repo, &args.remote).await?;
-    let approvals = client
-        .list_thread_approvals(&repo_path, &args.source, &args.target)
-        .await;
-    client.close().await;
-    let approvals = approvals?;
-
-    if should_output_json(cli, Some(repo.config())) {
-        let out: Vec<ApprovalOutput> = approvals
-            .into_iter()
-            .map(|a| ApprovalOutput {
-                id: a.id,
-                repo_path: repository_ref_string(a.repo_path),
-                source_thread: a.source_thread,
-                target_thread: a.target_thread,
-                source_state: api_state_id_string(&a.source_state),
-                approver_user_id: a.approver_user_id,
-                note: a.note,
-                approved_at: ts_secs(&a.approved_at),
-                expires_at: ts_secs(&a.expires_at),
-            })
-            .collect();
-        write_full_command_json(
-            &out,
-            NextActionValidationContext::without_repo(&["thread", "approvals"]),
-        )?;
-    } else if approvals.is_empty() {
-        println!("{}", approvals_empty_message(&args.source, &args.target));
-    } else {
-        println!(
-            "{}",
-            approvals_header(approvals.len(), &args.source, &args.target)
-        );
-        for a in approvals {
-            let approved_secs = ts_secs(&a.approved_at);
-            let when = format_unix_secs_display(approved_secs);
-            let state_str = api_state_id_string(&a.source_state);
-            print!(
-                "  {id}  approver={user}  state={state}  approved_at={when}",
-                id = a.id,
-                user = a.approver_user_id,
-                state = short_state_id(&state_str),
-            );
-            let exp_secs = ts_secs(&a.expires_at);
-            if exp_secs > 0 {
-                print!("  expires_at={}", format_unix_secs_display(exp_secs));
-            }
-            if !a.note.is_empty() {
-                print!("  note=\"{}\"", a.note);
-            }
-            println!();
-        }
-    }
-    Ok(())
+fn decision_output(decision: &wire::ReviewDecision, thread_name: &str) -> Result<ApprovalOutput> {
+    let kind = match wire::review_decision::Kind::try_from(decision.kind)? {
+        wire::review_decision::Kind::Approval => "approval",
+        wire::review_decision::Kind::Rejection => "rejection",
+        wire::review_decision::Kind::Opinion => "opinion",
+        wire::review_decision::Kind::Revocation => "revocation",
+        wire::review_decision::Kind::Read => "read",
+        wire::review_decision::Kind::AgentPreview => "agent_preview",
+        wire::review_decision::Kind::AgentCoReview => "agent_co_review",
+        wire::review_decision::Kind::Unspecified => bail!("review has no decision kind"),
+    };
+    Ok(ApprovalOutput {
+        id: decision
+            .r#ref
+            .as_ref()
+            .context("review ID absent")?
+            .id
+            .clone(),
+        thread: thread_name.to_owned(),
+        source_revision: revision_state(decision.source.as_ref().context("review source absent")?)?
+            .to_string(),
+        base_revision: revision_state(decision.target.as_ref().context("review base absent")?)?
+            .to_string(),
+        policy_version: hex::encode(&decision.policy_version),
+        principal_id: decision.principal_id.clone(),
+        kind: kind.into(),
+        explanation: decision.explanation.clone(),
+        expires_at: decision
+            .expires_at
+            .as_ref()
+            .and_then(|time| u64::try_from(time.seconds).ok())
+            .unwrap_or_default(),
+    })
 }
 
-pub async fn cmd_thread_revoke_approval(cli: &Cli, args: ThreadRevokeApprovalArgs) -> Result<()> {
+pub async fn cmd_review_show(cli: &Cli, args: &ReviewShowArgs) -> Result<()> {
     let repo = cli.open_repo()?;
-    let (mut client, _repo_path) = open_hosted_session(&repo, &args.remote).await?;
-    let result = client
-        .revoke_approval(&args.id, cli.operation_id_wire())
-        .await;
+    require_hosted_repo(&repo)?;
+    let thread = resolve_review_thread(&repo, args.thread.clone(), "review show")?;
+    let remote_name = resolve_review_remote(&repo, &args.remote_choice)?;
+    let (client, address) = open_hosted_session(&repo, &remote_name).await?;
+    announce_resolved_remote(cli, &repo, &remote_name, &address);
+    let snapshot = client.observe_review(&address, &thread).await;
     client.close().await;
-    result?;
+    let snapshot = snapshot?;
+    let comparison = comparison(&snapshot)?;
+    let output = ReviewComparisonOutput {
+        output_kind: "review_show",
+        thread,
+        source_revision: comparison.source.to_string(),
+        target_revision: comparison.base.to_string(),
+        policy_version: comparison.policy.to_string(),
+        decision_count: snapshot.decisions.len(),
+    };
     if should_output_json(cli, Some(repo.config())) {
-        let output = ApprovalRevokeOutput {
-            output_kind: "thread_revoke_approval",
-            id: args.id,
-            deleted: true,
-        };
         write_full_command_json(
             &output,
-            NextActionValidationContext::without_repo(&["thread", "revoke-approval"]),
+            NextActionValidationContext::without_repo(&["review", "show"]),
         )?;
     } else {
-        println!("{}", approval_revoked_message(&args.id));
+        println!("Review comparison for Thread '{}'", output.thread);
+        println!("  source: {}", output.source_revision);
+        println!("  target: {}", output.target_revision);
+        println!("  policy: {}", output.policy_version);
+        println!("  decisions: {}", output.decision_count);
     }
     Ok(())
 }
 
-pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Result<()> {
+pub async fn cmd_review_approve(cli: &Cli, args: &ReviewApproveArgs) -> Result<()> {
     let repo = cli.open_repo()?;
-    let source_state = thread_head_state(&repo, &args.source)?;
-    let (mut client, repo_path) = open_hosted_session(&repo, &args.remote).await?;
-    let resp = client
-        .check_merge_eligibility(
-            &repo_path,
-            &args.source,
-            &args.target,
-            &source_state,
-            &args.gated_action,
-            args.changed_paths,
-            None,
-        )
-        .await;
-    client.close().await;
-    let resp = resp?;
-
-    let unmet: Vec<UnmetOutput> = resp
-        .unmet
-        .into_iter()
-        .map(|u| UnmetOutput {
-            policy_id: u.policy_id,
-            kind: match api::heddle::api::v1alpha1::UnmetRequirementKind::try_from(u.kind)
-                .unwrap_or_default()
-            {
-                api::heddle::api::v1alpha1::UnmetRequirementKind::FlatRole => "flat_role",
-                api::heddle::api::v1alpha1::UnmetRequirementKind::Group => "group",
-                api::heddle::api::v1alpha1::UnmetRequirementKind::OpenDiscussion => {
-                    "open_discussion"
-                }
-                api::heddle::api::v1alpha1::UnmetRequirementKind::Unspecified => "unspecified",
+    require_hosted_repo(&repo)?;
+    let thread = resolve_review_thread(&repo, args.thread.clone(), "review approve")?;
+    let remote_name = resolve_review_remote(&repo, &args.remote_choice)?;
+    let (client, address) = open_hosted_session(&repo, &remote_name).await?;
+    announce_resolved_remote(cli, &repo, &remote_name, &address);
+    let id = operation_id(cli)?;
+    let (spool, endpoint, principal) = review_scope(&client, &address).await?;
+    let mut outbox = ReviewOutbox::open()?;
+    let request = match outbox.load(&endpoint, &principal, id)? {
+        Some(StoredReview::Completed(selector, decision)) => {
+            ensure!(
+                selector == thread,
+                "operation ID belongs to another Thread selector"
+            );
+            let reference = stored_reference(&decision, &spool)?;
+            let previous = wire::RecordReviewRequest {
+                client_operation_id: id.to_string(),
+                decision: Some(decision.clone()),
+                ..Default::default()
+            };
+            replay_matches(
+                &previous,
+                &reference,
+                &principal,
+                wire::review_decision::Kind::Approval,
+                None,
+                args.message.as_deref(),
+            )?;
+            client.close().await;
+            let output = decision_output(&decision, &thread)?;
+            if should_output_json(cli, Some(repo.config())) {
+                write_full_command_json(
+                    &output,
+                    NextActionValidationContext::without_repo(&["review", "approve"]),
+                )?;
+            } else {
+                println!(
+                    "Already approved Thread '{}' at {}",
+                    thread, output.source_revision
+                );
+                println!("  review id: {}", output.id);
             }
-            .to_string(),
-            group_id: u.group_id,
-            reason: u.reason,
-            needed: u.needed,
-            have: u.have,
-        })
-        .collect();
-    let valid_approvals: Vec<ApprovalOutput> = resp
-        .valid_approvals
-        .into_iter()
-        .map(|a| ApprovalOutput {
-            id: a.id,
-            repo_path: repository_ref_string(a.repo_path),
-            source_thread: a.source_thread,
-            target_thread: a.target_thread,
-            source_state: api_state_id_string(&a.source_state),
-            approver_user_id: a.approver_user_id,
-            note: a.note,
-            approved_at: ts_secs(&a.approved_at),
-            expires_at: ts_secs(&a.expires_at),
-        })
-        .collect();
-
-    let allowed = resp.allowed;
+            return Ok(());
+        }
+        Some(StoredReview::Pending(selector, stored)) => {
+            ensure!(
+                selector == thread,
+                "operation ID belongs to another Thread selector"
+            );
+            let reference = stored_reference(
+                stored
+                    .decision
+                    .as_ref()
+                    .context("stored review decision absent")?,
+                &spool,
+            )?;
+            replay_matches(
+                &stored,
+                &reference,
+                &principal,
+                wire::review_decision::Kind::Approval,
+                None,
+                args.message.as_deref(),
+            )?;
+            stored
+        }
+        None => {
+            let reference = client.resolve_thread_ref(&address, &thread).await?;
+            let snapshot = client.observe_review(&address, &thread).await?;
+            ensure!(
+                snapshot.endpoint_key == endpoint,
+                "hosted endpoint changed during review preparation"
+            );
+            let prepared = sign_decision(
+                &snapshot,
+                ReviewKind::Approval,
+                comparison(&snapshot)?,
+                args.message.clone().unwrap_or_default(),
+                None,
+                id,
+            )?;
+            ensure!(
+                prepared
+                    .decision
+                    .as_ref()
+                    .and_then(|decision| decision.thread.as_ref())
+                    == Some(&reference),
+                "review target changed during preparation"
+            );
+            outbox.save(&endpoint, &principal, id, &thread, &prepared)?;
+            prepared
+        }
+    };
+    let decision = request
+        .decision
+        .clone()
+        .context("prepared review decision absent")?;
+    let result = client.record_review(&request).await;
+    client.close().await;
+    result.with_context(|| {
+        format!("review request may be pending; retry the exact original with --op-id {id}")
+    })?;
+    outbox.complete(&endpoint, &principal, id)?;
+    let output = decision_output(&decision, &thread)?;
     if should_output_json(cli, Some(repo.config())) {
-        let out = EligibilityOutput {
-            allowed,
-            unmet,
-            valid_approvals,
-        };
         write_full_command_json(
-            &out,
-            NextActionValidationContext::without_repo(&["thread", "check-merge"]),
+            &output,
+            NextActionValidationContext::without_repo(&["review", "approve"]),
         )?;
     } else {
-        match plan_eligibility_summary(allowed, valid_approvals.len(), unmet.len()) {
-            EligibilitySummary::Allowed { approval_count } => {
-                println!(
-                    "{}",
-                    eligibility_allowed_message(&args.source, &args.target)
-                );
-                if approval_count > 0 {
-                    println!("{}", eligibility_approvals_counted_message(approval_count));
-                }
-            }
-            EligibilitySummary::Blocked { unmet_count } => {
-                println!(
-                    "{}",
-                    eligibility_blocked_message(&args.source, &args.target, unmet_count)
-                );
-                for u in &unmet {
-                    println!(
-                        "{}",
-                        unmet_requirement_line(&u.kind, &u.reason, u.have, u.needed)
-                    );
-                }
+        println!("Approved Thread '{}' at {}", thread, output.source_revision);
+        println!("  review id: {}", output.id);
+        println!("  compared base: {}", output.base_revision);
+    }
+    Ok(())
+}
+
+pub async fn cmd_review_list(cli: &Cli, args: &ReviewListArgs) -> Result<()> {
+    let repo = cli.open_repo()?;
+    require_hosted_repo(&repo)?;
+    let thread = resolve_review_thread(&repo, args.thread.clone(), "review list")?;
+    let remote_name = resolve_review_remote(&repo, &args.remote_choice)?;
+    let (client, address) = open_hosted_session(&repo, &remote_name).await?;
+    announce_resolved_remote(cli, &repo, &remote_name, &address);
+    let snapshot = client.observe_review(&address, &thread).await;
+    client.close().await;
+    let rows: Vec<_> = snapshot?
+        .decisions
+        .iter()
+        .map(|row| decision_output(row, &thread))
+        .collect::<Result<_>>()?;
+    if should_output_json(cli, Some(repo.config())) {
+        write_full_command_json(
+            &rows,
+            NextActionValidationContext::without_repo(&["review", "list"]),
+        )?;
+    } else if rows.is_empty() {
+        println!("No review decisions recorded for Thread '{thread}'");
+    } else {
+        println!("{} review decisions for Thread '{}'", rows.len(), thread);
+        for row in rows {
+            println!(
+                "  {}  {}  principal={}  source={}",
+                row.id, row.kind, row.principal_id, row.source_revision
+            );
+            if !row.explanation.is_empty() {
+                println!("    {}", row.explanation);
             }
         }
     }
-    // Non-zero exit so scripts can branch. Use DataErr (65) — exit 2 is
-    // reserved for panic / set -e fallout and must not be intentional.
-    // Report already rendered; main maps OutcomeExit without a second envelope.
-    if !allowed {
+    Ok(())
+}
+
+pub async fn cmd_review_revoke(cli: &Cli, args: &ReviewRevokeArgs) -> Result<()> {
+    let repo = cli.open_repo()?;
+    require_hosted_repo(&repo)?;
+    let id = uuid::Uuid::parse_str(&args.review_id).context("review ID must be UUID")?;
+    let remote_name = resolve_review_remote(&repo, &args.remote_choice)?;
+    let (client, address) = open_hosted_session(&repo, &remote_name).await?;
+    announce_resolved_remote(cli, &repo, &remote_name, &address);
+    let operation = operation_id(cli)?;
+    let (spool, endpoint, principal) = review_scope(&client, &address).await?;
+    let mut outbox = ReviewOutbox::open()?;
+    let request = match outbox.load(&endpoint, &principal, operation)? {
+        Some(StoredReview::Completed(selector, decision)) => {
+            ensure!(
+                selector == args.thread,
+                "operation ID belongs to another Thread selector"
+            );
+            let reference = stored_reference(&decision, &spool)?;
+            let previous = wire::RecordReviewRequest {
+                client_operation_id: operation.to_string(),
+                decision: Some(decision),
+                ..Default::default()
+            };
+            replay_matches(
+                &previous,
+                &reference,
+                &principal,
+                wire::review_decision::Kind::Revocation,
+                Some(id),
+                None,
+            )?;
+            client.close().await;
+            if should_output_json(cli, Some(repo.config())) {
+                write_full_command_json(
+                    &ApprovalRevokeOutput {
+                        output_kind: "review_revoke",
+                        id: args.review_id.clone(),
+                        revoked: true,
+                    },
+                    NextActionValidationContext::without_repo(&["review", "revoke"]),
+                )?;
+            } else {
+                println!(
+                    "Approval {} was already revoked for Thread '{}'",
+                    args.review_id, args.thread
+                );
+            }
+            return Ok(());
+        }
+        Some(StoredReview::Pending(selector, stored)) => {
+            ensure!(
+                selector == args.thread,
+                "operation ID belongs to another Thread selector"
+            );
+            let reference = stored_reference(
+                stored
+                    .decision
+                    .as_ref()
+                    .context("stored review decision absent")?,
+                &spool,
+            )?;
+            replay_matches(
+                &stored,
+                &reference,
+                &principal,
+                wire::review_decision::Kind::Revocation,
+                Some(id),
+                None,
+            )?;
+            stored
+        }
+        None => {
+            let reference = client.resolve_thread_ref(&address, &args.thread).await?;
+            let snapshot = client.observe_review(&address, &args.thread).await?;
+            ensure!(
+                snapshot.endpoint_key == endpoint,
+                "hosted endpoint changed during review preparation"
+            );
+            let prior = snapshot
+                .decisions
+                .iter()
+                .find(|decision| {
+                    decision
+                        .r#ref
+                        .as_ref()
+                        .is_some_and(|reference| reference.id == id.to_string())
+                })
+                .context("review ID is not visible on this Thread")?;
+            ensure!(
+                prior.kind == wire::review_decision::Kind::Approval as i32,
+                "only an approval can be revoked by this command"
+            );
+            let policy: [u8; 32] = snapshot
+                .overview
+                .review_policy_version
+                .as_slice()
+                .try_into()
+                .context("current review policy version absent")?;
+            let prepared = sign_decision(
+                &snapshot,
+                ReviewKind::Revocation,
+                ReviewComparison {
+                    source: revision_state(
+                        prior.source.as_ref().context("approval source absent")?,
+                    )?,
+                    base: revision_state(prior.target.as_ref().context("approval base absent")?)?,
+                    policy: ContentHash::from_bytes(policy),
+                },
+                String::new(),
+                Some(id),
+                operation,
+            )?;
+            ensure!(
+                prepared
+                    .decision
+                    .as_ref()
+                    .and_then(|decision| decision.thread.as_ref())
+                    == Some(&reference),
+                "review target changed during preparation"
+            );
+            outbox.save(&endpoint, &principal, operation, &args.thread, &prepared)?;
+            prepared
+        }
+    };
+    let result = client.record_review(&request).await;
+    client.close().await;
+    result.with_context(|| {
+        format!("revocation may be pending; retry the exact original with --op-id {operation}")
+    })?;
+    outbox.complete(&endpoint, &principal, operation)?;
+    if should_output_json(cli, Some(repo.config())) {
+        write_full_command_json(
+            &ApprovalRevokeOutput {
+                output_kind: "review_revoke",
+                id: args.review_id.clone(),
+                revoked: true,
+            },
+            NextActionValidationContext::without_repo(&["review", "revoke"]),
+        )?;
+    } else {
+        println!(
+            "Revoked approval {} for Thread '{}'",
+            args.review_id, args.thread
+        );
+    }
+    Ok(())
+}
+
+pub async fn cmd_review_readiness(cli: &Cli, args: &ReviewReadinessArgs) -> Result<()> {
+    let repo = cli.open_repo()?;
+    require_hosted_repo(&repo)?;
+    let thread = resolve_review_thread(&repo, args.thread.clone(), "review readiness")?;
+    let remote_name = resolve_review_remote(&repo, &args.remote_choice)?;
+    let (client, address) = open_hosted_session(&repo, &remote_name).await?;
+    announce_resolved_remote(cli, &repo, &remote_name, &address);
+    let snapshot = client
+        .observe_landing_assessment(&address, &thread, &args.into)
+        .await;
+    client.close().await;
+    let snapshot = snapshot?;
+    let assessment = snapshot
+        .overview
+        .landing_assessment
+        .context("target-bound landing assessment unavailable; refresh and retry")?;
+    let source_revision = revision_state(
+        assessment
+            .source
+            .as_ref()
+            .context("landing source absent")?,
+    )?
+    .to_string();
+    let target_revision = revision_state(
+        assessment
+            .expected_target
+            .as_ref()
+            .context("landing target head absent")?,
+    )?
+    .to_string();
+    let policy_version = hex::encode(&assessment.policy_version);
+    let readiness = match wire::ReviewReadiness::try_from(assessment.readiness)? {
+        wire::ReviewReadiness::Eligible => "eligible",
+        wire::ReviewReadiness::NeedsApproval => "needs_approval",
+        wire::ReviewReadiness::Blocked => "blocked",
+        wire::ReviewReadiness::Unknown | wire::ReviewReadiness::Unspecified => "unknown",
+    };
+    let requirements: Vec<_> = assessment
+        .requirements
+        .into_iter()
+        .map(|requirement| UnmetOutput {
+            policy_id: requirement.policy.map(|record| record.id),
+            kind: wire::RequirementKind::try_from(requirement.kind)
+                .map(|kind| kind.as_str_name().to_ascii_lowercase())
+                .unwrap_or_else(|_| "unknown".into()),
+            explanation: requirement.explanation,
+            recovery_method: requirement.recovery_method,
+        })
+        .collect();
+    if should_output_json(cli, Some(repo.config())) {
+        write_full_command_json(
+            &EligibilityOutput {
+                thread: thread.clone(),
+                target: args.into.clone(),
+                source_revision: source_revision.clone(),
+                target_revision: target_revision.clone(),
+                policy_version,
+                readiness: readiness.into(),
+                requirements,
+            },
+            NextActionValidationContext::without_repo(&["review", "readiness"]),
+        )?;
+    } else {
+        println!(
+            "Thread '{}' → '{}' readiness: {readiness}",
+            thread, args.into
+        );
+        println!("  source: {source_revision}");
+        println!("  target head: {target_revision}");
+        for requirement in &requirements {
+            println!("  {}: {}", requirement.kind, requirement.explanation);
+        }
+    }
+    if readiness != "eligible" {
         return Err(anyhow!(crate::exit::OutcomeExit::data_err()));
     }
     Ok(())
@@ -356,17 +744,39 @@ pub async fn cmd_thread_check_merge(cli: &Cli, args: ThreadCheckMergeArgs) -> Re
 
 #[cfg(test)]
 mod tests {
+    use clap::Parser;
+
+    use super::*;
+
     #[test]
-    fn workflow_mutations_forward_the_cli_operation_id() {
-        let source = include_str!("thread_approval.rs");
-        let implementation = source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("implementation section");
-        assert_eq!(
-            implementation.matches("cli.operation_id_wire()").count(),
-            2,
-            "approve and revoke must both forward the caller's --op-id"
+    fn review_cli_selects_one_thread_and_readiness_selects_exact_target() {
+        let approve = Cli::try_parse_from(["heddle", "review", "approve", "feature"])
+            .expect("one Thread review");
+        assert!(matches!(approve.command,
+            crate::cli::cli_args::Commands::Review {
+                command: crate::cli::cli_args::ReviewCommands::Approve(ReviewApproveArgs { thread: Some(thread), .. })
+            } if thread == "feature"));
+        let readiness =
+            Cli::try_parse_from(["heddle", "review", "readiness", "feature", "--into", "main"])
+                .expect("explicit target selection");
+        assert!(matches!(readiness.command,
+            crate::cli::cli_args::Commands::Review {
+                command: crate::cli::cli_args::ReviewCommands::Readiness(ReviewReadinessArgs { thread: Some(thread), into, .. })
+            } if thread == "feature" && into == "main"));
+        assert!(Cli::try_parse_from(["heddle", "review", "readiness", "feature"]).is_err());
+        assert!(Cli::try_parse_from(["heddle", "thread", "approve", "feature"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "heddle",
+                "review",
+                "readiness",
+                "feature",
+                "--into",
+                "main",
+                "--path",
+                "src/lib.rs"
+            ])
+            .is_err()
         );
     }
 }

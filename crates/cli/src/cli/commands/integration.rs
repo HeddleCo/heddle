@@ -813,6 +813,7 @@ fn install_claude(
         "SessionStart",
         "UserPromptSubmit",
         "PreToolUse",
+        "PermissionRequest",
         "PostToolUse",
         "SubagentStart",
         "SubagentStop",
@@ -820,7 +821,10 @@ fn install_claude(
         "SessionEnd",
     ] {
         let commands = if event == "PreToolUse" {
-            vec![stamp.clone()]
+            vec![
+                stamp.clone(),
+                format!("{heddle}{repo_flag} integration relay claude-code {event}"),
+            ]
         } else if event == "SessionEnd" {
             vec![
                 format!("{heddle}{repo_flag} integration relay claude-code {event}"),
@@ -1332,7 +1336,8 @@ mod tests {
         assert!(contents.contains("integration relay claude-code SessionStart"));
         assert!(contents.contains("integration relay claude-code UserPromptSubmit"));
         assert!(contents.contains("integration stamp claude-code"));
-        assert!(!contents.contains("integration relay claude-code PreToolUse"));
+        assert!(contents.contains("integration relay claude-code PreToolUse"));
+        assert!(contents.contains("integration relay claude-code PermissionRequest"));
         assert!(contents.contains("integration relay claude-code PostToolUse"));
         assert!(contents.contains("integration relay claude-code SubagentStop"));
         assert!(contents.contains("integration relay claude-code Stop"));

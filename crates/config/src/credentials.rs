@@ -39,6 +39,9 @@ pub struct CredentialDefaults {
 /// Credential for a single Heddle server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerCredential {
+    /// Public canonical SignedMintRootAttachment bytes; verified against owner history when used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mint_root_attachment: Option<Vec<u8>>,
     pub token: String,
     pub subject: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -249,6 +252,7 @@ mod tests {
             store.servers.insert(
                 "heddle.example:8421".to_string(),
                 ServerCredential {
+                    mint_root_attachment: None,
                     token: "token-123".to_string(),
                     subject: "dev".to_string(),
                     device_id: Some("device-1".to_string()),
@@ -308,6 +312,7 @@ private_key = "legacy-pem"
             store.servers.insert(
                 "heddle.example:8421".to_string(),
                 ServerCredential {
+                    mint_root_attachment: None,
                     token: "token-123".to_string(),
                     subject: "dev".to_string(),
                     device_id: None,
@@ -345,6 +350,7 @@ private_key = "legacy-pem"
             store.servers.insert(
                 "heddle.example:8421".to_string(),
                 ServerCredential {
+                    mint_root_attachment: None,
                     token: "token-123".to_string(),
                     subject: "dev".to_string(),
                     device_id: None,
@@ -380,6 +386,7 @@ private_key = "legacy-pem"
             store.servers.insert(
                 "http://heddle.example:8421".to_string(),
                 ServerCredential {
+                    mint_root_attachment: None,
                     token: "token-abc".to_string(),
                     subject: "dev".to_string(),
                     device_id: None,

@@ -176,7 +176,7 @@ impl ExecutionContext {
   The embedder supplies its own opened `Repository`, a no-op or custom progress
   sink, and a warning sink that captures into a `Vec` instead of printing.
 - **How a command gets the repo:** `ctx.require_repo()?` (or the op takes a path
-  param for init/clone/adopt and returns the new `Repository`).
+  param for init/clone/import and returns the new `Repository`).
 
 #### Before / after — `status`
 

@@ -80,6 +80,7 @@ fn validate_snapshot_artifact_records(
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::HeadUpdate { .. } => None,
         })
         .collect::<Vec<_>>();

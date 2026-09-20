@@ -32,8 +32,10 @@ use repo::{Repository, RepositoryCapability};
 use serde::Serialize;
 use verbs::redaction_signature_status;
 
-use super::advice::RecoveryAdvice;
-use super::next_action::{NextActionValidationContext, write_full_command_json};
+use super::{
+    advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
+};
 use crate::{
     cli::{
         Cli, RedactApplyArgs, RedactCommands, RedactListArgs, RedactShowArgs, should_output_json,

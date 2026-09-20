@@ -3,8 +3,10 @@
 
 use std::mem::{align_of, size_of};
 
-use super::super::budget::{BudgetExceeded, ResourceKind};
-use super::scan::LineOff;
+use super::{
+    super::budget::{BudgetExceeded, ResourceKind},
+    scan::LineOff,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy)]

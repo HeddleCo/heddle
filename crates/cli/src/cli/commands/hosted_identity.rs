@@ -8,7 +8,7 @@ use heddle_cli_contract::cli::commands::wire::auth::{
     AgentAccountCreatedOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, CaptureActor,
     DescriptorTrustSource as WireDescriptorTrustSource, HumanPromotionDirective,
     ServiceTokenOutput, SignupInviteCreatedOutput, SignupInviteListOutput, SignupInviteOutput,
-    WhoamiIdentity, WhoamiOutput, WhoamiRole,
+    WhoamiIdentity, WhoamiOutput,
 };
 use hosted_client::hosted_runtime::{
     AgentTemplate,
@@ -54,15 +54,10 @@ fn write_auth_event_to(
     mut open_browser: impl FnMut(&str) -> std::io::Result<()>,
 ) -> Result<()> {
     match event {
-        AuthEvent::DeviceAuthorizationReady {
-            verification_uri,
-            user_code,
-        } => {
+        AuthEvent::PairingReady { verification_uri } => {
             writeln!(stdout)?;
             writeln!(stdout, "Open this URL to authorize:")?;
             writeln!(stdout, "  {verification_uri}")?;
-            writeln!(stdout)?;
-            writeln!(stdout, "Enter code: {user_code}")?;
             writeln!(stdout)?;
         }
         AuthEvent::BrowserOpenRequested { url } => {
@@ -263,18 +258,18 @@ fn write_invite_created(
             serde_json::to_string(&SignupInviteCreatedOutput {
                 output_kind: "auth_invite",
                 invite_id: outcome.invite_id,
-                invite_code: outcome.invite_code,
+                redemption_secret: outcome.redemption_secret,
                 allowance_remaining: outcome.allowance_remaining,
             })?
         )?;
     } else {
-        // The code deliberately appears on exactly one output line.
-        writeln!(writer, "{}", outcome.invite_code)?;
-        writeln!(
-            writer,
-            "Allowance remaining: {}",
-            outcome.allowance_remaining
-        )?;
+        // The one-time secret deliberately appears on exactly one output line.
+        writeln!(writer, "{}", outcome.redemption_secret)?;
+        if let Some(remaining) = outcome.allowance_remaining {
+            writeln!(writer, "Allowance remaining: {remaining}")?;
+        } else {
+            writeln!(writer, "Allowance remaining: unavailable")?;
+        }
     }
     Ok(())
 }
@@ -294,34 +289,33 @@ fn write_invite_list(writer: &mut impl Write, outcome: SignupInviteList, json: b
         if outcome.invites.is_empty() {
             writeln!(writer, "No signup invites.")?;
         } else {
-            writeln!(writer, "CODE\tSTATUS\tCREATED_AT\tCONSUMED_AT")?;
+            writeln!(writer, "ID\tSTATUS\tBOUND_EMAIL\tEXPIRES_AT")?;
             for invite in outcome.invites {
                 writeln!(
                     writer,
                     "{}\t{}\t{}\t{}",
-                    invite.invite_code,
+                    invite.invite_id,
                     invite.status,
-                    invite.created_at.as_deref().unwrap_or("-"),
-                    invite.consumed_at.as_deref().unwrap_or("-")
+                    invite.bound_email.as_deref().unwrap_or("-"),
+                    invite.expires_at.as_deref().unwrap_or("-")
                 )?;
             }
         }
-        writeln!(
-            writer,
-            "Allowance remaining: {}",
-            outcome.allowance_remaining
-        )?;
+        if let Some(remaining) = outcome.allowance_remaining {
+            writeln!(writer, "Allowance remaining: {remaining}")?;
+        } else {
+            writeln!(writer, "Allowance remaining: unavailable")?;
+        }
     }
     Ok(())
 }
 
 fn invite_output(invite: SignupInvite) -> SignupInviteOutput {
     SignupInviteOutput {
-        invite_code: invite.invite_code,
+        invite_id: invite.invite_id,
         status: invite.status,
-        created_at: invite.created_at,
-        consumed: invite.consumed,
-        consumed_at: invite.consumed_at,
+        bound_email: invite.bound_email,
+        expires_at: invite.expires_at,
     }
 }
 
@@ -384,7 +378,11 @@ fn write_derived_agent(writer: &mut impl Write, outcome: DerivedAgent) -> Result
             writeln!(
                 writer,
                 "Allowed operations: {}",
-                outcome.allowed_operations.join(", ")
+                outcome
+                    .allowed_operations
+                    .as_ref()
+                    .map(|operations| operations.join(", "))
+                    .unwrap_or_else(|| "inherited from parent".into())
             )?;
             if let Some(scope) = outcome.rendered_scope {
                 writeln!(writer, "Scope: {scope}")?;
@@ -404,7 +402,11 @@ fn write_derived_agent(writer: &mut impl Write, outcome: DerivedAgent) -> Result
             writeln!(
                 writer,
                 "Allowed operations: {}",
-                outcome.allowed_operations.join(", ")
+                outcome
+                    .allowed_operations
+                    .as_ref()
+                    .map(|operations| operations.join(", "))
+                    .unwrap_or_else(|| "inherited from parent".into())
             )?;
             if outcome.scopes.is_empty() {
                 writeln!(
@@ -438,7 +440,6 @@ fn write_service_token(
             serde_json::to_string(&ServiceTokenOutput {
                 output_kind: "auth_create_service_token",
                 name: outcome.name,
-                namespace: outcome.namespace,
                 scope: outcome.scope,
                 credential_path: outcome.credential_path,
                 expires_in_days: outcome.expires_in_days,
@@ -463,11 +464,6 @@ fn write_service_token(
             "Point the runtime at it with HEDDLE_CREDENTIAL={}.",
             outcome.credential_path
         )?;
-        writeln!(
-            writer,
-            "This token is scoped to the {} namespace.",
-            outcome.namespace
-        )?;
     }
     Ok(())
 }
@@ -483,8 +479,8 @@ pub async fn cmd_hosted_claim(args: ClaimArgs) -> Result<()> {
     )
     .await?;
     match outcome {
-        ClaimOutcome::Claimed => {
-            println!("Claim complete. This agent account now has a human owner.")
+        ClaimOutcome::ConsentIssued => {
+            println!("Owner consent signed. Complete the account claim in your browser.")
         }
         ClaimOutcome::Expired => println!("Claim offer expired without changing the account."),
         ClaimOutcome::Interrupted => {
@@ -565,33 +561,26 @@ fn whoami_output(report: WhoamiReport) -> WhoamiOutput {
         ttl_seconds_remaining: report.ttl_seconds_remaining,
         proof_key_available: report.proof_key_available,
         identity: report.identity.map(whoami_identity),
+        spools: report.spools,
         recommended_action: report.recommended_action,
     }
 }
 
 fn whoami_identity(identity: HostedIdentity) -> WhoamiIdentity {
     WhoamiIdentity {
-        subject: identity.subject,
-        actor_subject: identity.actor_subject,
-        is_staff: identity.is_staff,
-        is_service_account: identity.is_service_account,
-        is_biscuit: identity.is_biscuit,
-        session_id: identity.session_id,
-        amr: identity.amr,
-        server_scope: identity.server_scope,
+        principal_id: identity.principal_id,
+        account_id: identity.account_id,
+        handle: identity.handle,
+        acting_agent_id: identity.acting_agent_id,
+        rooting_tier: identity.rooting_tier,
         credential_id: identity.credential_id,
-        device_id: identity.device_id,
+        credential_subject: identity.credential_subject,
+        credential_kind: identity.credential_kind,
+        session_id: identity.session_id,
+        authentication_methods: identity.authentication_methods,
         agent_provider: identity.agent_provider,
         agent_model: identity.agent_model,
-        roles: identity
-            .roles
-            .into_iter()
-            .map(|role| WhoamiRole {
-                resource_path: role.resource_path,
-                resource_kind: role.resource_kind,
-                role: role.role,
-            })
-            .collect(),
+        available_actions: identity.available_actions,
     }
 }
 
@@ -626,34 +615,43 @@ fn write_whoami_human(
         writeln!(writer, "Subject:       {subject}")?;
     }
     if let Some(identity) = &output.identity {
-        if identity.actor_subject != identity.subject && !identity.actor_subject.is_empty() {
-            writeln!(writer, "Acting as:     {}", identity.actor_subject)?;
+        writeln!(writer, "Account:       {}", identity.account_id)?;
+        if let Some(handle) = &identity.handle {
+            writeln!(writer, "Handle:        {handle}")?;
         }
-        if !identity.credential_id.is_empty() {
-            writeln!(writer, "Credential:    {}", identity.credential_id)?;
+        if let Some(agent_id) = &identity.acting_agent_id {
+            writeln!(writer, "Acting agent:  {agent_id}")?;
         }
-        if !identity.session_id.is_empty() {
-            writeln!(writer, "Session:       {}", identity.session_id)?;
+        writeln!(writer, "Account root:  {}", identity.rooting_tier)?;
+        writeln!(
+            writer,
+            "Credential:    {} ({})",
+            identity.credential_subject, identity.credential_kind
+        )?;
+        if let Some(credential_id) = &identity.credential_id {
+            writeln!(writer, "Credential ID: {credential_id}")?;
         }
-        if identity.is_staff {
-            writeln!(writer, "Staff:         yes")?;
+        if let Some(session_id) = &identity.session_id {
+            writeln!(writer, "Session:       {session_id}")?;
         }
-        if !identity.server_scope.is_empty() {
-            writeln!(writer, "Server scope:  {}", identity.server_scope)?;
+        if !identity.authentication_methods.is_empty() {
+            writeln!(
+                writer,
+                "Auth methods:  {}",
+                identity.authentication_methods.join(", ")
+            )?;
         }
-        if !identity.roles.is_empty() {
-            let roles = identity
-                .roles
-                .iter()
-                .map(|role| {
-                    format!(
-                        "{}:{}={}",
-                        role.resource_kind, role.resource_path, role.role
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(writer, "Roles:         {roles}")?;
+        if !identity.available_actions.is_empty() {
+            writeln!(
+                writer,
+                "Method hints:  {}",
+                identity.available_actions.join(", ")
+            )?;
+        }
+        if output.spools.is_empty() {
+            writeln!(writer, "Spools:        none")?;
+        } else {
+            writeln!(writer, "Spools:        {}", output.spools.join(", "))?;
         }
     } else {
         writeln!(
@@ -764,12 +762,12 @@ fn auth_command(command: AuthCommands, interactive: bool) -> AuthCommand {
         },
         AuthCommands::CreateServiceToken {
             name,
-            namespace,
+            scope,
             server,
             out,
         } => AuthCommand::CreateServiceToken {
             name,
-            namespace,
+            scope,
             server,
             out,
         },
@@ -790,12 +788,11 @@ mod tests {
 
     use hosted_client::hosted_runtime::{
         auth::{AuthLogout, HumanPromotionDirective as HostedHumanPromotionDirective},
-        whoami::{CaptureActor as HostedCaptureActor, WhoamiRole as HostedWhoamiRole},
+        whoami::CaptureActor as HostedCaptureActor,
     };
 
-    use crate::cli::{AuthTrustReplaceArgs, AuthTrustShowArgs};
-
     use super::*;
+    use crate::cli::{AuthTrustReplaceArgs, AuthTrustShowArgs};
 
     fn rendered(outcome: AuthOutcome, json: bool) -> String {
         let mut bytes = Vec::new();
@@ -835,11 +832,10 @@ mod tests {
 
     fn invite() -> SignupInvite {
         SignupInvite {
-            invite_code: "invite-code".into(),
-            status: "consumed".into(),
-            created_at: Some("2026-09-07T00:00:00Z".into()),
-            consumed: true,
-            consumed_at: Some("2026-09-07T01:00:00Z".into()),
+            invite_id: "invite-1".into(),
+            status: "redeemed".into(),
+            bound_email: Some("alice@example.com".into()),
+            expires_at: Some("2026-09-08T00:00:00Z".into()),
         }
     }
 
@@ -861,7 +857,7 @@ mod tests {
             parent_source: "device".into(),
             expires_at: "2030-01-01T00:00:00Z".into(),
             template: Some(AgentTemplate::Reviewer),
-            allowed_operations: vec!["Pull".into(), "WhoAmI".into()],
+            allowed_operations: Some(vec!["ReadContent".into(), "ObserveIdentity".into()]),
             scopes: vec!["repo:heddle/heddle".into()],
             rendered_scope: Some("repo:heddle/heddle".into()),
             destination,
@@ -871,8 +867,7 @@ mod tests {
     fn service_token() -> ServiceTokenCreated {
         ServiceTokenCreated {
             name: "ci-main".into(),
-            namespace: "heddle".into(),
-            scope: "namespace:heddle".into(),
+            scope: "spool:heddle/platform read write".into(),
             credential_path: "/tmp/ci-main.hcred".into(),
             expires_in_days: 30,
         }
@@ -885,16 +880,14 @@ mod tests {
         write_auth_event_to(
             &mut stdout,
             &mut stderr,
-            AuthEvent::DeviceAuthorizationReady {
+            AuthEvent::PairingReady {
                 verification_uri: "https://app.heddle.test/device".into(),
-                user_code: "ABCD-EFGH".into(),
             },
             |_| Ok(()),
         )
         .expect("render device authorization");
         let text = String::from_utf8(stdout).expect("event output is UTF-8");
         assert!(text.contains("https://app.heddle.test/device"));
-        assert!(text.contains("ABCD-EFGH"));
         assert!(stderr.is_empty());
 
         let mut stdout = Vec::new();
@@ -1007,8 +1000,8 @@ mod tests {
 
         let created = SignupInviteCreated {
             invite_id: "invite-1".into(),
-            invite_code: "invite-code".into(),
-            allowance_remaining: 3,
+            redemption_secret: "invite-code".into(),
+            allowance_remaining: Some(3),
         };
         assert!(
             rendered(AuthOutcome::SignupInviteCreated(created.clone()), false)
@@ -1021,20 +1014,22 @@ mod tests {
 
         let invites = SignupInviteList {
             invites: vec![invite()],
-            allowance_remaining: 2,
+            allowance_remaining: Some(2),
         };
         let invite_list = rendered(AuthOutcome::SignupInviteList(invites.clone()), false);
-        assert!(invite_list.contains("CODE\tSTATUS"));
-        assert!(invite_list.contains("invite-code\tconsumed"));
+        assert!(invite_list.contains("ID\tSTATUS"));
+        assert!(invite_list.contains("invite-1\tredeemed"));
+        assert!(!invite_list.contains("invite-code"));
         let invite_json: serde_json::Value =
             serde_json::from_str(&rendered(AuthOutcome::SignupInviteList(invites), true))
                 .expect("invite list JSON");
-        assert_eq!(invite_json["invites"][0]["consumed"], true);
+        assert_eq!(invite_json["invites"][0]["status"], "redeemed");
+        assert!(invite_json["invites"][0].get("redemption_secret").is_none());
         assert!(
             rendered(
                 AuthOutcome::SignupInviteList(SignupInviteList {
                     invites: Vec::new(),
-                    allowance_remaining: 4,
+                    allowance_remaining: Some(4),
                 }),
                 false,
             )
@@ -1093,7 +1088,7 @@ mod tests {
             true,
         ))
         .expect("service token JSON");
-        assert_eq!(service_json["namespace"], "heddle");
+        assert_eq!(service_json["scope"], "spool:heddle/platform read write");
         let service_human = rendered(AuthOutcome::ServiceTokenCreated(service_token()), false);
         assert!(service_human.contains("HEDDLE_CREDENTIAL=/tmp/ci-main.hcred"));
         assert!(service_human.contains("mode 0600"));
@@ -1101,23 +1096,19 @@ mod tests {
 
     fn identity() -> HostedIdentity {
         HostedIdentity {
-            subject: "human:1".into(),
-            actor_subject: "agent:reviewer-1".into(),
-            is_staff: true,
-            is_service_account: false,
-            is_biscuit: true,
-            session_id: "session-1".into(),
-            amr: vec!["passkey".into()],
-            server_scope: "api.heddle.test".into(),
-            credential_id: "credential-1".into(),
-            device_id: Some("device-1".into()),
+            principal_id: "principal-1".into(),
+            account_id: "account-1".into(),
+            handle: Some("heddle-human".into()),
+            acting_agent_id: Some("reviewer-1".into()),
+            rooting_tier: "self-rooted".into(),
+            credential_id: Some("credential-1".into()),
+            credential_subject: "agent:reviewer-1".into(),
+            credential_kind: "agent".into(),
+            session_id: Some("session-1".into()),
+            authentication_methods: vec!["passkey".into()],
             agent_provider: Some("codex".into()),
             agent_model: Some("gpt".into()),
-            roles: vec![HostedWhoamiRole {
-                resource_path: "heddle/heddle".into(),
-                resource_kind: "repo".into(),
-                role: "owner".into(),
-            }],
+            available_actions: vec!["/heddle.api.v1alpha2.ThreadService/RecordReview".into()],
         }
     }
 
@@ -1140,6 +1131,7 @@ mod tests {
             ttl_seconds_remaining: Some(60),
             proof_key_available: true,
             identity: Some(identity()),
+            spools: vec!["spool/acme".into(), "spool/acme/notes".into()],
             recommended_action: Some("heddle auth login".into()),
         }
     }
@@ -1151,8 +1143,8 @@ mod tests {
         assert_eq!(machine.output_kind, "whoami");
         assert_eq!(machine.capture_actor.email, "human@example.com");
         let mapped = machine.identity.expect("mapped hosted identity");
-        assert_eq!(mapped.actor_subject, "agent:reviewer-1");
-        assert_eq!(mapped.roles[0].role, "owner");
+        assert_eq!(mapped.credential_subject, "agent:reviewer-1");
+        assert_eq!(mapped.available_actions.len(), 1);
 
         let mut bytes = Vec::new();
         write_whoami_human(&mut bytes, &report).expect("render reachable whoami");
@@ -1160,12 +1152,12 @@ mod tests {
         for expected in [
             "Capture actor: Heddle Human <human@example.com>",
             "Source:        environment",
-            "Acting as:     agent:reviewer-1",
-            "Credential:    credential-1",
+            "Acting agent:  reviewer-1",
+            "Credential:    agent:reviewer-1 (agent)",
             "Session:       session-1",
-            "Staff:         yes",
-            "Server scope:  api.heddle.test",
-            "repo:heddle/heddle=owner",
+            "Account root:  self-rooted",
+            "Method hints:  /heddle.api.v1alpha2.ThreadService/RecordReview",
+            "Spools:        spool/acme, spool/acme/notes",
             "Scopes:        repo:heddle/heddle",
             "Op ceiling:    Pull, Push",
             "(in 60s)",
@@ -1409,7 +1401,7 @@ mod tests {
         match auth_command(
             AuthCommands::CreateServiceToken {
                 name: "ci-main".into(),
-                namespace: "heddle".into(),
+                scope: "spool:heddle/platform read write".into(),
                 server: Some("api.heddle.test".into()),
                 out: Some(PathBuf::from("ci-main.hcred")),
             },
@@ -1417,12 +1409,12 @@ mod tests {
         ) {
             AuthCommand::CreateServiceToken {
                 name,
-                namespace,
+                scope,
                 server,
                 out,
             } => {
                 assert_eq!(name, "ci-main");
-                assert_eq!(namespace, "heddle");
+                assert_eq!(scope, "spool:heddle/platform read write");
                 assert_eq!(server.as_deref(), Some("api.heddle.test"));
                 assert_eq!(out.as_deref(), Some(std::path::Path::new("ci-main.hcred")));
             }

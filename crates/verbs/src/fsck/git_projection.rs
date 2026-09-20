@@ -4,11 +4,6 @@
 //! note schema and malformed-note policy as ordinary projection reads.
 use std::{collections::HashMap, fs, path::PathBuf};
 
-use objects::{error::Result, object::StateId, store::ObjectStore};
-use repo::Repository;
-use serde::Deserialize;
-use sley::{ObjectFormat, ObjectId, Repository as SleyRepository};
-
 #[cfg(test)]
 use heddle_git_projection::git_notes::NOTES_REF;
 use heddle_git_projection::{
@@ -16,6 +11,10 @@ use heddle_git_projection::{
     git_export::commit_requires_residual,
     git_notes::{read_all_notes, read_identity_mappings},
 };
+use objects::{error::Result, object::StateId, store::ObjectStore};
+use repo::Repository;
+use serde::Deserialize;
+use sley::{ObjectFormat, ObjectId, Repository as SleyRepository};
 
 use super::{FsckError, invalid_fsck_config, make_error};
 

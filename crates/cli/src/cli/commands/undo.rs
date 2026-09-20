@@ -175,13 +175,13 @@ pub fn cmd_undo(
         return Err(anyhow!(RecoveryAdvice::safety_refusal(
             "undo_requires_hard",
             "Undo would rewind repository state and worktree files",
-            "Inspect the selected operation with `heddle undo --preview`, then rerun with `heddle undo --hard` to permit the worktree rewind.",
+            "Inspect the selected operation with `heddle undo --dry-run`, then rerun with `heddle undo --hard` to permit the worktree rewind.",
             "the selected undo operation materializes an earlier saved tree",
             "captured worktree files would be replaced by the selected operation's prior tree",
             "repository state and worktree files were left unchanged",
             "heddle undo --hard",
             vec![
-                "heddle undo --preview".to_string(),
+                "heddle undo --dry-run".to_string(),
                 "heddle undo --hard".to_string(),
             ],
         )));
@@ -568,6 +568,7 @@ fn undo_may_rewrite_worktree(repo: &Repository, batches: &[OpBatch]) -> Result<b
             | OpRecord::UndoRecoveryUpdate { .. }
             | OpRecord::StateVisibilitySet { .. }
             | OpRecord::StateVisibilityPromote { .. }
+            | OpRecord::EntryVisibilitySet { .. }
             | OpRecord::HeadUpdate { .. } => false,
         })
     }))

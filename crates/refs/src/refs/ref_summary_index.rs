@@ -440,7 +440,7 @@ impl RefManager {
 
     /// Incrementally fold a publish's loose-ref deltas into the on-disk summary
     /// index instead of rescanning the whole refs dir (the `O(refs²)` cost that
-    /// made `heddle adopt` quadratic — the index was rebuilt from a full
+    /// made `heddle import local` quadratic — the index was rebuilt from a full
     /// `read_dir` + per-ref `read_state_id_at` on *every* publish over a
     /// directory growing to `N` refs).
     ///

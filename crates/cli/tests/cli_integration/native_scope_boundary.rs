@@ -41,7 +41,15 @@ fn overlay_with_records() -> TempDir {
     )
     .expect("context set");
     heddle(
-        &["discuss", "open", "f.txt", "greeting", "why lowercase?"],
+        &[
+            "discuss",
+            "--new",
+            "--path",
+            "f.txt",
+            "--symbol",
+            "greeting",
+            "why lowercase?",
+        ],
         Some(dir),
     )
     .expect("discuss open");
@@ -262,15 +270,28 @@ fn overlay_creation_warns_once_per_working_copy() {
     }
 
     // `discuss` states the same boundary for its own records, also once.
-    let first_discuss = heddle_output(&["discuss", "open", "f.txt", "greeting", "why?"], Some(dir))
-        .expect("discuss open");
+    let first_discuss = heddle_output(
+        &[
+            "discuss", "--new", "--path", "f.txt", "--symbol", "greeting", "why?",
+        ],
+        Some(dir),
+    )
+    .expect("discuss --new");
     let discuss_stderr = String::from_utf8_lossy(&first_discuss.stderr).into_owned();
     assert!(
         discuss_stderr.contains(notice),
         "first overlay discussion must state the boundary: {discuss_stderr}"
     );
     let second_discuss = heddle_output(
-        &["discuss", "open", "f.txt", "greeting", "still why?"],
+        &[
+            "discuss",
+            "--new",
+            "--path",
+            "f.txt",
+            "--symbol",
+            "greeting",
+            "still why?",
+        ],
         Some(dir),
     )
     .expect("discuss open");

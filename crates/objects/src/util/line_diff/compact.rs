@@ -9,9 +9,7 @@
 //! moved just because the same line repeats at the end (`a` vs `a/a`
 //! stays `(0,0)`).
 
-use super::EqualRun;
-use super::myers::LineView;
-use super::scan::line_bytes;
+use super::{EqualRun, myers::LineView, scan::line_bytes};
 
 /// Relocate a prefix of `run` onto a preceding new-side insert when that
 /// insert matches. A partial slide splits the run; it does not move `len`.

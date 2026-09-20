@@ -494,8 +494,8 @@ pub fn mark_withheld_checkout(heddle_dir: &Path, canonical_worktree_root: &Path)
 
 /// `true` iff the worktree at `canonical_worktree_root` was recorded withheld
 /// by [`mark_withheld_checkout`] and not since cleared.
-pub fn is_withheld_checkout(heddle_dir: &Path, canonical_worktree_root: &Path) -> bool {
-    withheld_marker_path(heddle_dir, canonical_worktree_root).exists()
+pub fn is_withheld_checkout(heddle_dir: &Path, canonical_worktree_root: &Path) -> io::Result<bool> {
+    withheld_marker_path(heddle_dir, canonical_worktree_root).try_exists()
 }
 
 /// Clear any withheld marker for `canonical_worktree_root`. Called when the

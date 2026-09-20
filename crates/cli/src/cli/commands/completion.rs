@@ -114,7 +114,7 @@ __heddle_thread_value_position() {
         --thread) return 0 ;;
         --into)
             case "${COMP_WORDS[1]}" in
-                thread|capture) return 0 ;;
+                thread|capture|review) return 0 ;;
             esac
             ;;
     esac
@@ -123,11 +123,18 @@ __heddle_thread_value_position() {
     esac
     if [ "${COMP_WORDS[1]}" = "thread" ]; then
         case "${COMP_WORDS[2]}" in
-            switch|cd|show|captures|refresh|promote|drop|delete|absorb|resolve|approve|approvals|check-merge)
+            switch|cd|show|captures|refresh|promote|drop|delete|absorb|resolve)
                 [ "$COMP_CWORD" -eq 3 ] && return 0
                 ;;
             rename|move)
                 [ "$COMP_CWORD" -eq 3 ] || [ "$COMP_CWORD" -eq 4 ] && return 0
+                ;;
+        esac
+    fi
+    if [ "${COMP_WORDS[1]}" = "review" ]; then
+        case "${COMP_WORDS[2]}" in
+            show|approve|list|readiness)
+                [ "$COMP_CWORD" -eq 3 ] && return 0
                 ;;
         esac
     fi
@@ -174,7 +181,7 @@ __heddle_thread_value_position() {
         --thread) return 0 ;;
         --into)
             case "${words[2]}" in
-                thread|capture) return 0 ;;
+                thread|capture|review) return 0 ;;
             esac
             ;;
     esac
@@ -183,11 +190,18 @@ __heddle_thread_value_position() {
     esac
     if [[ "${words[2]}" == "thread" ]]; then
         case "${words[3]}" in
-            switch|cd|show|captures|refresh|promote|drop|delete|absorb|resolve|approve|approvals|check-merge)
+            switch|cd|show|captures|refresh|promote|drop|delete|absorb|resolve)
                 [[ "$CURRENT" -eq 4 ]] && return 0
                 ;;
             rename|move)
                 [[ "$CURRENT" -eq 4 || "$CURRENT" -eq 5 ]] && return 0
+                ;;
+        esac
+    fi
+    if [[ "${words[2]}" == "review" ]]; then
+        case "${words[3]}" in
+            show|approve|list|readiness)
+                [[ "$CURRENT" -eq 4 ]] && return 0
                 ;;
         esac
     fi
@@ -232,7 +246,7 @@ function __heddle_dynamic_subject
             printf threads
             return 0
         case --into
-            if __fish_seen_subcommand_from thread capture
+            if __fish_seen_subcommand_from thread capture review
                 printf threads
                 return 0
             end
@@ -246,13 +260,22 @@ function __heddle_dynamic_subject
     end
     if test (count $words) -ge 3; and test "$words[2]" = thread
         switch "$words[3]"
-            case switch cd show captures refresh promote drop delete absorb resolve approve approvals check-merge
+            case switch cd show captures refresh promote drop delete absorb resolve
                 if test (count $words) -eq 3
                     printf threads
                     return 0
                 end
             case rename move
                 if test (count $words) -eq 3; or test (count $words) -eq 4
+                    printf threads
+                    return 0
+                end
+        end
+    end
+    if test (count $words) -ge 3; and test "$words[2]" = review
+        switch "$words[3]"
+            case show approve list readiness
+                if test (count $words) -eq 3
                     printf threads
                     return 0
                 end

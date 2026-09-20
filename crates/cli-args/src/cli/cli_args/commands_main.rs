@@ -8,17 +8,17 @@ use super::BridgeCommands;
 #[cfg(feature = "semantic")]
 use super::SemanticCommands;
 use super::{
+    AgentCommands, BlameArgs, CompletionSubject, ContextCommands, DiscussArgs, EnvCommands,
+    HookCommands, ImportArgs, IntegrationCommands, OplogCommands, QueryArgs, RedactCommands,
+    RemoteCommands, ReviewCommands, ShellCommands, ThreadCommands, VisibilityCommands,
     commands_args::{
-        AdoptArgs, CloneArgs, DiffArgs, DoctorArgs, InitArgs, LandArgs, LogArgs, PullArgs,
-        PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadStartArgs,
-        UndoArgs, WatchArgs, INIT_VERB,
+        CloneArgs, DiffArgs, DoctorArgs, IMPORT_VERB, INIT_VERB, InitArgs, LandArgs, LogArgs,
+        PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs,
+        ThreadStartArgs, UndoArgs, WatchArgs,
     },
-    AgentCommands, CompletionSubject, ContextCommands, DiscussCommands, EnvCommands, HookCommands,
-    IntegrationCommands, OplogCommands, QueryArgs, RedactCommands, RemoteCommands, ReviewCommands,
-    ShellCommands, ThreadCommands, VisibilityCommands,
 };
 #[cfg(feature = "client")]
-use super::{AuthCommands, ClaimArgs, GrantCommands, PromoteArgs};
+use super::{AuthCommands, AuthInviteCommands, ClaimArgs, GrantCommands, PromoteArgs};
 
 #[derive(Clone, Debug, Args)]
 pub struct FsckArgs {
@@ -67,9 +67,8 @@ pub struct FsckRepairGitArgs {
     #[arg(long, value_parser = ["git", "heddle"])]
     pub prefer: Option<String>,
 
-    /// Show the authority-valid repair without changing refs.
-    #[arg(long)]
-    pub preview: bool,
+    #[command(flatten)]
+    pub dry_run: super::DryRunArgs,
 }
 
 #[derive(Subcommand)]
@@ -78,22 +77,21 @@ pub enum Commands {
     #[command(name = INIT_VERB)]
     Init(InitArgs),
 
-    /// Adopt Git history into Heddle-native source authority.
-    ///
-    /// Git Overlay is the normal existing-Git mode: Git keeps source objects,
-    /// refs, index, and worktree state while Heddle stores metadata in
-    /// `.heddle`. `adopt` imports history and moves source authority to Heddle.
-    Adopt(AdoptArgs),
+    /// Bring an existing Git repository into Heddle.
+    #[command(name = IMPORT_VERB, verbatim_doc_comment)]
+    Import(ImportArgs),
 
     /// Curated, progressive-disclosure help.
     ///
-    /// `heddle help` prints the locked everyday verbs. `heddle help
-    /// <topic>` prints the topic page (e.g. `model`, `daemon`,
-    /// `signals`, `git-concepts`). `heddle help <command path>` falls
-    /// through to that command's `--help` so the printer never
-    /// duplicates clap's per-verb derivation.
+    /// `heddle help` prints the task map. `heddle help --all` prints the
+    /// full command tree. `heddle help <topic>` prints the topic page
+    /// (e.g. `model`, `advanced`, `git-concepts`). `heddle help
+    /// <command path>` falls through to that command's `--help`.
     Help {
-        /// Topic name (`model`, `daemon`, `signals`, …) or command
+        /// Print the full command tree instead of the task map.
+        #[arg(long)]
+        all: bool,
+        /// Topic name (`model`, `advanced`, `git-concepts`, …) or command
         /// path. When omitted, prints the curated default.
         #[arg(value_name = "TOPIC_OR_COMMAND")]
         topics: Vec<String>,
@@ -174,7 +172,7 @@ Examples:
     /// Abort the active operation without remembering the specific subcommand.
     Abort,
 
-    /// Integrate a ready thread into its local target.
+    /// Integrate into the local target thread; push to publish.
     ///
     /// `land` is the local integration verb: capture outstanding work if needed,
     /// refresh against the target when safe, and land the thread. It fails
@@ -182,7 +180,7 @@ Examples:
     /// when you want the verdict and next action before landing anything.
     Land(LandArgs),
 
-    /// Prepare this thread for review or merge.
+    /// Check this checkout before local integration.
     ///
     /// `ready` captures outstanding work if needed, checks conflicts,
     /// blockers, freshness, and semantic risk, then marks the thread
@@ -214,12 +212,27 @@ Examples:
     /// Show what changed in the worktree, a thread, or two states.
     Diff(DiffArgs),
 
-    /// Open or resolve discussions anchored to symbols.
+    /// Show line-by-line attribution for a tracked file.
     ///
-    /// Open a discussion against a symbol; append turns;
-    /// resolve by edit or dismiss. Anchors
-    /// travel across renames and cross-file moves on subsequent
-    /// state mutations.
+    /// Names the state that last changed each line, with the same
+    /// structured principal / agent shape as `log` and `show`.
+    /// `heddle query --attribution <path>` remains as the equivalent
+    /// query form.
+    #[command(after_help = "\
+Examples:
+  heddle blame src/auth.rs
+  heddle blame src/auth.rs --state HEAD
+  heddle blame src/auth.rs --context
+  heddle blame src/auth.rs --output json
+")]
+    Blame(BlameArgs),
+
+    /// Open or resolve discussions anchored to code.
+    ///
+    /// Subcommands: `new`, `reply`, `resolve`, `reopen`, `list`, `show`,
+    /// `wait`. `--path` / `--symbol` / `--line` are the code anchor;
+    /// `--state` is the historical revision; `--body` / `--file` is the
+    /// markdown body.
     ///
     /// Native Heddle only. Discussions live in `.heddle` and travel
     /// over `heddle push` / `heddle pull` to a Heddle remote. They are
@@ -232,34 +245,32 @@ Scope:
   Git Overlay repository arrives with no discussions and no Heddle store.
 
 Examples:
-  heddle discuss open src/auth.rs verify 'Should this reject expired tokens?'  # anchor a discussion
-  heddle discuss append <id> 'switched to argon2'          # add a turn
+  heddle discuss new --path src/lib.rs --symbol greet --body \"why greet?\"
+  heddle discuss new --path src/lib.rs --file why.md
+  heddle discuss reply disc-01a0afc6 --body \"second thought\"
+  heddle discuss reply disc-01a0afc6 --turn 2 --body \"reply to that turn\"
   heddle discuss resolve <id> --mode by-edit --state HEAD
 ")]
-    Discuss {
-        #[command(subcommand)]
-        command: DiscussCommands,
-    },
+    Discuss(DiscussArgs),
 
     /// Structured query over the operation log. Filter by
     /// actor, time window, signal kind, symbol, thread, verbs. Returns
     /// structured results consumable by agents.
     Query(QueryArgs),
 
-    /// Review a state — render the payload, sign, see signal health.
+    /// Review and approve an exact hosted Thread comparison.
     ///
-    /// `heddle review show` renders the review payload (summary,
-    /// agent narrative, in-budget signals, anchored discussions).
-    /// `heddle review sign` submits a `read` / `agent_preview` /
-    /// `agent_co_review` signature on the state. `heddle review
-    /// health` reports per-module signal fire rates over a rolling
-    /// window.
+    /// `show`, `approve`, and `list` default to the current Thread.
+    /// `readiness` checks the exact source and target comparison before
+    /// hosted landing. Remote selection is explicit, then the configured
+    /// default, and fails when neither is available.
     #[command(after_help = "\
 Examples:
-  heddle review show HEAD                                # render the review payload for HEAD
-  heddle review show HEAD --base last-turn               # review this agent peer's turn
-  heddle review sign HEAD --kind read --public-key <hex> --signature <hex> --signed-at-unix <ts>
-  heddle review health --window 7                       # signal fire-rates over recent states
+  heddle review show feature
+  heddle review approve feature -m \"Looks good\"
+  heddle review list feature
+  heddle review revoke <review-id> --thread feature
+  heddle review readiness feature --into main
 ")]
     Review {
         #[command(subcommand)]
@@ -393,6 +404,33 @@ secrets. `heddle visibility` embargoes a state and its descendants;
         command: AuthCommands,
     },
 
+    /// Create or list signup invites (thin alias of `auth invite`).
+    ///
+    /// Signup-only: this mints an account-creation code. It does not grant
+    /// another principal access to a spool. Use `heddle grant` to add a
+    /// collaborator.
+    #[cfg(feature = "client")]
+    #[command(args_conflicts_with_subcommands = true)]
+    #[command(after_help = "\
+Signup-only. `heddle invite` is the same as `heddle auth invite`.
+It does not grant spool access. Add a collaborator with:
+
+  heddle grant create --spool <path|url> --principal <handle> --role writer
+")]
+    Invite {
+        /// Bind the new invite to an email address.
+        #[arg(long)]
+        email: Option<String>,
+
+        /// Heddle server address. Omit to use the configured default
+        /// (`api.heddle.sh` when none is stored).
+        #[arg(long, global = true)]
+        server: Option<String>,
+
+        #[command(subcommand)]
+        command: Option<AuthInviteCommands>,
+    },
+
     /// Grant a principal access to a hosted spool.
     ///
     /// Separate from `heddle auth invite`, which is signup-only. Create,
@@ -441,6 +479,9 @@ The capture actor and hosted auth are different objects:
   hosted auth    whether this machine has a credential for the server
                  (heddle auth login). whoami never attaches a credential.
 
+When the server answers, whoami lists grant-reachable spools as
+spool/<handle>/<name>.
+
 Examples:
   heddle whoami                       # capture actor first, then hosted auth
   heddle whoami --output json         # machine-readable, stable output_kind shape
@@ -466,8 +507,9 @@ Scope:
   Git Overlay repository arrives with no annotations and no Heddle store.
 
 Examples:
-  heddle context set --path src/auth.rs --scope symbol:verify --kind invariant -m 'returns false on timing mismatch'
-  heddle context get --path src/auth.rs --scope symbol:verify
+  heddle context set --path src/auth.rs --symbol verify --kind invariant -m 'returns false on timing mismatch'
+  heddle context get --path src/auth.rs --symbol verify
+  heddle context history --path src/auth.rs      # same --path as set, or pass the id
   heddle context list --prefix src/auth          # everything attached under a path
   heddle context check --path src/auth.rs        # surface annotations for editor tooling
 ")]
@@ -536,7 +578,7 @@ Examples:
         command: MaintenanceCommands,
     },
 
-    /// Clone from remote.
+    /// Download an existing repository into a local directory.
     Clone(CloneArgs),
 
     /// Manage repository hooks.
