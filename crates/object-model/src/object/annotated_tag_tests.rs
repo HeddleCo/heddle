@@ -50,6 +50,7 @@ fn unchecked(
         body,
         target_tag,
         marker,
+        canonical_body: CanonicalBody::default(),
     }
     .encode_current_msgpack()
 }
@@ -64,6 +65,24 @@ fn msgpack_roundtrip_preserves_exact_body() {
     assert_eq!(decoded.git_oid().unwrap(), tag.git_oid().unwrap());
     assert_eq!(decoded.git_target().unwrap().to_string(), COMMIT_OID);
     assert_eq!(decoded.git_target_type().unwrap(), GitObjectType::Commit);
+}
+
+#[test]
+fn hash_matches_reencode_of_canonical_body() {
+    let tag = exemplar();
+    let encoded = tag.encode_current_msgpack();
+    let raw = rmp_serde::to_vec_named(&tag).expect("historical named msgpack");
+    assert_eq!(encoded, raw);
+    let old = ContentHash::compute_typed("annotated-tag", &raw);
+    assert_eq!(tag.hash(), old);
+    assert_eq!(tag.hash(), old);
+    let decoded = AnnotatedTag::decode_current_msgpack(&encoded).expect("decode");
+    assert_eq!(decoded.hash(), old);
+    assert_eq!(
+        decoded.hash(),
+        ContentHash::compute_typed("annotated-tag", &decoded.encode_current_msgpack())
+    );
+    assert_eq!(decoded.encode_current_msgpack(), encoded);
 }
 
 #[test]

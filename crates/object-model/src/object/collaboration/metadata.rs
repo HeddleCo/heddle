@@ -203,12 +203,24 @@ mod tests {
             "actor and references must survive synchronization"
         );
         assert_eq!(decoded.operation, original);
+        assert_eq!(
+            decoded.operation.id().expect("id reuses decoded bytes"),
+            decoded.operation_id
+        );
+        assert_eq!(
+            decoded.operation.id().expect("cached id"),
+            CollabOpId::for_bytes(&decoded.operation.encode().expect("re-encode"))
+        );
         let mut changed = original.clone();
         changed.metadata.as_mut().expect("metadata").actor.agent_id = Some("another-agent".into());
+        let changed_id = changed.id().expect("changed actor");
         assert_ne!(
-            decoded.operation_id,
-            CollabOpId::for_bytes(&changed.encode().expect("changed actor")),
+            decoded.operation_id, changed_id,
             "author binding must change when agent changes"
+        );
+        assert_eq!(
+            changed_id,
+            CollabOpId::for_bytes(&changed.encode().expect("changed actor"))
         );
         changed = original.clone();
         changed
@@ -217,10 +229,14 @@ mod tests {
             .expect("metadata")
             .mentions
             .clear();
+        let changed_id = changed.id().expect("removed mention");
         assert_ne!(
-            decoded.operation_id,
-            CollabOpId::for_bytes(&changed.encode().expect("removed mention")),
+            decoded.operation_id, changed_id,
             "mentions belong to the author-signed identity"
+        );
+        assert_eq!(
+            changed_id,
+            CollabOpId::for_bytes(&changed.encode().expect("removed mention"))
         );
         changed = original;
         changed.metadata.as_mut().expect("metadata").scope.spool = Uuid::nil();

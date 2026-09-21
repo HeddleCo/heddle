@@ -6,7 +6,7 @@ use uuid::Uuid;
 use super::thread_replication::metadata::AUTHORITY_FORMAT;
 use crate::{
     error::{HeddleError, Result},
-    object::{CollaborationActor, ContentHash, StateId},
+    object::{CollaborationActor, ContentHash, StateId, collaboration::CanonicalBody},
 };
 
 pub const EVIDENCE_FORMAT: &str = "heddle-check-evidence-v2";
@@ -68,9 +68,13 @@ pub struct CheckEvidence {
     pub supersedes: Vec<Uuid>,
     pub author: CheckAuthor,
     pub completed_at_ms: i64,
+    /// Canonical MessagePack from the last successful [`Self::encode`] or [`Self::decode`].
+    /// Not serialized. Struct literals use [`Default::default`].
+    #[serde(skip)]
+    pub canonical_body: CanonicalBody,
 }
 impl CheckEvidence {
-    pub fn encode(&self) -> Result<Vec<u8>> {
+    fn encode_fields(&self) -> Result<Vec<u8>> {
         self.author.validate()?;
         if self.version != 2
             || self.id.is_nil()
@@ -92,6 +96,12 @@ impl CheckEvidence {
         }
         bounded_encode(self)
     }
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        self.canonical_body.clear();
+        let bytes = self.encode_fields()?;
+        self.canonical_body.store(bytes.clone());
+        Ok(bytes)
+    }
     pub fn decode(bytes: &[u8]) -> Result<Self> {
         bound(bytes)?;
         let value: Self = rmp_serde::from_slice(bytes)?;
@@ -101,6 +111,10 @@ impl CheckEvidence {
         Ok(value)
     }
     pub fn id(&self) -> Result<ContentHash> {
+        if let Some(bytes) = self.canonical_body.cloned() {
+            CanonicalBody::debug_matches(&bytes, || self.encode_fields());
+            return Ok(ContentHash::compute_typed(EVIDENCE_FORMAT, &bytes));
+        }
         Ok(ContentHash::compute_typed(EVIDENCE_FORMAT, &self.encode()?))
     }
 }
@@ -156,4 +170,68 @@ fn valid_text(value: &str, max: usize, empty: bool) -> bool {
 }
 fn invalid(message: &str) -> HeddleError {
     HeddleError::InvalidObject(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::object::{
+        CollaborationActor, ContentHash, StateId, thread_replication::metadata::AUTHORITY_FORMAT,
+    };
+
+    fn sample() -> CheckEvidence {
+        let envelope = b"independently verified authority".to_vec();
+        CheckEvidence {
+            version: 2,
+            id: Uuid::from_u128(1),
+            spool: Uuid::from_u128(2),
+            thread: ContentHash::from_bytes([7; 32]),
+            revision: StateId::from_bytes([3; 32]),
+            check: "unit-tests".into(),
+            outcome: CheckOutcome::Passed,
+            detail: "42 passed".into(),
+            artifacts: Vec::new(),
+            supersedes: Vec::new(),
+            author: CheckAuthor {
+                actor: CollaborationActor {
+                    principal_id: Uuid::from_u128(4),
+                    agent_id: None,
+                },
+                publisher: [9; 32],
+                authority_digest: ContentHash::compute_typed(AUTHORITY_FORMAT, &envelope),
+                authority_envelope: envelope,
+            },
+            completed_at_ms: 1000,
+            canonical_body: Default::default(),
+        }
+    }
+
+    #[test]
+    fn id_matches_reencode_of_canonical_body() {
+        let evidence = sample();
+        let bytes = evidence.encode().expect("canonical evidence");
+        let old = ContentHash::compute_typed(EVIDENCE_FORMAT, &bytes);
+        assert_eq!(evidence.id().expect("fresh id"), old);
+        assert_eq!(evidence.id().expect("cached id"), old);
+
+        let decoded = CheckEvidence::decode(&bytes).expect("decode");
+        assert_eq!(decoded, evidence);
+        assert_eq!(decoded.id().expect("decoded id"), old);
+        assert_eq!(
+            decoded.id().expect("decoded id"),
+            ContentHash::compute_typed(EVIDENCE_FORMAT, &decoded.encode().expect("re-encode"))
+        );
+
+        let mut changed = evidence.clone();
+        changed.outcome = CheckOutcome::Failed;
+        let changed_bytes = changed.encode().expect("changed evidence");
+        let changed_id = changed.id().expect("changed id");
+        assert_ne!(changed_id, old);
+        assert_eq!(
+            changed_id,
+            ContentHash::compute_typed(EVIDENCE_FORMAT, &changed_bytes)
+        );
+    }
 }

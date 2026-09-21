@@ -6,7 +6,7 @@ use super::CollaborationCodecError;
 use crate::object::{
     AnnotationKind, Attribution, ChangeId, ContentHash, StateId, VisibilityTier,
     collaboration::{
-        COLLABORATION_OPERATION_SCHEMA_VERSION, CollabOpId, CollaborationAnchor,
+        COLLABORATION_OPERATION_SCHEMA_VERSION, CanonicalBody, CollabOpId, CollaborationAnchor,
         CollaborationAnchorStatus, CollaborationIdempotencyKey, CollaborationOperationBodyV1,
         CollaborationOperationEnvelope, CollaborationResolution, DiscussionRecordId,
         DiscussionTurnV1, LegacyDiscussionId, LegacyDiscussionResolutionV1, LegacySourceLocator,
@@ -171,6 +171,7 @@ pub(super) fn decode(
         author: wire.author,
         occurred_at_ms: wire.occurred_at_ms,
         body: wire.body.into(),
+        canonical_body: CanonicalBody::default(),
     })
 }
 

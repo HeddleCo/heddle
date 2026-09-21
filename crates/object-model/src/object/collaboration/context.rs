@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use super::{
     CollaborationAnchor, CollaborationCodecError, CollaborationMetadata, DiscussionRecordId,
+    canonical_body::CanonicalBody,
 };
 use crate::object::{AnnotationKind, ContentHash, StateId};
 
@@ -41,9 +42,13 @@ pub struct ContextRevision {
     /// the signed body. New local replication must always populate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provenance: Option<ContextProvenance>,
+    /// Canonical MessagePack from the last successful [`Self::encode`] or [`Self::decode`].
+    /// Not serialized. Struct literals use [`Default::default`].
+    #[serde(skip)]
+    pub canonical_body: CanonicalBody,
 }
 impl ContextRevision {
-    pub fn encode(&self) -> Result<Vec<u8>, CollaborationCodecError> {
+    fn encode_fields(&self) -> Result<Vec<u8>, CollaborationCodecError> {
         self.metadata.validate()?;
         super::validate_annotation_tags(&self.tags)?;
         super::operation::validate_anchor(&self.anchor)?;
@@ -63,6 +68,12 @@ impl ContextRevision {
         }
         rmp_serde::to_vec_named(self).map_err(|e| CollaborationCodecError::Encoding(e.to_string()))
     }
+    pub fn encode(&self) -> Result<Vec<u8>, CollaborationCodecError> {
+        self.canonical_body.clear();
+        let bytes = self.encode_fields()?;
+        self.canonical_body.store(bytes.clone());
+        Ok(bytes)
+    }
     pub fn decode(bytes: &[u8]) -> Result<Self, CollaborationCodecError> {
         if bytes.len() > 512 * 1024 {
             return Err(CollaborationCodecError::Invalid(
@@ -79,6 +90,74 @@ impl ContextRevision {
         Ok(record)
     }
     pub fn id(&self) -> Result<ContentHash, CollaborationCodecError> {
+        if let Some(bytes) = self.canonical_body.cloned() {
+            CanonicalBody::debug_matches(&bytes, || self.encode_fields());
+            return Ok(ContentHash::compute_typed(CONTEXT_FORMAT, &bytes));
+        }
         Ok(ContentHash::compute_typed(CONTEXT_FORMAT, &self.encode()?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::object::{
+        CollaborationActor, CollaborationAnchor, CollaborationMetadata, CollaborationScope,
+        ContentHash,
+    };
+
+    fn sample() -> ContextRevision {
+        ContextRevision {
+            version: 2,
+            id: Uuid::from_u128(9),
+            parents: Vec::new(),
+            metadata: CollaborationMetadata {
+                scope: CollaborationScope {
+                    spool: Uuid::from_u128(1),
+                    thread: None,
+                },
+                actor: CollaborationActor {
+                    principal_id: Uuid::from_u128(2),
+                    agent_id: None,
+                },
+                mentions: Vec::new(),
+            },
+            anchor: CollaborationAnchor::Repository,
+            content: "rationale".into(),
+            tags: Vec::new(),
+            supersedes: None,
+            extracted_from: None,
+            occurred_at_ms: 10,
+            provenance: None,
+            canonical_body: Default::default(),
+        }
+    }
+
+    #[test]
+    fn id_matches_reencode_of_canonical_body() {
+        let revision = sample();
+        let bytes = revision.encode().expect("canonical revision");
+        let old = ContentHash::compute_typed(CONTEXT_FORMAT, &bytes);
+        assert_eq!(revision.id().expect("fresh id"), old);
+        assert_eq!(revision.id().expect("cached id"), old);
+
+        let decoded = ContextRevision::decode(&bytes).expect("decode");
+        assert_eq!(decoded, revision);
+        assert_eq!(decoded.id().expect("decoded id"), old);
+        assert_eq!(
+            decoded.id().expect("decoded id"),
+            ContentHash::compute_typed(CONTEXT_FORMAT, &decoded.encode().expect("re-encode"))
+        );
+
+        let mut changed = revision.clone();
+        changed.content = "other rationale".into();
+        let changed_id = changed.id().expect("changed id");
+        assert_ne!(changed_id, old);
+        assert_eq!(
+            changed_id,
+            ContentHash::compute_typed(CONTEXT_FORMAT, &changed.encode().expect("changed"))
+        );
     }
 }

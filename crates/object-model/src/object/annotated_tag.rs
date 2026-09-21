@@ -6,7 +6,7 @@ use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 use sley_object::{ObjectType as GitObjectType, Tag as TagObject};
 use thiserror::Error;
 
-use super::{ContentHash, StateId};
+use super::{ContentHash, StateId, collaboration::CanonicalBody};
 
 const ANNOTATED_TAG_FORMAT_VERSION: u8 = 1;
 const GIT_FORMAT_SHA1: u8 = 1;
@@ -34,6 +34,9 @@ pub struct AnnotatedTag {
     body: Vec<u8>,
     target_tag: Option<ContentHash>,
     marker: Option<AnnotatedTagMarker>,
+    /// Canonical MessagePack from construction or the last encode. Not serialized.
+    #[serde(skip)]
+    canonical_body: CanonicalBody,
 }
 
 impl AnnotatedTag {
@@ -51,6 +54,7 @@ impl AnnotatedTag {
             body,
             target_tag,
             marker,
+            canonical_body: CanonicalBody::default(),
         })
     }
 
@@ -64,12 +68,30 @@ impl AnnotatedTag {
             });
         }
         bind_git_target(tag.git_format()?, &tag.body, tag.target_tag)?;
+        let canonical = tag.encode_uncached();
+        // Hash the canonical body `hash` has always used. Reuse `bytes` only when
+        // they already are that body; non-canonical input stays acceptable.
+        tag.canonical_body.store(if canonical.as_slice() == bytes {
+            bytes.to_vec()
+        } else {
+            canonical
+        });
         Ok(tag)
+    }
+
+    fn encode_uncached(&self) -> Vec<u8> {
+        rmp_serde::to_vec_named(self).expect("annotated tag encoding is infallible")
     }
 
     /// Encode the versioned durable representation used by loose objects and packs.
     pub fn encode_current_msgpack(&self) -> Vec<u8> {
-        rmp_serde::to_vec_named(self).expect("annotated tag encoding is infallible")
+        if let Some(bytes) = self.canonical_body.cloned() {
+            CanonicalBody::debug_matches(&bytes, || Ok::<_, &str>(self.encode_uncached()));
+            return bytes;
+        }
+        let bytes = self.encode_uncached();
+        self.canonical_body.store(bytes.clone());
+        bytes
     }
 
     /// Native content address of this complete record.

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CollabOpId, CollaborationCodecError, CollaborationIdempotencyKey, DiscussionRecordId,
-    LegacyDiscussionId, LegacySourceLocator,
+    LegacyDiscussionId, LegacySourceLocator, canonical_body::CanonicalBody,
 };
 use crate::object::{AnnotationKind, Attribution, ChangeId, ContentHash, StateId, VisibilityTier};
 
@@ -233,6 +233,10 @@ pub struct CollaborationOperationEnvelope {
     pub author: Attribution,
     pub occurred_at_ms: i64,
     pub body: CollaborationOperationBodyV1,
+    /// Canonical MessagePack from the last successful [`Self::encode`], or the
+    /// exact bytes [`Self::decode`] hashed. Not serialized. [`Clone`] drops it.
+    #[serde(skip)]
+    pub(crate) canonical_body: CanonicalBody,
 }
 
 impl CollaborationOperationEnvelope {
@@ -254,6 +258,7 @@ impl CollaborationOperationEnvelope {
             author,
             occurred_at_ms,
             body,
+            canonical_body: CanonicalBody::default(),
         };
         operation.validate()?;
         Ok(operation)
@@ -266,11 +271,25 @@ impl CollaborationOperationEnvelope {
     ) -> Result<Self, CollaborationCodecError> {
         metadata.validate()?;
         self.metadata = Some(metadata);
+        self.canonical_body.clear();
         Ok(self)
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, CollaborationCodecError> {
-        super::codec::encode(self)
+        self.canonical_body.clear();
+        let bytes = super::codec::encode(self)?;
+        self.canonical_body.store(bytes.clone());
+        Ok(bytes)
+    }
+
+    /// Content id of the canonical body. Reuses bytes from [`Self::decode`] or the
+    /// last successful [`Self::encode`] instead of serializing again.
+    pub fn id(&self) -> Result<CollabOpId, CollaborationCodecError> {
+        if let Some(bytes) = self.canonical_body.cloned() {
+            CanonicalBody::debug_matches(&bytes, || super::codec::encode(self));
+            return Ok(CollabOpId::for_bytes(&bytes));
+        }
+        Ok(CollabOpId::for_bytes(&self.encode()?))
     }
 
     pub fn decode(
