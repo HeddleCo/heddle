@@ -334,6 +334,7 @@ pub(super) async fn roundtrip(
         extracted_from: None,
         occurred_at_ms: chrono::Utc::now().timestamp_millis(),
         provenance: None,
+        canonical_body: Default::default(),
     };
     let signed = thread_api::collaboration::sign_context(context.clone(), &[], &signer)
         .expect("context signature");

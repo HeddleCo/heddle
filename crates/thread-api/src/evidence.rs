@@ -276,6 +276,7 @@ mod tests {
                     authority_envelope: envelope,
                 },
                 completed_at_ms: 1000,
+                canonical_body: Default::default(),
             },
             signer,
         )

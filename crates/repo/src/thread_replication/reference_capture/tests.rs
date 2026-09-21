@@ -97,6 +97,7 @@ fn fixture() -> (
             extracted_from: None,
             occurred_at_ms: 100,
             provenance: None,
+            canonical_body: Default::default(),
         };
         let operation = ThreadOperation {
             version: 1,

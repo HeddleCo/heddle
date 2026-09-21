@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
+mod canonical_body;
 mod codec;
 mod context;
 mod ids;
@@ -10,6 +11,7 @@ mod requirements;
 mod source;
 mod tags;
 
+pub use canonical_body::CanonicalBody;
 pub use codec::{CollaborationCodecError, DecodedCollaborationOperation};
 pub use context::{CONTEXT_FORMAT, ContextProvenance, ContextRevision};
 pub use ids::{

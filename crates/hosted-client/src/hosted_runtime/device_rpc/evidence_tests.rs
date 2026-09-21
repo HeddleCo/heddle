@@ -55,6 +55,7 @@ pub(super) async fn roundtrip(
         supersedes: vec![],
         author: author.clone(),
         completed_at_ms: now * 1000,
+        canonical_body: Default::default(),
     };
     let record = codec::sign_evidence(&value, &signer).expect("signed result");
     let projection = codec::project(&record).expect("evidence projection");

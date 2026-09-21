@@ -446,6 +446,7 @@ mod tests {
             extracted_from: None,
             occurred_at_ms: 100,
             provenance: None,
+            canonical_body: Default::default(),
         };
         let first = sign_context(context.clone(), &[], &signer).expect("first context");
         let mut revised = context.clone();
@@ -518,6 +519,7 @@ mod tests {
             extracted_from: Some(discussion),
             occurred_at_ms: 100,
             provenance: None,
+            canonical_body: Default::default(),
         };
         let extracted = make(CollaborationOperationBodyV1::Resolve {
             resolution: CollaborationResolution::IntoContext {
@@ -648,6 +650,7 @@ mod tests {
             extracted_from: Some(discussion),
             occurred_at_ms: 100,
             provenance: None,
+            canonical_body: Default::default(),
         };
         let extraction = command(
             discussion,

@@ -48,6 +48,9 @@ pub(crate) fn decode(
     }
     let operation = v2::decode(bytes)?;
     operation.validate()?;
+    // `operation_id` is the hash of these exact bytes. Admitted records have
+    // already proven them canonical, so `id` reuses the body instead of encoding.
+    operation.canonical_body.store(bytes.to_vec());
     Ok(DecodedCollaborationOperation {
         operation_id: CollabOpId::for_bytes(bytes),
         operation,
@@ -346,6 +349,14 @@ mod tests {
             .map(|(name, bytes)| {
                 let decoded = CollaborationOperationEnvelope::decode(&bytes).unwrap();
                 assert_eq!(decoded.operation_id, CollabOpId::for_bytes(&bytes));
+                assert_eq!(
+                    decoded.operation.id().expect("id reuses decoded bytes"),
+                    decoded.operation_id
+                );
+                assert_eq!(
+                    decoded.operation.id().expect("cached id"),
+                    CollabOpId::for_bytes(&decoded.operation.encode().expect("re-encode"))
+                );
                 (name, ContentHash::compute(&bytes).to_hex())
             })
             .collect::<Vec<_>>();

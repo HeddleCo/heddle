@@ -1053,6 +1053,7 @@ impl HostedClient {
             extracted_from: None,
             occurred_at_ms,
             provenance: Some(provenance),
+            canonical_body: Default::default(),
         };
         let signed =
             thread_api::collaboration::sign_context_parent_ids(context, &parent_ids, signer)
@@ -1445,6 +1446,7 @@ mod tests {
             extracted_from: None,
             occurred_at_ms: 1,
             provenance: None,
+            canonical_body: Default::default(),
         };
         let signed =
             thread_api::collaboration::sign_context(context.clone(), &[], &proof_signer()).unwrap();
@@ -1503,6 +1505,7 @@ mod tests {
             extracted_from: None,
             occurred_at_ms: 1,
             provenance: None,
+            canonical_body: Default::default(),
         };
         let signed =
             thread_api::collaboration::sign_context(context, &[], &proof_signer()).unwrap();
@@ -1636,6 +1639,7 @@ mod tests {
             extracted_from: None,
             occurred_at_ms: 1_726_000_123_456,
             provenance: Some(provenance.clone()),
+            canonical_body: Default::default(),
         };
         let signed_first =
             thread_api::collaboration::sign_context(first.clone(), &[], &proof_signer())
@@ -1664,8 +1668,9 @@ mod tests {
     #[tokio::test]
     async fn requested_scope_failure_never_retargets_main() {
         let _process_env_guard = crate::test_process_env::shared().await;
-        use crate::hosted_runtime::hosted::test_server;
         use api::heddle::api::common::CallFailureCode;
+
+        use crate::hosted_runtime::hosted::test_server;
 
         for failure in [
             None,
