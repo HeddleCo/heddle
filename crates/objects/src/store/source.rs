@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Store bridges for read-only object source traits.
 
+#[cfg(feature = "fs")]
+use super::FsStore;
 #[cfg(any(test, feature = "memory-backend"))]
 use super::InMemoryStore;
-use super::{FsStore, ObjectStore, Result};
+#[cfg(any(test, feature = "fs", feature = "memory-backend"))]
+use super::{ObjectStore, Result};
 #[cfg(feature = "async-source")]
 pub use crate::object::AsyncObjectSource;
 pub use crate::object::ObjectSource;
+#[cfg(any(test, feature = "fs", feature = "memory-backend"))]
 use crate::object::{Blob, ContentHash, State, StateId, Tree};
 
+#[cfg(any(test, feature = "fs", feature = "memory-backend"))]
 macro_rules! impl_object_source {
     ($store:ty) => {
         impl ObjectSource for $store {
@@ -40,6 +45,7 @@ macro_rules! impl_object_source {
     };
 }
 
+#[cfg(feature = "fs")]
 impl_object_source!(FsStore);
 #[cfg(any(test, feature = "memory-backend"))]
 impl_object_source!(InMemoryStore);

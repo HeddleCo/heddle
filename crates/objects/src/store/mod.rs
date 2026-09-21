@@ -10,7 +10,9 @@ use crate::object::{
 };
 
 pub mod codec;
+#[cfg(feature = "fs")]
 mod delta_source;
+#[cfg(feature = "fs")]
 pub mod fs;
 pub mod liveness;
 #[cfg(any(test, feature = "memory-backend"))]
@@ -18,12 +20,16 @@ pub mod memory;
 #[cfg(test)]
 mod partial_tree_tests;
 pub use heddle_pack::store::pack;
+#[cfg(feature = "fs")]
 pub mod shallow;
+#[cfg(feature = "fs")]
 mod snapshot_commit;
 pub mod source;
 pub mod store_compliance;
+#[cfg(feature = "fs")]
 pub mod writer_lease;
 
+#[cfg(feature = "fs")]
 pub use fs::{
     DEFAULT_PACK_INSTALL_INTENT_TTL_SECS, FsRepackOperation, FsStore, PackInstallIntent,
     PackInstallMetricsSnapshot, PackInstallPhase, PackInstallRecoverReport,
@@ -42,7 +48,9 @@ pub use pack::{
     RepackOperation, RepackOutcome, RepackPolicy, RepackReason, RepackReport, RepackResourceLimits,
     RepackSchedule, RepackScheduler, StreamingPackBuilder, SyncData,
 };
+#[cfg(feature = "fs")]
 pub use shallow::ShallowInfo;
+#[cfg(feature = "fs")]
 #[doc(hidden)]
 pub use snapshot_commit::{
     SNAPSHOT_COMMIT_ARTIFACT_SCHEMA, SnapshotCommitArtifact, SnapshotCommitDescriptor,
@@ -51,6 +59,7 @@ pub use snapshot_commit::{
 #[cfg(feature = "async-source")]
 pub use source::AsyncObjectSource;
 pub use source::ObjectSource;
+#[cfg(feature = "fs")]
 pub use writer_lease::{
     WriterLease, WriterLeaseAuthOutcome, WriterLeaseDraft, WriterLeaseGrant,
     WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore, generate_writer_lease_id,

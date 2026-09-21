@@ -15,16 +15,16 @@ base32.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 chrono.workspace = true
-fs2.workspace = true
-hex.workspace = true
-heddle-fs-prims.workspace = true
+fs2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
+heddle-fs-prims = { workspace = true, optional = true }
 heddle-format.workspace = true
 heddle-object-model.workspace = true
 heddle-pack.workspace = true
 heddle-perf-contract.workspace = true
 ignore.workspace = true
 libc = "0.2"
-memmap2.workspace = true
+memmap2 = { workspace = true, optional = true }
 rand.workspace = true
 rmp-serde.workspace = true
 schemars.workspace = true
@@ -34,13 +34,23 @@ similar.workspace = true
 sley-core.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-tracing.workspace = true
-uuid.workspace = true
+tracing = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 
 [features]
 async-source = ["heddle-object-model/async-source"]
-bench = ["heddle-format/bench"]
+bench = ["fs", "heddle-format/bench"]
+default = ["fs"]
+fs = [
+    "dep:fs2",
+    "dep:heddle-fs-prims",
+    "dep:hex",
+    "dep:memmap2",
+    "dep:tracing",
+    "dep:uuid",
+    "heddle-pack/fs",
+]
 memory-backend = []
 zstd = [
     "dep:zstd",
@@ -58,6 +68,10 @@ proptest.workspace = true
 path = "src/lib.rs"
 name = "objects"
 
+[[test]]
+name = "ancestry_final_read"
+required-features = ["async-source"]
+
 [[bench]]
 name = "hashing"
 harness = false
@@ -71,12 +85,12 @@ required-features = ["bench"]
 [[bench]]
 name = "pack_io"
 harness = false
-required-features = ["bench"]
+required-features = ["bench", "fs"]
 
 [[bench]]
 name = "object_enumeration"
 harness = false
-required-features = ["bench"]
+required-features = ["bench", "fs"]
 
 [[bench]]
 name = "tree_diff"
