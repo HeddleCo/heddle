@@ -7,8 +7,10 @@ use std::{
     sync::OnceLock,
 };
 
+use objects::config_types::{FsMonitorMode, OutputFormat};
 use objects::fs_atomic::{StagedAtomicWrite, stage_file_atomic_secret};
-use repo::{FsMonitorMode, OutputFormat, WorktreeStatusOptions, identity::heddle_home_override};
+#[cfg(feature = "local-repository")]
+use repo::WorktreeStatusOptions;
 use serde::{Deserialize, Serialize};
 use wire::AuthToken;
 
@@ -116,7 +118,7 @@ pub struct UserFsMonitorConfig {
 }
 
 /// User-config default for thread workspace mode. Same vocabulary
-/// as [`crate::config::repo::ThreadMode`] and the `--workspace` flag,
+/// as the repository's `ThreadMode` and the `--workspace` flag,
 /// so a user setting `top_level_default = "materialized"` reads
 /// uniformly across the CLI surface and the thread record on disk.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -329,7 +331,7 @@ impl UserConfig {
         {
             return Some(PathBuf::from(path));
         }
-        if let Some(home) = heddle_home_override() {
+        if let Some(home) = crate::heddle_home_override() {
             return Some(home.join("config.toml"));
         }
         if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
@@ -486,6 +488,7 @@ impl UserConfig {
             .as_ref()
             .map(|path| read_security_config_file("remote.tls_ca_certificate_path", path))
             .transpose()?;
+        #[cfg(feature = "local-repository")]
         if ca_pem.is_none()
             && let Some(path) = discovered_repo_tls_ca_certificate_path(repo_start)?
         {
@@ -494,6 +497,8 @@ impl UserConfig {
                 &path,
             )?);
         }
+        #[cfg(not(feature = "local-repository"))]
+        let _ = repo_start;
         match env::var("HEDDLE_REMOTE_TLS_CA_CERT") {
             Ok(path) => {
                 ca_pem = Some(read_security_config_file(
@@ -628,6 +633,7 @@ impl UserConfig {
         Ok(config)
     }
 
+    #[cfg(feature = "local-repository")]
     pub fn worktree_status_options(
         &self,
         repo_config: Option<&repo::RepoConfig>,
@@ -734,6 +740,7 @@ where
     Ok(Some(parsed))
 }
 
+#[cfg(feature = "local-repository")]
 fn discovered_repo_tls_ca_certificate_path(
     start: Option<&Path>,
 ) -> anyhow::Result<Option<PathBuf>> {
@@ -774,6 +781,7 @@ fn discovered_repo_tls_ca_certificate_path(
     }))
 }
 
+#[cfg(feature = "local-repository")]
 #[derive(Debug, Default, Deserialize)]
 struct RepoRemoteProbe {
     #[serde(default)]
@@ -805,7 +813,10 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use repo::{FsMonitorMode, RepoConfig};
+    #[cfg(feature = "local-repository")]
+    use objects::config_types::FsMonitorMode;
+    #[cfg(feature = "local-repository")]
+    use repo::RepoConfig;
 
     use super::{
         HarnessMode, HarnessTranscriptMode, HarnessTransport, UserAutoCaptureMode,
@@ -877,6 +888,7 @@ mod tests {
         std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()))
     }
 
+    #[cfg(feature = "local-repository")]
     #[test]
     fn user_worktree_status_options_fall_back_to_repo_config() {
         let mut repo = RepoConfig::default();
@@ -888,6 +900,7 @@ mod tests {
         assert_eq!(options.fsmonitor.mode, FsMonitorMode::Watchman);
     }
 
+    #[cfg(feature = "local-repository")]
     #[test]
     fn user_worktree_status_options_default_to_off() {
         let config = UserConfig::default();
@@ -1195,6 +1208,7 @@ mod tests {
         assert!(message.contains("HEDDLE_REMOTE_TLS"));
     }
 
+    #[cfg(feature = "local-repository")]
     fn write_discoverable_repo(root: &std::path::Path, remote_toml: &str) {
         fs::create_dir_all(root.join(".heddle")).expect("create .heddle");
         fs::write(root.join(".heddle/HEAD"), "ref: refs/heddle/heads/main\n").expect("write HEAD");
@@ -1205,6 +1219,7 @@ mod tests {
         .expect("write repo config");
     }
 
+    #[cfg(feature = "local-repository")]
     #[test]
     fn remote_tls_ca_honours_repo_config_when_user_config_is_unset() {
         let _env = RemoteEnvGuard::clean();
@@ -1227,6 +1242,7 @@ mod tests {
         fs::remove_dir_all(root).expect("remove temp dir");
     }
 
+    #[cfg(feature = "local-repository")]
     #[test]
     fn remote_tls_ca_user_config_overrides_repo_config() {
         let _env = RemoteEnvGuard::clean();
@@ -1258,6 +1274,7 @@ mod tests {
         fs::remove_dir_all(root).expect("remove temp dir");
     }
 
+    #[cfg(feature = "local-repository")]
     #[test]
     fn remote_tls_ca_selected_start_is_not_another_repo() {
         let _env = RemoteEnvGuard::clean();
@@ -1296,6 +1313,7 @@ mod tests {
         fs::remove_dir_all(parent).expect("remove temp dir");
     }
 
+    #[cfg(feature = "local-repository")]
     #[test]
     fn remote_tls_ca_unknown_repo_remote_key_fails_closed() {
         let _env = RemoteEnvGuard::clean();

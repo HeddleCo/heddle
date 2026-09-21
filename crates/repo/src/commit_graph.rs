@@ -723,6 +723,14 @@ mod tests {
         let mut graph = CommitGraphIndex::new(&repo);
         assert!(graph.is_ancestor(&base.id(), &next.id())?);
         assert!(!graph.is_ancestor(&next.id(), &base.id())?);
+        assert_eq!(
+            objects::transfer::is_ancestor_from_source(repo.store(), base.id(), next.id())?,
+            graph.is_ancestor(&base.id(), &next.id())?
+        );
+        assert_eq!(
+            objects::transfer::is_ancestor_from_source(repo.store(), next.id(), base.id())?,
+            graph.is_ancestor(&next.id(), &base.id())?
+        );
 
         Ok(())
     }

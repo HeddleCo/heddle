@@ -13,6 +13,21 @@ pub mod logging;
 pub mod output;
 pub mod tls_trust;
 
+pub fn heddle_home_override() -> Option<std::path::PathBuf> {
+    std::env::var_os("HEDDLE_HOME")
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+pub fn heddle_home_dir() -> std::path::PathBuf {
+    heddle_home_override().unwrap_or_else(|| {
+        std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".heddle")
+    })
+}
+
 pub use client_config::{
     ClientConfig, cleartext_connect_allowed, cleartext_refused_message, is_loopback_ip,
 };

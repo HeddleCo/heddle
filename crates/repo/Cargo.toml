@@ -23,7 +23,7 @@ ignore.workspace = true
 heddle-perf-contract.workspace = true
 libc.workspace = true
 objects.workspace = true
-crypto.workspace = true
+crypto = { workspace = true, features = ["owner-root"] }
 oplog.workspace = true
 prost.workspace = true
 wire.workspace = true

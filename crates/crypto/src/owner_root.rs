@@ -7,18 +7,53 @@
 //! pins as spool genesis. Claim advances authority with ClaimDeferredHuman
 //! and must not mint a replacement human sequence-0.
 
+use crate::{Signer, SignerError, verify_payload_signature};
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha2::{
     AuthorizationKeyAlgorithm, AuthorizationSignature, AuthorizationVerificationKey,
     OwnerKeyBinding, OwnerKeyBindingKind, OwnerKeyTransition, OwnerKeyTransitionKind, OwnerRoot,
     RecoveryPolicy, SignedOwnerKeyTransition, SignedOwnerRoot, SignedSpoolOwnerGenesis,
 };
-use crypto::{Signer, SignerError, verify_payload_signature};
 use heddleco_capability_verifier::{
     VerificationLimits, apply_transition, verify_owner_key_binding, verify_owner_root,
     verify_spool_owner_genesis,
 };
 use sha2::{Digest, Sha256};
+
+/// Protocol-2 self-signature for a newly minted spool owner.
+pub fn sign_spool_owner_genesis(
+    signer: &impl Signer,
+    spool_uuid: [u8; 16],
+) -> Result<SignedSpoolOwnerGenesis, SignerError> {
+    use api::heddle::api::v1alpha2::SpoolOwnerGenesis;
+    let owner_public_key = AuthorizationVerificationKey {
+        algorithm: AuthorizationKeyAlgorithm::Ed25519 as i32,
+        public_key: signer.public_key().to_vec(),
+    };
+    let mut key_id_body = Vec::with_capacity(4 + owner_public_key.public_key.len());
+    key_id_body.extend_from_slice(&owner_public_key.algorithm.to_be_bytes());
+    key_id_body.extend_from_slice(&owner_public_key.public_key);
+    let signer_key_id = Sha256::new()
+        .chain_update(OWNER_KEY_ID_DOMAIN)
+        .chain_update(key_id_body)
+        .finalize()
+        .to_vec();
+    let digest = Sha256::new()
+        .chain_update(&owner_public_key.public_key)
+        .chain_update(spool_uuid)
+        .finalize();
+    Ok(SignedSpoolOwnerGenesis {
+        delegated_creation: None,
+        genesis: Some(SpoolOwnerGenesis {
+            spool_uuid: spool_uuid.to_vec(),
+            owner_public_key: Some(owner_public_key),
+        }),
+        owner_signature: Some(AuthorizationSignature {
+            signer_key_id,
+            signature: signer.sign(&digest)?,
+        }),
+    })
+}
 
 const OWNER_KEY_ID_DOMAIN: &[u8] = b"heddle-key-v1";
 const OWNER_ROOT_DOMAIN: &[u8] = b"heddle-owner-root-v1";
@@ -727,10 +762,7 @@ pub fn sign_current_spool_owner_genesis(
             "spool creation needs the current owner authority signer; this device proof key is not that authority"
         );
     }
-    Ok(crate::sign_spool_owner_genesis(
-        signer,
-        *spool_uuid.as_bytes(),
-    )?)
+    Ok(sign_spool_owner_genesis(signer, *spool_uuid.as_bytes())?)
 }
 
 fn verify_observed_owner(
@@ -785,8 +817,7 @@ struct OwnerObservationCache {
 static OWNER_OBSERVATION_CACHE: std::sync::OnceLock<std::sync::Mutex<OwnerObservationCache>> =
     std::sync::OnceLock::new();
 
-#[cfg(test)]
-pub(crate) fn owner_observation_cache_entries() -> Result<usize> {
+pub fn owner_observation_cache_entries() -> Result<usize> {
     let Some(cache) = OWNER_OBSERVATION_CACHE.get() else {
         return Ok(0);
     };

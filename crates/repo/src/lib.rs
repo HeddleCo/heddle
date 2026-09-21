@@ -54,7 +54,6 @@ pub mod operation_dedup;
 mod owner_authorization;
 #[cfg(test)]
 mod owner_authorization_tests;
-mod owner_root;
 pub mod reference_projection;
 mod spool_creation;
 pub use spool_creation::{
@@ -64,8 +63,8 @@ pub use spool_creation::{
 #[cfg(test)]
 mod owner_root_tests;
 pub mod thread_replication;
-pub use owner_authorization::sign_spool_owner_genesis;
-pub use owner_root::{
+pub use crypto::owner_root::sign_spool_owner_genesis;
+pub use crypto::owner_root::{
     CLAIMABLE_DEFERRED_HUMAN_TTL_SECS, ClaimDeferredHuman, OWNER_TRANSITION_DOMAIN,
     authorization_key_id, claim_deferred_human_transition, ed25519_verification_key,
     genesis_owner_public_key, owner_key_transition_body, registration_binding_nonce,
@@ -82,7 +81,7 @@ mod repository_resolve_for_command;
 #[cfg(feature = "tree-sitter-symbols")]
 mod repository_semantic_index;
 #[cfg(feature = "tree-sitter-symbols")]
-pub use repository_semantic_index::{ParentIndex, SemanticIndexBuilder};
+pub use semantic::index_assembly::{ParentIndex, SemanticIndexBuilder};
 #[cfg(feature = "tree-sitter-symbols")]
 pub use semantic::parser::ParseBudget as SemanticParseBudget;
 /// Read-only, never-compute semantic-index query primitives. Always compiled,
@@ -263,6 +262,9 @@ pub use thread_stack::{
     plan_stack_rebase, stack_for,
 };
 pub use thread_storage::{SyncedThreadMetadata, Thread, ThreadManager};
+pub use thread_storage::{
+    synced_metadata_current_state_id, synced_metadata_from_record, synced_metadata_from_thread,
+};
 pub use thread_worktree_target::{
     ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError, validate_thread_worktree_target,
 };

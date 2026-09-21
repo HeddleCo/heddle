@@ -393,7 +393,9 @@ mod tests {
         for unsafe_id in ["bad;echo pwn", "my feature", "a$(x)"] {
             // Construct the id the way a persisted/historical record does —
             // straight through `new_unchecked`, skipping validation.
-            let historical = crate::ThreadId::new_unchecked(unsafe_id);
+            let historical =
+                serde_json::from_str::<crate::ThreadId>(&serde_json::to_string(unsafe_id).unwrap())
+                    .unwrap();
             let rendered = RecommendedAction::Sync
                 .command(historical.as_str())
                 .expect("sync breadcrumb");
@@ -429,7 +431,7 @@ mod tests {
     // binds the value); the positional form needs the `--` end-of-options marker.
     #[test]
     fn leading_dash_thread_ids_use_equals_and_separator_forms() {
-        let id = crate::ThreadId::new_unchecked("-foo");
+        let id = serde_json::from_str::<crate::ThreadId>("\"-foo\"").unwrap();
         assert_eq!(
             RecommendedAction::Sync.command(id.as_str()).as_deref(),
             Some("heddle sync --thread=-foo")

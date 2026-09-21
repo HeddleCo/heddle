@@ -11,7 +11,7 @@ use crate::{
         StateAttachmentBody, StateAttachmentId, StateAttachmentKind, StateId, TreeEntryTarget,
         decode_tree_delta_header, is_delta_tree,
     },
-    store::{ObjectStore, pack::ObjectType as PackObjectType},
+    store::{ObjectSource, ObjectStore, pack::ObjectType as PackObjectType},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1173,6 +1173,23 @@ pub fn is_ancestor(
     ancestor: StateId,
     descendant: StateId,
 ) -> Result<bool> {
+    walk_ancestor(ancestor, descendant, |id| ObjectStore::get_state(store, id))
+}
+
+/// Walk ancestry against a read-only object source, including hosted stores.
+pub fn is_ancestor_from_source(
+    source: &(impl ObjectSource + ?Sized),
+    ancestor: StateId,
+    descendant: StateId,
+) -> Result<bool> {
+    walk_ancestor(ancestor, descendant, |id| source.get_state(id))
+}
+
+fn walk_ancestor(
+    ancestor: StateId,
+    descendant: StateId,
+    mut get_state: impl FnMut(&StateId) -> Result<Option<State>>,
+) -> Result<bool> {
     if ancestor == descendant {
         return Ok(true);
     }
@@ -1185,7 +1202,7 @@ pub fn is_ancestor(
         if !seen.insert(id) {
             continue;
         }
-        let state = match store.get_state(&id)? {
+        let state = match get_state(&id)? {
             Some(s) => s,
             None => return Ok(false),
         };

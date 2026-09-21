@@ -31,6 +31,8 @@ lang-zig = ["dep:tree-sitter-zig"]
 anyhow.workspace = true
 merge.workspace = true
 objects.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tree-sitter.workspace = true
 tree-sitter-c = { workspace = true, optional = true }

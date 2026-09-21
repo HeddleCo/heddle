@@ -9,6 +9,7 @@ pub mod behavior;
 pub mod cache;
 pub mod cross_file_resolution;
 pub mod diff;
+pub mod index_assembly;
 pub mod merge_driver;
 pub mod parser;
 pub mod semantic_index;
