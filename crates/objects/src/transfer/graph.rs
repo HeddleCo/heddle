@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "async-source")]
 use crate::store::AsyncObjectSource;
+#[cfg(feature = "async-source")]
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+#[cfg(feature = "async-source")]
+use std::time::Instant;
 
 use crate::{
     error::{HeddleError, Result},
@@ -1188,25 +1195,62 @@ pub fn is_ancestor_from_source(
     walk_ancestor(ancestor, descendant, |id| source.get_state(id))
 }
 
-/// Walk ancestry against an async read-only source without repository storage.
+/// Caller-owned limits for an async ancestry traversal. The source controls
+/// its own I/O timeout; these checks run between completed reads.
 #[cfg(feature = "async-source")]
-pub async fn is_ancestor_async<S>(
+#[derive(Clone, Debug)]
+pub struct AncestryBudget {
+    pub max_states: usize,
+    pub cancelled: Arc<AtomicBool>,
+    pub deadline: Option<Instant>,
+}
+
+#[cfg(feature = "async-source")]
+#[derive(Debug, thiserror::Error)]
+pub enum AncestryError {
+    #[error("ancestry traversal cancelled")]
+    Cancelled,
+    #[error("ancestry traversal deadline exceeded")]
+    Deadline,
+    #[error("ancestry work limit exhausted")]
+    WorkLimit,
+    #[error(transparent)]
+    Source(#[from] HeddleError),
+}
+
+/// Walk ancestry with caller-supplied work and interruption bounds. Missing
+/// states (including parents) terminate only that branch; `Ok(false)` means
+/// all reachable branches completed under the supplied budget.
+#[cfg(feature = "async-source")]
+pub async fn is_ancestor_async_bounded<S>(
     source: &S,
     ancestor: &StateId,
     descendant: &StateId,
-) -> Result<bool>
+    budget: &AncestryBudget,
+) -> std::result::Result<bool, AncestryError>
 where
     S: AsyncObjectSource + ?Sized,
 {
     if ancestor == descendant {
         return Ok(true);
     }
-
     let mut seen = HashSet::new();
     let mut stack = vec![*descendant];
     while let Some(id) = stack.pop() {
+        if budget.cancelled.load(Ordering::Acquire) {
+            return Err(AncestryError::Cancelled);
+        }
+        if budget
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(AncestryError::Deadline);
+        }
         if !seen.insert(id) {
             continue;
+        }
+        if seen.len() > budget.max_states {
+            return Err(AncestryError::WorkLimit);
         }
         let Some(state) = source.get_state(&id).await? else {
             continue;
@@ -1218,6 +1262,30 @@ where
         stack.extend(state.parents);
     }
     Ok(false)
+}
+
+/// Unbounded compatibility entry point for local callers. Hosted callers
+/// should use [`is_ancestor_async_bounded`].
+#[cfg(feature = "async-source")]
+pub async fn is_ancestor_async<S>(
+    source: &S,
+    ancestor: &StateId,
+    descendant: &StateId,
+) -> Result<bool>
+where
+    S: AsyncObjectSource + ?Sized,
+{
+    let budget = AncestryBudget {
+        max_states: usize::MAX,
+        cancelled: Arc::new(AtomicBool::new(false)),
+        deadline: None,
+    };
+    is_ancestor_async_bounded(source, ancestor, descendant, &budget)
+        .await
+        .map_err(|error| match error {
+            AncestryError::Source(error) => error,
+            other => HeddleError::InvalidObject(other.to_string()),
+        })
 }
 
 fn walk_ancestor(
@@ -1250,4 +1318,196 @@ fn walk_ancestor(
     }
 
     Ok(false)
+}
+
+#[cfg(all(test, feature = "async-source"))]
+mod async_ancestry_tests {
+    use super::*;
+    use crate::object::{Attribution, Blob, Principal, Tree};
+    use std::{
+        collections::HashMap,
+        future::Future,
+        sync::atomic::AtomicUsize,
+        task::{Context, Poll, Waker},
+    };
+
+    struct Source {
+        states: HashMap<StateId, State>,
+        reads: AtomicUsize,
+        fail: Option<StateId>,
+        cancel: Option<Arc<AtomicBool>>,
+    }
+
+    impl AsyncObjectSource for Source {
+        async fn get_tree(&self, _: &ContentHash) -> Result<Option<Tree>> {
+            Ok(None)
+        }
+        async fn get_blob(&self, _: &ContentHash) -> Result<Option<Blob>> {
+            Ok(None)
+        }
+        async fn get_state(&self, id: &StateId) -> Result<Option<State>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            if self.fail == Some(*id) {
+                return Err(HeddleError::InvalidObject("source failed".into()));
+            }
+            if let Some(cancel) = &self.cancel {
+                cancel.store(true, Ordering::Release);
+            }
+            Ok(self.states.get(id).cloned())
+        }
+    }
+
+    fn run<T>(future: impl Future<Output = T>) -> T {
+        let mut future = Box::pin(future);
+        let mut context = Context::from_waker(Waker::noop());
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    fn state(name: &str, parents: Vec<StateId>) -> State {
+        State::new(
+            Tree::new().hash(),
+            parents,
+            Attribution::human(Principal::new(name, "test@example.com")),
+        )
+    }
+
+    fn budget(limit: usize) -> AncestryBudget {
+        AncestryBudget {
+            max_states: limit,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: None,
+        }
+    }
+
+    #[test]
+    fn bounded_walk_distinguishes_complete_missing_error_and_interruption() {
+        let root = state("root", vec![]);
+        let left = state("left", vec![root.id()]);
+        let right = state("right", vec![root.id()]);
+        let merge = state("merge", vec![left.id(), right.id()]);
+        let missing = state("missing", vec![]).id();
+        let states = [root.clone(), left.clone(), right.clone(), merge.clone()]
+            .into_iter()
+            .map(|state| (state.id(), state))
+            .collect();
+        let mut source = Source {
+            states,
+            reads: AtomicUsize::new(0),
+            fail: None,
+            cancel: None,
+        };
+        assert!(
+            run(is_ancestor_async_bounded(
+                &source,
+                &merge.id(),
+                &merge.id(),
+                &budget(0)
+            ))
+            .unwrap()
+        );
+        assert_eq!(source.reads.load(Ordering::Relaxed), 0);
+
+        assert!(
+            run(is_ancestor_async_bounded(
+                &source,
+                &root.id(),
+                &merge.id(),
+                &budget(4)
+            ))
+            .unwrap()
+        );
+        source.states.remove(&root.id());
+        assert!(
+            !run(is_ancestor_async_bounded(
+                &source,
+                &root.id(),
+                &merge.id(),
+                &budget(4)
+            ))
+            .unwrap()
+        );
+        source.states.insert(root.id(), root.clone());
+        assert!(
+            !run(is_ancestor_async_bounded(
+                &source,
+                &merge.id(),
+                &left.id(),
+                &budget(4)
+            ))
+            .unwrap()
+        );
+        assert!(
+            !run(is_ancestor_async_bounded(
+                &source,
+                &missing,
+                &merge.id(),
+                &budget(5)
+            ))
+            .unwrap()
+        );
+        assert!(matches!(
+            run(is_ancestor_async_bounded(
+                &source,
+                &root.id(),
+                &merge.id(),
+                &budget(1)
+            )),
+            Err(AncestryError::WorkLimit)
+        ));
+
+        source.fail = Some(merge.id());
+        assert!(matches!(
+            run(is_ancestor_async_bounded(
+                &source,
+                &root.id(),
+                &merge.id(),
+                &budget(4)
+            )),
+            Err(AncestryError::Source(_))
+        ));
+        source.fail = None;
+
+        let cancelled = budget(4);
+        cancelled.cancelled.store(true, Ordering::Release);
+        let before = source.reads.load(Ordering::Relaxed);
+        assert!(matches!(
+            run(is_ancestor_async_bounded(
+                &source,
+                &root.id(),
+                &merge.id(),
+                &cancelled
+            )),
+            Err(AncestryError::Cancelled)
+        ));
+        assert_eq!(source.reads.load(Ordering::Relaxed), before);
+
+        let mut expired = budget(4);
+        expired.deadline = Some(Instant::now());
+        assert!(matches!(
+            run(is_ancestor_async_bounded(
+                &source,
+                &root.id(),
+                &merge.id(),
+                &expired
+            )),
+            Err(AncestryError::Deadline)
+        ));
+
+        let mid_cancel = budget(4);
+        source.cancel = Some(mid_cancel.cancelled.clone());
+        assert!(matches!(
+            run(is_ancestor_async_bounded(
+                &source,
+                &root.id(),
+                &merge.id(),
+                &mid_cancel
+            )),
+            Err(AncestryError::Cancelled)
+        ));
+    }
 }

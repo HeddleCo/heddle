@@ -68,15 +68,15 @@ fs2 = "0.4.3"
 fastembed = { version = "=5.17.4", default-features = false, features = ["ort-download-binaries-rustls-tls"] }
 futures = "0.3"
 getrandom = { version = "0.4", features = ["sys_rng"] }
-sley = { version = "0.10.0", default-features = false, features = ["mmap", "fast-sha1"] }
-sley-config = "0.10.0"
-sley-core = "0.10.0"
-sley-object = "0.10.0"
-sley-odb = "0.10.0"
-sley-pack = "0.10.0"
-sley-refs = "0.10.0"
-sley-transport = "0.10.0"
-sley-worktree = "0.10.0"
+sley = { version = "0.11.0", default-features = false, features = ["mmap", "fast-sha1"] }
+sley-config = "0.11.0"
+sley-core = "0.11.0"
+sley-object = "0.11.0"
+sley-odb = "0.11.0"
+sley-pack = "0.11.0"
+sley-refs = "0.11.0"
+sley-transport = "0.11.0"
+sley-worktree = "0.11.0"
 hex = "0.4"
 hkdf = "0.13"
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }

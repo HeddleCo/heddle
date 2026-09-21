@@ -40,13 +40,13 @@ pub use objects::operation_dedup::{
     DEFAULT_RETENTION_SECS, DedupOutcome, hash_request_body,
 };
 pub use objects::thread_record::ThreadRecord;
-pub use objects::transfer::is_ancestor_async;
-pub use semantic::index_assembly::SemanticIndexBuilder;
+pub use objects::transfer::{AncestryBudget, AncestryError, is_ancestor_async_bounded};
+pub use semantic::index_assembly::{SemanticAssemblyError, SemanticIndexBuilder};
 EOF
 
 cargo tree --manifest-path "$consumer_dir/Cargo.toml" --edges normal,build --prefix none \
     > "$consumer_dir/tree.txt"
-if rg '^(heddle-repo|rusqlite|libsqlite3-sys|ureq|sley-worktree|sley-hooks|sley-sequencer) v' \
+if rg '^(heddle-repo|rusqlite|libsqlite3-sys|ureq|sley-remote|sley-worktree|sley-hooks|sley-sequencer) v' \
     "$consumer_dir/tree.txt"; then
     echo "Hosted leaf consumer includes a local repository, SQLite, HTTP client, or local Sley engine" >&2
     exit 1

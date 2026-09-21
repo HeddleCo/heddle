@@ -12,6 +12,8 @@ pub mod plan;
 pub use availability::{ObjectAvailabilityPlan, has_object, plan_object_availability};
 #[cfg(feature = "async-source")]
 pub use graph::is_ancestor_async;
+#[cfg(feature = "async-source")]
+pub use graph::{AncestryBudget, AncestryError, is_ancestor_async_bounded};
 pub use graph::{
     ObjectId, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, StateClosureOptions,
     StateClosureTransferObjects, enumerate_state_closure, enumerate_state_closure_plan,

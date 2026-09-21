@@ -8,12 +8,12 @@ use crate::{
     },
 };
 use objects::{
-    error::{HeddleError, Result},
+    error::HeddleError,
     object::{
         ContentHash, SemanticEntryKind, SemanticFileFacts, SemanticFileNode, SemanticIndexRoot,
         SemanticTreeEntry, SemanticTreeNode, Tree, TreeEntryTarget,
     },
-    store::ObjectStore,
+    store::{ObjectSource, ObjectStore},
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -26,6 +26,35 @@ const SEMANTIC_FILE_BUDGET_BYTES: usize = 1 << 20;
 
 type PendingSemanticBlobs = Vec<(ContentHash, Vec<u8>)>;
 pub type DeferredSemanticRoot = (SemanticIndexRoot, ContentHash, PendingSemanticBlobs);
+
+/// Failures while assembling semantic nodes. Callers can map these to their
+/// own transport status without inspecting error text.
+#[derive(Debug, thiserror::Error)]
+pub enum SemanticAssemblyError {
+    #[error("semantic analysis cancelled")]
+    Cancelled,
+    #[error("semantic analysis deadline exceeded")]
+    Deadline,
+    #[error("semantic analysis source work budget exceeded")]
+    SourceLimit,
+    #[error("semantic analysis output budget exceeded")]
+    OutputLimit,
+    #[error("malformed semantic object: {0}")]
+    Malformed(String),
+    #[error(transparent)]
+    Storage(#[from] HeddleError),
+}
+
+pub type SemanticAssemblyResult<T> = std::result::Result<T, SemanticAssemblyError>;
+
+impl From<SemanticAssemblyError> for HeddleError {
+    fn from(error: SemanticAssemblyError) -> Self {
+        match error {
+            SemanticAssemblyError::Storage(error) => error,
+            other => HeddleError::InvalidObject(other.to_string()),
+        }
+    }
+}
 
 /// What a built subtree resolved to: the storage hash of the node blob (or the
 /// raw source blob, for opaque entries) plus its reformat-stable digest.
@@ -44,7 +73,7 @@ struct BuiltEntry {
 /// Work and output allowances apply to the lifetime of this builder, including
 /// repeated root builds. Flushing pending bytes does not reset accounting or
 /// memoized allocations; create a fresh builder for an independent analysis.
-pub struct SemanticIndexBuilder<'store, S: ObjectStore> {
+pub struct SemanticIndexBuilder<'store, S: ObjectSource> {
     store: &'store S,
     budget: Option<crate::parser::ParseBudget>,
     work_entries: usize,
@@ -69,7 +98,7 @@ pub struct SemanticIndexBuilder<'store, S: ObjectStore> {
     pub parse_count: usize,
 }
 
-impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
+impl<'store, S: ObjectSource> SemanticIndexBuilder<'store, S> {
     pub fn new(store: &'store S, extractor_version: u32) -> Self {
         Self {
             store,
@@ -102,23 +131,32 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         self
     }
 
-    fn check_work(&self) -> Result<()> {
-        if self
-            .budget
-            .as_ref()
-            .is_some_and(|budget| budget.interrupted())
-        {
-            return Err(HeddleError::InvalidObject(
-                "semantic analysis interrupted".into(),
-            ));
+    fn check_work(&self) -> SemanticAssemblyResult<()> {
+        if let Some(budget) = &self.budget {
+            if budget.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(SemanticAssemblyError::Cancelled);
+            }
+            if std::time::Instant::now() >= budget.deadline {
+                return Err(SemanticAssemblyError::Deadline);
+            }
         }
         if self.budget.is_some() && (self.work_entries > 4096 || self.work_bytes > 32 * 1024 * 1024)
         {
-            return Err(HeddleError::InvalidObject(
-                "semantic analysis source work budget exceeded".into(),
-            ));
+            return Err(SemanticAssemblyError::SourceLimit);
         }
         Ok(())
+    }
+
+    fn interruption_error(&self) -> SemanticAssemblyError {
+        if self
+            .budget
+            .as_ref()
+            .is_some_and(|budget| budget.cancelled.load(std::sync::atomic::Ordering::Acquire))
+        {
+            SemanticAssemblyError::Cancelled
+        } else {
+            SemanticAssemblyError::Deadline
+        }
     }
 
     pub fn with_source_objects(
@@ -134,20 +172,6 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         }
     }
 
-    /// Build the index for `tree`, optionally reusing `parent` (its source tree
-    /// plus semantic index root) for unchanged-subtree pruning. Returns the
-    /// persisted [`SemanticIndexRoot`] and its storage hash.
-    pub fn build_root(
-        &mut self,
-        tree: &Tree,
-        parent: Option<&ParentIndex>,
-    ) -> Result<(SemanticIndexRoot, ContentHash)> {
-        let (root, root_hash, pending) = self.build_root_deferred(tree, parent)?;
-        self.check_work()?;
-        self.store.put_blobs_packed(pending)?;
-        Ok((root, root_hash))
-    }
-
     /// Build the semantic closure without crossing a durability barrier.
     /// Worktree snapshots fold these blobs into their authoritative commit
     /// pack; other callers use [`Self::build_root`] for immediate persistence.
@@ -155,7 +179,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         &mut self,
         tree: &Tree,
         parent: Option<&ParentIndex>,
-    ) -> Result<DeferredSemanticRoot> {
+    ) -> SemanticAssemblyResult<DeferredSemanticRoot> {
         // Refuse node reuse across an extractor or grammar bump: reusing stale
         // nodes would mix v1+v2 fingerprints in one index. A non-current parent
         // is dropped entirely, forcing a clean full rebuild.
@@ -191,9 +215,9 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         tree: &Tree,
         parent: Option<(&Tree, &SemanticTreeNode)>,
         depth: usize,
-    ) -> Result<(ContentHash, ContentHash)> {
+    ) -> SemanticAssemblyResult<(ContentHash, ContentHash)> {
         if depth > MAX_SEMANTIC_TREE_DEPTH {
-            return Err(HeddleError::InvalidObject(format!(
+            return Err(SemanticAssemblyError::Malformed(format!(
                 "semantic index tree exceeds max depth {MAX_SEMANTIC_TREE_DEPTH}"
             )));
         }
@@ -240,7 +264,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         source_hash: ContentHash,
         parent: Option<(&Tree, &SemanticTreeNode)>,
         depth: usize,
-    ) -> Result<BuiltEntry> {
+    ) -> SemanticAssemblyResult<BuiltEntry> {
         // Unchanged-subtree prune: same-named source dir with the same hash and
         // a matching parent semantic entry ⇒ reuse wholesale, no recurse, no
         // parse.
@@ -285,7 +309,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         &self,
         name: &str,
         parent: Option<(&Tree, &SemanticTreeNode)>,
-    ) -> Result<Option<(Tree, SemanticTreeNode)>> {
+    ) -> SemanticAssemblyResult<Option<(Tree, SemanticTreeNode)>> {
         let Some((parent_source, parent_sem)) = parent else {
             return Ok(None);
         };
@@ -318,7 +342,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         name: &str,
         source_hash: ContentHash,
         parent: Option<(&Tree, &SemanticTreeNode)>,
-    ) -> Result<BuiltEntry> {
+    ) -> SemanticAssemblyResult<BuiltEntry> {
         // A file node is a pure function of (bytes, ext/language, grammar,
         // extractor), so memoize per `(source_hash, language)` — NOT bytes
         // alone (byte-identical `a.js`/`b.py` must not share a node).
@@ -349,7 +373,11 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         Ok(built)
     }
 
-    fn parse_file(&mut self, language: Language, source_hash: ContentHash) -> Result<BuiltEntry> {
+    fn parse_file(
+        &mut self,
+        language: Language,
+        source_hash: ContentHash,
+    ) -> SemanticAssemblyResult<BuiltEntry> {
         let opaque = BuiltEntry {
             kind: SemanticEntryKind::Opaque,
             node: source_hash,
@@ -380,7 +408,14 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
                 language,
                 budget,
             )
-            .map_err(|error| HeddleError::InvalidObject(error.to_string()))?,
+            .map_err(|error| match error {
+                crate::semantic_index::ExtractionBudgetError::Interrupted => {
+                    self.interruption_error()
+                }
+                crate::semantic_index::ExtractionBudgetError::Exceeded(_) => {
+                    SemanticAssemblyError::SourceLimit
+                }
+            })?,
             None => extract_semantic_file(blob.content(), language),
         };
         self.check_work()?;
@@ -420,7 +455,7 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
 
     /// Queue an encoded node blob for the end-of-build pack flush, returning its
     /// content hash (identical to what `put_blob` would assign).
-    fn put_node(&mut self, node: &impl serde::Serialize) -> Result<ContentHash> {
+    fn put_node(&mut self, node: &impl serde::Serialize) -> SemanticAssemblyResult<ContentHash> {
         self.check_work()?;
         let remaining = self
             .output_limit
@@ -434,16 +469,28 @@ impl<'store, S: ObjectStore> SemanticIndexBuilder<'store, S> {
         let encoded =
             node.serialize(&mut rmp_serde::Serializer::new(&mut writer).with_struct_map());
         if writer.exceeded {
-            return Err(HeddleError::InvalidObject(
-                "semantic analysis output budget exceeded".into(),
-            ));
+            return Err(SemanticAssemblyError::OutputLimit);
         }
-        encoded.map_err(|error| HeddleError::InvalidObject(error.to_string()))?;
+        encoded.map_err(|error| SemanticAssemblyError::Malformed(error.to_string()))?;
         let bytes = writer.bytes;
         let hash = ContentHash::compute_typed("blob", &bytes);
         self.pending_bytes = self.pending_bytes.saturating_add(bytes.len());
         self.pending.push((hash, bytes));
         Ok(hash)
+    }
+}
+
+impl<S: ObjectStore + ObjectSource> SemanticIndexBuilder<'_, S> {
+    /// Persist an assembled root and its generated node blobs.
+    pub fn build_root(
+        &mut self,
+        tree: &Tree,
+        parent: Option<&ParentIndex>,
+    ) -> SemanticAssemblyResult<(SemanticIndexRoot, ContentHash)> {
+        let (root, root_hash, pending) = self.build_root_deferred(tree, parent)?;
+        self.check_work()?;
+        self.store.put_blobs_packed(pending)?;
+        Ok((root, root_hash))
     }
 }
 
@@ -500,8 +547,147 @@ pub struct ParentIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parser::ParseBudget;
     use crate::semantic_index::EXTRACTOR_VERSION;
-    use objects::object::{SemanticEntryKind, SemanticTreeEntry};
+    use objects::object::{Blob, SemanticEntryKind, SemanticTreeEntry, State, StateId, TreeEntry};
+
+    struct ReadOnly<'a>(&'a objects::store::InMemoryStore);
+    impl ObjectSource for ReadOnly<'_> {
+        fn get_tree(&self, hash: &ContentHash) -> objects::store::Result<Option<Tree>> {
+            ObjectSource::get_tree(self.0, hash)
+        }
+        fn get_state(&self, id: &StateId) -> objects::store::Result<Option<State>> {
+            ObjectSource::get_state(self.0, id)
+        }
+        fn get_blob(&self, hash: &ContentHash) -> objects::store::Result<Option<Blob>> {
+            ObjectSource::get_blob(self.0, hash)
+        }
+    }
+
+    struct FailingSource;
+    impl ObjectSource for FailingSource {
+        fn get_tree(&self, _: &ContentHash) -> objects::store::Result<Option<Tree>> {
+            Ok(None)
+        }
+        fn get_state(&self, _: &StateId) -> objects::store::Result<Option<State>> {
+            Ok(None)
+        }
+        fn get_blob(&self, _: &ContentHash) -> objects::store::Result<Option<Blob>> {
+            Err(HeddleError::InvalidObject("source read failed".into()))
+        }
+    }
+
+    #[test]
+    fn read_only_deferred_assembly_matches_persisted_output() {
+        let store = objects::store::InMemoryStore::new();
+        let source_hash = ObjectStore::put_blob(&store, &Blob::from_slice(b"fn main() {}\n"))
+            .expect("source blob");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("main.rs", source_hash, false).expect("entry"),
+        ]);
+        let read_only = ReadOnly(&store);
+        let (deferred_root, deferred_hash, blobs) =
+            SemanticIndexBuilder::new(&read_only, EXTRACTOR_VERSION)
+                .build_root_deferred(&tree, None)
+                .expect("read-only assembly");
+        assert!(
+            ObjectStore::get_blob(&store, &deferred_hash)
+                .expect("lookup")
+                .is_none()
+        );
+        let (persisted_root, persisted_hash) = SemanticIndexBuilder::new(&store, EXTRACTOR_VERSION)
+            .build_root(&tree, None)
+            .expect("persisted assembly");
+        assert_eq!(deferred_root, persisted_root);
+        assert_eq!(deferred_hash, persisted_hash);
+        for (hash, bytes) in blobs {
+            assert_eq!(
+                ObjectStore::get_blob(&store, &hash)
+                    .expect("lookup")
+                    .expect("persisted blob")
+                    .content(),
+                bytes
+            );
+        }
+        let semantic_tree = SemanticTreeNode::decode(
+            ObjectStore::get_blob(&store, &persisted_root.tree)
+                .expect("lookup")
+                .expect("semantic tree")
+                .content(),
+        )
+        .expect("decode semantic tree");
+        let parent = ParentIndex {
+            source_tree: tree.clone(),
+            semantic_tree,
+            root: persisted_root,
+        };
+        let mut reused = SemanticIndexBuilder::new(&read_only, EXTRACTOR_VERSION);
+        let (reused_root, reused_hash, _) = reused
+            .build_root_deferred(&tree, Some(&parent))
+            .expect("reuse parent");
+        assert_eq!(reused_hash, persisted_hash);
+        assert_eq!(reused_root, parent.root);
+        assert_eq!(reused.parse_count, 0);
+    }
+
+    #[test]
+    fn semantic_failures_keep_cancellation_deadline_and_limits_distinct() {
+        use std::sync::{Arc, atomic::AtomicBool};
+        let store = objects::store::InMemoryStore::new();
+        let cancelled = ParseBudget {
+            cancelled: Arc::new(AtomicBool::new(true)),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+        };
+        let mut builder =
+            SemanticIndexBuilder::new(&store, EXTRACTOR_VERSION).with_budget(cancelled);
+        assert!(matches!(
+            builder.build_root_deferred(&Tree::new(), None),
+            Err(SemanticAssemblyError::Cancelled)
+        ));
+
+        let deadline = ParseBudget {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: std::time::Instant::now(),
+        };
+        let mut builder =
+            SemanticIndexBuilder::new(&store, EXTRACTOR_VERSION).with_budget(deadline);
+        assert!(matches!(
+            builder.build_root_deferred(&Tree::new(), None),
+            Err(SemanticAssemblyError::Deadline)
+        ));
+
+        let budget = ParseBudget {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(30),
+        };
+        let mut builder = SemanticIndexBuilder::new(&store, EXTRACTOR_VERSION).with_budget(budget);
+        builder.work_entries = 4097;
+        assert!(matches!(
+            builder.build_root_deferred(&Tree::new(), None),
+            Err(SemanticAssemblyError::SourceLimit)
+        ));
+
+        let mut builder = SemanticIndexBuilder::new(&store, EXTRACTOR_VERSION).with_output_limit(0);
+        assert!(matches!(
+            builder.build_root_deferred(&Tree::new(), None),
+            Err(SemanticAssemblyError::OutputLimit)
+        ));
+
+        let mut builder = SemanticIndexBuilder::new(&store, EXTRACTOR_VERSION);
+        assert!(matches!(
+            builder.build_tree(&Tree::new(), None, MAX_SEMANTIC_TREE_DEPTH + 1),
+            Err(SemanticAssemblyError::Malformed(_))
+        ));
+
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("main.rs", ContentHash::from_bytes([7; 32]), false).expect("entry"),
+        ]);
+        let mut builder = SemanticIndexBuilder::new(&FailingSource, EXTRACTOR_VERSION);
+        assert!(matches!(
+            builder.build_root_deferred(&tree, None),
+            Err(SemanticAssemblyError::Storage(_))
+        ));
+    }
     #[test]
     fn bounded_analysis_encodes_canonical_nodes_with_cumulative_output_limit() {
         let store = objects::store::InMemoryStore::new();
@@ -530,7 +716,9 @@ mod tests {
         assert_eq!(builder.pending.len(), 1, "failed node is never queued");
         assert_eq!(builder.pending_bytes, canonical.len());
         assert!(
-            store.get_blob(&hash).expect("lookup").is_none(),
+            ObjectStore::get_blob(&store, &hash)
+                .expect("lookup")
+                .is_none(),
             "no node is published during bounded assembly"
         );
     }

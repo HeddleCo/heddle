@@ -39,7 +39,7 @@ semantic-recovery = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sley = { workspace = true, features = ["remote", "history-editing", "tls-rustls"] }
+sley = { workspace = true, features = ["remote", "worktree", "hooks", "history-editing", "tls-rustls"] }
 tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true
