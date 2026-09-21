@@ -24,7 +24,13 @@ native = [
     "dep:tempfile",
 ]
 # Exact bounded source packs and download validation without a local repo or identity manager.
-source-transfer = ["replication", "dep:heddle-pack", "dep:tempfile", "dep:wire"]
+source-transfer = [
+    "replication",
+    "dep:heddle-pack",
+    "dep:tempfile",
+    "dep:wire",
+    "heddle-pack/fs",
+]
 # An Iroh adapter for the transport-neutral client and replication driver.
 iroh = ["dep:iroh", "dep:tokio", "dep:heddle-perf-contract"]
 # Causal protocol and async stream driver, without a local repository or Iroh.

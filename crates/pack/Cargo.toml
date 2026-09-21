@@ -13,7 +13,7 @@ categories.workspace = true
 blake3.workspace = true
 bytes.workspace = true
 heddle-format.workspace = true
-heddle-fs-prims.workspace = true
+heddle-fs-prims = { workspace = true, optional = true }
 heddle-object-model.workspace = true
 memmap2.workspace = true
 rmp-serde.workspace = true
@@ -21,6 +21,8 @@ tracing.workspace = true
 zstd = { workspace = true, optional = true }
 
 [features]
+default = ["fs"]
+fs = ["dep:heddle-fs-prims"]
 zstd = ["dep:zstd", "heddle-format/zstd"]
 
 [dev-dependencies]

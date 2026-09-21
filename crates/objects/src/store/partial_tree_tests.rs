@@ -8,9 +8,11 @@
 //! full tree and a partial obey the monotone discipline (full supersedes
 //! partial; a partial never overwrites a full).
 
+#[cfg(feature = "fs")]
+use crate::store::FsStore;
 use crate::{
     object::{ContentHash, PartialTree, Tree, TreeEntry, encode_redacted_projection},
-    store::{FsStore, InMemoryStore, ObjectStore, PartialTreeWrite, TreeRead, codec},
+    store::{InMemoryStore, ObjectStore, PartialTreeWrite, TreeRead, codec},
 };
 
 fn ch(bytes: &[u8]) -> ContentHash {
@@ -209,6 +211,7 @@ fn memory_put_tree_serialized_routes_hrt1() {
     assert_put_tree_serialized_routes_hrt1(&InMemoryStore::new());
 }
 
+#[cfg(feature = "fs")]
 fn fs_store() -> (tempfile::TempDir, FsStore) {
     let temp = tempfile::TempDir::new().unwrap();
     let store = FsStore::new(temp.path());
@@ -216,30 +219,35 @@ fn fs_store() -> (tempfile::TempDir, FsStore) {
 }
 
 #[test]
+#[cfg(feature = "fs")]
 fn fs_partial_distinct_from_full() {
     let (_t, store) = fs_store();
     assert_partial_distinct_from_full(&store);
 }
 
 #[test]
+#[cfg(feature = "fs")]
 fn fs_monotone() {
     let (_t, store) = fs_store();
     assert_monotone(&store);
 }
 
 #[test]
+#[cfg(feature = "fs")]
 fn fs_full_supersedes_stale_partial() {
     let (_t, store) = fs_store();
     assert_full_supersedes_stale_partial(&store);
 }
 
 #[test]
+#[cfg(feature = "fs")]
 fn fs_full_tree_regression() {
     let (_t, store) = fs_store();
     assert_full_tree_regression(&store);
 }
 
 #[test]
+#[cfg(feature = "fs")]
 fn fs_put_tree_serialized_routes_hrt1() {
     let (_t, store) = fs_store();
     assert_put_tree_serialized_routes_hrt1(&store);

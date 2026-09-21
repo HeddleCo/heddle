@@ -184,7 +184,7 @@ heddle-format = { path = "crates/format", version = "0.24.1" }
 heddle-fs-prims = { path = "crates/fs-prims", version = "0.24.1" }
 heddle-git-projection = { path = "crates/git-projection", version = "0.24.1", default-features = false }
 heddle-object-model = { path = "crates/object-model", version = "0.24.1" }
-heddle-pack = { path = "crates/pack", version = "0.24.1" }
+heddle-pack = { path = "crates/pack", version = "0.24.1", default-features = false }
 heddle-perf-contract = { path = "crates/perf-contract", version = "0.24.1" }
 agent-relay = { path = "crates/agent-relay", package = "heddle-agent-relay", version = "0.24.1", default-features = false }
 ci-config = { path = "crates/ci-config", package = "heddle-ci-config", version = "0.24.1" }

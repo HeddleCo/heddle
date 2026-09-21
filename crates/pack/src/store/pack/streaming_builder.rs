@@ -216,6 +216,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
     /// The `pack_writer` must support `Read` because finalize re-streams
     /// the body to compute the trailer checksum — see the module-level
     /// note on the format.
+    #[cfg(feature = "fs")]
     pub fn new(
         pack_writer: W,
         index_path: PathBuf,
@@ -231,6 +232,7 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
     /// may safely stream already-flushed pack bytes before `finalize()` appends
     /// the trailer checksum. `finalize()` still verifies that exactly this many
     /// objects were added before producing the index.
+    #[cfg(feature = "fs")]
     pub fn new_with_object_count(
         pack_writer: W,
         index_path: PathBuf,
@@ -279,10 +281,16 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         declared_object_count: Option<u64>,
         durable: bool,
     ) -> Result<Self> {
+        #[cfg(feature = "fs")]
         if durable {
             heddle_fs_prims::fs_atomic::create_dir_all_durable(&bucket_dir)
                 .map_err(StoreError::from)?;
         } else {
+            std::fs::create_dir_all(&bucket_dir).map_err(StoreError::from)?;
+        }
+        #[cfg(not(feature = "fs"))]
+        {
+            debug_assert!(!durable);
             std::fs::create_dir_all(&bucket_dir).map_err(StoreError::from)?;
         }
         let header_offset = pack_writer.stream_position().map_err(StoreError::from)?;
@@ -800,11 +808,12 @@ impl<W: Write + Read + Seek + SyncData> StreamingPackBuilder<W> {
         }
         idx_writer.flush().map_err(StoreError::from)?;
         // L7: durable staged index file + parent dirent for rename/read.
-        let idx_file = idx_writer
+        let _idx_file = idx_writer
             .into_inner()
             .map_err(|e| StoreError::from(std::io::Error::other(e.to_string())))?;
+        #[cfg(feature = "fs")]
         if self.durable {
-            idx_file.sync_all().map_err(StoreError::from)?;
+            _idx_file.sync_all().map_err(StoreError::from)?;
             if let Some(parent) = self.index_path.parent() {
                 heddle_fs_prims::fs_atomic::sync_directory(parent).map_err(StoreError::from)?;
             }
