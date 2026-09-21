@@ -75,7 +75,7 @@ serde.workspace = true
 serde_json.workspace = true
 heddle-perf-contract.workspace = true
 sha2.workspace = true
-sley.workspace = true
+sley = { workspace = true, features = ["remote", "worktree", "hooks", "history-editing", "tls-rustls"] }
 sley-core.workspace = true
 sley-refs.workspace = true
 sley-worktree.workspace = true

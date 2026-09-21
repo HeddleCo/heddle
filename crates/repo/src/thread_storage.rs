@@ -170,54 +170,55 @@ impl ThreadWorkspaceState {
 
 pub type SyncedThreadMetadata = ThreadRecord;
 
-impl SyncedThreadMetadata {
-    pub fn from_record(
-        repo: &crate::Repository,
-        record: &ThreadRecord,
-        current_state_override: Option<StateId>,
-    ) -> Result<Self> {
-        let mut record = record.clone();
-        let resolve_full = |spec: &str| -> Result<String> {
-            Ok(repo
-                .resolve_state(spec)?
-                .map(|id| id.to_string_full())
-                .unwrap_or_else(|| spec.to_string()))
-        };
-        record.base_state = resolve_full(&record.base_state)?;
-        record.current_state = match current_state_override {
-            Some(id) => Some(id.to_string_full()),
-            None => record
-                .current_state
-                .as_deref()
-                .map(resolve_full)
-                .transpose()?,
-        };
-        record.merged_state = record
-            .merged_state
+pub fn synced_metadata_from_record(
+    repo: &crate::Repository,
+    record: &ThreadRecord,
+    current_state_override: Option<StateId>,
+) -> Result<SyncedThreadMetadata> {
+    let mut record = record.clone();
+    let resolve_full = |spec: &str| -> Result<String> {
+        Ok(repo
+            .resolve_state(spec)?
+            .map(|id| id.to_string_full())
+            .unwrap_or_else(|| spec.to_string()))
+    };
+    record.base_state = resolve_full(&record.base_state)?;
+    record.current_state = match current_state_override {
+        Some(id) => Some(id.to_string_full()),
+        None => record
+            .current_state
             .as_deref()
             .map(resolve_full)
-            .transpose()?;
-        record.base_root = repo
-            .resolve_state(&record.base_state)?
-            .and_then(|id| repo.store().get_state(&id).ok().flatten())
-            .map(|state| state.tree.to_hex())
-            .unwrap_or_else(|| record.base_root.clone());
-        Ok(record)
-    }
+            .transpose()?,
+    };
+    record.merged_state = record
+        .merged_state
+        .as_deref()
+        .map(resolve_full)
+        .transpose()?;
+    record.base_root = repo
+        .resolve_state(&record.base_state)?
+        .and_then(|id| repo.store().get_state(&id).ok().flatten())
+        .map(|state| state.tree.to_hex())
+        .unwrap_or_else(|| record.base_root.clone());
+    Ok(record)
+}
 
-    pub fn from_thread(
-        repo: &crate::Repository,
-        thread: &Thread,
-        current_state_override: Option<StateId>,
-    ) -> Result<Self> {
-        Self::from_record(repo, &thread.to_record(), current_state_override)
-    }
+pub fn synced_metadata_from_thread(
+    repo: &crate::Repository,
+    thread: &Thread,
+    current_state_override: Option<StateId>,
+) -> Result<SyncedThreadMetadata> {
+    synced_metadata_from_record(repo, &thread.to_record(), current_state_override)
+}
 
-    pub fn current_state_id(&self, repo: &crate::Repository) -> Result<Option<StateId>> {
-        match self.current_state.as_deref() {
-            Some(state) => Ok(repo.resolve_state(state)?),
-            None => Ok(None),
-        }
+pub fn synced_metadata_current_state_id(
+    metadata: &SyncedThreadMetadata,
+    repo: &crate::Repository,
+) -> Result<Option<StateId>> {
+    match metadata.current_state.as_deref() {
+        Some(state) => Ok(repo.resolve_state(state)?),
+        None => Ok(None),
     }
 }
 
@@ -481,7 +482,7 @@ impl ThreadManager {
         current_state_override: Option<StateId>,
     ) -> Result<Option<SyncedThreadMetadata>> {
         self.find_record_by_thread(thread)?
-            .map(|record| SyncedThreadMetadata::from_record(repo, &record, current_state_override))
+            .map(|record| synced_metadata_from_record(repo, &record, current_state_override))
             .transpose()
     }
 
@@ -498,14 +499,12 @@ impl ThreadManager {
         current_state_override: Option<StateId>,
     ) -> Result<Option<SyncedThreadMetadata>> {
         if let Some(record) = self.find_record_by_thread(thread)? {
-            return SyncedThreadMetadata::from_record(repo, &record, current_state_override)
-                .map(Some);
+            return synced_metadata_from_record(repo, &record, current_state_override).map(Some);
         }
 
         let _lock = self.write_lock()?;
         if let Some(record) = self.find_record_by_thread(thread)? {
-            return SyncedThreadMetadata::from_record(repo, &record, current_state_override)
-                .map(Some);
+            return synced_metadata_from_record(repo, &record, current_state_override).map(Some);
         }
 
         let Some(ref_state) = repo.refs().get_thread(&ThreadName::from(thread))? else {
@@ -525,7 +524,7 @@ impl ThreadManager {
         objects::fault_inject::maybe_fail_at("thread_manager_save_before_workspace")?;
         self.save_workspace_file(&materialized.id, &materialized.workspace_state())?;
 
-        SyncedThreadMetadata::from_record(repo, &record, current_state_override).map(Some)
+        synced_metadata_from_record(repo, &record, current_state_override).map(Some)
     }
 
     /// Persist `stable_id` as the sole local identity for `thread`.
@@ -551,7 +550,7 @@ impl ThreadManager {
                 record.current_state = Some(current_state.to_string_full());
                 record.updated_at = Utc::now();
                 self.save_record(&record)?;
-                return SyncedThreadMetadata::from_record(repo, &record, Some(current_state));
+                return synced_metadata_from_record(repo, &record, Some(current_state));
             }
             _ => {}
         }
@@ -559,7 +558,7 @@ impl ThreadManager {
         let adopted =
             materialized_thread_for_state(repo, thread, stable_id.to_string(), current_state)?;
         self.converge_records(thread, std::slice::from_ref(&adopted))?;
-        SyncedThreadMetadata::from_record(repo, &adopted.to_record(), Some(current_state))
+        synced_metadata_from_record(repo, &adopted.to_record(), Some(current_state))
     }
 
     /// Write pulled/cloned metadata as the sole record for `local_thread`.

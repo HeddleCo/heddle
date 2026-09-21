@@ -213,12 +213,11 @@ def latest_stable(crate: str, records: list[dict]) -> LatestCrate:
     return LatestCrate(crate, version, record)
 
 
-def parse_partial(value: str, requirement: str) -> tuple[list[int], bool]:
-    if "-" in value or "+" in value:
-        raise CheckError(
-            f"pre-release/build metadata is unsupported in heddle-api requirement {requirement!r}"
-        )
-    parts = value.split(".")
+def parse_partial(value: str, requirement: str) -> tuple[list[int], bool, tuple[str, ...]]:
+    if "+" in value:
+        raise CheckError(f"build metadata is unsupported in heddle-api requirement {requirement!r}")
+    core, separator, suffix = value.partition("-")
+    parts = core.split(".")
     if len(parts) > 3:
         raise CheckError(f"invalid heddle-api requirement {requirement!r}")
     numbers: list[int] = []
@@ -234,12 +233,17 @@ def parse_partial(value: str, requirement: str) -> tuple[list[int], bool]:
         if not part.isdigit() or (len(part) > 1 and part.startswith("0")):
             raise CheckError(f"invalid heddle-api requirement {requirement!r}")
         numbers.append(int(part))
-    return numbers, wildcard
+    prerelease: tuple[str, ...] = ()
+    if separator:
+        if wildcard or len(numbers) != 3:
+            raise CheckError(f"invalid heddle-api requirement {requirement!r}")
+        prerelease = Version.parse(value, f"heddle-api requirement {requirement!r}").prerelease
+    return numbers, wildcard, prerelease
 
 
-def padded(numbers: list[int]) -> Version:
+def padded(numbers: list[int], prerelease: tuple[str, ...] = ()) -> Version:
     values = [*numbers, 0, 0, 0]
-    return Version(values[0], values[1], values[2])
+    return Version(values[0], values[1], values[2], prerelease)
 
 
 def caret_upper(numbers: list[int]) -> Version:
@@ -257,7 +261,7 @@ def comparator_matches(comparator: str, version: Version, requirement: str) -> b
         raise CheckError(f"invalid heddle-api requirement {requirement!r}")
     operator = match.group(1) or "^"
     value = match.group(2).strip()
-    numbers, wildcard = parse_partial(value, requirement)
+    numbers, wildcard, prerelease = parse_partial(value, requirement)
 
     if wildcard:
         return (version.major, version.minor, version.patch)[: len(numbers)] == tuple(
@@ -266,7 +270,7 @@ def comparator_matches(comparator: str, version: Version, requirement: str) -> b
     if not numbers:
         raise CheckError(f"invalid heddle-api requirement {requirement!r}")
 
-    lower = padded(numbers)
+    lower = padded(numbers, prerelease)
     if operator == ">=":
         return version >= lower
     if operator == ">":
@@ -292,10 +296,24 @@ def comparator_matches(comparator: str, version: Version, requirement: str) -> b
 
 def requirement_matches(requirement: str, version: Version) -> bool:
     if requirement.strip() == "*":
-        return True
+        return not version.prerelease
     comparators = [part.strip() for part in requirement.split(",") if part.strip()]
     if not comparators:
         raise CheckError("empty heddle-api version requirement")
+    if version.prerelease:
+        # Cargo admits a prerelease only when a comparator opts into a
+        # prerelease of the same major/minor/patch release.
+        opted_in = False
+        for comparator in comparators:
+            match = re.fullmatch(r"(\^|~|>=|<=|>|<|=)?\s*(.+)", comparator)
+            if match is None:
+                raise CheckError(f"invalid heddle-api requirement {requirement!r}")
+            numbers, _, prerelease = parse_partial(match.group(2).strip(), requirement)
+            opted_in |= bool(prerelease) and tuple(numbers) == (
+                version.major, version.minor, version.patch
+            )
+        if not opted_in:
+            return False
     return all(
         comparator_matches(comparator, version, requirement)
         for comparator in comparators
@@ -341,12 +359,10 @@ def run(workflow: Path, index: Index) -> int:
         version = Version.parse(
             record.get("vers"), f"heddle-api index line {line_number}"
         )
-        if record.get("yanked") is not True and not version.prerelease:
+        if record.get("yanked") is not True:
             api_version_set.add(version)
     if not api_version_set:
-        raise CheckError(
-            "heddle-api has no non-yanked stable version in the sparse index"
-        )
+        raise CheckError("heddle-api has no non-yanked version in the sparse index")
     api_versions = sorted(api_version_set, reverse=True)
 
     resolutions: list[ApiResolution] = []
@@ -368,7 +384,7 @@ def run(workflow: Path, index: Index) -> int:
             if not compatible:
                 raise CheckError(
                     f"{crate}@{latest.version} requires heddle-api {requirement}, "
-                    "but no published non-yanked stable version satisfies it"
+                    "but no published non-yanked version satisfies it"
                 )
             resolutions.append(
                 ApiResolution(crate, latest.version, requirement, compatible)

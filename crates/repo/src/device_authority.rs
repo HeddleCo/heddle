@@ -528,7 +528,7 @@ mod tests {
                 .expect("unchanged accepted owner with distinct pending presentation");
         }
         assert!(
-            crate::owner_root::owner_observation_cache_entries().expect("cache count") <= 128,
+            crypto::owner_root::owner_observation_cache_entries().expect("cache count") <= 128,
             "owner memoization cardinality remains bounded"
         );
     }

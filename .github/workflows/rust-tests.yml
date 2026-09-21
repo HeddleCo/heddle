@@ -99,6 +99,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: cargo run --locked -p heddle-devtools -- check-rust-source-reachability
 
+      - name: Hosted leaf consumer isolation
+        if: github.event_name == 'pull_request'
+        run: bash scripts/check-hosted-leaf-consumer.sh
+
       - name: Build (workspace, all targets)
         if: github.event_name == 'pull_request'
         run: cargo build --locked --workspace --all-targets
@@ -109,7 +113,12 @@ jobs:
 
       - name: Unit tests (workspace, lib + bins)
         if: github.event_name == 'pull_request'
-        run: cargo test --locked --workspace --lib --bins
+        run: cargo test --locked --workspace --exclude heddle-cli --lib --bins
+
+      - name: CLI unit tests
+        if: github.event_name == 'pull_request'
+        # CLI tests temporarily change HOME/HEDDLE_HOME; avoid process-global races.
+        run: cargo test --locked -p heddle-cli --lib --bins -- --test-threads=1
 
       - name: sccache stats
         if: ${{ always() && github.event_name == 'pull_request' }}

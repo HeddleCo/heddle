@@ -3,7 +3,7 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use proptest::prelude::*;
-use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
+use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{CHECKSUM_CHUNK_BYTES, CHECKSUM_LEN, MAX_CHAIN_DEPTH, Npk1Pack, TRAILER_HEADER_LEN};
 use crate::{

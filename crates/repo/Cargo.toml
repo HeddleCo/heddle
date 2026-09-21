@@ -12,7 +12,7 @@ categories.workspace = true
 [dependencies]
 anyhow.workspace = true
 biscuit-auth.workspace = true
-heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.24.0" }
+heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.24.1" }
 base32.workspace = true
 api = { workspace = true }
 blake3.workspace = true
@@ -23,7 +23,7 @@ ignore.workspace = true
 heddle-perf-contract.workspace = true
 libc.workspace = true
 objects.workspace = true
-crypto.workspace = true
+crypto = { workspace = true, features = ["owner-root"] }
 oplog.workspace = true
 prost.workspace = true
 wire.workspace = true
@@ -39,7 +39,7 @@ semantic-recovery = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sley.workspace = true
+sley = { workspace = true, features = ["remote", "worktree", "hooks", "history-editing", "tls-rustls"] }
 tempfile.workspace = true
 thiserror.workspace = true
 toml.workspace = true

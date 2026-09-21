@@ -2,12 +2,15 @@
 //! Heddle core domain modules extracted from the monolith.
 
 pub mod blame;
+pub mod config_types;
 pub mod fault_inject;
 pub mod observe;
+pub mod operation_dedup;
 pub mod progress;
 pub mod reference_store;
 pub mod store;
 pub mod sync;
+pub mod thread_record;
 pub mod transfer;
 pub mod util;
 pub mod worktree;

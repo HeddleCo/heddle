@@ -5,39 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::repository::RepoConfig;
 
-/// Optional fsmonitor backend selection for worktree status hot paths.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FsMonitorMode {
-    /// Disable fsmonitor integration.
-    ///
-    /// Fail-closed default: a stock install never binds the localhost helper
-    /// or consumes its baseline (heddle#1411).
-    #[default]
-    Off,
-    /// Auto-detect a supported backend at runtime.
-    ///
-    /// Opt-in. On Linux this still starts the native helper, which currently
-    /// accepts any localhost TCP peer.
-    Auto,
-    /// Use Heddle's local native backend.
-    Native,
-    /// Use the Watchman CLI backend when available.
-    Watchman,
-}
-
-impl FsMonitorMode {
-    /// Parse an environment override value.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "0" | "off" | "false" | "disabled" => Some(Self::Off),
-            "1" | "auto" | "true" | "enabled" => Some(Self::Auto),
-            "native" | "local" => Some(Self::Native),
-            "watchman" => Some(Self::Watchman),
-            _ => None,
-        }
-    }
-}
+pub use objects::config_types::FsMonitorMode;
 
 /// Serializable fsmonitor configuration stored in user or repo config.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
+use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 
 use super::{
     NAME_MAGIC, NAME_RESTART, RECORD_BLOCK_ENTRIES, TARGET_MAGIC, checked_slice, invalid,

@@ -543,50 +543,8 @@ fn paint_state<G>(
     }
 }
 
-/// Return whether `ancestor_id` is reachable from `descendant_id` using an async object source.
 #[cfg(feature = "async-source")]
-pub async fn is_ancestor_async<S>(
-    source: &S,
-    ancestor_id: &StateId,
-    descendant_id: &StateId,
-) -> Result<bool>
-where
-    S: AsyncObjectSource + ?Sized,
-{
-    if ancestor_id == descendant_id {
-        return Ok(true);
-    }
-
-    let mut nodes = HashMap::new();
-    ensure_loaded_async(source, &mut nodes, *descendant_id).await?;
-    let Some(ancestor_generation) = generation_async(&nodes, *ancestor_id) else {
-        return Ok(false);
-    };
-
-    let mut stack = vec![*descendant_id];
-    let mut visited = HashSet::new();
-    while let Some(state_id) = stack.pop() {
-        if !visited.insert(state_id) {
-            continue;
-        }
-        if state_id == *ancestor_id {
-            return Ok(true);
-        }
-
-        let Some(node) = nodes.get(&state_id) else {
-            continue;
-        };
-        for parent in &node.parents {
-            if generation_async(&nodes, *parent)
-                .is_some_and(|generation| generation >= ancestor_generation)
-            {
-                stack.push(*parent);
-            }
-        }
-    }
-
-    Ok(false)
-}
+pub use objects::transfer::is_ancestor_async;
 
 /// Find the best common ancestor of two states using an async object source.
 #[cfg(feature = "async-source")]
@@ -723,6 +681,14 @@ mod tests {
         let mut graph = CommitGraphIndex::new(&repo);
         assert!(graph.is_ancestor(&base.id(), &next.id())?);
         assert!(!graph.is_ancestor(&next.id(), &base.id())?);
+        assert_eq!(
+            objects::transfer::is_ancestor_from_source(repo.store(), base.id(), next.id())?,
+            graph.is_ancestor(&base.id(), &next.id())?
+        );
+        assert_eq!(
+            objects::transfer::is_ancestor_from_source(repo.store(), next.id(), base.id())?,
+            graph.is_ancestor(&next.id(), &base.id())?
+        );
 
         Ok(())
     }

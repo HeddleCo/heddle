@@ -30,7 +30,6 @@ use objects::{
 };
 use oplog::IsolationKey;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
-use serde::{Deserialize, Serialize};
 
 use crate::{
     Repository,
@@ -38,74 +37,9 @@ use crate::{
 };
 
 const COMPACTION_BATCH: usize = 256;
-/// Default retention for completed local receipts. Pending work does not expire.
-pub const DEFAULT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
+pub use objects::operation_dedup::{DEFAULT_RETENTION_SECS, hash_request_body};
 
-/// One persisted dedup entry. Identity is `(operation_id, verb)`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DedupEntry {
-    pub operation_id: OperationId,
-    /// Hosted method name or CLI verb name, including the replay encoding
-    /// generation when relevant. Operation IDs remain unique across the store;
-    /// reusing one under a different verb is a conflict.
-    pub verb: String,
-    /// BLAKE3-256 of the request body bytes. The caller is responsible for
-    /// choosing a deterministic encoding and including its generation in the
-    /// verb whenever an encoding change would make cached data incompatible.
-    pub request_hash: [u8; 32],
-    /// Cached response bytes in the caller-owned encoding for this verb.
-    /// Empty (`Vec::new()`) when [`pending`](Self::pending) is `true` —
-    /// i.e. the slot is reserved but the response hasn't been recorded yet.
-    pub response: Vec<u8>,
-    /// Unix epoch seconds when this entry was created. Used by compaction.
-    pub created_at_secs: i64,
-    /// `true` when the entry is a reservation written by
-    /// [`OperationDedupStore::reserve`] but not yet finalised by
-    /// [`OperationDedupStore::record`]. Concurrent retries with the same
-    /// `(operation_id, verb)` see [`DedupOutcome::InFlight`] while the
-    /// reservation is held. Cleared by `record` (when the response is
-    /// persisted) or [`OperationDedupStore::cancel`] (on execute failure).
-    ///
-    pub pending: bool,
-}
-
-/// Result of a [`OperationDedupStore::reserve`] call.
-///
-/// - [`DedupOutcome::Reserved`]: this id has not been seen, and the store
-///   has atomically claimed the slot for the caller. The caller MUST
-///   either complete the request via [`OperationDedupStore::record`] or
-///   release the reservation via [`OperationDedupStore::cancel`]. While
-///   the reservation is held, concurrent identical requests see
-///   [`DedupOutcome::InFlight`].
-/// - [`DedupOutcome::Replay`]: a completed entry exists with a matching
-///   body hash; the cached response is returned and the request must
-///   *not* be re-executed.
-/// - [`DedupOutcome::InFlight`]: a reservation for the same
-///   `(operation_id, verb)` is currently held by another caller (with
-///   the same body hash). The caller should surface a transient error
-///   (`Status::aborted`) so the client can retry once the original
-///   completes.
-/// - [`DedupOutcome::Conflict`]: same id, different body. Caller should
-///   surface a `FailedPrecondition` to the client.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DedupOutcome {
-    Reserved,
-    Replay { response: Vec<u8> },
-    InFlight,
-    Conflict,
-}
-
-/// Safe-to-report metadata for an existing op-id slot. This deliberately
-/// omits cached response bytes; callers use it to explain conflicts without
-/// leaking command output.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DedupConflictMetadata {
-    pub operation_id: OperationId,
-    pub verb: String,
-    pub request_hash: [u8; 32],
-    pub created_at_secs: i64,
-    pub pending: bool,
-}
+pub use objects::operation_dedup::{DedupConflictMetadata, DedupEntry, DedupOutcome};
 
 #[derive(Clone)]
 pub struct ReserveOpIdClaim {
@@ -592,12 +526,6 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-/// Compute the canonical request hash. Helper centralising the hashing
-/// scheme so all callers (CLI verbs, hosted handlers) hash identically.
-pub fn hash_request_body(bytes: &[u8]) -> [u8; 32] {
-    *blake3::hash(bytes).as_bytes()
 }
 
 #[cfg(test)]

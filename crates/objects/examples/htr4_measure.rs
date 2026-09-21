@@ -26,7 +26,7 @@ use objects::object::{
     BytesTreeSource, ContentHash, EntryType, FileMode, FileTreeSource, SpoolId, StateId,
     TREE_BLOCK_ENCODING_VERSION, TREE_HEADER_LEN, Tree, TreeEntry, TreeEntryReader, TreePageLimits,
 };
-use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
+use sley_core::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 use tempfile::{NamedTempFile, TempDir};
 
 const SEED: u64 = 0x6874_7234_5f62_656e;

@@ -7,6 +7,8 @@ mod ci_verdict;
 mod ed25519;
 mod error;
 pub mod original_boundary_acceptance;
+#[cfg(feature = "owner-root")]
+pub mod owner_root;
 mod p256;
 mod pem_loader;
 pub mod pop;

@@ -395,47 +395,7 @@ impl Default for DefaultsConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum OutputFormat {
-    Json,
-    #[default]
-    Text,
-}
-
-// Hand-written Deserialize so a legacy `output.format = "auto"` fails
-// with a field-named, value-named message instead of the default serde
-// "unknown variant" wording. The bug class #271 closes is the silent
-// JSON-when-piped surprise the old `auto` mode produced; rather than
-// keeping an alias that would re-route it to `text`, pre-1.0 we error
-// loudly so the operator updates the config.
-impl<'de> Deserialize<'de> for OutputFormat {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        struct OutputFormatVisitor;
-        impl<'de> serde::de::Visitor<'de> for OutputFormatVisitor {
-            type Value = OutputFormat;
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("'text' or 'json'")
-            }
-            fn visit_str<E>(self, value: &str) -> std::result::Result<OutputFormat, E>
-            where
-                E: serde::de::Error,
-            {
-                match value {
-                    "text" => Ok(OutputFormat::Text),
-                    "json" => Ok(OutputFormat::Json),
-                    other => Err(E::custom(format!(
-                        "invalid output.format: '{other}' — valid values are 'text' or 'json'"
-                    ))),
-                }
-            }
-        }
-        deserializer.deserialize_str(OutputFormatVisitor)
-    }
-}
+pub use objects::config_types::OutputFormat;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OutputConfig {

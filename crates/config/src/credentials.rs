@@ -63,7 +63,7 @@ pub struct ServerCredential {
 /// Uses the same home resolution as device identity (`$HEDDLE_HOME` if set,
 /// else `$HOME/.heddle`), so credentials and device keys stay co-located.
 pub fn credentials_path() -> PathBuf {
-    repo::identity::heddle_home_dir().join("credentials.toml")
+    crate::heddle_home_dir().join("credentials.toml")
 }
 
 /// Load the credential store from disk. Returns an empty store if the file

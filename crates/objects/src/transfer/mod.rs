@@ -10,12 +10,16 @@ pub mod graph;
 pub mod plan;
 
 pub use availability::{ObjectAvailabilityPlan, has_object, plan_object_availability};
+#[cfg(feature = "async-source")]
+pub use graph::is_ancestor_async;
+#[cfg(feature = "async-source")]
+pub use graph::{AncestryBudget, AncestryError, is_ancestor_async_bounded};
 pub use graph::{
     ObjectId, ObjectInfo, ObjectType, ObjectTypeBucket, PlannedObject, StateClosureOptions,
     StateClosureTransferObjects, enumerate_state_closure, enumerate_state_closure_plan,
     enumerate_state_closure_plan_with_options, enumerate_state_closure_transfer_from_boundaries,
     enumerate_state_closure_transfer_with_options, enumerate_state_closure_with_options,
-    is_ancestor, missing_blobs_in_tree,
+    is_ancestor, is_ancestor_from_source, missing_blobs_in_tree,
 };
 pub use plan::{
     GitLaneTransferIntent, RepositoryTransferPlan, TransferPartitions, TransferPlanStats,
