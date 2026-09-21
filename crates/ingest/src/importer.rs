@@ -2085,17 +2085,13 @@ mod tests {
             1,
             "fixture tip must be non-root"
         );
-        let note = serde_json::json!({
-            "state_id": source_state.id().to_string_full(),
-            "change_id": source_state.change_id.to_string_full(),
-            "source_state": source_state.clone(),
-            "status": "draft"
-        })
-        .to_string();
+        let note = objects::object::HeddleNote::from_state(&source_state)
+            .to_json_bytes()
+            .expect("encode canonical note");
         git_output(
             &source,
             &["notes", "--ref=heddle", "add", "-f", "-F", "-", &tip],
-            Some(note.as_bytes()),
+            Some(&note),
         );
 
         let clone_output = Command::new("git")

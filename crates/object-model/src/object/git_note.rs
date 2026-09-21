@@ -4,24 +4,34 @@
 //! Git projection owns where the payload is stored and how the notes ref is
 //! updated. The object model owns these durable bytes so projection, ingest,
 //! fsck, and hosted consumers cannot grow independent JSON schemas.
+//!
+//! `source_state`, when present, is the canonical named MessagePack body
+//! (`rmp_serde::to_vec_named`) hex-encoded inside that JSON document.
 
 use serde::{Deserialize, Serialize};
 
-use super::{State, Status};
+use super::{Agent, State, Status};
 
 /// Portable Heddle metadata attached to a projected Git commit.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeddleNote {
     pub state_id: String,
     pub change_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Hex-encoded canonical MessagePack. Absent or null when the note has no
+    /// embedded state. A JSON object is the retired inline `State` and is
+    /// rejected so serde_json never monomorphizes `State`'s deserializer.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "source_state_msgpack"
+    )]
     pub source_state: Option<State>,
     /// Whether Git projection changed the parent graph represented by the
     /// embedded source state.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub parents_rewritten: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<NoteAgent>,
+    pub agent: Option<Agent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f32>,
     /// Either `draft` or `published`.
@@ -35,12 +45,6 @@ pub struct HeddleNote {
     /// Author and agent attribution not representable by a Git signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution: Option<NoteAttribution>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct NoteAgent {
-    pub provider: String,
-    pub model: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -72,7 +76,44 @@ pub struct NoteAttribution {
     pub principal_name: String,
     pub principal_email: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<NoteAgent>,
+    pub agent: Option<Agent>,
+}
+
+/// Serde adapter for [`HeddleNote::source_state`].
+///
+/// `None` stays JSON null (and is omitted by `skip_serializing_if`). `Some`
+/// is `hex(rmp_serde::to_vec_named(state))`. JSON objects are not decoded as
+/// `State`; callers must re-export the note with a current heddle.
+mod source_state_msgpack {
+    use serde::de::Error as _;
+    use serde::ser::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::State;
+
+    pub fn serialize<S>(value: &Option<State>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            None => serializer.serialize_none(),
+            Some(state) => {
+                let bytes = rmp_serde::to_vec_named(state).map_err(S::Error::custom)?;
+                serializer.serialize_str(&hex::encode(bytes))
+            }
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<State>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(value) = Option::<String>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+        let bytes = hex::decode(value).map_err(D::Error::custom)?;
+        rmp_serde::from_slice(&bytes).map(Some).map_err(D::Error::custom)
+    }
 }
 
 impl HeddleNote {
@@ -83,10 +124,7 @@ impl HeddleNote {
             Status::Draft => "draft".to_string(),
             Status::Published => "published".to_string(),
         };
-        let agent = state.attribution.agent.as_ref().map(|agent| NoteAgent {
-            provider: agent.provider.clone(),
-            model: agent.model.clone(),
-        });
+        let agent = state.attribution.agent.clone();
         Self {
             state_id: state.id().to_string_full(),
             change_id: state.change_id.to_string_full(),
@@ -170,17 +208,37 @@ mod tests {
             .with_attribution(NoteAttribution {
                 principal_name: "Test User".to_string(),
                 principal_email: "test@example.com".to_string(),
-                agent: Some(NoteAgent {
-                    provider: "openai".to_string(),
-                    model: "codex".to_string(),
-                }),
+                agent: Some(Agent::new("openai", "codex")),
             });
 
         let bytes = note.to_json_bytes().expect("encode canonical note");
+        let encoded: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("note stays a JSON document");
+        let source_state = encoded["source_state"]
+            .as_str()
+            .expect("source_state is hex text, not an embedded State object");
+        assert!(
+            !source_state.is_empty() && source_state.chars().all(|c| c.is_ascii_hexdigit()),
+            "source_state must be hex-encoded MessagePack: {source_state}"
+        );
         assert_eq!(
             HeddleNote::from_json_bytes(&bytes).expect("decode canonical note"),
             note
         );
+    }
+
+    #[test]
+    fn null_source_state_is_absent() {
+        let source = state();
+        let null_note = serde_json::json!({
+            "state_id": source.id().to_string_full(),
+            "change_id": source.change_id.to_string_full(),
+            "source_state": null,
+            "status": "draft"
+        })
+        .to_string();
+        let note = HeddleNote::from_json_bytes(null_note.as_bytes()).expect("null source_state");
+        assert!(note.source_state.is_none());
     }
 
     #[test]
