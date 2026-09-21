@@ -206,6 +206,39 @@ class PublishedGraphTests(unittest.TestCase):
         self.assertIn("heddle-api 0.18", result.stdout)
         self.assertIn("heddle-api 0.19", result.stdout)
 
+    def test_explicit_prerelease_requirement_resolves_published_api(self) -> None:
+        self.write_records(
+            "heddle-api",
+            [
+                index_record("heddle-api", "0.19.0"),
+                index_record("heddle-api", "0.31.0-alpha.1"),
+            ],
+        )
+        self.write_records(
+            "heddle-alpha", [index_record("heddle-alpha", "1.0.0", "^0.31.0-alpha.1")]
+        )
+        self.write_records(
+            "heddle-beta", [index_record("heddle-beta", "1.0.0", ">=0.31.0-alpha.1, <0.32")]
+        )
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("converge on heddle-api 0.31", result.stdout)
+        self.assertIn("0.31.0-alpha.1", result.stdout)
+
+    def test_stable_requirement_does_not_select_prerelease(self) -> None:
+        self.write_records(
+            "heddle-api", [index_record("heddle-api", "0.31.0-alpha.1")]
+        )
+        self.write_records(
+            "heddle-alpha", [index_record("heddle-alpha", "1.0.0", "^0.31.0")]
+        )
+        self.write_records(
+            "heddle-beta", [index_record("heddle-beta", "1.0.0", "^0.31.0-alpha.1")]
+        )
+        result = self.check()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no published non-yanked version satisfies", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
