@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::collections::{HashSet, VecDeque};
-
-use serde::{Deserialize, Serialize};
-
-#[cfg(feature = "async-source")]
-use crate::store::AsyncObjectSource;
 #[cfg(feature = "async-source")]
 use std::sync::{
     Arc,
@@ -13,6 +8,10 @@ use std::sync::{
 #[cfg(feature = "async-source")]
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "async-source")]
+use crate::store::AsyncObjectSource;
 use crate::{
     error::{HeddleError, Result},
     object::{
@@ -1234,9 +1233,7 @@ where
     if ancestor == descendant {
         return Ok(true);
     }
-    let mut seen = HashSet::new();
-    let mut stack = vec![*descendant];
-    while let Some(id) = stack.pop() {
+    let check_interruption = || {
         if budget.cancelled.load(Ordering::Acquire) {
             return Err(AncestryError::Cancelled);
         }
@@ -1246,13 +1243,21 @@ where
         {
             return Err(AncestryError::Deadline);
         }
+        Ok(())
+    };
+    let mut seen = HashSet::new();
+    let mut stack = vec![*descendant];
+    while let Some(id) = stack.pop() {
+        check_interruption()?;
         if !seen.insert(id) {
             continue;
         }
         if seen.len() > budget.max_states {
             return Err(AncestryError::WorkLimit);
         }
-        let Some(state) = source.get_state(&id).await? else {
+        let state = source.get_state(&id).await?;
+        check_interruption()?;
+        let Some(state) = state else {
             continue;
         };
         heddle_perf_contract::record_history_object_decode();
@@ -1322,14 +1327,15 @@ fn walk_ancestor(
 
 #[cfg(all(test, feature = "async-source"))]
 mod async_ancestry_tests {
-    use super::*;
-    use crate::object::{Attribution, Blob, Principal, Tree};
     use std::{
         collections::HashMap,
         future::Future,
         sync::atomic::AtomicUsize,
         task::{Context, Poll, Waker},
     };
+
+    use super::*;
+    use crate::object::{Attribution, Blob, Principal, Tree};
 
     struct Source {
         states: HashMap<StateId, State>,
