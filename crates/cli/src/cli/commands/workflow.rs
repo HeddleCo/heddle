@@ -2318,8 +2318,40 @@ struct IncompleteLandMarker {
     pre_target_state: Option<String>,
     #[serde(default)]
     pre_source_state: Option<String>,
-    #[serde(default)]
+    /// Hex-encoded `rmp_serde::to_vec_named` snapshot of the thread record.
+    #[serde(default, with = "incomplete_land_pre_thread")]
     pre_thread: Option<Thread>,
+}
+
+mod incomplete_land_pre_thread {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use super::Thread;
+
+    pub fn serialize<S>(value: &Option<Thread>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            None => serializer.serialize_none(),
+            Some(thread) => {
+                let bytes = rmp_serde::to_vec_named(thread).map_err(serde::ser::Error::custom)?;
+                serializer.serialize_str(&hex::encode(bytes))
+            }
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Thread>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let Some(value) = Option::<String>::deserialize(deserializer)? else {
+            return Ok(None);
+        };
+        let bytes = hex::decode(value).map_err(D::Error::custom)?;
+        rmp_serde::from_slice(&bytes).map(Some).map_err(D::Error::custom)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -3362,6 +3394,53 @@ mod tests {
             ephemeral: None,
             auto: false,
             shared_target_dir: None,
+        }
+    }
+
+    fn marker_with_pre_thread(pre_thread: Option<Thread>) -> IncompleteLandMarker {
+        IncompleteLandMarker {
+            thread_id: "agent-thread".to_string(),
+            merge_state: None,
+            collapse_state: None,
+            target_branch: None,
+            pre_git_oid: None,
+            expected_git_oid: None,
+            integration_batch_id: None,
+            integration_transaction_id: None,
+            collapse_batch_id: None,
+            phase: IncompleteLandPhase::Prepared,
+            pre_target_state: None,
+            pre_source_state: None,
+            pre_thread,
+        }
+    }
+
+    #[test]
+    fn incomplete_land_pre_thread_roundtrips_as_rmp_hex() {
+        let thread = thread_with_execution_path(PathBuf::from("/tmp/work"));
+        let marker = marker_with_pre_thread(Some(thread.clone()));
+        let value = serde_json::to_value(&marker).expect("serialize marker");
+        let hex_snapshot = value["pre_thread"]
+            .as_str()
+            .expect("pre_thread must be a hex string, not an inlined thread");
+        let bytes = hex::decode(hex_snapshot).expect("pre_thread hex");
+        assert_eq!(bytes, rmp_serde::to_vec_named(&thread).unwrap());
+
+        let decoded: IncompleteLandMarker =
+            serde_json::from_value(value).expect("decode hex pre_thread");
+        assert_eq!(
+            rmp_serde::to_vec_named(decoded.pre_thread.as_ref().unwrap()).unwrap(),
+            rmp_serde::to_vec_named(&thread).unwrap()
+        );
+
+        let cleared = serde_json::to_value(marker_with_pre_thread(None)).expect("serialize none");
+        assert!(cleared["pre_thread"].is_null());
+        for raw in [
+            r#"{"thread_id":"t","merge_state":null,"collapse_state":null}"#,
+            r#"{"thread_id":"t","merge_state":null,"collapse_state":null,"pre_thread":null}"#,
+        ] {
+            let decoded: IncompleteLandMarker = serde_json::from_str(raw).expect(raw);
+            assert!(decoded.pre_thread.is_none(), "{raw}");
         }
     }
 

@@ -76,32 +76,12 @@ impl Action {
         self
     }
 
-    /// Compute the action ID from content.
+    /// Compute the action ID from the action's canonical MessagePack body.
+    ///
+    /// `id` is `#[serde(skip)]`, so the hash covers the stored action and not
+    /// a second JSON encoding of the same fields.
     pub fn compute_id(&self) -> ActionId {
-        #[derive(Serialize)]
-        struct ActionIdentity<'a> {
-            from_state: Option<&'a StateId>,
-            to_state: &'a StateId,
-            operation: &'a Operation,
-            description: &'a str,
-            semantic_changes: &'a [SemanticChange],
-            attribution: &'a Attribution,
-            timestamp_secs: i64,
-            timestamp_nanos: u32,
-        }
-
-        let identity = ActionIdentity {
-            from_state: self.from_state.as_ref(),
-            to_state: &self.to_state,
-            operation: &self.operation,
-            description: &self.description,
-            semantic_changes: &self.semantic_changes,
-            attribution: &self.attribution,
-            timestamp_secs: self.timestamp.timestamp(),
-            timestamp_nanos: self.timestamp.timestamp_subsec_nanos(),
-        };
-        let data = serde_json::to_vec(&identity).expect("action identity should serialize");
-
+        let data = rmp_serde::to_vec_named(self).expect("action identity should serialize");
         ActionId::from_hash(ContentHash::compute_typed("action", &data))
     }
 

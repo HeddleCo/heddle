@@ -194,7 +194,7 @@ fn parse_attribution_with_note(
         .and_then(|note| note.attribution.as_ref())
         .and_then(|attribution| attribution.agent.as_ref())
         .or_else(|| note.and_then(|note| note.agent.as_ref()))
-        .map(|agent| Agent::new(agent.provider.clone(), agent.model.clone()))
+        .cloned()
         .or_else(|| detect_agent_in_message(message))
     {
         Attribution::with_agent(principal, agent)
@@ -554,14 +554,9 @@ mod tests {
             "exported child\n",
         );
         commit.heddle_note = Some(
-            serde_json::json!({
-                "state_id": source.id().to_string_full(),
-                "change_id": source.change_id.to_string_full(),
-                "source_state": source,
-                "status": "draft"
-            })
-            .to_string()
-            .into_bytes(),
+            HeddleNote::from_state(&source)
+                .to_json_bytes()
+                .expect("encode canonical note"),
         );
 
         let descriptor = descriptor_state_from_commit(&commit, tree, false)

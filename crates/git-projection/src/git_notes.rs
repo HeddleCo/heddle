@@ -19,7 +19,7 @@ use std::{
 };
 
 use objects::object::StateId;
-pub use objects::object::{HeddleNote, NoteAgent, NoteAttribution, OmittedBreakdown, SignalCounts};
+pub use objects::object::{HeddleNote, NoteAttribution, OmittedBreakdown, SignalCounts};
 use sley::{ObjectId, Repository};
 
 use super::git_core::{GitProjectionError, GitProjectionResult, git_err};
