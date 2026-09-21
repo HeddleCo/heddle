@@ -3,11 +3,10 @@
 #![cfg(feature = "tree-sitter-symbols")]
 
 use crate::{HeddleError, Repository, Result, StateAttachmentKind};
+#[cfg(test)]
+use objects::object::SemanticTreeNode;
 use objects::{
-    object::{
-        ContentHash, SemanticIndexRoot, State, StateId, SymbolAnchor,
-        SymbolEntry, Tree,
-    },
+    object::{ContentHash, SemanticIndexRoot, State, StateId, SymbolAnchor, SymbolEntry, Tree},
     store::ObjectStore,
 };
 use semantic::{
@@ -18,8 +17,6 @@ use semantic::{
 use semantic::{parser::Language, semantic_index::extract_semantic_file};
 use std::collections::HashMap;
 use tracing::warn;
-#[cfg(test)]
-use objects::object::SemanticTreeNode;
 
 type DeferredSemanticIndex = (Option<ContentHash>, Vec<(ContentHash, Vec<u8>)>);
 

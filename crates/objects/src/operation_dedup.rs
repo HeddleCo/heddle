@@ -4,6 +4,14 @@
 use crate::object::OperationId;
 use serde::{Deserialize, Serialize};
 
+/// Default retention for completed receipts. Pending reservations do not expire.
+pub const DEFAULT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// Hash the caller's canonical request bytes for deduplication.
+pub fn hash_request_body(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
+}
+
 /// One persisted dedup entry. Identity is `(operation_id, verb)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DedupEntry {

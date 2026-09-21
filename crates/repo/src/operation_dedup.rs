@@ -37,8 +37,7 @@ use crate::{
 };
 
 const COMPACTION_BATCH: usize = 256;
-/// Default retention for completed local receipts. Pending work does not expire.
-pub const DEFAULT_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
+pub use objects::operation_dedup::{DEFAULT_RETENTION_SECS, hash_request_body};
 
 pub use objects::operation_dedup::{DedupConflictMetadata, DedupEntry, DedupOutcome};
 
@@ -527,12 +526,6 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-/// Compute the canonical request hash. Helper centralising the hashing
-/// scheme so all callers (CLI verbs, hosted handlers) hash identically.
-pub fn hash_request_body(bytes: &[u8]) -> [u8; 32] {
-    *blake3::hash(bytes).as_bytes()
 }
 
 #[cfg(test)]

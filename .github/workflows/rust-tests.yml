@@ -99,6 +99,10 @@ jobs:
         if: github.event_name == 'pull_request'
         run: cargo run --locked -p heddle-devtools -- check-rust-source-reachability
 
+      - name: Hosted leaf consumer isolation
+        if: github.event_name == 'pull_request'
+        run: bash scripts/check-hosted-leaf-consumer.sh
+
       - name: Build (workspace, all targets)
         if: github.event_name == 'pull_request'
         run: cargo build --locked --workspace --all-targets

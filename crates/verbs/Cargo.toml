@@ -28,7 +28,7 @@ schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 semantic = { workspace = true, optional = true }
-sley.workspace = true
+sley = { workspace = true, features = ["remote", "history-editing", "tls-rustls"] }
 sley-config.workspace = true
 sley-refs.workspace = true
 state_review.workspace = true

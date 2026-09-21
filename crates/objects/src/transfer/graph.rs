@@ -3,6 +3,9 @@ use std::collections::{HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "async-source")]
+use crate::store::AsyncObjectSource;
+
 use crate::{
     error::{HeddleError, Result},
     object::{
@@ -1183,6 +1186,38 @@ pub fn is_ancestor_from_source(
     descendant: StateId,
 ) -> Result<bool> {
     walk_ancestor(ancestor, descendant, |id| source.get_state(id))
+}
+
+/// Walk ancestry against an async read-only source without repository storage.
+#[cfg(feature = "async-source")]
+pub async fn is_ancestor_async<S>(
+    source: &S,
+    ancestor: &StateId,
+    descendant: &StateId,
+) -> Result<bool>
+where
+    S: AsyncObjectSource + ?Sized,
+{
+    if ancestor == descendant {
+        return Ok(true);
+    }
+
+    let mut seen = HashSet::new();
+    let mut stack = vec![*descendant];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(state) = source.get_state(&id).await? else {
+            continue;
+        };
+        heddle_perf_contract::record_history_object_decode();
+        if id == *ancestor {
+            return Ok(true);
+        }
+        stack.extend(state.parents);
+    }
+    Ok(false)
 }
 
 fn walk_ancestor(
