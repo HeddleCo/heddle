@@ -73,7 +73,6 @@ pub struct HostedDiscussion {
     pub thread_id: Option<String>,
     pub turns: Vec<HostedDiscussionTurn>,
     pub resolution: HostedResolution,
-    pub kind: i32,
     /// Current discussion heads (turn/open op ids). Empty for a freshly decoded
     /// bootstrap snapshot that has no hosted causal graph.
     pub causal_heads: Vec<Vec<u8>>,
@@ -434,7 +433,6 @@ fn hosted_from_record(
         thread_id: hosted_thread_id(record),
         turns,
         resolution,
-        kind: 0,
         causal_heads: record.causal_heads.clone(),
         version: record.version.clone(),
     }

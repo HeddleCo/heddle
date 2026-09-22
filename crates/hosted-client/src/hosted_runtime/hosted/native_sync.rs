@@ -41,7 +41,7 @@ use super::{
     HostedClient, HostedRefEntry, PullBootstrapRefs, PullMaterialization,
     helpers::native_client_error,
     native_provider::preferred_fetch_open,
-    sync::{PullProfile, PushProfile, encode_empty_pull_bootstrap},
+    sync::{PullProfile, PushProfile},
 };
 
 const PUBLISH: &str = "heddle.api.v1alpha2.SyncService/PublishContent";
@@ -833,7 +833,7 @@ impl HostedClient {
             transport_mode: String::new(),
             resume_offset: 0,
             chunk_index: 0,
-            checkpoint: encode_empty_pull_bootstrap(final_state)?,
+            checkpoint: Vec::new(),
             is_complete: true,
         })
     }

@@ -1151,36 +1151,6 @@ async fn pull_network_connected(
             },
         )
         .await?;
-    let bootstrap =
-        hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
-            .context("decode hosted pull bootstrap")?;
-    let bootstrap = if result.success {
-        bootstrap
-            .ok_or_else(|| {
-                anyhow::anyhow!(RecoveryAdvice::remote_pull_failed(
-                    options.remote_thread,
-                    options.local_thread,
-                    "hosted response is missing required folded metadata",
-                ))
-            })?
-            .resolve(repo, result.final_state)
-            .map(Some)
-            .context("resolve hosted pull bootstrap")?
-    } else {
-        None
-    };
-    if let Some(bootstrap) = &bootstrap {
-        for warning in [
-            bootstrap.discussions_pack_fallback.as_deref(),
-            bootstrap.context_pack_fallback.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            eprintln!("{} {warning}", crate::cli::style::warn_marker());
-        }
-    }
-
     // Keep typed StateId for ref/worktree I/O; map string fields for pure parse.
     let final_state_id = result.final_state;
     let fields = HostedPullResultFields {
@@ -1277,9 +1247,6 @@ async fn pull_network_connected(
                 repo,
                 client,
                 repo_path,
-                bootstrap
-                    .as_ref()
-                    .and_then(|metadata| metadata.discussions.as_deref()),
                 final_state_id,
             )
             .await
@@ -1304,9 +1271,6 @@ async fn pull_network_connected(
                 repo,
                 client,
                 repo_path,
-                bootstrap
-                    .as_ref()
-                    .and_then(|metadata| metadata.context.as_deref()),
                 final_state_id,
             )
             .await

@@ -2,20 +2,30 @@
 //! Public native client for hosted repository events.
 //!
 //! Weft persists repository events and serves every event after
-//! [`SubscribeRepoEventsRequest::after_event_id`] before switching to live
+//! the requested durable cursor before switching to live
 //! delivery. This client deliberately leaves reconnect timing to its caller:
 //! [`RepoEventSubscription::next`] never turns a dead stream into an indefinite
 //! wait. It returns [`RepoEventError::Disconnected`] or
 //! [`RepoEventError::Ended`], and [`RepoEventSubscription::resume_request`]
 //! carries the last received event ID into a new subscription.
 
-pub use crate::legacy_v1::{RepoEvent, SubscribeRepoEventsRequest};
 use api::heddle::api::common::CallFailureCode;
+pub use api::heddle::api::common::RepoEvent;
 use config::UserConfig;
 use repo::remote::RemoteTarget;
 
 pub use crate::hosted_runtime::hosted::HostedError;
 use crate::hosted_runtime::{HostedAuthMode, HostedClient, HostedSession, ServerStream};
+
+/// Cursor and filters retained by the client while a v2 event observation is open.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepoEventSubscriptionRequest {
+    pub repo_id: String,
+    pub thread: String,
+    pub after_event_id: i64,
+    pub event_types: Vec<String>,
+    pub thread_id: String,
+}
 
 /// Failure to connect or receive hosted repository events.
 #[derive(Debug, thiserror::Error)]
@@ -110,7 +120,7 @@ impl RepoEventClient {
     /// replays the available matching history before live delivery.
     pub async fn subscribe(
         &self,
-        request: SubscribeRepoEventsRequest,
+        request: RepoEventSubscriptionRequest,
     ) -> Result<RepoEventSubscription, RepoEventError> {
         let _ = request;
         Err(RepoEventError::Connection(
@@ -134,7 +144,7 @@ impl RepoEventClient {
 
 /// One long-lived repository-event stream and its durable resume cursor.
 pub struct RepoEventSubscription {
-    request: SubscribeRepoEventsRequest,
+    request: RepoEventSubscriptionRequest,
     stream: ServerStream<RepoEvent>,
     last_event_id: i64,
 }
@@ -169,7 +179,7 @@ impl RepoEventSubscription {
     }
 
     /// Clone the original wire request with its durable cursor advanced.
-    pub fn resume_request(&self) -> SubscribeRepoEventsRequest {
+    pub fn resume_request(&self) -> RepoEventSubscriptionRequest {
         let mut request = self.request.clone();
         request.after_event_id = self.last_event_id;
         request

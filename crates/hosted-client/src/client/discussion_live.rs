@@ -5,11 +5,9 @@
 //! #1585 event-cursor channel. weft already emits `discussion.opened` /
 //! `turn.appended` / `discussion.resolved`; this module is the consumer:
 //!
-//! 1. Bootstrap a fresh clone via [`super::discussion_sync::pull_discussions`]
-//!    (pull-bootstrap discussions when present, otherwise `ListByState` — the
-//!    same non-fatal path #1642 falls back to). A `--thread` wait filters
-//!    that ListByState snapshot by `thread_ref` / wire `thread_id` before
-//!    apply; clone/pull pull-fold stays repo-wide.
+//! 1. Bootstrap a fresh clone via native signed discussion operations from
+//!    [`super::discussion_sync::pull_discussions`]. A `--thread` wait filters
+//!    those operations by thread name or stable id.
 //! 2. Subscribe from the persisted client watermark (`after_event_id`).
 //! 3. Treat every live event as a doorbell. `ObserveCollaboration` is the
 //!    authorized snapshot; event JSON never supplies discussion or turn contents.
@@ -32,7 +30,7 @@ use api::heddle::api::common::CallFailureCode;
 use objects::{
     fs_atomic::write_file_atomic,
     lock::RepoLock,
-    object::{CollaborationCodecError, Discussion, StateId},
+    object::{CollaborationCodecError, StateId},
 };
 use repo::Repository;
 use serde::{Deserialize, Serialize};
@@ -41,7 +39,7 @@ use super::{
     discussion_sync::{apply_hosted_discussion, pull_discussions, pull_discussions_for_thread},
     repo_events::{
         RepoEvent, RepoEventClient, RepoEventError, RepoEventSubscription,
-        SubscribeRepoEventsRequest,
+        RepoEventSubscriptionRequest,
     },
 };
 use crate::{client::HostedClient, hosted_runtime::hosted::HostedDiscussion};
@@ -268,14 +266,14 @@ pub fn save_scoped_cursor(
 /// True when this event is a discussion doorbell or payload.
 pub fn is_discussion_event(event: &RepoEvent) -> bool {
     DISCUSSION_EVENT_TYPES.contains(&event.event_type.as_str())
-        || event.kind == crate::legacy_v1::RepoEventKind::DiscussionTurn as i32
+        || event.kind == api::heddle::api::common::RepoEventKind::DiscussionTurn as i32
 }
 
 /// Subscribe request for the discussion live tail.
 /// Pair a thread name with its stable record id for a scoped subscribe.
 ///
-/// heddle-api 0.23.0 `SubscribeRepoEventsRequest` requires both when the
-/// subscription is thread-scoped. An empty pair is the unfiltered wait.
+/// A thread-scoped observation requires both values. An empty pair is the
+/// unfiltered wait.
 pub fn paired_thread_scope(thread: &str, thread_id: &str) -> Result<(String, String)> {
     if thread.is_empty() && thread_id.is_empty() {
         return Ok((String::new(), String::new()));
@@ -293,8 +291,8 @@ pub fn subscribe_request(
     after_event_id: i64,
     thread: &str,
     thread_id: &str,
-) -> SubscribeRepoEventsRequest {
-    SubscribeRepoEventsRequest {
+) -> RepoEventSubscriptionRequest {
+    RepoEventSubscriptionRequest {
         repo_id: repo_id.to_string(),
         thread: thread.to_string(),
         after_event_id,
@@ -306,36 +304,27 @@ pub fn subscribe_request(
     }
 }
 
-/// Snapshot bootstrap for a fresh clone, then mark the cursor bootstrapped.
-///
-/// Does not start the live tail. `bootstrap` is the pull-fold discussions
-/// when the clone/pull already decoded them; `None` falls back to ListByState.
+/// Fetch the native snapshot for a fresh clone, then mark the cursor bootstrapped.
 pub async fn bootstrap_discussions(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
-    bootstrap: Option<&[Discussion]>,
 ) -> Result<DiscussionEventCursor> {
     bootstrap_discussions_scoped(
         repo,
         client,
         repo_path,
         &DiscussionCursorScope::unfiltered(repo_path),
-        bootstrap,
     )
     .await
 }
 
-/// Snapshot bootstrap, writing the bootstrapped flag on `scope`'s cursor.
-///
-/// A filtered scope (wait `--thread`) ListByState-filters by `thread_ref`
-/// before apply. Pull-fold `Some(discussions)` stays repo-wide.
+/// Native snapshot bootstrap, writing the bootstrapped flag on `scope`'s cursor.
 pub async fn bootstrap_discussions_scoped(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
     scope: &DiscussionCursorScope,
-    bootstrap: Option<&[Discussion]>,
 ) -> Result<DiscussionEventCursor> {
     if repo.head().context("resolve repository head")?.is_none() {
         return Err(anyhow!(
@@ -343,18 +332,11 @@ pub async fn bootstrap_discussions_scoped(
         ));
     }
     if scope.is_filtered() {
-        pull_discussions_for_thread(
-            repo,
-            client,
-            repo_path,
-            bootstrap,
-            &scope.thread,
-            &scope.thread_id,
-        )
-        .await
-        .context("bootstrap hosted discussions for thread")?;
+        pull_discussions_for_thread(repo, client, repo_path, &scope.thread, &scope.thread_id)
+            .await
+            .context("bootstrap hosted discussions for thread")?;
     } else {
-        pull_discussions(repo, client, repo_path, bootstrap, None)
+        pull_discussions(repo, client, repo_path, None)
             .await
             .context("bootstrap hosted discussions")?;
     }
@@ -611,23 +593,14 @@ impl<'a> DiscussionEventConsumer<'a> {
 
     /// Snapshot bootstrap (if this clone has no cursor yet) then open the
     /// replay-then-live subscription.
-    pub async fn start(
-        &mut self,
-        bootstrap: Option<&[Discussion]>,
-    ) -> Result<DiscussionEventSubscription, DiscussionLiveError> {
+    pub async fn start(&mut self) -> Result<DiscussionEventSubscription, DiscussionLiveError> {
         let scope = self.cursor_scope();
         let mut cursor = load_scoped_cursor(self.repo.heddle_dir(), &scope)
             .map_err(DiscussionLiveError::cursor)?;
         if !cursor.bootstrapped {
-            cursor = bootstrap_discussions_scoped(
-                self.repo,
-                self.client,
-                &self.repo_path,
-                &scope,
-                bootstrap,
-            )
-            .await
-            .map_err(DiscussionLiveError::bootstrap)?;
+            cursor = bootstrap_discussions_scoped(self.repo, self.client, &self.repo_path, &scope)
+                .await
+                .map_err(DiscussionLiveError::bootstrap)?;
         }
         self.subscribe_from_cursor(&cursor).await
     }
@@ -701,10 +674,9 @@ impl<'a> DiscussionEventConsumer<'a> {
         cursor.bootstrapped = false;
         save_scoped_cursor(self.repo.heddle_dir(), &scope, &cursor)
             .map_err(DiscussionLiveError::cursor)?;
-        let cursor =
-            bootstrap_discussions_scoped(self.repo, self.client, &self.repo_path, &scope, None)
-                .await
-                .map_err(DiscussionLiveError::bootstrap)?;
+        let cursor = bootstrap_discussions_scoped(self.repo, self.client, &self.repo_path, &scope)
+            .await
+            .map_err(DiscussionLiveError::bootstrap)?;
         self.open_subscription(&cursor)
             .await
             .map_err(DiscussionLiveError::Subscribe)
@@ -755,7 +727,7 @@ impl DiscussionEventSubscription {
         self.inner.last_event_id()
     }
 
-    pub fn resume_request(&self) -> SubscribeRepoEventsRequest {
+    pub fn resume_request(&self) -> RepoEventSubscriptionRequest {
         self.inner.resume_request()
     }
 }

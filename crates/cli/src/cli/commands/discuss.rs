@@ -639,7 +639,7 @@ async fn run_wait(cli: &Cli, repo: &repo::Repository, args: &DiscussWaitArgs) ->
         if !thread_name.is_empty() {
             consumer = consumer.with_thread(&thread_name, &thread_id);
         }
-        let mut subscription = consumer.start(None).await?;
+        let mut subscription = consumer.start().await?;
         emit_wait_line(
             cli,
             DiscussWaitLineOutput {

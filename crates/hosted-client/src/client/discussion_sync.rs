@@ -7,11 +7,9 @@
 //! operation bytes into the local [`CollaborationStore`]. This preserves the
 //! authored anchor, title, actor, scope, causal parents, and occurrence time.
 //!
-//! The older projection bridge remains only for reading legacy bootstrap and
-//! live event data. A projection without its native signed operation is
-//! reported as incomplete instead of being reconstructed as authored evidence.
-//! Legacy resolution shapes are handled the same way until their native signed
-//! operation is available from the frozen collaboration service contract.
+//! Hosted projections are never reconstructed as authored evidence. If a
+//! projection exists without its native signed operation, replication reports
+//! the repository as incomplete.
 
 #![cfg(feature = "client")]
 
@@ -30,9 +28,8 @@ use objects::{
     object::{
         Attribution, CollabOpId, CollaborationAnchor, CollaborationIdempotencyKey,
         CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
-        CollaborationRevision, Discussion, DiscussionRecordId, DiscussionTurnV1,
-        MaterializedDiscussion, Principal, StateId, VisibilityTier,
-        thread_replication::ThreadOperationBody,
+        CollaborationRevision, DiscussionRecordId, DiscussionTurnV1, MaterializedDiscussion,
+        Principal, StateId, VisibilityTier, thread_replication::ThreadOperationBody,
     },
     store::ObjectStore,
 };
@@ -540,9 +537,8 @@ async fn push_one(
     Ok(changed)
 }
 
-/// Fetch hosted discussions for `against` (or repository HEAD) and materialize
-/// any turns we do not already hold. Saves the mirror after each discussion
-/// and continues past a per-discussion failure.
+/// Fetch native signed discussion operations for `against` (or repository
+/// HEAD). A hosted projection without its signed source is incomplete.
 ///
 /// `against` is the pulled/cloned tip. Clone publishes HEAD only after this
 /// call, and `heddle pull feature --local-thread feature` leaves HEAD on the
@@ -553,98 +549,87 @@ pub async fn pull_discussions(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
-    bootstrap: Option<&[Discussion]>,
     against: Option<StateId>,
 ) -> Result<usize> {
-    pull_discussions_filtered(repo, client, repo_path, bootstrap, against, None).await
+    pull_discussions_filtered(repo, client, repo_path, against, None).await
 }
 
-/// Wait `--thread` bootstrap: same ObserveCollaboration list, then keep only
-/// discussions whose `thread_ref` matches the paired name or whose wire
-/// `thread_id` matches the stable id.
-///
-/// Do not call a second list RPC. Pull-fold `Some(discussions)` stays
-/// repo-wide: clone/pull must not shrink. An empty slice is treated as
-/// missing (v2 source-only bootstrap) and Observes.
+/// Fetch native signed operations for `discuss wait --thread`, keeping only
+/// discussions whose thread name or stable id matches the requested thread.
 pub async fn pull_discussions_for_thread(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
-    bootstrap: Option<&[Discussion]>,
     thread: &str,
     thread_id: &str,
 ) -> Result<usize> {
     let filter = (!thread.is_empty() || !thread_id.is_empty()).then_some((thread, thread_id));
-    pull_discussions_filtered(repo, client, repo_path, bootstrap, None, filter).await
+    pull_discussions_filtered(repo, client, repo_path, None, filter).await
 }
 
 async fn pull_discussions_filtered(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
-    bootstrap: Option<&[Discussion]>,
     against: Option<StateId>,
     thread_filter: Option<(&str, &str)>,
 ) -> Result<usize> {
-    if bootstrap.is_none() {
-        let signed = client
-            .list_discussion_operations(repo_path)
-            .await
-            .context("observe native discussion operations")?;
-        if !signed.is_empty() {
-            let store =
-                CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
-            let _guard = lock_mirror_write(repo.heddle_dir())?;
-            let mut mirror = load_mirror(repo.heddle_dir())?;
-            let mut changed = HashSet::new();
-            for record in signed {
-                let verified = thread_api::collaboration::verify(&record)
-                    .map_err(|error| anyhow!(error.to_string()))?;
-                let ThreadOperationBody::Discussion(bytes) = verified.body else {
+    let signed = client
+        .list_discussion_operations(repo_path)
+        .await
+        .context("observe native discussion operations")?;
+    if !signed.is_empty() {
+        let store =
+            CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
+        let _guard = lock_mirror_write(repo.heddle_dir())?;
+        let mut mirror = load_mirror(repo.heddle_dir())?;
+        let mut changed = HashSet::new();
+        for record in signed {
+            let verified = thread_api::collaboration::verify(&record)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            let ThreadOperationBody::Discussion(bytes) = verified.body else {
+                continue;
+            };
+            let decoded = CollaborationOperationEnvelope::decode(&bytes)
+                .map_err(|error| anyhow!(error.to_string()))?;
+            if let Some((thread, thread_id)) = thread_filter {
+                let by_name = matches!(
+                    &decoded.operation.body,
+                    CollaborationOperationBodyV1::Open { thread_ref, .. }
+                        if thread_ref.as_deref() == Some(thread)
+                );
+                let by_id = decoded
+                    .operation
+                    .metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.scope.thread)
+                    .is_some_and(|id| id.to_string() == thread_id);
+                if !by_name && !by_id {
                     continue;
-                };
-                let decoded = CollaborationOperationEnvelope::decode(&bytes)
-                    .map_err(|error| anyhow!(error.to_string()))?;
-                if let Some((thread, thread_id)) = thread_filter {
-                    let by_name = matches!(
-                        &decoded.operation.body,
-                        CollaborationOperationBodyV1::Open { thread_ref, .. }
-                            if thread_ref.as_deref() == Some(thread)
-                    );
-                    let by_id = decoded
-                        .operation
-                        .metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.scope.thread)
-                        .is_some_and(|id| id.to_string() == thread_id);
-                    if !by_name && !by_id {
-                        continue;
-                    }
-                }
-                store
-                    .write_operation_bytes(&bytes)
-                    .context("store native signed discussion operation")?;
-                changed.insert(decoded.operation.discussion_id);
-                let local_operation_id = decoded.operation_id.to_string_full();
-                let repository = mirror.repos.entry(repo_path.to_string()).or_default();
-                if !repository
-                    .native_operations
-                    .iter()
-                    .any(|operation| operation.local_operation_id == local_operation_id)
-                {
-                    repository.native_operations.push(PreparedNativeOperation {
-                        local_operation_id,
-                        signed_record: record.encode_to_vec(),
-                    });
                 }
             }
-            save_mirror(repo.heddle_dir(), &mirror)?;
-            return Ok(changed.len());
+            store
+                .write_operation_bytes(&bytes)
+                .context("store native signed discussion operation")?;
+            changed.insert(decoded.operation.discussion_id);
+            let local_operation_id = decoded.operation_id.to_string_full();
+            let repository = mirror.repos.entry(repo_path.to_string()).or_default();
+            if !repository
+                .native_operations
+                .iter()
+                .any(|operation| operation.local_operation_id == local_operation_id)
+            {
+                repository.native_operations.push(PreparedNativeOperation {
+                    local_operation_id,
+                    signed_record: record.encode_to_vec(),
+                });
+            }
         }
+        save_mirror(repo.heddle_dir(), &mirror)?;
+        return Ok(changed.len());
     }
-    let Some((head_state, hosted)) =
-        listed_hosted_discussions(repo, client, repo_path, bootstrap, against, thread_filter)
-            .await?
+    let Some((_head_state, hosted)) =
+        listed_hosted_discussions(repo, client, repo_path, against, thread_filter).await?
     else {
         // weft#638: a repo with no HEAD cannot resolve a state to list against
         // unless the caller passed the pulled/cloned tip.
@@ -653,45 +638,9 @@ async fn pull_discussions_filtered(
     if hosted.is_empty() {
         return Ok(0);
     }
-    if bootstrap.is_none() {
-        return Err(anyhow!(
-            "hosted discussions omitted their signed operations; replication is incomplete"
-        ));
-    }
-    // Our own hosted principal name, so reconciliation can recognize the turns
-    // we pushed (weft stamps `Principal::new(username, "")`).
-    let hosted_username = client.authenticated_username();
-
-    let store = CollaborationStore::open(repo.heddle_dir()).context("open collaboration store")?;
-    let self_attr = repo.get_attribution().ok();
-    let _guard = lock_mirror_write(repo.heddle_dir())?;
-    let mut mirror = load_mirror(repo.heddle_dir())?;
-    let mut changed = 0usize;
-
-    for discussion in hosted {
-        let result = pull_one(
-            &store,
-            repo_path,
-            &mut mirror,
-            head_state,
-            hosted_username.as_deref(),
-            self_attr.as_ref(),
-            &discussion,
-        );
-        save_mirror(repo.heddle_dir(), &mirror)?;
-        match result {
-            Ok(true) => changed += 1,
-            Ok(false) => {}
-            Err(error) => {
-                client.warn(
-                    "hosted_discussion_sync_failed",
-                    format!("hosted discussion {}: {error:#}", discussion.id),
-                );
-            }
-        }
-    }
-
-    Ok(changed)
+    Err(anyhow!(
+        "hosted discussions omitted their signed operations; replication is incomplete"
+    ))
 }
 
 /// Prefer the pulled/cloned tip. HEAD is wrong on clone (not published yet)
@@ -707,7 +656,6 @@ async fn listed_hosted_discussions(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
-    bootstrap: Option<&[Discussion]>,
     against: Option<StateId>,
     thread_filter: Option<(&str, &str)>,
 ) -> Result<Option<(StateId, Vec<HostedDiscussion>)>> {
@@ -722,44 +670,17 @@ async fn listed_hosted_discussions(
         return Ok(None);
     };
 
-    // Pull-fold attachments are clone/pull's repo-wide snapshot. Never shrink
-    // that set for wait `--thread` — wait's filtered path always passes None.
-    // v2 Fetch does not fold discussions: Some([]) is not "the server has
-    // none", it is a source-only header, so ObserveCollaboration.
-    let mut hosted = match bootstrap.filter(|discussions| !discussions.is_empty()) {
-        Some(discussions) => discussions
-            .iter()
-            .cloned()
-            .map(hosted_discussion_from_bootstrap)
+    let listed = client
+        .list_discussions_by_state(repo_path, state.change_id, "all")
+        .await
+        .context("observe hosted discussions")?;
+    let hosted = match thread_filter {
+        Some((thread, thread_id)) => listed
+            .into_iter()
+            .filter(|discussion| discussion_matches_wait_thread(discussion, thread, thread_id))
             .collect(),
-        None => {
-            let listed = client
-                .list_discussions_by_state(repo_path, state.change_id, "all")
-                .await
-                .context("observe hosted discussions")?;
-            match thread_filter {
-                Some((thread, thread_id)) => listed
-                    .into_iter()
-                    .filter(|discussion| {
-                        discussion_matches_wait_thread(discussion, thread, thread_id)
-                    })
-                    .collect(),
-                None => listed,
-            }
-        }
+        None => listed,
     };
-    // Once-mode list can return discussion records without Turn events.
-    // pull_one skips empty Open shells, so hydrate from a per-discussion
-    // ObserveCollaboration (not v1 GetDiscussion) before materializing.
-    for discussion in &mut hosted {
-        if discussion.turns.is_empty()
-            && !discussion.id.is_empty()
-            && let Ok(full) = client.get_discussion(repo_path, &discussion.id, None).await
-            && !full.turns.is_empty()
-        {
-            *discussion = full;
-        }
-    }
     Ok(Some((state_id, hosted)))
 }
 
@@ -812,7 +733,8 @@ pub fn apply_hosted_discussion(
     result
 }
 
-fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion {
+#[cfg(test)]
+fn hosted_discussion_fixture(discussion: objects::object::Discussion) -> HostedDiscussion {
     HostedDiscussion {
         id: discussion.id,
         file: discussion.anchor.file,
@@ -848,7 +770,6 @@ fn hosted_discussion_from_bootstrap(discussion: Discussion) -> HostedDiscussion 
                 HostedResolution::Dismissed { reason }
             }
         },
-        kind: 0,
         causal_heads: Vec::new(),
         version: Vec::new(),
     }
@@ -1197,14 +1118,11 @@ fn is_pushed_annotation_echo(
 }
 
 fn hosted_open_anchor(discussion: &HostedDiscussion, head_state: StateId) -> CollaborationAnchor {
-    use crate::legacy_v1::DiscussionKind;
-
-    let kind = DiscussionKind::try_from(discussion.kind).unwrap_or(DiscussionKind::Unspecified);
     let has_symbol = !discussion.file.is_empty() && !discussion.symbol.is_empty();
-    // Coordination has no PathSymbolRef. An empty-anchor fetch of any kind
+    // Coordination has no source anchor. An empty-anchor fetch
     // must still Open — failing validation here would not advance the
     // watermark and every restart would die on the same event.
-    if kind == DiscussionKind::Coordination || !has_symbol {
+    if !has_symbol {
         return CollaborationAnchor::Repository;
     }
     CollaborationAnchor::Symbol {
@@ -1682,10 +1600,7 @@ fn parse_visibility_token(token: &str) -> VisibilityTier {
 
 #[cfg(test)]
 mod tests {
-    use crate::legacy_v1::{
-        Discussion as ProtoDiscussion, DiscussionTurn as ProtoTurn, PathSymbolRef, RepoEvent,
-    };
-    use api::heddle::api::common::StateId as ProtoStateId;
+    use api::heddle::api::common::{RepoEvent, StateId as ProtoStateId};
     use objects::object::{
         AnnotationKind, Attribution, CollaborationAnchor, CollaborationIdempotencyKey,
         CollaborationOperationBodyV1, CollaborationOperationEnvelope, CollaborationResolution,
@@ -1698,7 +1613,10 @@ mod tests {
     use super::*;
     use crate::{
         client::discussion_live::{DiscussionEventOutcome, consume_discussion_event},
-        hosted_runtime::hosted::test_server::CollaborationFixture,
+        hosted_runtime::hosted::{
+            HostedDiscussion as ProtoDiscussion, HostedDiscussionTurn as ProtoTurn,
+            test_server::CollaborationFixture,
+        },
     };
 
     /// A stable per-turn idempotency key for tests that drive
@@ -1873,74 +1791,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clone_discussion_sync_uses_against_before_head_is_published() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let temp = TempDir::new().unwrap();
-        let repo = Repository::init(temp.path()).unwrap();
-        let tree = Tree::new();
-        let tree_id = repo.store().put_tree(&tree).unwrap();
-        let state = State::new_snapshot(
-            tree_id,
-            Vec::new(),
-            Attribution::human(Principal::new("Test", "test@example.com")),
-        );
-        repo.store().put_state(&state).unwrap();
-        let against = state.id();
-        assert_eq!(
-            repo.head().unwrap(),
-            None,
-            "clone has not published HEAD yet"
-        );
-
-        let bootstrap = vec![Discussion {
-            id: "server-discussion-before-head".to_string(),
-            anchor: SymbolAnchor::new("lib.rs", "run"),
-            opened_against_state: against,
-            opened_at: 1_700_000_000,
-            thread_ref: None,
-            turns: vec![DiscussionTurn {
-                author: Principal::new("Reviewer", "reviewer@example.com"),
-                body: "keep this invariant".to_string(),
-                posted_at: 1_700_000_001,
-                references: Vec::new(),
-            }],
-            resolution: DiscussionResolution::Open,
-            body_changed_since_open: false,
-            anchor_ambiguous: false,
-            orphaned: false,
-            visibility: VisibilityTier::Internal,
-            resolved_annotation_id: None,
-        }];
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-
-        assert_eq!(
-            pull_discussions(
-                &repo,
-                &mut client,
-                "acme/widgets",
-                Some(&bootstrap),
-                Some(against),
-            )
-            .await
-            .unwrap(),
-            1,
-            "discussion sync must not return Ok(0) just because HEAD is unpublished"
-        );
-        assert_eq!(
-            repo.head().unwrap(),
-            None,
-            "sync must not publish clone HEAD"
-        );
-
-        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-        assert_eq!(store.materialize().unwrap().discussions.len(), 1);
-
-        client.close().await;
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn clone_empty_bootstrap_observes_and_materializes_discussions() {
+    async fn clone_native_pull_rejects_projection_without_signed_operation() {
         let _process_env_guard = crate::test_process_env::shared().await;
         let temp = TempDir::new().unwrap();
         let repo = Repository::init(temp.path()).unwrap();
@@ -1962,10 +1813,8 @@ mod tests {
         let discussion_id = DiscussionRecordId::generate().to_string();
         let proto = ProtoDiscussion {
             id: discussion_id.clone(),
-            anchor: Some(PathSymbolRef {
-                file: "lib.rs".to_string(),
-                symbol: "run".to_string(),
-            }),
+            file: "lib.rs".to_string(),
+            symbol: "run".to_string(),
             visibility: "internal".to_string(),
             turns: vec![ProtoTurn {
                 author_name: "Reviewer".to_string(),
@@ -1973,10 +1822,8 @@ mod tests {
                 body: "keep this invariant".to_string(),
                 turn_id: "turn-open".to_string(),
                 turn_seq: 1,
-                posted_at: Some(prost_types::Timestamp {
-                    seconds: 1_700_000_001,
-                    nanos: 0,
-                }),
+                posted_at_secs: 1_700_000_001,
+                ..Default::default()
             }],
             ..ProtoDiscussion::default()
         };
@@ -1986,31 +1833,14 @@ mod tests {
         let (mut client, server, fixture) =
             crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
 
-        let empty: &[Discussion] = &[];
-        let changed = pull_discussions(
-            &repo,
-            &mut client,
-            "acme/widgets",
-            Some(empty),
-            Some(against),
-        )
-        .await
-        .unwrap();
+        let error = pull_discussions(&repo, &mut client, "acme/widgets", Some(against))
+            .await
+            .unwrap_err();
         let observed = *fixture.list_requests.lock().unwrap();
+        assert!(observed >= 1, "native pull must ObserveCollaboration");
         assert!(
-            observed >= 1,
-            "empty v2 bootstrap must ObserveCollaboration, not treat Some([]) as no discussions"
-        );
-        assert_eq!(
-            changed, 1,
-            "ObserveCollaboration returned a discussion; pull_one must materialize it (got {changed}, observed={observed})"
-        );
-
-        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-        let local_id: DiscussionRecordId = discussion_id.parse().unwrap();
-        assert!(
-            store.materialize_discussion(&local_id).unwrap().is_some(),
-            "clone discuss list is empty after Observe returned a discussion: pull_one did not adopt"
+            format!("{error:#}").contains("omitted their signed operations"),
+            "projection-only discussion must be an explicit incomplete result: {error:#}"
         );
 
         client.close().await;
@@ -2071,71 +1901,6 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("replication is incomplete"), "{message}");
         assert!(message.contains("exact source revision"), "{message}");
-    }
-
-    #[tokio::test]
-    async fn bootstrap_pull_materializes_discussion_once_and_persists_the_mirror() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
-        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
-        let state = repo
-            .snapshot_with_attribution(
-                Some("seed".to_string()),
-                None,
-                Attribution::human(Principal::new("Test", "test@example.com")),
-            )
-            .unwrap()
-            .id();
-        let bootstrap = vec![Discussion {
-            id: "server-discussion-1".to_string(),
-            anchor: SymbolAnchor::new("lib.rs", "run"),
-            opened_against_state: state,
-            opened_at: 1_700_000_000,
-            thread_ref: None,
-            turns: vec![DiscussionTurn {
-                author: Principal::new("Reviewer", "reviewer@example.com"),
-                body: "keep this invariant".to_string(),
-                posted_at: 1_700_000_001,
-                references: Vec::new(),
-            }],
-            resolution: DiscussionResolution::Open,
-            body_changed_since_open: false,
-            anchor_ambiguous: false,
-            orphaned: false,
-            visibility: VisibilityTier::Internal,
-            resolved_annotation_id: None,
-        }];
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-
-        assert_eq!(
-            pull_discussions(
-                &repo,
-                &mut client,
-                "acme/widgets",
-                Some(&bootstrap),
-                Some(state)
-            )
-            .await
-            .unwrap(),
-            1
-        );
-        assert_eq!(
-            pull_discussions(
-                &repo,
-                &mut client,
-                "acme/widgets",
-                Some(&bootstrap),
-                Some(state)
-            )
-            .await
-            .unwrap(),
-            0
-        );
-        assert!(mirror_path(repo.heddle_dir()).is_file());
-
-        client.close().await;
-        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -2314,7 +2079,7 @@ mod tests {
         let destination_dir = TempDir::new().unwrap();
         let destination = Repository::init_default(destination_dir.path()).unwrap();
         assert_eq!(
-            pull_discussions(&destination, &mut client, "acme/widgets", None, None)
+            pull_discussions(&destination, &mut client, "acme/widgets", None)
                 .await
                 .unwrap(),
             4
@@ -2416,7 +2181,6 @@ mod tests {
             visibility: "internal".to_string(),
             thread_ref: None,
             thread_id: None,
-            kind: 0,
             turns: vec![HostedDiscussionTurn {
                 author_name: "Ada".to_string(),
                 author_email: "ada@example.com".to_string(),
@@ -2817,7 +2581,7 @@ mod tests {
         (temp, repo, state)
     }
 
-    fn bootstrap_discussion(id: &str, state: StateId) -> Discussion {
+    fn discussion_fixture(id: &str, state: StateId) -> Discussion {
         Discussion {
             id: id.to_string(),
             anchor: SymbolAnchor::new("lib.rs", "run"),
@@ -2842,320 +2606,6 @@ mod tests {
     // Falsifier: the originator's `disc-` id must be the id every clone can
     // address, and two clones of one source must agree. Pre-fix the pull path
     // minted a fresh UUIDv7 per clone, so neither held.
-    #[tokio::test]
-    async fn pull_adopts_the_originators_disc_id_so_clones_agree() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let originator = DiscussionRecordId::generate();
-        let wire_id = originator.to_string();
-
-        let mut materialized_ids = Vec::new();
-        for _ in 0..2 {
-            let (_temp, repo, state) = seed_repo_with_state();
-            let bootstrap = vec![bootstrap_discussion(&wire_id, state)];
-            let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-            assert_eq!(
-                pull_discussions(
-                    &repo,
-                    &mut client,
-                    "acme/widgets",
-                    Some(&bootstrap),
-                    Some(state)
-                )
-                .await
-                .unwrap(),
-                1
-            );
-            client.close().await;
-            server.await.unwrap();
-
-            let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-            // Addressable by the ORIGINATOR's id on this clone.
-            assert!(
-                store.materialize_discussion(&originator).unwrap().is_some(),
-                "clone must be addressable by the originator's id {originator}"
-            );
-            let ids: Vec<DiscussionRecordId> = store
-                .materialize()
-                .unwrap()
-                .discussions
-                .keys()
-                .copied()
-                .collect();
-            materialized_ids.push(ids);
-        }
-        assert_eq!(
-            materialized_ids[0], materialized_ids[1],
-            "two clones of one source must materialize the same discussion id set"
-        );
-    }
-
-    // Falsifier for the resume guard: if the op-log already holds the discussion
-    // (its own id came back over the wire) but the mirror has no entry, pull must
-    // resume rather than write a second `Open` root (materialize rejects two roots).
-    #[tokio::test]
-    async fn pull_resumes_when_oplog_has_it_but_mirror_is_missing() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let (_temp, repo, state) = seed_repo_with_state();
-        let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-        // This discussion already exists in the op-log under its own id, with the
-        // open turn copied verbatim from the server (author + timestamp), so the
-        // resumed pull reconciles the one turn rather than appending a copy.
-        let local_id = DiscussionRecordId::generate();
-        write_local_operation(
-            &store,
-            local_id,
-            Vec::new(),
-            Attribution::human(Principal::new("Reviewer", "reviewer@example.com")),
-            1_700_000_001_000,
-            CollaborationOperationBodyV1::Open {
-                blocking: false,
-                title: "run contract".to_string(),
-                anchor: CollaborationAnchor::Symbol {
-                    state_id: state,
-                    path: "lib.rs".to_string(),
-                    symbol: "run".to_string(),
-                },
-                visibility: VisibilityTier::Internal,
-                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
-                thread_ref: None,
-            },
-            test_key("open-keep-invariant"),
-        )
-        .unwrap();
-        let ops_before = store.operation_ids().unwrap().len();
-
-        // A pulls its own discussion back — same id on the wire, mirror empty.
-        let bootstrap = vec![bootstrap_discussion(&local_id.to_string(), state)];
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-        pull_discussions(
-            &repo,
-            &mut client,
-            "acme/widgets",
-            Some(&bootstrap),
-            Some(state),
-        )
-        .await
-        .unwrap();
-        client.close().await;
-        server.await.unwrap();
-
-        // No duplicate `Open` root: exactly one discussion, still addressable, and
-        // the single seeded turn reconciled rather than duplicated.
-        let materialized = store.materialize().unwrap();
-        assert_eq!(
-            materialized.discussions.len(),
-            1,
-            "must not duplicate the discussion"
-        );
-        assert!(materialized.discussions.contains_key(&local_id));
-        assert_eq!(
-            store.operation_ids().unwrap().len(),
-            ops_before,
-            "resume must not write a duplicate Open root for the reconciled turn"
-        );
-    }
-
-    // Falsifier for heddle#1677: two clones must materialize the SAME
-    // `CollabOpId`s for the same server turns. The idempotency key is now
-    // derived from `(hosted discussion id, server turn ordinal)` — both
-    // identical on every clone — instead of a random `Uuid::new_v4()` per
-    // write. On the pre-change random key this assertion fails, the two clones
-    // producing disjoint `co-…` id sets.
-    #[tokio::test]
-    async fn two_clones_agree_on_turn_op_ids() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        // One server-side discussion, addressed by the originator's id and
-        // pinned to a single server `opened_against_state` — identical for every
-        // clone (the server sends the same value everywhere), so the Open op's
-        // anchor does not depend on any clone's local HEAD.
-        let wire_id = DiscussionRecordId::generate().to_string();
-        let (_temp0, _repo0, pinned_state) = seed_repo_with_state();
-        let mut discussion = bootstrap_discussion(&wire_id, pinned_state);
-        discussion.turns.push(DiscussionTurn {
-            author: Principal::new("Reviewer", "reviewer@example.com"),
-            body: "and here is a follow-up".to_string(),
-            posted_at: 1_700_000_002,
-            references: Vec::new(),
-        });
-
-        let mut op_id_sets = Vec::new();
-        for _ in 0..2 {
-            let (_temp, repo, head_state) = seed_repo_with_state();
-            let bootstrap = vec![discussion.clone()];
-            let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-            // `against` is this clone's own resolvable tip; the shared anchor
-            // rides on the discussion's pinned `opened_against_state`.
-            pull_discussions(
-                &repo,
-                &mut client,
-                "acme/widgets",
-                Some(&bootstrap),
-                Some(head_state),
-            )
-            .await
-            .unwrap();
-            client.close().await;
-            server.await.unwrap();
-
-            let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-            let mut ids: Vec<String> = store
-                .operation_ids()
-                .unwrap()
-                .into_iter()
-                .map(|id| id.to_string())
-                .collect();
-            ids.sort();
-            assert_eq!(ids.len(), 2, "one Open + one AppendTurn materialized");
-            op_id_sets.push(ids);
-        }
-        assert_eq!(
-            op_id_sets[0], op_id_sets[1],
-            "two clones of one source must materialize the same CollabOpId set"
-        );
-    }
-
-    // heddle#1695 control: the clone/materialization path is deterministic
-    // across clones for a REALISTIC hosted open turn — nonzero server posted_at,
-    // server-echoed anchor state, server-stamped author. Two clones agree. (The
-    // invariant #1677 established; the two tests below cover the posted_at=0 and
-    // resolve-op cases that previously escaped it via wall-clock now_ms().)
-    #[tokio::test]
-    async fn two_clones_agree_on_open_op_for_realistic_hosted_turn() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let wire_id = DiscussionRecordId::generate().to_string();
-        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
-        let mut op_id_sets = Vec::new();
-        for _ in 0..2 {
-            let (_temp, repo, head_state) = seed_repo_with_state();
-            // opened_against_state pinned to the server-echoed value (same for
-            // every clone); posted_at nonzero (weft stamps now_secs()).
-            let discussion = bootstrap_discussion(&wire_id, anchor_state);
-            let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-            pull_discussions(
-                &repo,
-                &mut client,
-                "acme/widgets",
-                Some(&[discussion]),
-                Some(head_state),
-            )
-            .await
-            .unwrap();
-            client.close().await;
-            server.await.unwrap();
-
-            let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-            let mut ids: Vec<String> = store
-                .operation_ids()
-                .unwrap()
-                .into_iter()
-                .map(|id| id.to_string())
-                .collect();
-            ids.sort();
-            op_id_sets.push(ids);
-        }
-        assert_eq!(
-            op_id_sets[0], op_id_sets[1],
-            "two clones must agree on the open-op CollabOpId for a realistic hosted turn"
-        );
-    }
-
-    // heddle#1695: a materialized turn whose server `posted_at` is 0 must still
-    // earn the SAME open-op `CollabOpId` on every clone. `occurred_at_ms` is
-    // hashed into the op id, and `turn_ms` previously fell back to wall-clock
-    // `now_ms()` for a 0 `posted_at`, reminting the op per clone. Now it is a
-    // deterministic 0. RED before the fix (disjoint co- ids), GREEN after.
-    #[tokio::test]
-    async fn two_clones_agree_on_open_op_when_posted_at_is_zero() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let wire_id = DiscussionRecordId::generate().to_string();
-        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
-        let mut op_id_sets = Vec::new();
-        for _ in 0..2 {
-            let (_temp, repo, head_state) = seed_repo_with_state();
-            let mut discussion = bootstrap_discussion(&wire_id, anchor_state);
-            discussion.turns[0].posted_at = 0; // server omitted the turn timestamp
-            let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-            pull_discussions(
-                &repo,
-                &mut client,
-                "acme/widgets",
-                Some(&[discussion]),
-                Some(head_state),
-            )
-            .await
-            .unwrap();
-            client.close().await;
-            server.await.unwrap();
-
-            let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-            let mut ids: Vec<String> = store
-                .operation_ids()
-                .unwrap()
-                .into_iter()
-                .map(|id| id.to_string())
-                .collect();
-            ids.sort();
-            op_id_sets.push(ids);
-        }
-        assert_eq!(
-            op_id_sets[0], op_id_sets[1],
-            "two clones must agree on the open-op CollabOpId even when posted_at is 0"
-        );
-    }
-
-    // heddle#1695: a resolution pulled onto two clones must earn the SAME
-    // resolve-op `CollabOpId`. The resolve op's `occurred_at_ms` is hashed into
-    // its id and previously came from wall-clock `now_ms()`, reminting the op per
-    // clone. It is now derived deterministically from the discussion's latest
-    // server turn `posted_at` (`resolution_ms`). RED before the fix, GREEN after.
-    #[tokio::test]
-    async fn two_clones_agree_on_resolve_op() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let wire_id = DiscussionRecordId::generate().to_string();
-        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
-        let mut op_id_sets = Vec::new();
-        for _ in 0..2 {
-            let (_temp, repo, head_state) = seed_repo_with_state();
-            let mut discussion = bootstrap_discussion(&wire_id, anchor_state);
-            // Server-side dismissal — carries a resolution the clone materializes
-            // as a Resolve op alongside the open op.
-            discussion.resolution = DiscussionResolution::Dismissed {
-                reason: "handled offline".to_string(),
-            };
-            let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-            pull_discussions(
-                &repo,
-                &mut client,
-                "acme/widgets",
-                Some(&[discussion]),
-                Some(head_state),
-            )
-            .await
-            .unwrap();
-            client.close().await;
-            server.await.unwrap();
-
-            let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-            let mut ids: Vec<String> = store
-                .operation_ids()
-                .unwrap()
-                .into_iter()
-                .map(|id| id.to_string())
-                .collect();
-            ids.sort();
-            assert_eq!(ids.len(), 2, "one Open + one Resolve materialized");
-            op_id_sets.push(ids);
-        }
-        assert_eq!(
-            op_id_sets[0], op_id_sets[1],
-            "two clones must agree on the resolve-op CollabOpId"
-        );
-    }
-
-    // A retried materialization re-derives the SAME idempotency key from the
-    // stable `(hosted discussion id, server turn ordinal)` tuple, so the op
-    // dedupes at the store instead of duplicating. On the pre-change random key
-    // the retry would mint a fresh `CollabOpId` and double the op count.
     #[test]
     fn rederived_turn_op_key_dedupes_on_retry() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
@@ -3212,389 +2662,6 @@ mod tests {
     // wall-clock time) must become the hosted-canonical id a clone materializes
     // from the same weft snapshot. Two clones already agreed after #1677/#1697;
     // this is the hosted-clone path against an originator who opened locally.
-    #[tokio::test]
-    async fn originator_adopts_hosted_open_op_so_clone_agrees() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let wire_id = DiscussionRecordId::generate();
-        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
-        let hosted_snapshot = {
-            let mut discussion = bootstrap_discussion(&wire_id.to_string(), anchor_state);
-            discussion.turns[0].author = Principal::new("preview-user", "");
-            discussion.turns[0].posted_at = 1_700_000_042;
-            discussion
-        };
-        let hosted = hosted_discussion_from_bootstrap(hosted_snapshot.clone());
-
-        let (originator_temp, originator_repo, originator_state) = seed_repo_with_state();
-        let _ = originator_temp;
-        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
-        let originator_open = write_local_operation(
-            &originator_store,
-            wire_id,
-            Vec::new(),
-            Attribution::human(Principal::new("Local Author", "local@example.com")),
-            1_111_111_111_111,
-            CollaborationOperationBodyV1::Open {
-                blocking: false,
-                title: "a title the clone will not see".to_string(),
-                anchor: CollaborationAnchor::Symbol {
-                    state_id: originator_state,
-                    path: "lib.rs".to_string(),
-                    symbol: "run".to_string(),
-                },
-                visibility: VisibilityTier::Internal,
-                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
-                thread_ref: None,
-            },
-            test_key("originator-local-open"),
-        )
-        .unwrap();
-
-        let (clone_temp, clone_repo, clone_head) = seed_repo_with_state();
-        let _ = clone_temp;
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-        pull_discussions(
-            &clone_repo,
-            &mut client,
-            "acme/widgets",
-            Some(std::slice::from_ref(&hosted_snapshot)),
-            Some(clone_head),
-        )
-        .await
-        .unwrap();
-        client.close().await;
-        server.await.unwrap();
-        let clone_ids: Vec<String> = {
-            let store = CollaborationStore::open(clone_repo.heddle_dir()).unwrap();
-            let mut ids: Vec<String> = store
-                .operation_ids()
-                .unwrap()
-                .into_iter()
-                .map(|id| id.to_string())
-                .collect();
-            ids.sort();
-            ids
-        };
-        assert_ne!(
-            vec![originator_open.to_string()],
-            clone_ids,
-            "pre-adopt originator CollabOpId must differ from the hosted clone (the remint this test exists to close)"
-        );
-
-        let mut entry = MirrorEntry {
-            local_id: wire_id.to_string(),
-            server_id: wire_id.to_string(),
-            links: vec![TurnLink {
-                local_turn_id: turn_identity(&originator_open, 0),
-                server_ordinal: 0,
-                server_turn_id: None,
-            }],
-            resolved_into_annotation_operation_id: None,
-            pulled_resolution_key: None,
-        };
-        assert!(
-            adopt_hosted_canonical_turns(
-                &originator_store,
-                originator_state,
-                &wire_id.to_string(),
-                &hosted,
-                &mut entry,
-            )
-            .unwrap(),
-            "originator must adopt the hosted-canonical open op"
-        );
-        assert!(
-            !adopt_hosted_canonical_turns(
-                &originator_store,
-                originator_state,
-                &wire_id.to_string(),
-                &hosted,
-                &mut entry,
-            )
-            .unwrap(),
-            "a second adopt must be a no-op"
-        );
-
-        let mut originator_ids: Vec<String> = originator_store
-            .operation_ids()
-            .unwrap()
-            .into_iter()
-            .map(|id| id.to_string())
-            .collect();
-        originator_ids.sort();
-        assert_eq!(
-            originator_ids, clone_ids,
-            "after adopt, originator CollabOpId must equal the hosted clone"
-        );
-        assert_eq!(
-            originator_store.operation_ids().unwrap().len(),
-            1,
-            "adopt must retire the local-only open, not leave two Open roots"
-        );
-    }
-
-    // Same contract for open + append: the whole published chain adopts so
-    // parent pointers stay hosted-canonical.
-    #[tokio::test]
-    async fn originator_adopts_hosted_open_and_append_so_clone_agrees() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let wire_id = DiscussionRecordId::generate();
-        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
-        let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
-        hosted_snapshot.turns[0].author = Principal::new("preview-user", "");
-        hosted_snapshot.turns[0].posted_at = 1_700_000_042;
-        hosted_snapshot.turns.push(DiscussionTurn {
-            author: Principal::new("preview-user", ""),
-            body: "and a follow-up".to_string(),
-            posted_at: 1_700_000_043,
-            references: Vec::new(),
-        });
-        let hosted = hosted_discussion_from_bootstrap(hosted_snapshot.clone());
-        assert!(
-            hosted.turns.len() >= 2,
-            "AppendTurn/OpenDiscussion echo is the full discussion, not the last turn only"
-        );
-
-        let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
-        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
-        let originator_open = write_local_operation(
-            &originator_store,
-            wire_id,
-            Vec::new(),
-            Attribution::human(Principal::new("Local Author", "local@example.com")),
-            1_111_111_111_111,
-            CollaborationOperationBodyV1::Open {
-                blocking: false,
-                title: "local title".to_string(),
-                anchor: CollaborationAnchor::Symbol {
-                    state_id: originator_state,
-                    path: "lib.rs".to_string(),
-                    symbol: "run".to_string(),
-                },
-                visibility: VisibilityTier::Internal,
-                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
-                thread_ref: None,
-            },
-            test_key("originator-local-open"),
-        )
-        .unwrap();
-        let originator_append = write_local_operation(
-            &originator_store,
-            wire_id,
-            vec![originator_open],
-            Attribution::human(Principal::new("Local Author", "local@example.com")),
-            1_111_111_111_222,
-            CollaborationOperationBodyV1::AppendTurn {
-                turn: DiscussionTurnV1::new("and a follow-up").unwrap(),
-            },
-            test_key("originator-local-append"),
-        )
-        .unwrap();
-
-        let (_clone_temp, clone_repo, clone_head) = seed_repo_with_state();
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-        pull_discussions(
-            &clone_repo,
-            &mut client,
-            "acme/widgets",
-            Some(&[hosted_snapshot]),
-            Some(clone_head),
-        )
-        .await
-        .unwrap();
-        client.close().await;
-        server.await.unwrap();
-        let clone_ids: Vec<String> = {
-            let store = CollaborationStore::open(clone_repo.heddle_dir()).unwrap();
-            let mut ids: Vec<String> = store
-                .operation_ids()
-                .unwrap()
-                .into_iter()
-                .map(|id| id.to_string())
-                .collect();
-            ids.sort();
-            ids
-        };
-        assert_eq!(clone_ids.len(), 2);
-
-        let mut entry = MirrorEntry {
-            local_id: wire_id.to_string(),
-            server_id: wire_id.to_string(),
-            links: vec![
-                TurnLink {
-                    local_turn_id: turn_identity(&originator_open, 0),
-                    server_ordinal: 0,
-                    server_turn_id: None,
-                },
-                TurnLink {
-                    local_turn_id: turn_identity(&originator_append, 0),
-                    server_ordinal: 1,
-                    server_turn_id: None,
-                },
-            ],
-            resolved_into_annotation_operation_id: None,
-            pulled_resolution_key: None,
-        };
-        assert!(
-            adopt_hosted_canonical_turns(
-                &originator_store,
-                originator_state,
-                &wire_id.to_string(),
-                &hosted,
-                &mut entry,
-            )
-            .unwrap()
-        );
-
-        let mut originator_ids: Vec<String> = originator_store
-            .operation_ids()
-            .unwrap()
-            .into_iter()
-            .map(|id| id.to_string())
-            .collect();
-        originator_ids.sort();
-        assert_eq!(
-            originator_ids, clone_ids,
-            "after adopt, originator open+append CollabOpIds must equal the hosted clone"
-        );
-    }
-
-    // The adopt `push_one` runs after `hosted = Some(echoed)`: a multi-turn
-    // AppendTurn echo is the full discussion, so both local ops adopt.
-    #[tokio::test]
-    async fn push_echo_adopt_uses_full_discussion() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let wire_id = DiscussionRecordId::generate();
-        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
-        let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
-        hosted_snapshot.turns[0].author = Principal::new("preview-user", "");
-        hosted_snapshot.turns[0].posted_at = 1_700_000_042;
-        hosted_snapshot.turns.push(DiscussionTurn {
-            author: Principal::new("preview-user", ""),
-            body: "and a follow-up".to_string(),
-            posted_at: 1_700_000_043,
-            references: Vec::new(),
-        });
-        let echo = hosted_discussion_from_bootstrap(hosted_snapshot.clone());
-        assert!(
-            echo.turns.len() >= 2,
-            "the AppendTurn echo push_one keeps must include every turn, not only the last"
-        );
-
-        let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
-        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
-        let originator_open = write_local_operation(
-            &originator_store,
-            wire_id,
-            Vec::new(),
-            Attribution::human(Principal::new("Local Author", "local@example.com")),
-            1_111_111_111_111,
-            CollaborationOperationBodyV1::Open {
-                blocking: false,
-                title: "local title".to_string(),
-                anchor: CollaborationAnchor::Symbol {
-                    state_id: originator_state,
-                    path: "lib.rs".to_string(),
-                    symbol: "run".to_string(),
-                },
-                visibility: VisibilityTier::Internal,
-                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
-                thread_ref: None,
-            },
-            test_key("originator-local-open"),
-        )
-        .unwrap();
-        let originator_append = write_local_operation(
-            &originator_store,
-            wire_id,
-            vec![originator_open],
-            Attribution::human(Principal::new("Local Author", "local@example.com")),
-            1_111_111_111_222,
-            CollaborationOperationBodyV1::AppendTurn {
-                turn: DiscussionTurnV1::new("and a follow-up").unwrap(),
-            },
-            test_key("originator-local-append"),
-        )
-        .unwrap();
-
-        let (_clone_temp, clone_repo, clone_head) = seed_repo_with_state();
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-        pull_discussions(
-            &clone_repo,
-            &mut client,
-            "acme/widgets",
-            Some(&[hosted_snapshot]),
-            Some(clone_head),
-        )
-        .await
-        .unwrap();
-        client.close().await;
-        server.await.unwrap();
-        let clone_ids: Vec<String> = {
-            let store = CollaborationStore::open(clone_repo.heddle_dir()).unwrap();
-            let mut ids: Vec<String> = store
-                .operation_ids()
-                .unwrap()
-                .into_iter()
-                .map(|id| id.to_string())
-                .collect();
-            ids.sort();
-            ids
-        };
-
-        let mut entry = MirrorEntry {
-            local_id: wire_id.to_string(),
-            server_id: wire_id.to_string(),
-            links: vec![
-                TurnLink {
-                    local_turn_id: turn_identity(&originator_open, 0),
-                    server_ordinal: 0,
-                    server_turn_id: None,
-                },
-                TurnLink {
-                    local_turn_id: turn_identity(&originator_append, 0),
-                    server_ordinal: 1,
-                    server_turn_id: None,
-                },
-            ],
-            resolved_into_annotation_operation_id: None,
-            pulled_resolution_key: None,
-        };
-        assert!(
-            echo.turns.len() >= entry.links.len(),
-            "full echo must cover every linked local turn"
-        );
-        assert!(
-            adopt_from_push_echo(
-                &originator_store,
-                originator_state,
-                &wire_id.to_string(),
-                &echo,
-                &mut entry,
-            )
-            .unwrap(),
-            "push_one's adopt must consume the full multi-turn echo"
-        );
-
-        let mut originator_ids: Vec<String> = originator_store
-            .operation_ids()
-            .unwrap()
-            .into_iter()
-            .map(|id| id.to_string())
-            .collect();
-        originator_ids.sort();
-        assert_eq!(
-            originator_ids, clone_ids,
-            "push_one adopt from a full echo must match the hosted clone"
-        );
-        assert_eq!(
-            originator_store.operation_ids().unwrap().len(),
-            2,
-            "full-echo adopt must keep both published turns"
-        );
-    }
-
-    // A last-turn-only echo must not retire the unpublished prefix.
     #[test]
     fn partial_push_echo_does_not_under_adopt() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
@@ -3635,10 +2702,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut partial = hosted_discussion_from_bootstrap(bootstrap_discussion(
-            &wire_id.to_string(),
-            originator_state,
-        ));
+        let mut partial =
+            hosted_discussion_fixture(discussion_fixture(&wire_id.to_string(), originator_state));
         partial.turns.truncate(1);
         assert_eq!(partial.turns.len(), 1);
 
@@ -3687,131 +2752,14 @@ mod tests {
     // pull_one must adopt the hosted-canonical envelope so the originator
     // matches a fresh clone of the same snapshot.
     #[tokio::test]
-    async fn pull_adopts_originator_local_open_to_match_clone() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let wire_id = DiscussionRecordId::generate();
-        let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
-        let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
-        hosted_snapshot.turns[0].author = Principal::new("preview-user", "");
-        hosted_snapshot.turns[0].posted_at = 1_700_000_042;
-
-        let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
-        let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
-        let originator_open = write_local_operation(
-            &originator_store,
-            wire_id,
-            Vec::new(),
-            Attribution::human(Principal::new("Local Author", "local@example.com")),
-            1_111_111_111_111,
-            CollaborationOperationBodyV1::Open {
-                blocking: false,
-                title: "local title".to_string(),
-                anchor: CollaborationAnchor::Symbol {
-                    state_id: originator_state,
-                    path: "lib.rs".to_string(),
-                    symbol: "run".to_string(),
-                },
-                visibility: VisibilityTier::Internal,
-                turn: DiscussionTurnV1::new("keep this invariant").unwrap(),
-                thread_ref: None,
-            },
-            test_key("originator-local-open"),
-        )
-        .unwrap();
-        let mut mirror = HostedMirror::default();
-        mirror
-            .repos
-            .entry("acme/widgets".to_string())
-            .or_default()
-            .discussions
-            .push(MirrorEntry {
-                local_id: wire_id.to_string(),
-                server_id: wire_id.to_string(),
-                links: vec![TurnLink {
-                    local_turn_id: turn_identity(&originator_open, 0),
-                    server_ordinal: 0,
-                    server_turn_id: None,
-                }],
-                resolved_into_annotation_operation_id: None,
-                pulled_resolution_key: None,
-            });
-        save_mirror(originator_repo.heddle_dir(), &mirror).unwrap();
-
-        let (_clone_temp, clone_repo, clone_head) = seed_repo_with_state();
-        let (mut clone_client, clone_server) =
-            crate::hosted_runtime::hosted::test_server::start().await;
-        pull_discussions(
-            &clone_repo,
-            &mut clone_client,
-            "acme/widgets",
-            Some(std::slice::from_ref(&hosted_snapshot)),
-            Some(clone_head),
-        )
-        .await
-        .unwrap();
-        clone_client.close().await;
-        clone_server.await.unwrap();
-
-        let (mut originator_client, originator_server) =
-            crate::hosted_runtime::hosted::test_server::start().await;
-        assert_eq!(
-            pull_discussions(
-                &originator_repo,
-                &mut originator_client,
-                "acme/widgets",
-                Some(&[hosted_snapshot]),
-                Some(originator_state),
-            )
-            .await
-            .unwrap(),
-            1,
-            "pull must adopt the hosted-canonical open op"
-        );
-        originator_client.close().await;
-        originator_server.await.unwrap();
-
-        let mut originator_ids: Vec<String> = originator_store
-            .operation_ids()
-            .unwrap()
-            .into_iter()
-            .map(|id| id.to_string())
-            .collect();
-        originator_ids.sort();
-        let clone_ids: Vec<String> = {
-            let store = CollaborationStore::open(clone_repo.heddle_dir()).unwrap();
-            let mut ids: Vec<String> = store
-                .operation_ids()
-                .unwrap()
-                .into_iter()
-                .map(|id| id.to_string())
-                .collect();
-            ids.sort();
-            ids
-        };
-        assert_eq!(
-            originator_ids, clone_ids,
-            "hosted pull must leave the originator with the same CollabOpId a clone materializes"
-        );
-        assert_ne!(
-            originator_ids,
-            vec![originator_open.to_string()],
-            "pull must retire the local-only open op, not keep it"
-        );
-    }
-
-    // Cross-path for heddle#1695 + #1677/#1697: after the originator adopts
-    // the hosted-canonical Open, a live doorbell GetDiscussion (thinner
-    // snapshot: no opened_against_state, turn_id/turn_seq set) must not remint
-    // or duplicate the first turn. Adopt-in-isolation tests never hit this.
-    #[tokio::test]
     async fn doorbell_after_adopt_does_not_duplicate_the_first_turn() {
         let _process_env_guard = crate::test_process_env::shared().await;
         let wire_id = DiscussionRecordId::generate();
         let (_temp0, _repo0, anchor_state) = seed_repo_with_state();
-        let mut hosted_snapshot = bootstrap_discussion(&wire_id.to_string(), anchor_state);
+        let mut hosted_snapshot = discussion_fixture(&wire_id.to_string(), anchor_state);
         hosted_snapshot.turns[0].author = Principal::new("preview-user", "");
         hosted_snapshot.turns[0].posted_at = 1_700_000_042;
-        let hosted = hosted_discussion_from_bootstrap(hosted_snapshot.clone());
+        let hosted = hosted_discussion_fixture(hosted_snapshot.clone());
 
         let (_originator_temp, originator_repo, originator_state) = seed_repo_with_state();
         let originator_store = CollaborationStore::open(originator_repo.heddle_dir()).unwrap();
@@ -3886,10 +2834,8 @@ mod tests {
             wire_id.to_string(),
             ProtoDiscussion {
                 id: wire_id.to_string(),
-                anchor: Some(PathSymbolRef {
-                    file: "lib.rs".to_string(),
-                    symbol: "run".to_string(),
-                }),
+                file: "lib.rs".to_string(),
+                symbol: "run".to_string(),
                 visibility: "internal".to_string(),
                 turns: vec![ProtoTurn {
                     author_name: "preview-user".to_string(),
@@ -3897,10 +2843,8 @@ mod tests {
                     body: "keep this invariant".to_string(),
                     turn_id: "turn-open".to_string(),
                     turn_seq: 1,
-                    posted_at: Some(prost_types::Timestamp {
-                        seconds: 1_700_000_042,
-                        nanos: 0,
-                    }),
+                    posted_at_secs: 1_700_000_042,
+                    ..Default::default()
                 }],
                 ..ProtoDiscussion::default()
             },

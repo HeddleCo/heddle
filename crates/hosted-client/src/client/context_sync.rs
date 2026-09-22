@@ -8,7 +8,6 @@
 //! so retries cannot reconstruct or restamp the evidence. Pull verifies native
 //! signed records and materializes the annotation view from those originals.
 //!
-//! Legacy bootstrap projections can still populate a local view during clone.
 //! An observed hosted projection without the corresponding signed operation is
 //! reported as incomplete rather than presented as authored provenance.
 
@@ -20,20 +19,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::legacy_v1::{
-    AnnotationScope as ProtoScope, ContextAnnotation, ContextAnnotationKind,
-    ContextAnnotationStatus, annotation_scope::Scope,
-};
-#[cfg(test)]
-use crate::legacy_v1::{LineRange, SymbolScope};
 use anyhow::{Context, Result};
 use api::heddle::api::v1alpha2::SignedRecord;
 use objects::{
     fs_atomic::write_file_atomic,
     object::{
-        Annotation, AnnotationKind, AnnotationRevision, AnnotationScope, AnnotationStatus,
-        CollaborationAnchor, CollaborationRevision, CollaborationSourceAnchor, ContentHash,
-        ContextBlob, ContextProvenance, ContextTarget, State, StateId,
+        Annotation, AnnotationRevision, AnnotationScope, CollaborationAnchor,
+        CollaborationRevision, CollaborationSourceAnchor, ContextBlob, ContextProvenance,
+        ContextTarget, State, StateId,
     },
     store::ObjectStore,
 };
@@ -200,70 +193,6 @@ fn add_revision_link(
     }
 }
 
-// =========================================================================
-// scope / kind converters
-// =========================================================================
-
-#[cfg(test)]
-fn scope_to_proto(scope: &AnnotationScope) -> ProtoScope {
-    let inner = match scope {
-        AnnotationScope::File => Scope::File(true),
-        AnnotationScope::Symbol {
-            name,
-            resolved_lines,
-        } => Scope::Symbol(SymbolScope {
-            name: name.clone(),
-            resolved_start: resolved_lines.map(|(start, _)| start),
-            resolved_end: resolved_lines.map(|(_, end)| end),
-        }),
-        AnnotationScope::Lines(start, end) => Scope::Lines(LineRange {
-            start: *start,
-            end: *end,
-        }),
-    };
-    ProtoScope { scope: Some(inner) }
-}
-
-fn scope_from_proto(scope: Option<&ProtoScope>) -> AnnotationScope {
-    match scope.and_then(|s| s.scope.as_ref()) {
-        Some(Scope::File(_)) | None => AnnotationScope::File,
-        Some(Scope::Symbol(symbol)) => AnnotationScope::Symbol {
-            name: symbol.name.clone(),
-            resolved_lines: match (symbol.resolved_start, symbol.resolved_end) {
-                (Some(start), Some(end)) => Some((start, end)),
-                _ => None,
-            },
-        },
-        Some(Scope::Lines(range)) => AnnotationScope::Lines(range.start, range.end),
-    }
-}
-
-#[cfg(test)]
-fn kind_to_proto(kind: AnnotationKind) -> ContextAnnotationKind {
-    match kind {
-        AnnotationKind::Constraint => ContextAnnotationKind::Constraint,
-        AnnotationKind::Invariant => ContextAnnotationKind::Invariant,
-        AnnotationKind::Rationale => ContextAnnotationKind::Rationale,
-    }
-}
-
-fn kind_from_proto(kind: i32) -> AnnotationKind {
-    match ContextAnnotationKind::try_from(kind).unwrap_or(ContextAnnotationKind::Rationale) {
-        ContextAnnotationKind::Constraint => AnnotationKind::Constraint,
-        ContextAnnotationKind::Invariant => AnnotationKind::Invariant,
-        ContextAnnotationKind::Rationale | ContextAnnotationKind::Unspecified => {
-            AnnotationKind::Rationale
-        }
-    }
-}
-
-fn status_from_proto(status: i32) -> AnnotationStatus {
-    match ContextAnnotationStatus::try_from(status).unwrap_or(ContextAnnotationStatus::Active) {
-        ContextAnnotationStatus::Superseded => AnnotationStatus::Superseded,
-        _ => AnnotationStatus::Active,
-    }
-}
-
 fn native_context_anchor(
     target: &ContextTarget,
     scope: &AnnotationScope,
@@ -389,17 +318,6 @@ async fn publish_native_context_revision(
     Ok(())
 }
 
-fn content_hash_from_bytes(bytes: &Option<Vec<u8>>) -> Option<ContentHash> {
-    bytes
-        .as_ref()
-        .and_then(|raw| <[u8; 32]>::try_from(raw.as_slice()).ok())
-        .map(ContentHash::from_bytes)
-}
-
-fn state_id_from_proto(id: Option<&api::heddle::api::common::StateId>) -> Option<StateId> {
-    id.and_then(|value| StateId::try_from_slice(&value.value).ok())
-}
-
 /// The attribution string weft stamps on our own hosted writes:
 /// `Principal::new(username, "")` renders as `"{username} <>"`.
 fn hosted_attribution(username: Option<&str>) -> Option<String> {
@@ -444,7 +362,7 @@ pub async fn push_context(
     let server_ann_ids: HashSet<String> = list_server_annotations(client, repo_path, Some(head_id))
         .await?
         .into_iter()
-        .map(|annotation| annotation.id)
+        .map(|annotation| annotation.annotation_id)
         .collect();
 
     let heddle_dir = repo.heddle_dir().to_path_buf();
@@ -774,7 +692,6 @@ pub async fn pull_context(
     repo: &Repository,
     client: &mut HostedClient,
     repo_path: &str,
-    bootstrap: Option<&[(ContextTarget, ContextBlob)]>,
     against: Option<StateId>,
 ) -> Result<usize> {
     let Some(head_id) = context_sync_state(repo, against)? else {
@@ -797,39 +714,6 @@ pub async fn pull_context(
     let heddle_dir = repo.heddle_dir().to_path_buf();
     let mut mirror = load_mirror(&heddle_dir)?;
     let mut changed = 0usize;
-    // v2 Fetch is source-only: Some([]) is not "no annotations".
-    if let Some(entries) = bootstrap.filter(|entries| !entries.is_empty()) {
-        for (target, blob) in entries {
-            for annotation in &blob.annotations {
-                if annotation.status == AnnotationStatus::Superseded {
-                    continue;
-                }
-                let result = pull_one_annotation(
-                    repo,
-                    repo_path,
-                    &head_state,
-                    target,
-                    annotation,
-                    self_local_attr.as_deref(),
-                    username.as_deref(),
-                    &mut mirror,
-                );
-                save_mirror(&heddle_dir, &mirror)?;
-                match result {
-                    Ok(true) => changed += 1,
-                    Ok(false) => {}
-                    Err(error) => {
-                        client.warn(
-                            "hosted_context_sync_failed",
-                            format!("hosted context {}: {error:#}", annotation.annotation_id),
-                        );
-                    }
-                }
-            }
-        }
-        return Ok(changed);
-    }
-
     let originals = client
         .list_context_operations(repo_path)
         .await
@@ -886,7 +770,7 @@ pub async fn pull_context(
             Err(error) => {
                 client.warn(
                     "hosted_context_sync_failed",
-                    format!("hosted context {}: {error:#}", annotation.id),
+                    format!("hosted context {}: {error:#}", annotation.annotation_id),
                 );
             }
         }
@@ -910,29 +794,16 @@ async fn pull_one_rpc(
     repo_path: &str,
     head_state: &State,
     target: &ContextTarget,
-    server: &ContextAnnotation,
+    server: &Annotation,
     self_local_attr: Option<&str>,
     username: Option<&str>,
     mirror: &mut HostedContextMirror,
 ) -> Result<bool> {
-    let mut server_revs = fetch_history(client, repo_path, &server.id).await?;
-    if server_revs.is_empty() {
-        // Observe list already carried the current revision (eee6d552
-        // mapping). Empty GetContextHistory must not attach a shell that
-        // `context list` then hides.
-        server_revs.push(annotation_revision_from_list(server));
+    let mut annotation = server.clone();
+    let server_revs = fetch_history(client, repo_path, &server.annotation_id).await?;
+    if !server_revs.is_empty() {
+        annotation.revisions = server_revs;
     }
-    let annotation = Annotation {
-        annotation_id: server.id.clone(),
-        scope: scope_from_proto(server.scope.as_ref()),
-        status: status_from_proto(server.status),
-        revisions: server_revs,
-        supersedes_annotation_id: server.supersedes_annotation_id.clone(),
-        supersedes_rewrite_pct: server.supersedes_rewrite_pct,
-        visibility: objects::object::VisibilityTier::default(),
-        resolved_from_discussion: None,
-        anchor_status: objects::object::AnnotationAnchorStatus::default(),
-    };
     pull_one_annotation(
         repo,
         repo_path,
@@ -1150,24 +1021,11 @@ fn reconcile_ok(
 // Server enumeration
 // =========================================================================
 
-fn annotation_revision_from_list(server: &ContextAnnotation) -> AnnotationRevision {
-    AnnotationRevision {
-        revision_id: server.id.clone(),
-        kind: kind_from_proto(server.kind),
-        content: server.content.clone(),
-        tags: server.tags.clone(),
-        attribution: server.attribution.clone(),
-        created_at: 0,
-        source_hash: None,
-        created_at_state: None,
-    }
-}
-
 async fn list_server_annotations(
     client: &mut HostedClient,
     repo_path: &str,
     fallback_state: Option<StateId>,
-) -> Result<Vec<ContextAnnotation>> {
+) -> Result<Vec<Annotation>> {
     Ok(list_server_targets(client, repo_path, fallback_state)
         .await?
         .into_iter()
@@ -1179,30 +1037,19 @@ async fn list_server_targets(
     client: &mut HostedClient,
     repo_path: &str,
     fallback_state: Option<StateId>,
-) -> Result<Vec<(ContextTarget, ContextAnnotation)>> {
-    let (files, states) = client
+) -> Result<Vec<(ContextTarget, Annotation)>> {
+    let annotations = client
         .list_context(repo_path, None, None, None)
         .await
         .context("list hosted context")?;
-    let mut out = Vec::new();
-    for file in files {
-        let Ok(target) = ContextTarget::file(&file.path) else {
-            continue;
-        };
-        for annotation in file.annotations {
-            out.push((target.clone(), annotation));
-        }
-    }
-    for state in states {
-        let Some(state_id) = state_id_from_proto(state.state_id.as_ref()).or(fallback_state) else {
-            continue;
-        };
-        let target = ContextTarget::state(state_id);
-        for annotation in state.annotations {
-            out.push((target.clone(), annotation));
-        }
-    }
-    Ok(out)
+    Ok(annotations
+        .into_iter()
+        .filter_map(|(target, annotation)| {
+            target
+                .or_else(|| fallback_state.map(ContextTarget::state))
+                .map(|target| (target, annotation))
+        })
+        .collect())
 }
 
 /// `GetContextHistory` returns revisions newest-first; local storage is
@@ -1216,19 +1063,7 @@ async fn fetch_history(
         .get_context_history(repo_path, None, annotation_id)
         .await
         .with_context(|| format!("fetch hosted annotation history {annotation_id}"))?;
-    let mut revisions: Vec<AnnotationRevision> = history
-        .into_iter()
-        .map(|revision| AnnotationRevision {
-            revision_id: revision.revision_id,
-            kind: kind_from_proto(revision.kind),
-            content: revision.content,
-            tags: revision.tags,
-            attribution: revision.attribution,
-            created_at: revision.created_at.map(|ts| ts.seconds).unwrap_or(0),
-            source_hash: content_hash_from_bytes(&revision.source_hash),
-            created_at_state: state_id_from_proto(revision.created_at_state.as_ref()),
-        })
-        .collect();
+    let mut revisions = history;
     revisions.reverse();
     Ok(revisions)
 }
@@ -1258,7 +1093,7 @@ fn create_op_id(repo_path: &str, annotation_id: &str, revision_id: &str) -> Stri
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Attribution, Principal};
+    use objects::object::{AnnotationKind, Attribution, ContentHash, Principal};
     use tempfile::TempDir;
 
     use super::*;
@@ -1273,33 +1108,6 @@ mod tests {
             created_at,
             source_hash: None,
             created_at_state: None,
-        }
-    }
-
-    #[test]
-    fn scope_round_trips_through_proto() {
-        let _process_env_guard = crate::test_process_env::shared_blocking();
-        for scope in [
-            AnnotationScope::File,
-            AnnotationScope::Symbol {
-                name: "run".to_string(),
-                resolved_lines: Some((3, 9)),
-            },
-            AnnotationScope::Lines(10, 20),
-        ] {
-            assert_eq!(scope_from_proto(Some(&scope_to_proto(&scope))), scope);
-        }
-    }
-
-    #[test]
-    fn kind_round_trips_through_proto() {
-        let _process_env_guard = crate::test_process_env::shared_blocking();
-        for kind in [
-            AnnotationKind::Constraint,
-            AnnotationKind::Invariant,
-            AnnotationKind::Rationale,
-        ] {
-            assert_eq!(kind_from_proto(kind_to_proto(kind) as i32), kind);
         }
     }
 
@@ -1488,105 +1296,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clone_context_pack_fallback_rejects_projection_without_signed_operation() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        use crate::legacy_v1::{AnnotatedFile, ContextAnnotation, ContextRevision};
-
-        use crate::hosted_runtime::hosted::{
-            PullBootstrapMetadata,
-            test_server::{ContextFixture, start_with_context},
-        };
-
-        let temp = TempDir::new().unwrap();
-        let repo = Repository::init(temp.path()).unwrap();
-        let tree_id = repo
-            .store()
-            .put_tree(&objects::object::Tree::new())
-            .unwrap();
-        let state = State::new_snapshot(
-            tree_id,
-            Vec::new(),
-            Attribution::human(Principal::new("Test", "test@example.com")),
-        );
-        repo.store().put_state(&state).unwrap();
-        let against = state.id();
-        assert_eq!(
-            repo.head().unwrap(),
-            None,
-            "clone has not published HEAD yet"
-        );
-
-        // The server advertised a Context attachment, but the pull loop does
-        // not consume StateAttachment frames. Resolution must select the RPC
-        // fallback instead of clone-killing or treating it as an empty page.
-        let bootstrap = PullBootstrapMetadata {
-            discussions_from_pack: false,
-            discussions: Vec::new(),
-            context_from_pack: true,
-            context: Vec::new(),
-        }
-        .resolve(&repo, Some(against))
-        .expect("unconsumable packed context must fall back");
-        assert!(bootstrap.context.is_none());
-
-        let annotation_id = "server-context-before-head".to_string();
-        let fixture = ContextFixture {
-            files: vec![AnnotatedFile {
-                path: "lib.rs".to_string(),
-                annotations: vec![ContextAnnotation {
-                    id: annotation_id.clone(),
-                    status: ContextAnnotationStatus::Active as i32,
-                    kind: ContextAnnotationKind::Invariant as i32,
-                    ..ContextAnnotation::default()
-                }],
-            }],
-            histories: std::collections::HashMap::from([(
-                annotation_id.clone(),
-                vec![ContextRevision {
-                    revision_id: "server-context-revision".to_string(),
-                    kind: ContextAnnotationKind::Invariant as i32,
-                    content: "preserve this contract".to_string(),
-                    attribution: "reviewer <>".to_string(),
-                    created_at: Some(prost_types::Timestamp {
-                        seconds: 1_700_000_000,
-                        nanos: 0,
-                    }),
-                    ..ContextRevision::default()
-                }],
-            )]),
-            ..ContextFixture::default()
-        };
-        let (mut client, server, fixture) = start_with_context(fixture).await;
-
-        let error = pull_context(
-            &repo,
-            &mut client,
-            "acme/widgets",
-            bootstrap.context.as_deref(),
-            Some(against),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            format!("{error:#}").contains("omitted their signed operations"),
-            "projection-only context must be an explicit incomplete result: {error:#}"
-        );
-        assert!(*fixture.list_requests.lock().unwrap() >= 1);
-        assert_eq!(
-            repo.head().unwrap(),
-            None,
-            "sync must not publish clone HEAD"
-        );
-
-        client.close().await;
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
     async fn clone_empty_bootstrap_rejects_projection_without_signed_operation() {
         let _process_env_guard = crate::test_process_env::shared().await;
-        use crate::legacy_v1::{AnnotatedFile, ContextAnnotation};
-
         use crate::hosted_runtime::hosted::test_server::{ContextFixture, start_with_context};
 
         let temp = TempDir::new().unwrap();
@@ -1610,87 +1321,28 @@ mod tests {
 
         let annotation_id = "server-context-from-observe".to_string();
         let fixture = ContextFixture {
-            files: vec![AnnotatedFile {
-                path: "lib.rs".to_string(),
-                annotations: vec![ContextAnnotation {
-                    id: annotation_id.clone(),
-                    status: ContextAnnotationStatus::Active as i32,
-                    kind: ContextAnnotationKind::Invariant as i32,
-                    content: "preserve this contract".to_string(),
-                    attribution: "reviewer <>".to_string(),
-                    ..ContextAnnotation::default()
-                }],
+            records: vec![api::heddle::api::v1alpha2::ContextRecord {
+                r#ref: Some(api::heddle::api::v1alpha2::RecordRef {
+                    id: annotation_id,
+                    ..Default::default()
+                }),
+                content: "preserve this contract".to_string(),
+                principal_id: "reviewer".to_string(),
+                ..Default::default()
             }],
             ..ContextFixture::default()
         };
         let (mut client, server, fixture) = start_with_context(fixture).await;
 
-        let empty: &[(ContextTarget, ContextBlob)] = &[];
-        let error = pull_context(
-            &repo,
-            &mut client,
-            "acme/widgets",
-            Some(empty),
-            Some(against),
-        )
-        .await
-        .unwrap_err();
+        let error = pull_context(&repo, &mut client, "acme/widgets", Some(against))
+            .await
+            .unwrap_err();
         let observed = *fixture.list_requests.lock().unwrap();
-        assert!(
-            observed >= 1,
-            "empty v2 bootstrap must ObserveCollaboration, not treat Some([]) as no annotations"
-        );
+        assert!(observed >= 1, "native pull must ObserveCollaboration");
         assert!(
             format!("{error:#}").contains("omitted their signed operations"),
             "projection-only context must be an explicit incomplete result: {error:#}"
         );
-
-        client.close().await;
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn bootstrap_pull_materializes_context_once_and_persists_the_mirror() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
-        std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
-        repo.snapshot_with_attribution(
-            Some("seed".to_string()),
-            None,
-            Attribution::human(Principal::new("Test", "test@example.com")),
-        )
-        .unwrap();
-        let target = ContextTarget::file("lib.rs").unwrap();
-        let annotation = Annotation::new(
-            AnnotationScope::Symbol {
-                name: "run".to_string(),
-                resolved_lines: Some((1, 1)),
-            },
-            AnnotationKind::Invariant,
-            "preserve this contract".to_string(),
-            vec!["api".to_string()],
-            "reviewer <>".to_string(),
-            1_700_000_000,
-            None,
-            None,
-        );
-        let bootstrap = vec![(target, ContextBlob::new(vec![annotation]))];
-        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-
-        assert_eq!(
-            pull_context(&repo, &mut client, "acme/widgets", Some(&bootstrap), None,)
-                .await
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            pull_context(&repo, &mut client, "acme/widgets", Some(&bootstrap), None,)
-                .await
-                .unwrap(),
-            0
-        );
-        assert!(mirror_path(repo.heddle_dir()).is_file());
 
         client.close().await;
         server.await.unwrap();
@@ -1769,66 +1421,6 @@ mod tests {
             0
         );
         assert!(warnings.warnings().is_empty());
-
-        client.close().await;
-        server.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn push_context_adopts_on_dedup_conflict_for_pending_nonce() {
-        let _process_env_guard = crate::test_process_env::shared().await;
-        use crate::legacy_v1::ContextRevision;
-
-        use crate::hosted_runtime::hosted::test_server::{ContextFixture, start_with_context};
-
-        let (_temp, repo, annotation) = seed_local_context_annotation("do not remove");
-        let annotation_id = annotation.annotation_id.clone();
-        let fixture = ContextFixture {
-            histories: std::collections::HashMap::from([(
-                annotation_id.clone(),
-                vec![ContextRevision {
-                    revision_id: "server-context-revision".to_string(),
-                    kind: ContextAnnotationKind::Constraint as i32,
-                    content: "do not remove".to_string(),
-                    attribution: "test <>".to_string(),
-                    ..ContextRevision::default()
-                }],
-            )]),
-            put_conflict: true,
-            ..ContextFixture::default()
-        };
-        let warnings = std::sync::Arc::new(objects::CollectingWarnings::default());
-        let (client, server, fixture) = start_with_context(fixture).await;
-        let mut client = client.with_warning_sink(warnings.clone());
-
-        let pushed = push_context(&repo, &mut client, "acme/widgets", "main")
-            .await
-            .unwrap();
-        assert_eq!(
-            pushed, 1,
-            "Dedup Conflict for this nonce must observe and adopt, not fail the push"
-        );
-        assert!(
-            *fixture.put_requests.lock().unwrap() >= 1,
-            "PutContext must have been attempted"
-        );
-        assert!(
-            *fixture.list_requests.lock().unwrap() >= 1
-                || !fixture.history_requests.lock().unwrap().is_empty(),
-            "conflict-as-adopt must ObserveCollaboration"
-        );
-        let mirror = load_mirror(repo.heddle_dir()).unwrap();
-        let entry = &mirror.repos["acme/widgets"].annotations[0];
-        assert!(
-            entry.pending_create_op.is_none(),
-            "conflict-as-adopt must clear the pending nonce"
-        );
-        assert_eq!(entry.server_id, annotation_id);
-        assert!(
-            warnings.warnings().is_empty(),
-            "Dedup Conflict for this nonce is replay success, not a warning: {:?}",
-            warnings.warnings()
-        );
 
         client.close().await;
         server.await.unwrap();
@@ -2022,7 +1614,6 @@ mod tests {
                 &destination,
                 &mut client,
                 "acme/widgets",
-                None,
                 Some(destination_state),
             )
             .await
