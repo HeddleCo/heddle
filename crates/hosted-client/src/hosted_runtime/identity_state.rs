@@ -48,6 +48,10 @@ pub(crate) struct ClaimState {
     pub(crate) owner_id: uuid::Uuid,
     pub(crate) subject: String,
     pub(crate) pet_name: String,
+    /// Email carried by the invite that provisioned this account. It becomes
+    /// eligible for capture attribution only after the human claim consent.
+    #[serde(default)]
+    account_email: Option<String>,
     pub(crate) node_id: String,
     /// Server-advertised claim page origin. Not trusted until `heddle claim`
     /// binds it to the configured hosted server.
@@ -161,6 +165,7 @@ impl ClaimState {
             owner_id,
             subject,
             pet_name,
+            account_email: None,
             node_id,
             web_origin,
             created_at: chrono::Utc::now().to_rfc3339(),
@@ -188,6 +193,23 @@ impl ClaimState {
     ) {
         self.seq0_public_key_hex = Some(hex::encode(seq0_public_key));
         self.signed_owner_root_hex = Some(hex::encode(signed_owner_root));
+    }
+
+    pub(crate) fn record_account_email(&mut self, email: Option<String>) {
+        if let Some(email) = email.filter(|value| !value.trim().is_empty()) {
+            self.account_email = Some(email);
+        }
+    }
+
+    pub(crate) fn claimed_principal(&self) -> Option<(&str, &str)> {
+        if !self.consent_issued() {
+            return None;
+        }
+        Some((
+            self.prepared_handle.as_deref()?.trim(),
+            self.account_email.as_deref()?.trim(),
+        ))
+        .filter(|(handle, email)| !handle.is_empty() && !email.is_empty())
     }
 
     /// Mint and activate a fresh one-time claim capability.
@@ -426,6 +448,22 @@ mod tests {
         assert!(!state.finish_browser_claim(&[2; 32]));
         assert!(state.finish_browser_claim(&[1; 32]));
         assert!(state.consent_issued());
+    }
+
+    #[test]
+    fn verified_invite_email_becomes_attribution_only_after_claim() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        let mut state = state();
+        state.record_account_email(Some("human@example.com".into()));
+        assert_eq!(state.claimed_principal(), None);
+        assert!(state.reissue(b"claim-secret", 2_000));
+        assert!(state.prepare_browser("human-handle", &[1; 32]));
+        assert_eq!(state.claimed_principal(), None);
+        assert!(state.finish_browser_claim(&[1; 32]));
+        assert_eq!(
+            state.claimed_principal(),
+            Some(("human-handle", "human@example.com"))
+        );
     }
 
     #[test]

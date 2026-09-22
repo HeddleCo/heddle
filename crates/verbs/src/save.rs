@@ -449,6 +449,7 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
         repo,
         ctx.principal_fallback(),
         ctx.hosted_principal(),
+        ctx.hosted_account_unclaimed(),
         &options.agent,
     )?;
     let harness_session_id = resolved_attribution
@@ -590,6 +591,7 @@ fn resolve_capture_attribution(
     repo: &Repository,
     principal_fallback: Option<(&str, &str)>,
     hosted_principal: Option<(&str, &str)>,
+    hosted_account_unclaimed: bool,
     options: &CaptureAgentOptions,
 ) -> Result<CaptureAttribution> {
     let resolved_principal = crate::apply_hosted_principal_fallback(
@@ -602,17 +604,32 @@ fn resolve_capture_attribution(
         &principal.name_lossy(),
         &principal.email_lossy(),
     ) {
+        let (summary, commands) = if hosted_account_unclaimed {
+            (
+                "Run `heddle claim` to attach the signed-in account to a human identity with an email, or configure a local principal, then retry the capture.",
+                vec![
+                    "heddle claim".to_string(),
+                    "heddle init --principal-name <name> --principal-email <email>".to_string(),
+                    "heddle capture -m \"...\"".to_string(),
+                ],
+            )
+        } else {
+            (
+                "Set `HEDDLE_PRINCIPAL_NAME` and `HEDDLE_PRINCIPAL_EMAIL`, or run `heddle init --principal-name <name> --principal-email <email>`, then retry the capture.",
+                vec![
+                    "heddle init --principal-name <name> --principal-email <email>".to_string(),
+                    "heddle capture -m \"...\"".to_string(),
+                ],
+            )
+        };
         return Err(capture_refusal(
             "capture_identity_required",
             "Refusing to capture: no accountable identity is configured",
-            "Set `HEDDLE_PRINCIPAL_NAME` and `HEDDLE_PRINCIPAL_EMAIL`, or run `heddle init --principal-name <name> --principal-email <email>`, then retry the capture.",
+            summary,
             "Heddle would otherwise have to record Unknown <unknown@example.com> on the captured state",
             "capture would create durable Heddle history without a real principal",
             "Heddle refs, captured states, Git refs, index, and worktree files were left unchanged",
-            vec![
-                "heddle init --principal-name <name> --principal-email <email>".to_string(),
-                "heddle capture -m \"...\"".to_string(),
-            ],
+            commands,
         ));
     }
 
@@ -718,7 +735,7 @@ pub fn resolve_capture_author(
     principal_fallback: Option<(&str, &str)>,
     options: &CaptureAgentOptions,
 ) -> Result<Attribution> {
-    resolve_capture_attribution(repo, principal_fallback, None, options)
+    resolve_capture_attribution(repo, principal_fallback, None, false, options)
         .map(|resolved| resolved.attribution)
 }
 
