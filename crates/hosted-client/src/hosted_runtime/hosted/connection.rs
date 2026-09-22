@@ -620,7 +620,7 @@ mod tests {
         let _home = crate::hosted_runtime::hosted::hosted_bridge::tests::PinHeddleHome::new(
             fixture.home.path(),
         );
-        let client = super::HostedClient::connect_via_netd(
+        let client = crate::hosted_runtime::hosted::HostedClient::connect_via_netd(
             crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
             &config::ClientConfig::default(),
         )
