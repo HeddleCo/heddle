@@ -19,7 +19,9 @@ use hosted_client::hosted_runtime::{
     },
     auth_requests::{AuthCommand, AuthOptions, AuthTrustCommand, LoginPermission},
     claim_offer::{ClaimOfferReady, ClaimOptions, ClaimOutcome},
-    whoami::{WhoamiIdentity as HostedIdentity, WhoamiReport},
+    whoami::{
+        CaptureActor as HostedCaptureActor, WhoamiIdentity as HostedIdentity, WhoamiReport,
+    },
 };
 
 use crate::cli::{
@@ -541,14 +543,31 @@ fn command_start_path(cli: &Cli) -> Result<std::path::PathBuf> {
     }
 }
 
+fn capture_actor_is_placeholder(actor: &HostedCaptureActor) -> bool {
+    actor.source.is_none()
+        && actor.name == "Unknown"
+        && actor.email == "unknown@example.com"
+}
+
 fn whoami_output(report: WhoamiReport) -> WhoamiOutput {
-    WhoamiOutput {
-        output_kind: "whoami",
-        capture_actor: CaptureActor {
+    let capture_actor = if capture_actor_is_placeholder(&report.capture_actor) {
+        // Purge the built-in Unknown placeholder from machine output: empty
+        // fields mean "not configured" (same contract as init's quiet path).
+        CaptureActor {
+            name: String::new(),
+            email: String::new(),
+            source: None,
+        }
+    } else {
+        CaptureActor {
             name: report.capture_actor.name,
             email: report.capture_actor.email,
             source: report.capture_actor.source,
-        },
+        }
+    };
+    WhoamiOutput {
+        output_kind: "whoami",
+        capture_actor,
         server: report.server,
         authenticated: report.authenticated,
         source: report.source,
@@ -588,17 +607,25 @@ fn write_whoami_human(
     writer: &mut impl std::io::Write,
     output: &WhoamiReport,
 ) -> std::io::Result<()> {
-    writeln!(
-        writer,
-        "Capture actor: {} <{}>",
-        output.capture_actor.name, output.capture_actor.email
-    )?;
-    if let Some(source) = output.capture_actor.source {
+    if capture_actor_is_placeholder(&output.capture_actor) {
+        writeln!(writer, "Capture actor: not configured")?;
         writeln!(
             writer,
-            "Source:        {}",
-            verbs::principal_source_display(source)
+            "  set with: heddle init --principal-name <name> --principal-email <email>"
         )?;
+    } else {
+        writeln!(
+            writer,
+            "Capture actor: {} <{}>",
+            output.capture_actor.name, output.capture_actor.email
+        )?;
+        if let Some(source) = output.capture_actor.source {
+            writeln!(
+                writer,
+                "Source:        {}",
+                verbs::principal_source_display(source)
+            )?;
+        }
     }
     writeln!(writer)?;
     writeln!(writer, "Hosted auth:")?;
@@ -786,9 +813,8 @@ fn agent_template(template: AgentTemplateArg) -> AgentTemplate {
 mod tests {
     use std::{path::PathBuf, time::Duration};
 
-    use hosted_client::hosted_runtime::{
-        auth::{AuthLogout, HumanPromotionDirective as HostedHumanPromotionDirective},
-        whoami::CaptureActor as HostedCaptureActor,
+    use hosted_client::hosted_runtime::auth::{
+        AuthLogout, HumanPromotionDirective as HostedHumanPromotionDirective,
     };
 
     use super::*;
@@ -1134,6 +1160,37 @@ mod tests {
             spools: vec!["spool/acme".into(), "spool/acme/notes".into()],
             recommended_action: Some("heddle auth login".into()),
         }
+    }
+
+    #[test]
+    fn whoami_quiets_unknown_placeholder_capture_actor() {
+        let mut report = whoami_report();
+        report.capture_actor = HostedCaptureActor {
+            name: "Unknown".into(),
+            email: "unknown@example.com".into(),
+            source: None,
+        };
+        report.authenticated = false;
+        report.recommended_action = Some("heddle auth login --server api.heddle.test".into());
+
+        let machine = whoami_output(report.clone());
+        assert!(
+            machine.capture_actor.name.is_empty() && machine.capture_actor.email.is_empty(),
+            "JSON whoami must not emit Unknown@example.com"
+        );
+        assert!(machine.capture_actor.source.is_none());
+
+        let mut bytes = Vec::new();
+        write_whoami_human(&mut bytes, &report).expect("render unconfigured whoami");
+        let human = String::from_utf8(bytes).expect("whoami output is UTF-8");
+        assert!(
+            human.contains("Capture actor: not configured"),
+            "human whoami should quiet the placeholder: {human}"
+        );
+        assert!(
+            !human.contains("unknown@example.com"),
+            "human whoami must not print unknown@example.com: {human}"
+        );
     }
 
     #[test]

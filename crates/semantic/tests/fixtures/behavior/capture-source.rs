@@ -598,7 +598,7 @@ fn resolve_capture_attribution(
             "capture_identity_required",
             "Refusing to capture: no accountable identity is configured",
             "Set `HEDDLE_PRINCIPAL_NAME` and `HEDDLE_PRINCIPAL_EMAIL`, or run `heddle init --principal-name <name> --principal-email <email>`, then retry the capture.",
-            "Heddle would otherwise have to record Unknown <unknown@example.com> on the captured state",
+            "No accountable name/email is configured for capture attribution",
             "capture would create durable Heddle history without a real principal",
             "Heddle refs, captured states, Git refs, index, and worktree files were left unchanged",
             vec![

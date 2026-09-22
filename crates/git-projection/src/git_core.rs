@@ -2036,7 +2036,7 @@ pub fn resolve_git_commit_identity(
     }
 
     Err(GitProjectionError::Git(
-        "refusing to write a Git commit with Unknown <unknown@example.com>; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
+        "refusing to write a Git commit without an accountable identity; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
     ))
 }
 

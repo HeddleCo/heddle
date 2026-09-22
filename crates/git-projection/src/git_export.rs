@@ -211,7 +211,7 @@ fn write_state_object(
     let sig = if principal_is_default_unknown(&state.attribution.principal) {
         let Some(identity) = options.identity else {
             return Err(GitProjectionError::Git(
-                "refusing to write a Git commit with Unknown <unknown@example.com>; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
+                "refusing to write a Git commit without an accountable identity; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
             ));
         };
         identity.to_signature(state.created_at.timestamp())

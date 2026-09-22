@@ -598,8 +598,9 @@ Configuration environment:
                  HEDDLE_HOME; otherwise HEDDLE_HOME uses <path>/config.toml.
 
 Principal resolution (highest first): HEDDLE_PRINCIPAL_NAME and
-HEDDLE_PRINCIPAL_EMAIL, repository config, Git config, user config, then
-Unknown <unknown@example.com>. Init, status, and capture use this same order.
+HEDDLE_PRINCIPAL_EMAIL, repository config, Git config, then user config.
+If none is set, capture refuses until a principal is configured (init never
+writes a placeholder identity).
 "#;
 
 // The single full statement of the --output machine contract (plus the
