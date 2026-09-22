@@ -55,7 +55,14 @@ enum HostedBridgeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum HostedBridgeResponse {
-    Ready { reused: bool, node_id: String },
+    // Ready carries Weft's Iroh-authenticated endpoint id so the CLI's
+    // local Iroh↔UDS adapter can run v2 Discover against Weft, not the
+    // proxy peer (heddle#1794).
+    Ready {
+        reused: bool,
+        node_id: String,
+        weft_endpoint_id: String,
+    },
     Opened { reused: bool },
     Error { message: String },
 }
@@ -151,9 +158,10 @@ async fn handle_client(bridge: Arc<HostedBridge>, mut stream: UnixStream) -> Res
         } => {
             let outcome = ensure_weft(&bridge, &server, allow_insecure).await;
             let response = match outcome {
-                Ok(reused) => HostedBridgeResponse::Ready {
+                Ok((reused, weft_endpoint_id)) => HostedBridgeResponse::Ready {
                     reused,
                     node_id: bridge.endpoint.id().to_string(),
+                    weft_endpoint_id: weft_endpoint_id.to_string(),
                 },
                 Err(error) => HostedBridgeResponse::Error {
                     message: error.to_string(),
@@ -167,7 +175,7 @@ async fn handle_client(bridge: Arc<HostedBridge>, mut stream: UnixStream) -> Res
         } => {
             let opened = ensure_weft(&bridge, &server, allow_insecure).await;
             match opened {
-                Ok(reused) => {
+                Ok((reused, _)) => {
                     write_frame(
                         &mut stream,
                         &serde_json::to_vec(&HostedBridgeResponse::Opened { reused })?,
@@ -190,9 +198,13 @@ async fn handle_client(bridge: Arc<HostedBridge>, mut stream: UnixStream) -> Res
     Ok(())
 }
 
-async fn ensure_weft(bridge: &HostedBridge, server: &str, allow_insecure: bool) -> Result<bool> {
-    if live_weft(bridge, server).await.is_some() {
-        return Ok(true);
+async fn ensure_weft(
+    bridge: &HostedBridge,
+    server: &str,
+    allow_insecure: bool,
+) -> Result<(bool, EndpointId)> {
+    if let Some(connection) = live_weft(bridge, server).await {
+        return Ok((true, connection.remote_id()));
     }
     let mut config = ClientConfig::default();
     if allow_insecure {
@@ -202,6 +214,7 @@ async fn ensure_weft(bridge: &HostedBridge, server: &str, allow_insecure: bool) 
         .await
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     let connection = connect_weft(&bridge.endpoint, &descriptor).await?;
+    let weft_endpoint_id = connection.remote_id();
     let expires_at_unix_millis = descriptor.document().expires_at_unix_millis;
     bridge.weft.lock().await.insert(
         server.to_string(),
@@ -210,7 +223,7 @@ async fn ensure_weft(bridge: &HostedBridge, server: &str, allow_insecure: bool) 
             expires_at_unix_millis,
         },
     );
-    Ok(false)
+    Ok((false, weft_endpoint_id))
 }
 
 async fn live_weft(bridge: &HostedBridge, server: &str) -> Option<iroh::endpoint::Connection> {
@@ -332,9 +345,18 @@ pub async fn ensure_via_netd(
         .map_err(HostedError::transport)?
         .ok_or_else(|| HostedError::transport("netd hosted bridge closed during Ensure"))?;
     match serde_json::from_slice(&response).map_err(HostedError::transport)? {
-        HostedBridgeResponse::Ready { reused, node_id } => {
+        HostedBridgeResponse::Ready {
+            reused,
+            node_id,
+            weft_endpoint_id,
+        } => {
             let node_id = node_id.parse().map_err(HostedError::transport)?;
-            Ok(EnsureOutcome { reused, node_id })
+            let weft_endpoint_id = weft_endpoint_id.parse().map_err(HostedError::transport)?;
+            Ok(EnsureOutcome {
+                reused,
+                node_id,
+                weft_endpoint_id,
+            })
         }
         HostedBridgeResponse::Error { message } => Err(HostedError::transport(message)),
         HostedBridgeResponse::Opened { .. } => Err(HostedError::transport(
@@ -347,6 +369,7 @@ pub async fn ensure_via_netd(
 pub struct EnsureOutcome {
     pub reused: bool,
     pub node_id: EndpointId,
+    pub weft_endpoint_id: EndpointId,
 }
 
 /// Open a bidirectional stream on the warm Weft connection.
@@ -575,6 +598,11 @@ pub(crate) mod tests {
         assert!(
             ensure_first.reused,
             "pre-seeded weft session must be reported as reused"
+        );
+        assert_eq!(
+            ensure_first.weft_endpoint_id,
+            server.id(),
+            "Ensure must advertise Weft's Iroh-authenticated endpoint id"
         );
 
         let (mut stream, reused) = open_bi_via_netd(&socket, "https://api.test.heddle.sh", false)
@@ -913,6 +941,36 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn ensure_rejects_ready_without_weft_identity() {
+        let home = TempDir::new().unwrap();
+        let socket = hosted_bridge_socket_path(home.path());
+        if let Some(parent) = socket.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let serve = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = read_frame(&mut stream).await;
+            let response = serde_json::to_vec(&serde_json::json!({
+                "op": "ready",
+                "reused": true,
+                "node_id": iroh_base::SecretKey::generate().public().to_string(),
+            }))
+            .unwrap();
+            let _ = write_frame(&mut stream, &response).await;
+        });
+        let error = ensure_via_netd(&socket, TEST_WEFT_SERVER, false)
+            .await
+            .expect_err("Ready without weft_endpoint_id must fail closed");
+        assert!(
+            error.to_string().contains("weft_endpoint_id"),
+            "got {error}"
+        );
+        serve.abort();
+        let _ = serve.await;
+    }
+
+    #[tokio::test]
     async fn open_bi_rejects_a_ready_response() {
         let home = TempDir::new().unwrap();
         let socket = hosted_bridge_socket_path(home.path());
@@ -926,6 +984,7 @@ pub(crate) mod tests {
             let response = serde_json::to_vec(&HostedBridgeResponse::Ready {
                 reused: true,
                 node_id: iroh_base::SecretKey::generate().public().to_string(),
+                weft_endpoint_id: iroh_base::SecretKey::generate().public().to_string(),
             })
             .unwrap();
             let _ = write_frame(&mut stream, &response).await;

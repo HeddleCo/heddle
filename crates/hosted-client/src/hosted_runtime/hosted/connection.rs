@@ -48,6 +48,10 @@ pub(super) struct HostedConnection {
     /// Local loopback endpoint that adapts the v2 Iroh transport to netd's UDS
     /// stream bridge. `None` for an ordinary direct connection.
     proxy_endpoint: Option<Endpoint>,
+    /// Weft's Iroh-authenticated endpoint id when this connection is proxied
+    /// through netd. The local adapter's `connection.remote_id()` is the proxy,
+    /// so v2 Discover must use this key instead (heddle#1794).
+    weft_endpoint_id: Option<EndpointId>,
     reused_warm: bool,
 }
 
@@ -75,6 +79,7 @@ impl HostedConnection {
             provider_transport: Some(ProviderWebSocketTransport::new(config.clone())),
             provider_connections: Mutex::new(HashMap::new()),
             proxy_endpoint: None,
+            weft_endpoint_id: None,
             reused_warm: false,
         })
     }
@@ -100,6 +105,7 @@ impl HostedConnection {
             provider_transport,
             provider_connections: Mutex::new(HashMap::new()),
             proxy_endpoint: None,
+            weft_endpoint_id: None,
             reused_warm: false,
         }))
     }
@@ -168,6 +174,7 @@ impl HostedConnection {
         tracing::debug!(
             reused = ensured.reused,
             netd_node_id = %ensured.node_id,
+            weft_endpoint_id = %ensured.weft_endpoint_id,
             local_node_id = %endpoint.id(),
             "hosted connect using netd warm bridge"
         );
@@ -179,8 +186,17 @@ impl HostedConnection {
             provider_transport: Some(provider_transport),
             provider_connections: Mutex::new(HashMap::new()),
             proxy_endpoint: Some(proxy_endpoint),
+            weft_endpoint_id: Some(ensured.weft_endpoint_id),
             reused_warm: ensured.reused,
         }))
+    }
+
+    /// Endpoint key v2 Discover must prove. Direct sessions use the Iroh peer;
+    /// proxied netd sessions use Weft's key from Ensure, not the local adapter.
+    pub(super) fn discover_endpoint_key(&self) -> [u8; 32] {
+        self.weft_endpoint_id
+            .map(|id| *id.as_bytes())
+            .unwrap_or_else(|| *self.connection.remote_id().as_bytes())
     }
 
     pub(super) fn endpoint_id(&self) -> EndpointId {
@@ -550,6 +566,11 @@ mod tests {
         assert_ne!(
             adapter_key, weft_key,
             "local Iroh↔UDS adapter peer must not be Weft"
+        );
+        assert_eq!(
+            connection.discover_endpoint_key(),
+            weft_key,
+            "proxied Discover must use Weft's Ensure key, not the adapter"
         );
 
         let transport = || {
