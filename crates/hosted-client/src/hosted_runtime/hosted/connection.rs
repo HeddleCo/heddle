@@ -529,6 +529,98 @@ mod tests {
         connection.close().await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn proxied_discover_rejects_adapter_id_and_accepts_weft_id() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let fixture =
+            crate::hosted_runtime::hosted::hosted_bridge::tests::WarmBridgeFixture::start_describe()
+                .await;
+        let _home = crate::hosted_runtime::hosted::hosted_bridge::tests::PinHeddleHome::new(
+            fixture.home.path(),
+        );
+        let connection = HostedConnection::connect_via_netd(
+            crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
+            &config::ClientConfig::default(),
+        )
+        .await
+        .expect("connect through warm netd bridge");
+        let adapter_key = *connection.connection.remote_id().as_bytes();
+        let weft_key = *fixture.weft_id.as_bytes();
+        assert_ne!(
+            adapter_key, weft_key,
+            "local Iroh↔UDS adapter peer must not be Weft"
+        );
+
+        let transport = || {
+            thread_api::transport::IrohTransport::new(
+                connection.connection.clone(),
+                thread_api::credentials::Credentials::Public,
+                api::framing::MAX_CONTROL_BODY,
+                Duration::from_secs(5),
+            )
+        };
+        let adapter = thread_api::Remote::discover(
+            transport().expect("adapter transport"),
+            adapter_key,
+            EndpointKind::Weft,
+        )
+        .await;
+        let adapter_error = match adapter {
+            Ok(_) => panic!("Discover must not treat the local adapter as Weft"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            adapter_error.contains("endpoint identity/package mismatch"),
+            "adapter Discover must fail closed, got {adapter_error}"
+        );
+
+        let remote = thread_api::Remote::discover(
+            transport().expect("weft transport"),
+            weft_key,
+            EndpointKind::Weft,
+        )
+        .await
+        .expect("Discover must accept Weft's endpoint key over the proxy");
+        assert_eq!(
+            remote.description.endpoint.expect("described endpoint").public_key,
+            weft_key
+        );
+        connection.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn netd_warm_client_discovers_weft_identity() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let fixture =
+            crate::hosted_runtime::hosted::hosted_bridge::tests::WarmBridgeFixture::start_describe()
+                .await;
+        let _home = crate::hosted_runtime::hosted::hosted_bridge::tests::PinHeddleHome::new(
+            fixture.home.path(),
+        );
+        let client = super::HostedClient::connect_via_netd(
+            crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
+            &config::ClientConfig::default(),
+        )
+        .await
+        .expect("warm Discover must succeed with Weft's endpoint key");
+        assert!(client.reused_warm_connection());
+        let remote = client
+            .native()
+            .await
+            .expect("cached native description after warm Discover");
+        assert_eq!(
+            remote
+                .description
+                .endpoint
+                .expect("described endpoint")
+                .public_key,
+            fixture.weft_id.as_bytes()
+        );
+        client.close().await;
+    }
+
     #[tokio::test]
     async fn failed_connect_closes_the_client_endpoint() {
         let _process_env_guard = crate::test_process_env::shared().await;

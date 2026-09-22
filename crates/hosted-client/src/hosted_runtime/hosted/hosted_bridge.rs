@@ -479,6 +479,62 @@ pub(crate) mod tests {
         (server, task)
     }
 
+    /// Weft stand-in that answers DescribeEndpoint with this endpoint's public
+    /// key. Used to prove proxied Discover must compare against Weft, not the
+    /// local Iroh↔UDS adapter (heddle#1794).
+    async fn describe_server(accepts: Arc<AtomicUsize>) -> (Endpoint, tokio::task::JoinHandle<()>) {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let accept_endpoint = server.clone();
+        let weft_key = server.id().as_bytes().to_vec();
+        let task = tokio::spawn(async move {
+            while let Some(incoming) = accept_endpoint.accept().await {
+                accepts.fetch_add(1, Ordering::SeqCst);
+                let Ok(connection) = incoming.await else {
+                    continue;
+                };
+                let weft_key = weft_key.clone();
+                tokio::spawn(async move {
+                    while let Ok((mut send, mut recv)) = connection.accept_bi().await {
+                        let bytes = recv.read_to_end(64 * 1024).await.unwrap_or_default();
+                        let Ok(frame) = api::framing::decode_request_frame(&bytes) else {
+                            continue;
+                        };
+                        if frame.method
+                            != "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint"
+                        {
+                            continue;
+                        }
+                        let description = api::heddle::api::v1alpha2::DescribeEndpointResponse {
+                            endpoint: Some(api::heddle::api::v1alpha2::EndpointRef {
+                                kind: api::heddle::api::v1alpha2::EndpointKind::Weft as i32,
+                                public_key: weft_key.clone(),
+                            }),
+                            supported_packages: vec!["heddle.api.v1alpha2".into()],
+                            implemented_methods: vec![
+                                "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint".into(),
+                            ],
+                            ..Default::default()
+                        };
+                        let encoded = prost::Message::encode_to_vec(&description);
+                        let Ok(response) = api::framing::encode_success_response(&encoded) else {
+                            continue;
+                        };
+                        let _ = send.write_all(&response).await;
+                        let _ = send.finish();
+                    }
+                });
+            }
+        });
+        (server, task)
+    }
+
     #[tokio::test]
     async fn warm_open_bi_reuses_the_cached_weft_connection() {
         let accepts = Arc::new(AtomicUsize::new(0));
@@ -560,6 +616,7 @@ pub(crate) mod tests {
         pub home: TempDir,
         pub socket: PathBuf,
         pub node_id: iroh::EndpointId,
+        pub weft_id: iroh::EndpointId,
         accepts: Arc<AtomicUsize>,
         serve: Option<tokio::task::JoinHandle<Result<()>>>,
         server_task: Option<tokio::task::JoinHandle<()>>,
@@ -568,8 +625,21 @@ pub(crate) mod tests {
 
     impl WarmBridgeFixture {
         pub async fn start() -> Self {
+            Self::start_with(echo_server).await
+        }
+
+        pub async fn start_describe() -> Self {
+            Self::start_with(describe_server).await
+        }
+
+        async fn start_with<F, Fut>(bind_server: F) -> Self
+        where
+            F: FnOnce(Arc<AtomicUsize>) -> Fut,
+            Fut: std::future::Future<Output = (Endpoint, tokio::task::JoinHandle<()>)>,
+        {
             let accepts = Arc::new(AtomicUsize::new(0));
-            let (server, server_task) = echo_server(Arc::clone(&accepts)).await;
+            let (server, server_task) = bind_server(Arc::clone(&accepts)).await;
+            let weft_id = server.id();
             let netd = Endpoint::builder(presets::Minimal)
                 .relay_mode(RelayMode::Disabled)
                 .bind_addr((Ipv4Addr::LOCALHOST, 0))
@@ -595,6 +665,7 @@ pub(crate) mod tests {
                 home,
                 socket,
                 node_id,
+                weft_id,
                 accepts,
                 serve: Some(serve),
                 server_task: Some(server_task),
