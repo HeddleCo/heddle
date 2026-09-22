@@ -63,8 +63,12 @@ enum HostedBridgeResponse {
         node_id: String,
         weft_endpoint_id: String,
     },
-    Opened { reused: bool },
-    Error { message: String },
+    Opened {
+        reused: bool,
+    },
+    Error {
+        message: String,
+    },
 }
 
 struct CachedWeft {
@@ -529,9 +533,7 @@ pub(crate) mod tests {
                         let Ok(frame) = api::framing::decode_request_frame(&bytes) else {
                             continue;
                         };
-                        if frame.method
-                            != "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint"
-                        {
+                        if frame.method != "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint" {
                             continue;
                         }
                         let description = api::heddle::api::v1alpha2::DescribeEndpointResponse {

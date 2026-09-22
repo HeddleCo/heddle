@@ -550,8 +550,9 @@ mod tests {
     async fn proxied_discover_rejects_adapter_id_and_accepts_weft_id() {
         let _process_env_guard = crate::test_process_env::exclusive().await;
         let fixture =
-            crate::hosted_runtime::hosted::hosted_bridge::tests::WarmBridgeFixture::start_describe()
-                .await;
+            crate::hosted_runtime::hosted::hosted_bridge::tests::WarmBridgeFixture::start_describe(
+            )
+            .await;
         let _home = crate::hosted_runtime::hosted::hosted_bridge::tests::PinHeddleHome::new(
             fixture.home.path(),
         );
@@ -604,7 +605,11 @@ mod tests {
         .await
         .expect("Discover must accept Weft's endpoint key over the proxy");
         assert_eq!(
-            remote.description.endpoint.expect("described endpoint").public_key,
+            remote
+                .description
+                .endpoint
+                .expect("described endpoint")
+                .public_key,
             weft_key
         );
         connection.close().await;
@@ -615,8 +620,9 @@ mod tests {
     async fn netd_warm_client_discovers_weft_identity() {
         let _process_env_guard = crate::test_process_env::exclusive().await;
         let fixture =
-            crate::hosted_runtime::hosted::hosted_bridge::tests::WarmBridgeFixture::start_describe()
-                .await;
+            crate::hosted_runtime::hosted::hosted_bridge::tests::WarmBridgeFixture::start_describe(
+            )
+            .await;
         let _home = crate::hosted_runtime::hosted::hosted_bridge::tests::PinHeddleHome::new(
             fixture.home.path(),
         );
