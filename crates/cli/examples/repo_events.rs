@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use hosted_client::client::repo_events::{RepoEventClient, SubscribeRepoEventsRequest};
+use hosted_client::client::repo_events::{RepoEventClient, RepoEventSubscriptionRequest};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = RepoEventClient::connect(&server).await?;
     let mut events = client
-        .subscribe(SubscribeRepoEventsRequest {
+        .subscribe(RepoEventSubscriptionRequest {
             repo_id,
             thread: String::new(),
             after_event_id,

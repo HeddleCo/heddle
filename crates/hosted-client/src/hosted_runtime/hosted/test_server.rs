@@ -9,14 +9,12 @@ use std::{
 use api::{
     StreamingShape,
     framing::{
-        StreamFrame, decode_request_frame, decode_request_prelude, decode_stream_frame,
-        encode_failure_response, encode_stream_failure, encode_stream_message,
-        encode_success_response,
+        decode_request_frame, decode_request_prelude, encode_failure_response,
+        encode_stream_failure, encode_stream_message, encode_success_response,
     },
     heddle::api::{
-        common::{CallFailure, CallFailureCode, StateId},
+        common::{CallFailure, CallFailureCode},
         v1alpha2 as v2,
-        v1alpha2::SignedSpoolOwnerGenesis,
     },
     method_descriptor,
 };
@@ -27,15 +25,8 @@ use prost::Message;
 use tokio::task::JoinHandle;
 
 use super::{CallContextFactory, HostedClient};
-use crate::legacy_v1::{
-    AnnotatedFile, ContextRevision, Discussion, DiscussionResolution, DiscussionTurn,
-    ListRefsPageEnd, ListRefsResponse, PackChunk, PackStreamKind, PathSymbolRef, PullComplete,
-    PullReady, PullServerFrame, PushClientFrame, PushComplete, PushReady, PushRequest,
-    PushServerFrame, StateContextEntry, TransferCheckpoint, TransportMode, discussion_resolution,
-    list_refs_response, pull_server_frame, push_client_frame, push_server_frame,
-};
+use super::{HostedDiscussion, HostedDiscussionTurn, HostedResolution};
 
-const OWNER_GENESIS_FIXTURE_HEX: &str = "0a380a10222222222222222222222222222222221224080112208a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c12640a20def88318e44a809464c1022f22230567bae6805d17b1ccfc2bebe5326232c58a1240bfe677c0b6fec8d28e379f584f36dee7258d834222f9b75f61dc75b7db2d836d76d4fb6eaf9e7f561925b2e6882b51eadaf3ec77c565f5b638ad0febfc8cd304";
 const OBSERVE_COLLABORATION_METHOD: &str =
     "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration";
 
@@ -66,15 +57,10 @@ pub(crate) struct ThreadListingFixture {
     pub resolution_requests: Arc<Mutex<Vec<String>>>,
 }
 
-fn owner_genesis_fixture() -> SignedSpoolOwnerGenesis {
-    let bytes = hex::decode(OWNER_GENESIS_FIXTURE_HEX).expect("published v2 fixture hex");
-    SignedSpoolOwnerGenesis::decode(bytes.as_slice()).expect("published v2 fixture genesis")
-}
-
 #[derive(Clone, Default)]
 pub(crate) struct CollaborationFixture {
-    pub discussions: HashMap<String, Discussion>,
-    pub list: Vec<Discussion>,
+    pub discussions: HashMap<String, HostedDiscussion>,
+    pub list: Vec<HostedDiscussion>,
     pub hidden: HashMap<String, CallFailureCode>,
     pub get_requests: Arc<Mutex<Vec<String>>>,
     pub get_request_state_ids: Arc<Mutex<Vec<Option<Vec<u8>>>>>,
@@ -83,9 +69,8 @@ pub(crate) struct CollaborationFixture {
 
 #[derive(Clone, Default)]
 pub(crate) struct ContextFixture {
-    pub files: Vec<AnnotatedFile>,
-    pub states: Vec<StateContextEntry>,
-    pub histories: HashMap<String, Vec<ContextRevision>>,
+    pub records: Vec<v2::ContextRecord>,
+    pub histories: HashMap<String, Vec<v2::ContextRecord>>,
     pub list_requests: Arc<Mutex<usize>>,
     pub history_requests: Arc<Mutex<Vec<String>>>,
     /// When true, PutContext returns Dedup Conflict for the create nonce.
@@ -94,7 +79,7 @@ pub(crate) struct ContextFixture {
 }
 
 pub async fn start() -> (HostedClient, JoinHandle<()>) {
-    start_inner(None, None, None, None, None, None, None, None).await
+    start_inner(None, None, None, None, None, None).await
 }
 
 #[cfg(test)]
@@ -102,8 +87,7 @@ pub(crate) async fn start_with_thread_listing(
     fixture: ThreadListingFixture,
 ) -> (HostedClient, JoinHandle<()>, ThreadListingFixture) {
     let captured = fixture.clone();
-    let (client, server) =
-        start_inner(None, None, None, None, None, None, None, Some(fixture)).await;
+    let (client, server) = start_inner(None, None, None, None, None, Some(fixture)).await;
     (client, server, captured)
 }
 
@@ -112,8 +96,7 @@ pub(crate) async fn start_with_collaboration(
     fixture: CollaborationFixture,
 ) -> (HostedClient, JoinHandle<()>, CollaborationFixture) {
     let fixture_clone = fixture.clone();
-    let (client, server) =
-        start_inner(None, None, None, None, None, Some(fixture), None, None).await;
+    let (client, server) = start_inner(None, None, None, Some(fixture), None, None).await;
     (client, server, fixture_clone)
 }
 
@@ -122,44 +105,16 @@ pub(crate) async fn start_with_context(
     fixture: ContextFixture,
 ) -> (HostedClient, JoinHandle<()>, ContextFixture) {
     let fixture_clone = fixture.clone();
-    let (client, server) =
-        start_inner(None, None, None, None, Some(fixture), None, None, None).await;
+    let (client, server) = start_inner(None, None, Some(fixture), None, None, None).await;
     (client, server, fixture_clone)
-}
-
-#[cfg(test)]
-pub(crate) async fn start_recording_push()
--> (HostedClient, JoinHandle<()>, Arc<Mutex<Vec<PushRequest>>>) {
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let (client, server) = start_inner(
-        None,
-        None,
-        None,
-        Some(Arc::clone(&captured)),
-        None,
-        None,
-        None,
-        None,
-    )
-    .await;
-    (client, server, captured)
 }
 
 #[cfg(test)]
 pub(crate) async fn start_recording_create_spool()
 -> (HostedClient, JoinHandle<()>, Arc<CreateSpoolCapture>) {
     let captured = Arc::new(CreateSpoolCapture::default());
-    let (client, server) = start_inner(
-        None,
-        Some(Arc::clone(&captured)),
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await;
+    let (client, server) =
+        start_inner(Some(Arc::clone(&captured)), None, None, None, None, None).await;
     (client, server, captured)
 }
 
@@ -170,17 +125,8 @@ pub(crate) async fn start_recording_spool_mutations() -> (
     Arc<Mutex<SpoolMutationCapture>>,
 ) {
     let captured = Arc::new(Mutex::new(SpoolMutationCapture::default()));
-    let (client, server) = start_inner(
-        None,
-        None,
-        Some(Arc::clone(&captured)),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await;
+    let (client, server) =
+        start_inner(None, Some(Arc::clone(&captured)), None, None, None, None).await;
     (client, server, captured)
 }
 
@@ -191,32 +137,15 @@ pub(crate) async fn start_recording_import_source() -> (
     Arc<Mutex<ImportSourceCapture>>,
 ) {
     let captured = Arc::new(Mutex::new(ImportSourceCapture::default()));
-    let (client, server) = start_inner(
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(Arc::clone(&captured)),
-        None,
-    )
-    .await;
+    let (client, server) =
+        start_inner(None, None, None, None, Some(Arc::clone(&captured)), None).await;
     (client, server, captured)
 }
 
 #[derive(Clone)]
-struct PullFixture {
-    remote_state: StateId,
-    pack: Option<(Vec<u8>, Vec<u8>)>,
-}
-
-#[derive(Clone)]
 struct TestServerState {
-    pull: Option<PullFixture>,
     create_spool: Option<Arc<CreateSpoolCapture>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
-    push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
     import_source: Option<Arc<Mutex<ImportSourceCapture>>>,
@@ -224,16 +153,13 @@ struct TestServerState {
     server_key: Vec<u8>,
     owner: v2::OwnerState,
     grants: Arc<Mutex<Vec<v2::GrantRecord>>>,
-    live_discussions: Arc<Mutex<HashMap<String, Discussion>>>,
+    live_discussions: Arc<Mutex<HashMap<String, HostedDiscussion>>>,
     live_operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn start_inner(
-    pull: Option<PullFixture>,
     create_spool: Option<Arc<CreateSpoolCapture>>,
     spool_mutations: Option<Arc<Mutex<SpoolMutationCapture>>>,
-    push_requests: Option<Arc<Mutex<Vec<PushRequest>>>>,
     context: Option<ContextFixture>,
     collaboration: Option<CollaborationFixture>,
     import_source: Option<Arc<Mutex<ImportSourceCapture>>>,
@@ -264,10 +190,8 @@ async fn start_inner(
         ..Default::default()
     };
     let state = TestServerState {
-        pull,
         create_spool,
         spool_mutations,
-        push_requests,
         context,
         collaboration,
         import_source,
@@ -275,7 +199,7 @@ async fn start_inner(
         server_key,
         owner,
         grants: Arc::new(Mutex::new(Vec::<v2::GrantRecord>::new())),
-        live_discussions: Arc::new(Mutex::new(HashMap::<String, Discussion>::new())),
+        live_discussions: Arc::new(Mutex::new(HashMap::<String, HostedDiscussion>::new())),
         live_operations: Arc::new(Mutex::new(HashMap::<String, Vec<v2::SignedRecord>>::new())),
     };
     let server_task = tokio::spawn(async move {
@@ -312,10 +236,8 @@ async fn serve_call(
     state: TestServerState,
 ) {
     let TestServerState {
-        pull,
         create_spool,
         spool_mutations,
-        push_requests,
         context,
         collaboration,
         import_source,
@@ -327,7 +249,7 @@ async fn serve_call(
         live_operations,
     } = state;
     let mut request = Vec::new();
-    let (method, prelude_len) = loop {
+    let (method, _prelude_len) = loop {
         let chunk = recv
             .read_chunk(api::framing::MAX_CONTROL_BODY + 6)
             .await
@@ -648,17 +570,12 @@ async fn serve_call(
                 )
                 .await;
             } else {
-                let body = terminal_page(&method);
-                send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
+                send.write_chunk(Bytes::from(encode_stream_message(&[]).unwrap()))
                     .await
                     .unwrap();
             }
         }
         StreamingShape::Bidirectional => {
-            if method == "/heddle.api.v1alpha2.SyncService/PublishContent" {
-                serve_push(send, recv, request.split_off(prelude_len), push_requests).await;
-                return;
-            }
             tokio::spawn(async move {
                 while recv
                     .read_chunk(api::framing::MAX_CONTROL_BODY + 5)
@@ -666,11 +583,6 @@ async fn serve_call(
                     .is_ok_and(|chunk| chunk.is_some())
                 {}
             });
-            for body in bidi_responses(&method, pull) {
-                send.write_chunk(Bytes::from(encode_stream_message(&body).unwrap()))
-                    .await
-                    .unwrap();
-            }
         }
     }
     send.finish().unwrap();
@@ -1767,67 +1679,6 @@ async fn serve_native_delete_spool(
     .unwrap();
 }
 
-async fn serve_push(
-    mut send: iroh::endpoint::SendStream,
-    mut recv: iroh::endpoint::RecvStream,
-    mut buffered: Vec<u8>,
-    captured: Option<Arc<Mutex<Vec<PushRequest>>>>,
-) {
-    let request = loop {
-        if let Some((frame, consumed)) = decode_stream_frame(&buffered).unwrap() {
-            let request = match frame {
-                StreamFrame::Message(body) => PushClientFrame::decode(body).unwrap(),
-                other => panic!("unexpected push request frame before request: {other:?}"),
-            };
-            buffered.drain(..consumed);
-            if let Some(push_client_frame::Frame::Request(request)) = request.frame {
-                break *request;
-            }
-            continue;
-        }
-        let chunk = recv
-            .read_chunk(api::framing::MAX_CONTROL_BODY + 5)
-            .await
-            .unwrap()
-            .expect("push request frame");
-        buffered.extend_from_slice(&chunk);
-    };
-    let advertised = request.objects.clone();
-    if let Some(captured) = captured {
-        captured
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .push(request);
-    }
-
-    let ready = PushServerFrame {
-        frame: Some(push_server_frame::Frame::Ready(PushReady {
-            want_objects: advertised,
-        })),
-    }
-    .encode_to_vec();
-    send.write_chunk(Bytes::from(encode_stream_message(&ready).unwrap()))
-        .await
-        .unwrap();
-
-    while recv
-        .read_chunk(api::framing::MAX_CONTROL_BODY + 5)
-        .await
-        .is_ok_and(|chunk| chunk.is_some())
-    {}
-    let complete = PushServerFrame {
-        frame: Some(push_server_frame::Frame::Complete(PushComplete {
-            success: false,
-            error: "test rejection".to_string(),
-        })),
-    }
-    .encode_to_vec();
-    send.write_chunk(Bytes::from(encode_stream_message(&complete).unwrap()))
-        .await
-        .unwrap();
-    send.finish().unwrap();
-}
-
 async fn serve_observe_threads(
     send: &mut iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
@@ -2021,7 +1872,7 @@ async fn serve_open_discussion(
     recv: &mut iroh::endpoint::RecvStream,
     request: &mut Vec<u8>,
     server_key: Vec<u8>,
-    live: Arc<Mutex<HashMap<String, Discussion>>>,
+    live: Arc<Mutex<HashMap<String, HostedDiscussion>>>,
     operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 ) {
     read_request_body(recv, request).await;
@@ -2043,7 +1894,7 @@ async fn serve_append_turn(
     recv: &mut iroh::endpoint::RecvStream,
     request: &mut Vec<u8>,
     server_key: Vec<u8>,
-    live: Arc<Mutex<HashMap<String, Discussion>>>,
+    live: Arc<Mutex<HashMap<String, HostedDiscussion>>>,
     operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 ) {
     read_request_body(recv, request).await;
@@ -2060,7 +1911,7 @@ async fn serve_append_turn(
         let mut live = live.lock().unwrap_or_else(|poison| poison.into_inner());
         if let Some(discussion) = live.get_mut(&id) {
             let seq = discussion.turns.len() as u64 + 1;
-            discussion.turns.push(DiscussionTurn {
+            discussion.turns.push(HostedDiscussionTurn {
                 body: body.body.clone(),
                 turn_id: format!("turn-{seq}"),
                 turn_seq: seq,
@@ -2076,7 +1927,7 @@ async fn serve_resolve_discussion(
     recv: &mut iroh::endpoint::RecvStream,
     request: &mut Vec<u8>,
     server_key: Vec<u8>,
-    live: Arc<Mutex<HashMap<String, Discussion>>>,
+    live: Arc<Mutex<HashMap<String, HostedDiscussion>>>,
     operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 ) {
     read_request_body(recv, request).await;
@@ -2092,13 +1943,9 @@ async fn serve_resolve_discussion(
         let mut live = live.lock().unwrap_or_else(|poison| poison.into_inner());
         remember_signed_operation(&operations, &id, body.signed_operation.clone());
         if let Some(discussion) = live.get_mut(&id) {
-            discussion.resolution = Some(DiscussionResolution {
-                state: Some(discussion_resolution::State::Dismissed(
-                    discussion_resolution::Dismissed {
-                        reason: "resolved".into(),
-                    },
-                )),
-            });
+            discussion.resolution = HostedResolution::Dismissed {
+                reason: "resolved".into(),
+            };
         }
     }
     write_native_grant_receipt(send, server_key, body.client_operation_id).await;
@@ -2145,7 +1992,7 @@ async fn serve_put_context(
     write_native_grant_receipt(send, server_key, body.client_operation_id).await;
 }
 
-fn discussion_from_open(request: &v2::OpenDiscussionRequest) -> Option<Discussion> {
+fn discussion_from_open(request: &v2::OpenDiscussionRequest) -> Option<HostedDiscussion> {
     let signed = request.signed_operation.as_ref()?;
     if signed.canonical_record.is_empty() {
         return None;
@@ -2189,16 +2036,17 @@ fn discussion_from_open(request: &v2::OpenDiscussionRequest) -> Option<Discussio
             }
             _ => (String::new(), String::new()),
         });
-    Some(Discussion {
+    Some(HostedDiscussion {
         id: record.discussion_id.to_string(),
-        anchor: Some(PathSymbolRef { file, symbol }),
+        file,
+        symbol,
         visibility: match visibility {
             objects::object::VisibilityTier::Public => "public".into(),
             objects::object::VisibilityTier::Private { .. } => "private".into(),
             _ => "internal".into(),
         },
-        thread_ref: thread_ref.unwrap_or_default(),
-        turns: vec![DiscussionTurn {
+        thread_ref,
+        turns: vec![HostedDiscussionTurn {
             body: turn.body,
             turn_id: "turn-open".into(),
             turn_seq: 1,
@@ -2211,7 +2059,7 @@ fn discussion_from_open(request: &v2::OpenDiscussionRequest) -> Option<Discussio
 struct ObserveCollaborationLive {
     collaboration: Option<CollaborationFixture>,
     context: Option<ContextFixture>,
-    discussions: Arc<Mutex<HashMap<String, Discussion>>>,
+    discussions: Arc<Mutex<HashMap<String, HostedDiscussion>>>,
     operations: Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 }
 
@@ -2269,7 +2117,7 @@ fn observe_payloads(
     request: &v2::ObserveCollaborationRequest,
     collaboration: Option<&CollaborationFixture>,
     context: Option<&ContextFixture>,
-    live: &Arc<Mutex<HashMap<String, Discussion>>>,
+    live: &Arc<Mutex<HashMap<String, HostedDiscussion>>>,
     operations: &Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
 ) -> Vec<v2::collaboration_event::Payload> {
     if !request.discussions.is_empty() {
@@ -2414,38 +2262,29 @@ fn anchor_state_bytes(anchor: &v2::CollaborationAnchor) -> Option<Vec<u8>> {
     }
 }
 
-fn discussion_title(discussion: &Discussion) -> String {
-    if !discussion.thread_id.is_empty() {
-        format!("{}\x1f{}", discussion.thread_ref, discussion.thread_id)
-    } else if !discussion.thread_ref.is_empty() {
-        discussion.thread_ref.clone()
+fn discussion_title(discussion: &HostedDiscussion) -> String {
+    if let (Some(thread_ref), Some(thread_id)) = (&discussion.thread_ref, &discussion.thread_id) {
+        format!("{thread_ref}\x1f{thread_id}")
+    } else if let Some(thread_ref) = &discussion.thread_ref {
+        thread_ref.clone()
     } else {
         dismiss_reason(discussion).unwrap_or_default()
     }
 }
 
-fn dismiss_reason(discussion: &Discussion) -> Option<String> {
-    match discussion
-        .resolution
-        .as_ref()
-        .and_then(|resolution| resolution.state.as_ref())
-    {
-        Some(discussion_resolution::State::Dismissed(dismissed)) => Some(dismissed.reason.clone()),
+fn dismiss_reason(discussion: &HostedDiscussion) -> Option<String> {
+    match &discussion.resolution {
+        HostedResolution::Dismissed { reason } => Some(reason.clone()),
         _ => None,
     }
 }
 
 fn discussion_payloads(
-    discussion: &Discussion,
+    discussion: &HostedDiscussion,
     operations: &[v2::SignedRecord],
 ) -> Vec<v2::collaboration_event::Payload> {
     let id = discussion.id.clone();
-    let (path, symbol) = discussion
-        .anchor
-        .as_ref()
-        .map(|anchor| (anchor.file.clone(), anchor.symbol.clone()))
-        .unwrap_or_default();
-    let status = if discussion.resolution.is_some() {
+    let status = if !matches!(discussion.resolution, HostedResolution::Open) {
         v2::discussion_record::Status::Resolved as i32
     } else {
         v2::discussion_record::Status::Open as i32
@@ -2479,7 +2318,10 @@ fn discussion_payloads(
             version: objects::object::ContentHash::compute(id.as_bytes())
                 .as_bytes()
                 .to_vec(),
-            anchor: Some(source_anchor(path, symbol)),
+            anchor: Some(source_anchor(
+                discussion.file.clone(),
+                discussion.symbol.clone(),
+            )),
             title: discussion_title(discussion),
             status,
             turn_count: discussion.turns.len() as u64,
@@ -2501,7 +2343,10 @@ fn discussion_payloads(
             }),
             body: turn.body.clone(),
             principal_id: turn.author_name.clone(),
-            created_at: turn.posted_at,
+            created_at: Some(prost_types::Timestamp {
+                seconds: turn.posted_at_secs,
+                nanos: 0,
+            }),
             causal_id,
             ..Default::default()
         }));
@@ -2580,61 +2425,12 @@ fn context_operation_payloads(
 }
 
 fn context_list_payloads(fixture: &ContextFixture) -> Vec<v2::collaboration_event::Payload> {
-    let mut payloads = Vec::new();
-    for file in &fixture.files {
-        for annotation in &file.annotations {
-            payloads.push(v2::collaboration_event::Payload::Context(
-                v2::ContextRecord {
-                    r#ref: Some(v2::RecordRef {
-                        id: annotation.id.clone(),
-                        spool: None,
-                    }),
-                    content: annotation.content.clone(),
-                    principal_id: annotation.attribution.clone(),
-                    tags: annotation
-                        .tags
-                        .iter()
-                        .map(|tag| v2::AnnotationTag {
-                            tag: Some(v2::annotation_tag::Tag::Text(tag.clone())),
-                        })
-                        .collect(),
-                    anchor: Some(source_anchor(file.path.clone(), String::new())),
-                    ..Default::default()
-                },
-            ));
-        }
-    }
-    for state in &fixture.states {
-        let path_state = state.state_id.as_ref().map(|id| id.value.clone());
-        for annotation in &state.annotations {
-            let mut record = v2::ContextRecord {
-                r#ref: Some(v2::RecordRef {
-                    id: annotation.id.clone(),
-                    spool: None,
-                }),
-                content: annotation.content.clone(),
-                principal_id: annotation.attribution.clone(),
-                ..Default::default()
-            };
-            if let Some(value) = &path_state {
-                record.anchor = Some(v2::CollaborationAnchor {
-                    target: Some(v2::collaboration_anchor::Target::Source(v2::SourceAnchor {
-                        revision: Some(v2::RevisionRef {
-                            revision: Some(v2::revision_ref::Revision::State(
-                                api::heddle::api::common::StateId {
-                                    value: value.clone(),
-                                },
-                            )),
-                            ..Default::default()
-                        }),
-                        ..Default::default()
-                    })),
-                });
-            }
-            payloads.push(v2::collaboration_event::Payload::Context(record));
-        }
-    }
-    payloads
+    fixture
+        .records
+        .iter()
+        .cloned()
+        .map(v2::collaboration_event::Payload::Context)
+        .collect()
 }
 
 fn context_history_payloads(
@@ -2646,25 +2442,8 @@ fn context_history_payloads(
         .get(annotation_id)
         .into_iter()
         .flatten()
-        .map(|revision| {
-            v2::collaboration_event::Payload::Context(v2::ContextRecord {
-                r#ref: Some(v2::RecordRef {
-                    id: annotation_id.to_string(),
-                    spool: None,
-                }),
-                content: revision.content.clone(),
-                principal_id: revision.attribution.clone(),
-                causal_id: revision.revision_id.as_bytes().to_vec(),
-                tags: revision
-                    .tags
-                    .iter()
-                    .map(|tag| v2::AnnotationTag {
-                        tag: Some(v2::annotation_tag::Tag::Text(tag.clone())),
-                    })
-                    .collect(),
-                ..Default::default()
-            })
-        })
+        .cloned()
+        .map(v2::collaboration_event::Payload::Context)
         .collect()
 }
 
@@ -2755,95 +2534,8 @@ async fn write_collaboration_observation(
     .unwrap();
 }
 
-fn terminal_page(method: &str) -> Vec<u8> {
-    match method {
-        "/heddle.api.v1alpha2.ThreadService/ObserveThreads" => ListRefsResponse {
-            frame: Some(list_refs_response::Frame::PageEnd(ListRefsPageEnd {
-                next_page_token: String::new(),
-            })),
-        }
-        .encode_to_vec(),
-        _ => Vec::new(),
-    }
-}
-
-fn bidi_responses(method: &str, pull: Option<PullFixture>) -> Vec<Vec<u8>> {
-    let pull_succeeds = pull.is_some();
-    match method {
-        "/heddle.api.v1alpha2.SyncService/PublishContent" => vec![
-            PushServerFrame {
-                frame: Some(push_server_frame::Frame::Ready(PushReady::default())),
-            }
-            .encode_to_vec(),
-            PushServerFrame {
-                frame: Some(push_server_frame::Frame::Complete(PushComplete {
-                    success: false,
-                    error: "test rejection".to_string(),
-                })),
-            }
-            .encode_to_vec(),
-        ],
-        "/heddle.api.v1alpha2.SyncService/Fetch" => {
-            let remote_state = pull.as_ref().map(|fixture| fixture.remote_state.clone());
-            let has_pack = pull.as_ref().is_some_and(|fixture| fixture.pack.is_some());
-            let mut responses = vec![
-                PullServerFrame {
-                    frame: Some(pull_server_frame::Frame::Ready(PullReady {
-                        remote_state: remote_state
-                            .clone()
-                            .or_else(|| Some(StateId { value: vec![7; 32] })),
-                        full_closure_available: has_pack || !pull_succeeds,
-                        owner_authorization_protocol_version: 2,
-                        owner_genesis: Some(owner_genesis_fixture()),
-                        ..PullReady::default()
-                    })),
-                }
-                .encode_to_vec(),
-            ];
-            if let Some((pack_data, index_data)) = pull.and_then(|fixture| fixture.pack) {
-                responses.push(pack_frame(PackStreamKind::Pack, pack_data));
-                responses.push(pack_frame(PackStreamKind::Index, index_data));
-            }
-            responses.push(
-                PullServerFrame {
-                    frame: Some(pull_server_frame::Frame::Complete(PullComplete {
-                        success: pull_succeeds,
-                        new_state: remote_state,
-                        error: if pull_succeeds {
-                            String::new()
-                        } else {
-                            "test rejection".to_string()
-                        },
-                    })),
-                }
-                .encode_to_vec(),
-            );
-            responses
-        }
-        _ => Vec::new(),
-    }
-}
-
 async fn read_request_body(recv: &mut iroh::endpoint::RecvStream, request: &mut Vec<u8>) {
     while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
         request.extend_from_slice(&chunk);
     }
-}
-
-fn pack_frame(stream_kind: PackStreamKind, data: Vec<u8>) -> Vec<u8> {
-    PullServerFrame {
-        frame: Some(pull_server_frame::Frame::Pack(PackChunk {
-            stream_kind: stream_kind as i32,
-            chunk_length: data.len() as u32,
-            data,
-            transfer: Some(TransferCheckpoint {
-                transfer_id: "pull-pack-test".to_string(),
-                transport_mode: TransportMode::NativePack as i32,
-                is_complete: true,
-                ..TransferCheckpoint::default()
-            }),
-            is_final_chunk: true,
-        })),
-    }
-    .encode_to_vec()
 }

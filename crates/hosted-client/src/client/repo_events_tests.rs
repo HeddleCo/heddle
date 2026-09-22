@@ -10,11 +10,11 @@ use iroh::{Endpoint, RelayMode, endpoint::presets};
 use prost::Message as _;
 use tokio::sync::oneshot;
 
-use super::{RepoEvent, RepoEventClient, RepoEventError, SubscribeRepoEventsRequest};
+use super::{RepoEvent, RepoEventClient, RepoEventError, RepoEventSubscriptionRequest};
 use crate::hosted_runtime::hosted::{CallContextFactory, HostedClient};
 
-fn request() -> SubscribeRepoEventsRequest {
-    SubscribeRepoEventsRequest {
+fn request() -> RepoEventSubscriptionRequest {
+    RepoEventSubscriptionRequest {
         repo_id: "00000000-0000-0000-0000-000000000001".to_string(),
         thread: "main".to_string(),
         after_event_id: 40,

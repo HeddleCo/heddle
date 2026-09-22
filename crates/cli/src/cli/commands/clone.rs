@@ -1803,27 +1803,6 @@ async fn clone_network_connected(
             verify_hosted_clone(&local_repo, final_state, depth, lazy)
                 .context("clone remained incomplete after targeted remote repair")?;
         }
-        let bootstrap =
-            hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)
-                .context("decode hosted clone bootstrap")?
-                .ok_or_else(|| {
-                    anyhow!(RecoveryAdvice::network_clone_failed(
-                        "hosted response is missing required folded metadata",
-                        local_path,
-                    ))
-                })?
-                .resolve(&local_repo, Some(final_state))
-                .context("resolve hosted clone bootstrap")?;
-        for warning in [
-            bootstrap.discussions_pack_fallback.as_deref(),
-            bootstrap.context_pack_fallback.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            eprintln!("{} {warning}", style::warn_marker());
-        }
-
         if lazy {
             use repo::lazy_hydrator::LazyHydratorConfig;
             let cfg = LazyHydratorConfig::hosted(
@@ -1845,7 +1824,6 @@ async fn clone_network_connected(
             &local_repo,
             client,
             repo_path,
-            bootstrap.discussions.as_deref(),
             Some(final_state),
         )
         .await
@@ -1865,7 +1843,6 @@ async fn clone_network_connected(
             &local_repo,
             client,
             repo_path,
-            bootstrap.context.as_deref(),
             Some(final_state),
         )
         .await
@@ -2070,29 +2047,10 @@ async fn recover_interrupted_clone_connected(
         .save(repo.heddle_dir())?;
     }
     configure_hosted_clone_origin(&repo, &intent.endpoint, &intent.repository)?;
-    let bootstrap =
-        hosted_client::hosted_runtime::hosted::decode_pull_bootstrap(&result.checkpoint)?
-            .ok_or_else(|| {
-                anyhow!(RecoveryAdvice::network_clone_failed(
-                    "hosted response is missing required folded metadata",
-                    root,
-                ))
-            })?
-            .resolve(&repo, Some(final_state))?;
-    for warning in [
-        bootstrap.discussions_pack_fallback.as_deref(),
-        bootstrap.context_pack_fallback.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        eprintln!("{} {warning}", style::warn_marker());
-    }
     if let Err(error) = hosted_client::client::discussion_sync::pull_discussions(
         &repo,
         client,
         &intent.repository,
-        bootstrap.discussions.as_deref(),
         Some(final_state),
     )
     .await
@@ -2106,7 +2064,6 @@ async fn recover_interrupted_clone_connected(
         &repo,
         client,
         &intent.repository,
-        bootstrap.context.as_deref(),
         Some(final_state),
     )
     .await

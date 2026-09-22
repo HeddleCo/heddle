@@ -3,13 +3,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use crate::legacy_v1::StreamOpeningProof;
 use api::{
     heddle::api::{
-        common::{
-            BearerProof, CallContext, HumanVerification, RepositoryRef, RequestProof, TraceContext,
-            repository_ref,
-        },
+        common::{BearerProof, CallContext, HumanVerification, RequestProof, TraceContext},
         v1alpha2::SignedSpoolOwnerGenesis,
     },
     signing,
@@ -316,52 +312,6 @@ impl CallContextFactory {
         client_operation_id: impl Into<String>,
     ) -> Result<CallContext> {
         self.base(method, client_operation_id.into())
-    }
-
-    pub fn stream_opening_proof(
-        &self,
-        method: &str,
-        stream_id: impl Into<String>,
-        repository: RepositoryRef,
-        resume_cursor: impl Into<String>,
-        capability_context: Vec<u8>,
-    ) -> Result<StreamOpeningProof> {
-        let signer = self
-            .signer
-            .as_ref()
-            .ok_or(HostedError::SigningIdentityRequired)?;
-        let identity = self
-            .signing_identity
-            .as_deref()
-            .ok_or(HostedError::SigningIdentityRequired)?;
-        let repository_text = match repository.reference.as_ref() {
-            Some(repository_ref::Reference::CanonicalPath(path))
-            | Some(repository_ref::Reference::HostedId(path))
-                if !path.is_empty() =>
-            {
-                path.as_str()
-            }
-            _ => return Err(HostedError::InvalidRepositoryReference),
-        };
-        let stream_id = stream_id.into();
-        let resume_cursor = resume_cursor.into();
-        let canonical = signing::stream_open_bytes(
-            identity,
-            &stream_id,
-            method,
-            repository_text,
-            &resume_cursor,
-            &capability_context,
-        );
-        Ok(StreamOpeningProof {
-            stream_id,
-            route: method.to_string(),
-            repository: Some(repository),
-            resume_cursor,
-            capability_context,
-            nonce: Vec::new(),
-            signature: signer.sign(&canonical)?,
-        })
     }
 
     fn base(&self, method: &str, client_operation_id: String) -> Result<CallContext> {
@@ -707,42 +657,6 @@ mod tests {
             context.request_proof.is_some(),
             "provider still receives proof of the ticketed client's terminal key"
         );
-    }
-
-    #[test]
-    fn stream_opening_proof_is_bound_to_route_repository_and_identity() {
-        let _process_env_guard = crate::test_process_env::shared_blocking();
-        let signer = Ed25519Signer::generate().unwrap();
-        let identity = CallContextFactory::device_key_principal(signer.public_key());
-        let config = ClientConfig::default()
-            .with_token(wire::AuthToken::new("token", "alice"))
-            .with_auth_proof_key_pem(signer.to_pem().unwrap())
-            .with_authenticated_principal("principal:alice");
-        let repository = RepositoryRef {
-            reference: Some(repository_ref::Reference::CanonicalPath(
-                "acme/widgets".to_string(),
-            )),
-        };
-        let proof = CallContextFactory::from_client_config(&config)
-            .unwrap()
-            .stream_opening_proof(
-                "/heddle.api.v1alpha2.SyncService/Fetch",
-                "stream-1",
-                repository,
-                "cursor-1",
-                b"capability".to_vec(),
-            )
-            .unwrap();
-        let canonical = signing::stream_open_bytes(
-            &identity,
-            "stream-1",
-            "/heddle.api.v1alpha2.SyncService/Fetch",
-            "acme/widgets",
-            "cursor-1",
-            b"capability",
-        );
-        Ed25519Signer::verify_with_public_key(&canonical, signer.public_key(), &proof.signature)
-            .unwrap();
     }
 
     #[test]

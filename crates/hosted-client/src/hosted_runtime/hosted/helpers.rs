@@ -1,5 +1,3 @@
-use api::heddle::api::common::StateId as ProtoStateId;
-use objects::object::StateId;
 use wire::ProtocolError;
 
 use super::HostedError;
@@ -204,27 +202,9 @@ fn remote_stream_failure(
     }
 }
 
-pub(super) fn parse_proto_state_id(
-    state_id: Option<ProtoStateId>,
-) -> Result<Option<StateId>, ProtocolError> {
-    state_id
-        .map(|state_id| {
-            let value: [u8; 32] = state_id.value.try_into().map_err(|value: Vec<u8>| {
-                ProtocolError::InvalidState(format!(
-                    "state ID must be 32 bytes, got {}",
-                    value.len()
-                ))
-            })?;
-            Ok(StateId::from_bytes(value))
-        })
-        .transpose()
-}
-
 #[cfg(test)]
 mod tests {
-    use api::heddle::api::common::{
-        CallFailure, CallFailureCode, StateId as ProtoStateId, StreamFailure,
-    };
+    use api::heddle::api::common::{CallFailure, CallFailureCode, StreamFailure};
 
     use super::*;
 
@@ -690,23 +670,5 @@ mod tests {
             message: "hidden".into(),
             error: None,
         }));
-    }
-
-    #[test]
-    fn parse_proto_state_id_requires_32_bytes() {
-        let _process_env_guard = crate::test_process_env::shared_blocking();
-        let state = StateId::from_bytes([0x55; 32]);
-        let proto = ProtoStateId {
-            value: state.as_bytes().to_vec(),
-        };
-        let parsed = parse_proto_state_id(Some(proto))
-            .expect("parse")
-            .expect("present");
-        assert_eq!(parsed, state);
-        assert_eq!(parse_proto_state_id(None).expect("none ok"), None);
-        let bad = ProtoStateId {
-            value: vec![1, 2, 3],
-        };
-        assert!(parse_proto_state_id(Some(bad)).is_err());
     }
 }

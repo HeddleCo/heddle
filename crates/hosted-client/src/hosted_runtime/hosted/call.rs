@@ -447,7 +447,7 @@ fn require_shape(method: &str, expected: StreamingShape) -> Result<()> {
 mod tests {
     use std::{net::Ipv4Addr, sync::Arc, time::Duration};
 
-    use crate::legacy_v1::PushServerFrame;
+    use api::heddle::api::common::RepoEvent;
     use iroh::{Endpoint, RelayMode, endpoint::presets};
     use tokio::sync::oneshot;
 
@@ -499,7 +499,7 @@ mod tests {
         send.write_all(b"x").await.unwrap();
         send.finish().unwrap();
         response_started_rx.await.unwrap();
-        let response = ServerStream::<PushServerFrame>::new(Arc::clone(&connection), recv);
+        let response = ServerStream::<RepoEvent>::new(Arc::clone(&connection), recv);
         drop(response);
 
         server_task.await.unwrap();

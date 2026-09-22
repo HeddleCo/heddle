@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::legacy_v1::{
-    Discussion as ProtoDiscussion, DiscussionKind, DiscussionResolution,
-    DiscussionTurn as ProtoTurn, PathSymbolRef, RepoEvent, RepoEventKind, discussion_resolution,
+use api::heddle::api::common::{
+    CallFailureCode, RepoEvent, RepoEventKind, StateId as ProtoStateId,
 };
-use api::heddle::api::common::{CallFailureCode, StateId as ProtoStateId};
 use objects::object::{Attribution, CollaborationAnchor, Principal};
 use repo::{CollaborationStore, Repository};
 use tempfile::TempDir;
@@ -16,7 +14,13 @@ use super::{
     paired_thread_scope, parse_event_payload, save_cursor, save_scoped_cursor, subscribe_request,
     wait_reconnect_backoff,
 };
-use crate::{client::HostedClient, hosted_runtime::hosted::test_server::CollaborationFixture};
+use crate::{
+    client::HostedClient,
+    hosted_runtime::hosted::{
+        HostedDiscussion as ProtoDiscussion, HostedDiscussionTurn as ProtoTurn, HostedResolution,
+        test_server::CollaborationFixture,
+    },
+};
 
 fn seed_repo() -> (TempDir, Repository) {
     let temp = TempDir::new().unwrap();
@@ -114,6 +118,76 @@ fn resolved_event(event_id: i64, discussion_id: &str) -> RepoEvent {
         .to_string(),
         ..RepoEvent::default()
     }
+}
+
+fn doorbell(
+    event_id: i64,
+    event_type: &str,
+    discussion_id: &str,
+    turn_id: &str,
+    turn_seq: u64,
+) -> RepoEvent {
+    RepoEvent {
+        event_id,
+        repo_id: "00000000-0000-0000-0000-000000000001".to_string(),
+        event_type: event_type.to_string(),
+        kind: if event_type == "turn.appended" {
+            RepoEventKind::DiscussionTurn as i32
+        } else {
+            0
+        },
+        payload_json: serde_json::json!({
+            "discussion_id": discussion_id,
+            "turn_id": turn_id,
+            "turn_seq": turn_seq,
+        })
+        .to_string(),
+        ..RepoEvent::default()
+    }
+}
+
+fn proto_discussion(id: &str, turns: &[(&str, &str, u64)]) -> ProtoDiscussion {
+    ProtoDiscussion {
+        id: id.to_string(),
+        file: "lib.rs".to_string(),
+        symbol: "run".to_string(),
+        visibility: "internal".to_string(),
+        turns: turns
+            .iter()
+            .map(|(turn_id, body, seq)| ProtoTurn {
+                author_name: "Ada".to_string(),
+                author_email: "ada@example.com".to_string(),
+                body: (*body).to_string(),
+                posted_at_secs: 1_700_000_000,
+                turn_id: (*turn_id).to_string(),
+                turn_seq: *seq,
+                causal_id: Vec::new(),
+            })
+            .collect(),
+        ..ProtoDiscussion::default()
+    }
+}
+
+fn proto_dismissed_discussion(
+    id: &str,
+    turns: &[(&str, &str, u64)],
+    reason: &str,
+) -> ProtoDiscussion {
+    let mut discussion = proto_discussion(id, turns);
+    discussion.resolution = HostedResolution::Dismissed {
+        reason: reason.to_string(),
+    };
+    discussion
+}
+
+fn seed_repo_without_head() -> (TempDir, Repository) {
+    let temp = TempDir::new().unwrap();
+    let repo = Repository::init(temp.path()).unwrap();
+    assert!(
+        repo.head().unwrap().is_none(),
+        "this fixture must have no HEAD"
+    );
+    (temp, repo)
 }
 
 #[test]
@@ -402,205 +476,6 @@ async fn unknown_event_types_are_ignored_without_touching_the_op_log() {
 }
 
 #[tokio::test]
-async fn bootstrap_marks_the_cursor_then_live_events_append() {
-    let _process_env_guard = crate::test_process_env::shared().await;
-    let (_temp, repo) = seed_repo();
-    let head = repo.head().unwrap().unwrap();
-    let bootstrap = vec![objects::object::Discussion {
-        id: "server-boot".to_string(),
-        anchor: objects::object::SymbolAnchor::new("lib.rs", "run"),
-        opened_against_state: head,
-        opened_at: 1_700_000_000,
-        thread_ref: None,
-        turns: vec![objects::object::DiscussionTurn {
-            author: Principal::new("Reviewer", "reviewer@example.com"),
-            body: "from snapshot".to_string(),
-            posted_at: 1_700_000_001,
-            references: Vec::new(),
-        }],
-        resolution: objects::object::DiscussionResolution::Open,
-        body_changed_since_open: false,
-        anchor_ambiguous: false,
-        orphaned: false,
-        visibility: objects::object::VisibilityTier::Internal,
-        resolved_annotation_id: None,
-    }];
-    let mut fixture = CollaborationFixture::default();
-    fixture.discussions.insert(
-        "server-boot".to_string(),
-        proto_discussion(
-            "server-boot",
-            &[
-                ("turn-open", "from snapshot", 1),
-                ("turn-live", "live turn", 2),
-            ],
-        ),
-    );
-    let (mut client, server, _fixture) =
-        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
-    let cursor = bootstrap_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap))
-        .await
-        .unwrap();
-    assert!(cursor.bootstrapped);
-
-    consume_discussion_event(
-        &repo,
-        &mut client,
-        "acme/widgets",
-        &appended_event(20, "server-boot", "live turn", "turn-live", 2),
-    )
-    .await
-    .unwrap();
-
-    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let discussion = store
-        .materialize()
-        .unwrap()
-        .discussions
-        .into_values()
-        .next()
-        .unwrap();
-    assert_eq!(discussion.turns.len(), 2);
-    assert_eq!(discussion.turns[1].1.body, "live turn");
-
-    client.close().await;
-    server.await.unwrap();
-}
-
-// Clone/bootstrap materialization then doorbell replay. Originator
-// adopt-then-doorbell is `discussion_sync::tests::doorbell_after_adopt_does_not_duplicate_the_first_turn`.
-#[tokio::test]
-async fn replaying_opened_after_bootstrap_does_not_duplicate_the_first_turn() {
-    let _process_env_guard = crate::test_process_env::shared().await;
-    let (_temp, repo) = seed_repo();
-    let head = repo.head().unwrap().unwrap();
-    let bootstrap = vec![objects::object::Discussion {
-        id: "server-boot".to_string(),
-        anchor: objects::object::SymbolAnchor::new("lib.rs", "run"),
-        opened_against_state: head,
-        opened_at: 1_700_000_000,
-        thread_ref: None,
-        turns: vec![objects::object::DiscussionTurn {
-            author: Principal::new("Ada", "ada@example.com"),
-            body: "keep this invariant".to_string(),
-            posted_at: 1_700_000_000,
-            references: Vec::new(),
-        }],
-        resolution: objects::object::DiscussionResolution::Open,
-        body_changed_since_open: false,
-        anchor_ambiguous: false,
-        orphaned: false,
-        visibility: objects::object::VisibilityTier::Internal,
-        resolved_annotation_id: None,
-    }];
-    let mut fixture = CollaborationFixture::default();
-    fixture.discussions.insert(
-        "server-boot".to_string(),
-        proto_discussion("server-boot", &[("turn-open", "keep this invariant", 1)]),
-    );
-    let (mut client, server, _fixture) =
-        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
-    bootstrap_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap))
-        .await
-        .unwrap();
-
-    let replay = consume_discussion_event(
-        &repo,
-        &mut client,
-        "acme/widgets",
-        &opened_event(3, "server-boot", "keep this invariant", "turn-open"),
-    )
-    .await
-    .unwrap();
-    assert!(matches!(
-        replay,
-        DiscussionEventOutcome::Unchanged { discussion_id } if discussion_id == "server-boot"
-    ));
-
-    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let discussion = store
-        .materialize()
-        .unwrap()
-        .discussions
-        .into_values()
-        .next()
-        .unwrap();
-    assert_eq!(discussion.turns.len(), 1);
-    assert_eq!(discussion.turns[0].1.body, "keep this invariant");
-
-    client.close().await;
-    server.await.unwrap();
-}
-
-fn doorbell(
-    event_id: i64,
-    event_type: &str,
-    discussion_id: &str,
-    turn_id: &str,
-    turn_seq: u64,
-) -> RepoEvent {
-    RepoEvent {
-        event_id,
-        repo_id: "00000000-0000-0000-0000-000000000001".to_string(),
-        event_type: event_type.to_string(),
-        kind: if event_type == "turn.appended" {
-            RepoEventKind::DiscussionTurn as i32
-        } else {
-            0
-        },
-        payload_json: serde_json::json!({
-            "discussion_id": discussion_id,
-            "turn_id": turn_id,
-            "turn_seq": turn_seq,
-        })
-        .to_string(),
-        ..RepoEvent::default()
-    }
-}
-
-fn proto_discussion(id: &str, turns: &[(&str, &str, u64)]) -> ProtoDiscussion {
-    ProtoDiscussion {
-        id: id.to_string(),
-        anchor: Some(PathSymbolRef {
-            file: "lib.rs".to_string(),
-            symbol: "run".to_string(),
-        }),
-        visibility: "internal".to_string(),
-        turns: turns
-            .iter()
-            .map(|(turn_id, body, seq)| ProtoTurn {
-                author_name: "Ada".to_string(),
-                author_email: "ada@example.com".to_string(),
-                body: (*body).to_string(),
-                turn_id: (*turn_id).to_string(),
-                turn_seq: *seq,
-                posted_at: Some(prost_types::Timestamp {
-                    seconds: 1_700_000_000,
-                    nanos: 0,
-                }),
-            })
-            .collect(),
-        ..ProtoDiscussion::default()
-    }
-}
-
-fn proto_dismissed_discussion(
-    id: &str,
-    turns: &[(&str, &str, u64)],
-    reason: &str,
-) -> ProtoDiscussion {
-    let mut discussion = proto_discussion(id, turns);
-    discussion.resolution = Some(DiscussionResolution {
-        state: Some(discussion_resolution::State::Dismissed(
-            discussion_resolution::Dismissed {
-                reason: reason.to_string(),
-            },
-        )),
-    });
-    discussion
-}
-
-#[tokio::test]
 async fn doorbell_payload_fetches_get_discussion_and_materializes() {
     let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
@@ -736,7 +611,7 @@ async fn bootstrap_none_rejects_projection_without_signed_operation() {
     let (mut client, server, fixture) =
         crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
 
-    let error = bootstrap_discussions(&repo, &mut client, "acme/widgets", None)
+    let error = bootstrap_discussions(&repo, &mut client, "acme/widgets")
         .await
         .unwrap_err();
     assert!(
@@ -1103,99 +978,6 @@ async fn incomplete_resolve_without_resolution_doorbell_fetches() {
 }
 
 #[tokio::test]
-async fn fat_append_with_turn_id_and_zero_seq_fetches_and_keeps_the_new_turn() {
-    let _process_env_guard = crate::test_process_env::shared().await;
-    let (_temp, repo) = seed_repo();
-    let head = repo.head().unwrap().unwrap();
-    let bootstrap = vec![objects::object::Discussion {
-        id: "disc-zero".to_string(),
-        anchor: objects::object::SymbolAnchor::new("lib.rs", "run"),
-        opened_against_state: head,
-        opened_at: 1_700_000_000,
-        thread_ref: None,
-        turns: vec![objects::object::DiscussionTurn {
-            author: Principal::new("Ada", "ada@example.com"),
-            body: "first turn".to_string(),
-            posted_at: 1_700_000_000,
-            references: Vec::new(),
-        }],
-        resolution: objects::object::DiscussionResolution::Open,
-        body_changed_since_open: false,
-        anchor_ambiguous: false,
-        orphaned: false,
-        visibility: objects::object::VisibilityTier::Internal,
-        resolved_annotation_id: None,
-    }];
-    let mut fixture = CollaborationFixture::default();
-    fixture.discussions.insert(
-        "disc-zero".to_string(),
-        proto_discussion(
-            "disc-zero",
-            &[
-                ("turn-open", "first turn", 1),
-                ("turn-append", "second turn", 2),
-            ],
-        ),
-    );
-    let (mut client, server, fixture) =
-        crate::hosted_runtime::hosted::test_server::start_with_collaboration(fixture).await;
-    bootstrap_discussions(&repo, &mut client, "acme/widgets", Some(&bootstrap))
-        .await
-        .unwrap();
-
-    let fat_zero = RepoEvent {
-        event_id: 2,
-        repo_id: "repo-1".to_string(),
-        event_type: "turn.appended".to_string(),
-        kind: RepoEventKind::DiscussionTurn as i32,
-        payload_json: serde_json::json!({
-            "discussion_id": "disc-zero",
-            "file": "lib.rs",
-            "symbol": "run",
-            "body": "second turn",
-            "author_name": "Ada",
-            "author_email": "ada@example.com",
-            "posted_at": 1_700_000_010,
-            "turn_id": "turn-append",
-            "turn_seq": 0
-        })
-        .to_string(),
-        ..RepoEvent::default()
-    };
-    let outcome = consume_discussion_event(&repo, &mut client, "acme/widgets", &fat_zero)
-        .await
-        .unwrap();
-    assert!(
-        outcome.applied(),
-        "a new turn_id must be kept, not dropped as ordinal 0"
-    );
-    assert_eq!(
-        fixture
-            .get_requests
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .as_slice(),
-        ["disc-zero"],
-        "already-mirrored zero-seq append cannot use the fast path"
-    );
-
-    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let discussion = store
-        .materialize()
-        .unwrap()
-        .discussions
-        .into_values()
-        .next()
-        .unwrap();
-    assert_eq!(discussion.turns.len(), 2);
-    assert_eq!(discussion.turns[0].1.body, "first turn");
-    assert_eq!(discussion.turns[1].1.body, "second turn");
-
-    client.close().await;
-    server.await.unwrap();
-}
-
-#[tokio::test]
 async fn get_discussion_unauthenticated_does_not_advance_the_watermark() {
     let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
@@ -1266,10 +1048,8 @@ async fn opened_without_state_id_fetches_get_discussion() {
 fn proto_coordination_discussion(id: &str, turns: &[(&str, &str, u64)]) -> ProtoDiscussion {
     ProtoDiscussion {
         id: id.to_string(),
-        kind: DiscussionKind::Coordination as i32,
-        thread_ref: "feature/run".to_string(),
+        thread_ref: Some("feature/run".to_string()),
         visibility: "internal".to_string(),
-        anchor: None,
         turns: turns
             .iter()
             .map(|(turn_id, body, seq)| ProtoTurn {
@@ -1278,10 +1058,8 @@ fn proto_coordination_discussion(id: &str, turns: &[(&str, &str, u64)]) -> Proto
                 body: (*body).to_string(),
                 turn_id: (*turn_id).to_string(),
                 turn_seq: *seq,
-                posted_at: Some(prost_types::Timestamp {
-                    seconds: 1_700_000_000,
-                    nanos: 0,
-                }),
+                posted_at_secs: 1_700_000_000,
+                ..Default::default()
             })
             .collect(),
         ..ProtoDiscussion::default()
@@ -1508,10 +1286,8 @@ async fn empty_anchor_get_discussion_uses_repository_and_advances() {
     let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo();
     let mut proto = proto_discussion("disc-empty-anchor", &[("turn-open", "repo wide", 1)]);
-    proto.anchor = Some(PathSymbolRef {
-        file: String::new(),
-        symbol: String::new(),
-    });
+    proto.file.clear();
+    proto.symbol.clear();
     let mut fixture = CollaborationFixture::default();
     fixture
         .discussions
@@ -1563,7 +1339,7 @@ fn proto_discussion_on_thread(
     turns: &[(&str, &str, u64)],
 ) -> ProtoDiscussion {
     let mut discussion = proto_discussion(id, turns);
-    discussion.thread_ref = thread_ref.to_string();
+    discussion.thread_ref = Some(thread_ref.to_string());
     discussion
 }
 
@@ -1587,10 +1363,9 @@ async fn thread_scoped_bootstrap_rejects_projection_without_signed_operation() {
         thread_id: "thr-foo".into(),
         ..DiscussionCursorScope::default()
     };
-    let error =
-        bootstrap_discussions_scoped(&repo_scoped, &mut client, "acme/widgets", &scoped, None)
-            .await
-            .unwrap_err();
+    let error = bootstrap_discussions_scoped(&repo_scoped, &mut client, "acme/widgets", &scoped)
+        .await
+        .unwrap_err();
     assert!(
         format!("{error:#}").contains("omitted their signed operations"),
         "projection-only discussion must be an explicit incomplete result: {error:#}"
@@ -1609,97 +1384,6 @@ async fn thread_scoped_bootstrap_rejects_projection_without_signed_operation() {
 
     client.close().await;
     server.await.unwrap();
-}
-
-#[tokio::test]
-async fn thread_scoped_pull_fold_bootstrap_stays_repo_wide() {
-    let _process_env_guard = crate::test_process_env::shared().await;
-    let (_temp, repo) = seed_repo();
-    let head = repo.head().unwrap().unwrap();
-    let bootstrap = vec![
-        objects::object::Discussion {
-            id: "disc-foo".to_string(),
-            anchor: objects::object::SymbolAnchor::new("lib.rs", "run"),
-            opened_against_state: head,
-            opened_at: 1_700_000_000,
-            thread_ref: Some("foo".to_string()),
-            turns: vec![objects::object::DiscussionTurn {
-                author: Principal::new("Ada", "ada@example.com"),
-                body: "from foo".to_string(),
-                posted_at: 1_700_000_000,
-                references: Vec::new(),
-            }],
-            resolution: objects::object::DiscussionResolution::Open,
-            body_changed_since_open: false,
-            anchor_ambiguous: false,
-            orphaned: false,
-            visibility: objects::object::VisibilityTier::Internal,
-            resolved_annotation_id: None,
-        },
-        objects::object::Discussion {
-            id: "disc-bar".to_string(),
-            anchor: objects::object::SymbolAnchor::new("lib.rs", "run"),
-            opened_against_state: head,
-            opened_at: 1_700_000_000,
-            thread_ref: Some("bar".to_string()),
-            turns: vec![objects::object::DiscussionTurn {
-                author: Principal::new("Ada", "ada@example.com"),
-                body: "from bar".to_string(),
-                posted_at: 1_700_000_000,
-                references: Vec::new(),
-            }],
-            resolution: objects::object::DiscussionResolution::Open,
-            body_changed_since_open: false,
-            anchor_ambiguous: false,
-            orphaned: false,
-            visibility: objects::object::VisibilityTier::Internal,
-            resolved_annotation_id: None,
-        },
-    ];
-    let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-    let scoped = DiscussionCursorScope {
-        repo_path: "acme/widgets".into(),
-        thread: "foo".into(),
-        thread_id: "thr-foo".into(),
-        ..DiscussionCursorScope::default()
-    };
-    bootstrap_discussions_scoped(
-        &repo,
-        &mut client,
-        "acme/widgets",
-        &scoped,
-        Some(&bootstrap),
-    )
-    .await
-    .unwrap();
-
-    let store = CollaborationStore::open(repo.heddle_dir()).unwrap();
-    let mut bodies: Vec<_> = store
-        .materialize()
-        .unwrap()
-        .discussions
-        .into_values()
-        .map(|discussion| discussion.turns[0].1.body.clone())
-        .collect();
-    bodies.sort();
-    assert_eq!(
-        bodies,
-        ["from bar".to_string(), "from foo".to_string()],
-        "clone/pull fold stays repo-wide even when the wait cursor is thread-scoped"
-    );
-
-    client.close().await;
-    server.await.unwrap();
-}
-
-fn seed_repo_without_head() -> (TempDir, Repository) {
-    let temp = TempDir::new().unwrap();
-    let repo = Repository::init(temp.path()).unwrap();
-    assert!(
-        repo.head().unwrap().is_none(),
-        "this fixture must have no HEAD"
-    );
-    (temp, repo)
 }
 
 #[tokio::test]
@@ -1741,7 +1425,7 @@ async fn bootstrap_without_head_does_not_mark_the_cursor_bootstrapped() {
     let _process_env_guard = crate::test_process_env::shared().await;
     let (_temp, repo) = seed_repo_without_head();
     let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
-    bootstrap_discussions(&repo, &mut client, "acme/widgets", None)
+    bootstrap_discussions(&repo, &mut client, "acme/widgets")
         .await
         .expect_err("bootstrap must defer until HEAD exists");
     let cursor = load_cursor(repo.heddle_dir(), "acme/widgets").unwrap();
@@ -1817,7 +1501,7 @@ async fn renamed_thread_projection_without_signed_operation_is_incomplete() {
         "old-name",
         &[("turn-open", "still this thread", 1)],
     );
-    renamed.thread_id = "thr-stable".to_string();
+    renamed.thread_id = Some("thr-stable".to_string());
     let other = proto_discussion_on_thread("disc-other", "bar", &[("turn-bar", "from bar", 1)]);
     let (_temp, repo) = seed_repo();
     let fixture = CollaborationFixture {
@@ -1833,7 +1517,7 @@ async fn renamed_thread_projection_without_signed_operation_is_incomplete() {
         thread_id: "thr-stable".into(),
         ..DiscussionCursorScope::default()
     };
-    let error = bootstrap_discussions_scoped(&repo, &mut client, "acme/widgets", &scoped, None)
+    let error = bootstrap_discussions_scoped(&repo, &mut client, "acme/widgets", &scoped)
         .await
         .unwrap_err();
     assert!(
