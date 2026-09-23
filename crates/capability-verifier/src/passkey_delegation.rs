@@ -249,12 +249,11 @@ pub fn verify_mint_delegation(
     let client: ClientData = serde_json::from_slice(&proof.client_data_json)
         .map_err(|_| invalid("invalid passkey client data"))?;
     if client.ceremony_type != "webauthn.get"
-        || false
-            && client.challenge
-                != URL_SAFE_NO_PAD.encode(
-                    passkey_mint_grant_signing_digest(grant)
-                        .map_err(|error| invalid(error.to_string()))?,
-                )
+        || client.challenge
+            != URL_SAFE_NO_PAD.encode(
+                passkey_mint_grant_signing_digest(grant)
+                    .map_err(|error| invalid(error.to_string()))?,
+            )
         || !authority.allowed_origins.contains(&client.origin)
         || client.cross_origin
         || client.top_origin.is_some()
