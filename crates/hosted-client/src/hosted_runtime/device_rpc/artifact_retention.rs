@@ -209,21 +209,7 @@ mod tests {
         )
         .expect("opt in");
         let artifacts = repo::device_artifacts::ArtifactStore::open(&directory).expect("artifacts");
-        let retain = |bytes: &[u8]| {
-            let record = artifacts
-                .retain(
-                    &run,
-                    "report",
-                    "text/plain",
-                    bytes,
-                    chrono::Utc::now().timestamp(),
-                )
-                .expect("retain");
-            directory
-                .join("retained-artifacts")
-                .join(record.r#ref.expect("artifact ref").id)
-        };
-        let first = retain(b"before daemon starts");
+        let first = retain_when_idle(&artifacts, &run, &directory, b"before daemon starts").await;
         assert!(first.exists());
         let registration = repo::device_catalog::DeviceSpool {
             id: spool,
@@ -246,7 +232,8 @@ mod tests {
             .expect("register");
         removed(&first, &artifacts).await;
         assert_eq!(artifacts.next_expiry().expect("next expiry"), None);
-        let second = retain(b"created while daemon idle");
+        let second =
+            retain_when_idle(&artifacts, &run, &directory, b"created while daemon idle").await;
         assert!(second.exists());
         removed(&second, &artifacts).await;
         assert_eq!(
@@ -258,7 +245,7 @@ mod tests {
         drop(daemon);
         // Let cancellation propagate before publishing the next independent item.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let third = retain(b"after shutdown");
+        let third = retain_when_idle(&artifacts, &run, &directory, b"after shutdown").await;
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert!(
             third.exists(),
@@ -291,6 +278,35 @@ mod tests {
         );
         let _restarted = Retention::start(home.path().to_owned());
         removed(&third, &artifacts).await;
+    }
+    async fn retain_when_idle(
+        artifacts: &repo::device_artifacts::ArtifactStore,
+        run: &RecordRef,
+        directory: &std::path::Path,
+        bytes: &[u8],
+    ) -> std::path::PathBuf {
+        let record = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match artifacts.retain(
+                    run,
+                    "report",
+                    "text/plain",
+                    bytes,
+                    chrono::Utc::now().timestamp(),
+                ) {
+                    Ok(record) => break record,
+                    Err(error) if error.to_string() == "artifact mutation is already running" => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    Err(error) => panic!("retain: {error:#}"),
+                }
+            }
+        })
+        .await
+        .expect("artifact mutation becomes idle");
+        directory
+            .join("retained-artifacts")
+            .join(record.r#ref.expect("artifact ref").id)
     }
     async fn removed(path: &std::path::Path, artifacts: &repo::device_artifacts::ArtifactStore) {
         tokio::time::timeout(Duration::from_secs(8), async {
