@@ -2451,6 +2451,7 @@ name = "heddle-format"
 version = "0.24.3"
 dependencies = [
  "blake3",
+ "proptest",
  "thiserror 2.0.18",
  "zstd",
 ]
