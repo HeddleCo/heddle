@@ -326,8 +326,9 @@ impl Repository {
 }
 
 fn decode_canonical_genesis(bytes: &[u8]) -> Result<SignedSpoolOwnerGenesis> {
-    let signed = SignedSpoolOwnerGenesis::decode(bytes)
-        .context("decode canonical self-signed owner genesis")?;
+    let signed =
+        heddleco_capability_verifier::creation::decode_spool_owner_genesis_for_verification(bytes)
+            .context("decode canonical self-signed owner genesis")?;
     if signed.encode_to_vec() != bytes {
         anyhow::bail!("owner genesis protobuf is not canonical");
     }

@@ -115,6 +115,7 @@ pub(crate) const METHODS: &[&str] = &[
     "/heddle.api.v1alpha2.SpoolService/SetSpoolMount",
     "/heddle.api.v1alpha2.SpoolService/RemoveSpoolMount",
     "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
+    "/heddle.api.v1alpha2.IdentityService/GetIdentity",
     "/heddle.api.v1alpha2.IdentityService/IntrospectCredential",
     "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership",
     "/heddle.api.v1alpha2.ThreadService/ObserveThreads",

@@ -6,6 +6,32 @@ use api::heddle::api::v1alpha2::*;
 use super::{DeviceRpc, account_auth::AccountSession};
 
 impl DeviceRpc {
+    pub(super) fn get_identity(
+        &self,
+        session: &AccountSession,
+        request: &GetIdentityRequest,
+    ) -> Result<GetIdentityResponse> {
+        let query = ObserveIdentityRequest {
+            include_current_credential: request.include_current_credential,
+            ..Default::default()
+        };
+        let mut response = GetIdentityResponse::default();
+        for (_, event) in self.identity_snapshot(session, &query)? {
+            match event.payload {
+                Some(identity_event::Payload::Identity(identity)) => {
+                    response.identity = Some(identity)
+                }
+                Some(identity_event::Payload::CurrentCredential(credential)) => {
+                    response.current_credential = Some(credential);
+                }
+                _ => {}
+            }
+        }
+        if response.identity.is_none() {
+            bail!("local identity unavailable");
+        }
+        Ok(response)
+    }
     pub(super) fn identity_snapshot(
         &self,
         session: &AccountSession,

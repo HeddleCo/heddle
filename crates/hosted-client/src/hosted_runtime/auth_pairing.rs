@@ -218,7 +218,7 @@ fn verify_pairing_authority(
         bail!("pairing ownership differs from the approving account");
     }
     let mint_roots = mint_attachment
-        .map(api::SignedMintRootAttachment::decode)
+        .map(api::SignedOwnerMintRootAttachment::decode)
         .transpose()
         .context("decode paired mint-root association")?
         .into_iter()

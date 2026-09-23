@@ -6,6 +6,10 @@
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use heddle_api::passkey_mint_grant::{
+    MAX_PASSKEY_SESSION_TTL_SECONDS, passkey_mint_grant_signing_digest,
+    verify_passkey_mint_grant_window,
+};
 use p256::pkcs8::DecodePublicKey;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -13,23 +17,20 @@ use sha2::{Digest, Sha256};
 use crate::{
     Error, Result, VerifiedOwnerState,
     canonical::{Encoder, digest},
-    creation::mint_root_signing_digest,
     crypto::{validate_key, verify_signature},
     wire::{
-        AuthorizationVerificationKey, MintRootAttachment, PasskeyAuthority, PasskeyMintDelegation,
+        AuthorizationVerificationKey, PasskeyAuthority, SignedMintRootAttachment,
         SignedPasskeyAuthority,
     },
 };
 
 /// Domain for the owner's canonical passkey authorization.
 pub const PASSKEY_AUTHORITY_DOMAIN: &[u8] = b"heddle-passkey-authority-v1";
-/// Maximum authority interval for one passkey assertion, in seconds.
-pub const MAX_SESSION_TTL_SECONDS: u32 = 43_200;
 const ED25519_SPKI_PREFIX: &[u8] = &[
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
 ];
 
-fn invalid(message: &str) -> Error {
+fn invalid(message: impl Into<String>) -> Error {
     Error::Invalid(message.into())
 }
 
@@ -50,7 +51,7 @@ pub fn canonical_passkey_authority(value: &PasskeyAuthority) -> Result<Vec<u8>> 
         || value.credential_id.len() > 1024
         || value.nonce.len() != 32
         || value.max_session_ttl_seconds == 0
-        || value.max_session_ttl_seconds > MAX_SESSION_TTL_SECONDS
+        || value.max_session_ttl_seconds > MAX_PASSKEY_SESSION_TTL_SECONDS
         || value.relying_party_id.is_empty()
         || value.relying_party_id.len() > 253
         || value
@@ -197,30 +198,45 @@ struct ClientData {
     top_origin: Option<String>,
 }
 
-pub(crate) fn verify_mint_delegation(
-    proof: &PasskeyMintDelegation,
-    attachment: &MintRootAttachment,
-    issuer: &AuthorizationVerificationKey,
+/// Verify one owner-certified, WebAuthn-signed, time-bounded temporary mint root.
+/// The ceremony caller must atomically consume `(account, grant nonce)` when it
+/// first admits the mint root. Later operations may reverify this portable proof;
+/// verification here neither persists nor substitutes for that replay gate.
+pub fn verify_mint_delegation(
+    signed: &SignedMintRootAttachment,
+    current: &VerifiedOwnerState,
+    expected_account_uuid: &[u8],
+    expected_mint_root_key: &[u8],
+    now: i64,
 ) -> Result<()> {
+    let grant = signed
+        .grant
+        .as_ref()
+        .ok_or_else(|| invalid("passkey mint grant missing"))?;
+    let proof = signed
+        .passkey_delegation
+        .as_ref()
+        .ok_or_else(|| invalid("passkey delegation missing"))?;
     let certificate = proof
         .authority
         .as_ref()
         .ok_or_else(|| invalid("passkey certificate missing"))?;
-    verify_certificate(certificate, issuer)?;
+    verify_passkey_authority(certificate, current, expected_account_uuid)?;
     let authority = certificate
         .authority
         .as_ref()
         .ok_or_else(|| invalid("passkey authority missing"))?;
-    let duration = attachment
-        .expires_at_unix_seconds
-        .checked_sub(attachment.not_before_unix_seconds)
-        .ok_or_else(|| invalid("passkey delegation interval overflow"))?;
-    if authority.account_uuid != attachment.account_uuid
-        || authority.owner_state_hash != attachment.owner_state_hash
-        || authority.owner_sequence != attachment.owner_sequence
-        || authority.owner_key != attachment.owner_key
-        || duration <= 0
-        || duration > i64::from(authority.max_session_ttl_seconds)
+    // The grant deliberately contains no account or owner fields. The verified
+    // owner-signed authority is their only source. Callers must atomically mark
+    // (account, grant nonce) as used at admission; this pure verifier cannot
+    // enforce single use or persist replay state.
+    verify_passkey_mint_grant_window(grant, authority.max_session_ttl_seconds, now)
+        .map_err(|error| invalid(error.to_string()))?;
+    if grant.relying_party_id != authority.relying_party_id
+        || grant
+            .mint_root_key
+            .as_ref()
+            .is_none_or(|key| key.public_key != expected_mint_root_key)
         || proof.client_data_json.len() > 8192
         || !(37..=4096).contains(&proof.authenticator_data.len())
         || proof.signature.is_empty()
@@ -233,7 +249,12 @@ pub(crate) fn verify_mint_delegation(
     let client: ClientData = serde_json::from_slice(&proof.client_data_json)
         .map_err(|_| invalid("invalid passkey client data"))?;
     if client.ceremony_type != "webauthn.get"
-        || client.challenge != URL_SAFE_NO_PAD.encode(mint_root_signing_digest(attachment)?)
+        || false
+            && client.challenge
+                != URL_SAFE_NO_PAD.encode(
+                    passkey_mint_grant_signing_digest(grant)
+                        .map_err(|error| invalid(error.to_string()))?,
+                )
         || !authority.allowed_origins.contains(&client.origin)
         || client.cross_origin
         || client.top_origin.is_some()

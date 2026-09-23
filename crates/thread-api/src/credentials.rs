@@ -50,12 +50,12 @@ impl Credentials {
         signer: std::sync::Arc<Ed25519Signer>,
         authority: &[u8],
     ) -> Result<Self, Error> {
-        use api::heddle::api::v1alpha2::ThreadControlAuthority;
         if authority.is_empty() || authority.len() > 64 * 1024 {
             return Err(Error::Protocol("owned-device authority proof bound"));
         }
-        let proof = ThreadControlAuthority::decode(authority)
-            .map_err(|error| Error::Io(error.to_string()))?;
+        let proof =
+            api::mint_root_association::decode_thread_control_authority_for_verification(authority)
+                .map_err(|error| Error::Io(error.to_string()))?;
         if proof.format != 1 || proof.encode_to_vec() != authority {
             return Err(Error::Protocol("canonical owned-device authority required"));
         }

@@ -1,7 +1,18 @@
 use super::*;
-use crate::thread_control_authority::{self as proof, Context, Revocation};
+use crate::{
+    thread_control_authority::{self as proof, Context, Revocation},
+    wire::thread_control_authority::MintRootAssociation,
+};
 
 const METHOD: &str = "/heddle.api.v1alpha2.ThreadService/RenameThread";
+
+#[test]
+fn thread_control_rejects_both_raw_mint_root_arms_before_decoding() {
+    let raw = hex::decode("080122003200").expect("ambiguous api vector");
+    assert!(crate::wire::ThreadControlAuthority::decode(raw.as_slice()).is_ok());
+    let error = proof::decode_envelope(&raw).expect_err("both arms rejected");
+    assert!(error.to_string().contains("both owner-v1 and passkey-v2"));
+}
 fn fixture(agent: bool) -> (Vec<u8>, VerifiedOwnerState, [u8; 32]) {
     fixture_mint(agent, false)
 }
@@ -57,8 +68,7 @@ fn fixture_mint_method_with_facts(
             expires_at_unix_seconds: NOW + 50,
             nonce: vec![7; 32],
         };
-        crate::wire::SignedMintRootAttachment {
-            passkey_delegation: None,
+        crate::wire::SignedOwnerMintRootAttachment {
             owner_signature: Some(owner.sign_digest(
                 &crate::creation::mint_root_signing_digest(&body).expect("attachment digest"),
             )),
@@ -72,7 +82,7 @@ fn fixture_mint_method_with_facts(
             state_hash: current.state_hash().to_vec(),
         },
         &mint.wire().public_key,
-        attachment.as_ref(),
+        attachment.map(MintRootAssociation::OwnerMintRootAttachment),
         &token,
     )
     .expect("proof");
@@ -179,11 +189,8 @@ fn thread_authority_typed_revocations_and_bounds_are_enforced() {
     let mut trailing = bytes.clone();
     trailing.extend([0x30, 1]);
     assert!(
-        proof::verify(&trailing, context(&owner, &publisher), |_| false)
-            .err()
-            .unwrap_or_else(|| panic!("unknown noncanonical field"))
-            .to_string()
-            .contains("noncanonical")
+        proof::verify(&trailing, context(&owner, &publisher), |_| false).is_err(),
+        "unexpected field 6 wire type must be rejected before authorization"
     );
     assert!(matches!(
         proof::verify(
@@ -244,8 +251,12 @@ fn retained_device_certificate_and_cached_proof_survive_rotation_without_new_aut
     .expect("accepted rotation");
     let envelope = crate::wire::ThreadControlAuthority::decode(bytes.as_slice()).expect("proof");
     let retained = envelope
-        .mint_root_attachment
+        .mint_root_association
         .clone()
+        .and_then(|proof| match proof {
+            MintRootAssociation::OwnerMintRootAttachment(signed) => Some(signed),
+            _ => None,
+        })
         .expect("admitted certificate");
     assert!(
         proof::verify(&bytes, context(&rotated, &publisher), |_| false).is_err(),
@@ -260,8 +271,12 @@ fn retained_device_certificate_and_cached_proof_survive_rotation_without_new_aut
     .expect("independently admitted device and cached owner prefix survive rotation");
     let mut backdated = envelope;
     let attachment = backdated
-        .mint_root_attachment
+        .mint_root_association
         .as_mut()
+        .and_then(|proof| match proof {
+            MintRootAssociation::OwnerMintRootAttachment(signed) => Some(signed),
+            _ => None,
+        })
         .expect("certificate");
     attachment.attachment.as_mut().expect("body").nonce[0] ^= 1;
     attachment.owner_signature = Some(

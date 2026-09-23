@@ -15,6 +15,11 @@ impl DeviceRpc {
         method: &str,
         body: &[u8],
     ) -> Result<Vec<u8>> {
+        if method.ends_with("/GetIdentity") {
+            return Ok(self
+                .get_identity(session, &GetIdentityRequest::decode(body)?)?
+                .encode_to_vec());
+        }
         if method.ends_with("/IntrospectCredential") {
             return Ok(self
                 .introspect(session, &IntrospectCredentialRequest::decode(body)?)?
@@ -284,12 +289,13 @@ impl DeviceRpc {
         if let Some(proof) = &genesis.delegated_creation {
             let facts = repo::admit_fresh_spool_creation(genesis, &owner, now)?;
             let statement = proof.statement.as_ref().context("creation statement")?;
-            let issuer = proof
-                .mint_root_attachment
-                .as_ref()
-                .and_then(|a| a.attachment.as_ref())
-                .and_then(|a| a.mint_root_key.as_ref())
-                .unwrap_or(owner.authority_key());
+            let issuer = match proof.mint_root_association.as_ref() {
+                Some(api::heddle::api::v1alpha2::spool_creation_proof::MintRootAssociation::OwnerMintRootAttachment(a)) =>
+                    a.attachment.as_ref().and_then(|a| a.mint_root_key.as_ref()),
+                Some(api::heddle::api::v1alpha2::spool_creation_proof::MintRootAssociation::PasskeyMintRootAttachment(a)) =>
+                    a.grant.as_ref().and_then(|g| g.mint_root_key.as_ref()),
+                None => None,
+            }.unwrap_or(owner.authority_key());
             if issuer.public_key == session.root.to_bytes() {
                 // The request already proved this exact mint root against the
                 // locally enrolled owner, including a fresh passkey delegation.

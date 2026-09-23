@@ -403,6 +403,7 @@ mod tests {
                 policy_id: "p1".into(),
                 rule: "r1".into(),
                 human_verification_can_override: true,
+                billing_lock: None,
             })),
         });
         assert!(matches!(
@@ -515,6 +516,7 @@ mod tests {
             policy_id: "retention".to_string(),
             rule: "no-purge".to_string(),
             human_verification_can_override: false,
+            billing_lock: None,
         }));
         assert_eq!(
             decoded_failure_details(&policy),

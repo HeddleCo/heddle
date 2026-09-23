@@ -25,6 +25,40 @@ pub const MINT_ROOT_DOMAIN: &[u8] = b"heddle-mint-root-attachment-v1";
 /// Verifier-only fact that no token block may assert or derive.
 pub const CREATION_REQUEST_PREDICATE: &str = "heddle_spool_creation_request_v1";
 
+#[derive(Clone, PartialEq, Message)]
+struct RawGenesisCreationProofs {
+    #[prost(bytes = "vec", repeated, tag = "3")]
+    proofs: Vec<Vec<u8>>,
+}
+
+/// Decode a genesis only after checking every raw delegated creation proof.
+/// Repeated nested messages are joined as protobuf merges them, so two oneof
+/// arms cannot hide in different occurrences before last-wins decoding.
+pub fn decode_spool_owner_genesis_for_verification(
+    bytes: &[u8],
+) -> Result<SignedSpoolOwnerGenesis> {
+    let raw = RawGenesisCreationProofs::decode(bytes)
+        .map_err(|error| invalid(format!("owner genesis wire: {error}")))?;
+    let proof_len = raw
+        .proofs
+        .iter()
+        .try_fold(0_usize, |total, proof| total.checked_add(proof.len()));
+    if proof_len.is_none_or(|len| len > MAX_CREATION_PROOF_BYTES) {
+        return Err(Error::TooLarge {
+            limit: MAX_CREATION_PROOF_BYTES,
+        });
+    }
+    let proof_bytes: Vec<u8> = raw.proofs.into_iter().flatten().collect();
+    if !proof_bytes.is_empty() {
+        heddle_api::mint_root_association::decode_spool_creation_proof_for_verification(
+            &proof_bytes,
+        )
+        .map_err(|error| invalid(format!("creation proof wire: {error}")))?;
+    }
+    SignedSpoolOwnerGenesis::decode(bytes)
+        .map_err(|error| invalid(format!("owner genesis encoding: {error}")))
+}
+
 fn invalid(message: impl Into<String>) -> Error {
     Error::Invalid(message.into())
 }
@@ -144,7 +178,7 @@ pub fn mint_root_signing_digest(value: &MintRootAttachment) -> Result<[u8; 32]> 
 /// The independently verified current owner state and expected account/root
 /// are caller inputs; the attachment cannot supply its own authority.
 pub fn verify_mint_root_attachment(
-    signed: &SignedMintRootAttachment,
+    signed: &SignedOwnerMintRootAttachment,
     current: &VerifiedOwnerState,
     expected_account_uuid: &[u8],
     expected_mint_root_key: &[u8],
@@ -167,7 +201,7 @@ pub fn verify_mint_root_attachment(
     if now < attachment.not_before_unix_seconds || now >= attachment.expires_at_unix_seconds {
         return Err(invalid("mint-root attachment is not currently valid"));
     }
-    verify_mint_root_signature(signed, attachment, current.authority_key(), &body)
+    verify_mint_root_signature(signed, current.authority_key(), &body)
 }
 
 /// Re-verify an exact mint certificate independently admitted before rotation.
@@ -176,7 +210,7 @@ pub fn verify_mint_root_attachment(
 /// A historical signature or backdated not-before time cannot prove admission.
 /// Fresh, user-supplied certificates use [`verify_mint_root_attachment`] instead.
 pub fn verify_retained_mint_root_attachment(
-    signed: &SignedMintRootAttachment,
+    signed: &SignedOwnerMintRootAttachment,
     current: &VerifiedOwnerState,
     expected_account_uuid: &[u8],
     expected_mint_root_key: &[u8],
@@ -203,24 +237,20 @@ pub fn verify_retained_mint_root_attachment(
             "retained mint-root attachment is not currently valid",
         ));
     }
-    verify_mint_root_signature(signed, attachment, issuer, &body)
+    verify_mint_root_signature(signed, issuer, &body)
 }
 
 pub(crate) fn verify_mint_root_signature(
-    signed: &SignedMintRootAttachment,
-    attachment: &MintRootAttachment,
+    signed: &SignedOwnerMintRootAttachment,
     issuer: &AuthorizationVerificationKey,
     body: &[u8],
 ) -> Result<()> {
-    match (&signed.owner_signature, &signed.passkey_delegation) {
-        (Some(signature), None) => verify_signature(issuer, signature, MINT_ROOT_DOMAIN, body),
-        (None, Some(proof)) => {
-            crate::passkey_delegation::verify_mint_delegation(proof, attachment, issuer)
-        }
-        _ => Err(invalid(
-            "mint-root attachment requires exactly one owner authorization proof",
-        )),
-    }
+    verify_signature(
+        issuer,
+        required(&signed.owner_signature, "mint-root owner signature")?,
+        MINT_ROOT_DOMAIN,
+        body,
+    )
 }
 
 /// Exact final narrowing block. The creator appends the existing standard
@@ -312,20 +342,35 @@ pub fn validate_spool_creation_structure(
             "creation statement differs from witnessed owner authority",
         ));
     }
-    let mint = if let Some(signed_attachment) = &proof.mint_root_attachment {
-        let attachment = required(&signed_attachment.attachment, "mint-root attachment")?;
-        let body = canonical_mint_root_attachment(attachment)?;
-        if attachment.account_uuid != statement.account_uuid
-            || attachment.owner_state_hash != statement.owner_state_hash
-            || attachment.owner_sequence != statement.owner_sequence
-            || attachment.owner_key.as_ref() != Some(state.authority_key())
-        {
-            return Err(invalid("mint root is attached to another owner state"));
+    let mint = match &proof.mint_root_association {
+        Some(spool_creation_proof::MintRootAssociation::OwnerMintRootAttachment(signed)) => {
+            let attachment = required(&signed.attachment, "mint-root attachment")?;
+            if attachment.account_uuid != statement.account_uuid
+                || attachment.owner_state_hash != statement.owner_state_hash
+                || attachment.owner_sequence != statement.owner_sequence
+                || attachment.owner_key.as_ref() != Some(state.authority_key())
+            {
+                return Err(invalid("mint root is attached to another owner state"));
+            }
+            let body = canonical_mint_root_attachment(attachment)?;
+            verify_mint_root_signature(signed, state.authority_key(), &body)?;
+            required(&attachment.mint_root_key, "mint root")?
         }
-        verify_mint_root_signature(signed_attachment, attachment, state.authority_key(), &body)?;
-        required(&attachment.mint_root_key, "mint root")?
-    } else {
-        state.authority_key()
+        Some(spool_creation_proof::MintRootAssociation::PasskeyMintRootAttachment(signed)) => {
+            let grant = required(&signed.grant, "passkey mint grant")?;
+            let key = required(&grant.mint_root_key, "passkey mint root")?;
+            // Structure proves signed lineage, not historical admission. The
+            // fresh gate below repeats this check with the real admission clock.
+            crate::passkey_delegation::verify_mint_delegation(
+                signed,
+                &state,
+                &statement.account_uuid,
+                &key.public_key,
+                grant.not_before_unix_seconds,
+            )?;
+            key
+        }
+        None => state.authority_key(),
     };
     let root = PublicKey::from_bytes(&mint.public_key, biscuit_auth::Algorithm::Ed25519)
         .map_err(|error| invalid(error.to_string()))?;
@@ -399,11 +444,26 @@ pub fn admit_fresh_spool_creation(
     if statement.created_at_unix_seconds > now.saturating_add(30) {
         return Err(invalid("creation timestamp is in the future"));
     }
-    if let Some(signed_attachment) = &proof.mint_root_attachment {
-        let attachment = required(&signed_attachment.attachment, "mint-root attachment")?;
-        if now < attachment.not_before_unix_seconds || now >= attachment.expires_at_unix_seconds {
-            return Err(invalid("mint-root attachment is not currently valid"));
+    match &proof.mint_root_association {
+        Some(spool_creation_proof::MintRootAssociation::OwnerMintRootAttachment(signed)) => {
+            let attachment = required(&signed.attachment, "mint-root attachment")?;
+            if now < attachment.not_before_unix_seconds || now >= attachment.expires_at_unix_seconds
+            {
+                return Err(invalid("mint-root attachment is not currently valid"));
+            }
         }
+        Some(spool_creation_proof::MintRootAssociation::PasskeyMintRootAttachment(signed)) => {
+            let grant = required(&signed.grant, "passkey mint grant")?;
+            let key = required(&grant.mint_root_key, "passkey mint root")?;
+            crate::passkey_delegation::verify_mint_delegation(
+                signed,
+                current,
+                &statement.account_uuid,
+                &key.public_key,
+                now,
+            )?;
+        }
+        None => {}
     }
     let time =
         DateTime::<Utc>::from_timestamp(now, 0).ok_or_else(|| invalid("invalid admission time"))?;

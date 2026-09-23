@@ -30,6 +30,29 @@ pub(super) async fn roundtrip(
         .expect("identity protocol")
         .expect("identity snapshot");
     assert!(batch.changes.iter().any(|p|matches!(p,identity_event::Payload::CurrentCredential(c) if !c.thread_control_authority.is_empty())));
+    let identity = remote
+        .api
+        .call::<thread_api::rpc::IdentityServiceGetIdentity>(&GetIdentityRequest {
+            include_current_credential: true,
+        })
+        .await
+        .expect("local unary identity");
+    assert!(identity.identity.is_some());
+    assert!(
+        identity
+            .current_credential
+            .as_ref()
+            .is_some_and(|credential| !credential.thread_control_authority.is_empty())
+    );
+    let identity_without_credential = remote
+        .api
+        .call::<thread_api::rpc::IdentityServiceGetIdentity>(&GetIdentityRequest {
+            include_current_credential: false,
+        })
+        .await
+        .expect("local unary identity without credential");
+    assert!(identity_without_credential.identity.is_some());
+    assert!(identity_without_credential.current_credential.is_none());
     let principal = uuid::Uuid::from_bytes([9; 16]).to_string();
     let token = crate::hosted_runtime::root_mint::mint_agent_root(&[71; 32])
         .expect("local root credential")

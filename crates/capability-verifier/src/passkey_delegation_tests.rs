@@ -1,7 +1,11 @@
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+use heddle_api::passkey_mint_grant::passkey_mint_grant_signing_digest;
 
 use super::*;
-use crate::{creation::*, passkey_delegation::*, wire::*};
+use crate::{
+    passkey_delegation::*,
+    wire::{thread_control_authority::MintRootAssociation, *},
+};
 
 fn fixture() -> (SignedMintRootAttachment, VerifiedOwnerState) {
     let owner = TestKey::new(81);
@@ -40,20 +44,17 @@ fn fixture() -> (SignedMintRootAttachment, VerifiedOwnerState) {
         )),
         authority: Some(authority),
     };
-    let attachment = MintRootAttachment {
+    let grant = PasskeyMintGrant {
         format_version: 1,
-        account_uuid: OWNER_UUID.to_vec(),
-        owner_state_hash: state.state_hash().to_vec(),
-        owner_sequence: state.sequence(),
-        owner_key: Some(owner.wire()),
         mint_root_key: Some(mint.wire()),
+        relying_party_id: "heddle.test".into(),
         not_before_unix_seconds: NOW,
         expires_at_unix_seconds: NOW + 3600,
         nonce: vec![9; 32],
     };
     let client_data_json = serde_json::to_vec(&serde_json::json!({
         "type": "webauthn.get",
-        "challenge": URL_SAFE_NO_PAD.encode(mint_root_signing_digest(&attachment).expect("challenge")),
+        "challenge": URL_SAFE_NO_PAD.encode(passkey_mint_grant_signing_digest(&grant).expect("challenge")),
         "origin": "https://app.heddle.test",
         "crossOrigin": false,
     })).expect("client data");
@@ -65,8 +66,7 @@ fn fixture() -> (SignedMintRootAttachment, VerifiedOwnerState) {
     let signature = passkey.signing.sign(&signed).to_bytes().to_vec();
     (
         SignedMintRootAttachment {
-            attachment: Some(attachment),
-            owner_signature: None,
+            grant: Some(grant),
             passkey_delegation: Some(PasskeyMintDelegation {
                 authority: Some(certificate),
                 client_data_json,
@@ -79,7 +79,7 @@ fn fixture() -> (SignedMintRootAttachment, VerifiedOwnerState) {
 }
 
 fn verify(value: &SignedMintRootAttachment, state: &VerifiedOwnerState) -> Result<()> {
-    verify_mint_root_attachment(
+    verify_mint_delegation(
         value,
         state,
         &OWNER_UUID,
@@ -131,7 +131,9 @@ fn temporary_passkey_thread_landing_is_exact_method_and_spool_bound() {
             state_hash: state.state_hash().to_vec(),
         },
         &publisher,
-        Some(&attachment),
+        Some(MintRootAssociation::PasskeyMintRootAttachment(
+            attachment.clone(),
+        )),
         &token,
     )
     .expect("portable temporary authority");
@@ -172,7 +174,9 @@ fn temporary_passkey_thread_landing_is_exact_method_and_spool_bound() {
             state_hash: state.state_hash().to_vec(),
         },
         &publisher,
-        Some(&attachment),
+        Some(MintRootAssociation::PasskeyMintRootAttachment(
+            attachment.clone(),
+        )),
         &stack_token,
     )
     .expect("portable stack authority");
@@ -262,7 +266,9 @@ fn expired_revoked_passkey_work_keeps_provenance_without_current_authority() {
             state_hash: state.state_hash().to_vec(),
         },
         &publisher,
-        Some(&attachment),
+        Some(MintRootAssociation::PasskeyMintRootAttachment(
+            attachment.clone(),
+        )),
         &token,
     )
     .expect("portable original authority");
@@ -307,7 +313,7 @@ fn resign_assertion(value: &mut SignedMintRootAttachment, refresh_challenge: boo
             serde_json::from_slice(&proof.client_data_json).expect("client");
         client["challenge"] = URL_SAFE_NO_PAD
             .encode(
-                mint_root_signing_digest(value.attachment.as_ref().expect("attachment"))
+                passkey_mint_grant_signing_digest(value.grant.as_ref().expect("grant"))
                     .expect("challenge"),
             )
             .into();
@@ -375,9 +381,7 @@ fn passkey_assertion_binds_exact_mint_origin_rp_and_user_verification() {
     let (valid, state) = fixture();
     verify(&valid, &state).expect("positive control");
     for (index, mutate) in [
-        |value: &mut SignedMintRootAttachment| {
-            value.attachment.as_mut().expect("attachment").nonce[0] ^= 1
-        },
+        |value: &mut SignedMintRootAttachment| value.grant.as_mut().expect("grant").nonce[0] ^= 1,
         |value: &mut SignedMintRootAttachment| {
             value
                 .passkey_delegation
@@ -415,7 +419,7 @@ fn passkey_assertion_binds_exact_mint_origin_rp_and_user_verification() {
         }
         assert!(
             verify(&changed, &state).is_err(),
-            "mutated authority must be rejected"
+            "mutated authority case {index} must be rejected"
         );
     }
 }
@@ -427,9 +431,9 @@ fn passkey_authority_cannot_extend_lifetime_or_select_another_owner() {
     verify(&valid, &state).expect("positive control");
     let mut changed = valid.clone();
     changed
-        .attachment
+        .grant
         .as_mut()
-        .expect("attachment")
+        .expect("grant")
         .expires_at_unix_seconds = NOW + 43_201;
     resign_assertion(&mut changed, true);
     assert!(verify(&changed, &state).is_err());
@@ -454,14 +458,249 @@ fn passkey_authority_cannot_extend_lifetime_or_select_another_owner() {
     );
     assert!(verify(&changed, &state).is_err());
     let mut changed = valid;
-    changed.owner_signature = Some(
-        TestKey::new(81).sign_digest(
-            &mint_root_signing_digest(changed.attachment.as_ref().expect("attachment"))
-                .expect("digest"),
-        ),
-    );
+    changed
+        .passkey_delegation
+        .as_mut()
+        .expect("proof")
+        .authority
+        .as_mut()
+        .expect("certificate")
+        .owner_signature
+        .as_mut()
+        .expect("owner signature")
+        .signature[0] ^= 1;
     assert!(
         verify(&changed, &state).is_err(),
-        "ambiguous authority forms must be rejected"
+        "owner signature must verify"
     );
+}
+
+#[test]
+fn passkey_authority_must_match_current_state_and_asserting_credential() {
+    let (valid, state) = fixture();
+    let mut stale = valid.clone();
+    let certificate = stale
+        .passkey_delegation
+        .as_mut()
+        .expect("proof")
+        .authority
+        .as_mut()
+        .expect("certificate");
+    let authority = certificate.authority.as_mut().expect("authority");
+    authority.owner_state_hash[0] ^= 1;
+    certificate.owner_signature = Some(
+        TestKey::new(81).sign_digest(&passkey_authority_signing_digest(authority).expect("digest")),
+    );
+    assert!(
+        verify(&stale, &state).is_err(),
+        "stale owner state rejected despite valid owner signature"
+    );
+
+    let mut foreign_credential = valid.clone();
+    let certificate = foreign_credential
+        .passkey_delegation
+        .as_mut()
+        .expect("proof")
+        .authority
+        .as_mut()
+        .expect("certificate");
+    let authority = certificate.authority.as_mut().expect("authority");
+    authority.credential_id[0] ^= 1;
+    authority.public_key_spki.truncate(12);
+    authority
+        .public_key_spki
+        .extend_from_slice(&TestKey::new(86).wire().public_key);
+    certificate.owner_signature = Some(
+        TestKey::new(81).sign_digest(&passkey_authority_signing_digest(authority).expect("digest")),
+    );
+    assert!(
+        verify(&foreign_credential, &state).is_err(),
+        "assertion must use certified credential key"
+    );
+
+    let mut unsigned = valid;
+    unsigned
+        .passkey_delegation
+        .as_mut()
+        .expect("proof")
+        .authority
+        .as_mut()
+        .expect("certificate")
+        .owner_signature = None;
+    assert!(
+        verify(&unsigned, &state).is_err(),
+        "owner signature required"
+    );
+}
+
+#[test]
+fn shared_api_passkey_mint_grant_vectors() {
+    use heddle_api::passkey_mint_grant::{
+        canonical_passkey_mint_grant, verify_passkey_authentication_challenge,
+        verify_passkey_mint_grant_window,
+    };
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../tests/fixtures/passkey_mint_grant_v1.json"))
+            .expect("shared api fixture");
+    let (_, state) = fixture();
+    let positive = &vectors["positive"];
+    let bytes = hex::decode(
+        positive["attachment_proto_hex"]
+            .as_str()
+            .expect("positive bytes"),
+    )
+    .expect("positive hex");
+    let attachment = SignedMintRootAttachment::decode(bytes.as_slice()).expect("positive protobuf");
+    let grant = attachment.grant.as_ref().expect("grant");
+    assert_eq!(
+        hex::encode(canonical_passkey_mint_grant(grant).expect("canonical")),
+        positive["canonical_hex"]
+    );
+    assert_eq!(
+        hex::encode(passkey_mint_grant_signing_digest(grant).expect("digest")),
+        positive["signing_digest_hex"]
+    );
+    let now = positive["now_unix_seconds"].as_i64().expect("now");
+    verify_mint_delegation(
+        &attachment,
+        &state,
+        &OWNER_UUID,
+        &TestKey::new(83).wire().public_key,
+        now,
+    )
+    .expect("shared positive verifies");
+    let challenge = AuthenticationChallenge::decode(
+        hex::decode(
+            positive["authentication_challenge_proto_hex"]
+                .as_str()
+                .expect("challenge hex"),
+        )
+        .expect("challenge bytes")
+        .as_slice(),
+    )
+    .expect("challenge protobuf");
+    verify_passkey_authentication_challenge(&challenge).expect("shared challenge binds grant");
+    for case in vectors["negative_cases"]
+        .as_array()
+        .expect("negative cases")
+    {
+        let id = case["id"].as_str().expect("case id");
+        if id == "mismatching-authentication-challenge" {
+            let challenge = AuthenticationChallenge::decode(
+                hex::decode(
+                    case["authentication_challenge_proto_hex"]
+                        .as_str()
+                        .expect("challenge hex"),
+                )
+                .expect("challenge bytes")
+                .as_slice(),
+            )
+            .expect("challenge protobuf");
+            assert!(
+                verify_passkey_authentication_challenge(&challenge).is_err(),
+                "{id}"
+            );
+            continue;
+        }
+        let candidate = if case["source"] == "positive" {
+            attachment.clone()
+        } else {
+            SignedMintRootAttachment::decode(
+                hex::decode(
+                    case["attachment_proto_hex"]
+                        .as_str()
+                        .expect("attachment hex"),
+                )
+                .expect("attachment bytes")
+                .as_slice(),
+            )
+            .expect("attachment protobuf")
+        };
+        let at = case["now_unix_seconds"].as_i64().unwrap_or(now);
+        assert!(
+            verify_mint_delegation(
+                &candidate,
+                &state,
+                &OWNER_UUID,
+                &TestKey::new(83).wire().public_key,
+                at
+            )
+            .is_err(),
+            "{id}"
+        );
+    }
+    for case in vectors["window_cases"].as_array().expect("window cases") {
+        let mut signed = attachment.clone();
+        let grant = signed.grant.as_mut().expect("grant");
+        grant.not_before_unix_seconds = case["not_before_unix_seconds"]
+            .as_i64()
+            .expect("not before");
+        grant.expires_at_unix_seconds = case["expires_at_unix_seconds"].as_i64().expect("expires");
+        let ceiling = case["max_session_ttl_seconds"].as_u64().expect("ttl") as u32;
+        let at = case["now_unix_seconds"].as_i64().expect("now");
+        assert_eq!(
+            verify_passkey_mint_grant_window(grant, ceiling, at).is_ok(),
+            case["accepted"].as_bool().expect("accepted"),
+            "{}",
+            case["id"]
+        );
+        let certificate = signed
+            .passkey_delegation
+            .as_mut()
+            .expect("delegation")
+            .authority
+            .as_mut()
+            .expect("certificate");
+        let authority = certificate.authority.as_mut().expect("authority");
+        authority.max_session_ttl_seconds = ceiling;
+        if ceiling <= heddle_api::passkey_mint_grant::MAX_PASSKEY_SESSION_TTL_SECONDS {
+            certificate.owner_signature = Some(TestKey::new(81).sign_digest(
+                &passkey_authority_signing_digest(authority).expect("authority digest"),
+            ));
+        }
+        resign_assertion(&mut signed, true);
+        assert_eq!(
+            verify_mint_delegation(
+                &signed,
+                &state,
+                &OWNER_UUID,
+                &TestKey::new(83).wire().public_key,
+                at
+            )
+            .is_ok(),
+            case["accepted"].as_bool().expect("accepted"),
+            "{}",
+            case["id"]
+        );
+    }
+    for case in vectors["ambiguous_oneof_cases"]
+        .as_array()
+        .expect("oneof cases")
+    {
+        let bytes =
+            hex::decode(case["raw_proto_hex"].as_str().expect("raw proto")).expect("raw bytes");
+        let outcome = match case["message"].as_str().expect("message") {
+            "ThreadControlAuthority" => {
+                heddle_api::mint_root_association::decode_thread_control_authority_for_verification(
+                    &bytes,
+                )
+                .map(|_| ())
+            }
+            "SpoolCreationProof" => {
+                heddle_api::mint_root_association::decode_spool_creation_proof_for_verification(
+                    &bytes,
+                )
+                .map(|_| ())
+            }
+            other => panic!("unknown oneof message {other}"),
+        };
+        assert!(
+            matches!(
+                outcome,
+                Err(heddle_api::mint_root_association::MintRootAssociationWireError::BothArms)
+            ),
+            "{}",
+            case["id"]
+        );
+    }
 }

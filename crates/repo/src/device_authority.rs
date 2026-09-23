@@ -5,7 +5,7 @@
 use std::{io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};
-use api::heddle::api::v1alpha2::{OwnerState, SignedMintRootAttachment};
+use api::heddle::api::v1alpha2::{OwnerState, SignedOwnerMintRootAttachment};
 use objects::{fs_atomic, lock::RepoLock};
 use prost::Message;
 
@@ -15,7 +15,7 @@ const MAX_REVOCATIONS: usize = 16_384;
 
 pub struct DeviceAuthority {
     pub owner: OwnerState,
-    pub mint_roots: Vec<SignedMintRootAttachment>,
+    pub mint_roots: Vec<SignedOwnerMintRootAttachment>,
     pub revoked_ids: Vec<String>,
     pub revoked_mint_roots: Vec<[u8; 32]>,
     pub revoked_publishers: Vec<[u8; 32]>,
@@ -28,7 +28,7 @@ struct StoredAuthority {
     #[prost(message, optional, tag = "2")]
     owner: Option<OwnerState>,
     #[prost(message, repeated, tag = "3")]
-    mint_roots: Vec<SignedMintRootAttachment>,
+    mint_roots: Vec<SignedOwnerMintRootAttachment>,
     #[prost(string, repeated, tag = "4")]
     revoked_ids: Vec<String>,
     #[prost(bytes = "vec", repeated, tag = "5")]
@@ -300,7 +300,8 @@ impl DeviceAuthority {
         if proof.len() > 64 * 1024 {
             bail!("device authority proof exceeds 64KiB");
         }
-        let envelope = api::heddle::api::v1alpha2::ThreadControlAuthority::decode(proof)?;
+        let envelope =
+            api::mint_root_association::decode_thread_control_authority_for_verification(proof)?;
         if envelope.format != 1
             || envelope.encode_to_vec() != proof
             || envelope.mint_root_public_key != root_key.as_slice()
@@ -343,15 +344,35 @@ impl DeviceAuthority {
             bail!("device mint root revoked");
         }
         if current.authority_key().public_key == root_key.as_slice() {
-            if envelope.mint_root_attachment.is_some() {
+            if envelope.mint_root_association.is_some() {
                 bail!("direct owner proof has an unrelated attachment");
             }
             return Ok(None);
         }
-        let attachment = envelope
-            .mint_root_attachment
+        use api::heddle::api::v1alpha2::thread_control_authority::MintRootAssociation;
+        let association = envelope
+            .mint_root_association
             .as_ref()
-            .context("sibling mint root requires owner certificate")?;
+            .context("sibling mint root requires an association")?;
+        if let MintRootAssociation::PasskeyMintRootAttachment(attachment) = association {
+            heddleco_capability_verifier::passkey_delegation::verify_mint_delegation(
+                attachment,
+                &current,
+                &account.account_uuid,
+                root_key,
+                now,
+            )?;
+            return Ok(Some(
+                attachment
+                    .grant
+                    .as_ref()
+                    .context("passkey grant missing")?
+                    .expires_at_unix_seconds,
+            ));
+        }
+        let MintRootAssociation::OwnerMintRootAttachment(attachment) = association else {
+            bail!("unknown mint root association");
+        };
         if self.mint_roots.contains(attachment) {
             heddleco_capability_verifier::creation::verify_retained_mint_root_attachment(
                 attachment,
@@ -388,7 +409,7 @@ mod tests {
     fn publish(
         home: &Path,
         owner: &OwnerState,
-        mint_roots: &[SignedMintRootAttachment],
+        mint_roots: &[SignedOwnerMintRootAttachment],
         revoked_ids: &[String],
         now: i64,
     ) -> Result<()> {
@@ -703,7 +724,10 @@ mod tests {
         );
         let envelope = api::heddle::api::v1alpha2::ThreadControlAuthority::decode(proof.as_slice())
             .expect("portable proof");
-        assert_eq!(envelope.mint_root_attachment, Some(certificate.clone()));
+        assert_eq!(
+            envelope.mint_root_association,
+            Some(api::heddle::api::v1alpha2::thread_control_authority::MintRootAssociation::OwnerMintRootAttachment(certificate.clone()))
+        );
         assert_eq!(
             envelope.owner.expect("owner history").state_hash,
             current.state_hash()

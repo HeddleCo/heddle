@@ -1,5 +1,8 @@
 use super::*;
-use crate::{creation::*, wire::*};
+use crate::{
+    creation::*,
+    wire::{spool_creation_proof::MintRootAssociation, *},
+};
 
 fn creation_fixture(
     separate_mint: bool,
@@ -76,8 +79,7 @@ fn creation_fixture(
                 expires_at_unix_seconds: NOW + 50,
                 nonce: vec![5; 32],
             };
-            SignedMintRootAttachment {
-                passkey_delegation: None,
+            SignedOwnerMintRootAttachment {
                 owner_signature: Some(owner.sign_digest(
                     &mint_root_signing_digest(&attachment).expect("certificate digest"),
                 )),
@@ -91,7 +93,7 @@ fn creation_fixture(
         ),
         statement: Some(statement),
         sealed_biscuit: child.to_vec().expect("serialized proof"),
-        mint_root_attachment: certificate,
+        mint_root_association: certificate.map(MintRootAssociation::OwnerMintRootAttachment),
         owner_history: Some(OwnerHistory {
             root: Some(root),
             accepted_transitions: vec![],
@@ -255,7 +257,7 @@ fn independent_mint_root_requires_current_owner_certificate() {
         .delegated_creation
         .as_mut()
         .expect("proof")
-        .mint_root_attachment = None;
+        .mint_root_association = None;
     assert!(
         validate_spool_creation_structure(&missing, NOW).is_err(),
         "host mapping cannot replace owner proof"
@@ -265,8 +267,12 @@ fn independent_mint_root_requires_current_owner_certificate() {
         .delegated_creation
         .as_mut()
         .expect("proof")
-        .mint_root_attachment
+        .mint_root_association
         .as_mut()
+        .and_then(|proof| match proof {
+            MintRootAssociation::OwnerMintRootAttachment(signed) => Some(signed),
+            _ => None,
+        })
         .expect("certificate")
         .owner_signature
         .as_mut()
@@ -304,7 +310,11 @@ fn mint_root_attachment_canonical_browser_fixture() {
     let certificate = signed
         .delegated_creation
         .expect("proof")
-        .mint_root_attachment
+        .mint_root_association
+        .and_then(|proof| match proof {
+            MintRootAssociation::OwnerMintRootAttachment(signed) => Some(signed),
+            _ => None,
+        })
         .expect("certificate");
     let attachment = certificate.attachment.as_ref().expect("body");
     verify_mint_root_attachment(
@@ -331,4 +341,14 @@ fn mint_root_attachment_canonical_browser_fixture() {
     ))
     .expect("fixture JSON");
     assert_eq!(fixture, expected);
+}
+
+#[test]
+fn spool_creation_rejects_both_raw_mint_root_arms_before_decoding() {
+    use prost::Message as _;
+    let raw = hex::decode("1a0422003200").expect("wrapped ambiguous api vector");
+    let unchecked = SignedSpoolOwnerGenesis::decode(raw.as_slice())
+        .expect("protobuf oneof silently keeps the last arm");
+    assert!(unchecked.delegated_creation.is_some());
+    assert!(decode_spool_owner_genesis_for_verification(&raw).is_err());
 }
