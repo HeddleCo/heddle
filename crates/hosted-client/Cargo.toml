@@ -40,6 +40,7 @@ heddle-perf-contract.workspace = true
 iroh = { workspace = true, optional = true }
 iroh-base = { workspace = true, optional = true }
 n0-watcher = { workspace = true, optional = true }
+noq = { workspace = true, optional = true }
 noq-udp = { workspace = true, optional = true }
 objects.workspace = true
 prost = { workspace = true, optional = true }
@@ -92,6 +93,7 @@ client = [
     "dep:iroh",
     "dep:iroh-base",
     "dep:n0-watcher",
+    "dep:noq",
     "dep:noq-udp",
     "dep:prost",
     "dep:prost-types",
