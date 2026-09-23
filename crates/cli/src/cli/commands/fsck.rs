@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn native_rejects_git_as_repair_authority_before_mutation() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let head_before = repo.head().unwrap();
 
         let error = repair_git(
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn preview_defaults_to_the_repository_authority_direction() {
         let native_dir = TempDir::new().unwrap();
-        let native = Repository::init_default(native_dir.path()).unwrap();
+        let native = crate::init_test_repository(native_dir.path()).unwrap();
         let native_preview = repair_git(&native, Some("main".to_string()), None, true).unwrap();
         assert_eq!(native_preview.len(), 1);
         assert!(native_preview[0].detail.contains("--prefer heddle"));

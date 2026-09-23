@@ -1306,7 +1306,7 @@ mod tests {
 
     fn seeded_repo() -> (TempDir, Repository) {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("file.txt"), b"tracked\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
         (repo_dir, repo)
@@ -1315,7 +1315,7 @@ mod tests {
     #[test]
     fn capture_thread_from_disk_preserves_unchanged_gitlink_when_sibling_changes() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         let target = gitlink_target_for_tests();
         let note_hash = repo
             .store()
@@ -1381,7 +1381,7 @@ mod tests {
     #[test]
     fn materialize_thread_writes_manifest_with_files() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         // Build a small worktree to capture.
         fs::write(repo_dir.path().join("Cargo.toml"), b"# a\n").unwrap();
         fs::create_dir_all(repo_dir.path().join("src")).unwrap();
@@ -1555,7 +1555,7 @@ mod tests {
     #[test]
     fn checkout_renders_courtesy_stub_when_state_is_under_tier_for_audience() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
         repo.snapshot(Some("embargoed fix".into()), None).unwrap();
         embargo_state_with_tier(
@@ -1593,7 +1593,7 @@ mod tests {
     #[test]
     fn checkout_materializes_real_content_for_the_authorized_audience() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
         repo.snapshot(Some("embargoed fix".into()), None).unwrap();
         embargo_state_with_tier(
@@ -1625,7 +1625,7 @@ mod tests {
     #[test]
     fn public_tip_does_not_disclose_private_ancestor_path_to_public_audience() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("public.env"), b"PUBLIC=1\n").unwrap();
         repo.snapshot(Some("public env".into()), None).unwrap();
 
@@ -1694,7 +1694,7 @@ mod tests {
     #[test]
     fn authorized_rematerialize_removes_stale_embargo_stub() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
         repo.snapshot(Some("embargoed fix".into()), None).unwrap();
         embargo_state_with_tier(
@@ -1742,7 +1742,7 @@ mod tests {
     #[test]
     fn visible_then_withheld_root_has_only_stub() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
         fs::create_dir_all(repo_dir.path().join("nested")).unwrap();
         fs::write(repo_dir.path().join("nested/inner.rs"), b"fn inner() {}\n").unwrap();
@@ -1802,7 +1802,7 @@ mod tests {
     #[test]
     fn withheld_then_visible_root_has_real_tree_no_stub() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
         repo.snapshot(Some("embargoed fix".into()), None).unwrap();
         embargo_state_with_tier(
@@ -1842,7 +1842,7 @@ mod tests {
     #[test]
     fn visible_then_visible_refreshes_tree() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("keep.rs"), b"keep\n").unwrap();
         fs::write(repo_dir.path().join("stale.rs"), b"stale\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
@@ -1880,7 +1880,7 @@ mod tests {
     #[test]
     fn withheld_then_withheld_stays_withheld() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
         repo.snapshot(Some("embargoed fix".into()), None).unwrap();
         embargo_state_with_tier(
@@ -1929,7 +1929,7 @@ mod tests {
     #[test]
     fn withheld_marker_keyed_on_canonical_root_for_relative_dest() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
         repo.snapshot(Some("embargoed fix".into()), None).unwrap();
         embargo_state_with_tier(
@@ -1976,7 +1976,7 @@ mod tests {
     #[test]
     fn withheld_reduction_survives_sibling_manifest_clobber() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
 
         // State S1 (visible): contains the secret that must not linger later.
         fs::write(repo_dir.path().join("old-secret.txt"), b"launch codes\n").unwrap();
@@ -2068,7 +2068,7 @@ mod tests {
     #[test]
     fn capture_refreshes_materialized_leaves() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
 
         // S1 (visible): tracked `a.txt`.
         fs::write(repo_dir.path().join("a.txt"), b"alpha\n").unwrap();
@@ -2145,7 +2145,7 @@ mod tests {
     #[test]
     fn capture_skips_embargo_courtesy_stub() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
         repo.snapshot(Some("embargoed fix".into()), None).unwrap();
         embargo_state_with_tier(
@@ -2226,7 +2226,7 @@ mod tests {
     #[test]
     fn withheld_manifest_is_per_worktree_not_per_thread() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
         repo.snapshot(Some("embargoed fix".into()), None).unwrap();
         embargo_state_with_tier(
@@ -2346,7 +2346,7 @@ mod tests {
     #[test]
     fn record_thread_manifest_writes_sidecar_for_externally_materialized_worktree() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("a.txt"), b"alpha\n").unwrap();
         fs::write(repo_dir.path().join("b.txt"), b"beta\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
@@ -2401,7 +2401,7 @@ mod tests {
     #[test]
     fn record_thread_manifest_errors_when_state_is_missing() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         let dest = TempDir::new().unwrap();
         let missing = crate::test_state_id();
         let err = repo
@@ -2417,7 +2417,7 @@ mod tests {
     #[test]
     fn materialize_unknown_thread_errors() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         let dest = TempDir::new().unwrap();
         let err = repo
             .materialize_thread(
@@ -2435,7 +2435,7 @@ mod tests {
     #[test]
     fn capture_after_edit_advances_thread() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
         let before = repo
@@ -2484,7 +2484,7 @@ mod tests {
     #[test]
     fn capture_with_no_changes_is_noop() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("steady.txt"), b"unchanged\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
         let before = repo
@@ -2516,7 +2516,7 @@ mod tests {
     #[test]
     fn stat_cache_short_circuits_unchanged_capture() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         for i in 0..20 {
             fs::write(
                 repo_dir.path().join(format!("file_{i:02}.txt")),
@@ -2552,7 +2552,7 @@ mod tests {
     #[test]
     fn stat_cache_detects_edit_and_falls_through() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("only.txt"), b"v1\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
@@ -2585,7 +2585,7 @@ mod tests {
     #[test]
     fn stat_cache_detects_added_file() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("a.txt"), b"a\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
@@ -2613,7 +2613,7 @@ mod tests {
     #[test]
     fn snapshot_in_materialized_thread_refreshes_manifest() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("alpha.txt"), b"v1\n").unwrap();
         fs::write(repo_dir.path().join("beta.txt"), b"steady\n").unwrap();
         let initial = repo.snapshot(Some("seed".into()), None).unwrap();
@@ -2676,7 +2676,7 @@ mod tests {
     #[test]
     fn snapshot_outside_materialized_worktree_does_not_refresh_manifest() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("alpha.txt"), b"v1\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
@@ -2756,7 +2756,7 @@ mod tests {
     #[test]
     fn capture_thread_from_disk_accepts_symlinks_in_dedicated_worktree() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         // Seed with a file + a symlink pointing inside the repo.
         fs::write(repo_dir.path().join("target.txt"), b"target\n").unwrap();
         std::os::unix::fs::symlink("target.txt", repo_dir.path().join("link")).unwrap();
@@ -2800,7 +2800,7 @@ mod tests {
     #[test]
     fn stat_cache_detects_ignore_config_tightening() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         // Seed: two files, no .heddleignore yet.
         fs::write(repo_dir.path().join("keep.txt"), b"keep\n").unwrap();
         fs::write(repo_dir.path().join("secret.txt"), b"secret\n").unwrap();
@@ -2839,7 +2839,7 @@ mod tests {
     #[test]
     fn stat_cache_detects_removed_tree_only_empty_directory() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         // Seed with one file (so the thread isn't empty) plus an
         // empty directory that becomes a tree entry on its own.
         fs::write(repo_dir.path().join("anchor.txt"), b"anchor\n").unwrap();
@@ -2878,7 +2878,7 @@ mod tests {
     #[test]
     fn stat_cache_detects_added_empty_directory() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("only.txt"), b"a\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
@@ -2904,7 +2904,7 @@ mod tests {
     #[test]
     fn stat_cache_detects_removed_empty_directory() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::create_dir_all(repo_dir.path().join("nested/deep")).unwrap();
         fs::write(repo_dir.path().join("nested/deep/leaf.txt"), b"leaf\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
@@ -2933,7 +2933,7 @@ mod tests {
     #[test]
     fn stat_cache_detects_deletion() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("a.txt"), b"a\n").unwrap();
         fs::write(repo_dir.path().join("b.txt"), b"b\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
@@ -2971,7 +2971,7 @@ mod tests {
         use std::sync::Arc;
 
         let repo_dir = TempDir::new().unwrap();
-        let repo = Arc::new(Repository::init_default(repo_dir.path()).unwrap());
+        let repo = Arc::new(crate::init_test_repository(repo_dir.path()).unwrap());
         fs::write(repo_dir.path().join("shared.txt"), b"seed\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
         let initial_head = repo

@@ -100,7 +100,7 @@ mod tests {
 
     fn init_repo() -> (tempfile::TempDir, Repository) {
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         (temp, repo)
     }
 

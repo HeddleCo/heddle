@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn suggest_context_targets_matches_golden_fixture() {
         let dir = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(dir.path()).unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
 
         fs::create_dir_all(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/a.rs"), "one\n").unwrap();

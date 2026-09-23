@@ -69,8 +69,16 @@ pub struct WhoamiIdentity {
 
 fn capture_actor_from_resolved(resolved: &ResolvedPrincipal) -> CaptureActor {
     CaptureActor {
-        name: resolved.principal.name_lossy().into_owned(),
-        email: resolved.principal.email_lossy().into_owned(),
+        name: resolved
+            .principal
+            .as_ref()
+            .map_or_else(String::new, |principal| principal.name_lossy().into_owned()),
+        email: resolved
+            .principal
+            .as_ref()
+            .map_or_else(String::new, |principal| {
+                principal.email_lossy().into_owned()
+            }),
         source: resolved.source,
     }
 }
@@ -548,7 +556,7 @@ mod tests {
 
     fn luke_actor() -> CaptureActor {
         capture_actor_from_resolved(&ResolvedPrincipal {
-            principal: Principal::new("Luke", "luke@example.com"),
+            principal: Some(Principal::new("Luke", "luke@example.com")),
             source: Some("user_config"),
         })
     }
@@ -575,8 +583,22 @@ mod tests {
         };
         let resolved = resolve_principal_without_repo(user_config.principal_pair());
         assert_eq!(resolved.source, Some("user_config"));
-        assert_eq!(resolved.principal.name_lossy(), "Luke");
-        assert_eq!(resolved.principal.email_lossy(), "luke@example.com");
+        assert_eq!(
+            resolved
+                .principal
+                .as_ref()
+                .expect("configured")
+                .name_lossy(),
+            "Luke"
+        );
+        assert_eq!(
+            resolved
+                .principal
+                .as_ref()
+                .expect("configured")
+                .email_lossy(),
+            "luke@example.com"
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use chrono::Utc;
 use objects::{
     HeddleError,
     error::Result,
-    object::{Principal, State, ThreadName, Tree},
+    object::{State, ThreadName, Tree},
     worktree::{WorktreeStatus, build_worktree_ignore},
 };
 use refs::Head;
@@ -140,6 +140,8 @@ pub struct StatusReport {
     pub base_root: Option<String>,
     pub current_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_remote: Option<NativeRemoteStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_path: Option<String>,
@@ -210,6 +212,56 @@ pub struct StatusReport {
     #[serde(skip)]
     #[schemars(skip)]
     pub profile: StatusProfile,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct NativeRemoteStatus {
+    pub name: String,
+    pub head: String,
+    pub relation: &'static str,
+}
+
+fn native_remote_status(
+    repo: &Repository,
+    thread: Option<&str>,
+    local: Option<&State>,
+) -> Result<Option<NativeRemoteStatus>> {
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        return Ok(None);
+    }
+    let (Some(remote), Some(thread), Some(local)) = (default_remote_name(repo), thread, local)
+    else {
+        return Ok(None);
+    };
+    let Some(head) = repo
+        .refs()
+        .get_remote_thread(&remote, &ThreadName::new(thread))?
+    else {
+        return Ok(None);
+    };
+    let relation = if local.state_id == head {
+        "up to date"
+    } else {
+        let mut graph = CommitGraphIndex::new(repo);
+        if graph
+            .is_ancestor(&head, &local.state_id)
+            .map_err(|error| HeddleError::InvalidObject(error.to_string()))?
+        {
+            "ahead"
+        } else if graph
+            .is_ancestor(&local.state_id, &head)
+            .map_err(|error| HeddleError::InvalidObject(error.to_string()))?
+        {
+            "behind"
+        } else {
+            "diverged"
+        }
+    };
+    Ok(Some(NativeRemoteStatus {
+        name: remote,
+        head: head.short(),
+        relation,
+    }))
 }
 
 impl StatusReport {
@@ -2262,6 +2314,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         intent: s.intent.clone(),
     });
     let current_state_short = current_state.as_ref().map(|state| state.state_id.short());
+    let native_remote = native_remote_status(repo, track_name.as_deref(), current_state.as_ref())?;
     let git_checkpoint = if trust.status == "needs_checkpoint" {
         None
     } else {
@@ -2312,10 +2365,8 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         base_root: thread_summary
             .as_ref()
             .and_then(|thread| thread.base_root.clone()),
-        current_state: thread_summary
-            .as_ref()
-            .and_then(|thread| thread.current_state.clone())
-            .or_else(|| current_state_short.clone()),
+        current_state: current_state_short.clone(),
+        native_remote,
         path: thread_summary
             .as_ref()
             .and_then(|thread| thread.path.clone()),
@@ -2546,6 +2597,9 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
     // Short path still needs the current lane for prompt segments and short
     // subject lines; read it from the already-open repo (no second open).
     let thread = input.repo.current_lane().ok().flatten();
+    let native_remote = native_remote_status(input.repo, thread.as_deref(), input.current_state)
+        .ok()
+        .flatten();
     StatusReport {
         output_kind: "status",
         repository_capability: input.repo.capability_label().to_string(),
@@ -2564,6 +2618,7 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         base_state: None,
         base_root: None,
         current_state: input.current_state.map(|state| state.state_id.short()),
+        native_remote,
         path: None,
         execution_path: None,
         session_id: None,
@@ -2938,29 +2993,17 @@ fn first_capture_identity_notice(
         return Ok(None);
     }
     let resolved = crate::resolve_principal_from_context(repo, ctx)?;
-    if principal_is_default_unknown(&resolved.principal) {
+    let Some(principal) = resolved.principal else {
         return Ok(Some(
-            "no principal configured; the first capture would use Unknown <unknown@example.com>. Set HEDDLE_PRINCIPAL_NAME and HEDDLE_PRINCIPAL_EMAIL or run `heddle init --principal-name <name> --principal-email <email>`.".to_string(),
+            "no principal configured; the first capture will refuse until you set HEDDLE_PRINCIPAL_NAME and HEDDLE_PRINCIPAL_EMAIL or run `heddle init --principal-name <name> --principal-email <email>`.".to_string(),
         ));
-    }
+    };
     let source = resolved
         .source
         .map(crate::principal_source_display)
         .map(|source| format!(" from {source}"))
         .unwrap_or_default();
-    Ok(Some(format!("{}{}", resolved.principal, source)))
-}
-
-/// Whether principal is the built-in unknown placeholder (exact match).
-pub fn principal_is_default_unknown(principal: &Principal) -> bool {
-    principal.name == b"Unknown" && principal.email == b"unknown@example.com"
-}
-
-/// Broader refuse-to-capture identity check: empty fields or default unknown.
-pub fn principal_lacks_accountable_identity(name: &str, email: &str) -> bool {
-    let name = name.trim();
-    let email = email.trim();
-    name.is_empty() || email.is_empty() || (name == "Unknown" && email == "unknown@example.com")
+    Ok(Some(format!("{principal}{source}")))
 }
 
 /// Large-capture safety gate (Git-overlay worktree size).

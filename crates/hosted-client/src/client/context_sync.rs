@@ -1350,7 +1350,7 @@ mod tests {
 
     fn seed_local_context_annotation(content: &str) -> (TempDir, Repository, Annotation) {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init(temp.path()).unwrap();
+        let repo = crate::with_test_principal(Repository::init(temp.path()).unwrap()).unwrap();
         let tree_id = repo
             .store()
             .put_tree(&objects::object::Tree::new())
@@ -1479,7 +1479,9 @@ mod tests {
         }
 
         let source_dir = TempDir::new().unwrap();
-        let source = Repository::init_default(source_dir.path()).unwrap();
+        let source =
+            crate::with_test_principal(Repository::init_default(source_dir.path()).unwrap())
+                .unwrap();
         std::fs::write(source_dir.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
         let state = source
             .snapshot_with_attribution(
@@ -1607,7 +1609,9 @@ mod tests {
         }
 
         let destination_dir = TempDir::new().unwrap();
-        let destination = Repository::init_default(destination_dir.path()).unwrap();
+        let destination =
+            crate::with_test_principal(Repository::init_default(destination_dir.path()).unwrap())
+                .unwrap();
         let destination_state = destination.head().unwrap().unwrap();
         assert_eq!(
             pull_context(

@@ -671,7 +671,7 @@ mod tests {
     #[test]
     fn commit_graph_detects_ancestor_relationships() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let repo = Repository::init_default(temp_dir.path())?;
+        let repo = crate::init_test_repository(temp_dir.path())?;
 
         std::fs::write(temp_dir.path().join("file.txt"), "base")?;
         let base = repo.snapshot(Some("base".to_string()), None)?;
@@ -696,7 +696,7 @@ mod tests {
     #[test]
     fn commit_graph_prefers_nearest_merge_base() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let repo = Repository::init_default(temp_dir.path())?;
+        let repo = crate::init_test_repository(temp_dir.path())?;
 
         std::fs::write(temp_dir.path().join("file.txt"), "a")?;
         let state_a = repo.snapshot(Some("a".to_string()), None)?;
@@ -725,7 +725,7 @@ mod tests {
     #[test]
     fn commit_graph_persists_and_reloads() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let repo = Repository::init_default(temp_dir.path())?;
+        let repo = crate::init_test_repository(temp_dir.path())?;
 
         fs::write(temp_dir.path().join("file.txt"), "base")?;
         let base = repo.snapshot(Some("base".to_string()), None)?;
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn commit_graph_reloads_parent_edges_materialized_after_lazy_tip() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let repo = Repository::init_default(temp_dir.path())?;
+        let repo = crate::init_test_repository(temp_dir.path())?;
         let attribution = Attribution::human(Principal::new("Test User", "test@example.com"));
         let parent = State::new(Tree::new().hash(), vec![], attribution.clone());
         let tip = State::new(Tree::new().hash(), vec![parent.id()], attribution);
@@ -797,7 +797,7 @@ mod tests {
     #[test]
     fn commit_graph_recovers_from_missing_and_invalid_files() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let repo = Repository::init_default(temp_dir.path())?;
+        let repo = crate::init_test_repository(temp_dir.path())?;
 
         fs::write(temp_dir.path().join("file.txt"), "base")?;
         let base = repo.snapshot(Some("base".to_string()), None)?;
@@ -826,7 +826,7 @@ mod tests {
     #[test]
     fn merge_base_remains_correct_after_graph_reload() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let repo = Repository::init_default(temp_dir.path())?;
+        let repo = crate::init_test_repository(temp_dir.path())?;
 
         fs::write(temp_dir.path().join("file.txt"), "a")?;
         let state_a = repo.snapshot(Some("a".to_string()), None)?;
@@ -861,7 +861,7 @@ mod tests {
     #[test]
     fn node_metadata_returns_correct_values_after_ensure_loaded() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let repo = Repository::init_default(temp_dir.path())?;
+        let repo = crate::init_test_repository(temp_dir.path())?;
 
         fs::write(temp_dir.path().join("file.txt"), "content")?;
         let state = repo.snapshot(Some("snapshot".to_string()), None)?;
@@ -883,7 +883,7 @@ mod tests {
     #[test]
     fn bloom_filter_populated_after_ensure_bloom() -> Result<()> {
         let temp_dir = TempDir::new()?;
-        let repo = Repository::init_default(temp_dir.path())?;
+        let repo = crate::init_test_repository(temp_dir.path())?;
 
         fs::write(temp_dir.path().join("alpha.txt"), "alpha")?;
         let state = repo.snapshot(Some("alpha".to_string()), None)?;

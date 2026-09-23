@@ -3106,7 +3106,15 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let repo = repo::Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
-        repo.snapshot(Some("seed".into()), None).unwrap();
+        repo.snapshot_with_attribution(
+            Some("seed".into()),
+            None,
+            objects::object::Attribution::human(objects::object::Principal::new(
+                "Test",
+                "test@example.com",
+            )),
+        )
+        .unwrap();
 
         let err = resolve_state_for_command(&repo, "hs-zzzzzzzzzzzz", ResolvePolicy::minimal())
             .unwrap_err();

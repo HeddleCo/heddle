@@ -141,7 +141,7 @@ mod tests {
 
     fn two_tree_repo() -> (tempfile::TempDir, Repository, ContentHash, ContentHash) {
         let temp = tempfile::TempDir::new().expect("temp");
-        let repo = Repository::init_default(temp.path()).expect("init");
+        let repo = crate::init_test_repository(temp.path()).expect("init");
         fs::write(temp.path().join("a.rs"), b"fn a() {}\n").unwrap();
         let base = repo
             .snapshot(Some("base".into()), None)

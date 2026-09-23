@@ -866,7 +866,7 @@ mod tests {
     #[test]
     fn flush_rebase_batch_with_no_advances_is_a_noop() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
 
         let before = repo
             .oplog()
@@ -895,7 +895,7 @@ mod tests {
 
     fn rebase_replay_fixture() -> (TempDir, Repository, StateId) {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
 
         fs::write(temp.path().join("base.txt"), "base\n").unwrap();
         let base = repo
@@ -999,7 +999,7 @@ mod tests {
     #[test]
     fn flush_rebase_batch_skips_when_transaction_id_already_committed() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let txn_id = "rebase-idempotency-fixture";
         let advance = synthetic_goto_advance();
 
@@ -1140,7 +1140,7 @@ mod tests {
         const N_THREADS: usize = 8;
 
         let temp = TempDir::new().unwrap();
-        let repo = Arc::new(Repository::init_default(temp.path()).unwrap());
+        let repo = Arc::new(crate::init_test_repository(temp.path()).unwrap());
         let txn_id = "rebase-concurrent-continue-fixture";
 
         let before = repo
@@ -1185,7 +1185,7 @@ mod tests {
     #[test]
     fn flush_rebase_batch_records_distinct_transaction_ids_separately() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let advance = synthetic_goto_advance();
 
         let before = repo

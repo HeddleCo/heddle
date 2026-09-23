@@ -545,8 +545,8 @@ fn whoami_output(report: WhoamiReport) -> WhoamiOutput {
     WhoamiOutput {
         output_kind: "whoami",
         capture_actor: CaptureActor {
-            name: report.capture_actor.name,
-            email: report.capture_actor.email,
+            name: (!report.capture_actor.name.is_empty()).then_some(report.capture_actor.name),
+            email: (!report.capture_actor.email.is_empty()).then_some(report.capture_actor.email),
             source: report.capture_actor.source,
         },
         server: report.server,
@@ -588,11 +588,15 @@ fn write_whoami_human(
     writer: &mut impl std::io::Write,
     output: &WhoamiReport,
 ) -> std::io::Result<()> {
-    writeln!(
-        writer,
-        "Capture actor: {} <{}>",
-        output.capture_actor.name, output.capture_actor.email
-    )?;
+    if output.capture_actor.source.is_none() {
+        writeln!(writer, "Capture actor: not configured")?;
+    } else {
+        writeln!(
+            writer,
+            "Capture actor: {} <{}>",
+            output.capture_actor.name, output.capture_actor.email
+        )?;
+    }
     if let Some(source) = output.capture_actor.source {
         writeln!(
             writer,
@@ -1141,7 +1145,10 @@ mod tests {
         let report = whoami_report();
         let machine = whoami_output(report.clone());
         assert_eq!(machine.output_kind, "whoami");
-        assert_eq!(machine.capture_actor.email, "human@example.com");
+        assert_eq!(
+            machine.capture_actor.email.as_deref(),
+            Some("human@example.com")
+        );
         let mapped = machine.identity.expect("mapped hosted identity");
         assert_eq!(mapped.credential_subject, "agent:reviewer-1");
         assert_eq!(mapped.available_actions.len(), 1);

@@ -142,7 +142,11 @@ mod tests {
     fn annotate_state(repo: &Repository, path: &str, content: &str) -> objects::object::State {
         std::fs::write(repo.root().join(path), "seed\n").expect("write seed file");
         let state = repo
-            .snapshot(Some("seed".into()), None)
+            .snapshot_with_attribution(
+                Some("seed".into()),
+                None,
+                Attribution::human(Principal::new("Test", "test@example.com")),
+            )
             .expect("snapshot seed");
         let target = ContextTarget::file(path).expect("file target");
         let blob = ContextBlob::new(vec![Annotation::new(

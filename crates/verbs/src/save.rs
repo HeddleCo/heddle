@@ -598,12 +598,11 @@ fn resolve_capture_attribution(
         crate::resolve_principal(repo, principal_fallback)?,
         hosted_principal,
     );
-    let principal_source = resolved_principal.source.unwrap_or("unknown").to_string();
-    let principal = resolved_principal.principal;
-    if crate::principal_lacks_accountable_identity(
-        &principal.name_lossy(),
-        &principal.email_lossy(),
-    ) {
+    let principal_source = resolved_principal
+        .source
+        .unwrap_or("not_configured")
+        .to_string();
+    let Some(principal) = resolved_principal.principal else {
         let (summary, commands) = if hosted_account_unclaimed {
             (
                 "Run `heddle claim` to attach the signed-in account to a human identity with an email, or configure a local principal, then retry the capture.",
@@ -626,12 +625,12 @@ fn resolve_capture_attribution(
             "capture_identity_required",
             "Refusing to capture: no accountable identity is configured",
             summary,
-            "Heddle would otherwise have to record Unknown <unknown@example.com> on the captured state",
+            "No accountable name/email is configured for capture attribution",
             "capture would create durable Heddle history without a real principal",
             "Heddle refs, captured states, Git refs, index, and worktree files were left unchanged",
             commands,
         ));
-    }
+    };
 
     if options.no_agent {
         return Ok(CaptureAttribution {

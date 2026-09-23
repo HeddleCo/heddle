@@ -607,7 +607,7 @@ mod tree_path_tests {
     #[test]
     fn blob_at_path_characterizes_blob_only_policy() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
         let store = repo.store();
 
         let blob_hash = store.put_blob(&Blob::from_slice(b"blob content")).unwrap();

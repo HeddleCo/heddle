@@ -28,14 +28,14 @@ use crate::{
 
 fn create_test_repo() -> (TempDir, Repository) {
     let temp_dir = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = crate::init_test_repository(temp_dir.path()).unwrap();
     (temp_dir, repo)
 }
 
 #[test]
 fn init_default_persists_and_reuses_stable_main_thread_record() {
     let temp_dir = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = crate::init_test_repository(temp_dir.path()).unwrap();
     let main_state = repo
         .refs()
         .get_thread(&ThreadName::new("main"))
@@ -101,7 +101,7 @@ fn init_default_persists_and_reuses_stable_main_thread_record() {
 #[test]
 fn capture_refresh_does_not_rewrite_identity_only_default_main() {
     let temp_dir = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = crate::init_test_repository(temp_dir.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
     let mut main = manager
         .find_by_thread("main")
@@ -344,7 +344,7 @@ fn handcrafted_symlink_tree(repo: &Repository, target: &std::path::Path) -> Tree
 #[test]
 fn test_init_creates_structure() {
     let temp_dir = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
     assert!(temp_dir.path().join(".heddle").exists());
     assert!(temp_dir.path().join(".heddle/config.toml").exists());
@@ -370,7 +370,7 @@ fn test_custom_store_fixture_threads_a_custom_object_store() {
     use objects::store::FsStore;
 
     let temp_dir = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = crate::init_test_repository(temp_dir.path()).unwrap();
     let heddle_dir = repo.heddle_dir().to_path_buf();
     drop(repo);
 
@@ -388,7 +388,7 @@ fn test_custom_store_fixture_threads_a_custom_object_store() {
 #[test]
 fn open_refuses_newer_repository_format_with_recovery_advice() {
     let temp_dir = TempDir::new().unwrap();
-    Repository::init_default(temp_dir.path()).unwrap();
+    crate::init_test_repository(temp_dir.path()).unwrap();
 
     let config_path = temp_dir.path().join(".heddle/config.toml");
     fs::write(&config_path, "[repository]\nversion = 99\n").unwrap();
@@ -431,7 +431,7 @@ fn open_refuses_newer_repository_format_with_recovery_advice() {
 #[test]
 fn open_accepts_supported_repository_format() {
     let temp_dir = TempDir::new().unwrap();
-    Repository::init_default(temp_dir.path()).unwrap();
+    crate::init_test_repository(temp_dir.path()).unwrap();
 
     let config_path = temp_dir.path().join(".heddle/config.toml");
     fs::write(
@@ -446,7 +446,7 @@ fn open_accepts_supported_repository_format() {
 #[test]
 fn open_refuses_v2_without_rewriting_fixture() {
     let temp_dir = TempDir::new().unwrap();
-    Repository::init_default(temp_dir.path()).unwrap();
+    crate::init_test_repository(temp_dir.path()).unwrap();
 
     let config_path = temp_dir.path().join(".heddle/config.toml");
     let fixture = include_str!("../tests/fixtures/repository-v2/config.toml");
@@ -470,7 +470,7 @@ fn open_refuses_v2_without_rewriting_fixture() {
 #[test]
 fn open_refuses_legacy_oplog_before_mutating_repository() {
     let temp_dir = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = crate::init_test_repository(temp_dir.path()).unwrap();
     assert_eq!(repo.config().repository.version, SUPPORTED_REPO_FORMAT);
 
     let heddle_dir = repo.heddle_dir().to_path_buf();
@@ -574,7 +574,7 @@ fn explicit_native_authority_survives_alongside_git_metadata() {
     let temp_dir = TempDir::new().unwrap();
     sley::Repository::init(temp_dir.path()).unwrap();
 
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = crate::init_test_repository(temp_dir.path()).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::NativeHeddle);
     drop(repo);
 
@@ -586,7 +586,7 @@ fn explicit_native_authority_survives_alongside_git_metadata() {
 #[test]
 fn open_refuses_v1_before_reading_legacy_objects() {
     let temp_dir = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp_dir.path()).unwrap();
+    let repo = crate::init_test_repository(temp_dir.path()).unwrap();
     let config_path = repo.heddle_dir().join("config.toml");
     fs::write(&config_path, "[repository]\nversion = 1\n").unwrap();
 
@@ -609,9 +609,9 @@ fn open_refuses_v1_before_reading_legacy_objects() {
 #[test]
 fn test_init_fails_if_exists() {
     let temp_dir = TempDir::new().unwrap();
-    Repository::init_default(temp_dir.path()).unwrap();
+    crate::init_test_repository(temp_dir.path()).unwrap();
 
-    let result = Repository::init_default(temp_dir.path());
+    let result = crate::init_test_repository(temp_dir.path());
     assert!(result.is_err());
 }
 
@@ -632,7 +632,7 @@ fn test_set_shallow_updates_memory_and_persists() {
 fn test_open_finds_repo() {
     let temp_dir = TempDir::new().unwrap();
     let temp_path = temp_dir.path().canonicalize().unwrap();
-    Repository::init_default(&temp_path).unwrap();
+    crate::init_test_repository(&temp_path).unwrap();
 
     let sub = temp_path.join("foo/bar");
     fs::create_dir_all(&sub).unwrap();
@@ -1476,7 +1476,7 @@ fn test_snapshot_with_parent() {
 #[test]
 fn test_snapshot_without_confidence_records_none() {
     let temp_dir = TempDir::new().unwrap();
-    Repository::init_default(temp_dir.path()).unwrap();
+    crate::init_test_repository(temp_dir.path()).unwrap();
 
     let config_path = temp_dir.path().join(".heddle/config.toml");
     let mut config = RepoConfig::load(&config_path).unwrap();
@@ -2846,7 +2846,7 @@ mod blob_hydrator_callback {
         // so we know the hydrator install is happening on the second
         // open, not lingering from the first construction.
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let heddle_dir = repo.heddle_dir().to_path_buf();
         repo.record_missing_blob(hash).unwrap();
         // Crucially: do NOT call `set_blob_hydrator` here. The hydrator
@@ -3268,7 +3268,7 @@ fn open_refuses_metadataless_virtualized_thread_mount() {
 fn managed_checkout_path_uses_source_repo_name_from_custom_checkout() {
     let temp = tempfile::tempdir().unwrap();
     let source_root = temp.path().join("source-repo");
-    let repo = Repository::init_default(&source_root).unwrap();
+    let repo = crate::init_test_repository(&source_root).unwrap();
     let custom_checkout = temp.path().join("custom-agent");
 
     Repository::init_worktree(&custom_checkout, repo.heddle_dir()).unwrap();

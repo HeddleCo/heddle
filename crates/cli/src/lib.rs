@@ -36,6 +36,15 @@ pub use objects::{
 pub use repo::{Repository, remote};
 pub type StoreResult<T> = objects::error::Result<T>;
 
+#[cfg(test)]
+pub(crate) fn init_test_repository(path: impl AsRef<std::path::Path>) -> StoreResult<Repository> {
+    let repo = Repository::init_default(path.as_ref())?;
+    let mut config = repo.config().clone();
+    config.set_principal("Heddle Test", "test@heddle.dev");
+    config.save(&repo.heddle_dir().join("config.toml"))?;
+    Repository::open(path)
+}
+
 /// Register factories needed to reopen CLI-owned lazy hosted repositories.
 /// The hosted client stack itself lives in `hosted-client`.
 #[cfg(feature = "client")]

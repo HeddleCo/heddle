@@ -83,6 +83,18 @@ fn native_push_status_shows_local_and_origin_heads() {
         text.contains(head) && text.contains("origin") && text.contains("up to date"),
         "{text}"
     );
+    let short = super::heddle(&["status", "--short"], Some(local.path())).expect("short status");
+    assert!(
+        short.contains(head) && short.contains("origin") && short.contains("up to date"),
+        "{short}"
+    );
+    let verbose = super::heddle(&["-v", "status"], Some(local.path())).expect("verbose status");
+    assert!(
+        verbose.contains(head)
+            && verbose.contains("Remote head: origin")
+            && verbose.contains("up to date"),
+        "{verbose}"
+    );
 
     fs::write(local.path().join("work.txt"), "second\n").expect("next work");
     super::heddle(&["capture", "-m", "second"], Some(local.path())).expect("second capture");

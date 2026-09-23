@@ -460,7 +460,7 @@ mod tests {
 
     fn setup() -> (TempDir, Repository) {
         let dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(dir.path()).unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
         (dir, repo)
     }
 

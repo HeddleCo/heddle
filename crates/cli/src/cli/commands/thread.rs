@@ -3074,7 +3074,7 @@ mod tests {
     #[test]
     fn slashed_thread_id_checkout_and_manifest_agree() {
         let repo_dir = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
 
         let checkout = default_thread_checkout_path(&repo, "foo/bar");
         let manifest = repo::thread_manifest::manifest_path(repo.heddle_dir(), "foo/bar");

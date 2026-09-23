@@ -1774,7 +1774,8 @@ mod tests {
     fn discussion_sync_state_prefers_the_pulled_tip_over_head() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo =
+            crate::with_test_principal(Repository::init_default(temp.path()).unwrap()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
         let first = repo.snapshot(Some("first".to_string()), None).unwrap().id();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() { 1 }\n").unwrap();
@@ -1907,7 +1908,8 @@ mod tests {
     async fn push_discussion_opens_and_appends_native_operations() {
         let _process_env_guard = crate::test_process_env::shared().await;
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo =
+            crate::with_test_principal(Repository::init_default(temp.path()).unwrap()).unwrap();
         std::fs::write(temp.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
         let state = repo
             .snapshot_with_attribution(
@@ -1976,7 +1978,9 @@ mod tests {
     async fn native_push_pull_preserves_path_line_symbol_and_repository_discussions() {
         let _process_env_guard = crate::test_process_env::shared().await;
         let source_dir = TempDir::new().unwrap();
-        let source = Repository::init_default(source_dir.path()).unwrap();
+        let source =
+            crate::with_test_principal(Repository::init_default(source_dir.path()).unwrap())
+                .unwrap();
         std::fs::write(source_dir.path().join("lib.rs"), "pub fn run() {}\n").unwrap();
         let state = source
             .snapshot_with_attribution(
@@ -2077,7 +2081,9 @@ mod tests {
         source_signed.sort();
 
         let destination_dir = TempDir::new().unwrap();
-        let destination = Repository::init_default(destination_dir.path()).unwrap();
+        let destination =
+            crate::with_test_principal(Repository::init_default(destination_dir.path()).unwrap())
+                .unwrap();
         assert_eq!(
             pull_discussions(&destination, &mut client, "acme/widgets", None)
                 .await

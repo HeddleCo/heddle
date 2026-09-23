@@ -169,7 +169,7 @@ mod tests {
 
     fn repo_with_snapshot() -> (TempDir, Repository, StateId) {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
         let state = repo.snapshot(Some("first".into()), None).unwrap();
         (temp, repo, state.id())
@@ -221,6 +221,10 @@ mod tests {
     fn bootstrap_runs_for_empty_head_before_resolving_head() {
         let temp = TempDir::new().unwrap();
         let repo = Repository::init(temp.path()).unwrap();
+        let mut config = repo.config().clone();
+        config.set_principal("Heddle Test", "test@heddle.dev");
+        config.save(&repo.heddle_dir().join("config.toml")).unwrap();
+        let repo = Repository::open(temp.path()).unwrap();
         assert!(repo.current_state().unwrap().is_none());
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
 

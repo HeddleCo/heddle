@@ -304,7 +304,6 @@ pub use status::{
     changes_path_count, changes_paths, combined_verdict_axes, coordination_axis_clean,
     coordination_label, coordination_severity, fast_short_status_report, git_index_plan_for_root,
     health_severity, human_thread_health, large_capture_requires_force, plain_git_status_report,
-    principal_is_default_unknown, principal_lacks_accountable_identity,
     resolve_coordination_with_trust, status, status_combined_verdict,
 };
 pub use thread::{

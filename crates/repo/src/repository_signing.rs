@@ -433,7 +433,7 @@ mod tests {
 
     fn setup_repo() -> (TempDir, Repository) {
         let temp = TempDir::new().expect("create temp dir");
-        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let repo = crate::init_test_repository(temp.path()).expect("init repo");
         (temp, repo)
     }
 

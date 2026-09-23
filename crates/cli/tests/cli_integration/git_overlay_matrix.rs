@@ -874,7 +874,7 @@ fn git_overlay_matrix_capture_without_any_identity_refuses_before_state_change()
     assert!(
         envelope["unsafe_condition"]
             .as_str()
-            .is_some_and(|condition| condition.contains("Unknown <unknown@example.com>")),
+            .is_some_and(|condition| condition.contains("No accountable name/email")),
         "capture refusal should name the unsafe fallback: {stderr}"
     );
     assert_eq!(git_stdout(temp.path(), &["rev-parse", "HEAD"]), before_head);

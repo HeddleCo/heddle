@@ -13,6 +13,14 @@ pub mod hosted_runtime;
 #[cfg(feature = "client")]
 pub mod network;
 
+#[cfg(test)]
+pub(crate) fn with_test_principal(repo: repo::Repository) -> repo::Result<repo::Repository> {
+    let mut config = repo.config().clone();
+    config.set_principal("Heddle Test", "test@heddle.dev");
+    config.save(&repo.heddle_dir().join("config.toml"))?;
+    repo::Repository::open(repo.root())
+}
+
 /// Register factories needed to reopen CLI-owned lazy hosted repositories.
 #[cfg(feature = "client")]
 pub fn register_hosted_factory() {

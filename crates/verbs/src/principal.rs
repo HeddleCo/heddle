@@ -13,21 +13,24 @@ use crate::ExecutionContext;
 /// A principal together with the configuration surface that selected it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedPrincipal {
-    pub principal: Principal,
+    pub principal: Option<Principal>,
     pub source: Option<&'static str>,
 }
 
 impl ResolvedPrincipal {
     fn configured(principal: Principal, source: &'static str) -> Self {
+        if principal.name_lossy().trim().is_empty() || principal.email_lossy().trim().is_empty() {
+            return Self::unconfigured();
+        }
         Self {
-            principal,
+            principal: Some(principal),
             source: Some(source),
         }
     }
 
-    fn unknown(principal: Principal) -> Self {
+    fn unconfigured() -> Self {
         Self {
-            principal,
+            principal: None,
             source: None,
         }
     }
@@ -39,7 +42,7 @@ impl ResolvedPrincipal {
 /// `user_principal` is the optional `(name, email)` pair from user config.
 ///
 /// Precedence is environment, repository config, Git config (including a
-/// shared parent checkout), user config, then the built-in Unknown principal.
+/// shared parent checkout), then user config.
 pub fn resolve_principal(
     repo: &Repository,
     user_principal: Option<(&str, &str)>,
@@ -53,39 +56,32 @@ pub fn resolve_principal(
             "repository",
         ));
     }
-    let principal = repo.get_principal()?;
-    if principal_is_accountable(&principal) {
+    if let Some(principal) = repo.configured_principal()? {
         return Ok(ResolvedPrincipal::configured(principal, "git_config"));
     }
-    Ok(finish_principal_resolution(user_principal, principal))
+    Ok(finish_principal_resolution(user_principal))
 }
 
 /// Resolve capture attribution when no repository is open.
 ///
-/// Precedence is environment, then user config, then the built-in Unknown
-/// principal. Repository and Git-config sources are unavailable without a repo.
+/// Precedence is environment, then user config. Repository and Git-config
+/// sources are unavailable without a repo.
 pub fn resolve_principal_without_repo(user_principal: Option<(&str, &str)>) -> ResolvedPrincipal {
     if let Some(resolved) = configured_from_env() {
         return resolved;
     }
-    finish_principal_resolution(
-        user_principal,
-        Principal::new("Unknown", "unknown@example.com"),
-    )
+    finish_principal_resolution(user_principal)
 }
 
 fn configured_from_env() -> Option<ResolvedPrincipal> {
     Principal::from_env().map(|principal| ResolvedPrincipal::configured(principal, "environment"))
 }
 
-fn finish_principal_resolution(
-    user_principal: Option<(&str, &str)>,
-    fallback: Principal,
-) -> ResolvedPrincipal {
+fn finish_principal_resolution(user_principal: Option<(&str, &str)>) -> ResolvedPrincipal {
     if let Some((name, email)) = user_principal {
         return ResolvedPrincipal::configured(Principal::new(name, email), "user_config");
     }
-    ResolvedPrincipal::unknown(fallback)
+    ResolvedPrincipal::unconfigured()
 }
 
 /// Resolve capture attribution from an execution context, including a hosted
@@ -101,13 +97,12 @@ pub fn resolve_principal_from_context(
     ))
 }
 
-/// Use a hosted-account identity only when local resolution produced the
-/// unaccountable Unknown placeholder.
+/// Use a hosted-account identity only when no local principal resolved.
 pub fn apply_hosted_principal_fallback(
     resolved: ResolvedPrincipal,
     hosted: Option<(&str, &str)>,
 ) -> ResolvedPrincipal {
-    if principal_is_accountable(&resolved.principal) {
+    if resolved.principal.is_some() {
         return resolved;
     }
     let Some((name, email)) = hosted else {
@@ -130,14 +125,6 @@ pub fn principal_source_display(source: &str) -> &str {
     }
 }
 
-fn principal_is_accountable(principal: &Principal) -> bool {
-    let name = principal.name_lossy();
-    let email = principal.email_lossy();
-    let name = name.trim();
-    let email = email.trim();
-    !name.is_empty() && !email.is_empty() && !(name == "Unknown" && email == "unknown@example.com")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,14 +133,21 @@ mod tests {
     fn without_repo_user_pair_beats_unknown_fallback() {
         let resolved = resolve_principal_without_repo(Some(("Luke", "luke@example.com")));
         assert_eq!(resolved.source, Some("user_config"));
-        assert_eq!(resolved.principal.name_lossy(), "Luke");
+        assert_eq!(
+            resolved
+                .principal
+                .as_ref()
+                .expect("configured")
+                .name_lossy(),
+            "Luke"
+        );
     }
 
     #[test]
-    fn without_repo_missing_pair_falls_back_to_unknown() {
+    fn without_repo_missing_pair_is_unconfigured() {
         let resolved = resolve_principal_without_repo(None);
         assert_eq!(resolved.source, None);
-        assert_eq!(resolved.principal.email_lossy(), "unknown@example.com");
+        assert!(resolved.principal.is_none());
     }
 
     #[test]
@@ -168,11 +162,18 @@ mod tests {
 
     #[test]
     fn hosted_fallback_fills_unaccountable_local_principal() {
-        let unknown = resolve_principal_without_repo(None);
-        let derived = apply_hosted_principal_fallback(unknown, Some(("luke", "luke@example.com")));
+        let unconfigured = resolve_principal_without_repo(None);
+        let derived =
+            apply_hosted_principal_fallback(unconfigured, Some(("luke", "luke@example.com")));
         assert_eq!(derived.source, Some("hosted_account"));
-        assert_eq!(derived.principal.name_lossy(), "luke");
-        assert_eq!(derived.principal.email_lossy(), "luke@example.com");
+        assert_eq!(
+            derived.principal.as_ref().expect("hosted").name_lossy(),
+            "luke"
+        );
+        assert_eq!(
+            derived.principal.as_ref().expect("hosted").email_lossy(),
+            "luke@example.com"
+        );
     }
 
     #[test]

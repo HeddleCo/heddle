@@ -901,7 +901,7 @@ mod tests {
     #[test]
     fn worktree_undo_safe_checks_full_same_name_set_not_just_winner() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let manager = ThreadManager::new(repo.heddle_dir());
 
         // A live worktree directory for the NON-winner duplicate.

@@ -94,7 +94,7 @@ fn setup() -> (
     ThreadReplica,
 ) {
     let temp = TempDir::new().expect("repo directory");
-    let repo = Repository::init_default(temp.path()).expect("native repository");
+    let repo = crate::init_test_repository(temp.path()).expect("native repository");
     let signer = Ed25519Signer::generate().expect("test publisher");
     let genesis = ThreadGenesis {
         owner: objects::object::thread_replication::GenesisOwner::LocalKey(
@@ -213,7 +213,7 @@ fn discussion(
 fn offline_branches_and_discussion_converge_after_reordered_duplicate_delivery_and_restart() {
     let (_left_dir, left_repo, genesis, signer, left) = setup();
     let right_dir = TempDir::new().expect("right directory");
-    let right_repo = Repository::init_default(right_dir.path()).expect("right repository");
+    let right_repo = crate::init_test_repository(right_dir.path()).expect("right repository");
     let right = ThreadReplica::create(
         right_repo.heddle_dir(),
         &crypto::thread_operation::SignedGenesis::sign(&genesis, &signer).expect("creator proof"),

@@ -588,17 +588,16 @@ fn resolve_capture_attribution(
     options: &CaptureAgentOptions,
 ) -> Result<CaptureAttribution> {
     let resolved_principal = crate::resolve_principal(repo, principal_fallback)?;
-    let principal_source = resolved_principal.source.unwrap_or("unknown").to_string();
-    let principal = resolved_principal.principal;
-    if crate::principal_lacks_accountable_identity(
-        &principal.name_lossy(),
-        &principal.email_lossy(),
-    ) {
+    let principal_source = resolved_principal
+        .source
+        .unwrap_or("not_configured")
+        .to_string();
+    if resolved_principal.principal.is_none() {
         return Err(capture_refusal(
             "capture_identity_required",
             "Refusing to capture: no accountable identity is configured",
             "Set `HEDDLE_PRINCIPAL_NAME` and `HEDDLE_PRINCIPAL_EMAIL`, or run `heddle init --principal-name <name> --principal-email <email>`, then retry the capture.",
-            "Heddle would otherwise have to record Unknown <unknown@example.com> on the captured state",
+            "No accountable name/email is configured for capture attribution",
             "capture would create durable Heddle history without a real principal",
             "Heddle refs, captured states, Git refs, index, and worktree files were left unchanged",
             vec![
@@ -607,6 +606,9 @@ fn resolve_capture_attribution(
             ],
         ));
     }
+    let Some(principal) = resolved_principal.principal else {
+        return Err(anyhow!("principal not configured"));
+    };
 
     if options.no_agent {
         return Ok(CaptureAttribution {

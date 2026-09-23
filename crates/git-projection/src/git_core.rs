@@ -2028,7 +2028,7 @@ pub fn resolve_git_commit_identity(
     repo_root: &Path,
     fallback: &Principal,
 ) -> GitProjectionResult<LocalGitIdentity> {
-    if !principal_is_default_unknown(fallback) {
+    if !principal_lacks_identity(fallback) {
         return Ok(LocalGitIdentity::from_principal(fallback));
     }
     if let Some(identity) = git_config_identity_with_global_fallback(repo_root)? {
@@ -2036,7 +2036,7 @@ pub fn resolve_git_commit_identity(
     }
 
     Err(GitProjectionError::Git(
-        "refusing to write a Git commit with Unknown <unknown@example.com>; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
+        "refusing to write a Git commit without an accountable identity; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
     ))
 }
 
@@ -2054,12 +2054,10 @@ pub fn git_config_identity_with_global_fallback(
     Ok(None)
 }
 
-pub fn principal_is_default_unknown(principal: &Principal) -> bool {
+pub fn principal_lacks_identity(principal: &Principal) -> bool {
     let name = principal.name_lossy();
     let email = principal.email_lossy();
-    name.trim().is_empty()
-        || email.trim().is_empty()
-        || (name.trim() == "Unknown" && email.trim() == "unknown@example.com")
+    name.trim().is_empty() || email.trim().is_empty()
 }
 
 fn git_config_value_with_global_fallback(

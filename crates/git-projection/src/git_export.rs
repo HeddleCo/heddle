@@ -24,7 +24,7 @@ use crate::{
         GitProjection, GitProjectionError, GitProjectionResult, LocalGitIdentity, RefNamespace,
         SyncMapping, collect_ref_updates, copy_reachable_objects, count_exported_commits,
         delete_reference_if_present, git_config_identity_with_global_fallback, git_err,
-        materialize_projection_managed_refs, principal_is_default_unknown,
+        materialize_projection_managed_refs, principal_lacks_identity,
         read_projection_managed_refs, set_reference, write_projection_managed_refs,
     },
     git_notes,
@@ -208,10 +208,10 @@ fn write_state_object(
             .collect::<GitProjectionResult<Vec<_>>>()?
     };
 
-    let sig = if principal_is_default_unknown(&state.attribution.principal) {
+    let sig = if principal_lacks_identity(&state.attribution.principal) {
         let Some(identity) = options.identity else {
             return Err(GitProjectionError::Git(
-                "refusing to write a Git commit with Unknown <unknown@example.com>; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
+                "refusing to write a Git commit without an accountable identity; configure user.name/user.email, HEDDLE_PRINCIPAL_NAME/HEDDLE_PRINCIPAL_EMAIL, or .heddle principal".to_string(),
             ));
         };
         identity.to_signature(state.created_at.timestamp())

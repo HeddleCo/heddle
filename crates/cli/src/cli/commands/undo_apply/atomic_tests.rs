@@ -19,7 +19,7 @@ use super::*;
 /// the two states.
 fn repo_with_two_snapshots() -> (TempDir, Repository, StateId, StateId) {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = crate::init_test_repository(temp.path()).unwrap();
     std::fs::write(temp.path().join("a.txt"), "a").unwrap();
     let s1 = repo.snapshot(Some("s1".to_string()), None).unwrap();
     std::fs::write(temp.path().join("b.txt"), "b").unwrap();
@@ -231,7 +231,7 @@ fn fault_mid_undo_rewinds_to_pre_operation_state() {
 #[test]
 fn fault_mid_redo_rewinds_to_pre_operation_state() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = crate::init_test_repository(temp.path()).unwrap();
     std::fs::write(temp.path().join("a.txt"), "a").unwrap();
     let _s1 = repo.snapshot(Some("s1".to_string()), None).unwrap();
     let scope = repo.op_scope();
@@ -1109,7 +1109,7 @@ impl DeferredMutation for SaveOnly {}
 #[test]
 fn step_nonatomic_restores_record_and_workspace_on_save_failure() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = crate::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     // R0: the prior persisted record (record half: current_state; workspace
@@ -1152,7 +1152,7 @@ fn step_nonatomic_restores_record_and_workspace_on_save_failure() {
 #[test]
 fn step_nonatomic_restores_replacement_save_deleting_leaked_new_record() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = crate::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     // R0: the prior persisted record for the isolated test thread.
@@ -1204,7 +1204,7 @@ fn step_nonatomic_restores_replacement_save_deleting_leaked_new_record() {
 #[test]
 fn step_nonatomic_create_save_rollback_removes_created_record() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = crate::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     let mut created = sample_atomic_record_thread("current-A", "/work/A");
@@ -1270,7 +1270,7 @@ impl DeferredMutation for RestoreSnapshotOnly {}
 #[test]
 fn step_nonatomic_restores_redo_snapshot_deleting_leaked_record() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = crate::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     // R0: the prior persisted record for the isolated test thread.
@@ -1353,7 +1353,7 @@ fn step_nonatomic_restores_redo_snapshot_deleting_leaked_record() {
 #[test]
 fn redo_restore_thread_record_converges_away_preexisting_duplicate() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = crate::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     // The record the redo snapshot will restore (older timestamp).
@@ -1461,7 +1461,7 @@ impl DeferredMutation for RemoveRecordOnly {}
 #[test]
 fn remove_thread_manager_record_converges_name_to_empty() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = crate::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     // Two records under the isolated test thread: a winner + an older duplicate.
@@ -1519,7 +1519,7 @@ fn remove_thread_manager_record_converges_name_to_empty() {
 #[test]
 fn remove_thread_manager_record_rollback_resaves_all_records() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = crate::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     let mut winner = sample_atomic_record_thread("current-A", "/work/A");

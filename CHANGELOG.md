@@ -753,8 +753,7 @@ public API was removed or changed in a breaking way.
 - `.git/HEAD` symref updates are now atomic (temp-file + rename + fsync),
   preventing a torn HEAD if the process is interrupted mid-write.
 - A corrupt or unreadable user config now fails closed with a clear error
-  instead of silently attributing captures/checkpoints to an
-  `Unknown <unknown@example.com>` identity.
+  instead of silently using an unconfigured identity for captures/checkpoints.
 - A git-lane pull targeting a non-overlay repository now returns an error
   instead of silently discarding the transferred data.
 - The fast short-status path now classifies staged-add-then-worktree-deleted

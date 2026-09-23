@@ -335,7 +335,6 @@ mod tests {
         list_grant_rows, map_grant_error, resolve_grant_spool,
     };
     use crate::{
-        Repository,
         cli::Cli,
         remote::{Remote, RemoteConfig},
     };
@@ -472,7 +471,7 @@ mod tests {
     #[test]
     fn remote_name_resolves_to_the_hosted_spool_path() {
         let temp = tempfile::TempDir::new().expect("repo");
-        let repo = Repository::init_default(temp.path()).expect("init");
+        let repo = crate::init_test_repository(temp.path()).expect("init");
         RemoteConfig::open(&repo)
             .expect("open remotes")
             .add(

@@ -968,7 +968,7 @@ mod tests {
 
     fn create_test_repo() -> (TempDir, Repository) {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
         (temp_dir, repo)
     }
 

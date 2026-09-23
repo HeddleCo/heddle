@@ -5,8 +5,6 @@ use std::path::{Path, PathBuf};
 
 use objects::object::Principal;
 
-use crate::principal_lacks_accountable_identity;
-
 /// Recommended command when no principal is configured.
 pub const SET_PRINCIPAL_COMMAND: &str =
     "heddle init --principal-name <name> --principal-email <email>";
@@ -45,7 +43,7 @@ impl InitPrincipalPlan {
 
 /// Whether a principal lacks accountable identity (same policy as capture).
 pub fn principal_is_unconfigured(principal: &Principal) -> bool {
-    principal_lacks_accountable_identity(&principal.name_lossy(), &principal.email_lossy())
+    principal.name_lossy().trim().is_empty() || principal.email_lossy().trim().is_empty()
 }
 
 /// Prefer the first configured principal among ordered candidates.
@@ -97,9 +95,9 @@ mod tests {
 
     #[test]
     fn principal_selection_and_side_effects() {
-        let unknown = Principal::new("Unknown", "unknown@example.com");
+        let unconfigured = Principal::new("", "");
         let ada = Principal::new("Ada", "ada@example.com");
-        let plan = select_init_principal(&[("environment", unknown), ("user_config", ada)]);
+        let plan = select_init_principal(&[("environment", unconfigured), ("user_config", ada)]);
         assert_eq!(plan.status, "configured");
         assert_eq!(plan.source, Some("user_config"));
         assert_eq!(plan.name.as_deref(), Some("Ada"));

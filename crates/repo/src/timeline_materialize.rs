@@ -717,7 +717,7 @@ mod tests {
 
     fn create_repo() -> (TempDir, Repository, TimelineStore) {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let store = TimelineStore::open(repo.heddle_dir()).unwrap();
         (temp, repo, store)
     }

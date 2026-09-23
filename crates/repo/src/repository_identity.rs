@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use objects::{
+    HeddleError,
     error::Result,
     object::{Attribution, Principal, State},
 };
@@ -14,25 +15,37 @@ use super::{Repository, RepositoryCapability, open_git_repository_at_root};
 
 impl Repository {
     pub fn get_principal(&self) -> Result<Principal> {
-        if let Some(principal) = Principal::from_env() {
-            return Ok(principal);
+        self.configured_principal()?.ok_or_else(|| {
+            HeddleError::Config("principal not configured; set HEDDLE_PRINCIPAL_NAME and HEDDLE_PRINCIPAL_EMAIL or run `heddle init --principal-name <name> --principal-email <email>`".to_string())
+        })
+    }
+
+    pub fn configured_principal(&self) -> Result<Option<Principal>> {
+        if let Some(principal) = Principal::from_env().filter(principal_has_identity) {
+            return Ok(Some(principal));
         }
 
-        if let Some(config) = &self.config.principal {
-            return Ok(Principal::new(&config.name, &config.email));
+        if let Some(config) = &self.config.principal
+            && !config.name.trim().is_empty()
+            && !config.email.trim().is_empty()
+        {
+            return Ok(Some(Principal::new(&config.name, &config.email)));
         }
 
         if self.capability() == RepositoryCapability::GitOverlay
             && let Some(principal) = git_config_principal(&self.root)
         {
-            return Ok(principal);
+            return Ok(Some(principal));
         }
 
-        if let Some(principal) = self.shared_checkout_parent_git_principal() {
-            return Ok(principal);
+        if let Some(principal) = self
+            .shared_checkout_parent_git_principal()
+            .filter(principal_has_identity)
+        {
+            return Ok(Some(principal));
         }
 
-        Ok(Principal::new("Unknown", "unknown@example.com"))
+        Ok(None)
     }
 
     fn shared_checkout_parent_git_principal(&self) -> Option<Principal> {
@@ -58,10 +71,13 @@ impl Repository {
     }
 }
 
+fn principal_has_identity(principal: &Principal) -> bool {
+    !principal.name_lossy().trim().is_empty() && !principal.email_lossy().trim().is_empty()
+}
+
 /// Stable system principal stamped into the synthetic seed state created
 /// at `heddle init` time, before any user principal is known. Kept
-/// distinct from the `Unknown <unknown@example.com>` fallback so the
-/// genesis state is never confused with an unattributed user state.
+/// distinct from user attribution because no principal may be configured yet.
 pub(crate) fn seed_principal() -> Principal {
     Principal::new("Heddle", "init@heddle")
 }

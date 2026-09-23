@@ -60,8 +60,7 @@ pub(crate) fn create_git_checkpoint(
     }
 
     let attribution = if current_state.is_some() {
-        let principal = super::snapshot::resolve_principal(repo, &user_config)
-            .unwrap_or_else(|_| objects::object::Principal::new("Unknown", "unknown@example.com"));
+        let principal = super::snapshot::resolve_principal(repo, &user_config)?;
         Attribution::human(principal)
     } else {
         build_attribution(
