@@ -13,6 +13,12 @@ use thread_api::{
 
 use crate::{ConnectionOptions, descriptor_url, fetch_endpoint_descriptor};
 
+const ENDPOINT_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
+
+async fn close_endpoint(endpoint: &Endpoint) {
+    let _ = tokio::time::timeout(ENDPOINT_CLOSE_TIMEOUT, endpoint.close()).await;
+}
+
 /// A direct Weft connection. The application retains operation IDs, credentials,
 /// observed versions and stream checkpoints; reconnect never retries a mutation.
 pub struct HostedClient {
@@ -67,10 +73,17 @@ impl HostedClient {
             .await
             .context("bind hosted client endpoint")?;
         let connection =
-            tokio::time::timeout(timeout, endpoint.connect(address, api::HOSTED_ALPN_V1))
+            match tokio::time::timeout(timeout, endpoint.connect(address, api::HOSTED_ALPN_V1))
                 .await
-                .context("hosted connection deadline elapsed")?
-                .context("connect to hosted endpoint")?;
+                .context("hosted connection deadline elapsed")
+                .and_then(|connection| connection.context("connect to hosted endpoint"))
+            {
+                Ok(connection) => connection,
+                Err(error) => {
+                    close_endpoint(&endpoint).await;
+                    return Err(error);
+                }
+            };
         let result = async {
             let transport = IrohTransport::new(
                 connection.clone(),
@@ -95,7 +108,7 @@ impl HostedClient {
             }),
             Err(error) => {
                 connection.close(0u32.into(), b"v2 discovery failed");
-                endpoint.close().await;
+                close_endpoint(&endpoint).await;
                 Err(error)
             }
         }
@@ -132,7 +145,7 @@ impl HostedClient {
     /// Cancel this connection's streams and await endpoint shutdown.
     pub async fn close(&self) {
         self.connection.close(0u32.into(), b"hosted client closed");
-        self.endpoint.close().await;
+        close_endpoint(&self.endpoint).await;
     }
 }
 

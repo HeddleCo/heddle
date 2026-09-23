@@ -34,7 +34,9 @@ pub async fn with_command_shutdown<T>(command: impl Future<Output = T>) -> T {
             let result = command.await;
             let connections = COMMAND_CONNECTIONS
                 .with(|connections| std::mem::take(&mut *connections.borrow_mut()));
-            drop(connections);
+            for connection in connections {
+                connection.close().await;
+            }
             result
         })
         .await
@@ -489,7 +491,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_does_not_wait_for_peer_after_locally_closed() {
+    async fn close_drains_endpoint_after_connection_is_locally_closed() {
         let server = Endpoint::builder(presets::Minimal)
             .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
             .relay_mode(RelayMode::Disabled)
@@ -527,8 +529,7 @@ mod tests {
 
         connection.close().await;
         assert!(connection.endpoint.is_closed());
-        server_task.abort();
-        let _ = server_task.await;
+        server_task.await.expect("server closes its endpoint");
     }
 
     #[cfg(unix)]

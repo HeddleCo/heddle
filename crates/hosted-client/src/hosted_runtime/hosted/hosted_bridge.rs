@@ -15,6 +15,7 @@ use std::{
     collections::HashMap,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -270,7 +271,11 @@ async fn splice_connection(
         loop {
             match unix_read.read(&mut buf).await {
                 Ok(0) => {
-                    let _ = send.finish();
+                    send.finish().context("finishing hosted stream to weft")?;
+                    tokio::time::timeout(Duration::from_secs(3), send.stopped())
+                        .await
+                        .context("waiting for hosted stream acknowledgment")?
+                        .context("hosted stream to weft stopped")?;
                     break;
                 }
                 Ok(n) => {

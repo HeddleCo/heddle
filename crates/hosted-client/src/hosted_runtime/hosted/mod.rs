@@ -62,6 +62,7 @@ pub use call::{BidirectionalRequestStream, BidirectionalStream, ServerStream, Se
 pub use collaboration::{HostedDiscussion, HostedDiscussionTurn, HostedResolution};
 use config::ClientConfig;
 use connection::HostedConnection;
+pub use connection::with_command_shutdown;
 pub use context::CallContextFactory;
 #[cfg(test)]
 pub(crate) use credential::CredentialSource;
