@@ -1231,7 +1231,7 @@ mod tests {
     #[test]
     fn partial_checkout_materializes_visible_omits_withheld() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let (tree, secret_leaf) = partial_fixture(&repo);
 
         let mut redact = std::collections::HashSet::new();
@@ -1268,7 +1268,7 @@ mod tests {
     #[test]
     fn partial_checkout_with_no_redactions_writes_all_entries() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let (tree, _secret_leaf) = partial_fixture(&repo);
 
         let partial = PartialTree::project(&tree, &std::collections::HashSet::new()).unwrap();
@@ -1294,7 +1294,7 @@ mod tests {
         use objects::object::encode_redacted_projection;
 
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let store = repo.store();
 
         // Inner subtree: one visible file + one withheld file.
@@ -1381,7 +1381,7 @@ mod tests {
     #[test]
     fn nested_absent_subtree_does_not_invent_redaction() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let store = repo.store();
 
         // Root references a subtree hash that is never stored in any form.
@@ -1419,7 +1419,7 @@ mod tests {
         use objects::object::encode_redacted_projection;
 
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let (tree, secret_leaf) = partial_fixture(&repo);
 
         let redact = std::collections::HashSet::from([secret_leaf]);
@@ -1462,7 +1462,7 @@ mod tests {
     #[test]
     fn unrelated_partial_tree_does_not_block_current_checkout_capture() {
         let temp = TempDir::new().expect("checkout");
-        let repo = Repository::init_default(temp.path()).expect("repo");
+        let repo = crate::init_test_repository(temp.path()).expect("repo");
         let (tree, secret_leaf) = partial_fixture(&repo);
         let partial = PartialTree::project(&tree, &std::collections::HashSet::from([secret_leaf]))
             .expect("another checkout projection");
@@ -1487,7 +1487,7 @@ mod tests {
     #[test]
     fn partial_checkout_removes_previously_materialized_withheld_files() {
         let temp = TempDir::new().expect("checkout");
-        let repo = Repository::init_default(temp.path()).expect("repo");
+        let repo = crate::init_test_repository(temp.path()).expect("repo");
         let (tree, secret_leaf) = partial_fixture(&repo);
         repo.materialize_tree(&tree, repo.root())
             .expect("full checkout");
@@ -1515,7 +1515,7 @@ mod tests {
         use objects::object::encode_redacted_projection;
 
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let (tree, secret_leaf) = partial_fixture(&repo);
 
         let redact = std::collections::HashSet::from([secret_leaf]);
@@ -1549,7 +1549,7 @@ mod tests {
     #[test]
     fn partial_checkout_rejects_root_mismatch_before_writing() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let (tree, _secret_leaf) = partial_fixture(&repo);
 
         let good = PartialTree::project(&tree, &std::collections::HashSet::new()).unwrap();
@@ -1598,7 +1598,7 @@ mod tests {
         }
 
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         // Well over MATERIALIZE_PARALLEL_THRESHOLD (32): on any multi-core host
         // this exercises the `thread::scope` branch; on a single core it
@@ -1707,7 +1707,7 @@ mod tests {
     #[test]
     fn try_clone_vanished_source_keeps_batch_reflinks_enabled() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let context = MaterializationContext::new();
         assert!(context.reflinks_enabled(), "context starts optimistic");
 
@@ -1795,7 +1795,7 @@ mod tests {
     #[test]
     fn materialize_write_ops_prepares_missing_parent_directories() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let blob = Blob::from("cold pull payload");
         let hash = repo.store().put_blob(&blob).unwrap();
@@ -1826,7 +1826,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let blob = Blob::from("normal mode payload");
         let hash = repo.store().put_blob(&blob).unwrap();
@@ -1879,7 +1879,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let blob = Blob::from("canonical bytes that must never change");
         let hash = repo.store().put_blob(&blob).unwrap();
@@ -1931,7 +1931,7 @@ mod tests {
     #[cfg(unix)]
     fn materialize_atomic_rename_does_not_affect_sibling_worktree() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let blob = Blob::from("atomic-rename canonical bytes");
         let hash = repo.store().put_blob(&blob).unwrap();
@@ -1989,7 +1989,7 @@ mod tests {
             "materialize_uses_reflink_when_filesystem_supports_it requires reflink support"
         );
 
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
         let blob = Blob::from("reflink correctness check, kept under compression threshold");
         let hash = repo.store().put_blob(&blob).unwrap();
         let worktree = temp_dir.path().join("wt/file.txt");
@@ -2031,7 +2031,7 @@ mod tests {
     #[cfg(unix)]
     fn materialize_blob_into_two_worktrees_reads_back_canonical_bytes() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let blob = Blob::from("two-worktree readback payload");
         let hash = repo.store().put_blob(&blob).unwrap();
@@ -2065,7 +2065,7 @@ mod tests {
     #[cfg(unix)]
     fn materialize_symlink_op_produces_real_symlink_not_hardlink() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let symlink_blob = Blob::new(b"../canonical".to_vec());
         let symlink_hash = repo.store().put_blob(&symlink_blob).unwrap();
@@ -2093,7 +2093,7 @@ mod tests {
     #[cfg(unix)]
     fn materialize_symlink_op_replaces_existing_symlink() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let first_hash = repo.store().put_blob(&Blob::from("first")).unwrap();
         let second_hash = repo.store().put_blob(&Blob::from("second")).unwrap();
@@ -2119,7 +2119,7 @@ mod tests {
     #[cfg(unix)]
     fn materialize_write_ops_reuses_prepared_parent_for_multiple_writes() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let symlink_target = Blob::new(b"../target.txt".to_vec());
         let target_hash = repo.store().put_blob(&Blob::from("target")).unwrap();
@@ -2160,7 +2160,7 @@ mod tests {
     #[cfg(unix)]
     fn lazy_promotion_after_pack_and_prune_restores_loose_mirror() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let blob = Blob::from(
             "lazy-promotion payload, packed-then-pruned, kept under compression threshold",
@@ -2212,7 +2212,7 @@ mod tests {
     #[cfg(unix)]
     fn proactive_warm_promotes_all_state_blobs() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         // Materialize a few files and snapshot.
         for i in 0..4 {
@@ -2288,7 +2288,7 @@ mod tests {
     #[cfg(unix)]
     fn warm_canonical_store_is_idempotent() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         for i in 0..3 {
             std::fs::write(
@@ -2344,7 +2344,7 @@ mod tests {
             "packed_repo_storage_win_after_warm_and_materialize requires reflink support"
         );
 
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let blob_count = 5;
         for i in 0..blob_count {
@@ -2418,7 +2418,7 @@ mod tests {
     #[test]
     fn promote_to_loose_uncompressed_idempotent_on_loose_blob() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let blob = Blob::from("idempotent promote payload");
         let hash = repo.store().put_blob(&blob).unwrap();
@@ -2441,7 +2441,7 @@ mod tests {
         use objects::object::ContentHash;
 
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let bogus = ContentHash::compute_typed("blob", b"never-stored");
         let result = repo.store().promote_to_loose_uncompressed(&bogus);

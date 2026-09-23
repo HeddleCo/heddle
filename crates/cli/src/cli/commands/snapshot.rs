@@ -698,7 +698,7 @@ fn snapshot_output_from_save_report(
     let principal_start = Instant::now();
     let principal_source = verbs::resolve_principal(repo, user_config.principal_pair())?
         .source
-        .unwrap_or("unknown")
+        .unwrap_or("not_configured")
         .to_string();
     let output_principal_ms = principal_start.elapsed().as_millis();
     let warnings = bulk_capture_warning(report.captured_path_count)
@@ -1005,7 +1005,7 @@ mod tests {
         let _model = EnvVarGuard::set("HEDDLE_AGENT_MODEL", "claude-opus-4-7");
         let _provider = EnvVarGuard::set("HEDDLE_AGENT_PROVIDER", "anthropic");
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         save_active_harness_entry(&repo, "anthropic", "claude-opus-4-8[1m]");
         let config_path = temp.path().join(".heddle/config.toml");
         let mut config = repo::RepoConfig::load(&config_path).unwrap();
@@ -1030,7 +1030,7 @@ mod tests {
     fn model_change_mid_thread_rotates_segment_and_leaves_old_state() {
         let _child = isolate_child_identity_env();
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let mut manager = SessionManager::new(repo.root());
         manager
             .start_session(
@@ -1094,7 +1094,7 @@ mod tests {
     fn session_end_expire_leaves_human_capture() {
         let _child = isolate_child_identity_env();
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         verbs::write_identity_cursor(
             repo.root(),
             &verbs::IdentityCursor {
@@ -1124,7 +1124,7 @@ mod tests {
     fn codex_stop_expire_leaves_human_capture() {
         let _child = isolate_child_identity_env();
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         crate::identity_stamp::stamp_bytes(
             repo.root(),
             "codex",
@@ -1158,7 +1158,7 @@ mod tests {
     fn build_attribution_omits_unpublished_cursor_fields() {
         let _child = isolate_child_identity_env();
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         verbs::write_identity_cursor(
             repo.root(),
             &verbs::IdentityCursor {

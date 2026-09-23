@@ -453,7 +453,8 @@ fn first_status_before_capture_names_default_identity() {
     assert!(
         verbose_text.contains("Identity:")
             && verbose_text.contains("first capture")
-            && verbose_text.contains("Unknown <unknown@example.com>")
+            && verbose_text.contains("no principal configured")
+            && !verbose_text.contains("unknown@example.com")
             && verbose_text.contains("HEDDLE_PRINCIPAL_NAME"),
         "verbose first-run status should make default attribution explicit before capture: {verbose_text}"
     );
@@ -490,7 +491,7 @@ fn capture_without_principal_refuses_before_recording_empty_identity() {
     assert!(
         envelope["unsafe_condition"]
             .as_str()
-            .is_some_and(|condition| condition.contains("Unknown <unknown@example.com>")),
+            .is_some_and(|condition| condition.contains("No accountable name/email")),
         "identity refusal should name the unsafe fallback: {envelope}"
     );
     let log = heddle_output_without_principal_env(&["log", "--output", "json"], temp.path())

@@ -15,6 +15,8 @@ fn run_relay(cwd: &Path, config_path: &Path, payload: &str) -> Output {
         .args(["integration", "relay", "codex", "agent_done"])
         .current_dir(cwd)
         .env("HEDDLE_CONFIG", config_path)
+        .env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev")
         .env_remove("NO_COLOR")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

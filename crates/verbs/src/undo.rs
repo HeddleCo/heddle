@@ -808,7 +808,14 @@ mod tests {
         let repo = Repository::init_default(temp.path()).unwrap();
         std::fs::write(temp.path().join("f.txt"), "x").unwrap();
         let _ = repo
-            .snapshot(Some("s".to_string()), None)
+            .snapshot_with_attribution(
+                Some("s".to_string()),
+                None,
+                objects::object::Attribution::human(objects::object::Principal::new(
+                    "Test",
+                    "test@example.com",
+                )),
+            )
             .expect("snapshot");
 
         let list = list_undo_history(&repo, 5).unwrap();

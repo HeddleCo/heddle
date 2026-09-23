@@ -2012,7 +2012,7 @@ mod cleanup_tests {
     #[test]
     fn promote_default_path_matches_canonical_thread_dir() {
         let dir = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(dir.path()).unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
         for id in ["foo", "foo/bar", "team@scope", "feature/foo"] {
             let promote = default_materialized_thread_path(&repo, id);
             let canonical = repo.managed_checkout_path(id);
@@ -2083,7 +2083,7 @@ mod cleanup_tests {
     #[test]
     fn current_thread_ref_state_resolves_persisted_short_state() {
         let dir = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(dir.path()).unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
         fs::write(dir.path().join("file.txt"), "content\n").unwrap();
         let state = repo.snapshot(Some("content".to_string()), None).unwrap();
 

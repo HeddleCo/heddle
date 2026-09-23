@@ -166,7 +166,7 @@ mod tests {
     fn command_boundary_auto_capture_snapshots_dirty_worktree() {
         let _env = AutoCaptureEnvGuard::clean();
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let path = repo.root().join("note.txt");
         std::fs::write(&path, b"one\n").unwrap();
         let seed = repo.snapshot(Some("seed".into()), None).unwrap();
@@ -192,7 +192,7 @@ mod tests {
     fn command_boundary_auto_capture_is_noop_when_disabled() {
         let _env = AutoCaptureEnvGuard::clean();
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let path = repo.root().join("note.txt");
         std::fs::write(&path, b"one\n").unwrap();
         let seed = repo.snapshot(Some("seed".into()), None).unwrap();
@@ -216,7 +216,7 @@ mod tests {
     fn command_boundary_auto_capture_is_noop_when_worktree_clean() {
         let _env = AutoCaptureEnvGuard::clean();
         let temp = tempfile::TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let path = repo.root().join("note.txt");
         std::fs::write(&path, b"one\n").unwrap();
         let seed = repo.snapshot(Some("seed".into()), None).unwrap();

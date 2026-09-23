@@ -913,7 +913,7 @@ mod tests {
 
     fn fresh_repo() -> (TempDir, Repository) {
         let dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(dir.path()).unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
         (dir, repo)
     }
 
@@ -948,7 +948,7 @@ mod tests {
 
     fn fresh_repo_trusting(signer: &dyn crypto::Signer) -> (TempDir, Repository) {
         let dir = TempDir::new().unwrap();
-        Repository::init_default(dir.path()).unwrap();
+        crate::init_test_repository(dir.path()).unwrap();
         let config_path = dir.path().join(".heddle/config.toml");
         let mut config = crate::repository::repo_config::RepoConfig::load(&config_path).unwrap();
         config.redact.trusted_keys.push(crate::TrustedKey {

@@ -587,7 +587,7 @@ mod tests {
     #[test]
     fn resolve_target_accepts_short_state_id_prefix() {
         let temp = tempfile::TempDir::new().expect("create temp dir");
-        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let repo = crate::init_test_repository(temp.path()).expect("init repo");
 
         let tree_hash = repo.store().put_tree(&Tree::new()).expect("put tree");
         let state = State::new(
@@ -634,7 +634,7 @@ mod tests {
     #[test]
     fn resolve_scope_at_target_stamps_lines_for_symbol_scope() {
         let temp = tempfile::TempDir::new().expect("create temp dir");
-        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let repo = crate::init_test_repository(temp.path()).expect("init repo");
 
         // Write a small TS file the resolver knows how to parse.
         let src_dir = temp.path().join("src/lib");
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn resolve_scope_at_target_passes_through_when_symbol_absent() {
         let temp = tempfile::TempDir::new().expect("create temp dir");
-        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let repo = crate::init_test_repository(temp.path()).expect("init repo");
         let src_dir = temp.path().join("src");
         std::fs::create_dir_all(&src_dir).expect("create src dir");
         std::fs::write(src_dir.join("db.ts"), "export const a = 1;\n").expect("write");
@@ -693,7 +693,7 @@ mod tests {
     #[test]
     fn context_updates_preserve_state_and_form_attachment_history() {
         let temp = tempfile::TempDir::new().expect("create temp dir");
-        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let repo = crate::init_test_repository(temp.path()).expect("init repo");
         let head_id = repo.head().expect("read head").expect("head state");
         let head_state = repo
             .store()

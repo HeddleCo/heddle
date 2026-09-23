@@ -441,12 +441,21 @@ pub async fn cmd_push(
     match target {
         RemoteTarget::Local(path) => {
             if plan.all_threads {
-                push_local_all_threads(&repo, &path, &plan, cli).await?;
+                push_local_all_threads(&repo, &path, remote.as_deref(), &plan, cli).await?;
             } else {
                 let state_id = single_state_id
                     .as_ref()
-                    .expect("single-thread push resolves a state");
-                push_local(&repo, &path, state_id, track_name, &plan, cli).await?;
+                    .context("single-thread push has no resolved state")?;
+                push_local(
+                    &repo,
+                    &path,
+                    state_id,
+                    track_name,
+                    remote.as_deref(),
+                    &plan,
+                    cli,
+                )
+                .await?;
             }
         }
         RemoteTarget::Network {
@@ -1203,8 +1212,9 @@ fn resolve_push_state_id(
     if let Some(thread_name) = thread {
         let tip = repo.refs().get_thread(&ThreadName::new(thread_name))?;
         let existing_tip_differs = tip.as_ref().is_some_and(|tip| tip != &current);
-        if refuse_named_thread_tip_overwrite(force, Some(thread_name), existing_tip_differs) {
-            let tip = tip.expect("existing_tip_differs implies tip present");
+        if refuse_named_thread_tip_overwrite(force, Some(thread_name), existing_tip_differs)
+            && let Some(tip) = tip
+        {
             return Err(map_push_failure(named_thread_tip_mismatch_failure(
                 thread_name,
                 tip.short().to_string(),
@@ -1221,6 +1231,7 @@ async fn push_local(
     target_path: &std::path::Path,
     state_id: &objects::object::StateId,
     track_name: &str,
+    remote_name: Option<&str>,
     plan: &PushPlan,
     cli: &Cli,
 ) -> Result<()> {
@@ -1244,6 +1255,7 @@ async fn push_local(
     let objects_copied = sync.fetch_state(&target_repo, state_id)?;
 
     target_repo.set_thread_recorded(&ThreadName::new(track_name), state_id)?;
+    record_pushed_remote_head(repo, remote_name, track_name, state_id)?;
 
     if should_output_json(cli, Some(repo.config())) {
         let trust = build_repository_verification_state(repo);
@@ -1285,6 +1297,24 @@ async fn push_local(
     Ok(())
 }
 
+fn record_pushed_remote_head(
+    repo: &Repository,
+    remote_name: Option<&str>,
+    track_name: &str,
+    state_id: &objects::object::StateId,
+) -> Result<()> {
+    let config = RemoteConfig::open(repo)?;
+    let name = match remote_name {
+        Some(name) if config.get(name).is_ok() => Some(name.to_string()),
+        Some(_) => None,
+        None => config.default_name().map(str::to_string),
+    };
+    if let Some(name) = name {
+        repo.set_remote_thread_recorded(&name, &ThreadName::new(track_name), state_id)?;
+    }
+    Ok(())
+}
+
 /// A pushable Heddle thread paired with its tip state (heddle#838).
 struct PushableThread {
     name: String,
@@ -1322,6 +1352,7 @@ fn pushable_threads_for_all(repo: &Repository) -> Result<Vec<PushableThread>> {
 async fn push_local_all_threads(
     repo: &Repository,
     target_path: &std::path::Path,
+    remote_name: Option<&str>,
     plan: &PushPlan,
     cli: &Cli,
 ) -> Result<()> {
@@ -1354,6 +1385,7 @@ async fn push_local_all_threads(
         let push_one = || -> Result<usize> {
             let copied = sync.fetch_state(&target_repo, &thread.state)?;
             target_repo.set_thread_recorded(&ThreadName::new(&thread.name), &thread.state)?;
+            record_pushed_remote_head(repo, remote_name, &thread.name, &thread.state)?;
             Ok(copied)
         };
         match push_one() {
@@ -1586,6 +1618,7 @@ async fn push_network_connected(
     };
     match parse_hosted_push_result(options.track_name, &fields) {
         HostedPushResult::Success { state } => {
+            record_pushed_remote_head(repo, options.remote_arg, options.track_name, &state_id)?;
             if should_output_json(options.cli, Some(repo.config())) {
                 let trust = build_repository_verification_state(repo);
                 let mut output = heddle_push_output(options.plan, state, None, trust);
@@ -1800,6 +1833,12 @@ async fn push_network_all_threads(
                 };
                 match parse_hosted_push_result(&thread.name, &fields) {
                     HostedPushResult::Success { state } => {
+                        record_pushed_remote_head(
+                            repo,
+                            options.remote_arg,
+                            &thread.name,
+                            &thread.state,
+                        )?;
                         pushed.push(thread.name.clone());
                         if !json {
                             let event =
@@ -2444,7 +2483,7 @@ mod tests {
         assert_eq!(reviews.status, "not_applicable");
 
         let temp = TempDir::new().expect("temp repo");
-        let repo = Repository::init_default(temp.path()).expect("native repo");
+        let repo = crate::init_test_repository(temp.path()).expect("native repo");
         let plan = PushPlan {
             remote: Some("origin".into()),
             all_threads: false,
@@ -2487,7 +2526,7 @@ mod tests {
         use verbs::review::{LocalReviewContext, LocalStateReview, SignReviewRequest};
 
         let temp = TempDir::new().expect("temp repo");
-        let repo = Repository::init_default(temp.path()).expect("native repo");
+        let repo = crate::init_test_repository(temp.path()).expect("native repo");
         let mut config = repo.config().clone();
         config.set_principal("Reviewer", "reviewer@example.com");
         config
@@ -2772,7 +2811,7 @@ mod tests {
     #[test]
     fn remote_url_suffix_selects_transport_for_push_and_pull() {
         let native_dir = tempfile::TempDir::new().unwrap();
-        let native = Repository::init_default(native_dir.path()).unwrap();
+        let native = crate::init_test_repository(native_dir.path()).unwrap();
         let overlay_dir = tempfile::TempDir::new().unwrap();
         SleyRepository::init(overlay_dir.path()).unwrap();
         let overlay = Repository::init_git_overlay_sidecar(overlay_dir.path()).unwrap();
@@ -2840,7 +2879,7 @@ mod tests {
     #[test]
     fn https_transport_is_hosted_for_both_repository_authorities() {
         let native_dir = tempfile::TempDir::new().unwrap();
-        let native = Repository::init_default(native_dir.path()).unwrap();
+        let native = crate::init_test_repository(native_dir.path()).unwrap();
         let https = "https://127.0.0.1:8431/acme/widget";
         assert_eq!(
             classify_push_remote_spec(&native, Some(https)),
@@ -2879,7 +2918,7 @@ mod tests {
     #[test]
     fn auto_provision_remote_name_uses_existing_or_origin_remote() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
 
         assert_eq!(
             auto_provision_remote_name(&repo, None).unwrap().as_deref(),
@@ -2938,7 +2977,7 @@ mod tests {
     #[test]
     fn auto_provision_persists_hostname_authority() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
 
         let configured =
             persist_auto_provisioned_remote(&repo, None, "api-staging.heddle.sh", "org/repo")
@@ -2959,7 +2998,7 @@ mod tests {
     #[test]
     fn auto_provision_persists_https_host_only_as_named_origin() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
 
         let configured = persist_auto_provisioned_remote(
             &repo,
@@ -2991,7 +3030,7 @@ mod tests {
     #[test]
     fn auto_provision_persists_https_loopback_host_only_as_origin() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
 
         let configured = persist_auto_provisioned_remote(
             &repo,
@@ -3017,7 +3056,7 @@ mod tests {
     #[test]
     fn auto_provision_does_not_overwrite_hostname_with_resolved_socket() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
 
         let configured = persist_auto_provisioned_remote(
             &repo,
@@ -3041,7 +3080,7 @@ mod tests {
     #[test]
     fn auto_provision_rewrites_existing_https_origin_path_without_losing_scheme() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         let mut cfg = RemoteConfig::open(&repo).unwrap();
         cfg.add(
             "origin",

@@ -485,11 +485,8 @@ mod tests {
         ChangedPathFilter, ChangedPathFilters, HistoryQuery, normalize_repo_relative_path,
         query_history_with_cache,
     };
-    use crate::{
-        Repository,
-        repository::commit_graph_persistence::{
-            CommitGraphCache, LoadedCommitGraph, NullCommitGraphCache,
-        },
+    use crate::repository::commit_graph_persistence::{
+        CommitGraphCache, LoadedCommitGraph, NullCommitGraphCache,
     };
 
     #[derive(Clone, Default)]
@@ -546,7 +543,7 @@ mod tests {
     #[test]
     fn query_history_path_filter_matches_with_and_without_fs_commit_graph_cache() {
         let temp_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp_dir.path()).unwrap();
+        let repo = crate::init_test_repository(temp_dir.path()).unwrap();
 
         let src_dir = temp_dir.path().join("src");
         fs::create_dir(&src_dir).unwrap();

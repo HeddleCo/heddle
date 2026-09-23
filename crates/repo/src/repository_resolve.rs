@@ -148,7 +148,7 @@ mod tests {
     /// to resolve against.
     fn repo_with_two_states() -> (TempDir, Repository, StateId, StateId) {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         fs::write(temp.path().join("a.txt"), "a").unwrap();
         let s1 = repo.snapshot(Some("first".into()), None).unwrap();
         fs::write(temp.path().join("b.txt"), "b").unwrap();
@@ -226,7 +226,7 @@ mod tests {
     fn resolve_state_errors_on_ambiguous_prefix() {
         use objects::object::{Attribution, State};
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
 
         let head = repo.head().unwrap().unwrap();
         let head_state = repo.store().get_state(&head).unwrap().unwrap();

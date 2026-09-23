@@ -199,11 +199,7 @@ pub fn build_commit_message(
     out.push_str(&format!("Merge-State: {merge_state_id}\n"));
     let principal_name = attribution.principal.name_lossy();
     let principal_email = attribution.principal.email_lossy();
-    if principal_name.trim() != "Unknown"
-        && principal_email.trim() != "unknown@example.com"
-        && !principal_name.trim().is_empty()
-        && !principal_email.trim().is_empty()
-    {
+    if !principal_name.trim().is_empty() && !principal_email.trim().is_empty() {
         out.push_str(&format!(
             "Co-Authored-By: {} <{}>\n",
             principal_name, principal_email

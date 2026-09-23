@@ -1856,7 +1856,7 @@ mod tests {
     #[cfg(feature = "client")]
     fn linear_fixture() -> (TempDir, Repository, StateId, StateId) {
         let temp = TempDir::new().expect("fixture directory");
-        let repo = Repository::init_default(temp.path()).expect("fixture repository");
+        let repo = crate::init_test_repository(temp.path()).expect("fixture repository");
         let first = snapshot_file(&repo, temp.path(), "state A\n");
         let second = snapshot_file(&repo, temp.path(), "state B\n");
         reset_attached(&repo, first);

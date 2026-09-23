@@ -2,7 +2,7 @@
 //! Attribution resolution shared by hosted sync and the CLI verbs.
 //!
 //! `resolve_attribution` mirrors the snapshot path's principal precedence
-//! (env > repo > user > Unknown) and attaches the ambient agent from the same
+//! (env > repo > user) and attaches the ambient agent from the same
 //! env/repo lookup `Repository::resolve_agent` performs. The only piece it
 //! cannot own itself is detecting the wrapping harness (codex/claude/...);
 //! the CLI installs that probe once at startup via [`install_harness_probe`].
@@ -42,7 +42,9 @@ pub fn clean_attribution_value(value: String) -> Option<String> {
 }
 
 pub fn resolve_principal(repo: &Repository, user_config: &config::UserConfig) -> Result<Principal> {
-    Ok(verbs::resolve_principal(repo, user_config.principal_pair())?.principal)
+    verbs::resolve_principal(repo, user_config.principal_pair())?
+        .principal
+        .ok_or_else(|| anyhow::anyhow!("principal not configured; run `heddle init --principal-name <name> --principal-email <email>`"))
 }
 
 /// Resolve the human + agent attribution for a non-capture command (context,

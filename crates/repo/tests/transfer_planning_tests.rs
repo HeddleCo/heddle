@@ -33,6 +33,14 @@ use repo::Repository;
 use sley::{ObjectFormat as GitObjectFormat, ObjectId as GitObjectId};
 use tempfile::TempDir;
 
+fn init_test_repository(path: &std::path::Path) -> objects::error::Result<Repository> {
+    let repo = Repository::init_default(path)?;
+    let mut config = repo.config().clone();
+    config.set_principal("Heddle Test", "test@heddle.dev");
+    config.save(&repo.heddle_dir().join("config.toml"))?;
+    Repository::open(path)
+}
+
 fn pairs_from_full(objects: &[ObjectInfo]) -> HashSet<(ObjectId, ObjectType)> {
     objects
         .iter()
@@ -129,7 +137,7 @@ fn depth_one_transfer_includes_hdc1_anchor_and_installs_a_readable_tip() {
     // fixture writes a V3 epoch-anchor lineage so the planner still has to
     // ship the storage anchor when depth excludes that ancestor state.
     let source_temp = TempDir::new().unwrap();
-    let source = Repository::init_default(source_temp.path()).unwrap();
+    let source = init_test_repository(source_temp.path()).unwrap();
     let store = source.store();
     let shared = (0..240)
         .map(|index| {
@@ -293,7 +301,7 @@ fn test_attribution() -> Attribution {
 #[test]
 fn lean_closure_planner_matches_object_info_ids_and_types() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
     std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
     std::fs::write(temp.path().join("src/lib.rs"), "pub fn hi() {}\n").unwrap();
@@ -332,7 +340,7 @@ fn lean_closure_planner_matches_object_info_ids_and_types() {
 #[test]
 fn state_closure_includes_annotated_tag_chain() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     let state = repo.snapshot(Some("tagged".to_string()), None).unwrap();
     let inner = AnnotatedTag::new(
             GitObjectFormat::Sha1,
@@ -370,7 +378,7 @@ fn state_closure_includes_annotated_tag_chain() {
 #[test]
 fn transfer_boundary_stops_at_server_head_without_walking_its_history() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     let path = temp.path().join("story.txt");
 
     std::fs::write(&path, "base\n").unwrap();
@@ -410,7 +418,7 @@ fn transfer_boundary_stops_at_server_head_without_walking_its_history() {
 #[test]
 fn transfer_projection_matches_full_and_plan_on_mixed_state_closure_fixture() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
 
     let excluded_blob = repo
         .store()
@@ -617,7 +625,7 @@ fn transfer_projection_matches_full_and_plan_on_mixed_state_closure_fixture() {
 #[test]
 fn transfer_projection_reads_root_state_once_on_small_transfer() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     let blob = repo
         .store()
         .put_blob(&Blob::from("hello\n"))
@@ -655,7 +663,7 @@ fn transfer_projection_reads_root_state_once_on_small_transfer() {
 #[test]
 fn transfer_projection_drops_full_descriptors_after_threshold() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
     let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
 
@@ -681,7 +689,7 @@ fn depth_and_exclude_options_match_between_full_and_plan() {
     use objects::object::{BindingDelta, SemanticIndexRoot, SemanticTreeNode};
 
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     let path = temp.path().join("story.txt");
 
     std::fs::write(&path, "base\n").unwrap();
@@ -768,7 +776,7 @@ fn depth_and_exclude_options_match_between_full_and_plan() {
 #[test]
 fn shared_tree_and_blob_references_are_emitted_once() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
 
     let shared_blob = Blob::from("shared contents\n");
     let shared_blob_hash = repo.store().put_blob(&shared_blob).unwrap();
@@ -829,7 +837,7 @@ fn shared_tree_and_blob_references_are_emitted_once() {
 #[test]
 fn state_closure_skips_gitlink_targets() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     let target: GitObjectId = "0303030303030303030303030303030303030303"
         .parse()
         .expect("git oid");
@@ -868,7 +876,7 @@ fn state_closure_skips_gitlink_targets() {
 #[test]
 fn missing_blobs_in_tree_skips_gitlinks_and_walks_nested_side_paths() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     let present_blob = repo
         .store()
         .put_blob(&Blob::from("already local"))
@@ -908,7 +916,7 @@ fn missing_blobs_in_tree_skips_gitlinks_and_walks_nested_side_paths() {
 #[test]
 fn enumerate_state_closure_emits_redaction_for_redacted_blob() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     std::fs::write(temp.path().join("secret.toml"), "api_token = \"x\"\n").unwrap();
     let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
 
@@ -970,7 +978,7 @@ fn enumerate_state_closure_emits_redaction_for_redacted_blob() {
 #[test]
 fn missing_merely_redacted_blob_still_fails_closure_planning() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     std::fs::write(temp.path().join("secret.toml"), "api_token = \"x\"\n").unwrap();
     let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
     let blob_hash = repo
@@ -1014,7 +1022,7 @@ fn missing_merely_redacted_blob_still_fails_closure_planning() {
 #[test]
 fn purged_blob_closure_carries_sidecar_without_deleted_bytes() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     std::fs::write(temp.path().join("secret.toml"), "api_token = \"x\"\n").unwrap();
     let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
     let blob_hash = repo
@@ -1067,7 +1075,7 @@ fn purged_blob_closure_carries_sidecar_without_deleted_bytes() {
 #[test]
 fn enumerate_state_closure_emits_state_visibility_for_visible_state() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
     let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
 
@@ -1117,7 +1125,7 @@ fn enumerate_state_closure_emits_state_visibility_for_visible_state() {
 #[test]
 fn enumerate_state_closure_includes_private_ancestor_visibility_on_public_tip() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     std::fs::write(temp.path().join("public.env"), "PUBLIC=1\n").unwrap();
     repo.snapshot(Some("public".to_string()), None).unwrap();
     std::fs::write(temp.path().join("secrets.env"), "AX_SECRET=do-not-leak\n").unwrap();
@@ -1157,7 +1165,7 @@ fn enumerate_state_closure_includes_private_ancestor_visibility_on_public_tip() 
 #[test]
 fn enumerate_state_closure_emits_state_metadata_blobs() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
     let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
 
@@ -1253,7 +1261,7 @@ fn semantic_index_attachment_excluded_from_push_pack_but_kept_for_pull() {
     use objects::object::{BindingDelta, FileBindingDelta, SemanticIndexRoot, SemanticTreeNode};
 
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     std::fs::write(temp.path().join("README.md"), "hello\n").unwrap();
     let state = repo.snapshot(Some("seed".to_string()), None).unwrap();
 

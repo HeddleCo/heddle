@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn canonical_context_adapter_maps_cli_state_for_an_injected_repository() {
         let temp = tempfile::tempdir().expect("temp repository");
-        Repository::init_default(temp.path()).expect("init repository");
+        crate::init_test_repository(temp.path()).expect("init repository");
         let repo = Repository::open(temp.path()).expect("open repository");
         let config = UserConfig::default();
 

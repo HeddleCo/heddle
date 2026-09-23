@@ -291,7 +291,8 @@ fn init_principal_status(
     let resolved = verbs::resolve_principal(repo, user_config.principal_pair())?;
     let candidates = resolved
         .source
-        .map(|source| vec![(source, resolved.principal)])
+        .zip(resolved.principal)
+        .map(|(source, principal)| vec![(source, principal)])
         .unwrap_or_default();
     Ok(init_principal_status_from_plan(select_init_principal(
         &candidates,

@@ -17,6 +17,17 @@ pub(crate) fn test_state_id() -> objects::object::StateId {
     objects::object::StateId::from_bytes(bytes)
 }
 
+#[cfg(test)]
+pub(crate) fn init_test_repository(
+    path: impl AsRef<std::path::Path>,
+) -> objects::error::Result<Repository> {
+    let repo = Repository::init_default(path.as_ref())?;
+    let mut config = repo.config().clone();
+    config.set_principal("Heddle Test", "test@heddle.dev");
+    config.save(&repo.heddle_dir().join("config.toml"))?;
+    Repository::open(path)
+}
+
 pub mod actor_presence;
 pub mod agent_task;
 pub mod atomic;
@@ -63,7 +74,6 @@ pub use spool_creation::{
 #[cfg(test)]
 mod owner_root_tests;
 pub mod thread_replication;
-pub use crypto::owner_root::sign_spool_owner_genesis;
 pub use crypto::owner_root::{
     CLAIMABLE_DEFERRED_HUMAN_TTL_SECS, ClaimDeferredHuman, OWNER_TRANSITION_DOMAIN,
     authorization_key_id, claim_deferred_human_transition, ed25519_verification_key,
@@ -71,7 +81,8 @@ pub use crypto::owner_root::{
     require_genesis_matches_seq0, seq0_authority_public_key, sign_agent_claim_binding,
     sign_canonical, sign_claim_deferred_human, sign_claimable_deferred_human_root,
     sign_current_spool_owner_genesis, sign_custodial_owner_binding, sign_custodial_owner_root,
-    sign_proposed_account_claim, verify_account_owner_observation, verify_spool_owner_observation,
+    sign_proposed_account_claim, sign_spool_owner_genesis, verify_account_owner_observation,
+    verify_spool_owner_observation,
 };
 mod repository;
 mod repository_key_binding;
@@ -261,9 +272,9 @@ pub use thread_stack::{
     PlanRebaseError, StackNode, StackRebasePlan, StackRebaseStep, ThreadStack, compute_stacks,
     plan_stack_rebase, stack_for,
 };
-pub use thread_storage::{SyncedThreadMetadata, Thread, ThreadManager};
 pub use thread_storage::{
-    synced_metadata_current_state_id, synced_metadata_from_record, synced_metadata_from_thread,
+    SyncedThreadMetadata, Thread, ThreadManager, synced_metadata_current_state_id,
+    synced_metadata_from_record, synced_metadata_from_thread,
 };
 pub use thread_worktree_target::{
     ThreadWorktreeTargetDisposition, ThreadWorktreeTargetError, validate_thread_worktree_target,

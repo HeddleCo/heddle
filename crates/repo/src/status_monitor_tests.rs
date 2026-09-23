@@ -61,7 +61,7 @@ fn assert_monitor_matches_full(
 
 fn seed_repo() -> (TempDir, Repository, Tree, WorktreeIndex) {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = crate::init_test_repository(temp.path()).unwrap();
     for directory in ["src", "tests", "nested/deep"] {
         fs::create_dir_all(temp.path().join(directory)).unwrap();
     }

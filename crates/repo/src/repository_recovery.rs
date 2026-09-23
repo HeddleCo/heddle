@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn missing_current_head_state_refuses_recovery_materialization() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
 
         fs::write(temp.path().join("notes.md"), "recoverable\n").unwrap();
         let recovery = repo

@@ -98,7 +98,13 @@ fn peel_native_annotated_tag_rejects_git_target_disagreeing_with_target_tag() {
 fn native_annotated_tag_oid_rejects_peel_disagreeing_with_peeled_state() {
     let temp = tempfile::TempDir::new().unwrap();
     let repo = HeddleRepository::init_default(temp.path()).unwrap();
-    let state = repo.snapshot(Some("tagged".to_string()), None).unwrap();
+    let state = repo
+        .snapshot_with_attribution(
+            Some("tagged".to_string()),
+            None,
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+        .unwrap();
     repo.create_marker_recorded(&MarkerName::new("v1.0"), &state.state_id)
         .unwrap();
     let tag = AnnotatedTag::new(
@@ -125,7 +131,13 @@ fn native_annotated_tag_oid_rejects_peel_disagreeing_with_peeled_state() {
 fn native_annotated_tag_oid_returns_tag_oid_after_peel_matches_mapped_commit() {
     let temp = tempfile::TempDir::new().unwrap();
     let repo = HeddleRepository::init_default(temp.path()).unwrap();
-    let state = repo.snapshot(Some("tagged".to_string()), None).unwrap();
+    let state = repo
+        .snapshot_with_attribution(
+            Some("tagged".to_string()),
+            None,
+            Attribution::human(Principal::new("Test", "test@example.com")),
+        )
+        .unwrap();
     repo.create_marker_recorded(&MarkerName::new("v1.0"), &state.state_id)
         .unwrap();
     let mapped = ObjectId::from_hex(ObjectFormat::Sha1, COMMIT_OID).expect("mapped oid");

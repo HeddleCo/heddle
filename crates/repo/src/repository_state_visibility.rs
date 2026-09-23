@@ -1155,7 +1155,7 @@ mod tests {
 
     fn fresh_repo() -> (TempDir, Repository) {
         let dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(dir.path()).unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
         (dir, repo)
     }
 
@@ -1163,7 +1163,7 @@ mod tests {
     /// `tier_toml`, so the capture-time binding resolves a non-public default.
     fn repo_with_internal_default() -> (TempDir, Repository) {
         let dir = TempDir::new().unwrap();
-        Repository::init_default(dir.path()).unwrap();
+        crate::init_test_repository(dir.path()).unwrap();
         let config_path = dir.path().join(".heddle/config.toml");
         let mut config = crate::repository::repo_config::RepoConfig::load(&config_path).unwrap();
         config.review.discussion.default_visibility = VisibilityTier::Internal;
@@ -1189,7 +1189,7 @@ mod tests {
 
     fn repo_trusting_metadata(signer: &dyn Signer) -> (TempDir, Repository) {
         let dir = TempDir::new().unwrap();
-        Repository::init_default(dir.path()).unwrap();
+        crate::init_test_repository(dir.path()).unwrap();
         let config_path = dir.path().join(".heddle/config.toml");
         let mut config = crate::repository::repo_config::RepoConfig::load(&config_path).unwrap();
         config.metadata.trusted_keys.push(crate::TrustedKey {
@@ -1292,7 +1292,7 @@ mod tests {
         let owner = Ed25519Signer::generate().expect("owner keygen");
         let stranger = Ed25519Signer::generate().expect("stranger keygen");
         let dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(dir.path()).unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
         let genesis = crate::sign_spool_owner_genesis(&owner, *uuid::Uuid::now_v7().as_bytes())
             .expect("sign genesis");
         repo.verify_and_pin_owner_genesis(2, Some(&genesis), &["alice".into(), "private".into()])
@@ -1338,7 +1338,7 @@ mod tests {
     #[test]
     fn local_visibility_copy_keeps_private_sidecar_without_trusted_keys() {
         let source_dir = TempDir::new().unwrap();
-        let source = Repository::init_default(source_dir.path()).unwrap();
+        let source = crate::init_test_repository(source_dir.path()).unwrap();
         let state = StateId::from_bytes([13u8; 32]);
         source
             .put_state_visibility(sample_record(
@@ -1354,7 +1354,7 @@ mod tests {
             .expect("sidecar present");
 
         let dest_dir = TempDir::new().unwrap();
-        let dest = Repository::init_default(dest_dir.path()).unwrap();
+        let dest = crate::init_test_repository(dest_dir.path()).unwrap();
         dest.accept_local_state_visibility(state, &bytes)
             .expect("local clone must copy the Private sidecar");
         assert_eq!(
@@ -1403,7 +1403,7 @@ mod tests {
     #[test]
     fn withholding_walk_is_downward_closed_for_public_audience() {
         let dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(dir.path()).unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
         std::fs::write(dir.path().join("public.env"), b"PUBLIC=1\n").unwrap();
         repo.snapshot(Some("public".into()), None).unwrap();
         std::fs::write(dir.path().join("secrets.env"), b"AX_SECRET=do-not-leak\n").unwrap();
@@ -1563,7 +1563,7 @@ mod tests {
     #[test]
     fn missing_ancestor_state_fails_closed_without_serving() {
         let dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(dir.path()).unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
         let missing = StateId::from_bytes([0xAB; 32]);
         let withheld = repo
             .withholding_visibility_for_audience(&missing, &crate::AudienceTier::Public)

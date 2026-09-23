@@ -262,7 +262,7 @@ pub(super) async fn partial_roundtrip(
                 scope_label: "security".into(),
             },
             embargo_until: None,
-            declarer: repository.get_principal().expect("local declarer"),
+            declarer: Principal::new("Owner", "owner@test"),
             declared_at: chrono::Utc::now(),
             signature: None,
             supersedes: None,

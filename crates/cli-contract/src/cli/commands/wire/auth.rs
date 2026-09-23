@@ -186,9 +186,12 @@ pub struct SignupInviteListOutput {
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 #[schemars(rename = "WhoamiCaptureActorSchema")]
 pub struct CaptureActor {
-    pub name: String,
-    pub email: String,
-    /// `environment`, `repository`, `git_config`, `user_config`, or null when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// `environment`, `repository`, `git_config`, `user_config`, or omitted when not configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<&'static str>,
 }
 

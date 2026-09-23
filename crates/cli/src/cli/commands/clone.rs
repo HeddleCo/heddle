@@ -3001,7 +3001,7 @@ mod tests {
     #[test]
     fn hosted_clone_persists_advertised_thread_stable_id() {
         let temp = tempfile::TempDir::new().expect("temp");
-        let repo = Repository::init_default(temp.path()).expect("init");
+        let repo = crate::init_test_repository(temp.path()).expect("init");
         std::fs::write(temp.path().join("tracked.txt"), b"cloned\n").unwrap();
         let state = repo
             .snapshot(Some("seed".into()), None)
@@ -3041,7 +3041,7 @@ mod tests {
     #[test]
     fn hosted_clone_refreshes_list_refs_when_folded_refs_omit_thread_id() {
         let temp = tempfile::TempDir::new().expect("temp");
-        let repo = Repository::init_default(temp.path()).expect("init");
+        let repo = crate::init_test_repository(temp.path()).expect("init");
         std::fs::write(temp.path().join("tracked.txt"), b"cloned\n").unwrap();
         let state = repo
             .snapshot(Some("seed".into()), None)
@@ -3149,7 +3149,14 @@ mod tests {
 
         std::fs::write(root.join("README"), "frontier\n").expect("seed worktree");
         let snapshot = repo
-            .snapshot(Some("frontier".to_string()), None)
+            .snapshot_with_attribution(
+                Some("frontier".to_string()),
+                None,
+                objects::object::Attribution::human(objects::object::Principal::new(
+                    "Heddle Test",
+                    "test@heddle.dev",
+                )),
+            )
             .expect("seed state");
         let remote_refs = vec![
             HostedRefEntry::from_advertised(
@@ -3296,7 +3303,7 @@ mod tests {
     #[test]
     fn hosted_clone_origin_is_persisted_as_default_remote() {
         let temp = tempfile::TempDir::new().expect("temp");
-        let repo = Repository::init_default(temp.path()).expect("init repo");
+        let repo = crate::init_test_repository(temp.path()).expect("init repo");
 
         let origin = configure_hosted_clone_origin(&repo, "weft.local:8421", "smoke-cli/project")
             .expect("configure hosted origin");
@@ -3467,7 +3474,7 @@ mod tests {
             let heddle_root = temp.path().join("heddle");
             std::fs::create_dir_all(&heddle_root).expect("mkdir heddle");
             let repo =
-                Repository::init_default(&heddle_root).expect("init heddle repo for hydrator");
+                crate::init_test_repository(&heddle_root).expect("init heddle repo for hydrator");
             (temp, bare, repo)
         }
 
@@ -3914,7 +3921,7 @@ mod tests {
         use objects::object::ThreadName;
 
         let temp = tempfile::TempDir::new().expect("temp");
-        let repo = Repository::init_default(temp.path()).expect("init");
+        let repo = crate::init_test_repository(temp.path()).expect("init");
         // Snapshot once so we have a real state tip to point threads at.
         std::fs::write(temp.path().join("seed.txt"), b"seed").unwrap();
         let state = repo
@@ -3949,7 +3956,7 @@ mod tests {
 
         // A second repo still has main from init/snapshot; selection stays on main.
         let temp2 = tempfile::TempDir::new().expect("temp2");
-        let repo2 = Repository::init_default(temp2.path()).expect("init2");
+        let repo2 = crate::init_test_repository(temp2.path()).expect("init2");
         std::fs::write(temp2.path().join("seed.txt"), b"seed").unwrap();
         let state2 = repo2.snapshot(Some("seed".into()), None).expect("snapshot");
         for name in ["zeta", "alpha"] {
@@ -3990,7 +3997,7 @@ mod tests {
     #[test]
     fn advertised_clone_source_lane_fails_closed_on_unreadable_head() {
         let temp = tempfile::TempDir::new().expect("temp");
-        let repo = Repository::init_default(temp.path()).expect("init");
+        let repo = crate::init_test_repository(temp.path()).expect("init");
         std::fs::write(repo.heddle_dir().join("HEAD"), b"not-a-head\n").expect("corrupt HEAD");
         let err = advertised_clone_source_lane(&repo)
             .expect_err("unreadable source HEAD must fail closed");
@@ -4007,7 +4014,7 @@ mod tests {
         use refs::Head;
 
         let temp = tempfile::TempDir::new().expect("temp");
-        let repo = Repository::init_default(temp.path()).expect("init");
+        let repo = crate::init_test_repository(temp.path()).expect("init");
         std::fs::write(temp.path().join("README.md"), b"captured\n").unwrap();
         let state = repo
             .snapshot(Some("seed".into()), None)

@@ -839,9 +839,7 @@ impl Repository {
     /// The seed state uses a stable `Heddle <init@heddle>` attribution
     /// instead of the user's principal because the user's principal may
     /// not yet be configured at init time (e.g. the user writes
-    /// `.heddle/config.toml` after `heddle init`). Falling back to
-    /// `Unknown <unknown@example.com>` would surface in `heddle log` as
-    /// a state owned by no one. The genesis state is also filtered out of
+    /// `.heddle/config.toml` after `heddle init`). The genesis state is filtered out of
     /// user-facing log output (see `repository_history::is_synthetic_root`).
     pub fn seed_default_thread(&self) -> Result<()> {
         let main_thread = ThreadName::from("main");

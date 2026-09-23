@@ -515,7 +515,7 @@ mod gate_tests {
     #[test]
     fn write_isolated_checkout_withholds_embargoed_state() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         std::fs::write(repo_dir.path().join("secret.rs"), b"fn exploit() {}\n").unwrap();
         repo.snapshot(Some("embargoed".into()), None).unwrap();
         let state_id = embargo_head(&repo);
@@ -607,7 +607,7 @@ mod gate_tests {
     #[test]
     fn validate_rejects_path_nested_in_existing_thread_checkout() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         let threads_root = repo.heddle_dir().join("threads");
         let checkout_leaf = PathBuf::from(repo::thread_manifest::managed_checkout_leaf(
             repo.managed_checkout_source_root(),
@@ -685,7 +685,7 @@ mod gate_tests {
     #[test]
     fn write_isolated_checkout_materializes_visible_state() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         std::fs::write(repo_dir.path().join("ok.rs"), b"fn ok() {}\n").unwrap();
         repo.snapshot(Some("public".into()), None).unwrap();
         let state_id = repo

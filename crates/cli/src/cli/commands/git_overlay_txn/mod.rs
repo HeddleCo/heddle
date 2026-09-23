@@ -8,7 +8,7 @@
 
 use anyhow::{Result, anyhow};
 use heddle_git_projection::git_core::{
-    git_config_identity_with_global_fallback, principal_is_default_unknown,
+    git_config_identity_with_global_fallback, principal_lacks_identity,
 };
 use objects::{
     object::{Principal, ThreadName},
@@ -93,7 +93,7 @@ pub(crate) fn preflight_git_checkpoint_identity_for_principal(
     action: &str,
     retry_command: &str,
 ) -> Result<()> {
-    if !principal_is_default_unknown(principal) {
+    if !principal_lacks_identity(principal) {
         return Ok(());
     }
     if git_config_identity_with_global_fallback(repo.root())?.is_some() {
@@ -287,7 +287,7 @@ fn missing_git_checkpoint_identity_advice(action: &str, retry_command: &str) -> 
         "git_checkpoint_identity_required",
         format!("Refusing to {action}: no accountable identity is configured for the Git commit"),
         "Configure `HEDDLE_PRINCIPAL_NAME` and `HEDDLE_PRINCIPAL_EMAIL`, set .heddle principal, or configure Git user.name/user.email before retrying.",
-        "Heddle would otherwise have to write Unknown <unknown@example.com> into the Git commit",
+        "No accountable name/email is configured for the Git commit author",
         format!("{action} would create an auditable Git checkpoint without a real author identity"),
         "Git refs, Heddle refs, Git checkpoint metadata, and worktree files were left unchanged",
         "heddle init --principal-name <name> --principal-email <email>",

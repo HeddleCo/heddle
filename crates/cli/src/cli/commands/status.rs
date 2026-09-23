@@ -644,7 +644,16 @@ fn render_short_changes(changes: &ChangesInfo) {
 
 fn render_short_status(output: &StatusOutput) {
     render_short_changes(&output.changes);
-    if output.changes.is_empty() {
+    if let (Some(remote), Some(local)) = (&output.native_remote, &output.current_state) {
+        println!(
+            "{} {}  {} {}  {}",
+            style::bold(short_status_subject(output)),
+            style::state_id(local),
+            remote.name,
+            style::state_id(&remote.head),
+            remote.relation
+        );
+    } else if output.changes.is_empty() {
         println!(
             "{} {}",
             style::bold(short_status_subject(output)),
@@ -791,14 +800,6 @@ fn compact_status_header(output: &StatusOutput) -> String {
             .unwrap_or("repository"),
     ));
     parts.push(compact_capability_label(&output.repository_capability).to_string());
-    if let Some(remote) = output
-        .trust
-        .default_remote
-        .as_deref()
-        .filter(|remote| !remote.is_empty())
-    {
-        parts.push(remote.to_string());
-    }
     if let Some(state) = output
         .current_state
         .as_deref()
@@ -806,7 +807,23 @@ fn compact_status_header(output: &StatusOutput) -> String {
     {
         parts.push(style::state_id(state));
     }
-    if compact_status_is_up_to_date(output) {
+    if let Some(remote) = &output.native_remote {
+        parts.push(format!("{} {}", remote.name, style::state_id(&remote.head)));
+        parts.push(remote.relation.to_string());
+    } else {
+        if let Some(remote) = output
+            .trust
+            .default_remote
+            .as_deref()
+            .filter(|remote| !remote.is_empty())
+        {
+            parts.push(remote.to_string());
+        }
+    }
+    if output.native_remote.is_none()
+        && compact_status_is_up_to_date(output)
+        && (output.trust.default_remote.is_none() || output.repository_capability == "git-overlay")
+    {
         parts.push("up to date".to_string());
     }
     parts.join("  ")
@@ -917,6 +934,14 @@ fn render_status_operation(output: &StatusOutput) {
         } else {
             println!("Remote drift: {}", style::warn(&remote_tracking.message));
         }
+    }
+    if let Some(remote) = &output.native_remote {
+        println!(
+            "Remote head: {} {} ({})",
+            remote.name,
+            style::state_id(&remote.head),
+            remote.relation
+        );
     }
     if let Some(hint) = &output.import_guidance
         && !hint
@@ -1738,7 +1763,7 @@ mod tests {
 
     fn init_repo_with_materialized_thread(content: &[u8]) -> (TempDir, TempDir, Repository) {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("hello.txt"), content).unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
@@ -1752,7 +1777,7 @@ mod tests {
     #[test]
     fn status_workspace_label_pairs_native_modes_without_main() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
         let cli = status_cli(repo_dir.path());
@@ -1798,14 +1823,14 @@ mod tests {
     #[test]
     fn assess_returns_empty_when_no_materialized_threads() {
         let dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(dir.path()).unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
         assert!(assess_materialized_threads(&repo).is_empty());
     }
 
     #[test]
     fn status_omits_agent_context_fields_when_unset() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
@@ -1821,7 +1846,7 @@ mod tests {
     #[test]
     fn status_serializes_agent_context_fields_when_set() {
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
@@ -1888,7 +1913,7 @@ mod tests {
         // worktree as stale, which is the user-facing signal
         // `heddle status` exists to deliver.
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = crate::init_test_repository(repo_dir.path()).unwrap();
         fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 
@@ -2020,7 +2045,7 @@ mod tests {
     fn compact_status_text_lists_dirty_paths_without_repeating_wip() {
         with_isolated_heddle_home(|| {
             let repo_dir = TempDir::new().unwrap();
-            let repo = Repository::init_default(repo_dir.path()).unwrap();
+            let repo = crate::init_test_repository(repo_dir.path()).unwrap();
             fs::create_dir_all(repo_dir.path().join("src")).unwrap();
             fs::write(repo_dir.path().join("src/lib.rs"), b"fn main() {}\n").unwrap();
 
@@ -2074,7 +2099,7 @@ mod tests {
     fn compact_status_text_is_one_line_when_clean() {
         with_isolated_heddle_home(|| {
             let repo_dir = TempDir::new().unwrap();
-            let repo = Repository::init_default(repo_dir.path()).unwrap();
+            let repo = crate::init_test_repository(repo_dir.path()).unwrap();
             fs::write(repo_dir.path().join("hello.txt"), b"hello\n").unwrap();
             repo.snapshot(Some("seed".into()), None).unwrap();
 
@@ -2085,6 +2110,13 @@ mod tests {
                     url: "https://127.0.0.1:8421/spool/x/repo".into(),
                     insecure: false,
                 },
+            )
+            .unwrap();
+            let head = repo.current_state().unwrap().unwrap().state_id;
+            repo.set_remote_thread_recorded(
+                "origin",
+                &objects::object::ThreadName::new("main"),
+                &head,
             )
             .unwrap();
 

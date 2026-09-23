@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn default_capture_supports_entry_visibility_without_configuration() {
         let directory = TempDir::new().expect("repository directory");
-        let repo = Repository::init_default(directory.path()).expect("default repository");
+        let repo = crate::init_test_repository(directory.path()).expect("default repository");
         fs::write(directory.path().join("secret.md"), b"private content").expect("write source");
         repo.mark_entry_visibility(
             "secret.md",
@@ -358,7 +358,7 @@ mod tests {
 
     fn v4_repo() -> (TempDir, Repository) {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         (temp, repo)
     }
 

@@ -1447,7 +1447,7 @@ mod tests {
     /// ignored dep dirs). Returns the temp dir, repo, and base state id.
     fn repo_with_state(deps: &[&str]) -> (TempDir, Repository, StateId) {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         std::fs::write(temp.path().join("a.txt"), "a").unwrap();
         if !deps.is_empty() {
             let ignore = deps.iter().map(|d| format!("{d}/\n")).collect::<String>();
@@ -1581,7 +1581,7 @@ mod tests {
     #[test]
     fn start_shared_target_writes_cargo_config_through_claimed_dir() {
         let temp = TempDir::new().unwrap();
-        let repo = Repository::init_default(temp.path()).unwrap();
+        let repo = crate::init_test_repository(temp.path()).unwrap();
         std::fs::write(temp.path().join("Cargo.toml"), "[package]\nname = \"p\"\n").unwrap();
         let state = repo
             .snapshot(Some("rust workspace".to_string()), None)

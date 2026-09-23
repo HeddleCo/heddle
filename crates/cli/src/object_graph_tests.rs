@@ -8,7 +8,7 @@ use wire::{ObjectId, StateClosureOptions, enumerate_state_closure_with_options};
 
 fn create_repo_with_two_states() -> (TempDir, Repository, StateId, StateId) {
     let temp_dir = TempDir::new().expect("temp dir");
-    let repo = Repository::init_default(temp_dir.path()).expect("init repo");
+    let repo = crate::init_test_repository(temp_dir.path()).expect("init repo");
 
     fs::write(temp_dir.path().join("a.txt"), "one").expect("write file");
     let state1 = repo

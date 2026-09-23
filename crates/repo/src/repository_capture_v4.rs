@@ -197,7 +197,7 @@ mod tests {
 
     fn native_repo() -> (TempDir, Repository) {
         let temp = TempDir::new().expect("repository directory");
-        let repo = Repository::init_default(temp.path()).expect("native repository");
+        let repo = crate::init_test_repository(temp.path()).expect("native repository");
         (temp, repo)
     }
 
