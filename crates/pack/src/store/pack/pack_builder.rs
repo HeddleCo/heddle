@@ -3,7 +3,10 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use heddle_format::{compression::CompressionConfig, delta::DeltaEncoder};
+use heddle_format::{
+    compression::CompressionConfig,
+    delta::{DeltaEncoder, DeltaIndex},
+};
 
 use super::{
     ObjectType, PackLogicalId, PackObjectId, PackObjectRecord, PackStats,
@@ -40,7 +43,7 @@ pub struct PackBuilder {
 struct WindowEntry {
     hash: ContentHash,
     data: Vec<u8>,
-    index: HashMap<[u8; 4], Vec<usize>>,
+    index: DeltaIndex,
     chain_depth: usize,
 }
 
