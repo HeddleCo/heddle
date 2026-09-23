@@ -42,6 +42,119 @@ fn assert_success(output: &Output, command: &str) {
 }
 
 #[test]
+fn native_push_status_shows_local_and_origin_heads() {
+    let local = TempDir::new().expect("local repo");
+    let origin = TempDir::new().expect("origin repo");
+    super::heddle(&["init"], Some(local.path())).expect("init local");
+    super::heddle(&["init"], Some(origin.path())).expect("init origin");
+    super::heddle(
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.path().to_str().expect("path"),
+        ],
+        Some(local.path()),
+    )
+    .expect("add origin");
+    fs::write(local.path().join("work.txt"), "first\n").expect("work file");
+    let capture = super::heddle(
+        &["--output", "json", "capture", "-m", "first"],
+        Some(local.path()),
+    )
+    .expect("capture");
+    let captured: serde_json::Value = serde_json::from_str(&capture).expect("capture JSON");
+    let head = captured["state_id"].as_str().expect("state ID");
+    let first_id = repo::Repository::open(local.path())
+        .expect("open local")
+        .current_state()
+        .expect("read state")
+        .expect("local head")
+        .state_id;
+    super::heddle(&["push", "origin"], Some(local.path())).expect("push");
+    let status =
+        super::heddle(&["--output", "json", "status"], Some(local.path())).expect("status");
+    let report: serde_json::Value = serde_json::from_str(&status).expect("status JSON");
+    assert_eq!(report["current_state"], head);
+    assert_eq!(report["native_remote"]["head"], head);
+    assert_eq!(report["native_remote"]["relation"], "up to date");
+    let text = super::heddle(&["status"], Some(local.path())).expect("status text");
+    assert!(
+        text.contains(head) && text.contains("origin") && text.contains("up to date"),
+        "{text}"
+    );
+
+    fs::write(local.path().join("work.txt"), "second\n").expect("next work");
+    super::heddle(&["capture", "-m", "second"], Some(local.path())).expect("second capture");
+    let status =
+        super::heddle(&["--output", "json", "status"], Some(local.path())).expect("ahead status");
+    let report: serde_json::Value = serde_json::from_str(&status).expect("status JSON");
+    assert_eq!(report["native_remote"]["head"], head);
+    assert_eq!(report["native_remote"]["relation"], "ahead");
+
+    let repo = repo::Repository::open(local.path()).expect("open local");
+    let ahead_id = repo
+        .current_state()
+        .expect("read ahead")
+        .expect("ahead head")
+        .state_id;
+    repo.set_remote_thread_recorded(
+        "origin",
+        &objects::object::ThreadName::new("main"),
+        &ahead_id,
+    )
+    .expect("record fetched origin head");
+    repo.set_thread_recorded(&objects::object::ThreadName::new("main"), &first_id)
+        .expect("move local ref behind origin");
+    let status =
+        super::heddle(&["--output", "json", "status"], Some(local.path())).expect("behind status");
+    let report: serde_json::Value = serde_json::from_str(&status).expect("status JSON");
+    assert_eq!(report["current_state"], head);
+    assert_eq!(report["native_remote"]["head"], ahead_id.short());
+    assert_eq!(report["native_remote"]["relation"], "behind");
+}
+
+#[test]
+fn missing_identity_is_not_a_person_on_read_or_write_paths() {
+    let temp = TempDir::new().expect("tempdir");
+    let home = temp.path().join("home");
+    let heddle_home = temp.path().join("heddle-home");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&home).expect("home");
+    fs::create_dir_all(&repo).expect("repo");
+    let run = |args: &[&str]| {
+        isolated_command(&repo, &home, &heddle_home, args)
+            .output()
+            .expect("run heddle")
+    };
+    assert_success(&run(&["init"]), "init");
+    let whoami = run(&["whoami"]);
+    assert_success(&whoami, "whoami");
+    let whoami_text = output_text(&whoami);
+    assert!(
+        whoami_text.contains("Capture actor: not configured")
+            && !whoami_text.contains("unknown@example.com"),
+        "{whoami_text}"
+    );
+    let whoami_json = run(&["--output", "json", "whoami"]);
+    assert_success(&whoami_json, "whoami JSON");
+    let actor: serde_json::Value =
+        serde_json::from_slice(&whoami_json.stdout).expect("whoami JSON");
+    assert!(actor["capture_actor"]["name"].is_null());
+    assert!(actor["capture_actor"]["email"].is_null());
+    let status = run(&["status", "--verbose"]);
+    assert_success(&status, "status");
+    assert!(!output_text(&status).contains("unknown@example.com"));
+    fs::write(repo.join("file.txt"), "content\n").expect("file");
+    let capture = run(&["capture", "-m", "no identity"]);
+    assert!(
+        !capture.status.success(),
+        "capture must refuse missing identity"
+    );
+    assert!(!output_text(&capture).contains("unknown@example.com"));
+}
+
+#[test]
 fn heddle_home_is_honored_alongside_heddle_config() {
     let temp = TempDir::new().expect("tempdir");
     let shared_home = temp.path().join("shared-home");
