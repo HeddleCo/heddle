@@ -74,7 +74,9 @@ pub fn default_relay_mode() -> RelayMode {
 /// bind, so restarting the process rebinds the same node id.
 #[cfg(feature = "client")]
 pub async fn bind_persistent_endpoint(relay_mode: RelayMode) -> anyhow::Result<Endpoint> {
-    crate::hosted_runtime::net_endpoint::bind(relay_mode).await
+    let endpoint = crate::hosted_runtime::net_endpoint::bind(relay_mode).await?;
+    crate::hosted_runtime::hosted::track_command_endpoint(&endpoint);
+    Ok(endpoint)
 }
 
 /// Bind the persistent device endpoint together with the hosted-session
@@ -87,6 +89,7 @@ pub async fn bind_persistent_hosted(
     crate::hosted_runtime::hosted::hosted_bridge::HostedBridge,
 )> {
     let endpoint = crate::hosted_runtime::net_endpoint::bind(relay_mode).await?;
+    crate::hosted_runtime::hosted::track_command_endpoint(&endpoint);
     let bridge = crate::hosted_runtime::hosted::hosted_bridge::HostedBridge::new(endpoint.clone());
     Ok((endpoint, bridge))
 }

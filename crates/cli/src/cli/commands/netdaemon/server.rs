@@ -165,7 +165,12 @@ pub async fn run_network_daemon() -> Result<()> {
     if let Err(error) = hosted_client::network::remove_reachability(&heddle_home) {
         tracing::warn!(%error, "removing device relay advertisement");
     }
-    endpoint.close().await;
+    if tokio::time::timeout(Duration::from_secs(3), endpoint.close())
+        .await
+        .is_err()
+    {
+        tracing::warn!("timed out closing netd endpoint");
+    }
     remove_endpoint_if_owned(&endpoint_path, &advertised);
     let _ = std::fs::remove_file(&claim_socket);
     let _ = std::fs::remove_file(&hosted_socket);

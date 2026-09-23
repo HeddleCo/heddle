@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap, future::Future, net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration,
+    cell::RefCell, collections::HashMap, future::Future, net::Ipv4Addr, path::PathBuf, sync::Arc,
+    time::Duration,
 };
 
 use api::heddle::api::v1alpha2::{
@@ -19,15 +20,56 @@ use super::{
     provider_transport::ProviderWebSocketTransport,
 };
 
-/// Foreground budget for graceful endpoint drain.
-///
-/// Relay paths can spend about one second waiting for a close-frame ACK after
-/// the operation is already locally closed. Start the graceful drain, but let
-/// one-shot commands return after this bound while the spawned task finishes.
-const FOREGROUND_ENDPOINT_DRAIN: Duration = Duration::from_millis(20);
+const ENDPOINT_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
-#[cfg(test)]
-static NEXT_SHUTDOWN_HOLD_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+tokio::task_local! {
+    static COMMAND_RESOURCES: RefCell<CommandResources>;
+}
+
+#[derive(Default)]
+struct CommandResources {
+    connections: Vec<Arc<HostedConnection>>,
+    endpoints: Vec<Endpoint>,
+}
+
+/// The CLI owns this scope. It drains hosted connections and the persistent
+/// netd endpoint even when a verb returns an error, before its runtime drops.
+pub async fn with_command_shutdown<T>(command: impl Future<Output = T>) -> T {
+    COMMAND_RESOURCES
+        .scope(RefCell::new(CommandResources::default()), async {
+            let result = command.await;
+            let resources =
+                COMMAND_RESOURCES.with(|resources| std::mem::take(&mut *resources.borrow_mut()));
+            for connection in resources.connections {
+                connection.close().await;
+            }
+            for endpoint in resources.endpoints {
+                close_endpoint(&endpoint).await;
+            }
+            result
+        })
+        .await
+}
+
+fn track(connection: Arc<HostedConnection>) -> Arc<HostedConnection> {
+    let _ = COMMAND_RESOURCES
+        .try_with(|resources| resources.borrow_mut().connections.push(connection.clone()));
+    connection
+}
+
+pub(crate) fn track_command_endpoint(endpoint: &Endpoint) {
+    let _ = COMMAND_RESOURCES
+        .try_with(|resources| resources.borrow_mut().endpoints.push(endpoint.clone()));
+}
+
+async fn close_endpoint(endpoint: &Endpoint) {
+    if tokio::time::timeout(ENDPOINT_CLOSE_TIMEOUT, endpoint.close())
+        .await
+        .is_err()
+    {
+        tracing::warn!("timed out closing Heddle Iroh endpoint");
+    }
+}
 
 #[derive(Debug)]
 pub(super) struct HostedConnection {
@@ -67,7 +109,7 @@ impl HostedConnection {
         let native_description = tokio::sync::OnceCell::new();
         let _ = native_description.set(description);
         let router = claim_router(endpoint.clone());
-        Arc::new(Self {
+        track(Arc::new(Self {
             native_description,
             router,
             endpoint,
@@ -76,7 +118,7 @@ impl HostedConnection {
             provider_connections: Mutex::new(HashMap::new()),
             proxy_endpoint: None,
             reused_warm: false,
-        })
+        }))
     }
 
     async fn connect_inner(
@@ -87,12 +129,12 @@ impl HostedConnection {
         let connection = match endpoint.connect(address, api::HOSTED_ALPN_V1).await {
             Ok(connection) => connection,
             Err(error) => {
-                endpoint.close().await;
+                close_endpoint(&endpoint).await;
                 return Err(HostedError::transport(error));
             }
         };
         let router = claim_router(endpoint.clone());
-        Ok(Arc::new(Self {
+        Ok(track(Arc::new(Self {
             native_description: tokio::sync::OnceCell::new(),
             router,
             endpoint,
@@ -101,7 +143,7 @@ impl HostedConnection {
             provider_connections: Mutex::new(HashMap::new()),
             proxy_endpoint: None,
             reused_warm: false,
-        }))
+        })))
     }
 
     /// Reuse netd's persistent endpoint and cached Weft QUIC session while
@@ -128,6 +170,26 @@ impl HostedConnection {
             .bind()
             .await
             .map_err(HostedError::transport)?;
+        let provider_transport = ProviderWebSocketTransport::new(config.clone());
+        let endpoint_builder = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .map_err(HostedError::transport);
+        let endpoint_result = match endpoint_builder {
+            Ok(builder) => builder
+                .add_custom_transport(Arc::new(provider_transport.clone()))
+                .bind()
+                .await
+                .map_err(HostedError::transport),
+            Err(error) => Err(error),
+        };
+        let endpoint = match endpoint_result {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                close_endpoint(&proxy_endpoint).await;
+                return Err(error);
+            }
+        };
         let proxy_address = proxy_endpoint.addr();
         let proxy_task_endpoint = proxy_endpoint.clone();
         let proxy_socket = socket_path.clone();
@@ -145,22 +207,12 @@ impl HostedConnection {
                 tracing::debug!(%error, "local netd hosted proxy stopped");
             }
         });
-
-        let provider_transport = ProviderWebSocketTransport::new(config.clone());
-        let endpoint = Endpoint::builder(presets::Minimal)
-            .relay_mode(RelayMode::Disabled)
-            .bind_addr((Ipv4Addr::LOCALHOST, 0))
-            .map_err(HostedError::transport)?
-            .add_custom_transport(Arc::new(provider_transport.clone()))
-            .bind()
-            .await
-            .map_err(HostedError::transport)?;
         heddle_perf_contract::record_network_client_initialization();
         let connection = match endpoint.connect(proxy_address, api::HOSTED_ALPN_V1).await {
             Ok(connection) => connection,
             Err(error) => {
-                endpoint.close().await;
-                proxy_endpoint.close().await;
+                close_endpoint(&endpoint).await;
+                close_endpoint(&proxy_endpoint).await;
                 return Err(HostedError::transport(error));
             }
         };
@@ -171,7 +223,7 @@ impl HostedConnection {
             local_node_id = %endpoint.id(),
             "hosted connect using netd warm bridge"
         );
-        Ok(Arc::new(Self {
+        Ok(track(Arc::new(Self {
             native_description: tokio::sync::OnceCell::new(),
             router,
             endpoint,
@@ -180,7 +232,7 @@ impl HostedConnection {
             provider_connections: Mutex::new(HashMap::new()),
             proxy_endpoint: Some(proxy_endpoint),
             reused_warm: ensured.reused,
-        }))
+        })))
     }
 
     pub(super) fn endpoint_id(&self) -> EndpointId {
@@ -251,17 +303,19 @@ impl HostedConnection {
 
     pub(super) async fn close(&self) {
         self.connection.close(0u32.into(), b"Heddle client closed");
-        let router = self.router.clone();
-        let proxy_endpoint = self.proxy_endpoint.clone();
-        bounded_foreground_shutdown(async move {
-            if let Err(error) = router.shutdown().await {
-                tracing::warn!(%error, "failed to shut down Heddle Iroh router");
+        if !self.router.is_shutdown() {
+            match tokio::time::timeout(ENDPOINT_CLOSE_TIMEOUT, self.router.shutdown()).await {
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "failed to shut down Heddle Iroh router");
+                }
+                Err(_) => tracing::warn!("timed out shutting down Heddle Iroh router"),
+                Ok(Ok(())) => {}
             }
-            if let Some(endpoint) = proxy_endpoint {
-                endpoint.close().await;
-            }
-        })
-        .await;
+        }
+        close_endpoint(&self.endpoint).await;
+        if let Some(endpoint) = &self.proxy_endpoint {
+            close_endpoint(endpoint).await;
+        }
     }
 }
 
@@ -272,24 +326,27 @@ async fn serve_netd_proxy(
     server: String,
     allow_insecure: bool,
 ) -> Result<()> {
-    let incoming = endpoint
-        .accept()
-        .await
-        .ok_or_else(|| HostedError::transport("local netd proxy endpoint closed before accept"))?;
-    let connection = incoming.await.map_err(HostedError::transport)?;
-    while let Ok((send, recv)) = connection.accept_bi().await {
-        let socket_path = socket_path.clone();
-        let server = server.clone();
-        tokio::spawn(async move {
-            if let Err(error) =
-                splice_netd_stream(send, recv, &socket_path, &server, allow_insecure).await
-            {
-                tracing::debug!(%error, "local netd stream proxy stopped");
-            }
-        });
+    let result = async {
+        let incoming = endpoint.accept().await.ok_or_else(|| {
+            HostedError::transport("local netd proxy endpoint closed before accept")
+        })?;
+        let connection = incoming.await.map_err(HostedError::transport)?;
+        while let Ok((send, recv)) = connection.accept_bi().await {
+            let socket_path = socket_path.clone();
+            let server = server.clone();
+            tokio::spawn(async move {
+                if let Err(error) =
+                    splice_netd_stream(send, recv, &socket_path, &server, allow_insecure).await
+                {
+                    tracing::debug!(%error, "local netd stream proxy stopped");
+                }
+            });
+        }
+        Ok(())
     }
-    endpoint.close().await;
-    Ok(())
+    .await;
+    close_endpoint(&endpoint).await;
+    result
 }
 
 #[cfg(unix)]
@@ -325,6 +382,10 @@ async fn splice_netd_stream(
                 .map_err(HostedError::transport)?;
             if read == 0 {
                 send.finish().map_err(HostedError::transport)?;
+                tokio::time::timeout(ENDPOINT_CLOSE_TIMEOUT, send.stopped())
+                    .await
+                    .map_err(HostedError::transport)?
+                    .map_err(HostedError::transport)?;
                 return Ok(());
             }
             send.write_all(&buffer[..read])
@@ -335,48 +396,6 @@ async fn splice_netd_stream(
     let (to_netd, from_netd) = tokio::join!(to_netd, from_netd);
     to_netd?;
     from_netd
-}
-
-async fn bounded_foreground_shutdown(shutdown: impl Future<Output = ()> + Send + 'static) {
-    let hold = shutdown_hold_for_test();
-    let mut drain = tokio::spawn(async move {
-        if let Some(hold) = hold {
-            tokio::time::sleep(hold).await;
-        }
-        shutdown.await;
-    });
-    tokio::select! {
-        result = &mut drain => {
-            if let Err(error) = result {
-                tracing::warn!(%error, "hosted endpoint drain task failed");
-            }
-        }
-        () = tokio::time::sleep(FOREGROUND_ENDPOINT_DRAIN) => {
-            // Dropping a JoinHandle detaches the task. Be explicit so a future
-            // refactor does not replace this with abort-on-timeout behavior.
-            std::mem::forget(drain);
-        }
-    }
-}
-
-#[cfg(test)]
-pub(super) fn hold_next_shutdown_for_test(duration: Duration) {
-    NEXT_SHUTDOWN_HOLD_MS.store(
-        duration.as_millis() as u64,
-        std::sync::atomic::Ordering::SeqCst,
-    );
-}
-
-fn shutdown_hold_for_test() -> Option<Duration> {
-    #[cfg(test)]
-    {
-        let millis = NEXT_SHUTDOWN_HOLD_MS.swap(0, std::sync::atomic::Ordering::SeqCst);
-        (millis != 0).then(|| Duration::from_millis(millis))
-    }
-    #[cfg(not(test))]
-    {
-        None
-    }
 }
 
 /// Mount a transient claim listener on this connection's endpoint.
@@ -409,47 +428,102 @@ impl Drop for HostedConnection {
 #[cfg(test)]
 mod tests {
     use std::{
+        io::Write,
         net::Ipv4Addr,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-        time::{Duration, Instant},
+        sync::{Arc, Mutex as StdMutex},
+        time::Duration,
     };
 
     use api::heddle::api::v1alpha2::{EndpointKind, EndpointRef};
     use iroh::{Endpoint, RelayMode, endpoint::presets};
     use tokio::sync::Mutex;
 
-    use super::{HostedConnection, bounded_foreground_shutdown, hold_next_shutdown_for_test};
+    use super::{HostedConnection, track_command_endpoint, with_command_shutdown};
 
     #[tokio::test]
-    async fn bounded_shutdown_detaches_and_keeps_draining() {
-        let _process_env_guard = crate::test_process_env::exclusive().await;
-        let completed = Arc::new(AtomicBool::new(false));
-        let completed_after_drain = Arc::clone(&completed);
-        hold_next_shutdown_for_test(Duration::from_millis(80));
-        let started = Instant::now();
-        bounded_foreground_shutdown(async move {
-            completed_after_drain.store(true, Ordering::SeqCst);
+    async fn command_scope_closes_a_registered_endpoint_on_error() {
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .expect("client address")
+            .bind()
+            .await
+            .expect("client endpoint");
+        let result = with_command_shutdown(async {
+            track_command_endpoint(&endpoint);
+            Err::<(), _>("simulated daemon error")
         })
         .await;
+        assert!(result.is_err());
+        assert!(endpoint.is_closed());
+    }
+
+    struct TraceWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl Write for TraceWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("trace lock").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn command_scope_closes_hosted_round_trip_on_error() {
+        let _process_env_guard = crate::test_process_env::shared_blocking();
+        let output = Arc::new(StdMutex::new(Vec::new()));
+        let trace_output = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || TraceWriter(trace_output.clone()))
+            .with_max_level(tracing::Level::ERROR)
+            .finish();
+        let _subscriber = tracing::subscriber::set_default(subscriber);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime.block_on(async {
+            let (server_task, endpoint, result) = with_command_shutdown(async {
+                let (client, server_task, _) = super::super::native_exchange_test_server::start(
+                    uuid::Uuid::new_v4(),
+                    "acme/widgets",
+                    [7; 32],
+                )
+                .await;
+                client.native().await.expect("hosted discovery round trip");
+                let endpoint = client.connection.endpoint.clone();
+                drop(client);
+                (
+                    server_task,
+                    endpoint,
+                    Err::<(), _>("simulated command error"),
+                )
+            })
+            .await;
+            assert!(result.is_err());
+            assert!(
+                endpoint.is_closed(),
+                "command returned with an open endpoint"
+            );
+            tokio::time::timeout(Duration::from_secs(5), server_task)
+                .await
+                .expect("server should finish after client endpoint closes")
+                .expect("server task");
+        });
+        drop(runtime);
+        let output = String::from_utf8(output.lock().expect("trace lock").clone())
+            .expect("UTF-8 trace output");
         assert!(
-            started.elapsed() < Duration::from_millis(50),
-            "foreground close must detach an 80ms drain"
+            !output.contains("Endpoint dropped without calling Endpoint::close"),
+            "iroh reported an unclosed endpoint: {output}"
         );
-        assert!(!completed.load(Ordering::SeqCst));
-        tokio::time::timeout(Duration::from_millis(200), async {
-            while !completed.load(Ordering::SeqCst) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("detached graceful drain must keep running");
     }
 
     #[tokio::test]
-    async fn close_does_not_wait_for_peer_after_locally_closed() {
+    async fn close_drains_endpoint_after_connection_is_locally_closed() {
         let server = Endpoint::builder(presets::Minimal)
             .alpns(vec![api::HOSTED_ALPN_V1.to_vec()])
             .relay_mode(RelayMode::Disabled)
@@ -485,14 +559,9 @@ mod tests {
             .await
             .expect("QUIC close should become locally closed");
 
-        let started = Instant::now();
         connection.close().await;
-        assert!(
-            started.elapsed() < Duration::from_millis(200),
-            "close after locally closed must not wait for endpoint drain"
-        );
-        server_task.abort();
-        let _ = server_task.await;
+        assert!(connection.endpoint.is_closed());
+        server_task.await.expect("server closes its endpoint");
     }
 
     #[cfg(unix)]

@@ -3,6 +3,7 @@
 
 use std::{
     any::Any,
+    fmt,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -59,6 +60,17 @@ use cli::{
 };
 use tracing::debug;
 
+#[derive(Debug)]
+struct RenderedExit(i32);
+
+impl fmt::Display for RenderedExit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "command exited with status {}", self.0)
+    }
+}
+
+impl std::error::Error for RenderedExit {}
+
 // `current_thread` flavor avoids spinning up a CPU-count-sized worker
 // pool on every CLI invocation. The foreground `heddle` binary is a
 // one-shot command — `heddle status`, `heddle capture`, etc. don't
@@ -74,11 +86,20 @@ fn main() -> Result<()> {
         .enable_all()
         .build()?;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.block_on(async_main())
+        #[cfg(feature = "client")]
+        let command = hosted_client::hosted_runtime::hosted::with_command_shutdown(async_main());
+        #[cfg(not(feature = "client"))]
+        let command = async_main();
+        runtime.block_on(command)
     }));
     match result {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(error),
+        Ok(Err(error)) => {
+            if let Some(exit) = error.downcast_ref::<RenderedExit>() {
+                std::process::exit(exit.0);
+            }
+            Err(error)
+        }
         Err(payload) if is_broken_pipe_panic(payload.as_ref()) => Ok(()),
         Err(payload) => std::panic::resume_unwind(payload),
     }
@@ -388,14 +409,14 @@ async fn async_main() -> Result<()> {
             if exit_code == 0 {
                 return Ok(());
             }
-            std::process::exit(exit_code);
+            return Err(RenderedExit(exit_code).into());
         }
         Ok(LocalIdempotencyOutcome::Continue) => {}
         Err(err) => {
             let code = HeddleExitCode::from_error(&err);
             print_error_with_hint(&cli, &err);
             shutdown_command_telemetry(command_trace, command_span_guard, telemetry, code.into());
-            std::process::exit(code.into());
+            return Err(RenderedExit(code.into()).into());
         }
     }
 
@@ -893,7 +914,7 @@ async fn async_main() -> Result<()> {
             if !HeddleExitCode::is_quiet_outcome(&err) {
                 print_error_with_hint(&cli, &err);
             }
-            std::process::exit(code.into());
+            Err(RenderedExit(code.into()).into())
         }
     }
 }
