@@ -91,10 +91,23 @@ fn capture_status_snapshot(paths: &[&str]) -> SubmoduleStatusSnapshot {
         Some(superproject.path()),
     )
     .expect("render JSON status");
+    let json: Value = serde_json::from_str(&json).expect("status JSON parses");
+    if !submodules.is_empty() {
+        assert!(
+            !text.contains("deleted"),
+            "an absent submodule checkout is not a deleted file:\n{text}"
+        );
+        assert_eq!(
+            json["changes"]["deleted"],
+            serde_json::json!([]),
+            "JSON status must keep gitlinks out of ordinary file changes"
+        );
+        assert_eq!(json["changed_path_count"], 0);
+    }
 
     SubmoduleStatusSnapshot {
         text,
-        json: serde_json::from_str(&json).expect("status JSON parses"),
+        json,
         submodules,
     }
 }

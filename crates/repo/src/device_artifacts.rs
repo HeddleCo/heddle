@@ -4,6 +4,8 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
@@ -15,6 +17,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub const MAX_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_RUN_ARTIFACTS: usize = 128;
 const MAX_RETENTION_SECONDS: u64 = 365 * 24 * 60 * 60;
+const MUTATION_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
+const MUTATION_LOCK_RETRY: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Debug)]
 pub struct ArtifactStore {
@@ -58,6 +62,19 @@ impl ArtifactStore {
         )?;
         Ok(())
     }
+    fn mutation_lock(&self) -> Result<objects::lock::WriteLockGuard> {
+        let lock = objects::lock::RepoLock::at(self.database.with_extension("artifacts.lock"));
+        let deadline = Instant::now() + MUTATION_LOCK_TIMEOUT;
+        loop {
+            if let Some(guard) = lock.try_write()? {
+                return Ok(guard);
+            }
+            if Instant::now() >= deadline {
+                bail!("artifact mutation remained busy for five seconds");
+            }
+            thread::sleep(MUTATION_LOCK_RETRY);
+        }
+    }
     /// The actual harness calls this only for its independently bound Run.
     /// Exact retries reuse immutable identity and never extend the original TTL.
     pub fn retain(
@@ -78,9 +95,7 @@ impl ArtifactStore {
             bail!("artifact exceeds retention bounds");
         }
         self.purge_expired(now, 128)?;
-        let _lock = objects::lock::RepoLock::at(self.database.with_extension("artifacts.lock"))
-            .try_write()?
-            .context("artifact mutation is already running")?;
+        let _lock = self.mutation_lock()?;
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let policy = policy(&tx, spool)?;
@@ -351,6 +366,33 @@ mod tests {
             "owning-human",
         )
         .expect("explicit retention opt-in");
+    }
+    #[test]
+    fn retain_waits_for_a_concurrent_cleanup_mutation() {
+        let (_directory, store, runs, run) = fixture();
+        enable(&runs, &run);
+        let lock = objects::lock::RepoLock::at(store.database.with_extension("artifacts.lock"));
+        let held = lock.write().expect("hold cleanup mutation lock");
+        let writer = std::thread::spawn({
+            let store = store.clone();
+            let run = run.clone();
+            move || {
+                store.retain(
+                    &run,
+                    "session-report",
+                    "application/json",
+                    b"serialized report",
+                    100,
+                )
+            }
+        });
+        std::thread::sleep(Duration::from_millis(50));
+        drop(held);
+
+        writer
+            .join()
+            .expect("retention writer thread")
+            .expect("foreground retention waits for cleanup");
     }
     #[test]
     fn retained_artifacts_require_scope_policy_integrity_and_keep_retry_expiry() {

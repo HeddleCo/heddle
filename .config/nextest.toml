@@ -1,0 +1,5 @@
+[profile.default]
+# A wedged child, daemon, watcher, or lock must fail the individual test rather
+# than leaving its Cargo suite alive indefinitely. The longest healthy hosted
+# integration test is currently under five minutes on the development runner.
+slow-timeout = { period = "60s", terminate-after = 6 }

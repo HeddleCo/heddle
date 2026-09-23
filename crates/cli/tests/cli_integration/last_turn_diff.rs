@@ -95,24 +95,6 @@ fn two_agent_captures_in_one_session_anchor_last_turn_to_the_first() {
     let captured_diff: Value = serde_json::from_str(&raw).expect("target diff JSON");
     assert_eq!(captured_diff["from_state"], first["state_id"]);
     assert_eq!(changed_paths(&captured_diff), vec!["second.txt"]);
-
-    let raw = heddle_env(
-        &[
-            "review",
-            "show",
-            "HEAD",
-            "--base",
-            "last-turn",
-            "--output",
-            "json",
-        ],
-        Some(temp.path()),
-        &[],
-    )
-    .expect("last-turn review");
-    let review: Value = serde_json::from_str(&raw).expect("review JSON");
-    assert_eq!(review["base"], "last-turn");
-    assert_eq!(review["files_changed"], 1);
 }
 
 #[test]

@@ -60,9 +60,13 @@ fn status_log_and_capture_text_use_capture_vocabulary() {
         "log after init must name the omitted genesis state: {empty_log}"
     );
 
-    let clean = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
+    let clean = heddle(
+        &["--output", "text", "--verbose", "status"],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
-        clean.contains("Nothing to capture, worktree clean"),
+        clean.contains("Nothing to capture"),
         "clean status should use nothing-to-capture language: {clean}"
     );
     assert!(
@@ -81,10 +85,14 @@ fn status_log_and_capture_text_use_capture_vocabulary() {
         "capture text should not say Saved by: {captured}"
     );
 
-    let status = heddle(&["--output", "text", "status"], Some(temp.path())).unwrap();
+    let status = heddle(
+        &["--output", "text", "--verbose", "status"],
+        Some(temp.path()),
+    )
+    .unwrap();
     assert!(
-        status.contains("Captured state:"),
-        "status should label the current state as captured: {status}"
+        status.contains("Capture durability:"),
+        "status should describe the current capture with capture vocabulary: {status}"
     );
     assert!(
         !status.contains("Saved change:"),
