@@ -23,19 +23,28 @@ use super::{
 const ENDPOINT_CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 tokio::task_local! {
-    static COMMAND_CONNECTIONS: RefCell<Vec<Arc<HostedConnection>>>;
+    static COMMAND_RESOURCES: RefCell<CommandResources>;
 }
 
-/// The CLI owns this scope. It drains every opened connection even when a verb
-/// returns early with an error, before its current-thread runtime is dropped.
+#[derive(Default)]
+struct CommandResources {
+    connections: Vec<Arc<HostedConnection>>,
+    endpoints: Vec<Endpoint>,
+}
+
+/// The CLI owns this scope. It drains hosted connections and the persistent
+/// netd endpoint even when a verb returns an error, before its runtime drops.
 pub async fn with_command_shutdown<T>(command: impl Future<Output = T>) -> T {
-    COMMAND_CONNECTIONS
-        .scope(RefCell::new(Vec::new()), async {
+    COMMAND_RESOURCES
+        .scope(RefCell::new(CommandResources::default()), async {
             let result = command.await;
-            let connections = COMMAND_CONNECTIONS
-                .with(|connections| std::mem::take(&mut *connections.borrow_mut()));
-            for connection in connections {
+            let resources =
+                COMMAND_RESOURCES.with(|resources| std::mem::take(&mut *resources.borrow_mut()));
+            for connection in resources.connections {
                 connection.close().await;
+            }
+            for endpoint in resources.endpoints {
+                close_endpoint(&endpoint).await;
             }
             result
         })
@@ -43,9 +52,14 @@ pub async fn with_command_shutdown<T>(command: impl Future<Output = T>) -> T {
 }
 
 fn track(connection: Arc<HostedConnection>) -> Arc<HostedConnection> {
-    let _ = COMMAND_CONNECTIONS
-        .try_with(|connections| connections.borrow_mut().push(connection.clone()));
+    let _ = COMMAND_RESOURCES
+        .try_with(|resources| resources.borrow_mut().connections.push(connection.clone()));
     connection
+}
+
+pub(crate) fn track_command_endpoint(endpoint: &Endpoint) {
+    let _ = COMMAND_RESOURCES
+        .try_with(|resources| resources.borrow_mut().endpoints.push(endpoint.clone()));
 }
 
 async fn close_endpoint(endpoint: &Endpoint) {
@@ -424,7 +438,25 @@ mod tests {
     use iroh::{Endpoint, RelayMode, endpoint::presets};
     use tokio::sync::Mutex;
 
-    use super::{HostedConnection, with_command_shutdown};
+    use super::{HostedConnection, track_command_endpoint, with_command_shutdown};
+
+    #[tokio::test]
+    async fn command_scope_closes_a_registered_endpoint_on_error() {
+        let endpoint = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .bind_addr((Ipv4Addr::LOCALHOST, 0))
+            .expect("client address")
+            .bind()
+            .await
+            .expect("client endpoint");
+        let result = with_command_shutdown(async {
+            track_command_endpoint(&endpoint);
+            Err::<(), _>("simulated daemon error")
+        })
+        .await;
+        assert!(result.is_err());
+        assert!(endpoint.is_closed());
+    }
 
     struct TraceWriter(Arc<StdMutex<Vec<u8>>>);
 
