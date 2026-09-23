@@ -123,3 +123,50 @@ jobs:
       - name: sccache stats
         if: ${{ always() && github.event_name == 'pull_request' }}
         run: sccache --show-stats
+
+  regression-suites:
+    name: CLI and hosted-client regression suites
+    if: github.event_name == 'pull_request'
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
+    timeout-minutes: 30
+    env:
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.98.0"
+
+      - name: Ensure LLVM linker
+        run: |
+          if ! command -v ld.lld; then
+            sudo apt-get update
+            sudo apt-get install -y lld
+          fi
+
+      - uses: taiki-e/install-action@nextest
+
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-ws-${{ runner.os }}-${{ runner.arch }}
+          prefix-key: v1-rust-incr
+          cache-on-failure: true
+          cache-all-crates: true
+
+      - name: Full CLI integration target
+        run: |
+          export HEDDLE_HOME=$(mktemp -d)
+          cargo nextest run --locked -p heddle-cli --features client --test cli_basics
+
+      - name: Hosted-client tests
+        run: |
+          export HEDDLE_HOME=$(mktemp -d)
+          cargo nextest run --locked -p heddle-hosted-client --features client
+
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

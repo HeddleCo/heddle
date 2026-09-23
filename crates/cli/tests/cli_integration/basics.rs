@@ -330,7 +330,23 @@ fn test_cli_adopt_partial_divergence_failure_preserves_state_and_one_recovery() 
 
     std::fs::write(temp.path().join("tracked.txt"), "heddle side\n").unwrap();
     heddle(&["capture", "-m", "heddle side"], Some(temp.path())).unwrap();
+    let discarded_checkpoint = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(temp.path())
+        .output()
+        .expect("read discarded checkpoint");
+    assert!(discarded_checkpoint.status.success());
+    let discarded_checkpoint = str::from_utf8(&discarded_checkpoint.stdout)
+        .expect("checkpoint oid is UTF-8")
+        .trim();
     git(&["reset", "--hard", "HEAD^"], temp.path());
+    // The discarded checkpoint's embedded source note describes the old
+    // projection, not either side of the divergence this fixture exercises.
+    // Remove it so import reaches the branch/thread divergence contract.
+    git(
+        &["notes", "--ref=heddle", "remove", discarded_checkpoint],
+        temp.path(),
+    );
     std::fs::write(temp.path().join("tracked.txt"), "git side\n").unwrap();
     git_commit_all(temp.path(), "git side");
 
@@ -370,11 +386,11 @@ fn test_cli_adopt_partial_divergence_failure_preserves_state_and_one_recovery() 
     );
     assert_eq!(
         envelope["primary_command"],
-        "heddle maintenance fsck repair git --ref feature/drop-in --preview"
+        "heddle maintenance fsck repair git --ref feature/drop-in --dry-run"
     );
     assert_eq!(
         envelope["recovery_commands"],
-        serde_json::json!(["heddle maintenance fsck repair git --ref feature/drop-in --preview"])
+        serde_json::json!(["heddle maintenance fsck repair git --ref feature/drop-in --dry-run"])
     );
 }
 
@@ -735,14 +751,17 @@ fn test_cli_discuss_uses_git_backed_overlay_anchor() {
             "--output",
             "json",
             "discuss",
-            "open",
+            "new",
+            "--path",
             "tracked.txt",
+            "--symbol",
             "tracked",
+            "--body",
             "anchor discussion",
         ],
         Some(temp.path()),
     )
-    .expect("invoke discussion open");
+    .expect("invoke discussion new");
     assert!(
         open.status.success(),
         "discussion open should use the Git-backed overlay anchor: stderr={}",

@@ -724,6 +724,14 @@ impl Repository {
                     if ignored_git_overlay_status_path(&path) {
                         return Ok(SleyStreamControl::Continue);
                     }
+                    // A gitlink's checkout directory is optional. Git reports an
+                    // absent checkout as a worktree-only deletion, but the
+                    // superproject still pins the submodule in its index/HEAD.
+                    // Keep it out of ordinary file changes; status exposes the
+                    // pinned commit through its dedicated submodule inventory.
+                    if status_row_is_gitlink_worktree_only(entry) {
+                        return Ok(SleyStreamControl::Continue);
+                    }
                     let path = PathBuf::from(&*path);
 
                     if entry.index == b'?' && entry.worktree == b'?' {

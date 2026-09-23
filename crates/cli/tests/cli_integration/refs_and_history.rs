@@ -464,17 +464,17 @@ fn test_cli_help_shows_thread_surface() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
 
-    // The default help is one ranked list: the locked everyday head
-    // followed by every remaining non-hidden root — `thread` included.
-    // Legacy `worktree`/`lane` verbs stay retired, and the retired
-    // `help advanced` view must not come back.
+    // The first screen is the everyday task map. The complete command tree is
+    // explicit progressive disclosure through `help --all`.
     let everyday = heddle(&["help"], Some(temp.path())).unwrap();
     assert!(everyday.contains("\n  ready"));
-    assert!(everyday.contains("\n  thread"));
+    assert!(!everyday.contains("\n  thread"));
     assert!(!everyday.contains("\n  workspace"));
     assert!(!everyday.contains("\n  worktree"));
     assert!(!everyday.contains("\n  lane"));
-    assert!(!everyday.contains("help advanced"));
+
+    let all = heddle(&["help", "--all"], Some(temp.path())).unwrap();
+    assert!(all.contains("\n  thread"));
 
     let thread_help = heddle(&["thread", "--help"], Some(temp.path())).unwrap();
     assert!(thread_help.contains("review") || thread_help.contains("Usage:"));

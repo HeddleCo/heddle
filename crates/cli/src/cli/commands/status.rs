@@ -741,6 +741,9 @@ fn render_long_status(output: &StatusOutput, verbose: bool) {
 fn format_compact_status(output: &StatusOutput) -> String {
     let mut lines = Vec::new();
     lines.push(compact_status_header(output));
+    if let Some(notice) = &output.identity_notice {
+        lines.push(format!("Identity: {}", style::warn(notice)));
+    }
     if compact_status_is_dirty(output) {
         let count = output.changed_path_count.max(compact_change_count(output));
         let path_word = if count == 1 { "path" } else { "paths" };
@@ -760,6 +763,14 @@ fn format_compact_status(output: &StatusOutput) -> String {
             "in progress  {} {}",
             operation.kind, operation.state
         ));
+    }
+    if !output.submodules.is_empty() {
+        lines.push(String::new());
+        lines.push("Submodules".to_string());
+        for submodule in &output.submodules {
+            let short_commit = submodule.commit.get(..12).unwrap_or(&submodule.commit);
+            lines.push(format!("  submodule {} @ {short_commit}", submodule.path));
+        }
     }
     if let Some(next) = format_next(&output.recommended_action) {
         if compact_status_is_dirty(output) || output.operation.is_some() {
@@ -2043,7 +2054,6 @@ mod tests {
                 "Work in progress",
                 "Repository:",
                 "Worktree",
-                "Identity:",
                 "Lifecycle:",
                 "why:",
             ] {
@@ -2052,6 +2062,10 @@ mod tests {
                     "compact status must not repeat {leaked:?}: {text}"
                 );
             }
+            assert!(
+                text.contains("Identity:"),
+                "first-capture identity must remain visible in compact status: {text}"
+            );
             let _ = repo;
         });
     }
