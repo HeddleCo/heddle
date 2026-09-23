@@ -15,6 +15,7 @@ zstd = { workspace = true, optional = true }
 
 [dev-dependencies]
 blake3.workspace = true
+proptest.workspace = true
 
 [features]
 bench = ["zstd"]

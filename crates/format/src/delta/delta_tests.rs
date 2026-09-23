@@ -1,5 +1,75 @@
 // SPDX-License-Identifier: Apache-2.0
+use proptest::prelude::*;
+
 use super::{DeltaDecoder, DeltaEncoder, DeltaError, MAX_DELTA_OUTPUT_SIZE};
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 128,
+        failure_persistence: None,
+        .. ProptestConfig::default()
+    })]
+
+    #[test]
+    fn prop_arbitrary_bytes_roundtrip(
+        base in prop::collection::vec(any::<u8>(), 0..4096),
+        target in prop::collection::vec(any::<u8>(), 0..4096),
+    ) {
+        let index = DeltaEncoder::build_index(&base);
+        let delta = DeltaEncoder::encode_with_index(&index, &base, &target);
+        let decoded = DeltaDecoder::decode(&base, &delta, MAX_DELTA_OUTPUT_SIZE);
+        prop_assert!(decoded.is_ok(), "{decoded:?}");
+        let decoded = decoded.expect("checked decode result");
+        prop_assert_eq!(decoded.as_slice(), target.as_slice());
+        prop_assert_eq!(
+            DeltaEncoder::estimate_delta_size_with_index(&index, &base, &target),
+            delta.len()
+        );
+    }
+
+    #[test]
+    fn prop_edited_binary_roundtrip(
+        base in prop::collection::vec(any::<u8>(), 1024..8192),
+        edit_at in any::<usize>(),
+        delete_len in 0usize..128,
+        insert in prop::collection::vec(any::<u8>(), 0..128),
+        replacement in prop::collection::vec(any::<u8>(), 0..128),
+    ) {
+        let mut target = base.clone();
+        let at = edit_at % (target.len() + 1);
+        let end = at.saturating_add(delete_len).min(target.len());
+        target.splice(at..end, insert);
+        let replace_at = target.len() / 2;
+        let replace_end = replace_at.saturating_add(replacement.len()).min(target.len());
+        target.splice(replace_at..replace_end, replacement);
+
+        let delta = DeltaEncoder::encode(&base, &target);
+        let decoded = DeltaDecoder::decode(&base, &delta, MAX_DELTA_OUTPUT_SIZE);
+        prop_assert!(decoded.is_ok(), "{decoded:?}");
+        let decoded = decoded.expect("checked decode result");
+        prop_assert_eq!(decoded.as_slice(), target.as_slice());
+    }
+
+    #[test]
+    fn prop_repeated_chunks_roundtrip(
+        pattern in prop::collection::vec(any::<u8>(), 1..64),
+        repetitions in 16usize..128,
+        insert in prop::collection::vec(any::<u8>(), 0..64),
+        delete_len in 0usize..64,
+    ) {
+        let base = pattern.repeat(repetitions);
+        let mut target = base.clone();
+        let middle = target.len() / 2;
+        target.splice(middle..middle.saturating_add(delete_len).min(target.len()), insert);
+        target.extend_from_slice(&pattern);
+
+        let delta = DeltaEncoder::encode(&base, &target);
+        let decoded = DeltaDecoder::decode(&base, &delta, MAX_DELTA_OUTPUT_SIZE);
+        prop_assert!(decoded.is_ok(), "{decoded:?}");
+        let decoded = decoded.expect("checked decode result");
+        prop_assert_eq!(decoded.as_slice(), target.as_slice());
+    }
+}
 
 #[test]
 fn test_delta_roundtrip() {
@@ -273,6 +343,38 @@ fn test_copy_size_boundaries() {
             "estimate mismatch for copy_len={copy_len}"
         );
     }
+}
+
+#[test]
+fn test_copy_longer_than_size_field_roundtrip() {
+    let base = vec![0xAB; 17 * 1024 * 1024];
+    let delta = DeltaEncoder::encode(&base, &base);
+    let decoded = DeltaDecoder::decode(&base, &delta, MAX_DELTA_OUTPUT_SIZE)
+        .expect("long copy should decode");
+
+    assert_eq!(decoded.len(), base.len(), "long copy was truncated");
+    assert_eq!(decoded, base);
+    assert_eq!(DeltaEncoder::estimate_delta_size(&base, &base), delta.len());
+    assert!(delta.len() < 20, "long copy should use two instructions");
+}
+
+#[test]
+fn test_sparse_index_finds_unaligned_target() {
+    let mut base = vec![0u8; 2 * 1024 * 1024];
+    let mut state = 1817u64;
+    for byte in &mut base {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *byte = state as u8;
+    }
+    let target = &base[12_345..24_345];
+    let delta = DeltaEncoder::encode(&base, target);
+    let decoded = DeltaDecoder::decode(&base, &delta, MAX_DELTA_OUTPUT_SIZE)
+        .expect("unaligned target should decode");
+
+    assert_eq!(decoded, target);
+    assert!(delta.len() < 32, "unaligned target should use a copy");
 }
 
 /// Test that small objects (< 1024 bytes) use the lower match threshold.
