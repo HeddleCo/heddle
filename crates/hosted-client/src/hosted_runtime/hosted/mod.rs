@@ -67,8 +67,8 @@ pub use context::CallContextFactory;
 pub(crate) use credential::CredentialSource;
 pub(crate) use credential::server_keys_match;
 pub use credential::{
-    ResolvedHostedCredential, hosted_account_principal, principal_from_hosted_subject,
-    resolve_active_bearer, resolve_hosted_credential,
+    ResolvedHostedCredential, hosted_account_is_unclaimed, hosted_account_principal,
+    principal_from_hosted_subject, resolve_active_bearer, resolve_hosted_credential,
 };
 use crypto::{Ed25519Signer, Signer as _};
 pub use descriptor_trust::{

@@ -2,7 +2,8 @@
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha2::{
-    self as v2, ProvisionAccountRequest, ProvisionAccountResponse, SignedOwnerRoot,
+    self as v2, ProvisionAccountRequest, ProvisionAccountResponse, ResolveSignupInvitationRequest,
+    SignedOwnerRoot,
 };
 use config::UserConfig;
 use crypto::{Ed25519Signer, Signer as _};
@@ -116,6 +117,28 @@ async fn provision(
         },
     )?;
     let client = session.connect(server).await?;
+    let invitation = client
+        .native()
+        .await?
+        .api
+        .call::<thread_api::rpc::IdentityServiceResolveSignupInvitation>(
+            &ResolveSignupInvitationRequest {
+                redemption_secret: invitation_secret.clone(),
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("resolving signup invitation: {error}"));
+    let invitation = match invitation {
+        Ok(invitation) => invitation,
+        Err(error) => {
+            client.close().await;
+            return Err(error);
+        }
+    };
+    let account_email = (invitation.status
+        == v2::signup_invitation_resolution::Status::Available as i32)
+        .then(|| invitation.bound_email.trim().to_string())
+        .filter(|email| !email.is_empty());
     let response = client
         .native()
         .await?
@@ -146,7 +169,7 @@ async fn provision(
     }) {
         bail!("account provisioning did not apply the requested operation");
     }
-    let output = finish_invite_create(server, minted, response)?;
+    let output = finish_invite_create(server, minted, response, account_email)?;
     if matches!(&output, AuthLoginOutcome::AgentAccountCreated(_))
         && let Some(state) = identity_state::load()?
         && let Some(root) = super::owner_root::load_recorded_root(&state)?
@@ -172,6 +195,7 @@ fn finish_invite_create(
     server: &str,
     mut minted: AgentRoot,
     response: ProvisionAccountResponse,
+    account_email: Option<String>,
 ) -> Result<AuthLoginOutcome> {
     let principal = response
         .principal
@@ -225,6 +249,7 @@ fn finish_invite_create(
                 web_origin,
             )
         });
+    claim_state.record_account_email(account_email);
     let signer = Ed25519Signer::from_pem(&minted.private_key_pem)
         .context("loading the agent proof key for the claimable owner root")?;
     if let Some(ownership) = response.ownership {
@@ -344,7 +369,7 @@ pub(crate) fn finish_invite_create_from_response(
     server: &str,
     response: ProvisionAccountResponse,
 ) -> Result<AgentAccountCreated> {
-    match finish_invite_create(server, mint_agent_credential()?, response)? {
+    match finish_invite_create(server, mint_agent_credential()?, response, None)? {
         AuthLoginOutcome::AgentAccountCreated(created) => Ok(created),
         _ => bail!("fixture expected unclaimed account"),
     }

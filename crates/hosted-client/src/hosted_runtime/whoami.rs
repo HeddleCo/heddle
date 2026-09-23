@@ -1,10 +1,11 @@
 //! `heddle whoami` — capture actor first, hosted auth second.
 //!
 //! The capture actor is who the next capture is attributed to
-//! (`user_config`, `init --principal-*`, environment). Hosted auth is
-//! whether this machine has a server credential. These are different
-//! objects. `heddle auth login` does not set the local actor. `whoami`
-//! only reads; it never attaches a credential.
+//! (`user_config`, `init --principal-*`, environment), with a claimed hosted
+//! account as the final fallback when it carries a real email. Hosted auth is
+//! whether this machine has a server credential. These remain different
+//! objects, and explicit local identity wins. `whoami` only reads; it never
+//! attaches a credential.
 
 use anyhow::{Context, Result};
 use api::heddle::api::v1alpha2::{CredentialKind, RootingTier};
@@ -93,10 +94,18 @@ async fn resolve_whoami(start_path: &std::path::Path, server: &str) -> Result<Wh
     // degrades to a local-only answer rather than erroring — `reachable`
     // records which case this is. ListSpools is additive: an older server
     // still yields identity without failing whoami.
+    let mut account_needs_claim = false;
     match fetch_identity(server).await {
-        Ok((identity, spools)) => {
-            output.token_kind = Some(identity.credential_kind.clone());
-            output.identity = Some(identity);
+        Ok((observed, spools)) => {
+            account_needs_claim = observed.identity.rooting_tier == "agent-rooted"
+                && observed.identity.handle.is_none();
+            output.token_kind = Some(observed.identity.credential_kind.clone());
+            if matches!(output.capture_actor.source, None | Some("hosted_account"))
+                && let Some(actor) = observed.capture_actor
+            {
+                output.capture_actor = actor;
+            }
+            output.identity = Some(observed.identity);
             output.spools = spools;
             output.reachable = true;
         }
@@ -110,6 +119,8 @@ async fn resolve_whoami(start_path: &std::path::Path, server: &str) -> Result<Wh
         Some(format!(
             "server did not answer ObserveIdentity; check connectivity to {server} or re-run `heddle auth login --server {server}`"
         ))
+    } else if account_needs_claim {
+        Some("heddle claim".to_string())
     } else {
         None
     };
@@ -216,7 +227,12 @@ fn resolve_local_whoami(
     })
 }
 
-async fn fetch_identity(server: &str) -> Result<(WhoamiIdentity, Vec<String>)> {
+struct ObservedHostedIdentity {
+    identity: WhoamiIdentity,
+    capture_actor: Option<CaptureActor>,
+}
+
+async fn fetch_identity(server: &str) -> Result<(ObservedHostedIdentity, Vec<String>)> {
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build(
         &user_config,
@@ -272,7 +288,7 @@ fn listed_spool_path(path_segments: &[String]) -> Option<String> {
 fn project_current_identity(
     principal: api::heddle::api::v1alpha2::PrincipalRecord,
     credential: api::heddle::api::v1alpha2::CurrentCredentialRecord,
-) -> Result<WhoamiIdentity> {
+) -> Result<ObservedHostedIdentity> {
     let kind = match CredentialKind::try_from(credential.kind).ok() {
         Some(CredentialKind::Device) => "device",
         Some(CredentialKind::Agent) => "agent",
@@ -300,24 +316,42 @@ fn project_current_identity(
         .collect::<Vec<_>>();
     actions.sort();
     actions.dedup();
-    Ok(WhoamiIdentity {
-        principal_id: principal.id,
-        account_id: principal.account_id,
-        handle: (!principal.handle.is_empty()).then_some(principal.handle),
-        acting_agent_id: (!principal.acting_agent_id.is_empty())
-            .then_some(principal.acting_agent_id),
-        rooting_tier: rooting_tier.into(),
-        credential_id: credential.r#ref.map(|value| value.id),
-        credential_subject: credential.subject,
-        credential_kind: kind.into(),
-        session_id: credential
-            .session
-            .and_then(|session| session.r#ref.map(|value| value.id)),
-        authentication_methods: credential.authentication_methods,
-        agent_provider: (!credential.agent_provider.is_empty())
-            .then_some(credential.agent_provider),
-        agent_model: (!credential.agent_model.is_empty()).then_some(credential.agent_model),
-        available_actions: actions,
+    let capture_actor = if rooting_tier != "agent-rooted" && !principal.handle.trim().is_empty() {
+        super::hosted::principal_from_hosted_subject(&credential.subject).map(|(_, email)| {
+            CaptureActor {
+                name: if principal.display_name.trim().is_empty() {
+                    principal.handle.clone()
+                } else {
+                    principal.display_name.clone()
+                },
+                email,
+                source: Some("hosted_account"),
+            }
+        })
+    } else {
+        None
+    };
+    Ok(ObservedHostedIdentity {
+        identity: WhoamiIdentity {
+            principal_id: principal.id,
+            account_id: principal.account_id,
+            handle: (!principal.handle.is_empty()).then_some(principal.handle),
+            acting_agent_id: (!principal.acting_agent_id.is_empty())
+                .then_some(principal.acting_agent_id),
+            rooting_tier: rooting_tier.into(),
+            credential_id: credential.r#ref.map(|value| value.id),
+            credential_subject: credential.subject,
+            credential_kind: kind.into(),
+            session_id: credential
+                .session
+                .and_then(|session| session.r#ref.map(|value| value.id)),
+            authentication_methods: credential.authentication_methods,
+            agent_provider: (!credential.agent_provider.is_empty())
+                .then_some(credential.agent_provider),
+            agent_model: (!credential.agent_model.is_empty()).then_some(credential.agent_model),
+            available_actions: actions,
+        },
+        capture_actor,
     })
 }
 
@@ -448,19 +482,68 @@ mod tests {
         };
         let viewed = project_current_identity(principal.clone(), credential.clone())
             .expect("native projection");
-        assert_eq!(viewed.account_id, "account-1");
-        assert_eq!(viewed.credential_subject, "agent:reviewer");
-        assert_eq!(viewed.credential_kind, "agent");
+        assert_eq!(viewed.identity.account_id, "account-1");
+        assert_eq!(viewed.identity.credential_subject, "agent:reviewer");
+        assert_eq!(viewed.identity.credential_kind, "agent");
         assert_eq!(
-            viewed.available_actions,
+            viewed.identity.available_actions,
             ["RecordReview", "RevokeSession [target-scoped]"]
         );
+        assert_eq!(viewed.capture_actor, None);
         let mut invalid = credential;
         invalid.kind = CredentialKind::Unspecified as i32;
         assert!(
             project_current_identity(principal, invalid).is_err(),
             "unknown credential classes cannot masquerade as a root"
         );
+    }
+
+    #[test]
+    fn claimed_account_projects_truthful_capture_actor() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        let principal = PrincipalRecord {
+            id: "principal-1".into(),
+            account_id: "account-1".into(),
+            handle: "luke".into(),
+            display_name: "Luke".into(),
+            rooting_tier: RootingTier::SelfRooted as i32,
+            ..Default::default()
+        };
+        let credential = CurrentCredentialRecord {
+            kind: CredentialKind::Device as i32,
+            subject: "luke@example.com".into(),
+            ..Default::default()
+        };
+
+        let viewed = project_current_identity(principal, credential).expect("native projection");
+        assert_eq!(
+            viewed.capture_actor,
+            Some(CaptureActor {
+                name: "Luke".into(),
+                email: "luke@example.com".into(),
+                source: Some("hosted_account"),
+            })
+        );
+    }
+
+    #[test]
+    fn unclaimed_account_does_not_fabricate_capture_email() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        let principal = PrincipalRecord {
+            id: "principal-1".into(),
+            account_id: "account-1".into(),
+            display_name: "calm-heron".into(),
+            rooting_tier: RootingTier::AgentRooted as i32,
+            ..Default::default()
+        };
+        let credential = CurrentCredentialRecord {
+            kind: CredentialKind::Agent as i32,
+            subject: "agent-key:abc".into(),
+            ..Default::default()
+        };
+
+        let viewed = project_current_identity(principal, credential).expect("native projection");
+        assert_eq!(viewed.capture_actor, None);
     }
 
     fn luke_actor() -> CaptureActor {

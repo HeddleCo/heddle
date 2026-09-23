@@ -143,9 +143,10 @@ pub fn resolve_active_bearer() -> Result<Option<AuthToken>> {
 
 /// Derive a capture principal from a locally stored hosted account.
 ///
-/// Name is the hosted handle / account subject. Email is the subject when it
-/// looks like an address; otherwise a noreply address derived from that same
-/// handle so Git overlay commits still have an accountable identity.
+/// The credential subject is usable only when it is itself an email address.
+/// A non-email subject (notably an unclaimed `agent-key:*` account) carries no
+/// email we can truthfully put on a capture, so it deliberately yields no
+/// principal instead of inventing one.
 pub fn hosted_account_principal() -> Option<(String, String)> {
     let server = credentials::default_server().ok().flatten().or_else(|| {
         credentials::load_credentials()
@@ -157,22 +158,52 @@ pub fn hosted_account_principal() -> Option<(String, String)> {
         .subject
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    Some(principal_from_hosted_subject(subject))
+        .filter(|value| !value.is_empty());
+    if let Some(principal) = subject.and_then(principal_from_hosted_subject) {
+        return Some(principal);
+    }
+    let server = server.as_deref()?;
+    let state = crate::hosted_runtime::identity_state::load()
+        .ok()
+        .flatten()?;
+    if !server_keys_match(&state.server, server) {
+        return None;
+    }
+    let (name, email) = state.claimed_principal()?;
+    Some((name.to_string(), email.to_string()))
 }
 
-pub fn principal_from_hosted_subject(subject: &str) -> (String, String) {
+/// Whether the locally authenticated account is still awaiting its human
+/// claim ceremony. This is advisory only; the server remains authoritative.
+pub fn hosted_account_is_unclaimed() -> bool {
+    let Some(server) = credentials::default_server().ok().flatten() else {
+        return false;
+    };
+    let subject_is_agent = resolve_hosted_credential(Some(&server))
+        .ok()
+        .and_then(|resolved| resolved.subject)
+        .is_some_and(|subject| subject.starts_with("agent-key:"));
+    if !subject_is_agent {
+        return false;
+    }
+    crate::hosted_runtime::identity_state::load()
+        .ok()
+        .flatten()
+        .filter(|state| server_keys_match(&state.server, &server))
+        .is_none_or(|state| !state.consent_issued())
+}
+
+pub fn principal_from_hosted_subject(subject: &str) -> Option<(String, String)> {
     let subject = subject.trim();
     if let Some((local, domain)) = subject.split_once('@')
         && !local.is_empty()
         && !domain.is_empty()
+        && !domain.contains('@')
+        && !subject.chars().any(char::is_whitespace)
     {
-        return (local.to_string(), subject.to_string());
+        return Some((local.to_string(), subject.to_string()));
     }
-    (
-        subject.to_string(),
-        format!("{subject}@users.noreply.heddle.sh"),
-    )
+    None
 }
 
 pub(crate) fn server_keys_match(left: &str, right: &str) -> bool {
@@ -340,18 +371,17 @@ mod tests {
     }
 
     #[test]
-    fn hosted_subject_derives_handle_and_optional_email() {
+    fn hosted_subject_requires_an_actual_email() {
         let _process_env_guard = crate::test_process_env::exclusive_blocking();
         assert_eq!(
             super::principal_from_hosted_subject("luke@example.com"),
-            ("luke".to_string(), "luke@example.com".to_string())
+            Some(("luke".to_string(), "luke@example.com".to_string()))
         );
+        assert_eq!(super::principal_from_hosted_subject("luke"), None);
+        assert_eq!(super::principal_from_hosted_subject("agent-key:abc"), None);
         assert_eq!(
-            super::principal_from_hosted_subject("luke"),
-            (
-                "luke".to_string(),
-                "luke@users.noreply.heddle.sh".to_string()
-            )
+            super::principal_from_hosted_subject("a@b@example.com"),
+            None
         );
     }
 
@@ -375,6 +405,45 @@ mod tests {
             assert_eq!(
                 super::hosted_account_principal(),
                 Some(("luke".to_string(), "luke@example.com".to_string()))
+            );
+        });
+    }
+
+    #[test]
+    fn hosted_account_principal_uses_claimed_invite_identity() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        with_isolated_env(|_| {
+            config::credentials::store_server_credential(
+                "api.heddle.test",
+                config::credentials::ServerCredential {
+                    mint_root_attachment: None,
+                    token: "token".to_string(),
+                    subject: "agent-key:abc".to_string(),
+                    device_id: None,
+                    credential_id: None,
+                    private_key_pem: None,
+                    expires_at: None,
+                },
+            )
+            .expect("store hosted login");
+            let mut state = crate::hosted_runtime::identity_state::ClaimState::new(
+                "api.heddle.test".into(),
+                uuid::Uuid::parse_str("7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28")
+                    .expect("account UUID"),
+                "agent-key:abc".into(),
+                "quiet-otter".into(),
+                "11".repeat(32),
+                None,
+            );
+            state.record_account_email(Some("human@example.com".into()));
+            assert!(state.reissue(b"claim-secret", 2_000));
+            assert!(state.prepare_browser("human-handle", &[1; 32]));
+            assert!(state.finish_browser_claim(&[1; 32]));
+            crate::hosted_runtime::identity_state::store(&state).expect("store claim state");
+
+            assert_eq!(
+                super::hosted_account_principal(),
+                Some(("human-handle".into(), "human@example.com".into()))
             );
         });
     }

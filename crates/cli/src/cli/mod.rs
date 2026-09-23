@@ -52,6 +52,12 @@ pub(crate) fn execution_context_from_cli_parts(
         .worktree_status_options(repo.as_ref().map(Repository::config))
         .fsmonitor
         .mode;
+    #[cfg(feature = "client")]
+    let hosted_principal = hosted_client::hosted_runtime::hosted::hosted_account_principal();
+    #[cfg(feature = "client")]
+    let hosted_account_unclaimed =
+        hosted_client::hosted_runtime::hosted::hosted_account_is_unclaimed();
+
     let mut builder = verbs::ExecutionContext::builder()
         .start_path(start.to_path_buf())
         .principal_fallback(
@@ -62,11 +68,21 @@ pub(crate) fn execution_context_from_cli_parts(
         .hosted_principal({
             #[cfg(feature = "client")]
             {
-                hosted_client::hosted_runtime::hosted::hosted_account_principal()
+                hosted_principal
             }
             #[cfg(not(feature = "client"))]
             {
                 None
+            }
+        })
+        .hosted_account_unclaimed({
+            #[cfg(feature = "client")]
+            {
+                hosted_account_unclaimed
+            }
+            #[cfg(not(feature = "client"))]
+            {
+                false
             }
         })
         .fsmonitor_mode(fsmonitor_mode);

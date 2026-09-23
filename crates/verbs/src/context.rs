@@ -15,6 +15,7 @@ pub struct ExecutionContext {
     start_path: Option<PathBuf>,
     principal_fallback: Option<(String, String)>,
     hosted_principal: Option<(String, String)>,
+    hosted_account_unclaimed: bool,
     fsmonitor_mode: FsMonitorMode,
 }
 
@@ -52,6 +53,12 @@ impl ExecutionContext {
             .map(|(name, email)| (name.as_str(), email.as_str()))
     }
 
+    /// Whether local hosted state identifies an account that still needs its
+    /// human claim ceremony before it can supply accountable attribution.
+    pub fn hosted_account_unclaimed(&self) -> bool {
+        self.hosted_account_unclaimed
+    }
+
     /// Resolved fsmonitor mode for worktree-status hot paths.
     pub fn fsmonitor_mode(&self) -> FsMonitorMode {
         self.fsmonitor_mode
@@ -73,6 +80,7 @@ pub struct ExecutionContextBuilder {
     start_path: Option<PathBuf>,
     principal_fallback: Option<(String, String)>,
     hosted_principal: Option<(String, String)>,
+    hosted_account_unclaimed: bool,
     fsmonitor_mode: FsMonitorMode,
 }
 
@@ -97,6 +105,11 @@ impl ExecutionContextBuilder {
         self
     }
 
+    pub fn hosted_account_unclaimed(mut self, unclaimed: bool) -> Self {
+        self.hosted_account_unclaimed = unclaimed;
+        self
+    }
+
     pub fn fsmonitor_mode(mut self, mode: FsMonitorMode) -> Self {
         self.fsmonitor_mode = mode;
         self
@@ -108,6 +121,7 @@ impl ExecutionContextBuilder {
             start_path: self.start_path,
             principal_fallback: self.principal_fallback,
             hosted_principal: self.hosted_principal,
+            hosted_account_unclaimed: self.hosted_account_unclaimed,
             fsmonitor_mode: self.fsmonitor_mode,
         }
     }
@@ -127,6 +141,7 @@ mod tests {
         ));
         assert_eq!(ctx.fsmonitor_mode(), FsMonitorMode::Off);
         assert!(ctx.principal_fallback().is_none());
+        assert!(!ctx.hosted_account_unclaimed());
     }
 
     #[test]
@@ -134,6 +149,7 @@ mod tests {
         let ctx = ExecutionContext::builder()
             .start_path("/tmp/heddle-verbs-context-test")
             .principal_fallback(Some(("Luke".into(), "luke@example.com".into())))
+            .hosted_account_unclaimed(true)
             .fsmonitor_mode(FsMonitorMode::Watchman)
             .build();
 
@@ -142,6 +158,7 @@ mod tests {
             Some(std::path::Path::new("/tmp/heddle-verbs-context-test"))
         );
         assert_eq!(ctx.principal_fallback(), Some(("Luke", "luke@example.com")));
+        assert!(ctx.hosted_account_unclaimed());
         assert_eq!(
             ctx.worktree_status_options().fsmonitor.mode,
             FsMonitorMode::Watchman

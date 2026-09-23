@@ -364,4 +364,123 @@ fn capture_derives_principal_from_hosted_account_when_none_is_local() {
     assert_eq!(json["principal"]["name"], "luke");
     assert_eq!(json["principal"]["email"], "luke@example.com");
     assert_eq!(json["principal_source"], "hosted_account");
+
+    let configure = isolated_command(
+        &repo,
+        &shared_home,
+        &heddle_home,
+        &[
+            "init",
+            "--principal-name",
+            "Local Author",
+            "--principal-email",
+            "local@example.com",
+        ],
+    )
+    .output()
+    .expect("configure local principal");
+    assert_success(&configure, "configure local principal");
+    fs::write(repo.join("local.txt"), "explicit identity\n").expect("second worktree change");
+    let local_capture = isolated_command(
+        &repo,
+        &shared_home,
+        &heddle_home,
+        &["capture", "-m", "local wins", "--output", "json"],
+    )
+    .output()
+    .expect("capture with local principal");
+    assert_success(&local_capture, "capture with local principal");
+    let local_json: serde_json::Value =
+        serde_json::from_slice(&local_capture.stdout).expect("capture JSON");
+    assert_eq!(local_json["principal"]["name"], "Local Author");
+    assert_eq!(local_json["principal"]["email"], "local@example.com");
+    assert_eq!(local_json["principal_source"], "user_config");
+}
+
+#[test]
+fn unclaimed_hosted_account_guides_claim_without_fabricating_email() {
+    let temp = TempDir::new().expect("tempdir");
+    let shared_home = temp.path().join("shared-home");
+    let heddle_home = temp.path().join("heddle-home");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&shared_home).expect("shared home");
+    fs::create_dir_all(&heddle_home).expect("heddle home");
+    fs::create_dir_all(&repo).expect("repo");
+
+    let init = isolated_command(&repo, &shared_home, &heddle_home, &["init"])
+        .output()
+        .expect("run init without principal");
+    assert_success(&init, "init without local principal");
+
+    let credentials = "[defaults]\nserver = \"api.heddle.test\"\n\n[servers.\"api.heddle.test\"]\ntoken = \"token\"\nsubject = \"agent-key:abc\"\n";
+    fs::write(heddle_home.join("credentials.toml"), credentials).expect("store hosted login");
+
+    fs::write(repo.join("notes.txt"), "after agent login\n").expect("worktree change");
+    let capture = isolated_command(
+        &repo,
+        &shared_home,
+        &heddle_home,
+        &["capture", "-m", "unclaimed capture"],
+    )
+    .output()
+    .expect("run capture");
+    assert!(
+        !capture.status.success(),
+        "unclaimed capture must be guided"
+    );
+    let text = output_text(&capture);
+    assert!(
+        text.contains("heddle claim"),
+        "missing claim guidance: {text}"
+    );
+    assert!(
+        !text.contains("users.noreply.heddle.sh"),
+        "capture must not fabricate an email: {text}"
+    );
+}
+
+#[test]
+fn claimed_agent_account_supplies_its_verified_invite_identity() {
+    let temp = TempDir::new().expect("tempdir");
+    let shared_home = temp.path().join("shared-home");
+    let heddle_home = temp.path().join("heddle-home");
+    let repo = temp.path().join("repo");
+    fs::create_dir_all(&shared_home).expect("shared home");
+    fs::create_dir_all(&heddle_home).expect("heddle home");
+    fs::create_dir_all(&repo).expect("repo");
+
+    let init = isolated_command(&repo, &shared_home, &heddle_home, &["init"])
+        .output()
+        .expect("run init without principal");
+    assert_success(&init, "init without local principal");
+
+    let credentials = "[defaults]\nserver = \"api.heddle.test\"\n\n[servers.\"api.heddle.test\"]\ntoken = \"token\"\nsubject = \"agent-key:abc\"\n";
+    fs::write(heddle_home.join("credentials.toml"), credentials).expect("store hosted login");
+    let claim_state = format!(
+        "format = \"heddle-agent-claim\"\nversion = 3\nserver = \"api.heddle.test\"\nowner_id = \"7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28\"\nsubject = \"agent-key:abc\"\npet_name = \"quiet-otter\"\naccount_email = \"human@example.com\"\nnode_id = \"{}\"\ncreated_at = \"2026-09-22T00:00:00Z\"\nsecret_hash = \"00\"\nexpires_at_millis = 1\nstatus = \"consent_issued\"\nprepared_handle = \"human-handle\"\nprepared_nonce_hash = \"00\"\ncommand_receipts = []\n",
+        "11".repeat(32)
+    );
+    let claim_path = heddle_home.join("agent-claim.toml");
+    fs::write(&claim_path, claim_state).expect("store claimed account identity");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&claim_path, fs::Permissions::from_mode(0o600))
+            .expect("secure claim state permissions");
+    }
+
+    fs::write(repo.join("notes.txt"), "after human claim\n").expect("worktree change");
+    let capture = isolated_command(
+        &repo,
+        &shared_home,
+        &heddle_home,
+        &["capture", "-m", "claimed capture", "--output", "json"],
+    )
+    .output()
+    .expect("run capture");
+    assert_success(&capture, "capture after human claim");
+    let json: serde_json::Value = serde_json::from_slice(&capture.stdout).expect("capture JSON");
+    assert_eq!(json["principal"]["name"], "human-handle");
+    assert_eq!(json["principal"]["email"], "human@example.com");
+    assert_eq!(json["principal_source"], "hosted_account");
 }
