@@ -1,0 +1,176 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/HeddleCo/heddle/scripts/apex/p0-report.schema.json",
+  "title": "Apex Package 0 fork-only Biscuit measurement report",
+  "description": "Raw output of scripts/apex/p0-measure.sh (heddle#1808). Every result item is either measured (non-null value) or unsupported (reason + command + captured error).",
+  "type": "object",
+  "required": ["schema_version", "issue", "generated_at", "meta", "results"],
+  "properties": {
+    "schema_version": {"const": "apex-p0-report/1"},
+    "issue": {"const": "HeddleCo/heddle#1808"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "meta": {
+      "type": "object",
+      "required": ["hardware", "os", "toolchain", "sources", "pin", "method", "configs"],
+      "properties": {
+        "hardware": {
+          "type": "object",
+          "required": ["cpu_model", "logical_cpus", "nproc", "mem_total_bytes"],
+          "properties": {
+            "cpu_model": {"type": "string", "minLength": 1},
+            "logical_cpus": {"type": "integer", "minimum": 1},
+            "nproc": {"type": "integer", "minimum": 1},
+            "mem_total_bytes": {"type": "integer", "minimum": 1}
+          }
+        },
+        "os": {
+          "type": "object",
+          "required": ["pretty_name", "kernel", "arch"],
+          "properties": {
+            "pretty_name": {"type": "string", "minLength": 1},
+            "kernel": {"type": "string", "minLength": 1},
+            "arch": {"type": "string", "minLength": 1}
+          }
+        },
+        "toolchain": {
+          "type": "object",
+          "required": ["rustc", "rustc_verbose", "cargo", "node", "bun", "python"],
+          "properties": {
+            "rustc": {"type": "string", "pattern": "^rustc "},
+            "rustc_verbose": {"type": "string", "pattern": "commit-hash: [0-9a-f]{40}"},
+            "cargo": {"type": "string", "pattern": "^cargo "},
+            "node": {"type": "string", "pattern": "^v[0-9]"},
+            "bun": {"type": "string", "pattern": "^[0-9]"},
+            "python": {"type": "string", "minLength": 1},
+            "wasm_bindgen": {"type": ["string", "null"]}
+          }
+        },
+        "sources": {
+          "type": "object",
+          "required": ["heddle", "weft", "tapestry"],
+          "properties": {
+            "heddle": {"$ref": "#/$defs/source"},
+            "weft": {"$ref": "#/$defs/source"},
+            "tapestry": {"$ref": "#/$defs/source"}
+          }
+        },
+        "pin": {
+          "type": "object",
+          "required": ["url", "rev", "upstream_pr", "baseline_version", "measurement_only"],
+          "properties": {
+            "url": {"const": "https://github.com/eclipse-biscuit/biscuit-rust"},
+            "rev": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+            "upstream_pr": {"type": "string"},
+            "baseline_version": {"type": "string"},
+            "measurement_only": {"const": true}
+          }
+        },
+        "method": {
+          "type": "object",
+          "required": ["runs", "warmup_runs", "interleaved_configs"],
+          "properties": {
+            "runs": {"type": "integer", "minimum": 10},
+            "warmup_runs": {"type": "integer", "minimum": 1},
+            "interleaved_configs": {"type": "boolean"}
+          }
+        },
+        "configs": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": ["description", "edits"],
+            "properties": {
+              "description": {"type": "string"},
+              "edits": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
+    },
+    "results": {
+      "type": "object",
+      "required": ["dependency_graph", "builds", "binary_sizes", "wasm", "bundle", "latency", "features", "negative_tests"],
+      "properties": {
+        "dependency_graph": {"$ref": "#/$defs/items"},
+        "builds": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/timed_item"}},
+        "binary_sizes": {"$ref": "#/$defs/items"},
+        "wasm": {"$ref": "#/$defs/items"},
+        "bundle": {"$ref": "#/$defs/items"},
+        "latency": {"$ref": "#/$defs/items"},
+        "features": {"$ref": "#/$defs/items"},
+        "negative_tests": {"$ref": "#/$defs/items"}
+      }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": ["commit", "dirty"],
+      "properties": {
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "dirty": {"type": "boolean"},
+        "branch": {"type": "string"}
+      }
+    },
+    "items": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/item"}},
+    "item": {
+      "type": "object",
+      "required": ["id", "repo", "config", "status", "command"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "repo": {"type": "string"},
+        "config": {"type": "string"},
+        "status": {"enum": ["measured", "unsupported"]},
+        "command": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "measured"}}},
+          "then": {"required": ["value"], "properties": {"value": {"type": ["object", "array"]}}}
+        },
+        {
+          "if": {"properties": {"status": {"const": "unsupported"}}},
+          "then": {
+            "required": ["reason", "error"],
+            "properties": {"reason": {"type": "string", "minLength": 1}, "error": {"type": "string"}}
+          }
+        }
+      ]
+    },
+    "stats": {
+      "type": "object",
+      "required": ["n", "min", "p50", "p95", "max", "mean", "stdev", "cv"],
+      "properties": {"n": {"type": "integer", "minimum": 10}}
+    },
+    "timed_item": {
+      "allOf": [
+        {"$ref": "#/$defs/item"},
+        {
+          "if": {"properties": {"status": {"const": "measured"}}},
+          "then": {
+            "properties": {
+              "value": {
+                "type": "object",
+                "required": ["unit", "warmup", "samples", "wall", "cpu"],
+                "properties": {
+                  "samples": {
+                    "type": "array",
+                    "minItems": 10,
+                    "items": {
+                      "type": "object",
+                      "required": ["wall_s", "cpu_s", "load1_before", "rc"],
+                      "properties": {"rc": {"const": 0}}
+                    }
+                  },
+                  "wall": {"$ref": "#/$defs/stats"},
+                  "cpu": {"$ref": "#/$defs/stats"}
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
