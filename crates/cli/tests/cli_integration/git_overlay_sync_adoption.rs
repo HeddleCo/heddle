@@ -380,6 +380,30 @@ fn adopt_all_uses_ingest_mapping_without_internal_mirror() {
     );
 }
 
+/// heddle#1791: cloning before adoption adds a remote-tracking ref, but the
+/// attached `main` Thread must still receive the native identity hosted push
+/// requires. The 0.23.0 path imported refs without creating that identity.
+#[test]
+fn cloned_git_repo_adoption_creates_main_native_identity_for_hosted_push() {
+    let temp = TempDir::new().unwrap();
+    let seed = temp.path().join("seed");
+    let work = temp.path().join("work");
+    std::fs::create_dir(&seed).unwrap();
+    git(&seed, &["init", "-b", "main"]);
+    configure_git_identity(&seed);
+    commit_file(&seed, "story.txt", "one\n", "seed");
+    git(
+        temp.path(),
+        &["clone", seed.to_str().unwrap(), work.to_str().unwrap()],
+    );
+
+    heddle(&["import", "local"], Some(&work)).expect("adopt cloned Git repository");
+    let adopted = repo::Repository::open(&work).expect("open adopted repository");
+    adopted
+        .native_thread("main")
+        .expect("main native identity required by hosted push");
+}
+
 #[test]
 fn adopt_roots_native_threads_at_the_hosted_seed_and_admits_git_history_as_captures() {
     use objects::object::thread_replication::{Admission, ThreadFacet, ThreadOperationBody};

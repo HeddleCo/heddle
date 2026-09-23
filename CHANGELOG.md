@@ -87,6 +87,13 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 
 ### Fixed
 
+- **Imported Git repositories can push to hosted storage.** `heddle import local`
+  roots imported history at the canonical hosted seed, creates the
+  native Thread identity required by hosted push, and admits the imported tip
+  before publication. A clone → import → push → clone round-trip now preserves
+  the imported history instead of failing with `Thread "main" has no native
+  identity` (heddle#1791).
+
 - **Hosted clone drops the `heddle-pull-refs-v1` side channel.** Bootstrap
   refs are heddle-api `RefEntry` from `PullReady.refs` (ListRefs when that
   field is empty). The old hex-msgpack fold fails closed. Workspace pins
