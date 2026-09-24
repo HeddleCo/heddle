@@ -23,6 +23,14 @@ const OWNER_GENESIS_PIN_FILE: &str = "owner-authorization.bin";
 const OWNER_AUTHORIZATION_PROTOCOL_VERSION: u32 = 2;
 const MAX_CAPABILITY_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 
+#[derive(Clone, PartialEq, Message)]
+struct RawPullReadyGenesis {
+    #[prost(uint32, tag = "9")]
+    protocol_version: u32,
+    #[prost(bytes = "vec", repeated, tag = "10")]
+    owner_genesis: Vec<Vec<u8>>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct PinnedOwnerGenesis {
     protocol_version: u32,
@@ -34,6 +42,24 @@ struct PinnedOwnerGenesis {
 }
 
 impl Repository {
+    /// Retain the raw owner genesis carried by PullReady until the oneof scan
+    /// and canonical wire check finish. Prost's typed decode loses both arms.
+    pub fn verify_and_pin_pull_ready_owner_genesis(
+        &self,
+        payload: &[u8],
+        canonical_spool_path_segments: &[String],
+    ) -> Result<()> {
+        let raw = RawPullReadyGenesis::decode(payload).context("decode raw PullReady genesis")?;
+        let [genesis_bytes] = raw.owner_genesis.as_slice() else {
+            anyhow::bail!("PullReady requires exactly one raw owner genesis");
+        };
+        self.verify_and_pin_owner_genesis(
+            raw.protocol_version,
+            Some(genesis_bytes),
+            canonical_spool_path_segments,
+        )
+    }
+
     /// Pin an executor only after selecting and authenticating the remote. The
     /// immutable Spool identity comes from the existing verified local owner
     /// observation, never from an incoming integration attestation.
@@ -112,23 +138,24 @@ impl Repository {
     pub fn verify_and_pin_owner_genesis(
         &self,
         protocol_version: u32,
-        signed: Option<&SignedSpoolOwnerGenesis>,
+        signed: Option<&[u8]>,
         canonical_spool_path_segments: &[String],
     ) -> Result<()> {
         if protocol_version != OWNER_AUTHORIZATION_PROTOCOL_VERSION {
             anyhow::bail!("unsupported owner authorization protocol version {protocol_version}");
         }
-        let signed = signed.ok_or_else(|| {
+        let signed_bytes = signed.ok_or_else(|| {
             HeddleError::InvalidObject("PullReady owner genesis is absent".to_owned())
         })?;
-        let verified = verify_spool_owner_genesis(signed)
+        let signed = decode_canonical_genesis(signed_bytes)?;
+        let verified = verify_spool_owner_genesis(&signed)
             .context("verify PullReady self-signed owner genesis")?;
         let candidate = PinnedOwnerGenesis {
             protocol_version,
             spool_uuid: verified.spool_uuid(),
             owner_public_key: verified.owner_public_key().public_key.clone(),
             canonical_spool_path_segments: canonical_spool_path_segments.to_vec(),
-            signed_genesis: signed.encode_to_vec(),
+            signed_genesis: signed_bytes.to_vec(),
             owner_observation: None,
         };
 

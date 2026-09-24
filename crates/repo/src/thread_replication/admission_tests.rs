@@ -116,7 +116,7 @@ fn retained_receipt_is_atomic_with_pending_bytes_and_survives_restart_without_or
     repository
         .verify_and_pin_owner_genesis(
             2,
-            Some(&owner_genesis),
+            Some(&owner_genesis.encode_to_vec()),
             &["selected".into(), "shared".into()],
         )
         .expect("independent selected owner enrollment");

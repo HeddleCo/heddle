@@ -24,7 +24,7 @@ include = [
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.24.3" }
+heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.25.0" }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 biscuit-auth = { version = "6.0", default-features = false, features = ["datalog-macro"] }

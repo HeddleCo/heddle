@@ -831,7 +831,7 @@ fn hosted_integration_requires_independent_persistent_executor_trust_and_never_w
     );
     repo.verify_and_pin_owner_genesis(
         2,
-        Some(&owner_genesis),
+        Some(&owner_genesis.encode_to_vec()),
         &["selected".into(), "spool".into()],
     )
     .expect("selected remote owner genesis");

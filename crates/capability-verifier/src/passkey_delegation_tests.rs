@@ -349,9 +349,7 @@ fn export_vector(name: &str, value: &SignedMintRootAttachment) {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
-fn owner_authorized_es256_passkey_accepts_der_assertion() {
+fn es256_fixture() -> (SignedMintRootAttachment, VerifiedOwnerState) {
     let (mut value, state) = fixture();
     let passkey = p256::ecdsa::SigningKey::from_bytes((&[82_u8; 32]).into()).expect("P256 key");
     let proof = value.passkey_delegation.as_mut().expect("proof");
@@ -371,8 +369,47 @@ fn owner_authorized_es256_passkey_accepts_der_assertion() {
     signed.extend_from_slice(&Sha256::digest(&proof.client_data_json));
     let signature: p256::ecdsa::Signature = passkey.sign(&signed);
     proof.signature = signature.to_der().as_bytes().to_vec();
+    (value, state)
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn owner_authorized_es256_passkey_accepts_der_assertion() {
+    let (value, state) = es256_fixture();
     verify(&value, &state).expect("P256 certificate and DER signature");
     export_vector("es256", &value);
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn es256_passkey_rejects_malleable_high_s_assertion() {
+    let (mut value, state) = es256_fixture();
+    let proof = value.passkey_delegation.as_mut().expect("assertion");
+    let signature = p256::ecdsa::Signature::from_der(&proof.signature)
+        .expect("valid DER assertion")
+        .normalize_s();
+    let order: [u8; 32] =
+        hex::decode("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551")
+            .expect("P256 order")
+            .try_into()
+            .expect("P256 order length");
+    let mut high_s = order;
+    let low_s = signature.s().to_bytes();
+    let mut borrow = 0_i16;
+    for i in (0..32).rev() {
+        let difference = i16::from(high_s[i]) - i16::from(low_s[i]) - borrow;
+        high_s[i] = difference.rem_euclid(256) as u8;
+        borrow = i16::from(difference < 0);
+    }
+    assert_eq!(borrow, 0);
+    let high = p256::ecdsa::Signature::from_scalars(signature.r().to_bytes(), high_s)
+        .expect("malleable signature");
+    assert_ne!(high, high.normalize_s());
+    proof.signature = high.to_der().as_bytes().to_vec();
+    assert!(
+        verify(&value, &state).is_err(),
+        "high-S assertion must be rejected"
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]

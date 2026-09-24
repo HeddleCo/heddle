@@ -543,7 +543,11 @@ fn receipt_backfill(
             .is_none()
     );
     repository
-        .verify_and_pin_owner_genesis(2, Some(&genesis), &["selected".into(), "shared".into()])
+        .verify_and_pin_owner_genesis(
+            2,
+            Some(&genesis.encode_to_vec()),
+            &["selected".into(), "shared".into()],
+        )
         .expect("independent Spool trust");
     repository
         .pin_thread_hosted_executor(replica, record.executor)

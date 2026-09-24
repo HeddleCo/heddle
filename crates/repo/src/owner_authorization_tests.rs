@@ -32,8 +32,12 @@ fn pinned_repository() -> (TempDir, Repository, ConformanceFixture) {
     let genesis: SignedSpoolOwnerGenesis = decode(&valid.owner_genesis_hex);
     let temp = TempDir::new().expect("temp repo");
     let repo = Repository::init_default(temp.path()).expect("init repo");
-    repo.verify_and_pin_owner_genesis(2, Some(&genesis), &valid.spool_path_segments)
-        .expect("pin fixture genesis");
+    repo.verify_and_pin_owner_genesis(
+        2,
+        Some(&genesis.encode_to_vec()),
+        &valid.spool_path_segments,
+    )
+    .expect("pin fixture genesis");
     // Fixture-owned authoritative snapshot is installed before any submitted
     // sidecar is evaluated. Individual matrix cases cannot replace this pin.
     let authorization: SidecarAuthorization = decode(&valid.authorization_hex);
@@ -89,6 +93,52 @@ fn pinned_repository() -> (TempDir, Repository, ConformanceFixture) {
 fn generated_genesis(spool_uuid: [u8; 16]) -> SignedSpoolOwnerGenesis {
     let signer = crypto::Ed25519Signer::generate().expect("owner keypair");
     crate::sign_spool_owner_genesis(&signer, spool_uuid).expect("sign owner genesis")
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct RawPullReadyGenesis {
+    #[prost(uint32, tag = "9")]
+    protocol_version: u32,
+    #[prost(bytes = "vec", repeated, tag = "10")]
+    owner_genesis: Vec<Vec<u8>>,
+}
+
+#[test]
+fn pull_ready_rejects_both_raw_mint_root_arms_before_pinning() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../capability-verifier/tests/fixtures/browser_spool_creation_interop.json"
+    ))
+    .expect("creation fixture");
+    let valid = hex::decode(
+        fixture["signed_spool_owner_genesis_hex"]
+            .as_str()
+            .expect("signed genesis"),
+    )
+    .expect("genesis bytes");
+    let path = &["acme".to_owned(), "project".to_owned()];
+    let temp = TempDir::new().expect("temp repo");
+    let repo = Repository::init_default(temp.path()).expect("init repo");
+    let valid_payload = RawPullReadyGenesis {
+        protocol_version: 2,
+        owner_genesis: vec![valid.clone()],
+    }
+    .encode_to_vec();
+    repo.verify_and_pin_pull_ready_owner_genesis(&valid_payload, path)
+        .expect("valid PullReady owner genesis pins");
+    let mut ambiguous = vec![0x1a, 0x02, 0x32, 0x00];
+    ambiguous.extend_from_slice(&valid);
+    let unchecked = SignedSpoolOwnerGenesis::decode(ambiguous.as_slice()).expect("Prost merge");
+    verify_spool_owner_genesis(&unchecked).expect("surviving owner arm verifies");
+    let payload = RawPullReadyGenesis {
+        protocol_version: 2,
+        owner_genesis: vec![ambiguous],
+    }
+    .encode_to_vec();
+    assert!(
+        repo.verify_and_pin_pull_ready_owner_genesis(&payload, path)
+            .is_err(),
+        "ambiguous PullReady owner genesis must not establish a pin"
+    );
 }
 
 #[test]
@@ -222,7 +272,11 @@ fn published_purge_accept_deny_matrix_holds_against_clone_pin() {
     let other_repo = Repository::init_default(other.path()).expect("other spool repo");
     let other_genesis = generated_genesis([0x33; 16]);
     other_repo
-        .verify_and_pin_owner_genesis(2, Some(&other_genesis), &["other".to_owned()])
+        .verify_and_pin_owner_genesis(
+            2,
+            Some(&other_genesis.encode_to_vec()),
+            &["other".to_owned()],
+        )
         .expect("pin another spool");
     other_repo
         .verify_owner_purge_authorization(
@@ -274,7 +328,11 @@ fn clone_pin_rejects_forged_and_later_first_seen_genesis() {
     let fresh = TempDir::new().expect("fresh temp repo");
     let fresh_repo = Repository::init_default(fresh.path()).expect("fresh repo");
     fresh_repo
-        .verify_and_pin_owner_genesis(2, Some(&forged_genesis), &forged.spool_path_segments)
+        .verify_and_pin_owner_genesis(
+            2,
+            Some(&forged_genesis.encode_to_vec()),
+            &forged.spool_path_segments,
+        )
         .expect_err("forged self-signature must not establish a pin");
     assert!(
         !fresh
@@ -287,7 +345,7 @@ fn clone_pin_rejects_forged_and_later_first_seen_genesis() {
     let other_genesis = generated_genesis([0x44; 16]);
     let path = &valid_fixture.cases[0].spool_path_segments;
     let error = repo
-        .verify_and_pin_owner_genesis(2, Some(&other_genesis), path)
+        .verify_and_pin_owner_genesis(2, Some(&other_genesis.encode_to_vec()), path)
         .expect_err("a later first-seen valid genesis must not replace the TOFU pin");
     assert!(
         error.to_string().contains("first-operation trust"),
@@ -309,8 +367,12 @@ fn submitted_purge_bundle_cannot_establish_current_owner_authority() {
     let payload = hex::decode(&valid.payload_hex).expect("payload");
     let temp = TempDir::new().expect("repo");
     let repo = Repository::init_default(temp.path()).expect("repo");
-    repo.verify_and_pin_owner_genesis(2, Some(&genesis), &valid.spool_path_segments)
-        .expect("genesis alone is sufficient for metadata");
+    repo.verify_and_pin_owner_genesis(
+        2,
+        Some(&genesis.encode_to_vec()),
+        &valid.spool_path_segments,
+    )
+    .expect("genesis alone is sufficient for metadata");
     let error = repo
         .verify_owner_purge_authorization(
             &body.purge_identity.expect("identity").blob_hash,

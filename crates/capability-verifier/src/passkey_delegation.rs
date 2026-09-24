@@ -280,14 +280,17 @@ pub fn verify_mint_delegation(
                 &Signature::from_slice(&proof.signature).map_err(|_| Error::InvalidSignature)?,
             )
             .map_err(|_| Error::InvalidSignature),
-        -7 => p256::ecdsa::VerifyingKey::from_public_key_der(&authority.public_key_spki)
-            .map_err(|_| Error::InvalidSignature)?
-            .verify(
-                &signed,
-                &p256::ecdsa::Signature::from_der(&proof.signature)
-                    .map_err(|_| Error::InvalidSignature)?,
-            )
-            .map_err(|_| Error::InvalidSignature),
+        -7 => {
+            let signature = p256::ecdsa::Signature::from_der(&proof.signature)
+                .map_err(|_| Error::InvalidSignature)?;
+            if signature != signature.normalize_s() {
+                return Err(Error::InvalidSignature);
+            }
+            p256::ecdsa::VerifyingKey::from_public_key_der(&authority.public_key_spki)
+                .map_err(|_| Error::InvalidSignature)?
+                .verify(&signed, &signature)
+                .map_err(|_| Error::InvalidSignature)
+        }
         _ => Err(invalid("unsupported passkey signature algorithm")),
     }
 }
