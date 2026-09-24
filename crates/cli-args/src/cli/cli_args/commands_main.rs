@@ -468,7 +468,7 @@ Examples:
     ///
     /// The capture actor is who the next capture is attributed to
     /// (`user_config`, `init --principal-*`, or `HEDDLE_PRINCIPAL_*`).
-    /// Hosted auth is whether this machine has a server credential.
+    /// Hosted auth shows the account, handle, claim state, and current credential.
     /// These are different objects. `heddle auth login` does not set the
     /// local actor. `whoami` only reads; it never attaches a credential.
     #[cfg(feature = "client")]
@@ -478,9 +478,6 @@ The capture actor and hosted auth are different objects:
                  (user_config, init --principal-*, or HEDDLE_PRINCIPAL_*)
   hosted auth    whether this machine has a credential for the server
                  (heddle auth login). whoami never attaches a credential.
-
-When the server answers, whoami lists grant-reachable spools as
-spool/<handle>/<name>.
 
 Examples:
   heddle whoami                       # capture actor first, then hosted auth

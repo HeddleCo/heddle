@@ -314,7 +314,9 @@ pub fn service_attenuation(
                     || (method.path.contains("Grant")
                         && ((read && allows(Capability::GrantRead))
                             || allows(Capability::GrantWrite)))
-                    || (allows(Capability::AgentRead) && method.path.ends_with("/ObserveIdentity"))
+                    || (allows(Capability::AgentRead)
+                        && (method.path.ends_with("/ObserveIdentity")
+                            || method.path.ends_with("/GetIdentity")))
                     || (allows(Capability::AgentUpdate)
                         && (method.path.ends_with("/PutDelegation")
                             || method.path.ends_with("/RevokeDelegation")))
@@ -389,4 +391,23 @@ pub enum ServiceCeilingError {
     /// Signed child lacks the exact required time, method or resource caveat.
     #[error("issued service credential does not contain the requested scope ceiling")]
     Invalid,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_read_scope_can_get_identity_snapshot() {
+        let restriction = service_attenuation(
+            "agent:read",
+            "delegation-1",
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .expect("valid agent read scope");
+        let operations = restriction.allowed_operations.expect("operation ceiling");
+        assert!(operations.contains(&"GetIdentity".to_string()));
+        assert!(operations.contains(&"ObserveIdentity".to_string()));
+        assert!(!operations.contains(&"ListSpools".to_string()));
+    }
 }

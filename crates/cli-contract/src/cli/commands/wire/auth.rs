@@ -208,7 +208,7 @@ pub struct WhoamiOutput {
     pub source: String,
     /// Locally verified subject, present even when the server is unreachable.
     pub subject: Option<String>,
-    /// The server answered native `ObserveIdentity` with the current credential.
+    /// The server answered native `GetIdentity` with the current credential.
     pub reachable: bool,
     /// Locally inferred credential class, replaced by the observed v2 class
     /// when the server is reachable. `None` when unauthenticated.
@@ -227,10 +227,19 @@ pub struct WhoamiOutput {
     pub proof_key_available: bool,
     /// Server-authoritative identity, present only when `reachable`.
     pub identity: Option<WhoamiIdentity>,
-    /// Grant-reachable hosted paths as `spool/<handle>/<name>`.
-    /// Empty when unauthenticated, unreachable, or ListSpools was unavailable.
-    pub spools: Vec<String>,
+    pub billing_lock: Option<WhoamiBillingLock>,
     pub recommended_action: Option<String>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+#[schemars(rename = "WhoamiBillingLockSchema")]
+pub struct WhoamiBillingLock {
+    pub reason: String,
+    pub locked_at: Option<String>,
+    pub delete_after: Option<String>,
+    pub used_bytes: u64,
+    pub cap_bytes: u64,
+    pub allowed_actions: Vec<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]

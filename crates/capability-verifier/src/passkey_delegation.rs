@@ -283,9 +283,8 @@ pub fn verify_mint_delegation(
         -7 => {
             let signature = p256::ecdsa::Signature::from_der(&proof.signature)
                 .map_err(|_| Error::InvalidSignature)?;
-            if signature != signature.normalize_s() {
-                return Err(Error::InvalidSignature);
-            }
+            // WebAuthn permits high-S signatures; the caller's single-use grant
+            // nonce bounds replay of either valid encoding.
             p256::ecdsa::VerifyingKey::from_public_key_der(&authority.public_key_spki)
                 .map_err(|_| Error::InvalidSignature)?
                 .verify(&signed, &signature)

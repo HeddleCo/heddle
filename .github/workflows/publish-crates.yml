@@ -8,17 +8,18 @@ name: Publish crates
 #
 # The job tree mirrors heddle#56's release.yml:
 #
-#   validate-publish ──► publish (conditional on has_publishes)
+#   validate-publish ──► consumer-build ──► publish (conditional on has_publishes)
 #
-# validate-publish is the single trust gate. It refuses to proceed
+# validate-publish is the first trust gate. It refuses to proceed
 # unless the merged commit (a) lives on main and (b) is the SHA we'll
 # pin every downstream step to. It also probes crates.io to decide
 # whether each declared-publishable crate needs publishing this run,
 # and refuses to publish if a Cargo.toml version is *lower* than the
 # crate's current published version (a downgrade is always a bad
 # state). The publish job then runs only if at least one crate needs
-# publishing — so no-op merges (the common case) cost a few seconds of
-# validation and nothing else.
+# publishing. consumer-build then verifies the registry-facing graph
+# before the credentialed publish job starts. No-op merges (the common
+# case) cost a few seconds of validation and nothing else.
 #
 # Trust pattern (mirroring heddle#56 r3):
 #   - on.push.branches: ['main'] only. NOT workflow_dispatch.
@@ -302,9 +303,34 @@ jobs:
           echo "to_publish=${to_publish}" >> "$GITHUB_OUTPUT"
           echo "has_publishes=${has_publishes}" >> "$GITHUB_OUTPUT"
 
+  consumer-build:
+    name: build packaged crates as a registry consumer
+    needs: validate-publish
+    if: needs.validate-publish.outputs.has_publishes == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.validate-publish.outputs.commit_sha }}
+
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: publish-consumer
+          cache-on-failure: true
+
+      - name: Build consumer from published and packaged crates
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/heddle-consumer-target
+        run: |
+          export HEDDLE_HOME=$(mktemp -d)
+          timeout 40m python3 scripts/check-crate-consumer-build.py
+
   publish:
     name: publish to crates.io
-    needs: validate-publish
+    needs: [validate-publish, consumer-build]
     # Skip the entire job (no runner spin-up, no token expose) when
     # there's nothing to publish. The common case is a non-version-bump
     # merge to main.

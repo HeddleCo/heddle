@@ -222,6 +222,7 @@ def block_after(start_pattern, sibling_pattern):
 on_block = block_after(r"^on:\s*$", r"^[A-Za-z0-9_-]+:")
 jobs_block = block_after(r"^jobs:\s*$", r"^[A-Za-z0-9_-]+:")
 validate_block = block_after(r"^  validate-publish:\s*$", r"^  [A-Za-z0-9_-]+:")
+consumer_block = block_after(r"^  consumer-build:\s*$", r"^  [A-Za-z0-9_-]+:")
 publish_block = block_after(r"^  publish:\s*$", r"^  [A-Za-z0-9_-]+:")
 
 if not on_block:
@@ -262,12 +263,13 @@ else:
 if not publish_block:
     errors.append("publish job missing or malformed")
 else:
-    if re.search(r"(?m)^    needs:\s*validate-publish\s*$", publish_block) or re.search(
-        r"(?m)^    needs:\s*\[\s*validate-publish\s*\]\s*$", publish_block
+    if re.search(
+        r"(?m)^    needs:\s*\[\s*validate-publish\s*,\s*consumer-build\s*\]\s*$",
+        publish_block,
     ):
-        oks.append("publish job declares needs: validate-publish")
+        oks.append("publish job waits for validation and consumer build")
     else:
-        errors.append("publish job does not declare 'needs: validate-publish' (would skip the trust gate)")
+        errors.append("publish job must depend on validate-publish and consumer-build")
 
     if "needs.validate-publish.outputs.has_publishes" in publish_block:
         oks.append("publish job gates execution on has_publishes")
@@ -303,6 +305,22 @@ else:
             "publish job's cargo-publish step must expose CARGO_REGISTRY_TOKEN "
             "so cargo publish can authenticate without leaking the secret to actions"
         )
+
+if not consumer_block:
+    errors.append("consumer-build job missing or malformed")
+else:
+    if re.search(r"(?m)^    needs:\s*validate-publish\s*$", consumer_block):
+        oks.append("consumer build follows validated publish set")
+    else:
+        errors.append("consumer-build must depend on validate-publish")
+    if "ref: ${{ needs.validate-publish.outputs.commit_sha }}" in consumer_block:
+        oks.append("consumer build pins validated commit SHA")
+    else:
+        errors.append("consumer-build checkout must pin validated commit SHA")
+    if "python3 scripts/check-crate-consumer-build.py" in consumer_block:
+        oks.append("consumer build runs packaged registry consumer gate")
+    else:
+        errors.append("consumer-build must run scripts/check-crate-consumer-build.py")
 
 print("OKS:")
 for o in oks:
