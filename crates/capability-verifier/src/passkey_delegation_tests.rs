@@ -382,7 +382,7 @@ fn owner_authorized_es256_passkey_accepts_der_assertion() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn es256_passkey_rejects_malleable_high_s_assertion() {
+fn es256_passkey_accepts_valid_high_s_assertion_but_rejects_tampering() {
     let (mut value, state) = es256_fixture();
     let proof = value.passkey_delegation.as_mut().expect("assertion");
     let signature = p256::ecdsa::Signature::from_der(&proof.signature)
@@ -406,10 +406,10 @@ fn es256_passkey_rejects_malleable_high_s_assertion() {
         .expect("malleable signature");
     assert_ne!(high, high.normalize_s());
     proof.signature = high.to_der().as_bytes().to_vec();
-    assert!(
-        verify(&value, &state).is_err(),
-        "high-S assertion must be rejected"
-    );
+    verify(&value, &state).expect("valid high-S WebAuthn assertion");
+
+    value.passkey_delegation.as_mut().expect("assertion").signature[0] ^= 1;
+    assert!(verify(&value, &state).is_err(), "tampered assertion must fail");
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
