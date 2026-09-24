@@ -259,6 +259,25 @@ impl RunStore {
         }
         Ok(output)
     }
+    /// The fixed initial tail selection; later positions use observation_page.
+    pub fn latest_timeline(&self, run_id: &str, limit: usize) -> Result<Vec<TimelineRecord>> {
+        valid_id(run_id)?;
+        if limit == 0 || limit > 1024 {
+            bail!("invalid latest timeline limit");
+        }
+        let connection = self.connection()?;
+        let mut query = connection.prepare(
+            "SELECT record FROM run_timeline WHERE run=?1 ORDER BY position DESC LIMIT ?2",
+        )?;
+        let mut records = query
+            .query_map(params![run_id, limit as i64], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })?
+            .map(|body| Ok(TimelineRecord::decode(body?.as_slice())?))
+            .collect::<Result<Vec<_>>>()?;
+        records.reverse();
+        Ok(records)
+    }
     pub fn enqueue_control(&self, request: &ControlRunRequest, principal: &str) -> Result<()> {
         use api::heddle::api::v1alpha2::control_run_request::Action;
         valid_id(&request.client_operation_id)?;

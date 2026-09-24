@@ -22,6 +22,7 @@ mod probe;
 mod relay;
 #[cfg(feature = "client")]
 mod run_permissions;
+mod timeline_detail;
 
 pub use bridge::{HarnessCliBridge, RelayCapture};
 pub use probe::{HarnessProbeInput, HarnessProbeResult};

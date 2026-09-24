@@ -2,7 +2,7 @@
 //! Claude output semantics: https://code.claude.com/docs/en/hooks#json-output
 use anyhow::{Context, Result};
 use api::heddle::api::v1alpha2 as v2;
-use objects::object::ContentHash;
+use objects::object::{ContentHash, StateId};
 use repo::{
     ActorPresenceStatus, Repository, device_runs::RunStore,
     thread_replication::checkout::ThreadCheckout,
@@ -119,13 +119,39 @@ pub(crate) fn publish(
             *status == ActorPresenceStatus::Active,
         )?;
     }
-    let last = store.last_timeline_position(&report.heddle_session_id)?;
-    let next = last.map_or(0, |position| position.saturating_add(1));
+    let last_record = store.latest_timeline(&report.heddle_session_id, 1)?.pop();
+    let mut next = last_record
+        .as_ref()
+        .map_or(0, |record| record.position.saturating_add(1));
+    let mut last_at = last_record
+        .as_ref()
+        .and_then(|record| record.recorded_at.as_ref())
+        .map(|time| (time.seconds, time.nanos));
     let run_ref = v2::RecordRef {
         spool: Some(spool.clone()),
         id: report.heddle_session_id.clone(),
     };
-    let emit = |position: u64, kind: &str, summary: String| -> Result<()> {
+    let emit = |position: u64,
+                kind: &str,
+                summary: String,
+                detail: Option<String>,
+                tool_name: Option<String>,
+                recorded_at: &str,
+                captured: Option<&str>|
+     -> Result<()> {
+        let at = timestamp_parts(recorded_at)?;
+        let captured_revision =
+            captured
+                .map(StateId::parse)
+                .transpose()?
+                .map(|state| v2::RevisionRef {
+                    spool: Some(spool.clone()),
+                    revision: Some(v2::revision_ref::Revision::State(
+                        api::heddle::api::common::StateId {
+                            value: state.as_bytes().to_vec(),
+                        },
+                    )),
+                });
         store.put_timeline(&v2::TimelineRecord {
             r#ref: Some(v2::RecordRef {
                 spool: Some(spool.clone()),
@@ -135,32 +161,93 @@ pub(crate) fn publish(
             position,
             kind: kind.into(),
             summary,
+            detail,
+            tool_name,
+            recorded_at: Some(prost_types::Timestamp {
+                seconds: at.0,
+                nanos: at.1,
+            }),
+            captured_revision,
             ..Default::default()
         })
     };
     if next == 0 {
-        emit(0, "session_opened", "Harness session opened".into())?;
+        emit(
+            0,
+            "session_opened",
+            "Harness session opened".into(),
+            None,
+            None,
+            &report.opened_at,
+            None,
+        )?;
+        last_at = Some(timestamp_parts(&report.opened_at)?);
+        next = 1;
     }
-    // Skip directly to the first unseen checkpoint. A report flush never
-    // rewrites the retained history and never republishes transcript contents.
-    for (index, checkpoint) in report
-        .progress
-        .iter()
-        .enumerate()
-        .skip(next.saturating_sub(1) as usize)
-    {
+    // A reconnect may start a fresh report with one checkpoint under the same
+    // Run. Checkpoint time determines which events are new; position remains
+    // append-only and breaks ties for display.
+    for checkpoint in &report.progress {
+        let at = timestamp_parts(&checkpoint.recorded_at)?;
+        if last_at.is_some_and(|last| at <= last) {
+            continue;
+        }
         let kind = checkpoint.status.as_deref().unwrap_or("progress");
-        let summary = format!("{}: {} paths", kind, checkpoint.touched_paths.len());
-        emit(index as u64 + 1, kind, summary)?;
+        let detail = if kind == "UserPromptSubmit" {
+            None
+        } else if let Some(detail) = checkpoint.detail.as_deref() {
+            Some(crate::timeline_detail::redact_excerpt(detail, 120))
+        } else if matches!(kind, "Stop" | "SubagentStop" | "turn_complete") {
+            checkpoint.message.as_deref().map(|message| {
+                crate::timeline_detail::redact_excerpt(
+                    message.lines().next().unwrap_or_default(),
+                    200,
+                )
+            })
+        } else {
+            None
+        }
+        .filter(|detail| !detail.is_empty());
+        let summary = detail.clone().unwrap_or_else(|| match kind {
+            "UserPromptSubmit" => "User prompt submitted".into(),
+            "Stop" | "SubagentStop" => "Assistant turn finished".into(),
+            _ => format!("{}: {} paths", kind, checkpoint.touched_paths.len()),
+        });
+        emit(
+            next,
+            kind,
+            summary,
+            detail,
+            checkpoint.tool_name.clone(),
+            &checkpoint.recorded_at,
+            checkpoint.captured_revision.as_deref(),
+        )?;
+        last_at = Some(at);
+        next = next.saturating_add(1);
     }
-    let closing = report.progress.len() as u64 + 1;
-    if report.closed_at.is_some() && closing >= next {
-        emit(closing, "session_closed", "Harness session closed".into())?;
+    if let Some(closed_at) = report.closed_at.as_deref() {
+        let closing_at = timestamp_parts(closed_at)?;
+        if last_at.is_none_or(|last| closing_at > last) {
+            emit(
+                next,
+                "session_closed",
+                "Harness session closed".into(),
+                None,
+                None,
+                closed_at,
+                report.head_state_at_close.as_deref(),
+            )?;
+        }
     }
     if report.closed_at.is_some() {
         retain_final_report(repo, &run_ref, report)?;
     }
     Ok(())
+}
+
+fn timestamp_parts(value: &str) -> Result<(i64, i32)> {
+    let at = chrono::DateTime::parse_from_rfc3339(value)?;
+    Ok((at.timestamp(), at.timestamp_subsec_nanos() as i32))
 }
 
 /// Preserve the harness report only under explicit raw-retention policy. Its

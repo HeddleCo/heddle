@@ -177,17 +177,42 @@ impl DeviceRpc {
         mut send: SendStream,
     ) -> Result<()> {
         let is_checkout = method.ends_with("/ObserveCheckouts");
-        let (options, page) = if is_checkout {
+        let (options, page, latest_run, latest_limit) = if is_checkout {
             let request = ObserveCheckoutsRequest::decode(body)?;
             (
                 request.observe.unwrap_or_default(),
                 request.page.unwrap_or_default(),
+                None,
+                0,
             )
         } else {
             let request = ObserveRunsRequest::decode(body)?;
+            let latest = false;
+            if latest {
+                anyhow::ensure!(
+                    request.include_timeline
+                        && request.runs.len() == 1
+                        && request.timeline_limit > 0
+                        && request.page.is_none()
+                        && request
+                            .observe
+                            .as_ref()
+                            .is_none_or(|options| options.mode != ObservationMode::Once as i32),
+                    "LATEST requires one run, timeline, FOLLOW, a positive limit, and no page"
+                );
+            } else {
+                anyhow::ensure!(
+                    request.timeline_start == TimelineStart::Unspecified as i32
+                        && request.timeline_limit == 0
+                        || request.timeline_start == TimelineStart::Latest as i32,
+                    "invalid timeline start or limit"
+                );
+            }
             (
                 request.observe.unwrap_or_default(),
                 request.page.unwrap_or_default(),
+                latest.then(|| request.runs[0].id.clone()),
+                request.timeline_limit as usize,
             )
         };
         let requested = options.budget.unwrap_or_default();
@@ -281,6 +306,7 @@ impl DeviceRpc {
         let mut authority_clock = self.authority_clock.subscribe()?;
         let mut previous = Vec::new();
         let mut observed = BTreeMap::<String, Vec<u8>>::new();
+        let mut latest_after: Option<String> = None;
         let mut projection_retries = 0u8;
         loop {
             let generation = *changes.borrow_and_update();
@@ -296,6 +322,9 @@ impl DeviceRpc {
                 &page,
                 page_size,
                 &binding,
+                latest_run
+                    .as_deref()
+                    .map(|run| (run, latest_limit, latest_after.as_deref())),
             )?;
             if *changes.borrow() != generation {
                 projection_retries += 1;
@@ -349,7 +378,10 @@ impl DeviceRpc {
             if !snapshot && next == observed { /* no visible change */
             } else {
                 if !snapshot
-                    && (observed.keys().any(|id| !next.contains_key(id)) || !page_info.exhausted)
+                    && ((!latest_run.is_some()
+                        && (observed.keys().any(|id| !next.contains_key(id))
+                            || !page_info.exhausted))
+                        || (latest_run.is_some() && !next.keys().any(|id| id.starts_with("run:"))))
                 {
                     write(
                         &mut send,
@@ -443,7 +475,28 @@ impl DeviceRpc {
                 )
                 .await?;
                 previous = cursor;
+                if let Some(run) = latest_run.as_deref() {
+                    let position = next
+                        .keys()
+                        .filter_map(|id| id.strip_prefix(&format!("timeline:{run}:")))
+                        .filter_map(|position| position.parse::<u64>().ok())
+                        .max();
+                    if let Some(position) = position {
+                        latest_after = Some(format!("t:{run}:{position:020}"));
+                    } else if latest_after.is_none() {
+                        latest_after = Some(format!("t:{run}:"));
+                    }
+                }
                 observed = next;
+            }
+            if let (Some(run), Some(after)) = (latest_run.as_deref(), latest_after.as_deref()) {
+                if !feed
+                    .runs
+                    .observation_page(after, 1, &[run.to_owned()], &[], true)?
+                    .is_empty()
+                {
+                    continue;
+                }
             }
             if options.mode == ObservationMode::Once as i32 {
                 write(
@@ -502,6 +555,7 @@ impl DeviceRpc {
         page: &PageRequest,
         size: usize,
         binding: &[u8],
+        latest: Option<(&str, usize, Option<&str>)>,
     ) -> Result<(Vec<Payload>, PageInfo)> {
         {
             let mut anchor = feed
@@ -633,20 +687,61 @@ impl DeviceRpc {
                 .iter()
                 .map(|r| r.id.clone())
                 .collect::<Vec<_>>();
-            let policy = if after.is_empty() {
+            let policy = if after.is_empty() || latest.is_some() {
                 feed.runs.policy(&session.spool.id.to_string())?
             } else {
                 None
             };
             let remaining = size.saturating_sub(usize::from(policy.is_some()));
-            let candidates = feed.runs.observation_page(
-                &after,
-                remaining + 1,
-                &runs,
-                &threads,
-                request.include_timeline,
-            )?;
-            exhausted = candidates.len() <= remaining;
+            let candidates = if let Some((run, limit, latest_after)) = latest {
+                let mut selected = feed.runs.observation_page("", 1, &runs, &threads, false)?;
+                if !selected.is_empty() {
+                    let timeline: Vec<_> = if let Some(after) = latest_after {
+                        feed.runs
+                            .observation_page(
+                                after,
+                                remaining.saturating_sub(1).max(1),
+                                &runs,
+                                &threads,
+                                true,
+                            )?
+                            .into_iter()
+                            .filter_map(|(key, item)| match item {
+                                repo::device_runs::RunObservation::Timeline(_) => Some((key, item)),
+                                _ => None,
+                            })
+                            .collect()
+                    } else {
+                        feed.runs
+                            .latest_timeline(run, limit)?
+                            .into_iter()
+                            .map(|record| {
+                                (
+                                    format!("t:{run}:{:020}", record.position),
+                                    repo::device_runs::RunObservation::Timeline(record),
+                                )
+                            })
+                            .collect()
+                    };
+                    selected.extend(timeline);
+                }
+                selected
+            } else {
+                feed.runs.observation_page(
+                    &after,
+                    remaining + 1,
+                    &runs,
+                    &threads,
+                    request.include_timeline,
+                )?
+            };
+            if latest.is_some() {
+                anyhow::ensure!(
+                    candidates.len() <= remaining,
+                    "LATEST snapshot exceeds accepted item budget"
+                );
+            }
+            exhausted = latest.is_some() || candidates.len() <= remaining;
             for (key, value) in candidates.into_iter().take(remaining) {
                 last = key;
                 payloads.push(match value {
