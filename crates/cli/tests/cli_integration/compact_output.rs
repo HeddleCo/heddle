@@ -13,7 +13,7 @@ use std::str;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{heddle, heddle_output};
+use super::{heddle, heddle_output, seed_test_repo_principal};
 
 /// Every key the compact decision surface is allowed to emit. Any key
 /// outside this set leaking into a compact payload is a regression —
@@ -330,6 +330,7 @@ fn assert_only_compact_error_keys(value: &Value, context: &str) {
 fn field_study_everyday_verbs_accept_json_compact() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).expect("init");
+    seed_test_repo_principal(temp.path()).expect("seed test principal");
     std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
     heddle(&["capture", "-m", "seed"], Some(temp.path())).expect("seed");
 
@@ -342,8 +343,6 @@ fn field_study_everyday_verbs_accept_json_compact() {
             "set",
             "--path",
             "main.rs",
-            "--scope",
-            "file",
             "--kind",
             "rationale",
             "-m",
@@ -351,11 +350,12 @@ fn field_study_everyday_verbs_accept_json_compact() {
         ][..],
         &[
             "discuss",
-            "--new",
+            "new",
             "--path",
             "main.rs",
             "--symbol",
             "main",
+            "-m",
             "first turn",
         ][..],
     ] {

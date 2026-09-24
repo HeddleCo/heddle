@@ -105,8 +105,6 @@ fn setup_repo_with_context() -> (TempDir, String) {
             "set",
             "--path",
             "main.rs",
-            "--scope",
-            "file",
             "--kind",
             "rationale",
             "-m",

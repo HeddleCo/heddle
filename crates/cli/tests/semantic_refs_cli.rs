@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! End-to-end coverage for `heddle semantic refs`.
 
+#[path = "support/mod.rs"]
+mod cli_test_support;
+
 use std::process::Command;
 
 use repo::Repository;
@@ -19,7 +22,7 @@ fn run_heddle(repo: &TempDir, args: &[&str]) -> std::process::Output {
 #[test]
 fn semantic_refs_time_travels_without_reparse() {
     let temp = TempDir::new().expect("temp repo");
-    let repo = Repository::init_default(temp.path()).expect("init repo");
+    let repo = cli_test_support::init_test_repository(temp.path()).expect("init repo");
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
     std::fs::write(
         temp.path().join("src/api.rs"),

@@ -19,12 +19,13 @@ use objects::object::{ReviewKind, ReviewScope, StateId, signing_payload};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{heddle, heddle_output_with_env, heddle_schema};
+use super::{heddle, heddle_output_with_env, heddle_schema, seed_test_repo_principal};
 
 /// Init a repo, write a tracked file, capture one state.
 fn init_and_capture() -> TempDir {
     let temp = TempDir::new().expect("tempdir");
     heddle(&["init"], Some(temp.path())).expect("heddle init");
+    seed_test_repo_principal(temp.path()).expect("seed test principal");
     fs::write(temp.path().join("main.rs"), "fn main() {}\n").expect("seed main.rs");
     heddle(&["capture", "-m", "seed"], Some(temp.path())).expect("seed capture");
     temp
@@ -242,24 +243,24 @@ fn thread_operator_envelopes_emit_approved_thread_kinds() {
 }
 
 #[test]
-fn thread_promote_and_cleanup_emit_approved_thread_kinds() {
+fn thread_checkout_and_cleanup_emit_approved_thread_kinds() {
     let temp = init_and_capture();
     let promo = temp.path().join("promo-checkout");
-    heddle(
+    heddle(&["thread", "create", "promo"], Some(temp.path())).expect("create promo thread");
+
+    let checkout = heddle_json(
         &[
-            "start",
+            "thread",
+            "checkout",
             "promo",
             "--path",
             promo.to_str().expect("utf-8 promo path"),
         ],
-        Some(temp.path()),
-    )
-    .expect("start promo thread");
-
-    let promote = heddle_json(&["thread", "promote", "promo"], &temp);
-    assert_output_kind(&promote, "thread_promote");
-    assert_not_output_kind(&promote, &["thread"]);
-    assert_eq!(promote["action"].as_str(), Some("thread_promote"));
+        &temp,
+    );
+    assert_output_kind(&checkout, "thread_promote");
+    assert_not_output_kind(&checkout, &["thread"]);
+    assert_eq!(checkout["action"].as_str(), Some("thread_promote"));
 
     let cleanup = heddle_json(&["thread", "cleanup", "--merged", "--dry-run"], &temp);
     assert_output_kind(&cleanup, "thread_cleanup");
@@ -374,8 +375,6 @@ fn context_set_get_history_audit_check_emit_output_kind() {
             "set",
             "--path",
             "main.rs",
-            "--scope",
-            "file",
             "--kind",
             "rationale",
             "-m",
@@ -421,8 +420,6 @@ fn context_set_get_history_audit_check_emit_output_kind() {
             &annotation_id,
             "--path",
             "main.rs",
-            "--scope",
-            "file",
             "--kind",
             "rationale",
             "-m",
@@ -480,8 +477,6 @@ fn context_list_envelope_wraps_items_for_empty_and_populated() {
             "set",
             "--path",
             "main.rs",
-            "--scope",
-            "file",
             "--kind",
             "rationale",
             "-m",
@@ -533,11 +528,12 @@ fn discuss_open_show_append_emit_output_kind() {
     let open = heddle_json_with_env(
         &[
             "discuss",
-            "--new",
+            "new",
             "--path",
             "main.rs",
             "--symbol",
             "main",
+            "-m",
             "first turn",
         ],
         &temp,
@@ -558,7 +554,7 @@ fn discuss_open_show_append_emit_output_kind() {
         .to_string();
 
     let append = heddle_json_with_env(
-        &["discuss", "--id", &discussion_id, "follow-up turn"],
+        &["discuss", "reply", &discussion_id, "-m", "follow-up turn"],
         &temp,
         &env_principal,
     );

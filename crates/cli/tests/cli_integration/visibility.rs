@@ -16,7 +16,7 @@ use std::{fs, path::Path};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{assert_undo_requires_hard, heddle};
+use super::{assert_undo_requires_hard, heddle, seed_test_repo_principal};
 
 /// Pin `[review.discussion] default_visibility` while preserving the current
 /// repository-format and source-authority fields written by `heddle init`.
@@ -42,6 +42,7 @@ fn set_repo_default_visibility(repo: &Path, tier_toml: &str) {
 fn init_and_capture(label: &str) -> (TempDir, String) {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     fs::write(temp.path().join("note.txt"), label.as_bytes()).unwrap();
     (temp, String::new())
 }
@@ -146,6 +147,7 @@ fn revert_state_gets_default_visibility() {
     // default through the snapshot chokepoint.
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
 
     fs::write(temp.path().join("note.txt"), b"base").unwrap();
     heddle(&["capture", "-m", "first"], Some(temp.path())).expect("capture first");
@@ -176,6 +178,7 @@ fn undo_after_capture_with_nonpublic_default_reverts_snapshot_and_visibility_in_
     // snapshot AND its auto-applied default tier together.
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
 
     fs::write(temp.path().join("note.txt"), b"base").unwrap();
     heddle(&["capture", "-m", "first"], Some(temp.path())).expect("capture first");
@@ -503,11 +506,12 @@ fn owner_clone_of_private_spool_after_visibility_discuss_and_context() {
     heddle(
         &[
             "discuss",
-            "--new",
+            "new",
             "--path",
             "note.rs",
             "--symbol",
             "note",
+            "-m",
             "keep this ax-only",
             "--visibility",
             "private:ax-only",

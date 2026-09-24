@@ -6,7 +6,7 @@ use repo::{CollaborationStore, Repository};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::heddle;
+use super::{heddle, seed_test_repo_principal};
 
 fn json(output: &str) -> Value {
     serde_json::from_str(output.trim()).expect("valid JSON output")
@@ -68,6 +68,7 @@ fn assert_views_and_get(
 fn discuss_views_follow_an_in_file_symbol_rename() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::write(
         temp.path().join("main.rs"),
         "fn foo() {\n    let value = 42;\n    println!(\"{}\", value);\n}\n",
@@ -77,7 +78,7 @@ fn discuss_views_follow_an_in_file_symbol_rename() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "foo",
+                "--output", "json", "discuss", "new", "--path", "main.rs", "--symbol", "foo", "-m",
                 "review q",
             ],
             Some(temp.path()),
@@ -105,6 +106,7 @@ fn discuss_views_follow_an_in_file_symbol_rename() {
 fn discuss_anchor_stays_rebound_after_a_later_body_edit() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::write(
         temp.path().join("main.rs"),
         "fn foo() {\n    let value = 42;\n    println!(\"{}\", value);\n}\n",
@@ -114,7 +116,7 @@ fn discuss_anchor_stays_rebound_after_a_later_body_edit() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "foo",
+                "--output", "json", "discuss", "new", "--path", "main.rs", "--symbol", "foo", "-m",
                 "review q",
             ],
             Some(temp.path()),
@@ -149,6 +151,7 @@ fn discuss_anchor_stays_rebound_after_a_later_body_edit() {
 fn discuss_ambiguous_symbol_rename_requires_attention_without_picking() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::write(
         temp.path().join("main.rs"),
         "fn foo() {\n    let x = 1;\n}\n",
@@ -158,7 +161,7 @@ fn discuss_ambiguous_symbol_rename_requires_attention_without_picking() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "foo",
+                "--output", "json", "discuss", "new", "--path", "main.rs", "--symbol", "foo", "-m",
                 "review q",
             ],
             Some(temp.path()),
@@ -188,6 +191,7 @@ fn discuss_ambiguous_symbol_rename_requires_attention_without_picking() {
 fn discuss_deleted_symbol_becomes_orphaned() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::write(
         temp.path().join("main.rs"),
         "fn foo() {\n    let x = 1;\n}\n",
@@ -197,7 +201,7 @@ fn discuss_deleted_symbol_becomes_orphaned() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "foo",
+                "--output", "json", "discuss", "new", "--path", "main.rs", "--symbol", "foo", "-m",
                 "review q",
             ],
             Some(temp.path()),
@@ -220,6 +224,7 @@ fn discuss_deleted_symbol_becomes_orphaned() {
 fn discuss_anchor_still_follows_a_file_rename() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::write(
         temp.path().join("main.rs"),
         "fn foo() {\n    let x = 1;\n}\n",
@@ -229,7 +234,7 @@ fn discuss_anchor_still_follows_a_file_rename() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "foo",
+                "--output", "json", "discuss", "new", "--path", "main.rs", "--symbol", "foo", "-m",
                 "review q",
             ],
             Some(temp.path()),
@@ -252,6 +257,7 @@ fn discuss_anchor_still_follows_a_file_rename() {
 fn discuss_anchor_still_follows_a_mkdir_rename() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::write(
         temp.path().join("lib.py"),
         "def greet(name):\n    return f\"hello {name}\"\n",
@@ -261,8 +267,8 @@ fn discuss_anchor_still_follows_a_mkdir_rename() {
     let opened = json(
         &heddle(
             &[
-                "--output", "json", "discuss", "--new", "--path", "lib.py", "--symbol", "greet",
-                "review q",
+                "--output", "json", "discuss", "new", "--path", "lib.py", "--symbol", "greet",
+                "-m", "review q",
             ],
             Some(temp.path()),
         )

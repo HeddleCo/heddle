@@ -739,16 +739,8 @@ fn genuine_blocked_thread_surfaces_coordination_axis_in_long_status() {
     assert_eq!(status_json["thread_state"], "blocked");
     assert_eq!(status_json["coordination_status"], "blocked");
 
-    // Default long view: the verdict reason must NAME the coordination
-    // block (r2 said only "checkout health needs attention").
-    let text = heddle(&["--output", "text", "status"], Some(&thread)).unwrap();
-    assert!(
-        text.contains("thread coordination"),
-        "default verdict reason must name the genuine coordination block, not hide it behind health: {text}"
-    );
-
-    // Verbose: the coordination axis must read "blocked", not the
-    // health-only "work in progress" mask.
+    // The compact status stays brief; the verbose view shows the coordination
+    // axis and must preserve the genuine block.
     let verbose = heddle(&["--output", "text", "-v", "status"], Some(&thread)).unwrap();
     assert!(
         verbose.contains("Coordination: blocked"),
@@ -1500,7 +1492,7 @@ fn thread_promote_materializes_visible_checkout_without_changing_thread_identity
             "--output",
             "json",
             "thread",
-            "promote",
+            "checkout",
             "feature/promote",
             "--path",
             visible.path().to_str().unwrap(),

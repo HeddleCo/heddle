@@ -425,7 +425,7 @@ fn native_isolated_verify_status_and_doctor_present_non_overlay_as_valid() {
 }
 
 #[test]
-fn first_status_before_capture_names_default_identity() {
+fn first_status_before_capture_explains_missing_identity() {
     let temp = TempDir::new().unwrap();
     let init = heddle_output_without_principal_env(&["init"], temp.path()).expect("init output");
     assert!(init.status.success(), "init should succeed");
@@ -441,8 +441,8 @@ fn first_status_before_capture_names_default_identity() {
         "compact first-run status should name the thread and the capture next step: {text}"
     );
     assert!(
-        !text.contains("Identity:") && !text.contains("Heddle status"),
-        "compact first-run status should not repeat long-form identity chrome: {text}"
+        text.contains("Identity: no principal configured") && !text.contains("Heddle status"),
+        "first-run status should explain the mandatory principal: {text}"
     );
 
     let verbose =
@@ -908,9 +908,13 @@ fn confidence_parse_errors_fail_loudly_in_json_mode() {
         let parsed: Value = serde_json::from_str(stderr)
             .unwrap_or_else(|err| panic!("stderr should be JSON: {err}: {stderr}"));
         assert_eq!(parsed["kind"], "parse_error");
-        assert_eq!(
-            parsed["primary_command_template"]["argv_template"],
-            heddle_argv_json(["help", "--output", "json"])
+        assert!(
+            parsed["recovery_action_templates"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().any(|action| {
+                    action["argv_template"] == heddle_argv_json(["help", "--output", "json"])
+                })),
+            "parse error should offer machine-readable help: {parsed}"
         );
         assert!(
             parsed["error"].as_str().is_some_and(
@@ -1496,7 +1500,7 @@ fn op_id_local_dedup_is_cross_process_safe() {
 
     let repo_path = temp.path().to_path_buf();
     let config_path = default_test_user_config_path(&repo_path);
-    seed_default_test_user_config(&config_path, &repo_path).unwrap();
+    seed_default_test_user_config(&config_path).unwrap();
 
     let barrier = Arc::new(Barrier::new(2));
     let mut handles = Vec::new();
@@ -3868,13 +3872,13 @@ fn undo_list_preview_conflict_uses_typed_advice() {
     heddle(&["init"], Some(temp.path())).unwrap();
 
     let output = heddle_output(
-        &["--output", "json", "undo", "--list", "--preview"],
+        &["--output", "json", "undo", "--list", "--dry-run"],
         Some(temp.path()),
     )
     .expect("invoke undo mode conflict");
     assert!(
         !output.status.success(),
-        "undo --list --preview should fail"
+        "undo --list --dry-run should fail"
     );
     assert!(
         output.stdout.is_empty(),
@@ -3888,14 +3892,14 @@ fn undo_list_preview_conflict_uses_typed_advice() {
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(|error| error.contains("Use either --list or --preview")),
+            .is_some_and(|error| error.contains("Use either --list or --dry-run")),
         "undo mode conflict should include full typed advice: {stderr}"
     );
     assert!(
         envelope["hint"]
             .as_str()
             .is_some_and(|hint| hint.contains("heddle undo --list")
-                && hint.contains("heddle undo --preview")),
+                && hint.contains("heddle undo --dry-run")),
         "undo mode conflict hint should name both valid commands: {stderr}"
     );
 }
@@ -4082,6 +4086,7 @@ fn thread_switch_from_worktree_to_shared_thread_uses_typed_advice() {
     let temp = TempDir::new().unwrap();
     let alpha = sibling_checkout_path(temp.path(), "alpha-worktree");
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::write(temp.path().join("base.txt"), "base\n").unwrap();
     heddle(&["capture", "-m", "base"], Some(temp.path())).unwrap();
     heddle(
@@ -4115,7 +4120,10 @@ fn thread_switch_from_worktree_to_shared_thread_uses_typed_advice() {
     let stderr = std::str::from_utf8(&output.stderr).unwrap();
     let envelope: Value =
         serde_json::from_str(stderr).expect("switch refusal should emit JSON envelope");
-    assert_eq!(envelope["kind"], "thread_switch_would_overwrite_worktree");
+    assert_eq!(
+        envelope["kind"], "thread_switch_would_overwrite_worktree",
+        "{stderr}"
+    );
     assert!(
         envelope["error"].as_str().is_some_and(
             |error| error.contains("beta/shared") && error.contains("no dedicated worktree")
@@ -4485,7 +4493,16 @@ fn promote_materialized_thread_converts_in_place() {
         "materialized checkout present"
     );
 
-    let promoted = json_value(temp.path(), &["thread", "promote", "promo"]);
+    let promoted = json_value(
+        temp.path(),
+        &[
+            "thread",
+            "checkout",
+            "promo",
+            "--path",
+            checkout.to_str().expect("checkout path"),
+        ],
+    );
     assert_eq!(promoted["thread"]["mode"], "solid", "{promoted}");
     assert!(
         checkout.join(".heddle").exists(),
@@ -5522,7 +5539,7 @@ fn verify_plain_git_blocker_text_is_not_redundant() {
     )
     .expect("adopt should render text");
     assert!(
-        adopt.contains("adopted the Git repository into Heddle-native source storage")
+        adopt.contains("imported the Git repository into Heddle-native source storage")
             && adopt.contains("Git worktree: stays clean")
             && adopt.contains(".heddle metadata")
             && adopt.contains("imported Git history")
@@ -6436,17 +6453,18 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         !stdout.contains("compatibility") && !stdout.contains(concat!("Git ", "adapter")),
         "default help should not frame Git Projection commands as old compatibility wording: {stdout}"
     );
+    // The v2 first screen (#1718) keeps the daily, sharing, and recovery
+    // routes visible; the full tree is one `heddle help --all` away.
     for verb in [
-        "status", "diff", "capture", "start", "ready", "land", "query", "review", "discuss",
-        "context", "daemon", "whoami", "doctor", "help",
+        "init", "clone", "status", "diff", "capture", "start", "ready", "land", "undo", "push",
+        "pull", "review", "discuss", "context", "resolve", "continue", "doctor",
     ] {
         assert!(
             stdout.contains(&format!("\n  {verb}")),
             "everyday verb `{verb}` should be on the first screen: {stdout}"
         );
     }
-    // One ranked list: the remaining non-hidden roots render too.
-    for verb in ["thread", "import", "verify"] {
+    for verb in ["import"] {
         assert!(
             stdout.contains(&format!("\n  {verb}")),
             "non-hidden root `{verb}` should be on the ranked screen: {stdout}"
@@ -6460,10 +6478,8 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
         "retired roots must stay off the ranked screen: {stdout}"
     );
     assert!(
-        !stdout.contains("heddle help advanced")
-            && !stdout.contains("Nearby:")
-            && stdout.contains("Start here: `heddle init`, `heddle clone`, or `heddle capture`."),
-        "first screen is the ranked list, not a nearby/advanced pointer: {stdout}"
+        !stdout.contains("Nearby:") && stdout.contains("Full command tree: `heddle help --all`."),
+        "first screen should link to the full command tree: {stdout}"
     );
     assert!(
         stdout.contains("Save: heddle init -> heddle capture -m \"...\"")
@@ -6950,7 +6966,7 @@ fn command_catalog_exposes_public_surface_for_agents() {
     assert!(
         ready["summary"]
             .as_str()
-            .is_some_and(|summary| summary.starts_with("Prepare this thread")
+            .is_some_and(|summary| summary.starts_with("Check this checkout")
                 && !summary.contains("Automation/workflow command")),
         "catalog summaries should use product language, not internal clap framing: {ready}"
     );
@@ -7022,7 +7038,7 @@ fn command_catalog_exposes_public_surface_for_agents() {
         .expect("start command should be cataloged");
     assert_eq!(start["tier"], "everyday");
     assert_eq!(start["help_visibility"], "everyday");
-    for display in ["thread create", "thread promote"] {
+    for display in ["thread create", "thread checkout"] {
         let entry = commands
             .iter()
             .find(|entry| entry["display"] == display)
@@ -7694,8 +7710,6 @@ fn context_get_honors_user_config_principal_not_unknown() {
             "set",
             "--path",
             "main.rs",
-            "--scope",
-            "file",
             "--kind",
             "rationale",
             "-m",
@@ -7744,8 +7758,8 @@ fn context_invalid_scope_uses_typed_advice_json() {
             "set",
             "--path",
             "main.rs",
-            "--scope",
-            "symbol:",
+            "--symbol",
+            "",
             "-m",
             "empty symbol",
         ],
@@ -7774,7 +7788,7 @@ fn context_invalid_scope_uses_typed_advice_json() {
     assert!(
         envelope["hint"]
             .as_str()
-            .is_some_and(|hint| hint.contains("symbol:<name>")),
+            .is_some_and(|hint| hint.contains("--symbol <name>")),
         "context scope hint should explain the valid symbol form: {stderr}"
     );
 }
@@ -7783,6 +7797,7 @@ fn context_invalid_scope_uses_typed_advice_json() {
 fn discuss_resolve_by_edit_emits_resolved_state_json() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
     std::fs::write(temp.path().join("src/lib.rs"), "fn foo() {}\n").unwrap();
     let capture = json_value(temp.path(), &["capture", "-m", "seed"]);
@@ -7794,11 +7809,12 @@ fn discuss_resolve_by_edit_emits_resolved_state_json() {
         temp.path(),
         &[
             "discuss",
-            "--new",
+            "new",
             "--path",
             "src/lib.rs",
             "--symbol",
             "foo",
+            "-m",
             "Please keep this rationale",
             "--state",
             &state_id,
@@ -7845,6 +7861,7 @@ fn discuss_resolve_by_edit_emits_resolved_state_json() {
 fn discuss_open_named_flags_records_thread_ref() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
     std::fs::write(temp.path().join("src/lib.rs"), "fn foo() {}\n").unwrap();
     heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
@@ -7853,11 +7870,12 @@ fn discuss_open_named_flags_records_thread_ref() {
         temp.path(),
         &[
             "discuss",
-            "--new",
+            "new",
             "--path",
             "src/lib.rs",
             "--symbol",
             "foo",
+            "-m",
             "Keep the thread context attached",
             "--thread",
             "refs/heads/feature/foo",
@@ -7873,6 +7891,7 @@ fn discuss_open_named_flags_records_thread_ref() {
 fn discuss_resolve_into_annotation_creates_context_annotation() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
     std::fs::write(temp.path().join("src/lib.rs"), "fn foo() {}\n").unwrap();
     heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
@@ -7880,11 +7899,12 @@ fn discuss_resolve_into_annotation_creates_context_annotation() {
         temp.path(),
         &[
             "discuss",
-            "--new",
+            "new",
             "--path",
             "src/lib.rs",
             "--symbol",
             "foo",
+            "-m",
             "Please preserve this invariant",
         ],
     );
@@ -7901,7 +7921,8 @@ fn discuss_resolve_into_annotation_creates_context_annotation() {
             "discuss",
             "resolve",
             discussion_id,
-            "--into-annotation",
+            "--mode",
+            "into-annotation",
             "--body",
             "The cache key must include visibility",
             "--kind",
@@ -7956,7 +7977,8 @@ fn discuss_resolve_into_annotation_creates_context_annotation() {
             "discuss",
             "resolve",
             discussion_id,
-            "--into-annotation",
+            "--mode",
+            "into-annotation",
             "--body",
             "The cache key must include visibility",
             "--kind",
@@ -7991,6 +8013,7 @@ fn discuss_resolve_into_annotation_creates_context_annotation() {
 fn discuss_write_path_file_body_short_id_and_turn() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::create_dir_all(temp.path().join("src")).unwrap();
     std::fs::write(temp.path().join("src/lib.rs"), "fn greet() {}\n").unwrap();
     heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
@@ -7998,14 +8021,7 @@ fn discuss_write_path_file_body_short_id_and_turn() {
 
     let opened = json_value(
         temp.path(),
-        &[
-            "discuss",
-            "--new",
-            "--path",
-            "src/lib.rs",
-            "--file",
-            "why.md",
-        ],
+        &["discuss", "new", "--path", "src/lib.rs", "--file", "why.md"],
     );
     assert_eq!(opened["output_kind"], "discuss_open");
     assert_eq!(opened["discussion"]["anchor"]["path"], "src/lib.rs");
@@ -8025,11 +8041,12 @@ fn discuss_write_path_file_body_short_id_and_turn() {
     let text = heddle(
         &[
             "discuss",
-            "--new",
+            "new",
             "--path",
             "src/lib.rs",
             "--symbol",
             "greet",
+            "-m",
             "why greet?",
         ],
         Some(temp.path()),
@@ -8045,7 +8062,7 @@ fn discuss_write_path_file_body_short_id_and_turn() {
     );
 
     let verbose = heddle(
-        &["-v", "discuss", "--id", &full_id, "second thought"],
+        &["-v", "discuss", "reply", &full_id, "-m", "second thought"],
         Some(temp.path()),
     )
     .expect("verbose discuss --id");
@@ -8062,10 +8079,11 @@ fn discuss_write_path_file_body_short_id_and_turn() {
         temp.path(),
         &[
             "discuss",
-            "--id",
+            "reply",
             &full_id,
             "--turn",
             "1",
+            "-m",
             "reply to that turn",
         ],
     );
@@ -8642,6 +8660,7 @@ fn agent_presence_explain_json_detects_harness_without_active_presence() {
 fn agent_presence_and_provenance_outputs_match_registered_schemas() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::write(temp.path().join("seed.txt"), "seed\n").unwrap();
     heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
 
@@ -9405,7 +9424,7 @@ fn default_undo_text_hides_batches_and_checkpoint_ids_until_verbose() {
     );
 
     let preview = heddle(
-        &["--output", "text", "undo", "--preview"],
+        &["--output", "text", "undo", "--dry-run"],
         Some(temp.path()),
     )
     .expect("undo preview text");
@@ -9876,11 +9895,11 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
     assert_eq!(envelope["kind"], "git_heddle_thread_diverged");
     assert_eq!(
         envelope["primary_command"],
-        "heddle maintenance fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --dry-run"
     );
     assert_eq!(
         envelope["recovery_commands"],
-        serde_json::json!(["heddle maintenance fsck repair git --ref main --preview"])
+        serde_json::json!(["heddle maintenance fsck repair git --ref main --dry-run"])
     );
     assert!(
         envelope["preserved"]
@@ -9898,7 +9917,7 @@ fn bridge_git_divergence_error_uses_structured_recovery_envelope() {
             "git",
             "--ref",
             "main",
-            "--preview",
+            "--dry-run",
         ])
     );
 }

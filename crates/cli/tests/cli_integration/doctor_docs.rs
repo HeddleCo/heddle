@@ -167,7 +167,7 @@ fn accepts_catalog_global_options_and_non_finite_scope_values() {
         temp.path(),
         "ok.md",
         "Inspect `heddle status --output json --repo .`.\n\
-         Add context with `heddle context set --path src/lib.rs --scope symbol:foo --kind rationale -m note`.\n\
+         Add context with `heddle context set --path src/lib.rs --symbol foo --kind rationale -m note`.\n\
          Install with `heddle integration install codex --harness-install-scope repo`.\n",
     );
 
@@ -282,7 +282,7 @@ fn all_enumerates_markdown_without_git() {
     write_file(
         &root.join("docs"),
         "guide.md",
-        "Use `heddle context set --path X --scope file --kind rationale -m \"y\"`.\n",
+        "Use `heddle context set --path X --kind rationale -m \"y\"`.\n",
     );
     fs::create_dir_all(root.join("target/doc")).unwrap();
     write_file(

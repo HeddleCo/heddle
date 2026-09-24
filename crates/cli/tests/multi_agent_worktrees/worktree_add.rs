@@ -127,7 +127,7 @@ fn thread_promote_preserves_thread_identity() {
             "--output",
             "json",
             "thread",
-            "promote",
+            "checkout",
             "feature/promote-me",
             "--path",
             thread_dir.path().to_str().unwrap(),

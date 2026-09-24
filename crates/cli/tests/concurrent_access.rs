@@ -2,6 +2,9 @@
 //!
 //! Tests for verifying correct behavior under concurrent access.
 
+#[path = "support/mod.rs"]
+mod cli_test_support;
+
 use std::{
     sync::{Arc, Barrier},
     thread,
@@ -18,7 +21,7 @@ use tempfile::TempDir;
 #[test]
 fn test_concurrent_reads() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create some data
     std::fs::write(temp.path().join("data.txt"), "initial").unwrap();
@@ -57,7 +60,7 @@ fn test_concurrent_reads() {
 #[test]
 fn test_concurrent_snapshots() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     let repo = Arc::new(repo);
     let barrier = Arc::new(Barrier::new(5));
@@ -123,7 +126,7 @@ fn test_concurrent_snapshots() {
 #[test]
 fn test_concurrent_track_operations() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create initial state
     std::fs::write(temp.path().join("base.txt"), "base").unwrap();
@@ -171,7 +174,7 @@ fn test_concurrent_track_operations() {
 #[test]
 fn test_concurrent_read_write() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create initial state
     std::fs::write(temp.path().join("data.txt"), "initial").unwrap();
@@ -219,7 +222,7 @@ fn test_concurrent_read_write() {
 #[test]
 fn test_concurrent_goto() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create multiple states
     let mut states = Vec::new();
@@ -313,7 +316,7 @@ fn test_concurrent_object_store() {
 #[test]
 fn test_concurrent_snapshots_same_parent() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create base state
     std::fs::write(temp.path().join("base.txt"), "base").unwrap();
@@ -378,7 +381,7 @@ fn test_concurrent_snapshots_same_parent() {
 #[test]
 fn test_concurrent_marker_operations() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create state
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
@@ -422,7 +425,7 @@ fn test_concurrent_marker_operations() {
 #[test]
 fn test_concurrent_worktree_modifications() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Initial snapshot
     std::fs::write(temp.path().join("file.txt"), "initial").unwrap();
@@ -508,7 +511,7 @@ fn test_thread_safe_blob_storage() {
 #[test]
 fn test_concurrent_state_retrieval() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create many states
     let mut state_ids = Vec::new();
@@ -551,7 +554,7 @@ fn test_concurrent_state_retrieval() {
 #[test]
 fn test_concurrent_repository_open() {
     let temp = TempDir::new().unwrap();
-    let _ = Repository::init_default(temp.path()).unwrap();
+    let _ = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     let barrier = Arc::new(Barrier::new(10));
     let mut handles = Vec::new();

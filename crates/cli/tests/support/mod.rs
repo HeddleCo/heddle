@@ -105,6 +105,24 @@ pub use sley::{
 pub use sley_refs::ReflogEntry;
 pub use tempfile::TempDir;
 
+/// Initialize a repository used directly by integration tests with an explicit
+/// principal, since library snapshot paths do not load CLI user config.
+pub fn init_test_repository(path: &Path) -> objects::error::Result<Repository> {
+    Repository::init_default(path)?;
+    seed_test_repo_principal(path)?;
+    Repository::open(path)
+}
+
+/// Give CLI fixtures an explicit repository principal for commands whose
+/// persistence layer requires local attribution.
+pub fn seed_test_repo_principal(path: &Path) -> objects::error::Result<()> {
+    let repo = Repository::open(path)?;
+    let mut config = repo.config().clone();
+    config.set_principal(TEST_PRINCIPAL_NAME, TEST_PRINCIPAL_EMAIL);
+    config.save(&repo.heddle_dir().join("config.toml"))?;
+    Ok(())
+}
+
 pub trait SleyIntegrationRepoExt {
     fn find_commit(&self, oid: ObjectId) -> Result<TestCommit, String>;
     fn find_object(&self, oid: ObjectId) -> Result<(), String>;
@@ -489,7 +507,7 @@ pub fn heddle_output(args: &[&str], cwd: Option<&std::path::Path>) -> Result<Out
     };
     cmd.current_dir(&dir);
     let config_path = default_test_user_config_path(&dir);
-    seed_default_test_user_config(&config_path, &dir)?;
+    seed_default_test_user_config(&config_path)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(&dir));
     cmd.env("HEDDLE_FSMONITOR", "off");
@@ -544,7 +562,7 @@ pub fn heddle_output_with_env_removed(
     };
     cmd.current_dir(&dir);
     let config_path = default_test_user_config_path(&dir);
-    seed_default_test_user_config(&config_path, &dir)?;
+    seed_default_test_user_config(&config_path)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(&dir));
     cmd.env("HEDDLE_FSMONITOR", "off");
@@ -568,7 +586,7 @@ pub fn heddle_output_with_stdin(
     cmd.args(args);
     cmd.current_dir(cwd);
     let config_path = default_test_user_config_path(cwd);
-    seed_default_test_user_config(&config_path, cwd)?;
+    seed_default_test_user_config(&config_path)?;
     cmd.env("HEDDLE_CONFIG", config_path);
     cmd.env("HOME", default_test_home_path(cwd));
     cmd.env("HEDDLE_FSMONITOR", "off");
@@ -679,14 +697,8 @@ pub fn git_test_signature() -> Signature {
     }
 }
 
-pub fn seed_default_test_user_config(
-    config_path: &std::path::Path,
-    cwd: &std::path::Path,
-) -> Result<(), String> {
+pub fn seed_default_test_user_config(config_path: &std::path::Path) -> Result<(), String> {
     if config_path.exists() {
-        return Ok(());
-    }
-    if cwd.join(".git").exists() {
         return Ok(());
     }
     if let Some(parent) = config_path.parent() {

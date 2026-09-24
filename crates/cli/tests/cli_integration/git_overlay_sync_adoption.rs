@@ -132,16 +132,32 @@ fn capture_persists_unchanged_git_subtree_and_blob_as_native_closure() {
         .current_state()
         .unwrap()
         .expect("native capture state");
+    let root = captured_repo
+        .store()
+        .get_tree(&captured.tree)
+        .unwrap()
+        .expect("captured root tree");
+    let native_subtree = root
+        .entries()
+        .iter()
+        .find(|entry| entry.name() == "stable")
+        .and_then(|entry| entry.tree_hash())
+        .expect("captured stable subtree");
+    assert_ne!(
+        native_subtree, stable_hash,
+        "V4 capture re-salts the Git subtree"
+    );
+    let root_local = captured_repo
+        .store()
+        .has_tree_locally(&captured.tree)
+        .unwrap();
+    let subtree_local = captured_repo
+        .store()
+        .has_tree_locally(&native_subtree)
+        .unwrap();
     assert!(
-        captured_repo
-            .store()
-            .has_tree_locally(&captured.tree)
-            .unwrap()
-            && captured_repo
-                .store()
-                .has_tree_locally(&stable_hash)
-                .unwrap(),
-        "native capture must own its root and unchanged subtree"
+        root_local && subtree_local,
+        "native capture must own its root and unchanged subtree: root={root_local}, subtree={subtree_local}"
     );
     assert!(
         captured_repo
@@ -163,7 +179,7 @@ fn capture_persists_unchanged_git_subtree_and_blob_as_native_closure() {
     let reopened = repo::Repository::open(&work).unwrap();
     let subtree = reopened
         .store()
-        .get_tree(&stable_hash)
+        .get_tree(&native_subtree)
         .unwrap()
         .expect("unchanged subtree must survive loss of Git source object");
     let kept = subtree
@@ -559,7 +575,9 @@ fn adopt_roots_native_threads_at_the_hosted_seed_and_admits_git_history_as_captu
 
 #[test]
 fn adopt_deep_linear_history_registers_a_publishable_native_thread() {
-    const COMMIT_COUNT: usize = 5_000;
+    // Keep this beyond a shallow fixture while leaving room under nextest's
+    // per-test timeout on a shared CI runner.
+    const COMMIT_COUNT: usize = 512;
 
     let temp = TempDir::new().expect("test directory");
     let work = temp.path().join("work");

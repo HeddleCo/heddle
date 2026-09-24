@@ -7,6 +7,9 @@
 //! stack snapshot`) and the agentic harness hook can rely on a stable
 //! discovery API.
 
+#[path = "support/mod.rs"]
+mod cli_test_support;
+
 use chrono::Utc;
 use objects::object::ThreadName;
 use repo::{
@@ -54,7 +57,7 @@ fn save_thread_record(
 #[test]
 fn compute_stacks_finds_all_roots_and_descendants() {
     let temp = tempfile::TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     // Two disjoint stacks:
@@ -118,7 +121,7 @@ fn compute_stacks_finds_all_roots_and_descendants() {
 #[test]
 fn thread_stack_for_walks_up_to_root_from_any_descendant() {
     let temp = tempfile::TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     save_thread_record(
@@ -155,14 +158,14 @@ fn thread_stack_for_walks_up_to_root_from_any_descendant() {
 #[test]
 fn thread_stack_for_returns_none_for_unknown_thread() {
     let temp = tempfile::TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
     assert!(repo.thread_stack_for("does-not-exist").unwrap().is_none());
 }
 
 #[test]
 fn plan_rebase_emits_bfs_steps_against_real_thread_records() {
     let temp = tempfile::TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     std::fs::write(temp.path().join("file.txt"), "base").unwrap();
@@ -238,7 +241,7 @@ fn plan_rebase_emits_bfs_steps_against_real_thread_records() {
 #[test]
 fn plan_rebase_rejects_non_root_target() {
     let temp = tempfile::TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     save_thread_record(
@@ -273,7 +276,7 @@ fn plan_rebase_rejects_non_root_target() {
 #[test]
 fn repository_snapshot_round_trips_through_json() {
     let temp = tempfile::TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     save_thread_record(
@@ -313,7 +316,7 @@ fn repository_snapshot_round_trips_through_json() {
 #[test]
 fn stack_next_action_all_clean_returns_ready() {
     let temp = tempfile::TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     save_thread_record(
@@ -349,7 +352,7 @@ fn stack_next_action_all_clean_returns_ready() {
 #[test]
 fn stack_next_action_one_blocked_reports_blocked() {
     let temp = tempfile::TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     save_thread_record(
@@ -388,7 +391,7 @@ fn stack_next_action_one_blocked_reports_blocked() {
 #[test]
 fn stack_next_action_top_active_means_waiting_on_review() {
     let temp = tempfile::TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     // All threads ready EXCEPT the top, which is still Active — the stack
@@ -433,7 +436,7 @@ fn repository_snapshot_for_stack_scopes_to_one_stack_only() {
     // `heddle stack snapshot --thread feat-a` leaks sibling-stack data
     // into per-thread tooling output.
     let temp = tempfile::TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
     let manager = ThreadManager::new(repo.heddle_dir());
 
     save_thread_record(

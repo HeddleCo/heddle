@@ -5,6 +5,9 @@
 //! the lifecycle a stack-aware rebase produces — start → resolve →
 //! finish / abort / carry_forward.
 
+#[path = "support/mod.rs"]
+mod cli_test_support;
+
 use objects::{
     object::{StateId, ThreadName},
     store::ObjectStore,
@@ -16,7 +19,7 @@ use tempfile::TempDir;
 #[test]
 fn test_detect_divergent_history() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create initial state on main
     std::fs::write(temp.path().join("common.txt"), "common base").unwrap();
@@ -48,7 +51,7 @@ fn test_detect_divergent_history() {
 #[test]
 fn test_find_common_ancestor() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create chain: A -> B -> C
     std::fs::write(temp.path().join("file.txt"), "A").unwrap();
@@ -74,7 +77,7 @@ fn test_find_common_ancestor() {
 #[test]
 fn test_three_way_merge_base() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Base: common ancestor
     std::fs::write(temp.path().join("base.txt"), "base content").unwrap();
@@ -98,7 +101,7 @@ fn test_three_way_merge_base() {
 #[test]
 fn test_detect_conflicting_modifications() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Base with file
     std::fs::write(temp.path().join("conflict.txt"), "base").unwrap();
@@ -121,7 +124,7 @@ fn test_detect_conflicting_modifications() {
 #[test]
 fn test_non_conflicting_changes() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Base
     std::fs::write(temp.path().join("base.txt"), "base").unwrap();
@@ -146,7 +149,7 @@ fn test_non_conflicting_changes() {
 #[test]
 fn test_fast_forward_detection() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Linear history: A -> B -> C
     std::fs::write(temp.path().join("file.txt"), "A").unwrap();
@@ -168,7 +171,7 @@ fn test_fast_forward_detection() {
 #[test]
 fn test_modify_vs_delete_conflict() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Base with file
     std::fs::write(temp.path().join("file.txt"), "content").unwrap();
@@ -190,7 +193,7 @@ fn test_modify_vs_delete_conflict() {
 #[test]
 fn test_rename_detection_in_merge() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Base with file
     std::fs::write(temp.path().join("oldname.txt"), "content").unwrap();
@@ -216,7 +219,7 @@ fn test_rename_detection_in_merge() {
 #[test]
 fn test_octopus_merge_structure() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create base
     std::fs::write(temp.path().join("base.txt"), "base").unwrap();
@@ -244,7 +247,7 @@ fn test_octopus_merge_structure() {
 #[test]
 fn test_binary_file_merge() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Base with binary file
     std::fs::write(temp.path().join("image.bin"), vec![0u8, 1, 2, 3, 4]).unwrap();
@@ -266,7 +269,7 @@ fn test_binary_file_merge() {
 #[test]
 fn test_directory_file_conflict() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Base
     std::fs::write(temp.path().join("item.txt"), "file content").unwrap();
@@ -290,7 +293,7 @@ fn test_directory_file_conflict() {
 // ── MergeState lifecycle (stack-aware rebase paths) ─────────────────────
 
 fn merge_manager(temp: &TempDir) -> (Repository, MergeStateManager) {
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
     let manager = repo.merge_state_manager();
     (repo, manager)
 }

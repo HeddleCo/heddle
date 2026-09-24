@@ -704,7 +704,7 @@ fn test_undo_recover_refuses_when_preserved_state_is_missing() {
 
 /// Dry-run reports the pending undo without changing repository state.
 #[test]
-fn test_undo_dry_run_alias_does_not_apply() {
+fn test_undo_dry_run_does_not_apply() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
 
@@ -729,19 +729,10 @@ fn test_undo_dry_run_alias_does_not_apply() {
         "v2",
         "--dry-run must not touch the worktree"
     );
-
-    // The same operation under the original `--preview` spelling still works
-    // (we kept the existing flag rather than renaming it).
-    let out_preview = heddle_must_succeed(&["undo", "--preview"], temp.path());
-    assert!(
-        out_preview.to_lowercase().contains("would undo"),
-        "--preview must keep working: {out_preview}"
-    );
-    assert_eq!(head_short(temp.path()), before);
 }
 
 #[test]
-fn test_undo_hard_preview_previews_without_applying() {
+fn test_undo_hard_dry_run_previews_without_applying() {
     let temp = TempDir::new().unwrap();
     heddle_must_succeed(&["init"], temp.path());
     std::fs::write(temp.path().join("a.txt"), "v1").unwrap();
@@ -750,20 +741,20 @@ fn test_undo_hard_preview_previews_without_applying() {
     heddle_must_succeed(&["capture", "-m", "second"], temp.path());
     let before = head_short(temp.path());
 
-    let out = heddle_must_succeed(&["undo", "--hard", "--preview"], temp.path());
+    let out = heddle_must_succeed(&["undo", "--hard", "--dry-run"], temp.path());
     assert_eq!(
         head_short(temp.path()),
         before,
-        "--hard --preview must not move HEAD"
+        "--hard --dry-run must not move HEAD"
     );
     assert!(
         out.to_lowercase().contains("would undo"),
-        "--hard --preview must preview: {out}"
+        "--hard --dry-run must preview: {out}"
     );
     assert_eq!(
         std::fs::read_to_string(temp.path().join("a.txt")).unwrap(),
         "v2",
-        "--hard --preview must not rewind the worktree"
+        "--hard --dry-run must not rewind the worktree"
     );
 }
 
@@ -1294,8 +1285,8 @@ fn test_undo_redact_removes_exact_record_when_multiple_target_same_triple() {
 }
 
 #[test]
-fn test_undo_preview_refuses_redact_without_allow_flag() {
-    // `heddle undo --preview` must mirror the real command's refusals
+fn test_undo_dry_run_refuses_redact_without_allow_flag() {
+    // `heddle undo --dry-run` must mirror the real command's refusals
     // rather than optimistically saying "Would undo ..." Pre-fix it
     // short-circuited before the redaction safety check and lied about
     // the outcome.
@@ -1314,8 +1305,8 @@ fn test_undo_preview_refuses_redact_without_allow_flag() {
         temp.path(),
     );
 
-    let err = heddle(&["undo", "--preview"], Some(temp.path())).expect_err(
-        "undo --preview against a Redact batch must refuse without --allow-redact-undo",
+    let err = heddle(&["undo", "--dry-run"], Some(temp.path())).expect_err(
+        "undo --dry-run against a Redact batch must refuse without --allow-redact-undo",
     );
     let lower = err.to_lowercase();
     assert!(
@@ -1329,10 +1320,10 @@ fn test_undo_preview_refuses_redact_without_allow_flag() {
 }
 
 #[test]
-fn test_undo_preview_refuses_redact_when_blob_already_purged() {
-    // Parallel to the non-preview case: undoing across a purged
+fn test_undo_dry_run_refuses_redact_when_blob_already_purged() {
+    // Parallel to the non-dry-run case: undoing across a purged
     // redaction must refuse with the irreversibility/audit-trail
-    // message, and `--preview` must surface that refusal honestly.
+    // message, and `--dry-run` must surface that refusal honestly.
     let (temp, state) = setup_repo_with_secret();
 
     heddle_must_succeed(
@@ -1361,10 +1352,10 @@ fn test_undo_preview_refuses_redact_when_blob_already_purged() {
     );
 
     let err = heddle(
-        &["undo", "-n", "2", "--preview", "--allow-redact-undo"],
+        &["undo", "-n", "2", "--dry-run", "--allow-redact-undo"],
         Some(temp.path()),
     )
-    .expect_err("undo --preview across a purged redaction must refuse");
+    .expect_err("undo --dry-run across a purged redaction must refuse");
     let lower = err.to_lowercase();
     assert!(
         lower.contains("purge") || lower.contains("irreversible"),
@@ -1373,9 +1364,9 @@ fn test_undo_preview_refuses_redact_when_blob_already_purged() {
 }
 
 #[test]
-fn test_redo_preview_refuses_redact_chain() {
-    // Mirror of the undo `--preview` honesty rule on the redo side:
-    // `heddle undo --redo --preview` against a previously-undone Redact must
+fn test_redo_dry_run_refuses_redact_chain() {
+    // Mirror of the undo `--dry-run` honesty rule on the redo side:
+    // `heddle undo --redo --dry-run` against a previously-undone Redact must
     // surface the same "no re-apply path" refusal the real `redo`
     // would surface, not advertise "Would redo …".
     let (temp, state) = setup_repo_with_secret();
@@ -1395,8 +1386,8 @@ fn test_redo_preview_refuses_redact_chain() {
     heddle(&["undo", "--allow-redact-undo"], Some(temp.path()))
         .expect("undo of Redact must succeed with --allow-redact-undo");
 
-    let err = heddle(&["undo", "--redo", "--preview"], Some(temp.path()))
-        .expect_err("redo --preview of an undone Redact must refuse");
+    let err = heddle(&["undo", "--redo", "--dry-run"], Some(temp.path()))
+        .expect_err("redo --dry-run of an undone Redact must refuse");
     let lower = err.to_lowercase();
     assert!(
         lower.contains("redact"),
@@ -1820,14 +1811,14 @@ fn test_undo_thread_refresh_restores_base_state() {
     );
 }
 
-/// `heddle undo --preview` (alias `--dry-run`) must surface the
+/// `heddle undo --dry-run` must surface the
 /// worktree-attached refusal pre-mutation, matching the same
-/// preview-honesty rule used by the redaction gate at undo.rs:88.
-/// Pre-fix `--preview` would happily print "Would undo …" for a chain
+/// dry-run honesty rule used by the redaction gate at undo.rs:88.
+/// Pre-fix `--dry-run` would happily print "Would undo …" for a chain
 /// the real `undo` would reject, then the user runs the real command
 /// and is surprised by the refusal.
 #[test]
-fn test_undo_preview_surfaces_worktree_refusal() {
+fn test_undo_dry_run_surfaces_worktree_refusal() {
     let temp = bootstrap_repo_with_initial_state();
 
     let wt_path = temp.path().join("feature-wt");
@@ -1843,8 +1834,8 @@ fn test_undo_preview_surfaces_worktree_refusal() {
         temp.path(),
     );
 
-    let err = heddle(&["undo", "--preview"], Some(temp.path())).expect_err(
-        "`undo --preview` must refuse a worktree-attached ThreadCreate \
+    let err = heddle(&["undo", "--dry-run"], Some(temp.path())).expect_err(
+        "`undo --dry-run` must refuse a worktree-attached ThreadCreate \
                      instead of advertising 'Would undo …'",
     );
     let lower = err.to_lowercase();
