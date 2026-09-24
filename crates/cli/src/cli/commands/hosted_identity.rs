@@ -659,7 +659,7 @@ fn write_whoami_human(
                 identity.available_actions.join(", ")
             )?;
         }
-        if let Some(lock) = &None::<hosted_client::hosted_runtime::whoami::WhoamiBillingLock> {
+        if let Some(lock) = &output.billing_lock {
             write!(writer, "Account locked")?;
             if lock.reason == "ACCOUNT_BILLING_LOCK_REASON_OVER_FREE_CAP_WITHOUT_PAID_PLAN" {
                 write!(writer, " (over the Free cap without a paid plan)")?;

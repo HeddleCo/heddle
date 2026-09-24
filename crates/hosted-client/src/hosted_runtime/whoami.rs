@@ -266,13 +266,18 @@ async fn fetch_identity(
 async fn fetch_identity_snapshot(
     client: &mut super::hosted::HostedClient,
 ) -> Result<(ObservedHostedIdentity, Option<WhoamiBillingLock>)> {
-    let (principal, credential) = client
-        .observe_current_identity()
+    let response = client
+        .get_identity()
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
-    let _ = client.list_spools(false).await;
+    let principal = response
+        .identity
+        .ok_or_else(|| anyhow::anyhow!("identity snapshot omitted principal"))?;
+    let credential = response
+        .current_credential
+        .ok_or_else(|| anyhow::anyhow!("identity snapshot omitted current credential"))?;
     let identity = project_current_identity(principal, credential)?;
-    Ok((identity, None))
+    Ok((identity, response.billing_lock.map(project_billing_lock)))
 }
 
 fn project_billing_lock(lock: api::heddle::api::common::AccountBillingLock) -> WhoamiBillingLock {

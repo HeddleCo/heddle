@@ -21,7 +21,7 @@ impl HostedClient {
 
     /// Resolve the acting identity for the bound bearer (subject, staff/service
     /// markers, session, server-side scope, and directly-held resource roles).
-    /// Read-only; used by flows that need a live identity roster.
+    /// Read-only observation for callers that consume identity events.
     pub async fn observe_current_identity(
         &mut self,
     ) -> Result<

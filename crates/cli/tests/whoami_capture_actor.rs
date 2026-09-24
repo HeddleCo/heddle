@@ -238,3 +238,19 @@ fn whoami_help_names_capture_actor_and_hosted_auth_as_different_objects() {
         "help must say whoami is observe-only and point at auth login:\n{text}"
     );
 }
+
+#[test]
+fn whoami_verbose_does_not_add_spool_inventory() {
+    let temp = TempDir::new().expect("tempdir");
+    let output = isolated_command(
+        temp.path(),
+        temp.path(),
+        &["whoami", "--verbose", "--output", "json"],
+    )
+    .output()
+    .expect("run verbose whoami");
+    assert_success(&output, "whoami --verbose --output json");
+    let json: Value = serde_json::from_slice(&output.stdout).expect("whoami JSON");
+    assert_eq!(json["output_kind"], "whoami");
+    assert!(json.get("spools").is_none(), "{json}");
+}
