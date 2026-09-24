@@ -408,8 +408,19 @@ fn es256_passkey_accepts_valid_high_s_assertion_but_rejects_tampering() {
     proof.signature = high.to_der().as_bytes().to_vec();
     verify(&value, &state).expect("valid high-S WebAuthn assertion");
 
-    value.passkey_delegation.as_mut().expect("assertion").signature[0] ^= 1;
-    assert!(verify(&value, &state).is_err(), "tampered assertion must fail");
+    let mut tampered_r = high.r().to_bytes();
+    tampered_r[31] ^= 1;
+    let tampered = p256::ecdsa::Signature::from_scalars(tampered_r, high.s().to_bytes())
+        .expect("well-formed tampered signature");
+    value
+        .passkey_delegation
+        .as_mut()
+        .expect("assertion")
+        .signature = tampered.to_der().as_bytes().to_vec();
+    assert!(
+        verify(&value, &state).is_err(),
+        "tampered assertion must fail"
+    );
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
