@@ -24,6 +24,7 @@ const TEMPLATE_READ_OPERATIONS: &[&str] = &[
     "ResolveResources",
     "Fetch",
     "ObserveIdentity",
+    "GetIdentity",
     "ObserveOwnership",
     "ObserveWorkspace",
     "ListSpools",

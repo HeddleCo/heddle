@@ -2901,6 +2901,7 @@ mod tests {
         assert!(contributor.contains(&"OpenDiscussion".to_string()));
         assert!(!contributor.contains(&"CreateSignupInvitation".to_string()));
         assert!(contributor.contains(&"ObserveIdentity".to_string()));
+        assert!(contributor.contains(&"GetIdentity".to_string()));
 
         let ci = resolve_agent_operations(Some(AgentTemplate::CiLanding), Vec::new())
             .expect("ci-landing template resolves")
