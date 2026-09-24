@@ -170,6 +170,16 @@ pub(crate) mod mocks {
     }
 }
 
+/// Initialise a fixture repository with a configured principal. Identity is
+/// never fabricated, so any test that records history must declare one.
+fn init_test_repository(path: &Path) -> repo::Result<Repository> {
+    let repo = Repository::init_default(path)?;
+    let mut config = repo.config().clone();
+    config.set_principal("Heddle Test", "test@heddle.dev");
+    config.save(&repo.heddle_dir().join("config.toml"))?;
+    Repository::open(path)
+}
+
 /// Build a repository with a small, deterministic tree:
 ///
 /// ```text
@@ -181,7 +191,7 @@ pub(crate) mod mocks {
 /// ```
 fn fixture() -> (TempDir, Repository) {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     fs::write(temp.path().join("hello.txt"), b"world").unwrap();
     fs::create_dir_all(temp.path().join("nested")).unwrap();
     fs::write(temp.path().join("nested/inner.txt"), b"deep").unwrap();
@@ -223,7 +233,7 @@ fn open_mount() -> (TempDir, ContentAddressedMount) {
 
 fn mount_with_gitlink() -> (TempDir, ContentAddressedMount, GitObjectId) {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     let target: GitObjectId = "0303030303030303030303030303030303030303"
         .parse()
         .expect("git oid");
@@ -399,7 +409,7 @@ fn write_to_overlay_then_read_back() {
 /// shape of a captured blob after a partial overwrite.
 fn mount_with_seed(path: &str, content: &[u8]) -> (TempDir, ContentAddressedMount) {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     let full = temp.path().join(path);
     if let Some(parent) = full.parent() {
         fs::create_dir_all(parent).unwrap();
@@ -579,7 +589,7 @@ fn enumerate_serves_size_without_loading_blob_bytes() {
     // wrapped around the FsStore. enumerate() must return sizes
     // without ever calling get_blob — only blob_size.
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     fs::write(temp.path().join("a.txt"), b"first").unwrap();
     fs::write(temp.path().join("b.txt"), b"second-larger-payload").unwrap();
     fs::write(temp.path().join("c.txt"), vec![0u8; 4096]).unwrap();
@@ -650,7 +660,7 @@ fn enumerate_serves_size_without_loading_blob_bytes() {
 /// (no captured state beyond the seeded empty-tree main).
 fn fresh_mount() -> (TempDir, ContentAddressedMount) {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     let mount = ContentAddressedMount::new(repo, "main").unwrap();
     (temp, mount)
 }
@@ -854,7 +864,7 @@ fn cross_thread_blob_dedup() {
     // content-addressed: the same bytes hash to the same blob_oid,
     // so the store ends up with exactly one blob — not two.
     let temp = TempDir::new().unwrap();
-    let repo_a = Repository::init_default(temp.path()).unwrap();
+    let repo_a = init_test_repository(temp.path()).unwrap();
     // Add a sibling thread by reusing the seeded `main` head.
     let main_id = repo_a
         .refs()
@@ -1043,7 +1053,7 @@ fn drop_joins_sweep_thread_cleanly() {
 #[test]
 fn crash_recovery_warm_durable_hot_lost() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     {
         let mount = ContentAddressedMount::new(repo, "main")
             .unwrap()
@@ -1090,7 +1100,7 @@ fn crash_recovery_warm_durable_hot_lost() {
 #[test]
 fn cross_thread_blob_dedup_at_scale() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = init_test_repository(temp.path()).unwrap();
     let main_id = repo
         .refs()
         .get_thread(&ThreadName::new("main"))
@@ -3288,7 +3298,7 @@ mod fuse_smoke {
             "fuse_open_close_read_round_trip requires /dev/fuse"
         );
         let repo_dir = TempDir::new().unwrap();
-        let repo = Repository::init_default(repo_dir.path()).unwrap();
+        let repo = init_test_repository(repo_dir.path()).unwrap();
         std::fs::write(repo_dir.path().join("seed.txt"), b"hello").unwrap();
         repo.snapshot(Some("seed".into()), None).unwrap();
 

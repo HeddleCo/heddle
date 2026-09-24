@@ -8,6 +8,38 @@ use repo::device_catalog::{
 };
 
 use super::{DeviceRpc, account_auth::AccountSession, stream::ObservationAuthority};
+
+#[derive(Clone, PartialEq, Message)]
+struct RawCreateSpoolGenesis {
+    #[prost(bytes = "vec", repeated, tag = "5")]
+    owner_genesis: Vec<Vec<u8>>,
+}
+
+fn decode_create_spool_request(body: &[u8]) -> Result<CreateSpoolRequest> {
+    let raw = RawCreateSpoolGenesis::decode(body).context("decode raw CreateSpool genesis")?;
+    let [genesis_bytes] = raw.owner_genesis.as_slice() else {
+        bail!("CreateSpool requires exactly one raw owner genesis");
+    };
+    let genesis =
+        heddleco_capability_verifier::creation::decode_spool_owner_genesis_for_verification(
+            genesis_bytes,
+        )
+        .context("verify raw CreateSpool genesis")?;
+    ensure!(
+        genesis.encode_to_vec().as_slice() == genesis_bytes.as_slice(),
+        "CreateSpool owner genesis protobuf is not canonical"
+    );
+    let request = CreateSpoolRequest::decode(body)?;
+    ensure!(
+        matches!(
+            &request.ownership,
+            Some(create_spool_request::Ownership::OwnerGenesis(decoded)) if decoded == &genesis
+        ),
+        "CreateSpool owner genesis differs from raw request"
+    );
+    Ok(request)
+}
+
 impl DeviceRpc {
     pub(super) fn account_command(
         &self,
@@ -15,6 +47,11 @@ impl DeviceRpc {
         method: &str,
         body: &[u8],
     ) -> Result<Vec<u8>> {
+        if method.ends_with("/GetIdentity") {
+            return Ok(self
+                .get_identity(session, &GetIdentityRequest::decode(body)?)?
+                .encode_to_vec());
+        }
         if method.ends_with("/IntrospectCredential") {
             return Ok(self
                 .introspect(session, &IntrospectCredentialRequest::decode(body)?)?
@@ -40,7 +77,7 @@ impl DeviceRpc {
         }
         match method.rsplit('/').next().context("method")? {
             "CreateSpool" => {
-                let request = CreateSpoolRequest::decode(body)?;
+                let request = decode_create_spool_request(body)?;
                 let response: SpoolMutationResponse = catalog.mutate(
                     &session.principal,
                     method,
@@ -284,12 +321,13 @@ impl DeviceRpc {
         if let Some(proof) = &genesis.delegated_creation {
             let facts = repo::admit_fresh_spool_creation(genesis, &owner, now)?;
             let statement = proof.statement.as_ref().context("creation statement")?;
-            let issuer = proof
-                .mint_root_attachment
-                .as_ref()
-                .and_then(|a| a.attachment.as_ref())
-                .and_then(|a| a.mint_root_key.as_ref())
-                .unwrap_or(owner.authority_key());
+            let issuer = match proof.mint_root_association.as_ref() {
+                Some(api::heddle::api::v1alpha2::spool_creation_proof::MintRootAssociation::OwnerMintRootAttachment(a)) =>
+                    a.attachment.as_ref().and_then(|a| a.mint_root_key.as_ref()),
+                Some(api::heddle::api::v1alpha2::spool_creation_proof::MintRootAssociation::PasskeyMintRootAttachment(a)) =>
+                    a.grant.as_ref().and_then(|g| g.mint_root_key.as_ref()),
+                None => None,
+            }.unwrap_or(owner.authority_key());
             if issuer.public_key == session.root.to_bytes() {
                 // The request already proved this exact mint root against the
                 // locally enrolled owner, including a fresh passkey delegation.
@@ -369,7 +407,7 @@ impl DeviceRpc {
         }
         repository.verify_and_pin_owner_genesis(
             2,
-            Some(genesis),
+            Some(&genesis.encode_to_vec()),
             &path.split('/').map(str::to_owned).collect::<Vec<_>>(),
         )?;
         let overview = spool_in(tx, id)?.context("created Spool")?.overview;
@@ -417,6 +455,7 @@ impl DeviceRpc {
         receipt
     }
 }
+
 pub(super) fn scope_id(reference: Option<&SpoolRef>) -> Result<uuid::Uuid> {
     let id = uuid::Uuid::parse_str(&reference.context("Spool reference required")?.id)?;
     ensure!(!id.is_nil(), "Spool identity required");
@@ -434,4 +473,35 @@ fn bookmark_spool(reference: Option<&BookmarkRef>) -> Result<uuid::Uuid> {
         None => None,
     };
     scope_id(scope)
+}
+
+#[cfg(test)]
+mod raw_creation_tests {
+    use super::*;
+
+    #[test]
+    fn create_spool_rejects_both_raw_mint_root_arms() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../capability-verifier/tests/fixtures/browser_spool_creation_interop.json"
+        ))
+        .expect("creation fixture");
+        let valid = hex::decode(
+            fixture["signed_spool_owner_genesis_hex"]
+                .as_str()
+                .expect("signed genesis"),
+        )
+        .expect("genesis bytes");
+        // A first proof occurrence supplies the passkey arm. The signed,
+        // valid owner arm in the next occurrence survives Prost's oneof merge.
+        let mut wire = vec![0x1a, 0x02, 0x32, 0x00];
+        wire.extend_from_slice(&valid);
+        let unchecked = SignedSpoolOwnerGenesis::decode(wire.as_slice()).expect("Prost merge");
+        repo::verify_spool_owner_genesis(&unchecked).expect("surviving owner arm verifies");
+        let body = RawCreateSpoolGenesis {
+            owner_genesis: vec![wire],
+        }
+        .encode_to_vec();
+        assert!(CreateSpoolRequest::decode(body.as_slice()).is_ok());
+        assert!(decode_create_spool_request(&body).is_err());
+    }
 }

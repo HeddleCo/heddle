@@ -6,7 +6,7 @@ use biscuit_auth::{Biscuit, PublicKey, builder::BlockBuilder};
 use crate::{
     Error, Result, VerifiedOwnerState,
     thread_control_authority::{self as original, Context, Revocation, VerifiedAuthor},
-    wire::SignedMintRootAttachment,
+    wire::{SignedOwnerMintRootAttachment, thread_control_authority::MintRootAssociation},
 };
 
 /// Verifier-owned request selector. Credentials may check, never assert it.
@@ -168,33 +168,50 @@ fn inspect_mint_provenance(
     account: &[u8; 16],
 ) -> Result<()> {
     if envelope.mint_root_public_key == original_owner.authority_key().public_key {
-        if envelope.mint_root_attachment.is_some() {
+        if envelope.mint_root_association.is_some() {
             return Err(invalid("direct original root has unrelated attachment"));
         }
         return Ok(());
     }
-    let signed = envelope
-        .mint_root_attachment
-        .as_ref()
-        .ok_or_else(|| invalid("original mint identity attachment required"))?;
-    let body = signed
-        .attachment
-        .as_ref()
-        .ok_or_else(|| invalid("original mint attachment missing"))?;
-    let issuer = current.provenance_issuer(&body.owner_state_hash, body.owner_sequence)?;
-    if body.account_uuid != account
-        || body.owner_key.as_ref() != Some(issuer)
-        || body
-            .mint_root_key
-            .as_ref()
-            .is_none_or(|key| key.public_key != envelope.mint_root_public_key)
-    {
-        return Err(invalid(
-            "original mint provenance differs from independently pinned account",
-        ));
+    match envelope.mint_root_association.as_ref() {
+        Some(MintRootAssociation::OwnerMintRootAttachment(signed)) => {
+            let body = signed
+                .attachment
+                .as_ref()
+                .ok_or_else(|| invalid("original mint attachment missing"))?;
+            let issuer = current.provenance_issuer(&body.owner_state_hash, body.owner_sequence)?;
+            if body.account_uuid != account
+                || body.owner_key.as_ref() != Some(issuer)
+                || body
+                    .mint_root_key
+                    .as_ref()
+                    .is_none_or(|key| key.public_key != envelope.mint_root_public_key)
+            {
+                return Err(invalid(
+                    "original mint provenance differs from independently pinned account",
+                ));
+            }
+            let canonical = crate::creation::canonical_mint_root_attachment(body)?;
+            crate::creation::verify_mint_root_signature(signed, issuer, &canonical)
+        }
+        Some(MintRootAssociation::PasskeyMintRootAttachment(signed)) => {
+            let grant = signed
+                .grant
+                .as_ref()
+                .ok_or_else(|| invalid("original passkey grant missing"))?;
+            // This path inspects lineage only; fresh admission checks the real
+            // clock. The grant start checks shape and signature without claiming
+            // that an historical admission actually happened.
+            crate::passkey_delegation::verify_mint_delegation(
+                signed,
+                original_owner,
+                account,
+                &envelope.mint_root_public_key,
+                grant.not_before_unix_seconds,
+            )
+        }
+        None => Err(invalid("original mint identity attachment required")),
     }
-    let canonical = crate::creation::canonical_mint_root_attachment(body)?;
-    crate::creation::verify_mint_root_signature(signed, body, issuer, &canonical)
 }
 /// Verify current explicit acceptance with all existing capability restrictions.
 /// This returns current accepting authority, never relabels the original actor.
@@ -204,7 +221,7 @@ pub fn verify_accepting_authority(
     bytes: &[u8],
     context: Context<'_>,
     subject: OriginalSubjectScope<'_>,
-    retained: &[SignedMintRootAttachment],
+    retained: &[SignedOwnerMintRootAttachment],
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<VerifiedAuthor> {
     if subject.account != context.account_uuid

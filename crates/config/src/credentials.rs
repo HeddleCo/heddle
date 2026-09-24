@@ -39,7 +39,7 @@ pub struct CredentialDefaults {
 /// Credential for a single Heddle server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerCredential {
-    /// Public canonical SignedMintRootAttachment bytes; verified against owner history when used.
+    /// Public canonical owner-v1 or passkey-v2 mint association bytes, verified when used.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mint_root_attachment: Option<Vec<u8>>,
     pub token: String,

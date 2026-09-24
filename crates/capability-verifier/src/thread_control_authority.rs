@@ -8,7 +8,9 @@ use prost::Message;
 
 use crate::{
     Error, Result, VerifiedOwnerState,
-    wire::{OwnerHistory, SignedMintRootAttachment},
+    wire::{
+        OwnerHistory, SignedOwnerMintRootAttachment, thread_control_authority::MintRootAssociation,
+    },
 };
 
 /// Maximum complete public proof, including owner history and sealed Biscuit.
@@ -24,7 +26,7 @@ fn invalid(message: impl Into<String>) -> Error {
 pub fn encode(
     owner: &OwnerHistory,
     mint_root_public_key: &[u8],
-    attachment: Option<&SignedMintRootAttachment>,
+    association: Option<MintRootAssociation>,
     token: &Biscuit,
 ) -> Result<Vec<u8>> {
     if mint_root_public_key.len() != 32 {
@@ -39,7 +41,7 @@ pub fn encode(
         format: 1,
         owner: Some(owner.clone()),
         mint_root_public_key: mint_root_public_key.to_vec(),
-        mint_root_attachment: attachment.cloned(),
+        mint_root_association: association,
         sealed_biscuit: sealed
             .to_vec()
             .map_err(|error| invalid(error.to_string()))?,
@@ -107,7 +109,7 @@ pub fn verify(
 pub fn verify_with_retained_mint_roots(
     bytes: &[u8],
     context: Context<'_>,
-    admitted_mint_roots: &[SignedMintRootAttachment],
+    admitted_mint_roots: &[SignedOwnerMintRootAttachment],
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<VerifiedAuthor> {
     verify_original(bytes, context, admitted_mint_roots, is_revoked, true, &[])
@@ -118,7 +120,7 @@ pub fn verify_with_retained_mint_roots(
 pub fn verify_genesis_with_retained_mint_roots(
     bytes: &[u8],
     context: Context<'_>,
-    admitted_mint_roots: &[SignedMintRootAttachment],
+    admitted_mint_roots: &[SignedOwnerMintRootAttachment],
     is_revoked: impl Fn(Revocation<'_>) -> bool,
 ) -> Result<VerifiedAuthor> {
     if !matches!(
@@ -136,7 +138,7 @@ pub fn verify_genesis_with_retained_mint_roots(
 pub(super) fn verify_original(
     bytes: &[u8],
     context: Context<'_>,
-    admitted_mint_roots: &[SignedMintRootAttachment],
+    admitted_mint_roots: &[SignedOwnerMintRootAttachment],
     is_revoked: impl Fn(Revocation<'_>) -> bool,
     bind_agent_attribution: bool,
     extra_facts: &[String],
@@ -172,28 +174,38 @@ pub(super) fn verify_original(
     }
     verify_original_owner(&envelope, &context)?;
     if envelope.mint_root_public_key != context.owner.authority_key().public_key {
-        let attachment = envelope
-            .mint_root_attachment
-            .as_ref()
-            .ok_or_else(|| invalid("mint root requires current owner attachment"))?;
-        if admitted_mint_roots.contains(attachment) {
-            crate::creation::verify_retained_mint_root_attachment(
-                attachment,
-                context.owner,
-                context.account_uuid,
-                &envelope.mint_root_public_key,
-                context.now,
-            )?;
-        } else {
-            crate::creation::verify_mint_root_attachment(
-                attachment,
-                context.owner,
-                context.account_uuid,
-                &envelope.mint_root_public_key,
-                context.now,
-            )?;
+        match envelope.mint_root_association.as_ref() {
+            Some(MintRootAssociation::OwnerMintRootAttachment(attachment)) => {
+                if admitted_mint_roots.contains(attachment) {
+                    crate::creation::verify_retained_mint_root_attachment(
+                        attachment,
+                        context.owner,
+                        context.account_uuid,
+                        &envelope.mint_root_public_key,
+                        context.now,
+                    )?;
+                } else {
+                    crate::creation::verify_mint_root_attachment(
+                        attachment,
+                        context.owner,
+                        context.account_uuid,
+                        &envelope.mint_root_public_key,
+                        context.now,
+                    )?;
+                }
+            }
+            Some(MintRootAssociation::PasskeyMintRootAttachment(attachment)) => {
+                crate::passkey_delegation::verify_mint_delegation(
+                    attachment,
+                    context.owner,
+                    context.account_uuid,
+                    &envelope.mint_root_public_key,
+                    context.now,
+                )?;
+            }
+            None => return Err(invalid("mint root requires current owner attachment")),
         }
-    } else if envelope.mint_root_attachment.is_some() {
+    } else if envelope.mint_root_association.is_some() {
         return Err(invalid(
             "direct owner mint root must not carry an unrelated attachment",
         ));
@@ -269,8 +281,9 @@ pub(super) fn decode_envelope(bytes: &[u8]) -> Result<Envelope> {
     if bytes.len() > MAX_BYTES {
         return Err(Error::TooLarge { limit: MAX_BYTES });
     }
-    let envelope = Envelope::decode(bytes)
-        .map_err(|error| invalid(format!("Thread authority encoding: {error}")))?;
+    let envelope =
+        heddle_api::mint_root_association::decode_thread_control_authority_for_verification(bytes)
+            .map_err(|error| invalid(format!("Thread authority encoding: {error}")))?;
     if envelope.format != 1
         || envelope.encode_to_vec() != bytes
         || envelope.mint_root_public_key.len() != 32

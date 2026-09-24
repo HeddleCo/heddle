@@ -65,7 +65,7 @@ pub fn prepare_control_authority(
             state_hash: authority.owner.version.clone(),
         },
         mint_root,
-        attachment,
+        attachment.cloned().map(api::heddle::api::v1alpha2::thread_control_authority::MintRootAssociation::OwnerMintRootAttachment),
         token,
     )
     .map_err(|error| Error::Invalid(error.to_string()))

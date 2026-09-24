@@ -1286,6 +1286,7 @@ mod tests {
 
     #[test]
     fn wire_visibility_accepts_pullready_pinned_owner_key() {
+        use prost::Message;
         // Clone destinations have an empty `[metadata] trusted_keys`. The
         // owner key TOFU-pinned from PullReady must still admit that owner's
         // Private sidecar, or clone cannot resolve the advertised head.
@@ -1295,8 +1296,12 @@ mod tests {
         let repo = crate::init_test_repository(dir.path()).unwrap();
         let genesis = crate::sign_spool_owner_genesis(&owner, *uuid::Uuid::now_v7().as_bytes())
             .expect("sign genesis");
-        repo.verify_and_pin_owner_genesis(2, Some(&genesis), &["alice".into(), "private".into()])
-            .expect("pin owner genesis");
+        repo.verify_and_pin_owner_genesis(
+            2,
+            Some(&genesis.encode_to_vec()),
+            &["alice".into(), "private".into()],
+        )
+        .expect("pin owner genesis");
 
         let state = StateId::from_bytes([11u8; 32]);
         let mut record = sample_record(

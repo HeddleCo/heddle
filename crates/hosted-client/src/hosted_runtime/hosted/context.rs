@@ -173,9 +173,8 @@ impl CallContextFactory {
         let attachment = self
             .mint_root_attachment
             .as_deref()
-            .map(api::heddle::api::v1alpha2::SignedMintRootAttachment::decode)
-            .transpose()
-            .map_err(|error| HostedError::Framing(error.to_string()))?;
+            .map(decode_mint_root_association)
+            .transpose()?;
         repo::sign_delegated_spool_creation(signer, intent, owner, token, attachment, now)
             .map_err(|error| HostedError::Framing(error.to_string()))
     }
@@ -368,6 +367,45 @@ impl CallContextFactory {
     }
 }
 
+fn decode_mint_root_association(
+    bytes: &[u8],
+) -> Result<api::heddle::api::v1alpha2::spool_creation_proof::MintRootAssociation> {
+    use api::heddle::api::v1alpha2::{
+        SignedMintRootAttachment, SignedOwnerMintRootAttachment,
+        spool_creation_proof::MintRootAssociation,
+    };
+    let passkey = SignedMintRootAttachment::decode(bytes)
+        .ok()
+        .filter(|signed| {
+            signed.encode_to_vec() == bytes
+                && signed.passkey_delegation.is_some()
+                && signed.grant.as_ref().is_some_and(|grant| {
+                    api::passkey_mint_grant::canonical_passkey_mint_grant(grant).is_ok()
+                })
+        });
+    let owner = SignedOwnerMintRootAttachment::decode(bytes)
+        .ok()
+        .filter(|signed| {
+            signed.encode_to_vec() == bytes
+                && signed.owner_signature.as_ref().is_some_and(|signature| {
+                    signature.signer_key_id.len() == 32 && signature.signature.len() == 64
+                })
+                && signed.attachment.as_ref().is_some_and(|attachment| {
+                    heddleco_capability_verifier::creation::canonical_mint_root_attachment(
+                        attachment,
+                    )
+                    .is_ok()
+                })
+        });
+    match (owner, passkey) {
+        (Some(owner), None) => Ok(MintRootAssociation::OwnerMintRootAttachment(owner)),
+        (None, Some(passkey)) => Ok(MintRootAssociation::PasskeyMintRootAttachment(passkey)),
+        _ => Err(HostedError::Framing(
+            "unrecognized or ambiguous mint-root association".into(),
+        )),
+    }
+}
+
 #[cfg(feature = "telemetry")]
 #[derive(Default)]
 struct TraceHeaders {
@@ -475,6 +513,57 @@ fn deadline(timeout: Duration) -> Result<Timestamp> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stored_mint_association_recognizes_exact_owner_and_passkey_shapes() {
+        use api::heddle::api::v1alpha2::{
+            SignedMintRootAttachment, SignedOwnerMintRootAttachment,
+            spool_creation_proof::MintRootAssociation,
+        };
+        let owner: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../capability-verifier/tests/fixtures/mint_root_attachment_v1.json"
+        ))
+        .expect("owner fixture");
+        let passkey: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../capability-verifier/tests/fixtures/passkey_mint_grant_v1.json"
+        ))
+        .expect("passkey fixture");
+        let owner =
+            hex::decode(owner["record_hex"].as_str().expect("owner hex")).expect("owner bytes");
+        let passkey = hex::decode(
+            passkey["positive"]["attachment_proto_hex"]
+                .as_str()
+                .expect("passkey hex"),
+        )
+        .expect("passkey bytes");
+        assert!(matches!(
+            super::decode_mint_root_association(&owner),
+            Ok(MintRootAssociation::OwnerMintRootAttachment(_))
+        ));
+        assert!(matches!(
+            super::decode_mint_root_association(&passkey),
+            Ok(MintRootAssociation::PasskeyMintRootAttachment(_))
+        ));
+        let owner_record =
+            SignedOwnerMintRootAttachment::decode(owner.as_slice()).expect("owner record");
+        let passkey_record =
+            SignedMintRootAttachment::decode(passkey.as_slice()).expect("passkey record");
+        let mut legacy = SignedOwnerMintRootAttachment {
+            attachment: owner_record.attachment,
+            owner_signature: None,
+        }
+        .encode_to_vec();
+        legacy.extend_from_slice(
+            &SignedMintRootAttachment {
+                grant: None,
+                passkey_delegation: passkey_record.passkey_delegation,
+            }
+            .encode_to_vec(),
+        );
+        assert!(
+            super::decode_mint_root_association(&legacy).is_err(),
+            "account-bound v1 passkey attachment is not an owner certificate"
+        );
+    }
     use api::UNARY_SIGNING_V1_FIXTURE_JSON;
     #[cfg(feature = "telemetry")]
     use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};

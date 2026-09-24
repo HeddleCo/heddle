@@ -33,7 +33,7 @@ pub(super) async fn roundtrip(
     repository
         .verify_and_pin_owner_genesis(
             2,
-            Some(&owner_genesis),
+            Some(&owner_genesis.encode_to_vec()),
             &["selected".into(), "hosted-spool".into()],
         )
         .expect("selected authenticated remote owner");

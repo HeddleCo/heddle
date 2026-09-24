@@ -2479,6 +2479,19 @@ fn test_fast_forward_attached_when_detached_stays_detached() {
 fn test_open_preserves_explicit_detached_head_in_git_overlay() {
     let temp_dir = TempDir::new().unwrap();
     sley::Repository::init(temp_dir.path()).expect("init real git repository");
+    // A git overlay takes its principal from git config. Declare it on the
+    // repository itself so the test never depends on the host's global
+    // git identity (CI runners have none).
+    let mut git_config = fs::OpenOptions::new()
+        .append(true)
+        .open(temp_dir.path().join(".git/config"))
+        .unwrap();
+    std::io::Write::write_all(
+        &mut git_config,
+        b"[user]\n\tname = Heddle Test\n\temail = test@heddle.dev\n",
+    )
+    .unwrap();
+    drop(git_config);
 
     let repo = Repository::bootstrap_git_overlay(temp_dir.path()).unwrap();
     assert_eq!(repo.capability(), RepositoryCapability::GitOverlay);

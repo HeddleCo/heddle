@@ -26,7 +26,7 @@ pub fn sign_mint_root_attachment(
     not_before: i64,
     expires_at: i64,
     nonce: [u8; 32],
-) -> Result<SignedMintRootAttachment> {
+) -> Result<SignedOwnerMintRootAttachment> {
     let current = crate::verify_account_owner_observation(owner, not_before)?;
     if current.authority_key().public_key != owner_signer.public_key() {
         bail!("mint-root attachment needs the current owner authority signer");
@@ -52,10 +52,9 @@ pub fn sign_mint_root_attachment(
         creation::MINT_ROOT_DOMAIN,
         &creation::canonical_mint_root_attachment(&attachment)?,
     )?;
-    Ok(SignedMintRootAttachment {
+    Ok(SignedOwnerMintRootAttachment {
         attachment: Some(attachment),
         owner_signature: Some(signature),
-        passkey_delegation: None,
     })
 }
 
@@ -67,7 +66,7 @@ pub fn sign_delegated_spool_creation(
     intent: SpoolCreationIntent,
     owner: &OwnerState,
     existing_biscuit: &str,
-    mint_root_attachment: Option<SignedMintRootAttachment>,
+    mint_root_association: Option<spool_creation_proof::MintRootAssociation>,
     now: i64,
 ) -> Result<SignedSpoolOwnerGenesis> {
     let current = crate::verify_account_owner_observation(owner, now)?;
@@ -128,7 +127,7 @@ pub fn sign_delegated_spool_creation(
             statement: Some(statement),
             creator_signature: Some(creator_signature),
             sealed_biscuit: sealed,
-            mint_root_attachment,
+            mint_root_association,
             owner_history: Some(OwnerHistory {
                 root: owner.root.clone(),
                 accepted_transitions: owner.accepted_transitions.clone(),

@@ -340,7 +340,7 @@ async fn boundary_native_two_receiver_relay_preserves_exact_testimony_without_cr
             repository
                 .verify_and_pin_owner_genesis(
                     2,
-                    Some(&spool_genesis),
+                    Some(&spool_genesis.encode_to_vec()),
                     &["selected".into(), "shared".into()],
                 )
                 .expect("independent trust setup");

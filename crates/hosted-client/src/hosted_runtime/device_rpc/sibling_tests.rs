@@ -125,12 +125,9 @@ pub(super) async fn roundtrip(
         ),
         authority: Some(passkey_authority),
     };
-    let attachment = MintRootAttachment {
+    let grant = PasskeyMintGrant {
         format_version: 1,
-        account_uuid: account.account_uuid.clone(),
-        owner_state_hash: verified.state_hash().to_vec(),
-        owner_sequence: verified.sequence(),
-        owner_key: Some(verified.authority_key().clone()),
+        relying_party_id: "heddle.test".into(),
         mint_root_key: Some(
             repo::ed25519_verification_key(temporary.public_key()).expect("mint key"),
         ),
@@ -138,8 +135,8 @@ pub(super) async fn roundtrip(
         expires_at_unix_seconds: now + 3600,
         nonce: vec![19; 32],
     };
-    let challenge = heddleco_capability_verifier::creation::mint_root_signing_digest(&attachment)
-        .expect("challenge");
+    let challenge =
+        api::passkey_mint_grant::passkey_mint_grant_signing_digest(&grant).expect("challenge");
     let client_data_json = serde_json::to_vec(&serde_json::json!({
         "type": "webauthn.get",
         "challenge": base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, challenge),
@@ -152,8 +149,7 @@ pub(super) async fn roundtrip(
     let mut assertion = authenticator_data.clone();
     assertion.extend_from_slice(&Sha256::digest(&client_data_json));
     let temporary_attachment = SignedMintRootAttachment {
-        attachment: Some(attachment),
-        owner_signature: None,
+        grant: Some(grant),
         passkey_delegation: Some(PasskeyMintDelegation {
             authority: Some(certificate),
             client_data_json,
@@ -173,10 +169,16 @@ pub(super) async fn roundtrip(
         },
         owner,
         &encoded,
-        Some(temporary_attachment.clone()),
+        Some(
+            spool_creation_proof::MintRootAssociation::PasskeyMintRootAttachment(
+                temporary_attachment.clone(),
+            ),
+        ),
         now,
     )
     .expect("passkey-authorized creation proof");
+    repo::verify_spool_owner_genesis(&creation)
+        .expect("passkey creation remains portable structural evidence");
     let thread_genesis = objects::object::thread_replication::ThreadGenesis {
         owner: objects::object::thread_replication::GenesisOwner::Account(uuid::Uuid::from_bytes(
             [9; 16],
@@ -208,7 +210,11 @@ pub(super) async fn roundtrip(
             state_hash: owner.version.clone(),
         },
         temporary.public_key(),
-        Some(&temporary_attachment),
+        Some(
+            thread_control_authority::MintRootAssociation::PasskeyMintRootAttachment(
+                temporary_attachment.clone(),
+            ),
+        ),
         &token,
     )
     .expect("temporary portable authority");
