@@ -262,7 +262,7 @@ impl RunStore {
     /// The fixed initial tail selection; later positions use observation_page.
     pub fn latest_timeline(&self, run_id: &str, limit: usize) -> Result<Vec<TimelineRecord>> {
         valid_id(run_id)?;
-        if limit == 0 || limit > 1024 {
+        if limit == 0 || limit > 1025 {
             bail!("invalid latest timeline limit");
         }
         let connection = self.connection()?;

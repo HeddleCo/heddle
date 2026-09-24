@@ -187,7 +187,7 @@ impl DeviceRpc {
             )
         } else {
             let request = ObserveRunsRequest::decode(body)?;
-            let latest = false;
+            let latest = request.timeline_start == TimelineStart::Latest as i32;
             if latest {
                 anyhow::ensure!(
                     request.include_timeline
@@ -203,8 +203,7 @@ impl DeviceRpc {
             } else {
                 anyhow::ensure!(
                     request.timeline_start == TimelineStart::Unspecified as i32
-                        && request.timeline_limit == 0
-                        || request.timeline_start == TimelineStart::Latest as i32,
+                        && request.timeline_limit == 0,
                     "invalid timeline start or limit"
                 );
             }
@@ -396,6 +395,20 @@ impl DeviceRpc {
                     send.finish()?;
                     return Ok(());
                 }
+                if snapshot && latest_run.is_some() {
+                    let mut bytes = 0usize;
+                    for payload in &payloads {
+                        let encoded = payload_bytes(payload);
+                        bytes = bytes
+                            .checked_add(encoded.len())
+                            .context("snapshot size overflow")?;
+                        anyhow::ensure!(
+                            encoded.len() + 256 <= budget.max_frame_bytes as usize
+                                && bytes <= budget.max_snapshot_bytes as usize,
+                            "LATEST snapshot exceeds accepted byte budget"
+                        );
+                    }
+                }
                 let mut total = 0usize;
                 for payload in payloads {
                     let encoded = payload_bytes(&payload);
@@ -488,15 +501,17 @@ impl DeviceRpc {
                     }
                 }
                 observed = next;
+                if latest_run.is_some() {
+                    observed.retain(|id, _| !id.starts_with("timeline:"));
+                }
             }
-            if let (Some(run), Some(after)) = (latest_run.as_deref(), latest_after.as_deref()) {
-                if !feed
+            if let (Some(run), Some(after)) = (latest_run.as_deref(), latest_after.as_deref())
+                && !feed
                     .runs
                     .observation_page(after, 1, &[run.to_owned()], &[], true)?
                     .is_empty()
-                {
-                    continue;
-                }
+            {
+                continue;
             }
             if options.mode == ObservationMode::Once as i32 {
                 write(
@@ -713,7 +728,7 @@ impl DeviceRpc {
                             .collect()
                     } else {
                         feed.runs
-                            .latest_timeline(run, limit)?
+                            .latest_timeline(run, limit.min(remaining))?
                             .into_iter()
                             .map(|record| {
                                 (

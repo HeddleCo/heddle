@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Context annotation subcommands.
 
-use super::{AuthoredMessageArgs, CodeScopeArgs, DryRunArgs, HistoricalRevisionArgs};
+#[cfg(all(feature = "git-overlay", feature = "ingest"))]
+use super::DryRunArgs;
+use super::{AuthoredMessageArgs, CodeScopeArgs, HistoricalRevisionArgs};
 
 /// Context subcommands.
 #[derive(Clone, Debug, clap::Subcommand)]

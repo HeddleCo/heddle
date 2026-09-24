@@ -15,10 +15,8 @@ pub(crate) fn redact_excerpt(raw: &str, limit: usize) -> String {
         if leading && (word == "env" || word == "export") {
             continue;
         }
-        if false && word.split_once('=').is_some_and(|(key, _)| {
-            !key.is_empty()
-                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                && (leading || key.chars().all(|c| !c.is_ascii_lowercase()))
+        if word.split_once('=').is_some_and(|(key, _)| {
+            !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         }) {
             if let Some((_, value)) = word.split_once('=') {
                 for quote in ['\'', '"'] {
@@ -38,28 +36,17 @@ pub(crate) fn redact_excerpt(raw: &str, limit: usize) -> String {
             output.push("[content redacted]".to_string());
             break;
         }
-        if matches!(
-            lower.as_str(),
-            "--password" | "--passwd" | "--token" | "--secret" | "--api-key" | "--apikey"
-        ) {
-            output.push(format!("{word} [redacted]"));
-            break;
-        }
-        if [
-            "--password=",
-            "--passwd=",
-            "--token=",
-            "--secret=",
-            "--api-key=",
-            "--apikey=",
-        ]
-        .iter()
-        .any(|prefix| lower.starts_with(prefix))
+        if lower.starts_with("--")
+            && ["password", "passwd", "token", "secret", "api-key", "apikey"]
+                .iter()
+                .any(|part| lower.contains(part))
         {
-            output.push(format!(
-                "{}=[redacted]",
-                word.split('=').next().unwrap_or_default()
-            ));
+            let flag = word.split('=').next().unwrap_or(word);
+            output.push(if word.contains('=') {
+                format!("{flag}=[redacted]")
+            } else {
+                format!("{flag} [redacted]")
+            });
             break;
         }
         if [
@@ -81,7 +68,8 @@ pub(crate) fn redact_excerpt(raw: &str, limit: usize) -> String {
             let _ = words.next();
             continue;
         }
-        if lower.starts_with("ghp_") || lower.starts_with("sk-") || lower.starts_with("xoxb-") {
+        let token = lower.trim_start_matches(['\'', '"']);
+        if token.starts_with("ghp_") || token.starts_with("sk-") || token.starts_with("xoxb-") {
             output.push("[redacted]".to_string());
             continue;
         }
@@ -104,10 +92,14 @@ mod tests {
         let cases = [
             ("FOO=bar cargo test -p weft-auth", "cargo test -p weft-auth"),
             ("env FOO=bar TOKEN=hidden cargo check", "cargo check"),
+            ("foo=hidden cargo check", "cargo check"),
             (
                 "curl --password hunter2 --token=abc",
                 "curl --password [redacted]",
             ),
+            ("curl --token=abc", "curl --token=[redacted]"),
+            ("curl --access-token=abc", "curl --access-token=[redacted]"),
+            ("curl --api-key hidden", "curl --api-key [redacted]"),
             (
                 "curl Authorization: Bearer secret",
                 "[sensitive text redacted]",
@@ -117,6 +109,7 @@ mod tests {
                 "run ghp_abcdef sk-secret xoxb-token",
                 "run [redacted] [redacted] [redacted]",
             ),
+            ("run 'ghp_abcdef'", "run [redacted]"),
             ("cargo test\nSECRET=hidden", "cargo test"),
             ("FOO=bar\ncargo   test", "cargo test"),
             ("cat <<EOF secret file contents", "cat [content redacted]"),

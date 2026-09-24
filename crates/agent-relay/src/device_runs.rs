@@ -197,7 +197,15 @@ pub(crate) fn publish(
             None
         } else if let Some(detail) = checkpoint.detail.as_deref() {
             Some(crate::timeline_detail::redact_excerpt(detail, 120))
-        } else if matches!(kind, "Stop" | "SubagentStop" | "turn_complete") {
+        } else if matches!(
+            kind,
+            "Stop"
+                | "SubagentStop"
+                | "turn_complete"
+                | "agent_done"
+                | "session.idle"
+                | "session.end"
+        ) {
             checkpoint.message.as_deref().map(|message| {
                 crate::timeline_detail::redact_excerpt(
                     message.lines().next().unwrap_or_default(),
@@ -210,7 +218,16 @@ pub(crate) fn publish(
         .filter(|detail| !detail.is_empty());
         let summary = detail.clone().unwrap_or_else(|| match kind {
             "UserPromptSubmit" => "User prompt submitted".into(),
-            "Stop" | "SubagentStop" => "Assistant turn finished".into(),
+            "Stop" | "SubagentStop" | "turn_complete" | "agent_done" | "session.idle"
+            | "session.end" => "Assistant turn finished".into(),
+            "PostToolUse" | "tool.execute.after" => format!(
+                "{} finished",
+                checkpoint.tool_name.as_deref().unwrap_or("Tool")
+            ),
+            "tool.execute.before" => format!(
+                "{} started",
+                checkpoint.tool_name.as_deref().unwrap_or("Tool")
+            ),
             _ => format!("{}: {} paths", kind, checkpoint.touched_paths.len()),
         });
         emit(

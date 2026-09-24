@@ -316,7 +316,9 @@ struct AttachmentResolutionInput<'a> {
     token_claims: Option<&'a TokenClaims>,
 }
 
-fn relay_codex(runtime: &mut HarnessBridgeRuntime, _event: &str, payload: &Value) -> Result<()> {
+fn relay_codex(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value) -> Result<()> {
+    let tool_name =
+        first_value_string(payload, &[&["tool_name"], &["toolName"], &["tool", "name"]]);
     let metadata = map_from_pairs([
         (
             "client_name",
@@ -341,11 +343,24 @@ fn relay_codex(runtime: &mut HarnessBridgeRuntime, _event: &str, payload: &Value
     })?;
     runtime.update_progress(UpdateProgressParams {
         heddle_session_id: opened.heddle_session_id,
+        status: Some(event.to_string()),
+        message: matches!(event, "agent_done" | "Stop" | "turn_complete")
+            .then(|| {
+                first_value_string(
+                    payload,
+                    &[
+                        &["last-assistant-message"],
+                        &["last_assistant_message"],
+                        &["message"],
+                    ],
+                )
+            })
+            .flatten(),
         summary: value_string(payload, &["message"]),
-        tool_name: value_string(payload, &["tool_name"]),
-        detail: value_string(payload, &["tool_name"])
+        detail: tool_name
             .as_deref()
             .and_then(|name| tool_detail(name, payload)),
+        tool_name,
         harness: Some("codex".to_string()),
         ..UpdateProgressParams::default()
     })?;
@@ -627,21 +642,30 @@ fn relay_opencode(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Val
         ..OpenSessionParams::default()
     })?;
     let session_id = opened.heddle_session_id.clone();
+    let captured_revision = match record_opencode_timeline_event(runtime, event, payload, &opened) {
+        Ok(revision) => revision,
+        Err(err) => {
+            tracing::debug!(?err, event, "heddle OpenCode timeline recording skipped");
+            None
+        }
+    };
     runtime.update_progress(UpdateProgressParams {
         heddle_session_id: session_id.clone(),
         harness: Some("opencode".to_string()),
         status: Some(event.to_string()),
-        tool_name: (event == "tool.execute.after").then(|| opencode_tool_name(payload)),
-        detail: (event == "tool.execute.after")
+        message: matches!(event, "session.idle" | "session.end")
+            .then(|| value_string(payload, &["message"]))
+            .flatten(),
+        captured_revision,
+        tool_name: matches!(event, "tool.execute.before" | "tool.execute.after")
+            .then(|| opencode_tool_name(payload)),
+        detail: matches!(event, "tool.execute.before" | "tool.execute.after")
             .then(|| tool_detail(&opencode_tool_name(payload), payload))
             .flatten(),
         touched_paths: csv_from_value(metadata.get("touched_paths")),
         probe_metadata: metadata,
         ..UpdateProgressParams::default()
     })?;
-    if let Err(err) = record_opencode_timeline_event(runtime, event, payload, &opened) {
-        tracing::debug!(?err, event, "heddle OpenCode timeline recording skipped");
-    }
     Ok(())
 }
 
@@ -786,7 +810,7 @@ fn record_opencode_timeline_event(
     event: &str,
     payload: &Value,
     opened: &OpenSessionResult,
-) -> Result<()> {
+) -> Result<Option<String>> {
     record_timeline_event(runtime, event, payload, opened, &OpenCodeTimelineExtractor)
 }
 
@@ -796,15 +820,16 @@ fn record_timeline_event<E: HarnessTimelineExtractor>(
     payload: &Value,
     opened: &OpenSessionResult,
     extractor: &E,
-) -> Result<()> {
+) -> Result<Option<String>> {
     match extractor.timeline_event(event) {
         Some(TimelineToolEvent::Started) => {
-            record_timeline_tool_started(runtime, event, payload, opened, extractor)
+            record_timeline_tool_started(runtime, event, payload, opened, extractor)?;
+            Ok(None)
         }
         Some(TimelineToolEvent::Finished) => {
             record_timeline_tool_finished(runtime, event, payload, opened, extractor)
         }
-        None => Ok(()),
+        None => Ok(None),
     }
 }
 
@@ -851,12 +876,12 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
     payload: &Value,
     opened: &OpenSessionResult,
     extractor: &E,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let Some(native) = extractor.native_tool_call(payload) else {
-        return Ok(());
+        return Ok(None);
     };
     let Some(fallback_state) = current_state_id(&runtime.repo)? else {
-        return Ok(());
+        return Ok(None);
     };
     let thread = extractor.timeline_thread(runtime, opened)?;
     let store = TimelineStore::open(runtime.repo.heddle_dir())?;
@@ -894,6 +919,7 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
         }
     };
     let after_state = current_state_id(&runtime.repo)?.unwrap_or(fallback_state);
+    let captured_revision = capture_state.as_ref().map(StateId::to_string_full);
     let mut touched_paths = extractor.touched_paths(payload);
     merge_string_vec(
         &mut touched_paths,
@@ -923,7 +949,7 @@ fn record_timeline_tool_finished<E: HarnessTimelineExtractor>(
         labels,
     );
     store.write_operation(&envelope)?;
-    Ok(())
+    Ok(captured_revision)
 }
 
 fn opencode_native_tool_call(payload: &Value) -> Option<NativeToolCallRefV1> {
@@ -4278,6 +4304,9 @@ mod tests {
             .find(|record| record.kind == "Stop")
             .expect("stop record");
         assert_eq!(stop.detail.as_deref(), Some("Tests passed."));
+        assert_eq!([tool.position, prompt.position, stop.position], [1, 2, 3]);
+        assert_eq!(tool.run, prompt.run);
+        assert_eq!(prompt.run, stop.run);
     }
 
     #[cfg(feature = "client")]
@@ -4315,6 +4344,124 @@ mod tests {
             panic!("state revision required");
         };
         assert_eq!(actual.value, state.as_bytes());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn claude_stop_capture_attaches_revision_to_checkpoint() {
+        struct SnapshotBridge;
+        impl HarnessCliBridge for SnapshotBridge {
+            fn capture_snapshot(
+                &self,
+                repo: &Repository,
+                _config: &UserConfig,
+                _capture: RelayCapture,
+            ) -> Result<String> {
+                Ok(repo
+                    .snapshot(Some("agent capture".into()), None)?
+                    .state_id
+                    .to_string_full())
+            }
+            fn prepare_worktree_target(
+                &self,
+                _repo: &Repository,
+                _path: &Path,
+                _thread: Option<&str>,
+            ) -> Result<PathBuf> {
+                anyhow::bail!("not used")
+            }
+            fn write_isolated_checkout(
+                &self,
+                _repo: &Repository,
+                _path: &Path,
+                _base: &StateId,
+                _thread: Option<&str>,
+            ) -> Result<()> {
+                anyhow::bail!("not used")
+            }
+        }
+        let (temp, repo) = init_repo();
+        std::fs::write(temp.path().join("edited.txt"), "agent edit").expect("working edit");
+        let mut runtime = HarnessBridgeRuntime::new(
+            repo,
+            UserConfig::default(),
+            std::sync::Arc::new(SnapshotBridge),
+        );
+        relay_claude(
+            &mut runtime,
+            "Stop",
+            &serde_json::json!({
+                "session_id": "capture-session",
+                "last_assistant_message": "Captured changes"
+            }),
+        )
+        .expect("stop hook");
+        let head = runtime.repo.head().expect("head").expect("captured state");
+        let store = repo::device_runs::RunStore::open(runtime.repo.heddle_dir()).expect("runs");
+        let timeline: Vec<_> = store
+            .observation_page("", 20, &[], &[], true)
+            .expect("timeline")
+            .into_iter()
+            .filter_map(|(_, record)| match record {
+                repo::device_runs::RunObservation::Timeline(record) => Some(record),
+                _ => None,
+            })
+            .collect();
+        let stop = timeline
+            .iter()
+            .find(|record| record.kind == "Stop")
+            .expect("Stop record");
+        let revision = stop.captured_revision.as_ref().expect("captured revision");
+        let Some(api::heddle::api::v1alpha2::revision_ref::Revision::State(actual)) =
+            revision.revision.as_ref()
+        else {
+            panic!("state revision required");
+        };
+        assert_eq!(actual.value, head.as_bytes());
+    }
+
+    #[cfg(feature = "client")]
+    #[test]
+    fn codex_turn_end_projects_first_message_line() {
+        let (_temp, repo) = init_repo();
+        let mut runtime = HarnessBridgeRuntime::new(repo, UserConfig::default(), test_bridge());
+        relay_codex(
+            &mut runtime,
+            "agent_done",
+            &serde_json::json!({
+                "last-assistant-message": "Ready for review.\nprivate second line"
+            }),
+        )
+        .expect("Codex turn");
+        let store = repo::device_runs::RunStore::open(runtime.repo.heddle_dir()).expect("runs");
+        let timeline: Vec<_> = store
+            .observation_page("", 20, &[], &[], true)
+            .expect("timeline")
+            .into_iter()
+            .filter_map(|(_, record)| match record {
+                repo::device_runs::RunObservation::Timeline(record) => Some(record),
+                _ => None,
+            })
+            .collect();
+        let done = timeline
+            .iter()
+            .find(|record| record.kind == "agent_done")
+            .expect("turn end");
+        assert_eq!(done.detail.as_deref(), Some("Ready for review."));
+        assert_eq!(done.summary, "Ready for review.");
+    }
+
+    #[test]
+    fn tool_details_select_only_command_path_or_count() {
+        let read =
+            serde_json::json!({"args": {"files": ["a", "b", "c"], "content": "private contents"}});
+        assert_eq!(tool_detail("Read", &read).as_deref(), Some("Read: 3 files"));
+        let edit = serde_json::json!({"tool_input": {"file_path": "crates/auth/src/verifier.rs", "new_string": "private contents"}});
+        assert_eq!(
+            tool_detail("Edit", &edit).as_deref(),
+            Some("Edit: crates/auth/src/verifier.rs")
+        );
+        assert_eq!(tool_detail("Unknown", &read), None);
     }
 
     #[test]
