@@ -490,6 +490,10 @@ operator tooling; the native hosted transport remains internal to
      **publish** (Cargo.toml version isn't on crates.io yet),
      **skip** (already published — idempotent re-run), or **fail**
      (Cargo.toml downgrade — refuses).
+   - `consumer-build` runs `scripts/check-crate-consumer-build.py` on the
+     validated commit before publishing. It builds a scratch crate against
+     crates.io for existing versions and `.crate` archives for new versions.
+     Run it locally with `CARGO_TARGET_DIR` set to check the same graph.
    - `publish` runs only when `has_publishes == 'true'`, enters the
      approval-protected `release` environment, checks out
      the validated `commit_sha` (not `refs/heads/main` — see the
