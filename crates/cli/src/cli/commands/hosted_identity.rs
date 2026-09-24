@@ -8,7 +8,7 @@ use heddle_cli_contract::cli::commands::wire::auth::{
     AgentAccountCreatedOutput, AuthLogoutOutput, AuthStatusOutput, AuthTrustOutput, CaptureActor,
     DescriptorTrustSource as WireDescriptorTrustSource, HumanPromotionDirective,
     ServiceTokenOutput, SignupInviteCreatedOutput, SignupInviteListOutput, SignupInviteOutput,
-    WhoamiIdentity, WhoamiOutput,
+    WhoamiBillingLock, WhoamiIdentity, WhoamiOutput,
 };
 use hosted_client::hosted_runtime::{
     AgentTemplate,
@@ -561,7 +561,14 @@ fn whoami_output(report: WhoamiReport) -> WhoamiOutput {
         ttl_seconds_remaining: report.ttl_seconds_remaining,
         proof_key_available: report.proof_key_available,
         identity: report.identity.map(whoami_identity),
-        spools: report.spools,
+        billing_lock: report.billing_lock.map(|lock| WhoamiBillingLock {
+            reason: lock.reason,
+            locked_at: lock.locked_at,
+            delete_after: lock.delete_after,
+            used_bytes: lock.used_bytes,
+            cap_bytes: lock.cap_bytes,
+            allowed_actions: lock.allowed_actions,
+        }),
         recommended_action: report.recommended_action,
     }
 }
@@ -652,10 +659,16 @@ fn write_whoami_human(
                 identity.available_actions.join(", ")
             )?;
         }
-        if output.spools.is_empty() {
-            writeln!(writer, "Spools:        none")?;
-        } else {
-            writeln!(writer, "Spools:        {}", output.spools.join(", "))?;
+        if let Some(lock) = &None::<hosted_client::hosted_runtime::whoami::WhoamiBillingLock> {
+            write!(writer, "Account locked")?;
+            if lock.reason == "ACCOUNT_BILLING_LOCK_REASON_OVER_FREE_CAP_WITHOUT_PAID_PLAN" {
+                write!(writer, " (over the Free cap without a paid plan)")?;
+            }
+            write!(writer, " — pay or delete")?;
+            if let Some(date) = &lock.delete_after {
+                write!(writer, " by {date}")?;
+            }
+            writeln!(writer)?;
         }
     } else {
         writeln!(
@@ -1135,7 +1148,7 @@ mod tests {
             ttl_seconds_remaining: Some(60),
             proof_key_available: true,
             identity: Some(identity()),
-            spools: vec!["spool/acme".into(), "spool/acme/notes".into()],
+            billing_lock: None,
             recommended_action: Some("heddle auth login".into()),
         }
     }
@@ -1152,6 +1165,7 @@ mod tests {
         let mapped = machine.identity.expect("mapped hosted identity");
         assert_eq!(mapped.credential_subject, "agent:reviewer-1");
         assert_eq!(mapped.available_actions.len(), 1);
+        assert!(machine.billing_lock.is_none());
 
         let mut bytes = Vec::new();
         write_whoami_human(&mut bytes, &report).expect("render reachable whoami");
@@ -1164,7 +1178,6 @@ mod tests {
             "Session:       session-1",
             "Account root:  self-rooted",
             "Method hints:  /heddle.api.v1alpha2.ThreadService/RecordReview",
-            "Spools:        spool/acme, spool/acme/notes",
             "Scopes:        repo:heddle/heddle",
             "Op ceiling:    Pull, Push",
             "(in 60s)",
@@ -1203,6 +1216,30 @@ mod tests {
         let mut bytes = Vec::new();
         write_whoami_human(&mut bytes, &unreachable).expect("render unknown TTL");
         assert!(String::from_utf8_lossy(&bytes).contains("Expires:       2030-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn whoami_renders_billing_lock_in_human_and_json() {
+        let mut report = whoami_report();
+        report.billing_lock = Some(hosted_client::hosted_runtime::whoami::WhoamiBillingLock {
+            reason: "ACCOUNT_BILLING_LOCK_REASON_OVER_FREE_CAP_WITHOUT_PAID_PLAN".into(),
+            locked_at: Some("2026-09-24T00:00:00+00:00".into()),
+            delete_after: Some("2026-10-24T00:00:00+00:00".into()),
+            used_bytes: 6_000_000_000,
+            cap_bytes: 5_000_000_000,
+            allowed_actions: vec!["ACCOUNT_BILLING_LOCK_ALLOWED_ACTION_DELETE_SPOOL".into()],
+        });
+        let json = serde_json::to_value(whoami_output(report.clone())).expect("whoami JSON");
+        assert_eq!(json["billing_lock"]["used_bytes"], 6_000_000_000_u64);
+        assert_eq!(
+            json["billing_lock"]["delete_after"],
+            "2026-10-24T00:00:00+00:00"
+        );
+        let mut bytes = Vec::new();
+        write_whoami_human(&mut bytes, &report).expect("render lock");
+        let human = String::from_utf8(bytes).expect("UTF-8");
+        assert!(human.contains("Account locked (over the Free cap without a paid plan) — pay or delete by 2026-10-24"), "{human}");
+        assert!(!human.contains("Spools:"), "{human}");
     }
 
     #[test]

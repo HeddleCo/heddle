@@ -4,9 +4,24 @@ use wire::ProtocolError;
 use super::{HostedClient, helpers::hosted_to_protocol_error, operation_id::ClientOperationId};
 
 impl HostedClient {
+    /// Read one authoritative identity snapshot for a one-shot caller.
+    pub async fn get_identity(
+        &mut self,
+    ) -> Result<api::heddle::api::v1alpha2::GetIdentityResponse, ProtocolError> {
+        use api::heddle::api::v1alpha2 as contract;
+        let remote = self.native().await.map_err(native_protocol_error)?;
+        remote
+            .api
+            .call::<thread_api::rpc::IdentityServiceGetIdentity>(&contract::GetIdentityRequest {
+                include_current_credential: true,
+            })
+            .await
+            .map_err(super::helpers::native_client_error)
+    }
+
     /// Resolve the acting identity for the bound bearer (subject, staff/service
     /// markers, session, server-side scope, and directly-held resource roles).
-    /// Read-only; drives `heddle whoami`.
+    /// Read-only; used by flows that need a live identity roster.
     pub async fn observe_current_identity(
         &mut self,
     ) -> Result<

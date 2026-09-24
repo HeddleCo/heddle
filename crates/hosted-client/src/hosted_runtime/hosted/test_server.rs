@@ -24,8 +24,9 @@ use iroh::{Endpoint, RelayMode, endpoint::presets};
 use prost::Message;
 use tokio::task::JoinHandle;
 
-use super::{CallContextFactory, HostedClient};
-use super::{HostedDiscussion, HostedDiscussionTurn, HostedResolution};
+use super::{
+    CallContextFactory, HostedClient, HostedDiscussion, HostedDiscussionTurn, HostedResolution,
+};
 
 const OBSERVE_COLLABORATION_METHOD: &str =
     "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration";
@@ -293,6 +294,7 @@ async fn serve_call(
                         "/heddle.api.v1alpha2.ThreadService/ObserveThreads".into(),
                         "/heddle.api.v1alpha2.ThreadService/RecordReview".into(),
                         "/heddle.api.v1alpha2.IdentityService/ObserveIdentity".into(),
+                        "/heddle.api.v1alpha2.IdentityService/GetIdentity".into(),
                         "/heddle.api.v1alpha2.IdentityService/CreateSignupInvitation".into(),
                         "/heddle.api.v1alpha2.WorkspaceService/ObserveWorkspace".into(),
                         "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership".into(),
@@ -417,6 +419,8 @@ async fn serve_call(
                 .unwrap();
             } else if method == "/heddle.api.v1alpha2.SpoolService/ListSpools" {
                 serve_native_list_spools(&mut send, &mut recv, &mut request).await;
+            } else if method == "/heddle.api.v1alpha2.IdentityService/GetIdentity" {
+                serve_native_get_identity(&mut send, &mut recv, &mut request).await;
             } else if method == "/heddle.api.v1alpha2.SpoolService/DeleteSpool" {
                 serve_native_delete_spool(
                     &mut send,
@@ -586,6 +590,51 @@ async fn serve_call(
         }
     }
     send.finish().unwrap();
+}
+
+async fn serve_native_get_identity(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    request: &mut Vec<u8>,
+) {
+    while let Ok(Some(chunk)) = recv.read_chunk(api::framing::MAX_CONTROL_BODY + 6).await {
+        request.extend_from_slice(&chunk);
+    }
+    let body = decode_request_frame(request)
+        .ok()
+        .and_then(|frame| v2::GetIdentityRequest::decode(frame.body).ok())
+        .expect("native GetIdentity request");
+    assert!(body.include_current_credential);
+    let response = v2::GetIdentityResponse {
+        identity: Some(v2::PrincipalRecord {
+            id: "principal-1".into(),
+            account_id: "account-1".into(),
+            handle: "acme".into(),
+            rooting_tier: v2::RootingTier::SelfRooted as i32,
+            ..Default::default()
+        }),
+        current_credential: Some(v2::CurrentCredentialRecord {
+            kind: v2::CredentialKind::Agent as i32,
+            subject: "agent:reviewer".into(),
+            ..Default::default()
+        }),
+        billing_lock: Some(api::heddle::api::common::AccountBillingLock {
+            reason: api::heddle::api::common::AccountBillingLockReason::OverFreeCapWithoutPaidPlan
+                as i32,
+            delete_after: Some(prost_types::Timestamp {
+                seconds: 1_893_456_000,
+                nanos: 0,
+            }),
+            used_bytes: 6_000_000_000,
+            cap_bytes: 5_000_000_000,
+            ..Default::default()
+        }),
+    };
+    send.write_chunk(Bytes::from(
+        encode_success_response(&response.encode_to_vec()).unwrap(),
+    ))
+    .await
+    .unwrap();
 }
 
 async fn serve_native_list_spools(

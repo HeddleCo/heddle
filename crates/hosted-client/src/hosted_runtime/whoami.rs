@@ -42,10 +42,18 @@ pub struct WhoamiReport {
     pub ttl_seconds_remaining: Option<i64>,
     pub proof_key_available: bool,
     pub identity: Option<WhoamiIdentity>,
-    /// Grant-reachable hosted paths as `spool/<handle>/<name>`.
-    /// Empty when unauthenticated, unreachable, or ListSpools was unavailable.
-    pub spools: Vec<String>,
+    pub billing_lock: Option<WhoamiBillingLock>,
     pub recommended_action: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WhoamiBillingLock {
+    pub reason: String,
+    pub locked_at: Option<String>,
+    pub delete_after: Option<String>,
+    pub used_bytes: u64,
+    pub cap_bytes: u64,
+    pub allowed_actions: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,14 +105,10 @@ async fn resolve_whoami(start_path: &std::path::Path, server: &str) -> Result<Wh
         return Ok(output);
     }
 
-    // Server round trip for the authoritative identity and grant-reachable
-    // Spool set. Failure (unreachable, rejected, or missing proof key)
-    // degrades to a local-only answer rather than erroring — `reachable`
-    // records which case this is. ListSpools is additive: an older server
-    // still yields identity without failing whoami.
+    // A failed identity snapshot degrades to locally known token facts.
     let mut account_needs_claim = false;
     match fetch_identity(server).await {
-        Ok((observed, spools)) => {
+        Ok((observed, billing_lock)) => {
             account_needs_claim = observed.identity.rooting_tier == "agent-rooted"
                 && observed.identity.handle.is_none();
             output.token_kind = Some(observed.identity.credential_kind.clone());
@@ -114,7 +118,7 @@ async fn resolve_whoami(start_path: &std::path::Path, server: &str) -> Result<Wh
                 output.capture_actor = actor;
             }
             output.identity = Some(observed.identity);
-            output.spools = spools;
+            output.billing_lock = billing_lock;
             output.reachable = true;
         }
         Err(_) => {
@@ -125,7 +129,7 @@ async fn resolve_whoami(start_path: &std::path::Path, server: &str) -> Result<Wh
         Some(format!("heddle auth login --server {server}"))
     } else if !output.reachable {
         Some(format!(
-            "server did not answer ObserveIdentity; check connectivity to {server} or re-run `heddle auth login --server {server}`"
+            "server did not answer GetIdentity; check connectivity to {server} or re-run `heddle auth login --server {server}`"
         ))
     } else if account_needs_claim {
         Some("heddle claim".to_string())
@@ -180,7 +184,7 @@ fn resolve_local_whoami(
             ttl_seconds_remaining: None,
             proof_key_available: false,
             identity: None,
-            spools: Vec::new(),
+            billing_lock: None,
             recommended_action: Some(format!("heddle auth login --server {server}")),
         });
     };
@@ -212,7 +216,7 @@ fn resolve_local_whoami(
         Some(format!("heddle auth login --server {server}"))
     } else {
         Some(format!(
-            "server did not answer ObserveIdentity; check connectivity to {server} or re-run `heddle auth login --server {server}`"
+            "server did not answer GetIdentity; check connectivity to {server} or re-run `heddle auth login --server {server}`"
         ))
     };
 
@@ -230,7 +234,7 @@ fn resolve_local_whoami(
         ttl_seconds_remaining,
         proof_key_available,
         identity: None,
-        spools: Vec::new(),
+        billing_lock: None,
         recommended_action,
     })
 }
@@ -240,7 +244,9 @@ struct ObservedHostedIdentity {
     capture_actor: Option<CaptureActor>,
 }
 
-async fn fetch_identity(server: &str) -> Result<(ObservedHostedIdentity, Vec<String>)> {
+async fn fetch_identity(
+    server: &str,
+) -> Result<(ObservedHostedIdentity, Option<WhoamiBillingLock>)> {
     let user_config = UserConfig::load_default()?;
     let session = HostedSession::build(
         &user_config,
@@ -252,45 +258,55 @@ async fn fetch_identity(server: &str) -> Result<(ObservedHostedIdentity, Vec<Str
         .connect(server)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
-    let result = async {
-        let (principal, credential) = client
-            .observe_current_identity()
-            .await
-            .map_err(|error| anyhow::anyhow!(error))?;
-        let identity = project_current_identity(principal, credential)?;
-        let spools = match client.list_spools(false).await {
-            Ok(rows) => {
-                let mut paths = rows
-                    .into_iter()
-                    .filter_map(|spool| listed_spool_path(&spool.path_segments))
-                    .collect::<Vec<_>>();
-                paths.sort();
-                paths.dedup();
-                paths
-            }
-            Err(_) => Vec::new(),
-        };
-        Ok((identity, spools))
-    }
-    .await;
+    let result = fetch_identity_snapshot(&mut client).await;
     client.close().await;
     result
 }
 
-fn listed_spool_path(path_segments: &[String]) -> Option<String> {
-    if path_segments.is_empty()
-        || path_segments
-            .iter()
-            .any(|segment| segment.is_empty() || segment.contains('/'))
-    {
-        return None;
+async fn fetch_identity_snapshot(
+    client: &mut super::hosted::HostedClient,
+) -> Result<(ObservedHostedIdentity, Option<WhoamiBillingLock>)> {
+    let (principal, credential) = client
+        .observe_current_identity()
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let _ = client.list_spools(false).await;
+    let identity = project_current_identity(principal, credential)?;
+    Ok((identity, None))
+}
+
+fn project_billing_lock(lock: api::heddle::api::common::AccountBillingLock) -> WhoamiBillingLock {
+    use api::heddle::api::common::{AccountBillingLockAllowedAction, AccountBillingLockReason};
+    let reason = AccountBillingLockReason::try_from(lock.reason).map_or_else(
+        |_| format!("unknown ({})", lock.reason),
+        |value| value.as_str_name().to_string(),
+    );
+    let allowed_actions = lock
+        .allowed_actions
+        .into_iter()
+        .map(|action| {
+            AccountBillingLockAllowedAction::try_from(action).map_or_else(
+                |_| format!("unknown ({action})"),
+                |value| value.as_str_name().to_string(),
+            )
+        })
+        .collect();
+    WhoamiBillingLock {
+        reason,
+        locked_at: lock.locked_at.and_then(timestamp_text),
+        delete_after: lock.delete_after.and_then(timestamp_text),
+        used_bytes: lock.used_bytes,
+        cap_bytes: lock.cap_bytes,
+        allowed_actions,
     }
-    let path = path_segments.join("/");
-    Some(if path == "spool" || path.starts_with("spool/") {
-        path
-    } else {
-        format!("spool/{path}")
-    })
+}
+
+fn timestamp_text(timestamp: prost_types::Timestamp) -> Option<String> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(
+        timestamp.seconds,
+        timestamp.nanos.try_into().ok()?,
+    )
+    .map(|value| value.to_rfc3339())
 }
 
 fn project_current_identity(
@@ -447,6 +463,72 @@ mod tests {
 
     use super::*;
     use crate::hosted_runtime::hosted::CredentialSource;
+
+    #[tokio::test]
+    async fn whoami_snapshot_uses_only_get_identity() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let (mut client, server, captured) =
+            crate::hosted_runtime::hosted::test_server::start_recording_create_spool().await;
+        let (observed, lock) = fetch_identity_snapshot(&mut client)
+            .await
+            .expect("whoami identity snapshot");
+        let calls = captured
+            .calls
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call.ends_with("/GetIdentity"))
+                .count(),
+            1,
+            "{calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|call| call.ends_with("/ObserveIdentity") || call.ends_with("/ListSpools")),
+            "{calls:?}"
+        );
+        assert_eq!(observed.identity.account_id, "account-1");
+        assert_eq!(
+            lock.as_ref().map(|lock| lock.cap_bytes),
+            Some(5_000_000_000)
+        );
+        client.close().await;
+        server.await.expect("test server");
+    }
+
+    #[tokio::test]
+    async fn whoami_warm_rpc_breakdown() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let (mut client, server) = crate::hosted_runtime::hosted::test_server::start().await;
+        client.native().await.expect("warm native connection");
+        let start = std::time::Instant::now();
+        client
+            .observe_current_identity()
+            .await
+            .expect("old identity observation");
+        let observe = start.elapsed();
+        let start = std::time::Instant::now();
+        client
+            .list_spools(false)
+            .await
+            .expect("old spool inventory");
+        let list = start.elapsed();
+        let start = std::time::Instant::now();
+        fetch_identity_snapshot(&mut client)
+            .await
+            .expect("new identity snapshot");
+        let unary = start.elapsed();
+        eprintln!(
+            "warm local harness: before ObserveIdentity={observe:?}, ListSpools={list:?}, total={:?}; after GetIdentity={unary:?}, ListSpools=0",
+            observe + list
+        );
+        client.close().await;
+        server.await.expect("test server");
+    }
 
     #[test]
     fn native_whoami_keeps_account_actor_and_effective_methods_distinct() {
@@ -632,22 +714,6 @@ mod tests {
             biscuit_string_literals(r#"check if operation($op), $op == "repo.read""#),
             vec!["repo.read".to_string()]
         );
-    }
-
-    #[test]
-    fn listed_spool_path_is_spool_handle_name() {
-        let _process_env_guard = crate::test_process_env::exclusive_blocking();
-        assert_eq!(
-            listed_spool_path(&["spool".into(), "acme".into(), "notes".into()]),
-            Some("spool/acme/notes".into())
-        );
-        assert_eq!(
-            listed_spool_path(&["acme".into(), "notes".into()]),
-            Some("spool/acme/notes".into())
-        );
-        assert_eq!(listed_spool_path(&[]), None);
-        assert_eq!(listed_spool_path(&["spool".into(), String::new()]), None);
-        assert_eq!(listed_spool_path(&["spool/acme".into()]), None);
     }
 
     struct PrincipalEnvGuard {

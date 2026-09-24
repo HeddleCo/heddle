@@ -479,9 +479,6 @@ The capture actor and hosted auth are different objects:
   hosted auth    whether this machine has a credential for the server
                  (heddle auth login). whoami never attaches a credential.
 
-When the server answers, whoami lists grant-reachable spools as
-spool/<handle>/<name>.
-
 Examples:
   heddle whoami                       # capture actor first, then hosted auth
   heddle whoami --output json         # machine-readable, stable output_kind shape
