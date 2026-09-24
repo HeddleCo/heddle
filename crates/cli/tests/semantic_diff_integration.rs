@@ -6,7 +6,6 @@
 mod cli_test_support;
 
 use objects::store::ObjectStore;
-use repo::Repository;
 use semantic::{
     analysis::{SimilarityMethod, detect_file_renames, detect_function_changes},
     parser::{Language, ParsedFile},

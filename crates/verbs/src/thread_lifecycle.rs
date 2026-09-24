@@ -222,7 +222,10 @@ pub fn resolve_promote_target_path(
     default_path: PathBuf,
 ) -> (PathBuf, bool) {
     match path {
-        Some(explicit) => (explicit, false),
+        Some(explicit) => {
+            let is_default = explicit == default_path;
+            (explicit, is_default)
+        }
         None => (default_path, true),
     }
 }
@@ -574,6 +577,23 @@ mod tests {
         );
         assert_eq!(plan.resulting_mode, ThreadMode::Solid);
         assert_eq!(plan.resulting_state, ThreadState::Promoted);
+    }
+
+    #[test]
+    fn explicit_default_checkout_path_can_convert_in_place() {
+        let path = PathBuf::from("/repo/.heddle/threads/feat/repo");
+        let plan = plan_thread_promote(&ThreadPromoteOptions {
+            force: false,
+            path: Some(path.clone()),
+            default_path: path.clone(),
+            mode: ThreadMode::Materialized,
+            execution_path: path.clone(),
+            materialized_path: Some(path.clone()),
+            execution_path_exists: true,
+            execution_path_is_repo_root: false,
+            execution_path_has_heddle: true,
+        });
+        assert_eq!(plan.in_place_conversion_candidate, Some(path));
     }
 
     #[test]

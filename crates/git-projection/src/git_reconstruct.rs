@@ -68,16 +68,28 @@ pub fn reconstruct_commit_bytes(
     state: &State,
 ) -> GitProjectionResult<Vec<u8>> {
     let tree_oid = export_tree(heddle_repo, repo, &state.tree)?;
-    let parent_oids = state
+    let parent_oids = mapped_git_parents(state, mapping)?;
+    build_commit_content(state, &tree_oid, &parent_oids)
+}
+
+/// Native adoption roots Git history at Heddle's synthetic hosted seed. That
+/// state has no Git commit, so it is absent from the projected parent list.
+pub fn mapped_git_parents(
+    state: &State,
+    mapping: &SyncMapping,
+) -> GitProjectionResult<Vec<ObjectId>> {
+    let hosted_seed =
+        objects::object::thread_replication::hosted_import::synthetic_initial_base()?.id();
+    state
         .parents
         .iter()
+        .filter(|parent| **parent != hosted_seed)
         .map(|parent| {
             mapping
                 .get_git(parent)
                 .ok_or(GitProjectionError::StateNotFound(*parent))
         })
-        .collect::<GitProjectionResult<Vec<_>>>()?;
-    build_commit_content(state, &tree_oid, &parent_oids)
+        .collect()
 }
 
 /// Frame + write a reconstructed commit object's `content` bytes into `repo`'s

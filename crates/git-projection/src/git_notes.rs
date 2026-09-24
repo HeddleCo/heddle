@@ -18,8 +18,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use objects::object::StateId;
 pub use objects::object::{HeddleNote, NoteAttribution, OmittedBreakdown, SignalCounts};
+use objects::{
+    object::{State, StateId, TreeScheme},
+    store::ObjectStore,
+};
+use repo::Repository as HeddleRepository;
 use sley::{ObjectId, Repository};
 
 use super::git_core::{GitProjectionError, GitProjectionResult, git_err};
@@ -27,6 +31,32 @@ use super::git_core::{GitProjectionError, GitProjectionResult, git_err};
 /// The notes ref heddle uses. Git-compatible notes readers can opt into
 /// this location, while Heddle reads and writes it natively.
 pub const NOTES_REF: &str = "refs/notes/heddle";
+
+/// A V4 tree keeps private per-entry salts that Git cannot reconstruct. Keep
+/// the source identity for lineage, but let Git import mint a state over the
+/// reconstructed Git tree instead of claiming the embedded state is portable.
+pub fn note_for_state(
+    repo: &HeddleRepository,
+    state: &State,
+    parents_rewritten: bool,
+) -> GitProjectionResult<HeddleNote> {
+    let hosted_seed =
+        objects::object::thread_replication::hosted_import::synthetic_initial_base()?.id();
+    let omits_hosted_seed = state.parents.contains(&hosted_seed);
+    let mut note = if parents_rewritten || omits_hosted_seed {
+        HeddleNote::from_projected_state(state)
+    } else {
+        HeddleNote::from_state(state)
+    };
+    let tree = repo
+        .store()
+        .get_tree(&state.tree)?
+        .ok_or_else(|| GitProjectionError::Git(format!("state tree {} is missing", state.tree)))?;
+    if tree.scheme() == TreeScheme::V4Salted || omits_hosted_seed {
+        note.source_state = None;
+    }
+    Ok(note)
+}
 
 fn notes_ref() -> sley::notes::NotesRef {
     sley::notes::NotesRef::expand(NOTES_REF)

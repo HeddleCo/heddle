@@ -13,8 +13,8 @@ mod cli_test_support;
 use chrono::Utc;
 use objects::object::ThreadName;
 use repo::{
-    Repository, RepositorySnapshot, StackNextAction, ThreadFreshness, ThreadManager, ThreadMode,
-    ThreadRecord, ThreadState,
+    RepositorySnapshot, StackNextAction, ThreadFreshness, ThreadManager, ThreadMode, ThreadRecord,
+    ThreadState,
 };
 
 fn save_thread_record(

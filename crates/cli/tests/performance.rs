@@ -15,7 +15,6 @@ use objects::{
         pack::ObjectType as PackObjectType,
     },
 };
-use repo::Repository;
 use tempfile::TempDir;
 use wire::{ObjectData, ObjectId, ObjectType};
 

@@ -6,7 +6,6 @@ mod cli_test_support;
 
 use std::process::Command;
 
-use repo::Repository;
 use serde_json::Value;
 use tempfile::TempDir;
 

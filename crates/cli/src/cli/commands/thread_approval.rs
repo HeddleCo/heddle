@@ -17,7 +17,10 @@ use thread_api::thread_control::{Author, Control, PreparedControl, Review, Revie
 mod review_outbox;
 use review_outbox::{ReviewOutbox, StoredReview};
 
-use super::next_action::{NextActionValidationContext, write_full_command_json};
+use super::{
+    advice::RecoveryAdvice,
+    next_action::{NextActionValidationContext, write_full_command_json},
+};
 use crate::{
     cli::{
         Cli,
@@ -81,7 +84,12 @@ async fn open_hosted_session(
             repo_path.context("hosted remote must include a Spool address")?,
         ),
         RemoteTarget::Local(_) => {
-            bail!("Thread review requires a hosted remote; choose one with `heddle remote list`")
+            return Err(anyhow!(RecoveryAdvice::invalid_usage(
+                "review_requires_hosted_remote",
+                "Thread review requires a hosted remote",
+                "Choose a hosted remote shown by `heddle remote list`.",
+                "heddle remote list",
+            )));
         }
     };
     let config = UserConfig::load_default()?;
@@ -98,7 +106,12 @@ async fn open_hosted_session(
 
 fn revision_state(revision: &wire::RevisionRef) -> Result<StateId> {
     let Some(wire::revision_ref::Revision::State(state)) = &revision.revision else {
-        bail!("review comparison requires an exact state revision")
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "review_exact_state_required",
+            "review comparison requires an exact state revision",
+            "Choose a concrete state ID for the comparison.",
+            "heddle help review",
+        )));
     };
     let bytes: [u8; 32] = state
         .value
@@ -187,7 +200,12 @@ fn sign_decision(
         actor, authority, ..
     } = author
     else {
-        bail!("current account author proof unavailable")
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "review_account_author_unavailable",
+            "current account author proof unavailable",
+            "Sign in before recording a review.",
+            "heddle help auth",
+        )));
     };
     let prepared = PreparedControl::sign(
         &snapshot.overview,
@@ -230,7 +248,12 @@ async fn review_scope(
     let spool = client.resolve_spool_ref(address).await?;
     let (_, author) = current_author(&spool)?;
     let SourceAuthor::Account { actor, .. } = author else {
-        bail!("current account author proof unavailable")
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "review_account_author_unavailable",
+            "current account author proof unavailable",
+            "Sign in before recording a review.",
+            "heddle help auth",
+        )));
     };
     let endpoint = client
         .native()

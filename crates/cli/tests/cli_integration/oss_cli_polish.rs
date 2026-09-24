@@ -6464,12 +6464,10 @@ fn global_flags_only_renders_curated_help_not_clap_error() {
             "everyday verb `{verb}` should be on the first screen: {stdout}"
         );
     }
-    for verb in ["import"] {
-        assert!(
-            stdout.contains(&format!("\n  {verb}")),
-            "non-hidden root `{verb}` should be on the ranked screen: {stdout}"
-        );
-    }
+    assert!(
+        stdout.contains("\n  import"),
+        "non-hidden root `import` should be on the ranked screen: {stdout}"
+    );
     assert!(
         !stdout.lines().any(|line| {
             let trimmed = line.trim_start();

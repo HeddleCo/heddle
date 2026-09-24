@@ -29,7 +29,8 @@ use crate::{
     },
     git_notes,
     git_reconstruct::{
-        commit_object_id, reconstruct_commit_bytes, write_commit_object, write_tag_object,
+        commit_object_id, mapped_git_parents, reconstruct_commit_bytes, write_commit_object,
+        write_tag_object,
     },
     git_residual::ResidualStore,
     git_sync::{force_rewind_track_to_branch, sync_marker_to_tag, sync_track_to_branch},
@@ -197,15 +198,7 @@ fn write_state_object(
     let parent_oids: Vec<ObjectId> = if let Some(parents) = options.parent_override {
         parents.to_vec()
     } else {
-        state
-            .parents
-            .iter()
-            .map(|parent_id| {
-                mapping
-                    .get_git(parent_id)
-                    .ok_or(GitProjectionError::StateNotFound(*parent_id))
-            })
-            .collect::<GitProjectionResult<Vec<_>>>()?
+        mapped_git_parents(state, mapping)?
     };
 
     let sig = if principal_lacks_identity(&state.attribution.principal) {
@@ -590,6 +583,8 @@ fn export_scoped(
     // parallel tally over `list_states()` that could include an orphan
     // state reachable from no copied ref.
     let mut newly_minted: HashSet<ObjectId> = HashSet::new();
+    let hosted_seed =
+        objects::object::thread_replication::hosted_import::synthetic_initial_base()?.id();
 
     for state_id in sorted_states {
         // Already mapped to a git object — the common case for git-imported
@@ -685,10 +680,11 @@ fn export_scoped(
             .store()
             .get_state(&state_id)?
             .map(|state| {
-                state
-                    .parents
-                    .iter()
-                    .any(|p| reachable.contains(p) && bridge.mapping.get_git(p).is_none())
+                state.parents.iter().any(|p| {
+                    *p != hosted_seed
+                        && reachable.contains(p)
+                        && bridge.mapping.get_git(p).is_none()
+                })
             })
             .unwrap_or(false);
         if parent_withheld {
@@ -743,11 +739,7 @@ fn export_scoped(
                             bridge.mapping.get_git(state_parent) != Some(*git_parent)
                         })
             });
-            let note = if rewrites_parents {
-                git_notes::HeddleNote::from_projected_state(&state)
-            } else {
-                git_notes::HeddleNote::from_state(&state)
-            };
+            let note = git_notes::note_for_state(bridge.heddle_repo, &state, rewrites_parents)?;
             git_notes::write_note(&repo, git_oid, &note)?;
         }
     }
@@ -793,7 +785,7 @@ fn export_scoped(
             && git_notes::read_note(&repo, git_oid)?.is_none()
             && let Some(state) = bridge.heddle_repo.store().get_state(&state_id)?
         {
-            let note = git_notes::HeddleNote::from_state(&state);
+            let note = git_notes::note_for_state(bridge.heddle_repo, &state, false)?;
             git_notes::write_note(&repo, git_oid, &note)?;
         }
     }
