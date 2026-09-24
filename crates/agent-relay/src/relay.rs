@@ -3245,6 +3245,12 @@ mod tests {
     fn init_repo() -> (tempfile::TempDir, Repository) {
         let temp = tempfile::TempDir::new().unwrap();
         let repo = Repository::init_default(temp.path()).unwrap();
+        // Identity is never fabricated: session attribution requires a
+        // configured principal, so the fixture repository declares one.
+        let mut config = repo.config().clone();
+        config.set_principal("Heddle Test", "test@heddle.dev");
+        config.save(&repo.heddle_dir().join("config.toml")).unwrap();
+        let repo = Repository::open(temp.path()).unwrap();
         (temp, repo)
     }
 
