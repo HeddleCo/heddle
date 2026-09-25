@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.3](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.21.2...heddleco-capability-verifier-v0.21.3) - 2026-09-25
+
+### Other
+
+- updated the following local packages: heddle-biscuit-verifier
+
 ## [0.21.2] - 2026-09-25
 
 ### Other
