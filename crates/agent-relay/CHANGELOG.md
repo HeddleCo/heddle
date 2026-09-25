@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.3] - 2026-09-25
+
+### Fixed
+
+- restrict run timelines to owner and run principal (#1829)
+
+### Other
+
+- Make device run timelines readable and follow newest records (#1821)
+
 ## [0.15.2](https://github.com/HeddleCo/heddle/compare/heddle-agent-relay-v0.15.1...heddle-agent-relay-v0.15.2) - 2026-08-28
 
 ### Other

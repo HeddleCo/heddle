@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.3] - 2026-09-25
+
+### Fixed
+
+- restrict run timelines to owner and run principal (#1829)
+
+### Other
+
+- Make device run timelines readable and follow newest records (#1821)
+
 ### Other
 
 - *(deps)* consume the Heddle-hosted capability verifier 0.20.0
