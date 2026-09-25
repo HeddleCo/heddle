@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 pub const DATABASE_NAME: &str = "metadata.sqlite3";
 pub const CHANGE_MARKER_NAME: &str = "metadata.sqlite3.changed";
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 pub const CHANGE_WINDOW: i64 = 4096;
 
 /// Publish an external sidecar change into the same committed device change
@@ -74,7 +74,7 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
         }
         return Ok(connection);
     }
-    if version != 0 {
+    if version != 0 && version != 1 {
         return Err(Error::Schema(version));
     }
     // WAL activation itself can return SQLITE_BUSY without honoring the busy
@@ -104,6 +104,11 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
             initialize_changes(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        1 => {
+            crate::device_runs::migrate_reader_schema(&tx)
+                .map_err(|error| Error::Initialization(error.to_string()))?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
         SCHEMA_VERSION => {}
         other => return Err(Error::Schema(other)),
     }
@@ -111,8 +116,8 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
     Ok(connection)
 }
 
-/// Opening an unknown store is side-effect free. Every initialized database
-/// contains the complete core schema, regardless of which subsystem opened it.
+/// Opening an unknown store is side-effect free. Existing legacy stores migrate
+/// once, so a hook can read its run before a foreground writer opens the store.
 pub fn open_existing(heddle_dir: &Path) -> Result<Option<Connection>, Error> {
     let path = heddle_dir.join(DATABASE_NAME);
     if !path.try_exists()? {
@@ -121,6 +126,10 @@ pub fn open_existing(heddle_dir: &Path) -> Result<Option<Connection>, Error> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     configure(&connection)?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version == 1 {
+        drop(connection);
+        return open(heddle_dir).map(Some);
+    }
     if version != SCHEMA_VERSION {
         return Err(Error::Schema(version));
     }
@@ -327,6 +336,6 @@ mod tests {
         assert_eq!(page.cursor, 12);
         db.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
             .expect("future schema");
-        assert!(matches!(open(directory.path()), Err(Error::Schema(2))));
+        assert!(matches!(open(directory.path()), Err(Error::Schema(3))));
     }
 }

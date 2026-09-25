@@ -39,6 +39,32 @@ async fn run_snapshot(
     run_snapshot_batch(remote, spool, runs).await.changes
 }
 
+async fn latest_snapshot(
+    remote: &DeviceRemote,
+    spool: &SpoolRef,
+    run: RecordRef,
+) -> thread_api::observation::CommittedBatch<run_event::Payload> {
+    let mut observed = remote
+        .observe::<thread_api::rpc::RunServiceObserveRuns>(
+            ObserveRunsRequest {
+                spool: Some(spool.clone()),
+                runs: vec![run],
+                include_timeline: true,
+                timeline_start: TimelineStart::Latest as i32,
+                timeline_limit: 1,
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .expect("latest stream opens");
+    tokio::time::timeout(std::time::Duration::from_secs(10), observed.next_commit())
+        .await
+        .expect("latest deadline")
+        .expect("latest protocol")
+        .expect("latest snapshot")
+}
+
 pub(super) async fn principal_visibility(
     owner: &DeviceRemote,
     browser: &iroh::Endpoint,
@@ -70,14 +96,19 @@ pub(super) async fn principal_visibility(
             spool: Some(spool_ref.clone()),
             id: id.into(),
         };
-        store
-            .put_run(RunRecord {
-                r#ref: Some(reference.clone()),
-                principal_id: owner_id.clone(),
-                agent_id: agent.into(),
-                ..Default::default()
-            })
-            .expect("run");
+        let record = RunRecord {
+            r#ref: Some(reference.clone()),
+            principal_id: owner_id.clone(),
+            agent_id: agent.into(),
+            ..Default::default()
+        };
+        if agent.is_empty() {
+            store.put_run(record).expect("owner run");
+        } else {
+            store
+                .put_run_from_credential(record, agent)
+                .expect("agent run");
+        }
         store
             .put_timeline(&TimelineRecord {
                 r#ref: Some(RecordRef {
@@ -146,6 +177,8 @@ pub(super) async fn principal_visibility(
     let own = run_snapshot(&agents[0], &spool_ref, vec![refs[0].clone()]).await;
     assert!(own.iter().any(|event| matches!(event, run_event::Payload::Run(run) if run.r#ref.as_ref() == Some(&refs[0]))), "agent sees own run");
     assert!(own.iter().any(|event| matches!(event, run_event::Payload::Timeline(timeline) if timeline.run.as_ref() == Some(&refs[0]))), "agent sees own timeline");
+    let own_latest = latest_snapshot(&agents[0], &spool_ref, refs[0].clone()).await;
+    assert!(own_latest.changes.iter().any(|event| matches!(event, run_event::Payload::Timeline(timeline) if timeline.run.as_ref() == Some(&refs[0]))), "agent sees own latest timeline");
     let list = run_snapshot(&agents[0], &spool_ref, Vec::new()).await;
     assert_eq!(
         list.iter()
@@ -177,6 +210,75 @@ pub(super) async fn principal_visibility(
             (absent.changes, absent.page),
             "forbidden and nonexistent snapshots are indistinguishable"
         );
+        let denied_latest = latest_snapshot(&agents[0], &spool_ref, forbidden.clone()).await;
+        let absent_latest = latest_snapshot(
+            &agents[0],
+            &spool_ref,
+            RecordRef {
+                spool: Some(spool_ref.clone()),
+                id: "no-such-run".into(),
+            },
+        )
+        .await;
+        assert_eq!(
+            (denied_latest.changes, denied_latest.page),
+            (absent_latest.changes, absent_latest.page),
+            "forbidden and nonexistent follows are indistinguishable"
+        );
+        let missing = RecordRef {
+            spool: Some(spool_ref.clone()),
+            id: "no-such-run".into(),
+        };
+        let control = ControlRunRequest {
+            client_operation_id: "visibility-control".into(),
+            run: Some(forbidden.clone()),
+            action: control_run_request::Action::Pause as i32,
+            expected_version: vec![1],
+            ..Default::default()
+        };
+        let forbidden_control = agents[0]
+            .api
+            .call::<thread_api::rpc::RunServiceControlRun>(&control)
+            .await
+            .expect_err("forbidden control");
+        let absent_control = agents[0]
+            .api
+            .call::<thread_api::rpc::RunServiceControlRun>(&ControlRunRequest {
+                run: Some(missing.clone()),
+                ..control
+            })
+            .await
+            .expect_err("absent control");
+        assert_eq!(
+            forbidden_control.to_string(),
+            absent_control.to_string(),
+            "control has no run existence oracle"
+        );
+        let decision = DecideRunPermissionRequest {
+            client_operation_id: "visibility-decision".into(),
+            run: Some(forbidden.clone()),
+            permission_id: "pending".into(),
+            request_digest: vec![1; 32],
+            allow: true,
+        };
+        let forbidden_decision = agents[0]
+            .api
+            .call::<thread_api::rpc::RunServiceDecidePermission>(&decision)
+            .await
+            .expect_err("forbidden decision");
+        let absent_decision = agents[0]
+            .api
+            .call::<thread_api::rpc::RunServiceDecidePermission>(&DecideRunPermissionRequest {
+                run: Some(missing),
+                ..decision
+            })
+            .await
+            .expect_err("absent decision");
+        assert_eq!(
+            forbidden_decision.to_string(),
+            absent_decision.to_string(),
+            "permission decision has no run existence oracle"
+        );
     }
     let sibling = run_snapshot(&agents[1], &spool_ref, vec![refs[0].clone()]).await;
     assert!(
@@ -185,6 +287,55 @@ pub(super) async fn principal_visibility(
             run_event::Payload::Run(_) | run_event::Payload::Timeline(_)
         )),
         "sibling cannot observe another agent's run"
+    );
+
+    let unlabeled = crypto::Ed25519Signer::from_seed(&[83; 32]).expect("unlabeled proof key");
+    let unlabeled_key: [u8; 32] = unlabeled.public_key().try_into().expect("public key");
+    let statement = biscuit_verifier::key_delegation::statement(&root_token, &unlabeled_key)
+        .expect("proof-key transfer statement");
+    let signature: [u8; 64] = root
+        .sign(&statement)
+        .expect("proof-key transfer signature")
+        .try_into()
+        .expect("signature bytes");
+    let unlabeled_token = biscuit_verifier::key_delegation::append(
+        &root_token,
+        &unlabeled_key,
+        &signature,
+        biscuit_auth::builder::BlockBuilder::new(),
+    )
+    .expect("unlabeled delegated capability");
+    let transport = thread_api::transport::IrohTransport::new(
+        browser
+            .connect(address, NATIVE_ALPN)
+            .await
+            .expect("unlabeled connection"),
+        thread_api::credentials::Credentials::Signed {
+            signer: Arc::new(unlabeled),
+            biscuit: unlabeled_token.into_bytes(),
+            grant_envelope: Vec::new(),
+        },
+        256 * 1024,
+        std::time::Duration::from_secs(10),
+    )
+    .expect("unlabeled transport");
+    let unlabeled = thread_api::Remote::discover(transport, endpoint, EndpointKind::Device)
+        .await
+        .expect("unlabeled remote");
+    let denied = run_snapshot_batch(&unlabeled, &spool_ref, refs.clone()).await;
+    let absent = run_snapshot_batch(
+        &unlabeled,
+        &spool_ref,
+        vec![RecordRef {
+            spool: Some(spool_ref.clone()),
+            id: "no-such-run".into(),
+        }],
+    )
+    .await;
+    assert_eq!(
+        (denied.changes, denied.page),
+        (absent.changes, absent.page),
+        "a transferred proof key is not the owner"
     );
 }
 

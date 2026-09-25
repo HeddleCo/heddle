@@ -293,11 +293,21 @@ impl DeviceRpc {
         let operation = match method.rsplit('/').next().context("method missing")? {
             "ControlRun" => {
                 let request = ControlRunRequest::decode(body)?;
+                let run = request.run.as_ref().context("run required")?;
+                anyhow::ensure!(
+                    store.readable(&run.id, session.run_reader())?,
+                    "run unavailable"
+                );
                 store.enqueue_control(&request, &session.actor)?;
                 request.client_operation_id
             }
             "DecidePermission" => {
                 let request = DecideRunPermissionRequest::decode(body)?;
+                let run = request.run.as_ref().context("run required")?;
+                anyhow::ensure!(
+                    store.readable(&run.id, session.run_reader())?,
+                    "run unavailable"
+                );
                 store.decide_permission(&request, &session.actor)?;
                 request.client_operation_id
             }

@@ -4230,7 +4230,9 @@ mod tests {
         )
         .expect("tool hook");
         let store = repo::device_runs::RunStore::open(runtime.repo.heddle_dir()).expect("runs");
-        let tool_run_id = store.page("", 10).expect("run page")[0]
+        let tool_run_id = store
+            .page("", 10, repo::device_runs::RunReader::Owner)
+            .expect("run page")[0]
             .r#ref
             .as_ref()
             .expect("run ref")
@@ -4267,7 +4269,7 @@ mod tests {
         )
         .expect("stop hook");
         let records = store
-            .observation_page("", 100, &[], &[], true)
+            .observation_page("", 100, &[], &[], true, repo::device_runs::RunReader::Owner)
             .expect("timeline");
         let timeline: Vec<_> = records
             .into_iter()
@@ -4335,7 +4337,11 @@ mod tests {
             .expect("checkpoint");
         let store = repo::device_runs::RunStore::open(runtime.repo.heddle_dir()).expect("runs");
         let timeline = store
-            .latest_timeline(&opened.heddle_session_id, 1)
+            .latest_timeline(
+                &opened.heddle_session_id,
+                1,
+                repo::device_runs::RunReader::Owner,
+            )
             .expect("timeline");
         let revision = timeline[0].captured_revision.as_ref().expect("revision");
         let Some(api::heddle::api::v1alpha2::revision_ref::Revision::State(actual)) =
@@ -4399,7 +4405,7 @@ mod tests {
         let head = runtime.repo.head().expect("head").expect("captured state");
         let store = repo::device_runs::RunStore::open(runtime.repo.heddle_dir()).expect("runs");
         let timeline: Vec<_> = store
-            .observation_page("", 20, &[], &[], true)
+            .observation_page("", 20, &[], &[], true, repo::device_runs::RunReader::Owner)
             .expect("timeline")
             .into_iter()
             .filter_map(|(_, record)| match record {
@@ -4435,7 +4441,7 @@ mod tests {
         .expect("Codex turn");
         let store = repo::device_runs::RunStore::open(runtime.repo.heddle_dir()).expect("runs");
         let timeline: Vec<_> = store
-            .observation_page("", 20, &[], &[], true)
+            .observation_page("", 20, &[], &[], true, repo::device_runs::RunReader::Owner)
             .expect("timeline")
             .into_iter()
             .filter_map(|(_, record)| match record {

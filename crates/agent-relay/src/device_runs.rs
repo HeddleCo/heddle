@@ -12,17 +12,19 @@ use wire::SessionReportEnvelope;
 
 // A display name is not an account identifier. Unenrolled local sessions have
 // no hosted principal yet; enrollment supplies the independently verified pin.
-fn admitted_principal_id() -> Result<String> {
+fn admitted_run_identity() -> Result<(String, String)> {
     let home = repo::identity::heddle_home_dir();
     if !home.join("state/device-rpc/authority.bin").try_exists()? {
-        return Ok(String::new());
+        return Ok((String::new(), String::new()));
     }
     let authority = repo::device_authority::load(&home, chrono::Utc::now().timestamp())?;
-    Ok(authority
+    let principal = authority
         .owner
         .owner
         .context("admitted account missing")?
-        .id)
+        .id;
+    let agent = hosted_client::client::authenticated_run_agent(&home)?.unwrap_or_default();
+    Ok((principal, agent))
 }
 
 pub(crate) fn publish(
@@ -78,6 +80,8 @@ pub(crate) fn publish(
     } else {
         Vec::new()
     };
+    let (principal_id, agent_id) = admitted_run_identity()?;
+    let reader_agent = agent_id.clone();
     let record = v2::RunRecord {
         r#ref: Some(reference),
         thread,
@@ -92,8 +96,8 @@ pub(crate) fn publish(
             }),
             _ => None,
         },
-        principal_id: admitted_principal_id()?,
-        agent_id: report.agent_session_id.clone().unwrap_or_default(),
+        principal_id,
+        agent_id,
         harness,
         model: report.harness.model.clone().unwrap_or_default(),
         state: state as i32,
@@ -101,14 +105,21 @@ pub(crate) fn publish(
         ..Default::default()
     };
     // Identical report flushes should not wake every device observation again.
-    let mut previous = store.run(&report.heddle_session_id)?;
+    let mut previous = store.run(
+        &report.heddle_session_id,
+        repo::device_runs::RunReader::Owner,
+    )?;
     if let Some(previous) = previous.as_mut() {
         previous.version.clear();
         previous.pending_permissions.clear();
         previous.artifacts.clear();
     }
     if previous.as_ref() != Some(&record) {
-        store.put_run(record)?;
+        if reader_agent.is_empty() {
+            store.put_run(record)?;
+        } else {
+            store.put_run_from_credential(record, &reader_agent)?;
+        }
     }
     if report.harness.harness.as_deref() == Some("claude-code")
         && let Some(key) = report.native_actor_key.as_deref()
@@ -119,7 +130,13 @@ pub(crate) fn publish(
             *status == ActorPresenceStatus::Active,
         )?;
     }
-    let last_record = store.latest_timeline(&report.heddle_session_id, 1)?.pop();
+    let last_record = store
+        .latest_timeline(
+            &report.heddle_session_id,
+            1,
+            repo::device_runs::RunReader::Owner,
+        )?
+        .pop();
     let mut next = last_record
         .as_ref()
         .map_or(0, |record| record.position.saturating_add(1));
@@ -318,7 +335,9 @@ pub(crate) fn claude_controls(
     if controls.is_empty() {
         return Ok(false);
     }
-    store.run(run_id)?.context("controlled run missing")?;
+    store
+        .run(run_id, repo::device_runs::RunReader::Owner)?
+        .context("controlled run missing")?;
     let mut context = additional_context()?.unwrap_or_default();
     let mut stop = false;
     let mut delivered = Vec::new();
@@ -564,7 +583,9 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            store.last_timeline_position("run-1").expect("timeline"),
+            store
+                .last_timeline_position("run-1", repo::device_runs::RunReader::Owner)
+                .expect("timeline"),
             None,
             "a tool boundary must not manufacture progress records"
         );
@@ -609,7 +630,11 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            store.run("run-1").expect("read").expect("run").state,
+            store
+                .run("run-1", repo::device_runs::RunReader::Owner)
+                .expect("read")
+                .expect("run")
+                .state,
             run.state,
             "hook output is not process-termination evidence"
         );
@@ -637,7 +662,11 @@ mod tests {
             1
         );
         assert_eq!(
-            store.run("run-1").expect("read").expect("run").state,
+            store
+                .run("run-1", repo::device_runs::RunReader::Owner)
+                .expect("read")
+                .expect("run")
+                .state,
             run.state
         );
     }

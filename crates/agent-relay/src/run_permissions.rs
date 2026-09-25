@@ -194,7 +194,10 @@ mod tests {
             ready_tx.send(()).expect("ready");
             let deadline = Instant::now() + Duration::from_secs(5);
             loop {
-                let run = remote.run("run-a").expect("read run").expect("run");
+                let run = remote
+                    .run("run-a", repo::device_runs::RunReader::Owner)
+                    .expect("read run")
+                    .expect("run");
                 if let Some(permission) = run.pending_permissions.first() {
                     let intent: Value = serde_json::from_slice(&permission.canonical_input_json)
                         .expect("intent JSON");
@@ -236,7 +239,7 @@ mod tests {
         );
         assert!(
             store
-                .run("run-a")
+                .run("run-a", repo::device_runs::RunReader::Owner)
                 .expect("run")
                 .expect("run")
                 .pending_permissions
@@ -273,7 +276,7 @@ mod tests {
         );
         assert!(
             store
-                .run("run-a")
+                .run("run-a", repo::device_runs::RunReader::Owner)
                 .expect("run")
                 .expect("run")
                 .pending_permissions
