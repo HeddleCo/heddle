@@ -11,7 +11,7 @@ use std::{path::Path, str};
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{git_hermetic, heddle, heddle_help, heddle_output};
+use super::{git_hermetic, heddle, heddle_help, heddle_output, seed_test_repo_principal};
 
 fn git(args: &[&str], dir: &Path) {
     git_hermetic(args, dir);
@@ -26,6 +26,7 @@ fn overlay_with_records() -> TempDir {
     git(&["add", "f.txt"], dir);
     git(&["commit", "-qm", "init"], dir);
     heddle(&["init"], Some(dir)).expect("heddle init");
+    seed_test_repo_principal(dir).expect("seed test principal");
     heddle(
         &[
             "context",
@@ -43,11 +44,12 @@ fn overlay_with_records() -> TempDir {
     heddle(
         &[
             "discuss",
-            "--new",
+            "new",
             "--path",
             "f.txt",
             "--symbol",
             "greeting",
+            "-m",
             "why lowercase?",
         ],
         Some(dir),
@@ -222,6 +224,7 @@ fn overlay_creation_warns_once_per_working_copy() {
     git(&["add", "f.txt"], dir);
     git(&["commit", "-qm", "init"], dir);
     heddle(&["init"], Some(dir)).expect("heddle init");
+    seed_test_repo_principal(dir).expect("seed test principal");
 
     let notice = "local to this working copy";
 
@@ -252,8 +255,6 @@ fn overlay_creation_warns_once_per_working_copy() {
                 "set",
                 "--path",
                 "f.txt",
-                "--scope",
-                "file",
                 "--kind",
                 "invariant",
                 "-m",
@@ -272,7 +273,7 @@ fn overlay_creation_warns_once_per_working_copy() {
     // `discuss` states the same boundary for its own records, also once.
     let first_discuss = heddle_output(
         &[
-            "discuss", "--new", "--path", "f.txt", "--symbol", "greeting", "why?",
+            "discuss", "new", "--path", "f.txt", "--symbol", "greeting", "-m", "why?",
         ],
         Some(dir),
     )
@@ -285,11 +286,12 @@ fn overlay_creation_warns_once_per_working_copy() {
     let second_discuss = heddle_output(
         &[
             "discuss",
-            "--new",
+            "new",
             "--path",
             "f.txt",
             "--symbol",
             "greeting",
+            "-m",
             "still why?",
         ],
         Some(dir),

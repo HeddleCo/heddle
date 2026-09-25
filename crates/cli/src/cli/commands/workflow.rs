@@ -2324,8 +2324,7 @@ struct IncompleteLandMarker {
 }
 
 mod incomplete_land_pre_thread {
-    use serde::de::Error as _;
-    use serde::{Deserialize, Deserializer, Serializer};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _};
 
     use super::Thread;
 
@@ -2350,7 +2349,9 @@ mod incomplete_land_pre_thread {
             return Ok(None);
         };
         let bytes = hex::decode(value).map_err(D::Error::custom)?;
-        rmp_serde::from_slice(&bytes).map(Some).map_err(D::Error::custom)
+        rmp_serde::from_slice(&bytes)
+            .map(Some)
+            .map_err(D::Error::custom)
     }
 }
 
@@ -3201,14 +3202,26 @@ fn multi_land_has_checkpointed_peer() -> bool {
 }
 
 fn multi_land_error_peer(thread: &str, error: &anyhow::Error) -> MultiLandPeerResult {
+    let name_land_command = format!("heddle land --thread {thread}");
+    let requested_name = |command: &str| {
+        if command.starts_with("heddle land --thread ") {
+            name_land_command.clone()
+        } else {
+            command.to_string()
+        }
+    };
     let (message, blockers, warnings, primary_command, recovery_commands) =
         match error.downcast_ref::<RecoveryAdvice>() {
             Some(advice) => (
                 advice.error.clone(),
                 vec![advice.unsafe_condition.clone()],
                 vec![advice.hint.clone()],
-                Some(advice.primary_command.clone()),
-                advice.recovery_commands.clone(),
+                Some(requested_name(&advice.primary_command)),
+                advice
+                    .recovery_commands
+                    .iter()
+                    .map(|command| requested_name(command))
+                    .collect(),
             ),
             None => (
                 format!("{error:#}"),

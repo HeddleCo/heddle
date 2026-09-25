@@ -232,7 +232,7 @@ pub(crate) fn parse_scope(input: Option<&str>) -> Result<AnnotationScope> {
                 "Invalid scope '{other}'. Use --symbol <name>, --line <n>, or the deprecated --scope file|symbol:<name>|lines:<start>-<end>"
             ),
             "Pass `--symbol <name>` or `--line <n>` (or the deprecated `--scope` alias).",
-            "heddle context set --path <path> --symbol <name> -m \"...\"",
+            "heddle help context",
         ))),
     }
 }
@@ -243,7 +243,7 @@ fn symbol_scope(name: &str) -> Result<AnnotationScope> {
             "context_symbol_name_required",
             "Symbol name must not be empty",
             "Use `--symbol <name>` with a non-empty symbol name.",
-            "heddle context set --path <path> --symbol <name> -m \"...\"",
+            "heddle help context",
         )));
     }
     Ok(AnnotationScope::Symbol {
@@ -273,17 +273,16 @@ pub(crate) fn scope_from_flags(
     line: Option<u32>,
     scope: Option<&str>,
 ) -> Result<Option<AnnotationScope>> {
-    match (
-        symbol.map(str::trim).filter(|value| !value.is_empty()),
-        line,
-        scope,
-    ) {
+    match (symbol.map(str::trim), line, scope) {
         (Some(name), None, None) => Ok(Some(symbol_scope(name)?)),
         (None, Some(n), None) => Ok(Some(line_scope(n, n)?)),
-        (Some(name), Some(n), None) => Ok(Some(AnnotationScope::Symbol {
-            name: name.to_string(),
-            resolved_lines: Some((n, n)),
-        })),
+        (Some(name), Some(n), None) => {
+            symbol_scope(name)?;
+            Ok(Some(AnnotationScope::Symbol {
+                name: name.to_string(),
+                resolved_lines: Some((n, n)),
+            }))
+        }
         (None, None, Some(raw)) => Ok(Some(parse_scope(Some(raw))?)),
         (None, None, None) => Ok(None),
         _ => Err(anyhow!(RecoveryAdvice::invalid_usage(

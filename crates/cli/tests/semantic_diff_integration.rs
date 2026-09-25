@@ -2,8 +2,10 @@
 //!
 //! These tests verify that semantic analysis actually works with real code changes.
 
+#[path = "support/mod.rs"]
+mod cli_test_support;
+
 use objects::store::ObjectStore;
-use repo::Repository;
 use semantic::{
     analysis::{SimilarityMethod, detect_file_renames, detect_function_changes},
     parser::{Language, ParsedFile},
@@ -376,7 +378,7 @@ const fn compile_time_calc() -> usize {
 #[test]
 fn test_semantic_diff_on_repository() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create initial source code
     std::fs::create_dir(temp.path().join("src")).unwrap();

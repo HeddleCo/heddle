@@ -157,10 +157,12 @@ jobs:
           cache-on-failure: true
           cache-all-crates: true
 
-      - name: Full CLI integration target
+      # Run all CLI test binaries: the themed suites and standalone integration
+      # targets exercise contracts that cli_basics alone does not cover.
+      - name: Full CLI test suite
         run: |
           export HEDDLE_HOME=$(mktemp -d)
-          cargo nextest run --locked -p heddle-cli --features client --test cli_basics
+          cargo nextest run --locked -p heddle-cli --features client --test-threads 4
 
       - name: Hosted-client tests
         run: |

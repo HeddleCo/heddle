@@ -22,7 +22,7 @@ use crypto::Signer;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::{assert_json_recovery_advice_fields, heddle, heddle_output};
+use super::{assert_json_recovery_advice_fields, heddle, heddle_output, seed_test_repo_principal};
 
 fn write_test_private_key(path: &std::path::Path, pem: &str) {
     objects::fs_atomic::write_file_atomic_secret(path, pem.as_bytes())
@@ -43,6 +43,7 @@ fn trust_redact_public_key(repo: &std::path::Path, public_key_hex: &str) {
 fn setup_repo_with_secret() -> (TempDir, String) {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     fs::create_dir_all(temp.path().join("config")).unwrap();
     fs::write(
         temp.path().join("config/secrets.toml"),
@@ -73,6 +74,7 @@ fn setup_git_overlay_repo_with_secret() -> (TempDir, String) {
     git_overlay_fixture_cmd(temp.path(), &["add", "."]);
     git_overlay_fixture_cmd(temp.path(), &["commit", "-m", "seed"]);
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     heddle(
         &["bridge", "git", "import", "--ref", "main"],
         Some(temp.path()),

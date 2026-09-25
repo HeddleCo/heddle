@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! End-to-end coverage for the stored-index symbol diff CLI.
 
+#[path = "support/mod.rs"]
+mod cli_test_support;
+
 use std::process::Command;
 
-use repo::Repository;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -19,7 +21,7 @@ fn run_heddle(repo: &TempDir, args: &[&str]) -> std::process::Output {
 #[test]
 fn semantic_diff_reports_added_removed_modified_and_moved_symbols() {
     let temp = TempDir::new().expect("temp repo");
-    let repo = Repository::init_default(temp.path()).expect("init repo");
+    let repo = cli_test_support::init_test_repository(temp.path()).expect("init repo");
     std::fs::write(
         temp.path().join("lib.rs"),
         "fn changed() -> i32 { 1 }\nfn removed() {}\nfn moved() -> i32 { 7 }\n",

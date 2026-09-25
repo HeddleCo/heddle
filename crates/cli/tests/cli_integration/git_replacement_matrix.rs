@@ -810,7 +810,7 @@ fn git_replacement_matrix_git_import_export_sync_reconcile_without_git_on_path()
             "git",
             "--ref",
             "main",
-            "--preview",
+            "--dry-run",
         ],
         &work,
     );

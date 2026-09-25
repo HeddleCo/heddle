@@ -15,7 +15,6 @@ use objects::{
         pack::ObjectType as PackObjectType,
     },
 };
-use repo::Repository;
 use tempfile::TempDir;
 use wire::{ObjectData, ObjectId, ObjectType};
 
@@ -72,7 +71,7 @@ fn try_git_snapshot_baseline(file_count: usize) -> Option<(Duration, Duration)> 
 
 fn measure_snapshot_profile(file_count: usize) -> SnapshotProfile {
     let snapshot_temp = TempDir::new().unwrap();
-    let snapshot_repo = Repository::init_default(snapshot_temp.path()).unwrap();
+    let snapshot_repo = cli_test_support::init_test_repository(snapshot_temp.path()).unwrap();
     cli_test_support::write_many_small_files(snapshot_temp.path(), file_count);
     let attribution = snapshot_repo.get_attribution().unwrap();
 
@@ -176,7 +175,7 @@ fn perf_assert_enabled() -> bool {
 #[test]
 fn test_large_file_handling() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create a 10MB file
     let large_content = vec![b'x'; 10 * 1024 * 1024];
@@ -203,7 +202,7 @@ fn test_large_file_handling() {
 #[test]
 fn test_deep_directory_structure() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create deeply nested directories (50 levels)
     let mut path = temp.path().to_path_buf();
@@ -231,7 +230,7 @@ fn test_deep_directory_structure() {
 #[test]
 fn test_wide_directory_structure() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create 100 directories at the same level, each with a file
     for i in 0..100 {
@@ -256,7 +255,7 @@ fn test_wide_directory_structure() {
 #[test]
 fn test_deduplication_performance() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create same large content in multiple files
     let content = vec![b'd'; 1024 * 1024]; // 1MB of 'd'
@@ -280,7 +279,7 @@ fn test_deduplication_performance() {
 #[test]
 fn test_log_performance_many_states() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create 100 states in history
     for i in 0..100 {
@@ -310,7 +309,7 @@ fn test_log_performance_many_states() {
 #[test]
 fn test_goto_performance() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create several states
     let mut state_ids = Vec::new();
@@ -338,7 +337,7 @@ fn test_goto_performance() {
 #[test]
 fn test_diff_performance_large_trees() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create base state with many files
     for i in 0..500 {
@@ -377,7 +376,7 @@ fn test_diff_performance_large_trees() {
 #[test]
 fn test_memory_efficiency() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create many states
     for i in 0..50 {
@@ -398,7 +397,7 @@ fn test_memory_efficiency() {
 #[test]
 fn test_status_performance_many_changes() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create base state
     for i in 0..100 {
@@ -455,7 +454,7 @@ fn test_status_performance_many_changes() {
 #[test]
 fn test_binary_file_patterns() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create various binary-like files
     let files = vec![
@@ -477,7 +476,7 @@ fn test_binary_file_patterns() {
 #[test]
 fn test_incremental_snapshot_performance() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create base with many files
     for i in 0..1000 {
@@ -740,7 +739,7 @@ fn sample_fs_pack_objects() -> Vec<(ContentHash, PackObjectType, Vec<u8>)> {
 #[test]
 fn test_empty_file_handling() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Mix of empty and non-empty files
     std::fs::write(temp.path().join("empty.txt"), "").unwrap();
@@ -765,7 +764,7 @@ fn test_symlink_handling() {
     use std::os::unix::fs::symlink;
 
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create file and symlink
     std::fs::write(temp.path().join("target.txt"), "target content").unwrap();
@@ -781,7 +780,7 @@ fn test_symlink_handling() {
 #[test]
 fn test_long_filename_handling() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create file with very long name (接近系统限制)
     let long_name = "a".repeat(200) + ".txt";
@@ -795,7 +794,7 @@ fn test_long_filename_handling() {
 #[test]
 fn test_special_characters_in_filenames() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     let special_names = vec![
         "file with spaces.txt",
@@ -832,7 +831,7 @@ fn test_special_characters_in_filenames() {
 #[test]
 fn test_cold_cache_status() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create a realistic directory structure
     for i in 0..50 {
@@ -879,7 +878,7 @@ fn test_cold_cache_status() {
 #[test]
 fn test_warm_cache_status() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create a realistic directory structure
     for i in 0..50 {
@@ -930,7 +929,7 @@ fn test_warm_cache_status() {
 #[test]
 fn test_single_file_change_detection() {
     let temp = TempDir::new().unwrap();
-    let repo = Repository::init_default(temp.path()).unwrap();
+    let repo = cli_test_support::init_test_repository(temp.path()).unwrap();
 
     // Create a large repository with many files
     let file_count = 500;

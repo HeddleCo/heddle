@@ -468,6 +468,7 @@ fn run_with_home_user_config(
         .args(args)
         .current_dir(&dir)
         .env_remove("HEDDLE_CONFIG")
+        .env_remove("HEDDLE_HOME")
         .env_remove("XDG_CONFIG_HOME")
         .env("HOME", home)
         .output()

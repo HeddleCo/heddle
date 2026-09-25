@@ -52,8 +52,8 @@ fn test_path_case_sensitivity() {
         result.err()
     );
 
-    let status = heddle(&["status", "--output", "text"], Some(temp.path())).unwrap();
-    assert!(status.contains("clean") || status.contains("Nothing"));
+    let status = status_json(temp.path());
+    assert_eq!(status["verification"]["worktree_dirty"], false, "{status}");
 }
 
 #[test]

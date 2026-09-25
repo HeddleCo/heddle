@@ -1088,7 +1088,7 @@ impl<'a> GitProjection<'a> {
                 && super::git_notes::read_note(git_repo, git_oid)?.is_none()
                 && let Some(state) = self.heddle_repo.store().get_state(&state_id)?
             {
-                let note = super::git_notes::HeddleNote::from_state(&state);
+                let note = super::git_notes::note_for_state(self.heddle_repo, &state, false)?;
                 super::git_notes::write_note(git_repo, git_oid, &note)?;
             }
         }
@@ -1265,11 +1265,7 @@ impl<'a> GitProjection<'a> {
                                 },
                             )
                     });
-                let note = if rewrites_parents {
-                    git_notes::HeddleNote::from_projected_state(&state)
-                } else {
-                    git_notes::HeddleNote::from_state(&state)
-                };
+                let note = git_notes::note_for_state(self.heddle_repo, &state, rewrites_parents)?;
                 git_notes::write_note(&checkout.object_repo, git_oid, &note)?;
             }
         }

@@ -199,17 +199,31 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     ThreadId::new(args.thread.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
     let repo = cli.open_repo()?;
     let anchor = match &args.anchor {
-        Some(spec) => repo
-            .resolve_state(spec)?
-            .ok_or_else(|| anyhow!("anchor state '{}' not found", spec))?,
-        None => repo
-            .head()?
-            .ok_or_else(|| anyhow!("repository has no HEAD state to reserve from"))?,
+        Some(spec) => repo.resolve_state(spec)?.ok_or_else(|| {
+            anyhow!(RecoveryAdvice::invalid_usage(
+                "agent_anchor_not_found",
+                format!("anchor state '{spec}' not found"),
+                "Choose a state shown by `heddle log`.",
+                "heddle log",
+            ))
+        })?,
+        None => repo.head()?.ok_or_else(|| {
+            anyhow!(RecoveryAdvice::invalid_usage(
+                "agent_reservation_missing_head",
+                "repository has no HEAD state to reserve from",
+                "Capture a state before reserving this thread.",
+                "heddle status",
+            ))
+        })?,
     };
-    let state = repo
-        .store()
-        .get_state(&anchor)?
-        .ok_or_else(|| anyhow!("anchor state '{}' not found", anchor.short()))?;
+    let state = repo.store().get_state(&anchor)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::invalid_usage(
+            "agent_anchor_not_found",
+            format!("anchor state '{}' not found", anchor.short()),
+            "Run `heddle verify` to inspect the missing state.",
+            "heddle verify",
+        ))
+    })?;
     let anchor_full = anchor.to_string_full();
     let anchor_short = anchor.short();
     let anchor_root = state.tree.short();
@@ -819,13 +833,22 @@ fn map_fanout_plan_error(err: FanoutPlanError) -> anyhow::Error {
 }
 
 fn fanout_base(repo: &Repository) -> Result<(String, String)> {
-    let head = repo
-        .head()?
-        .ok_or_else(|| anyhow!("repository has no HEAD state for agent fanout"))?;
-    let state = repo
-        .store()
-        .get_state(&head)?
-        .ok_or_else(|| anyhow!("HEAD state '{}' not found", head.short()))?;
+    let head = repo.head()?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::invalid_usage(
+            "agent_fanout_missing_head",
+            "repository has no HEAD state for agent fanout",
+            "Capture a state before starting fanout.",
+            "heddle status",
+        ))
+    })?;
+    let state = repo.store().get_state(&head)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::invalid_usage(
+            "agent_fanout_head_missing",
+            format!("HEAD state '{}' not found", head.short()),
+            "Run `heddle verify` to inspect the missing state.",
+            "heddle verify",
+        ))
+    })?;
     Ok((head.to_string_full(), state.tree.short()))
 }
 

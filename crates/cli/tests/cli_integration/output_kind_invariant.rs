@@ -49,6 +49,7 @@ const SWEPT: &[&str] = &[
     "init",
     "capture",
     "clone",
+    "blame",
     "diff",
     "undo",
     "thread list",
@@ -90,7 +91,8 @@ const SWEPT: &[&str] = &[
     "visibility list",
     "invite",
     "invite list",
-    "discuss",
+    "discuss new",
+    "discuss reply",
     "discuss resolve",
     "discuss reopen",
     "discuss list",
@@ -176,7 +178,7 @@ const SWEPT: &[&str] = &[
     "thread marker delete",
     "thread marker list",
     "thread marker show",
-    "thread promote",
+    "thread checkout",
     "thread refresh",
     "thread rename",
     "thread resolve",
@@ -269,13 +271,15 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // they emit the delegate's kind.
         "agent capture" => Some("capture"),
         "agent ready" => Some("ready"),
-        "discuss" => Some("discuss_open"),
+        "discuss new" => Some("discuss_open"),
+        "discuss reply" => Some("discuss_turn"),
         "invite" => Some("auth_invite"),
         "invite list" => Some("auth_invite_list"),
         "thread ownership status" | "thread ownership claim" | "thread ownership resolve" => {
             Some("thread_ownership")
         }
         "start" => Some("thread_start"),
+        "thread checkout" => Some("thread_promote"),
         "import url" | "import status" => Some("import_operation"),
         // The garbage-collection wrapper emits its inner tool's kind.
         "maintenance gc" => Some("gc"),

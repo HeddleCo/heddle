@@ -664,7 +664,7 @@ mod fsck {
                 "git",
                 "--ref",
                 "main",
-                "--preview",
+                "--dry-run",
                 "--output",
                 "json",
             ],

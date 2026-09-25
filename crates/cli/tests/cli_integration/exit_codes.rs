@@ -158,11 +158,6 @@ fn import_git_exits_zero() {
 fn sync_git_exits_zero() {
     // Documented: `0 ok`.
     let repo = adopted_git_overlay();
-    assert_exit(
-        &["bridge", "git", "import", "--ref", "main"],
-        repo.path(),
-        0,
-    );
     assert_exit(&["sync", "git"], repo.path(), 0);
 }
 

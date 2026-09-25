@@ -18,9 +18,10 @@ mod fixture {
     use api::{
         HOSTED_ALPN_V1,
         descriptor_trust::ephemeral_attestation_bytes,
-        framing::{decode_request_prelude, encode_stream_failure},
-        heddle::api::common::{
-            CallFailure, CallFailureCode, EndpointDescriptor, SignedEndpointDescriptor,
+        framing::{decode_request_prelude, encode_failure_response, encode_success_response},
+        heddle::api::{
+            common::{CallFailure, CallFailureCode, EndpointDescriptor, SignedEndpointDescriptor},
+            v1alpha2 as v2,
         },
         signing::endpoint_descriptor_bytes,
     };
@@ -198,12 +199,12 @@ mod fixture {
     }
 
     #[test]
-    fn authenticated_clone_starts_with_folded_pull_instead_of_list_refs() {
-        const PULL: &str = "/heddle.api.v1alpha2.SyncService/Fetch";
+    fn authenticated_clone_discovers_endpoint_before_resolving_resource() {
+        const RESOLVE: &str = "/heddle.api.v1alpha2.WorkspaceService/ResolveResources";
 
         let temp = TempDir::new().expect("create folded clone fixture root");
         let (ephemeral_secret, endpoint_id, direct_address, iroh_thread) =
-            disconnecting_iroh_server(Some(PULL));
+            disconnecting_iroh_server(Some(RESOLVE));
         let signer = Ed25519Signer::generate().expect("generate descriptor root");
         let ephemeral = Ed25519Signer::from_seed(&ephemeral_secret.to_bytes())
             .expect("ephemeral signer from Iroh secret");
@@ -325,33 +326,48 @@ mod fixture {
                 let (mut send, mut recv) = connection
                     .accept_bi()
                     .await
-                    .expect("accept initial Pull RPC");
-                let mut request = vec![0_u8; 70 * 1024];
-                let mut received = 0;
-                let method = loop {
-                    let read = recv
-                        .read(&mut request[received..])
-                        .await
-                        .expect("read clone request prelude")
-                        .expect("clone request ended before its prelude");
-                    received += read;
-                    if let Some((prelude, _)) = decode_request_prelude(&request[..received])
-                        .expect("decode request prelude")
-                    {
-                        break prelude.method.to_string();
-                    }
-                    assert!(
-                        received < request.len(),
-                        "clone request prelude is oversized"
-                    );
+                    .expect("accept endpoint discovery RPC");
+                let method = read_method(&mut recv).await;
+                assert_eq!(
+                    method,
+                    "/heddle.api.v1alpha2.EndpointService/DescribeEndpoint"
+                );
+                let description = v2::DescribeEndpointResponse {
+                    endpoint: Some(v2::EndpointRef {
+                        kind: v2::EndpointKind::Weft as i32,
+                        public_key: endpoint.id().as_bytes().to_vec(),
+                    }),
+                    supported_packages: vec!["heddle.api.v1alpha2".into()],
+                    implemented_methods: vec![
+                        "/heddle.api.v1alpha2.WorkspaceService/ResolveResources".into(),
+                        "/heddle.api.v1alpha2.SyncService/Fetch".into(),
+                    ],
+                    default_read_budget: Some(v2::ReadBudget {
+                        max_items: 64,
+                        max_frame_bytes: 64 * 1024,
+                        max_snapshot_bytes: 1024 * 1024,
+                    }),
+                    ..Default::default()
                 };
+                let response = encode_success_response(&description.encode_to_vec())
+                    .expect("encode endpoint description");
+                send.write_all(&response)
+                    .await
+                    .expect("send endpoint description");
+                send.finish().expect("finish endpoint description");
+
+                let (mut send, mut recv) = connection
+                    .accept_bi()
+                    .await
+                    .expect("accept clone RPC after discovery");
+                let method = read_method(&mut recv).await;
                 if let Some(expected_method) = expected_method {
                     assert_eq!(
                         method, expected_method,
-                        "an authenticated clone must start with folded Pull, not ListRefs"
+                        "an authenticated clone should resolve its resource before fetching"
                     );
                 }
-                let failure = encode_stream_failure(&CallFailure {
+                let failure = encode_failure_response(&CallFailure {
                     code: CallFailureCode::Unavailable as i32,
                     message: "Broken pipe".to_string(),
                     error: None,
@@ -371,6 +387,28 @@ mod fixture {
             .recv_timeout(Duration::from_secs(10))
             .expect("Iroh fixture starts");
         (secret, endpoint_id, direct_address, thread)
+    }
+
+    async fn read_method(recv: &mut iroh::endpoint::RecvStream) -> String {
+        let mut request = vec![0_u8; 70 * 1024];
+        let mut received = 0;
+        loop {
+            let read = recv
+                .read(&mut request[received..])
+                .await
+                .expect("read clone request prelude")
+                .expect("clone request ended before its prelude");
+            received += read;
+            if let Some((prelude, _)) =
+                decode_request_prelude(&request[..received]).expect("decode request prelude")
+            {
+                return prelude.method.to_string();
+            }
+            assert!(
+                received < request.len(),
+                "clone request prelude is oversized"
+            );
+        }
     }
 
     fn signed_descriptor(

@@ -77,11 +77,15 @@ use std::{fs, path::Path};
 ///     native-HTTPS before this re-parse, so a non-`Network` target
 ///     here is a logic inconsistency, not something a user can act on.
 ///
+/// 2026-09-25 ratchet-DOWN 160 -> 148 while widening nextest coverage.
+/// Marker lookups, agent reservation/fanout preconditions, and hosted review
+/// preconditions now provide typed recovery advice instead of bare strings.
+///
 /// Decrease when you migrate sites to typed `RecoveryAdvice` (PR C-3
 /// and follow-ups). Only increase with explicit justification — every
 /// new untyped site is a future Priya-style "run heddle status" dead
 /// end.
-const MAX_UNTYPED_ANYHOW_SITES: usize = 149;
+const MAX_UNTYPED_ANYHOW_SITES: usize = 148;
 const MIN_SCANNED_RUST_FILES: usize = 50;
 
 #[test]

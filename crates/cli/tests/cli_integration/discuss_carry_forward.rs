@@ -4,11 +4,12 @@
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::heddle;
+use super::{heddle, seed_test_repo_principal};
 
 fn setup() -> TempDir {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
+    seed_test_repo_principal(temp.path()).unwrap();
     std::fs::write(temp.path().join("main.rs"), "fn main() {}\n").unwrap();
     std::fs::write(temp.path().join("other.rs"), "fn f() {}\n").unwrap();
     heddle(&["capture", "-m", "seed"], Some(temp.path())).unwrap();
@@ -23,8 +24,8 @@ fn open(temp: &TempDir) -> Value {
     json(
         &heddle(
             &[
-                "--output", "json", "discuss", "--new", "--path", "main.rs", "--symbol", "main",
-                "review q",
+                "--output", "json", "discuss", "new", "--path", "main.rs", "--symbol", "main",
+                "-m", "review q",
             ],
             Some(temp.path()),
         )
@@ -64,7 +65,7 @@ fn append_writes_a_new_collaboration_operation() {
 
     let appended = json(
         &heddle(
-            &["--output", "json", "discuss", "--id", id, "second"],
+            &["--output", "json", "discuss", "reply", id, "-m", "second"],
             Some(temp.path()),
         )
         .unwrap(),
@@ -89,8 +90,9 @@ fn reply_and_show_accept_short_id() {
                 "--output",
                 "json",
                 "discuss",
-                "--id",
+                "reply",
                 &short,
+                "-m",
                 "from short id",
             ],
             Some(temp.path()),

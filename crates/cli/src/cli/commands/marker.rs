@@ -125,8 +125,14 @@ fn cmd_marker_create(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
 
 fn cmd_marker_delete(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     let mn = MarkerName::new(&name);
-    repo.delete_marker_recorded(&mn)?
-        .ok_or_else(|| anyhow!("Marker not found: {}", name))?;
+    repo.delete_marker_recorded(&mn)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::invalid_usage(
+            "marker_not_found",
+            format!("Marker not found: {name}"),
+            "List markers to find a valid name.",
+            "heddle thread marker list",
+        ))
+    })?;
 
     let output = MarkerOpOutput {
         output_kind: "thread_marker_delete",
@@ -248,12 +254,27 @@ fn cmd_marker_show(cli: &Cli, repo: &Repository, name: String) -> Result<()> {
     let state_id = repo
         .refs()
         .get_marker(&MarkerName::new(&name))?
-        .ok_or_else(|| anyhow!("Marker not found: {}", name))?;
+        .ok_or_else(|| {
+            anyhow!(RecoveryAdvice::invalid_usage(
+                "marker_not_found",
+                format!("Marker not found: {name}"),
+                "List markers to find a valid name.",
+                "heddle thread marker list",
+            ))
+        })?;
 
-    let state = repo
-        .store()
-        .get_state(&state_id)?
-        .ok_or_else(|| anyhow!("State not found for marker: {}", name))?;
+    let state = repo.store().get_state(&state_id)?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::safety_refusal(
+            "marker_state_missing",
+            format!("State not found for marker: {name}"),
+            "Run `heddle verify` to inspect the missing state.",
+            format!("marker {name} points at a missing state"),
+            "showing the marker as valid would hide repository corruption",
+            "no marker refs or repository objects were changed",
+            "heddle verify",
+            vec!["heddle verify".to_string()],
+        ))
+    })?;
 
     let output = MarkerOpOutput {
         output_kind: "thread_marker_show",

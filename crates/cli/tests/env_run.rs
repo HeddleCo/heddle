@@ -18,6 +18,8 @@ fn isolated_heddle(cwd: &Path, home: &Path, args: &[&str]) -> Command {
         .current_dir(cwd)
         .env("HOME", home)
         .env("HEDDLE_HOME", home)
+        .env("HEDDLE_PRINCIPAL_NAME", "Ada")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "ada@example.com")
         .env("NO_COLOR", "1")
         .env_remove("HEDDLE_CONFIG")
         .env_remove("HEDDLE_CREDENTIAL")

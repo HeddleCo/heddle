@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use cli::remote::RemoteConfig;
-use objects::object::{MarkerName, ThreadName};
+use objects::object::{ChangeLineageKind, MarkerName, ThreadName};
 use repo::{ThreadFreshness, ThreadManager, ThreadState};
 use sley::{ConfigEdit, ConfigEditPlan};
 
@@ -1024,9 +1024,8 @@ fn test_cli_pull_local_dirty_refusal_leaves_thread_ref_unchanged() {
 /// (out of the human options list), and human help carries a one-line
 /// breadcrumb to the detailed topic.
 ///
-/// heddle#1452: `clone --help` must name the native default **thread**
-/// (with `--thread` as the override) and must not describe native
-/// checkout as a Git default branch.
+/// After the v2 help cutover (#1718), the first screen explains protocol
+/// selection and links to the topic for checkout details.
 #[test]
 fn test_cli_clone_help_keeps_planned_lazy_flag_to_breadcrumb() {
     let output = heddle_help(&["clone", "--help"]);
@@ -1039,11 +1038,9 @@ fn test_cli_clone_help_keeps_planned_lazy_flag_to_breadcrumb() {
         "clone help should keep planned lazy/partial clone flags out of first-run help: {output}"
     );
     assert!(
-        output.contains("Native clones follow the remote default thread")
-            && output.contains("`--thread` overrides")
-            && output.contains("Git clones check out the selected default branch")
-            && !output.contains("and checks out the selected default branch"),
-        "clone --help should match `heddle help clone` (native default thread, Git default branch): {output}"
+        output.contains("`--source git|heddle` selects the protocol")
+            && output.contains("No protocol retry on failure"),
+        "clone --help should explain protocol selection: {output}"
     );
 }
 
@@ -1968,7 +1965,7 @@ fn test_cli_clone_local_lazy_is_rejected() {
     assert!(
         envelope["error"]
             .as_str()
-            .is_some_and(|error| error.contains("--lazy is only supported")),
+            .is_some_and(|error| error.contains("--lazy is not supported for local clones")),
         "local lazy clone should include typed recovery detail: {stderr}"
     );
     assert!(
@@ -2038,6 +2035,7 @@ fn test_cli_local_sync_copies_context_and_discussion_blobs() {
     std::fs::create_dir_all(&remote).unwrap();
 
     heddle(&["init"], Some(&source)).unwrap();
+    seed_test_repo_principal(&source).unwrap();
     std::fs::write(source.join("src/lib.rs"), "pub fn run() {}\n").unwrap();
     heddle(&["capture", "-m", "seed"], Some(&source)).unwrap();
     heddle(
@@ -2046,8 +2044,8 @@ fn test_cli_local_sync_copies_context_and_discussion_blobs() {
             "set",
             "--path",
             "src/lib.rs",
-            "--scope",
-            "symbol:run",
+            "--symbol",
+            "run",
             "--kind",
             "rationale",
             "-m",
@@ -2061,11 +2059,12 @@ fn test_cli_local_sync_copies_context_and_discussion_blobs() {
             "--output",
             "json",
             "discuss",
-            "--new",
+            "new",
             "--path",
             "src/lib.rs",
             "--symbol",
             "run",
+            "-m",
             "should this remain the entry point?",
         ],
         Some(&source),
@@ -2936,9 +2935,24 @@ fn test_cli_git_overlay_current_push_carries_notes_for_cross_clone_identity() {
     .expect("clone succeeds");
     let clone_status_json = heddle(&["--output", "json", "status"], Some(&clone)).unwrap();
     let clone_status: Value = serde_json::from_str(&clone_status_json).expect("status JSON parses");
-    assert_eq!(
-        clone_status["state"]["state_id"], first_state,
-        "clone should preserve the note-backed Heddle state id instead of deriving a second id"
+    let source_id = repo::Repository::open(&work)
+        .expect("open source")
+        .current_state()
+        .expect("read source state")
+        .expect("source tip")
+        .id();
+    assert_eq!(source_id.short(), first_state);
+    let cloned_repo = repo::Repository::open(&clone).expect("open clone");
+    let cloned_state = cloned_repo
+        .current_state()
+        .expect("read cloned state")
+        .expect("cloned tip");
+    assert_eq!(clone_status["state"]["state_id"], cloned_state.id().short(),);
+    assert!(
+        cloned_state.lineage.iter().any(|lineage| {
+            lineage.kind == ChangeLineageKind::GitProjection && lineage.source_state == source_id
+        }),
+        "Git round-trip should retain source identity as lineage when V4 tree salts cannot travel"
     );
 
     std::fs::write(
@@ -3503,7 +3517,7 @@ fn test_cli_pull_local_lazy_is_rejected() {
     assert_eq!(envelope["kind"], "local_lazy_pull_unsupported");
     assert!(
         envelope["error"].as_str().is_some_and(
-            |error| error.contains("lazy materialization requires a hosted or network remote")
+            |error| error.contains("lazy materialization is not yet supported end to end")
         ),
         "local lazy pull should include typed recovery detail: {stderr}"
     );

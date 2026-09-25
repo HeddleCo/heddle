@@ -844,6 +844,8 @@ fn git_overlay_matrix_capture_without_any_identity_refuses_before_state_change()
     let before_state = json(temp.path(), &["status", "--output", "json"])["current_state"].clone();
 
     std::fs::write(temp.path().join("no-identity.txt"), "anonymous?\n").unwrap();
+    let empty_user_config = global_home.path().join("no-principal.toml");
+    std::fs::write(&empty_user_config, "").unwrap();
     let output = heddle_output_with_env(
         &[
             "--output",
@@ -855,6 +857,7 @@ fn git_overlay_matrix_capture_without_any_identity_refuses_before_state_change()
         Some(temp.path()),
         &[
             ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("HEDDLE_CONFIG", empty_user_config.to_str().unwrap()),
             ("HOME", global_home.path().to_str().unwrap()),
             ("XDG_CONFIG_HOME", global_home.path().to_str().unwrap()),
             ("HEDDLE_PRINCIPAL_NAME", ""),
@@ -2806,7 +2809,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     assert!(status["changes"]["deleted"].as_array().unwrap().is_empty());
     assert_eq!(
         status["recommended_action"],
-        "heddle maintenance fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --dry-run"
     );
     assert_eq!(
         status["recommended_action_template"]["argv_template"],
@@ -2817,7 +2820,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
             "git",
             "--ref",
             "main",
-            "--preview"
+            "--dry-run"
         ])
     );
     assert!(
@@ -2849,14 +2852,14 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     assert_eq!(verify["status"], "needs_reconcile");
     assert_eq!(
         verify["recommended_action"],
-        "heddle maintenance fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --dry-run"
     );
 
     let bridge = json(temp.path(), &["status", "--output", "json"]);
     assert_eq!(bridge["verification"]["status"], "needs_reconcile");
     assert_eq!(
         bridge["recommended_action"],
-        "heddle maintenance fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --dry-run"
     );
 
     let refused = heddle_output(
@@ -2886,7 +2889,7 @@ fn git_overlay_matrix_raw_git_reset_reports_reconcile_not_unsaved_work() {
     );
     assert_eq!(
         envelope["primary_command"],
-        "heddle maintenance fsck repair git --ref main --preview"
+        "heddle maintenance fsck repair git --ref main --dry-run"
     );
     assert_eq!(
         git_stdout(temp.path(), &["rev-parse", "HEAD"]),
@@ -4519,7 +4522,7 @@ fn recovered_manual_land_clears_resolution_metadata_before_journal() {
     );
     let repo = repo::Repository::open(fixture.path()).unwrap();
     let record = repo::ThreadManager::new(repo.heddle_dir())
-        .load(thread)
+        .load_id_or_name(thread)
         .unwrap()
         .expect("landed thread metadata");
     assert_eq!(

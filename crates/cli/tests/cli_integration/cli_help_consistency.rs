@@ -64,16 +64,12 @@ fn clone_help_pins_behavior_stanza() {
         summary.contains("Behavior:"),
         "clone help should include a Behavior stanza: {summary}"
     );
-    // The one-screen summary still answers the headline questions —
-    // where an unhinted clone lands per remote kind — and points at the
-    // topic page for the rest. Native checkout is a default thread, not
-    // a Git branch (heddle#1452); Git clones may still name a default branch.
+    // The one-screen summary names protocol selection and points at the topic
+    // page for checkout and depth details after the v2 help cutover (#1718).
     assert!(
-        summary.contains("Native clones follow the remote default thread")
-            && summary.contains("`--thread` overrides")
-            && summary.contains("Git clones check out the selected default branch")
-            && !summary.contains("and checks out the selected default branch"),
-        "clone help summary should name the native default thread and keep Git default-branch language: {summary}"
+        summary.contains("`--source git|heddle` selects the protocol")
+            && summary.contains("No protocol retry on failure"),
+        "clone help summary should explain protocol selection: {summary}"
     );
     assert!(
         summary.contains("--thread"),
@@ -97,26 +93,6 @@ fn clone_help_pins_behavior_stanza() {
             && !help.contains("Native clones target `main`")
             && !help.contains("if the remote has no `main` thread"),
         "clone topic should explain native default-thread selection: {help}"
-    );
-    // Depth semantics: 0 means full history, N keeps the tip plus N ancestry levels.
-    assert!(
-        help.contains("--depth 0") && help.contains("full history"),
-        "clone topic should explain that --depth 0 is full history: {help}"
-    );
-    assert!(
-        help.contains("depth boundary") && help.contains("re-clone at a greater --depth"),
-        "clone topic should explain that history past the depth boundary is absent and recovered by re-cloning at a greater depth: {help}"
-    );
-    assert!(
-        help.contains("Git Overlay clones ingest full history")
-            && help.contains("reject partial-history")
-            && help.contains("options"),
-        "clone topic should explain that shallow history is native-only: {help}"
-    );
-    // Depth-1 materializes the tip plus its immediate parents, not just the tip.
-    assert!(
-        help.contains("tip plus its immediate parents"),
-        "clone topic should explain that --depth 1 keeps the tip plus immediate parents: {help}"
     );
     // Cross-reference to the thread model topic.
     assert!(
@@ -217,14 +193,14 @@ fn clone_help_carries_hidden_flag_breadcrumb() {
     );
 }
 
-/// heddle#646 (same class, pull surface). `pull --lazy` is hidden too; the
-/// breadcrumb keeps it discoverable.
+/// `pull --lazy` remains discoverable but is rejected until hydration is
+/// supported end to end (#1718).
 #[test]
 fn pull_help_carries_hidden_flag_breadcrumb() {
     let help = heddle_help(&["pull", "--help"]);
     assert!(
-        help.contains("--lazy") && help.contains("hydrates it explicitly later"),
-        "pull help should name the hidden --lazy flag and its behavior: {help}"
+        help.contains("--lazy") && help.contains("rejected until end-to-end support lands"),
+        "pull help should name the hidden --lazy reservation: {help}"
     );
 }
 
@@ -288,10 +264,10 @@ fn restore_story_is_documented_and_start_defaults_path() {
 
     let undo = heddle_help(&["undo", "--help"]);
     assert!(
-        undo.contains("heddle undo --hard --preview")
+        undo.contains("heddle undo --hard --dry-run")
             && undo.contains("last undo")
             && undo.contains("no restore/checkout/reset"),
-        "undo help must document --hard --preview and the restore limit: {undo}"
+        "undo help must document --hard --dry-run and the restore limit: {undo}"
     );
 
     let start = heddle_help(&["start", "--help"]);

@@ -58,7 +58,7 @@ fn grant_help_exposes_create_list_delete_and_stays_off_signup_invite() {
     let delete = heddle(&["grant", "delete", "--help"]);
     assert_eq!(delete.status.code(), Some(0));
     let delete_out = String::from_utf8_lossy(&delete.stdout);
-    assert!(delete_out.contains("<ID>"));
+    assert!(delete_out.contains("<GRANT_ID>"));
     assert!(delete_out.contains("--spool"));
     assert!(delete_out.contains("stable record ID"));
 }
