@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
-- updated the following local packages: heddle-biscuit-verifier
+- *(deps)* bump heddle-api to 0.31.0-alpha.3
 
 ## [0.21.2] - 2026-09-25
 
