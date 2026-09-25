@@ -90,6 +90,10 @@ pub(super) struct HostedConnection {
     /// Local loopback endpoint that adapts the v2 Iroh transport to netd's UDS
     /// stream bridge. `None` for an ordinary direct connection.
     proxy_endpoint: Option<Endpoint>,
+    /// Weft's Iroh-authenticated endpoint id when this connection is proxied
+    /// through netd. The local adapter's `connection.remote_id()` is the proxy,
+    /// so v2 Discover must use this key instead (heddle#1794).
+    weft_endpoint_id: Option<EndpointId>,
     reused_warm: bool,
 }
 
@@ -117,6 +121,7 @@ impl HostedConnection {
             provider_transport: Some(ProviderWebSocketTransport::new(config.clone())),
             provider_connections: Mutex::new(HashMap::new()),
             proxy_endpoint: None,
+            weft_endpoint_id: None,
             reused_warm: false,
         }))
     }
@@ -142,6 +147,7 @@ impl HostedConnection {
             provider_transport,
             provider_connections: Mutex::new(HashMap::new()),
             proxy_endpoint: None,
+            weft_endpoint_id: None,
             reused_warm: false,
         })))
     }
@@ -220,6 +226,7 @@ impl HostedConnection {
         tracing::debug!(
             reused = ensured.reused,
             netd_node_id = %ensured.node_id,
+            weft_endpoint_id = %ensured.weft_endpoint_id,
             local_node_id = %endpoint.id(),
             "hosted connect using netd warm bridge"
         );
@@ -231,8 +238,17 @@ impl HostedConnection {
             provider_transport: Some(provider_transport),
             provider_connections: Mutex::new(HashMap::new()),
             proxy_endpoint: Some(proxy_endpoint),
+            weft_endpoint_id: Some(ensured.weft_endpoint_id),
             reused_warm: ensured.reused,
         })))
+    }
+
+    /// Endpoint key v2 Discover must prove. Direct sessions use the Iroh peer;
+    /// proxied netd sessions use Weft's key from Ensure, not the local adapter.
+    pub(super) fn discover_endpoint_key(&self) -> [u8; 32] {
+        self.weft_endpoint_id
+            .map(|id| *id.as_bytes())
+            .unwrap_or_else(|| *self.connection.remote_id().as_bytes())
     }
 
     pub(super) fn endpoint_id(&self) -> EndpointId {
@@ -596,6 +612,109 @@ mod tests {
             "netd must reuse its cached QUIC session"
         );
         connection.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn proxied_discover_rejects_adapter_id_and_accepts_weft_id() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let fixture =
+            crate::hosted_runtime::hosted::hosted_bridge::tests::WarmBridgeFixture::start_describe(
+            )
+            .await;
+        let _home = crate::hosted_runtime::hosted::hosted_bridge::tests::PinHeddleHome::new(
+            fixture.home.path(),
+        );
+        let connection = HostedConnection::connect_via_netd(
+            crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
+            &config::ClientConfig::default(),
+        )
+        .await
+        .expect("connect through warm netd bridge");
+        let adapter_key = *connection.connection.remote_id().as_bytes();
+        let weft_key = *fixture.weft_id.as_bytes();
+        assert_ne!(
+            adapter_key, weft_key,
+            "local Iroh↔UDS adapter peer must not be Weft"
+        );
+        assert_eq!(
+            connection.discover_endpoint_key(),
+            weft_key,
+            "proxied Discover must use Weft's Ensure key, not the adapter"
+        );
+
+        let transport = || {
+            thread_api::transport::IrohTransport::new(
+                connection.connection.clone(),
+                thread_api::credentials::Credentials::Public,
+                api::framing::MAX_CONTROL_BODY,
+                Duration::from_secs(5),
+            )
+        };
+        let adapter = thread_api::Remote::discover(
+            transport().expect("adapter transport"),
+            adapter_key,
+            EndpointKind::Weft,
+        )
+        .await;
+        let adapter_error = match adapter {
+            Ok(_) => panic!("Discover must not treat the local adapter as Weft"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            adapter_error.contains("endpoint identity/package mismatch"),
+            "adapter Discover must fail closed, got {adapter_error}"
+        );
+
+        let remote = thread_api::Remote::discover(
+            transport().expect("weft transport"),
+            weft_key,
+            EndpointKind::Weft,
+        )
+        .await
+        .expect("Discover must accept Weft's endpoint key over the proxy");
+        assert_eq!(
+            remote
+                .description
+                .endpoint
+                .expect("described endpoint")
+                .public_key,
+            weft_key
+        );
+        connection.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn netd_warm_client_discovers_weft_identity() {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let fixture =
+            crate::hosted_runtime::hosted::hosted_bridge::tests::WarmBridgeFixture::start_describe(
+            )
+            .await;
+        let _home = crate::hosted_runtime::hosted::hosted_bridge::tests::PinHeddleHome::new(
+            fixture.home.path(),
+        );
+        let client = crate::hosted_runtime::hosted::HostedClient::connect_via_netd(
+            crate::hosted_runtime::hosted::hosted_bridge::tests::TEST_WEFT_SERVER,
+            &config::ClientConfig::default(),
+        )
+        .await
+        .expect("warm Discover must succeed with Weft's endpoint key");
+        assert!(client.reused_warm_connection());
+        let remote = client
+            .native()
+            .await
+            .expect("cached native description after warm Discover");
+        assert_eq!(
+            remote
+                .description
+                .endpoint
+                .expect("described endpoint")
+                .public_key,
+            fixture.weft_id.as_bytes()
+        );
+        client.close().await;
     }
 
     #[tokio::test]

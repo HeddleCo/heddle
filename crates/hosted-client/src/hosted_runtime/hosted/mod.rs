@@ -215,10 +215,12 @@ impl HostedClient {
             .get_or_try_init(|| async {
                 // Session connect seeds this from weft_client::HostedClient
                 // (Remote::discover). Tests that inject a raw Iroh connection
-                // still discover here.
+                // still discover here. Proxied netd sessions must prove Weft's
+                // Ensure key: connection.remote_id() is the local Iroh↔UDS
+                // adapter (heddle#1794).
                 let remote = thread_api::Remote::discover(
                     transport()?,
-                    *self.connection.connection.remote_id().as_bytes(),
+                    self.connection.discover_endpoint_key(),
                     api::heddle::api::v1alpha2::EndpointKind::Weft,
                 )
                 .await?;
