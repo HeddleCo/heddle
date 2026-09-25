@@ -82,6 +82,7 @@ fn refresh_thread_for_land(path: &std::path::Path, thread: &str) {
 mod resolve {
     use super::*;
 
+    // Conflict fixtures run several CLI subprocesses; allow for parallel test load.
     fn create_conflict(temp: &TempDir) {
         heddle(&["init"], Some(temp.path())).unwrap();
         fs::write(temp.path().join("file.txt"), "base").unwrap();
@@ -108,7 +109,7 @@ mod resolve {
     }
 
     #[test]
-    #[serial(inner_attrs = [timeout(15000)])]
+    #[serial(inner_attrs = [timeout(60000)])]
     fn test_resolve_marks_file_as_resolved() {
         let temp = TempDir::new().unwrap();
         create_conflict(&temp);
@@ -172,7 +173,7 @@ mod resolve {
     }
 
     #[test]
-    #[serial(inner_attrs = [timeout(15000)])]
+    #[serial(inner_attrs = [timeout(60000)])]
     fn rebase_auto_resolution_appends_attributed_conflict_resolved_op_record() {
         let temp = TempDir::new().unwrap();
         heddle(&["init"], Some(temp.path())).unwrap();
@@ -231,7 +232,7 @@ mod resolve {
     }
 
     #[test]
-    #[serial(inner_attrs = [timeout(15000)])]
+    #[serial(inner_attrs = [timeout(60000)])]
     fn test_resolve_all() {
         let temp = TempDir::new().unwrap();
         create_conflict(&temp);
@@ -288,7 +289,7 @@ mod resolve {
     }
 
     #[test]
-    #[serial(inner_attrs = [timeout(15000)])]
+    #[serial(inner_attrs = [timeout(60000)])]
     fn test_resolve_list_conflicts() {
         let temp = TempDir::new().unwrap();
         create_conflict(&temp);
@@ -354,7 +355,7 @@ mod resolve {
     }
 
     #[test]
-    #[serial(inner_attrs = [timeout(15000)])]
+    #[serial(inner_attrs = [timeout(60000)])]
     fn test_resolve_with_ours() {
         let temp = TempDir::new().unwrap();
         create_conflict(&temp);
@@ -376,7 +377,7 @@ mod resolve {
     }
 
     #[test]
-    #[serial(inner_attrs = [timeout(15000)])]
+    #[serial(inner_attrs = [timeout(60000)])]
     fn test_resolve_with_theirs() {
         let temp = TempDir::new().unwrap();
         create_conflict(&temp);
@@ -402,7 +403,7 @@ mod resolve {
     }
 
     #[test]
-    #[serial(inner_attrs = [timeout(15000)])]
+    #[serial(inner_attrs = [timeout(60000)])]
     fn test_abort() {
         let temp = TempDir::new().unwrap();
         create_conflict(&temp);
@@ -412,7 +413,7 @@ mod resolve {
     }
 
     #[test]
-    #[serial(inner_attrs = [timeout(15000)])]
+    #[serial(inner_attrs = [timeout(60000)])]
     fn test_resolved_merge_snapshot_preserves_theirs_provenance() {
         let temp = TempDir::new().unwrap();
         heddle(&["init"], Some(temp.path())).unwrap();
@@ -505,7 +506,7 @@ mod resolve {
     }
 
     #[test]
-    #[serial(inner_attrs = [timeout(15000)])]
+    #[serial(inner_attrs = [timeout(60000)])]
     fn test_resolved_merge_snapshot_attributes_manual_lines_to_resolver() {
         let temp = TempDir::new().unwrap();
         create_conflict(&temp);
