@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.3] - 2026-09-25
+
+### Other
+
+- Fix wider CLI nextest suites and gate all CLI tests (#1826)
+
 ## [0.15.2](https://github.com/HeddleCo/heddle/compare/heddle-verbs-v0.15.1...heddle-verbs-v0.15.2) - 2026-08-28
 
 ### Added

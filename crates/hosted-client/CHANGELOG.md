@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.3] - 2026-09-25
+
+### Fixed
+
+- restrict run timelines to owner and run principal (#1829)
+
+### Other
+
+- Send authenticated Weft keepalive while netd is idle (#1828)
+- Make device run timelines readable and follow newest records (#1821)
+
 ### Added
 
 - Native bootstrap pins the deployment descriptor **root** and trusts a

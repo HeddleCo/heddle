@@ -1,6 +1,6 @@
 [package]
 name = "heddleco-capability-verifier"
-version = "0.21.1"
+version = "0.21.2"
 edition = "2024"
 rust-version = "1.85"
 authors = ["HeddleCo"]
@@ -24,7 +24,7 @@ include = [
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.25.1" }
+heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.25.3" }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 biscuit-auth = { version = "6.0", default-features = false, features = ["datalog-macro"] }
