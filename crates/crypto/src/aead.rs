@@ -6,7 +6,7 @@
 //! never derived from a signing seed.
 
 use aes_gcm::{
-    Aes256Gcm, Key, Nonce,
+    Aes256Gcm,
     aead::{Aead, KeyInit, Payload},
 };
 use hkdf::Hkdf;
@@ -188,10 +188,10 @@ pub fn encrypt_padded(
     let (padded, pad_bucket) = pad_plaintext(plaintext)?;
     let mut nonce = [0u8; NONCE_LEN];
     fill_random(&mut nonce)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(dek.as_bytes()));
+    let cipher = Aes256Gcm::new(dek.as_bytes().into());
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce),
+            (&nonce).into(),
             Payload {
                 msg: padded.as_slice(),
                 aad,
@@ -214,11 +214,11 @@ pub fn decrypt_padded(
     if sealed.alg != AEAD_AES256_GCM_V1 {
         return Err(AeadError::Decrypt);
     }
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(dek.as_bytes()));
+    let cipher = Aes256Gcm::new(dek.as_bytes().into());
     let padded = Zeroizing::new(
         cipher
             .decrypt(
-                Nonce::from_slice(&sealed.nonce),
+                (&sealed.nonce).into(),
                 Payload {
                     msg: &sealed.ciphertext,
                     aad,
@@ -265,10 +265,10 @@ pub fn wrap_dek(
     let wrap_key = wrap_key_from_shared(&shared, &ephemeral_public, recipient_public)?;
     let mut nonce = [0u8; NONCE_LEN];
     fill_random(&mut nonce)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(wrap_key.as_slice()));
+    let cipher = Aes256Gcm::new((&*wrap_key).into());
     let ciphertext = cipher
         .encrypt(
-            Nonce::from_slice(&nonce),
+            (&nonce).into(),
             Payload {
                 msg: dek.as_bytes().as_slice(),
                 aad,
@@ -295,11 +295,11 @@ pub fn unwrap_dek(
         .diffie_hellman(&PublicKey::from(wrapped.ephemeral_public));
     let recipient_public = recipient.public_key();
     let okm = wrap_key_from_shared(&shared, &wrapped.ephemeral_public, &recipient_public)?;
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(okm.as_slice()));
+    let cipher = Aes256Gcm::new((&*okm).into());
     let dek_bytes = Zeroizing::new(
         cipher
             .decrypt(
-                Nonce::from_slice(&wrapped.nonce),
+                (&wrapped.nonce).into(),
                 Payload {
                     msg: wrapped.ciphertext.as_slice(),
                     aad,
