@@ -12,7 +12,7 @@ use std::path::Path;
 
 use agent_relay::{HarnessCliBridge, RelayCapture};
 pub use agent_relay::{current_process_harness_hint, probe_current_process_harness};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use config::UserConfig;
 use objects::object::StateId;
 use repo::Repository;
@@ -39,7 +39,7 @@ impl HarnessCliBridge for CliAgentBridge {
         user_config: &UserConfig,
         capture: RelayCapture,
     ) -> Result<String> {
-        let output = crate::cli::commands::snapshot::create_snapshot(
+        crate::cli::commands::snapshot::create_snapshot(
             repo,
             user_config,
             Some(capture.intent),
@@ -54,7 +54,10 @@ impl HarnessCliBridge for CliAgentBridge {
                 no_agent: false,
             },
         )?;
-        Ok(output.state_id)
+        Ok(repo
+            .head()?
+            .context("captured state missing from HEAD")?
+            .to_string_full())
     }
 
     fn prepare_worktree_target(
