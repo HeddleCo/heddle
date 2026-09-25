@@ -94,6 +94,40 @@ pub async fn bind_persistent_hosted(
     Ok((endpoint, bridge))
 }
 
+/// Refresh Weft's server-observed device activity with one authenticated v2
+/// identity read. Resolve the credential each time so a daemon started before
+/// login begins reporting activity once the device is enrolled.
+#[cfg(feature = "client")]
+pub async fn authenticated_keepalive() -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    use crate::hosted_runtime::hosted::{HostedAuthMode, HostedSession, resolve_hosted_credential};
+
+    let server = crate::hosted_runtime::auth::resolve_server(None)?;
+    let credential = resolve_hosted_credential(Some(&server))?;
+    if credential.token.is_none() || credential.proof_key_pem.is_none() {
+        return Ok(());
+    }
+    let user_config = config::UserConfig::load_default()?;
+    let session = HostedSession::build(
+        &user_config,
+        Some(server.clone()),
+        HostedAuthMode::CredentialFallback,
+    )?;
+    let mut client = session
+        .connect_outbound(&server)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))
+        .context("connecting authenticated weft keepalive")?;
+    let result = client
+        .get_identity()
+        .await
+        .map(|_| ())
+        .map_err(|error| anyhow::anyhow!(error));
+    client.close().await;
+    result.context("reading authenticated weft identity")
+}
+
 /// The persisted device node id, or `None` when the identity has
 /// never been minted. Does not mint one as a side effect, so a status
 /// probe stays read-only.

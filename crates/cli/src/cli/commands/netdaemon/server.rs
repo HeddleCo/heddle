@@ -28,6 +28,7 @@
 //! the weft subscription/doorbell (piece 2) is separate.
 
 use std::{
+    future::Future,
     os::unix::net::UnixStream,
     path::Path,
     sync::{
@@ -44,7 +45,11 @@ use repo::daemon::{
     handle_authenticated_unix_connection, load_endpoint, persist_endpoint, pid_alive,
     remove_endpoint_if_owned, run_unix_server_loop,
 };
+use tokio::sync::watch;
 use tracing::info;
+
+const KEEPALIVE_CADENCE: Duration = Duration::from_secs(120);
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 use super::proto::{
     NETWORK_DAEMON_PROTOCOL_VERSION, NetworkDaemonRequest, NetworkDaemonResponse,
@@ -118,6 +123,14 @@ pub async fn run_network_daemon() -> Result<()> {
     let hosted_socket = hosted_client::network::hosted_bridge_socket_path(&heddle_home);
     let hosted_bridge = tokio::spawn(hosted_sessions.serve(hosted_socket.clone()));
 
+    let (keepalive_stop, keepalive_stopped) = watch::channel(false);
+    let keepalive = tokio::spawn(run_keepalive(
+        tokio::time::sleep,
+        hosted_client::network::authenticated_keepalive,
+        keepalive_stopped,
+        retry_jitter,
+    ));
+
     let advertised = EndpointState {
         version: NETWORK_DAEMON_PROTOCOL_VERSION,
         host: "iroh".to_string(),
@@ -153,6 +166,9 @@ pub async fn run_network_daemon() -> Result<()> {
 
     let loop_result = control.await;
 
+    let _ = keepalive_stop.send(true);
+    let _ = keepalive.await;
+
     // Cleanup ordering: stop the claim bridge, close the endpoint (which
     // tears the router down), then unlink our own discovery file (only if
     // it still advertises us) and the sockets. `remove_endpoint_if_owned`
@@ -180,6 +196,62 @@ pub async fn run_network_daemon() -> Result<()> {
     match loop_result {
         Ok(result) => result.map_err(Into::into),
         Err(join_error) => bail!("netd control loop panicked: {join_error}"),
+    }
+}
+
+fn retry_jitter(delay: Duration) -> Duration {
+    let mut random = [0_u8; 2];
+    if let Err(error) = getrandom::fill(&mut random) {
+        tracing::warn!(%error, "unable to jitter weft keepalive retry");
+        return delay;
+    }
+    let percent = 80 + u64::from(u16::from_le_bytes(random)) % 41;
+    delay.mul_f64(percent as f64 / 100.0)
+}
+
+fn retry_delay(failures: u32) -> Duration {
+    Duration::from_secs(15 * (1_u64 << failures.saturating_sub(1).min(3)))
+}
+
+async fn run_keepalive<Wait, WaitFuture, Call, CallFuture, Jitter>(
+    mut wait: Wait,
+    mut call: Call,
+    mut stopped: watch::Receiver<bool>,
+    mut jitter: Jitter,
+) where
+    Wait: FnMut(Duration) -> WaitFuture,
+    WaitFuture: Future<Output = ()>,
+    Call: FnMut() -> CallFuture,
+    CallFuture: Future<Output = Result<()>>,
+    Jitter: FnMut(Duration) -> Duration,
+{
+    let mut delay = KEEPALIVE_CADENCE;
+    let mut failures = 0_u32;
+    loop {
+        tokio::select! {
+            _ = wait(delay) => {},
+            _ = stopped.changed() => return,
+        }
+        let result = tokio::select! {
+            result = tokio::time::timeout(KEEPALIVE_TIMEOUT, call()) => result,
+            _ = stopped.changed() => return,
+        };
+        match result {
+            Ok(Ok(())) => {
+                failures = 0;
+                delay = KEEPALIVE_CADENCE;
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "authenticated weft keepalive failed");
+                failures = failures.saturating_add(1);
+                delay = jitter(retry_delay(failures));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "authenticated weft keepalive timed out");
+                failures = failures.saturating_add(1);
+                delay = jitter(retry_delay(failures));
+            }
+        }
     }
 }
 
@@ -244,5 +316,141 @@ impl UnixDaemonHandler for NetworkDaemonHandler {
         } else {
             IdleDecision::Continue
         }
+    }
+}
+
+#[cfg(test)]
+mod keepalive_tests {
+    use std::sync::atomic::AtomicUsize;
+
+    use tokio::sync::{Semaphore, mpsc};
+
+    use super::*;
+
+    async fn next<T>(receiver: &mut mpsc::UnboundedReceiver<T>) -> Option<T> {
+        tokio::time::timeout(Duration::from_secs(1), receiver.recv())
+            .await
+            .expect("keepalive event arrives")
+    }
+
+    #[tokio::test]
+    async fn authenticated_call_repeats_every_two_minutes() {
+        let (wait_tx, mut waits) = mpsc::unbounded_channel();
+        let clock = Arc::new(Semaphore::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (stop, stopped) = watch::channel(false);
+        let call_count = Arc::clone(&calls);
+        let tick_clock = Arc::clone(&clock);
+        let task = tokio::spawn(run_keepalive(
+            move |delay| {
+                let _ = wait_tx.send(delay);
+                let clock = Arc::clone(&tick_clock);
+                async move {
+                    if let Ok(permit) = clock.acquire().await {
+                        permit.forget();
+                    }
+                }
+            },
+            move || {
+                call_count.fetch_add(1, Ordering::Relaxed);
+                async { Ok(()) }
+            },
+            stopped,
+            |delay| delay,
+        ));
+
+        assert_eq!(next(&mut waits).await, Some(KEEPALIVE_CADENCE));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        clock.add_permits(1);
+        assert_eq!(next(&mut waits).await, Some(KEEPALIVE_CADENCE));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        clock.add_permits(1);
+        assert_eq!(next(&mut waits).await, Some(KEEPALIVE_CADENCE));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        let _ = stop.send(true);
+        task.await.expect("keepalive stops");
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_an_in_flight_call() {
+        let (wait_tx, mut waits) = mpsc::unbounded_channel();
+        let clock = Arc::new(Semaphore::new(0));
+        let tick_clock = Arc::clone(&clock);
+        let (entered_tx, mut entered) = mpsc::unbounded_channel();
+        let (stop, stopped) = watch::channel(false);
+        let task = tokio::spawn(run_keepalive(
+            move |delay| {
+                let _ = wait_tx.send(delay);
+                let clock = Arc::clone(&tick_clock);
+                async move {
+                    if let Ok(permit) = clock.acquire().await {
+                        permit.forget();
+                    }
+                }
+            },
+            move || {
+                let _ = entered_tx.send(());
+                std::future::pending::<Result<()>>()
+            },
+            stopped,
+            |delay| delay,
+        ));
+
+        assert_eq!(next(&mut waits).await, Some(KEEPALIVE_CADENCE));
+        clock.add_permits(1);
+        assert_eq!(next(&mut entered).await, Some(()));
+        let _ = stop.send(true);
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("shutdown must not wait for weft")
+            .expect("keepalive stops");
+    }
+
+    #[tokio::test]
+    async fn failure_retries_without_stalling_control_work() {
+        let (wait_tx, mut waits) = mpsc::unbounded_channel();
+        let clock = Arc::new(Semaphore::new(0));
+        let tick_clock = Arc::clone(&clock);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let call_count = Arc::clone(&calls);
+        let (stop, stopped) = watch::channel(false);
+        let task = tokio::spawn(run_keepalive(
+            move |delay| {
+                let _ = wait_tx.send(delay);
+                let clock = Arc::clone(&tick_clock);
+                async move {
+                    if let Ok(permit) = clock.acquire().await {
+                        permit.forget();
+                    }
+                }
+            },
+            move || {
+                let attempt = call_count.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if attempt == 0 {
+                        anyhow::bail!("transient weft failure");
+                    }
+                    Ok(())
+                }
+            },
+            stopped,
+            |delay| delay,
+        ));
+
+        assert_eq!(next(&mut waits).await, Some(KEEPALIVE_CADENCE));
+        clock.add_permits(1);
+        assert_eq!(next(&mut waits).await, Some(Duration::from_secs(15)));
+        let (control_tx, control_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _ = control_tx.send(());
+        });
+        control_rx
+            .await
+            .expect("control work runs during retry wait");
+        clock.add_permits(1);
+        assert_eq!(next(&mut waits).await, Some(KEEPALIVE_CADENCE));
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        let _ = stop.send(true);
+        task.await.expect("keepalive stops");
     }
 }
