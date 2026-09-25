@@ -7,8 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.25.3] - 2026-09-25
+## [0.21.2] - 2026-09-25
 
-### Fixed
+### Other
 
-- Replace deprecated AES-GCM array conversions while preserving the ciphertext format.
+- updated the following local packages: heddle-biscuit-verifier

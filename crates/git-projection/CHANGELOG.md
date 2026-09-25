@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.3] - 2026-09-25
+
+### Other
+
+- Fix wider CLI nextest suites and gate all CLI tests (#1826)
+
 ### Changed
 
 - Smart-HTTP authoritative-ref push now reconciles and executes from one

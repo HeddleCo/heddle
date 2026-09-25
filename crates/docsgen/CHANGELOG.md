@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.3] - 2026-09-25
+
+### Other
+
+- v2 cutover cascade → main (netd/#1747 reconciled into v2 transport) (#1777)
+- heddle v0.15.3
+- heddle v0.15.2
+- *(release)* heddle 0.15.1 (adopt api 0.17 + cv 0.6, via release-plz) (#1573)
+- Port agent docs generator to Rust (#1571)
+
 ## [0.15.3](https://github.com/HeddleCo/heddle/compare/heddle-docsgen-v0.15.2...heddle-docsgen-v0.15.3) - 2026-08-28
 
 ### Other
