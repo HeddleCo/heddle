@@ -1575,9 +1575,195 @@ fn state_to_signature(state: &objects::object::State) -> Signature {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Attribution, ContentHash, Principal, State};
+    use std::process::Command;
+
+    use objects::object::{
+        Attribution, ContentHash, Principal, State, StateVisibility, VisibilityTier,
+    };
+    use repo::VisibilityCommitKind;
 
     use super::*;
+
+    #[test]
+    fn export_rebuilds_notes_without_hidden_history() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let repo = HeddleRepository::init_default(temp.path()).expect("init");
+        let author = Attribution::human(Principal::new("Test", "test@example.com"));
+        let capture = |name: &str| {
+            std::fs::write(temp.path().join("story.txt"), name).expect("write story");
+            repo.snapshot_with_attribution(Some(name.to_string()), None, author.clone())
+                .expect("snapshot")
+                .state_id
+        };
+        let a = capture("A");
+        let b = capture("B");
+        let mut bridge = GitProjection::new(&repo);
+        let destination = temp.path().join("export.git");
+        bridge.export_to_path(&destination).expect("publish B");
+        let exported = SleyRepository::open(&destination).expect("open destination");
+        let a_oid = bridge.mapping.get_git(&a).expect("A mapped");
+        let b_oid = bridge.mapping.get_git(&b).expect("B mapped");
+        let initial_notes = exported
+            .list_notes(&sley::notes::NotesRef::expand(git_notes::NOTES_REF))
+            .expect("list notes");
+        let a_blob = initial_notes
+            .iter()
+            .find(|note| note.annotated == a_oid)
+            .expect("A note")
+            .blob;
+        let a_bytes = exported.read_object(&a_blob).expect("A blob").body.clone();
+        let b_blob = initial_notes
+            .into_iter()
+            .find(|note| note.annotated == b_oid)
+            .expect("B note")
+            .blob;
+        let b_bytes = exported.read_object(&b_blob).expect("B blob").body.clone();
+        let expected_b = git_notes::note_for_state(
+            &repo,
+            &repo
+                .store()
+                .get_state(&b)
+                .expect("read B")
+                .expect("B state"),
+            false,
+        )
+        .expect("B note payload")
+        .to_json_bytes()
+        .expect("serialize B note");
+        assert_eq!(b_bytes, expected_b, "served note bytes must stay canonical");
+
+        // Model an export made before notes entered the mirror ownership map.
+        // Its generated notes tip is still recorded in the residual store.
+        let mut legacy_record =
+            read_projection_managed_refs(repo.heddle_dir()).expect("mirror record");
+        legacy_record.remove(git_notes::NOTES_REF);
+        write_projection_managed_refs(repo.heddle_dir(), &legacy_record).expect("legacy record");
+
+        let c = capture("C");
+        let private = StateVisibility {
+            state: b,
+            tier: VisibilityTier::Private {
+                scope_label: "embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal::new("Test", "test@example.com"),
+            declared_at: chrono::Utc::now(),
+            signature: None,
+            supersedes: None,
+        };
+        repo.commit_state_visibility(private, VisibilityCommitKind::Set)
+            .expect("narrow B visibility");
+        let foreign = exported
+            .find_reference("refs/heads/main")
+            .expect("read main")
+            .expect("main ref");
+        set_reference(
+            &exported,
+            "refs/heads/foreign",
+            match foreign.target {
+                ReferenceTarget::Direct(oid) => oid,
+                _ => panic!("main is direct"),
+            },
+            sley::RefPrecondition::MustNotExist,
+            "test: foreign ref",
+        )
+        .expect("write foreign ref");
+
+        bridge
+            .export_to_path(&destination)
+            .expect("re-export after narrowing");
+        let notes_tip = exported
+            .find_reference(git_notes::NOTES_REF)
+            .expect("read notes ref")
+            .expect("notes ref")
+            .target;
+        let ReferenceTarget::Direct(notes_oid) = notes_tip else {
+            panic!("notes ref is direct");
+        };
+        let reachable = Command::new("git")
+            .arg("--git-dir")
+            .arg(&destination)
+            .args(["rev-list", "--objects", git_notes::NOTES_REF])
+            .output()
+            .expect("walk notes closure");
+        assert!(reachable.status.success(), "git rev-list: {reachable:?}");
+        let reachable = String::from_utf8(reachable.stdout).expect("object list");
+        assert!(
+            !reachable
+                .lines()
+                .any(|line| line.starts_with(&b_blob.to_string())),
+            "B's old note blob {b_blob} remains reachable through notes history:\n{reachable}"
+        );
+        assert!(
+            exported
+                .read_commit(&notes_oid)
+                .expect("notes commit")
+                .parents
+                .is_empty(),
+            "rebuilt notes commit must be parentless"
+        );
+        let entries = git_notes::read_all_notes(&exported).expect("read visible notes");
+        assert!(!entries.contains_key(&b_oid), "B note must be absent");
+        assert_eq!(
+            entries
+                .get(&a_oid)
+                .expect("served A note")
+                .to_json_bytes()
+                .expect("serialize A note"),
+            a_bytes,
+            "a served state's note payload must remain byte-identical"
+        );
+        assert!(
+            !entries.values().any(|note| note.state_id == c.to_string()),
+            "C must be withheld by its Private ancestor"
+        );
+        assert!(
+            exported
+                .find_reference("refs/heads/foreign")
+                .expect("foreign ref")
+                .is_some()
+        );
+
+        bridge.export_to_path(&destination).expect("repeat export");
+        assert_eq!(
+            exported
+                .find_reference(git_notes::NOTES_REF)
+                .expect("repeat notes")
+                .expect("notes")
+                .target,
+            ReferenceTarget::Direct(notes_oid),
+            "repeat export must preserve the notes tip"
+        );
+        let a_note = git_notes::read_note(&exported, a_oid)
+            .expect("read A note")
+            .expect("A note");
+        git_notes::write_note(&exported, b_oid, &a_note).expect("out-of-band notes edit");
+        let out_of_band = exported
+            .find_reference(git_notes::NOTES_REF)
+            .expect("read external tip")
+            .expect("external tip")
+            .target;
+        let result = bridge.export_to_path(&destination);
+        assert!(
+            result.is_err()
+                || exported
+                    .find_reference(git_notes::NOTES_REF)
+                    .expect("read preserved tip")
+                    .expect("notes ref")
+                    .target
+                    == out_of_band,
+            "out-of-band notes edit must be preserved or reported"
+        );
+        assert_eq!(
+            exported
+                .find_reference(git_notes::NOTES_REF)
+                .expect("read final tip")
+                .expect("notes ref")
+                .target,
+            out_of_band,
+            "reconcile must not clobber an out-of-band notes tip"
+        );
+    }
 
     fn fidelity_state() -> State {
         State::new(

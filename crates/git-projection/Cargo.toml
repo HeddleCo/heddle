@@ -35,6 +35,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 serial_test.workspace = true
+chrono.workspace = true
 # Test-only: the in-memory object backend never ships in the library.
 objects = { workspace = true, features = ["memory-backend"] }
 

@@ -2471,6 +2471,7 @@ dependencies = [
 name = "heddle-git-projection"
 version = "0.25.2"
 dependencies = [
+ "chrono",
  "heddle-ingest",
  "heddle-objects",
  "heddle-perf-contract",
