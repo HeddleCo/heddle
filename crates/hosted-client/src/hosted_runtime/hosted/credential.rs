@@ -3,7 +3,7 @@
 //! `HEDDLE_CREDENTIAL=<path.hcred>` is authoritative. If it is absent, the
 //! per-server keystore is consulted; otherwise the call is unauthenticated.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use config::credentials;
@@ -139,6 +139,44 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
 pub fn resolve_active_bearer() -> Result<Option<AuthToken>> {
     let server = credentials::default_server()?;
     Ok(resolve_hosted_credential(server.as_deref())?.token)
+}
+
+/// Resolve run attribution from the locally active, proof-key-held credential.
+/// A report's local session label does not authenticate a delegated principal.
+pub fn authenticated_run_agent(home: &Path) -> Result<Option<String>> {
+    use crypto::{Ed25519Signer, Signer as _};
+
+    let server = credentials::default_server()?;
+    let resolved = resolve_hosted_credential(server.as_deref())?;
+    let Some(token) = resolved.token else {
+        return Ok(None);
+    };
+    let proof_key = resolved
+        .proof_key_pem
+        .context("active run credential has no proof key")?;
+    let signer = Ed25519Signer::from_pem(&proof_key)?;
+    let root = biscuit_verifier::unverified_authority_device_pop_key(&token.id)?
+        .context("active run credential has no device root selector")?;
+    let parsed = biscuit_verifier::parse_token(&token.id, &[root])?;
+    let now = chrono::Utc::now().timestamp();
+    let authority = repo::device_authority::load(home, now)?;
+    authority.verify_mint_root(&root.to_bytes(), now)?;
+    let inspected = biscuit_verifier::inspect_verified_credential(&parsed, &root)?;
+    if inspected.expires_at_unix_seconds != 0 && inspected.expires_at_unix_seconds <= now as u64 {
+        anyhow::bail!("active run credential expired");
+    }
+    if inspected
+        .revocation_ids
+        .iter()
+        .any(|id| authority.revoked_ids.contains(id))
+    {
+        anyhow::bail!("active run credential revoked");
+    }
+    authority.verify_publisher(&inspected.proof_public_key)?;
+    if signer.public_key() != inspected.proof_public_key {
+        anyhow::bail!("active run credential proof key differs from bearer");
+    }
+    Ok(inspected.agent_id)
 }
 
 /// Derive a capture principal from a locally stored hosted account.
@@ -367,6 +405,78 @@ mod tests {
 
             resolve_hosted_credential(Some("api.target.test"))
                 .expect_err("unreadable explicit credential must be a hard error");
+        });
+    }
+
+    #[test]
+    fn run_agent_uses_verified_delegation_not_local_session_label() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        with_isolated_env(|home| {
+            let root = Ed25519Signer::from_seed(&[71; 32]).expect("owner key");
+            let recovery = Ed25519Signer::from_seed(&[72; 32]).expect("recovery key");
+            let signed = repo::sign_custodial_owner_root(&root, &recovery, [9; 16], [5; 32])
+                .expect("owner root");
+            let binding =
+                repo::sign_custodial_owner_binding(&root, &signed, [6; 32]).expect("owner binding");
+            let version = heddleco_capability_verifier::verify_owner_root(&signed)
+                .expect("owner proof")
+                .state_hash()
+                .to_vec();
+            let owner = api::heddle::api::v1alpha2::OwnerState {
+                owner: Some(api::heddle::api::v1alpha2::PrincipalRef {
+                    id: uuid::Uuid::from_bytes([9; 16]).to_string(),
+                }),
+                root: Some(signed),
+                binding: Some(binding),
+                version,
+                ..Default::default()
+            };
+            repo::device_authority::publish(
+                home,
+                &repo::device_authority::DeviceAuthority {
+                    owner,
+                    mint_roots: Vec::new(),
+                    revoked_ids: Vec::new(),
+                    revoked_mint_roots: Vec::new(),
+                    revoked_publishers: Vec::new(),
+                },
+                chrono::Utc::now().timestamp(),
+            )
+            .expect("admit owner");
+            let root_token =
+                crate::hosted_runtime::root_mint::mint_agent_root(&[71; 32]).expect("root token");
+            let child = Ed25519Signer::from_seed(&[81; 32]).expect("child proof key");
+            let token = crate::hosted_runtime::device_flow::attenuate_for_agent(
+                &root_token.token,
+                crate::hosted_runtime::device_flow::AgentAttenuation::time_bounded(
+                    "delegated-agent",
+                    chrono::Utc::now() + chrono::Duration::hours(1),
+                ),
+                &root,
+                child.public_key(),
+            )
+            .expect("delegated token");
+            let path = home.join("agent.hcred");
+            crate::hosted_runtime::credential_file::write_credential_file(
+                &path,
+                &crate::hosted_runtime::credential_file::VerifiedCredential {
+                    mint_root_attachment: None,
+                    server: "api.heddle.test".into(),
+                    kind: crate::hosted_runtime::credential_file::CredentialKind::Agent,
+                    subject: root_token.subject,
+                    token,
+                    proof_key_pem: child.to_pem().expect("child PEM"),
+                    expires_at: None,
+                    credential_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("write agent credential");
+            unsafe { std::env::set_var("HEDDLE_CREDENTIAL", path) };
+            assert_eq!(
+                super::authenticated_run_agent(home).expect("authenticated agent"),
+                Some("delegated-agent".into())
+            );
         });
     }
 

@@ -47,7 +47,11 @@ fn controls_preserve_arrival_order_and_need_real_harness_acknowledgment() {
         .enqueue_control(&pause, "actor")
         .expect("retry exact request");
     assert_eq!(
-        store.run("run-1").expect("read").expect("run").state,
+        store
+            .run("run-1", RunReader::Owner)
+            .expect("read")
+            .expect("run")
+            .state,
         State::Running as i32,
         "queued request does not fake execution"
     );
@@ -70,7 +74,11 @@ fn controls_preserve_arrival_order_and_need_real_harness_acknowledgment() {
         .complete_control("z-first", &paused)
         .expect("actual harness pause");
     assert_eq!(
-        store.run("run-1").expect("read").expect("run").state,
+        store
+            .run("run-1", RunReader::Owner)
+            .expect("read")
+            .expect("run")
+            .state,
         State::Paused as i32
     );
     assert_eq!(
@@ -81,14 +89,22 @@ fn controls_preserve_arrival_order_and_need_real_harness_acknowledgment() {
         .complete_control("z-first", &run)
         .expect("duplicate ack does not overwrite state");
     assert_eq!(
-        store.run("run-1").expect("read").expect("run").state,
+        store
+            .run("run-1", RunReader::Owner)
+            .expect("read")
+            .expect("run")
+            .state,
         State::Paused as i32
     );
     let mut unsupported = resume;
     unsupported.client_operation_id = "steer".into();
     unsupported.action = Action::Steer as i32;
     unsupported.instruction = "change".into();
-    unsupported.expected_version = store.run("run-1").expect("read").expect("run").version;
+    unsupported.expected_version = store
+        .run("run-1", RunReader::Owner)
+        .expect("read")
+        .expect("run")
+        .version;
     assert!(
         store
             .enqueue_control(&unsupported, "actor")
@@ -164,31 +180,279 @@ fn timeline_is_immutable_and_shares_bounded_filtered_pagination() {
             .contains("reused")
     );
     assert_eq!(
-        store.last_timeline_position("run-1").expect("position"),
+        store
+            .last_timeline_position("run-1", RunReader::Owner)
+            .expect("position"),
         Some(0)
     );
     let first = store
-        .observation_page("", 1, &[], &[], true)
+        .observation_page("", 1, &[], &[], true, RunReader::Owner)
         .expect("first");
     assert_eq!(first.len(), 1);
     assert!(matches!(first[0].1, RunObservation::Run(_)));
     let next = store
-        .observation_page(&first[0].0, 1, &[], &[], true)
+        .observation_page(&first[0].0, 1, &[], &[], true, RunReader::Owner)
         .expect("next");
     assert_eq!(next.len(), 1);
     assert!(matches!(next[0].1, RunObservation::Timeline(_)));
     assert!(
         store
-            .observation_page("", 1, &["different".into()], &[], true)
+            .observation_page("", 1, &["different".into()], &[], true, RunReader::Owner)
             .expect("filter")
             .is_empty()
     );
     assert_eq!(
         store
-            .observation_page("", 5, &[], &[], false)
+            .observation_page("", 5, &[], &[], false, RunReader::Owner)
             .expect("no timeline")
             .len(),
         1
+    );
+}
+
+#[test]
+fn existing_run_rows_migrate_to_queryable_principals() {
+    let directory = tempfile::tempdir().expect("directory");
+    let connection =
+        rusqlite::Connection::open(directory.path().join(crate::local_metadata::DATABASE_NAME))
+            .expect("legacy database");
+    connection.execute_batch("CREATE TABLE runs(id TEXT PRIMARY KEY,thread TEXT NOT NULL,record BLOB NOT NULL);
+        CREATE TABLE run_timeline(run TEXT NOT NULL,position INTEGER NOT NULL,record BLOB NOT NULL,PRIMARY KEY(run,position));
+        PRAGMA user_version=1;").expect("legacy schema");
+    let record = RunRecord {
+        r#ref: Some(RecordRef {
+            id: "existing".into(),
+            spool: Some(SpoolRef {
+                id: uuid::Uuid::from_u128(1).to_string(),
+            }),
+        }),
+        principal_id: "account".into(),
+        agent_id: "agent-a".into(),
+        ..Default::default()
+    };
+    connection
+        .execute(
+            "INSERT INTO runs(id,thread,record) VALUES(?1,'',?2)",
+            params!["existing", record.encode_to_vec()],
+        )
+        .expect("legacy row");
+    let event = TimelineRecord {
+        run: record.r#ref.clone(),
+        r#ref: Some(RecordRef {
+            id: "existing:0".into(),
+            spool: record.r#ref.as_ref().expect("reference").spool.clone(),
+        }),
+        ..Default::default()
+    };
+    connection
+        .execute(
+            "INSERT INTO run_timeline(run,position,record) VALUES('existing',0,?1)",
+            [event.encode_to_vec()],
+        )
+        .expect("legacy timeline");
+    drop(connection);
+    let store = RunStore::open_existing(directory.path())
+        .expect("migrate existing store")
+        .expect("existing store");
+    assert!(
+        store
+            .observation_page(
+                "",
+                2,
+                &[],
+                &[],
+                false,
+                RunReader::Agent {
+                    principal: "account",
+                    agent: "agent-a"
+                }
+            )
+            .expect("unverified legacy page")
+            .is_empty()
+    );
+    assert!(
+        store
+            .observation_page(
+                "",
+                2,
+                &[],
+                &[],
+                false,
+                RunReader::Agent {
+                    principal: "account",
+                    agent: "agent-b"
+                }
+            )
+            .expect("sibling page")
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .latest_timeline("existing", 1, RunReader::Owner)
+            .expect("owner tail")
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .latest_timeline(
+                "existing",
+                1,
+                RunReader::Agent {
+                    principal: "account",
+                    agent: "agent-a"
+                }
+            )
+            .expect("unverified legacy tail")
+            .is_empty()
+    );
+    assert!(
+        store
+            .latest_timeline(
+                "existing",
+                1,
+                RunReader::Agent {
+                    principal: "account",
+                    agent: "agent-b"
+                }
+            )
+            .expect("sibling tail")
+            .is_empty()
+    );
+    assert!(
+        store
+            .latest_timeline(
+                "existing",
+                1,
+                RunReader::Agent {
+                    principal: "other-account",
+                    agent: "agent-a"
+                }
+            )
+            .expect("foreign tail")
+            .is_empty()
+    );
+    assert!(
+        store
+            .latest_timeline(
+                "missing",
+                1,
+                RunReader::Agent {
+                    principal: "account",
+                    agent: "agent-b"
+                }
+            )
+            .expect("missing tail")
+            .is_empty()
+    );
+}
+
+#[test]
+fn verified_run_reader_is_immutable_and_filters_both_pages_and_tails() {
+    let (_directory, store, mut run) = fixture();
+    run.r#ref.as_mut().expect("reference").id = "run-auth".into();
+    run.principal_id = "account".into();
+    run.agent_id = "agent-a".into();
+    let run = store
+        .put_run_from_credential(run, "agent-a")
+        .expect("verified run");
+    store
+        .put_timeline(&TimelineRecord {
+            run: run.r#ref.clone(),
+            r#ref: Some(RecordRef {
+                id: "agent-event".into(),
+                spool: run.r#ref.as_ref().expect("ref").spool.clone(),
+            }),
+            ..Default::default()
+        })
+        .expect("timeline");
+    let own = RunReader::Agent {
+        principal: "account",
+        agent: "agent-a",
+    };
+    let sibling = RunReader::Agent {
+        principal: "account",
+        agent: "agent-b",
+    };
+    assert!(store.readable("run-auth", own).expect("own exact run"));
+    assert!(
+        !store
+            .readable("run-auth", sibling)
+            .expect("sibling exact run")
+    );
+    assert_eq!(
+        store.readable("run-auth", sibling).expect("forbidden"),
+        store.readable("missing", sibling).expect("missing")
+    );
+    assert!(store.run("run-auth", own).expect("own get").is_some());
+    assert_eq!(
+        store.run("run-auth", sibling).expect("sibling get"),
+        store.run("missing", sibling).expect("missing get")
+    );
+    assert_eq!(store.page("", 3, own).expect("own list").len(), 1);
+    assert!(store.page("", 3, sibling).expect("sibling list").is_empty());
+    assert_eq!(
+        store
+            .observation_page("", 3, &[], &[], true, own)
+            .expect("own page")
+            .len(),
+        2
+    );
+    assert_eq!(
+        store
+            .latest_timeline("run-auth", 1, own)
+            .expect("own tail")
+            .len(),
+        1
+    );
+    assert!(
+        store
+            .observation_page("", 3, &[], &[], true, sibling)
+            .expect("sibling page")
+            .is_empty()
+    );
+    assert!(
+        store
+            .latest_timeline("run-auth", 1, sibling)
+            .expect("sibling tail")
+            .is_empty()
+    );
+    assert!(
+        store
+            .observation_page("", 3, &[], &[], true, RunReader::Other)
+            .expect("other page")
+            .is_empty()
+    );
+    assert_eq!(
+        store
+            .observation_page("", 4, &[], &[], true, RunReader::Owner)
+            .expect("owner page")
+            .len(),
+        3
+    );
+    let mut reassigned = run;
+    reassigned.agent_id = "agent-b".into();
+    assert!(
+        store
+            .put_run_from_credential(reassigned, "agent-b")
+            .is_err(),
+        "another credential cannot reassign a run"
+    );
+    let mut owner_run = RunRecord {
+        r#ref: Some(RecordRef {
+            id: "run-owner".into(),
+            spool: Some(SpoolRef {
+                id: uuid::Uuid::from_u128(1).to_string(),
+            }),
+        }),
+        principal_id: "account".into(),
+        ..Default::default()
+    };
+    store.put_run(owner_run.clone()).expect("owner run");
+    owner_run.agent_id = "agent-a".into();
+    assert!(
+        store.put_run_from_credential(owner_run, "agent-a").is_err(),
+        "an agent cannot take over an owner-only run"
     );
 }
 
@@ -208,7 +472,10 @@ fn pending_permission_is_observable_versioned_closed_and_expiring() {
     store
         .request_permission_record("run-1", &permission)
         .expect("pending intent");
-    let pending = store.run("run-1").expect("read").expect("run");
+    let pending = store
+        .run("run-1", RunReader::Owner)
+        .expect("read")
+        .expect("run");
     assert_ne!(pending.version, run.version);
     assert_eq!(pending.pending_permissions, [permission.clone()]);
     let refreshed = store.put_run(run.clone()).expect("harness report refresh");
@@ -222,7 +489,7 @@ fn pending_permission_is_observable_versioned_closed_and_expiring() {
         .expect("hook exited");
     assert!(
         store
-            .run("run-1")
+            .run("run-1", RunReader::Owner)
             .expect("read")
             .expect("run")
             .pending_permissions
@@ -244,13 +511,23 @@ fn pending_permission_is_observable_versioned_closed_and_expiring() {
     );
     let mut expiring = permission;
     expiring.id = "expires".into();
-    expiring.expires_at.as_mut().expect("expiry").seconds = chrono::Utc::now().timestamp() + 1;
+    let deadline = chrono::Utc::now().timestamp() + 5;
+    expiring.expires_at.as_mut().expect("expiry").seconds = deadline;
     store
         .request_permission_record("run-1", &expiring)
         .expect("short prompt");
-    let before = store.run("run-1").expect("read").expect("run").version;
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-    let expired = store.run("run-1").expect("read").expect("run");
+    let before = store
+        .run("run-1", RunReader::Owner)
+        .expect("read")
+        .expect("run");
+    assert_eq!(before.pending_permissions, [expiring.clone()]);
+    let before = before.version;
+    let remaining = (deadline - chrono::Utc::now().timestamp() + 1).max(1) as u64;
+    std::thread::sleep(std::time::Duration::from_secs(remaining));
+    let expired = store
+        .run("run-1", RunReader::Owner)
+        .expect("read")
+        .expect("run");
     assert!(expired.pending_permissions.is_empty());
     assert_ne!(expired.version, before);
     assert_eq!(

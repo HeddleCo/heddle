@@ -21,6 +21,7 @@ pub(super) struct Session {
     pub principal: String,
     pub actor: String,
     pub agent_id: Option<String>,
+    pub owner: bool,
     pub publisher: [u8; 32],
     pub attribution: objects::object::Attribution,
     pub spool: DeviceSpool,
@@ -32,6 +33,18 @@ pub(super) struct Session {
     pub request_proof: objects::object::ContentHash,
 }
 impl Session {
+    pub fn run_reader(&self) -> repo::device_runs::RunReader<'_> {
+        if self.owner {
+            repo::device_runs::RunReader::Owner
+        } else if let Some(agent) = self.agent_id.as_deref() {
+            repo::device_runs::RunReader::Agent {
+                principal: &self.principal,
+                agent,
+            }
+        } else {
+            repo::device_runs::RunReader::Other
+        }
+    }
     pub fn authorize_thread(
         &self,
         repository: &repo::Repository,
@@ -180,6 +193,9 @@ impl Session {
         if uuid::Uuid::from_slice(&owner.account_uuid)?.to_string() != self.principal {
             bail!("device account changed");
         }
+        if self.owner && current.authority_key().public_key != self.root.to_bytes() {
+            bail!("device owner authority changed");
+        }
         let registered = repo::device_catalog::load(home, self.spool.id)?;
         if registered.capability_path != self.spool.capability_path
             || registered.heddle_dir != self.spool.heddle_dir
@@ -278,6 +294,14 @@ pub(super) fn authorize(
         .as_ref()
         .context("account root missing")?;
     let principal = uuid::Uuid::from_slice(&owner.account_uuid)?.to_string();
+    let agent_id = checked.delegation_agent_id.clone().or_else(|| {
+        (checked.agent_provider.is_some() || checked.agent_model.is_some())
+            .then(|| checked.sid.clone())
+    });
+    let owner_key = current.authority_key().public_key.as_slice();
+    let owner_credential = agent_id.is_none()
+        && owner_key == root.to_bytes().as_slice()
+        && owner_key == key.as_slice();
     let mut expires = i64::try_from(checked.exp).context("capability expiration out of range")?;
     if let Some(attachment_expiry) = attachment_deadline {
         expires = if expires == 0 {
@@ -306,7 +330,8 @@ pub(super) fn authorize(
     Ok(Session {
         sources: Mutex::new(BoundSources::default()),
         principal,
-        agent_id: checked.delegation_agent_id,
+        agent_id,
+        owner: owner_credential,
         attribution,
         actor: hex::encode(key),
         publisher: key,

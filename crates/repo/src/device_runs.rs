@@ -22,6 +22,24 @@ pub enum RunObservation {
     Run(RunRecord),
     Timeline(TimelineRecord),
 }
+/// Read scope derived by the device credential verifier, never by a request.
+#[derive(Clone, Copy, Debug)]
+pub enum RunReader<'a> {
+    Owner,
+    Agent { principal: &'a str, agent: &'a str },
+    Other,
+}
+impl<'a> RunReader<'a> {
+    fn scope(self) -> (bool, &'a str, &'a str) {
+        match self {
+            Self::Owner => (true, "", ""),
+            Self::Agent { principal, agent } if !principal.is_empty() && !agent.is_empty() => {
+                (false, principal, agent)
+            }
+            _ => (false, "", ""),
+        }
+    }
+}
 #[derive(Clone, Debug)]
 pub struct RunControl {
     pub id: String,
@@ -31,7 +49,8 @@ pub struct RunControl {
 }
 pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch("
-            CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, thread TEXT NOT NULL, record BLOB NOT NULL);
+            CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, thread TEXT NOT NULL, principal_id TEXT NOT NULL DEFAULT '', reader_agent_id TEXT NOT NULL DEFAULT '', record BLOB NOT NULL);
+            CREATE INDEX IF NOT EXISTS runs_reader ON runs(principal_id,reader_agent_id,id);
             CREATE TABLE IF NOT EXISTS run_harness_bindings (native_key TEXT PRIMARY KEY, run TEXT NOT NULL, active INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS run_timeline (run TEXT NOT NULL, position INTEGER NOT NULL, record BLOB NOT NULL, PRIMARY KEY(run,position));
             CREATE TABLE IF NOT EXISTS run_controls (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, run TEXT NOT NULL, request BLOB NOT NULL, principal TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0);
@@ -39,6 +58,29 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
             CREATE TABLE IF NOT EXISTS run_permissions (run TEXT NOT NULL, id TEXT NOT NULL, digest BLOB NOT NULL, record BLOB NOT NULL, expires INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, decision INTEGER, PRIMARY KEY(run,id));
             CREATE TABLE IF NOT EXISTS run_policies (spool TEXT PRIMARY KEY, policy BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS run_commands (id TEXT PRIMARY KEY, method TEXT NOT NULL, body BLOB NOT NULL, principal TEXT NOT NULL);")
+}
+
+/// Existing stores must gain queryable identity before admitting run readers.
+pub(crate) fn migrate_reader_schema(connection: &Connection) -> Result<()> {
+    connection.execute_batch(
+        "ALTER TABLE runs ADD COLUMN principal_id TEXT NOT NULL DEFAULT '';
+         ALTER TABLE runs ADD COLUMN reader_agent_id TEXT NOT NULL DEFAULT '';",
+    )?;
+    let mut query = connection.prepare("SELECT id,record FROM runs")?;
+    let rows = query.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+    })?;
+    for row in rows {
+        let (id, bytes) = row?;
+        let run = RunRecord::decode(bytes.as_slice())?;
+        connection.execute(
+            "UPDATE runs SET principal_id=?2 WHERE id=?1",
+            params![id, run.principal_id],
+        )?;
+    }
+    connection
+        .execute_batch("CREATE INDEX runs_reader ON runs(principal_id,reader_agent_id,id)")?;
+    Ok(())
 }
 
 impl RunStore {
@@ -50,7 +92,7 @@ impl RunStore {
             _anchor: std::sync::Arc::new(std::sync::Mutex::new(connection)),
         })
     }
-    /// Hook reads never create a database or execute schema statements.
+    /// Hook reads never create a database; an existing legacy store migrates once.
     pub fn open_existing(heddle_dir: &Path) -> Result<Option<Self>> {
         let path = heddle_dir.join(crate::local_metadata::DATABASE_NAME);
         let Some(connection) = crate::local_metadata::open_existing(heddle_dir)? else {
@@ -115,7 +157,18 @@ impl RunStore {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         Ok(connection)
     }
-    pub fn put_run(&self, mut run: RunRecord) -> Result<RunRecord> {
+    /// Local owner writes are visible only to the owner.
+    pub fn put_run(&self, run: RunRecord) -> Result<RunRecord> {
+        self.put_run_with_reader(run, None)
+    }
+    /// The caller supplies an agent ID from a verified, proof-key-held bearer.
+    pub fn put_run_from_credential(&self, run: RunRecord, agent: &str) -> Result<RunRecord> {
+        if agent.is_empty() || agent.len() > 512 {
+            bail!("invalid authenticated run agent");
+        }
+        self.put_run_with_reader(run, Some(agent))
+    }
+    fn put_run_with_reader(&self, mut run: RunRecord, agent: Option<&str>) -> Result<RunRecord> {
         let id = run
             .r#ref
             .as_ref()
@@ -125,38 +178,87 @@ impl RunStore {
         valid_id(&id)?;
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String)> = tx
+            .query_row(
+                "SELECT principal_id,reader_agent_id FROM runs WHERE id=?1",
+                [&id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let reader_agent = if let Some((principal, previous_agent)) = existing {
+            if !principal.is_empty() && principal != run.principal_id {
+                bail!("run principal cannot change");
+            }
+            if previous_agent != agent.unwrap_or_default() {
+                bail!("run agent cannot change");
+            }
+            previous_agent
+        } else {
+            agent.unwrap_or_default().to_string()
+        };
         permissions::populate(&tx, &mut run)?;
         run.version.clear();
         run.version = blake3::hash(&run.encode_to_vec()).as_bytes().to_vec();
         if run.encode_to_vec().len() > 240 * 1024 {
             bail!("run record exceeds observation frame budget");
         }
-        tx.execute("INSERT INTO runs(id,thread,record) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET thread=excluded.thread,record=excluded.record WHERE runs.record!=excluded.record",params![id,run.thread.as_ref().and_then(|thread|thread.id.as_ref()).map(|id|hex::encode(&id.value)).unwrap_or_default(),run.encode_to_vec()])?;
+        tx.execute("INSERT INTO runs(id,thread,principal_id,reader_agent_id,record) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET thread=excluded.thread,principal_id=excluded.principal_id,record=excluded.record WHERE runs.record!=excluded.record",params![id,run.thread.as_ref().and_then(|thread|thread.id.as_ref()).map(|id|hex::encode(&id.value)).unwrap_or_default(),&run.principal_id,reader_agent,run.encode_to_vec()])?;
         tx.commit()?;
         // Explicit idempotent retry can repair a prior post-commit marker failure.
         self.committed()?;
         Ok(run)
     }
-    pub fn run(&self, id: &str) -> Result<Option<RunRecord>> {
-        load_run(&self.connection()?, id)
+    pub fn run(&self, id: &str, reader: RunReader<'_>) -> Result<Option<RunRecord>> {
+        let (owner, principal, agent) = reader.scope();
+        self.connection()?
+            .query_row(
+                "SELECT record FROM runs WHERE id=?1 AND (?2 OR (principal_id=?3 AND reader_agent_id=?4 AND ?4!=''))",
+                params![id, owner, principal, agent],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?
+            .map(|bytes| Ok(permissions::project(RunRecord::decode(bytes.as_slice())?)))
+            .transpose()
+    }
+    /// Authorize an exact run without decoding its record or timeline.
+    pub fn readable(&self, id: &str, reader: RunReader<'_>) -> Result<bool> {
+        valid_id(id)?;
+        let (owner, principal, agent) = reader.scope();
+        Ok(self
+            .connection()?
+            .query_row(
+                "SELECT 1 FROM runs WHERE id=?1 AND (?2 OR (principal_id=?3 AND reader_agent_id=?4 AND ?4!=''))",
+                params![id, owner, principal, agent],
+                |row| row.get::<_, i32>(0),
+            )
+            .optional()?
+            .is_some())
     }
     /// Stable keyset page; the caller's stream budget bounds each page.
-    pub fn page(&self, after: &str, limit: usize) -> Result<Vec<RunRecord>> {
+    pub fn page(&self, after: &str, limit: usize, reader: RunReader<'_>) -> Result<Vec<RunRecord>> {
         if limit == 0 || limit > 1024 {
             bail!("invalid run page budget");
         }
         let connection = self.connection()?;
-        let mut query =
-            connection.prepare("SELECT record FROM runs WHERE id>?1 ORDER BY id LIMIT ?2")?;
+        let (owner, principal, agent) = reader.scope();
+        let mut query = connection.prepare("SELECT record FROM runs WHERE id>?1 AND (?3 OR (principal_id=?4 AND reader_agent_id=?5 AND ?5!='')) ORDER BY id LIMIT ?2")?;
         query
-            .query_map(params![after, limit as i64], |row| row.get::<_, Vec<u8>>(0))?
+            .query_map(
+                params![after, limit as i64, owner, principal, agent],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?
             .map(|value| Ok(permissions::project(RunRecord::decode(value?.as_slice())?)))
             .collect()
     }
-    pub fn last_timeline_position(&self, run_id: &str) -> Result<Option<u64>> {
+    pub fn last_timeline_position(
+        &self,
+        run_id: &str,
+        reader: RunReader<'_>,
+    ) -> Result<Option<u64>> {
+        let (owner, principal, agent) = reader.scope();
         let position: Option<i64> = self.connection()?.query_row(
-            "SELECT MAX(position) FROM run_timeline WHERE run=?1",
-            [run_id],
+            "SELECT MAX(t.position) FROM run_timeline t JOIN runs r ON r.id=t.run WHERE t.run=?1 AND (?2 OR (r.principal_id=?3 AND r.reader_agent_id=?4 AND ?4!=''))",
+            params![run_id, owner, principal, agent],
             |row| row.get(0),
         )?;
         position
@@ -205,6 +307,7 @@ impl RunStore {
         run_ids: &[String],
         thread_ids: &[Vec<u8>],
         timeline: bool,
+        reader: RunReader<'_>,
     ) -> Result<Vec<(String, RunObservation)>> {
         if limit == 0 || limit > 1025 || run_ids.len() > 1024 || thread_ids.len() > 1024 {
             bail!("invalid run observation budget");
@@ -215,13 +318,24 @@ impl RunStore {
         let run_filter = serde_json::to_string(run_ids)?;
         let thread_filter =
             serde_json::to_string(&thread_ids.iter().map(hex::encode).collect::<Vec<_>>())?;
+        let (owner, principal, agent) = reader.scope();
         let mut query = connection.prepare("WITH candidates AS (
             SELECT 'r:'||id AS key,0 AS kind,record,id AS run FROM runs
             UNION ALL SELECT 't:'||run||':'||printf('%020d',position),1,record,run FROM run_timeline WHERE ?3
         ) SELECT c.key,c.kind,c.record,r.record FROM candidates c JOIN runs r ON r.id=c.run
-        WHERE c.key>?1 AND (?4='[]' OR c.run IN (SELECT value FROM json_each(?4))) AND (?5='[]' OR r.thread IN (SELECT value FROM json_each(?5))) ORDER BY c.key LIMIT ?2")?;
+        WHERE c.key>?1 AND (?4='[]' OR c.run IN (SELECT value FROM json_each(?4))) AND (?5='[]' OR r.thread IN (SELECT value FROM json_each(?5)))
+        AND (?6 OR (r.principal_id=?7 AND r.reader_agent_id=?8 AND ?8!='')) ORDER BY c.key LIMIT ?2")?;
         let rows = query.query_map(
-            params![after, limit as i64, timeline, run_filter, thread_filter],
+            params![
+                after,
+                limit as i64,
+                timeline,
+                run_filter,
+                thread_filter,
+                owner,
+                principal,
+                agent
+            ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -260,19 +374,26 @@ impl RunStore {
         Ok(output)
     }
     /// The fixed initial tail selection; later positions use observation_page.
-    pub fn latest_timeline(&self, run_id: &str, limit: usize) -> Result<Vec<TimelineRecord>> {
+    pub fn latest_timeline(
+        &self,
+        run_id: &str,
+        limit: usize,
+        reader: RunReader<'_>,
+    ) -> Result<Vec<TimelineRecord>> {
         valid_id(run_id)?;
         if limit == 0 || limit > 1025 {
             bail!("invalid latest timeline limit");
         }
         let connection = self.connection()?;
+        let (owner, principal, agent) = reader.scope();
         let mut query = connection.prepare(
-            "SELECT record FROM run_timeline WHERE run=?1 ORDER BY position DESC LIMIT ?2",
+            "SELECT t.record FROM run_timeline t JOIN runs r ON r.id=t.run WHERE t.run=?1 AND (?3 OR (r.principal_id=?4 AND r.reader_agent_id=?5 AND ?5!='')) ORDER BY t.position DESC LIMIT ?2",
         )?;
         let mut records = query
-            .query_map(params![run_id, limit as i64], |row| {
-                row.get::<_, Vec<u8>>(0)
-            })?
+            .query_map(
+                params![run_id, limit as i64, owner, principal, agent],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?
             .map(|body| Ok(TimelineRecord::decode(body?.as_slice())?))
             .collect::<Result<Vec<_>>>()?;
         records.reverse();

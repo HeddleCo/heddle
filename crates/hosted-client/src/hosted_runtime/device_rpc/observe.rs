@@ -508,7 +508,7 @@ impl DeviceRpc {
             if let (Some(run), Some(after)) = (latest_run.as_deref(), latest_after.as_deref())
                 && !feed
                     .runs
-                    .observation_page(after, 1, &[run.to_owned()], &[], true)?
+                    .observation_page(after, 1, &[run.to_owned()], &[], true, session.run_reader())?
                     .is_empty()
             {
                 continue;
@@ -709,7 +709,14 @@ impl DeviceRpc {
             };
             let remaining = size.saturating_sub(usize::from(policy.is_some()));
             let candidates = if let Some((run, limit, latest_after)) = latest {
-                let mut selected = feed.runs.observation_page("", 1, &runs, &threads, false)?;
+                let mut selected = feed.runs.observation_page(
+                    "",
+                    1,
+                    &runs,
+                    &threads,
+                    false,
+                    session.run_reader(),
+                )?;
                 if !selected.is_empty() {
                     let timeline: Vec<_> = if let Some(after) = latest_after {
                         feed.runs
@@ -719,6 +726,7 @@ impl DeviceRpc {
                                 &runs,
                                 &threads,
                                 true,
+                                session.run_reader(),
                             )?
                             .into_iter()
                             .filter_map(|(key, item)| match item {
@@ -728,7 +736,7 @@ impl DeviceRpc {
                             .collect()
                     } else {
                         feed.runs
-                            .latest_timeline(run, limit.min(remaining))?
+                            .latest_timeline(run, limit.min(remaining), session.run_reader())?
                             .into_iter()
                             .map(|record| {
                                 (
@@ -748,6 +756,7 @@ impl DeviceRpc {
                     &runs,
                     &threads,
                     request.include_timeline,
+                    session.run_reader(),
                 )?
             };
             if latest.is_some() {
