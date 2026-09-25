@@ -225,11 +225,32 @@ async fn run_keepalive<Wait, WaitFuture, Call, CallFuture, Jitter>(
     CallFuture: Future<Output = Result<()>>,
     Jitter: FnMut(Duration) -> Duration,
 {
-    let _ = (&mut call, &mut jitter);
+    let mut delay = KEEPALIVE_CADENCE;
+    let mut failures = 0_u32;
     loop {
         tokio::select! {
-            _ = wait(KEEPALIVE_CADENCE) => {},
+            _ = wait(delay) => {},
             _ = stopped.changed() => return,
+        }
+        let result = tokio::select! {
+            result = tokio::time::timeout(KEEPALIVE_TIMEOUT, call()) => result,
+            _ = stopped.changed() => return,
+        };
+        match result {
+            Ok(Ok(())) => {
+                failures = 0;
+                delay = KEEPALIVE_CADENCE;
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "authenticated weft keepalive failed");
+                failures = failures.saturating_add(1);
+                delay = jitter(retry_delay(failures));
+            }
+            Err(error) => {
+                tracing::warn!(%error, "authenticated weft keepalive timed out");
+                failures = failures.saturating_add(1);
+                delay = jitter(retry_delay(failures));
+            }
         }
     }
 }
