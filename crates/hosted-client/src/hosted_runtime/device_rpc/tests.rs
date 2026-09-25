@@ -9,6 +9,7 @@ use super::*;
 
 mod checkouts;
 mod replication;
+mod runs;
 use crate::hosted_runtime::{
     claim_authorization::StoredClaimAuthorization,
     hosted::claim_protocol::{ClaimProtocol, NATIVE_ALPN},
@@ -202,6 +203,7 @@ async fn real_device_roundtrip_with_partial(content_only: bool, partial_only: bo
     .await;
     let (materialize, target_replica) =
         checkouts::roundtrip(&remote, &device, &repository, &replica, base, spool).await;
+    runs::latest_then_follow(&remote, &repository, spool).await;
     super::ownership_tests::claim(&remote, &repository, &replica).await;
     super::fetch_tests::claimed_roundtrip(&remote, &repository, &replica, &endpoint_signer, &owner)
         .await;

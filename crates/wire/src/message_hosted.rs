@@ -93,6 +93,12 @@ pub struct ProgressCheckpoint {
     pub total_steps: Option<u32>,
     #[serde(default)]
     pub touched_paths: Vec<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub captured_revision: Option<String>,
     pub recorded_at: String,
 }
 

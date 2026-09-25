@@ -167,17 +167,16 @@ fn format_stack_context(
 /// Stop / SubagentStop capture.
 ///
 /// Creates a Heddle state from the current worktree, attributed to the agent
-/// described in the payload. Returns `Ok(())` whether or not a capture
-/// happened (clean worktrees are silently skipped).
+/// described in the payload. Clean worktrees return no captured state.
 pub(crate) fn handle_stop_capture(
     bridge: &dyn crate::bridge::HarnessCliBridge,
     repo: &Repository,
     user_config: &UserConfig,
     payload: &Value,
     intent_hint: &str,
-) -> Result<()> {
+) -> Result<Option<String>> {
     if !worktree_dirty(repo)? {
-        return Ok(());
+        return Ok(None);
     }
     let intent = payload
         .get("message")
@@ -199,7 +198,7 @@ pub(crate) fn handle_stop_capture(
         },
     )?;
     debug!(state_id = %state_id, "heddle stop-hook captured state");
-    Ok(())
+    Ok(Some(state_id))
 }
 
 fn is_file_tool(tool_name: &str) -> bool {
