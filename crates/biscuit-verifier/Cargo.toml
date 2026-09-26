@@ -18,7 +18,7 @@ blake3.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
 hex.workspace = true
-heddle-api = { package = "heddle-api", version = "=0.31.0-alpha.2", optional = true }
+heddle-api = { package = "heddle-api", version = "=0.31.0-alpha.3", optional = true }
 thiserror.workspace = true
 uuid = { version = "1", default-features = false }
 
@@ -33,7 +33,7 @@ chrono = { workspace = true, features = ["wasmbind"] }
 getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
-heddle-api = { package = "heddle-api", version = "=0.31.0-alpha.2" }
+heddle-api = { package = "heddle-api", version = "=0.31.0-alpha.3" }
 heddleco-capability-verifier = { path = "../capability-verifier" }
 prost-types.workspace = true
 proptest.workspace = true

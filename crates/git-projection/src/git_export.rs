@@ -13,7 +13,7 @@ use objects::{
 };
 use repo::Repository as HeddleRepository;
 use sley::{
-    BString, CommitObject, EntryKind, GitObjectType, ObjectId, ReferenceTarget,
+    BString, CommitObject, EntryKind, GitObjectType, ObjectId, RefPrecondition, ReferenceTarget,
     Repository as SleyRepository, Signature,
 };
 use tracing::debug;
@@ -22,10 +22,11 @@ use crate::{
     facet_gate::require_source_history_projection,
     git_core::{
         GitProjection, GitProjectionError, GitProjectionResult, LocalGitIdentity, RefNamespace,
-        SyncMapping, collect_ref_updates, copy_reachable_objects, count_exported_commits,
-        delete_reference_if_present, git_config_identity_with_global_fallback, git_err,
-        materialize_projection_managed_refs, principal_lacks_identity,
-        read_projection_managed_refs, set_reference, write_projection_managed_refs,
+        RefUpdate, SyncMapping, collect_ref_updates, copy_reachable_objects,
+        count_exported_commits, delete_reference_if_present, delete_reference_matching,
+        git_config_identity_with_global_fallback, git_err, materialize_projection_managed_refs,
+        plan_destination_reconcile, principal_lacks_identity, read_projection_managed_refs,
+        set_reference, write_projection_managed_refs,
     },
     git_notes,
     git_reconstruct::{
@@ -424,6 +425,9 @@ fn export_scoped(
     thread: Option<&str>,
 ) -> GitProjectionResult<ExportStats> {
     bridge.init_scratch_repo()?;
+    let source_generation = bridge.heddle_repo.oplog().head_id().map_err(|error| {
+        GitProjectionError::Git(format!("read export source generation: {error}"))
+    })?;
 
     let states = match thread {
         Some(thread) => {
@@ -460,20 +464,27 @@ fn export_scoped(
     let reachable: HashSet<StateId> = sorted_states.iter().copied().collect();
     let repo = bridge.open_git_repo()?;
     install_native_annotated_tags(bridge.heddle_repo, &repo)?;
+    let mut prior_heddle_notes_tip = None;
     for note_ref in residual_store.list_note_refs(repo.object_format())? {
+        if note_ref.name == "heddle" {
+            prior_heddle_notes_tip = Some(note_ref.oid);
+        }
         if !residual_store.install_object_closure_into(&repo, &note_ref.oid)? {
             return Err(GitProjectionError::Git(format!(
                 "imported note ref {} is missing its Raw Git Object Residual",
                 note_ref.name
             )));
         }
-        set_reference(
-            &repo,
-            &format!("refs/notes/{}", note_ref.name),
-            note_ref.oid,
-            sley::RefPrecondition::Any,
-            "heddle: restore store-sourced imported note ref",
-        )?;
+        let ref_name = format!("refs/notes/{}", note_ref.name);
+        if repo.find_reference(&ref_name).map_err(git_err)?.is_none() {
+            set_reference(
+                &repo,
+                &ref_name,
+                note_ref.oid,
+                RefPrecondition::MustNotExist,
+                "heddle: restore store-sourced imported note ref",
+            )?;
+        }
     }
     materialize_cached_mappings(bridge, &repo, &residual_store, identity.as_ref(), &audience)?;
     bridge.mapping.retain_git_objects(&repo);
@@ -547,11 +558,8 @@ fn export_scoped(
     // an all-thread export the frontier ⊆ the mint set and this reduces to the prior
     // behavior. After this, `mapping` == the served set across every reconciled ref,
     // exactly what `frontier_git_oid` assumes.
-    // Snapshot EVERY mapped target before the purge mutates the mapping: these are
-    // exactly the commits that may already carry a `refs/notes/*` entry in the
-    // mirror, so the notes-ref retraction below must consider all of them —
-    // including the states the purge is about to drop AND any orphaned mapping a
-    // deleted thread left behind, which no current-ref frontier reaches (heddle#316).
+    // Include old mapped targets when checking notes servedness, including
+    // orphaned mappings whose ancestry the live frontier does not visit.
     let pre_purge_targets: Vec<(StateId, ObjectId)> =
         bridge.mapping.iter().map(|(c, o)| (*c, *o)).collect();
 
@@ -724,24 +732,6 @@ fn export_scoped(
         };
         bridge.mapping.insert(state_id, git_oid);
         newly_minted.insert(git_oid);
-
-        // Attach a heddle note to the freshly-created commit so the
-        // state_id survives a fresh `git clone` of the destination
-        // (when only the git side travels, without our sidecar).
-        if let Some(state) = bridge.heddle_repo.store().get_state(&state_id)? {
-            let rewrites_parents = parent_override.is_some_and(|parents| {
-                state.parents.len() != parents.len()
-                    || state
-                        .parents
-                        .iter()
-                        .zip(parents)
-                        .any(|(state_parent, git_parent)| {
-                            bridge.mapping.get_git(state_parent) != Some(*git_parent)
-                        })
-            });
-            let note = git_notes::note_for_state(bridge.heddle_repo, &state, rewrites_parents)?;
-            git_notes::write_note(&repo, git_oid, &note)?;
-        }
     }
 
     // The downward-closure served set across EVERY note target — the pre-purge
@@ -751,10 +741,9 @@ fn export_scoped(
     // ref-rooted (it walks the whole-mirror frontier of current thread tips +
     // markers), so it never examines an ORPHANED mapping a deleted thread left
     // behind; without this closure such a commit's note — public-tier but with a
-    // now-Private ancestor — would slip past both the backfill gate and the
-    // retraction below. This is the SAME served rule the branch frontier uses,
-    // applied to notes (heddle#316). For an all-states export it reduces to the
-    // post-purge served set, so behavior there is unchanged.
+    // now-Private ancestor — would otherwise slip into desired notes. This is
+    // the same downward-closed served rule the branch frontier uses; projection
+    // below also restricts entries to desired roots.
     let note_target_roots: Vec<StateId> = pre_purge_targets
         .iter()
         .map(|(c, _)| *c)
@@ -766,55 +755,6 @@ fn export_scoped(
     let note_served =
         served_state_ids(bridge.heddle_repo, &note_sorted, &note_reachable, &audience)?;
 
-    // For states whose git_oid was already in the mapping (the SHA-stable
-    // path above), make sure the note is present too. This covers two
-    // cases: (a) the state was imported from a non-heddle git source and
-    // never had a note, and (b) the note was deleted from the mirror.
-    let note_targets: Vec<(StateId, ObjectId)> =
-        bridge.mapping.iter().map(|(c, o)| (*c, *o)).collect();
-    for (state_id, git_oid) in note_targets {
-        // Gate the backfill on the downward-closure served set, not the commit's
-        // DIRECT tier. The mapping can carry orphaned entries (a deleted thread's
-        // commits) the ref-rooted purge never examined; gating on direct
-        // visibility alone would re-publish a note for a public commit whose
-        // ancestor became Private — a commit the branch downward-closure
-        // withholds. `note_served` is the same served notion the branch frontier
-        // uses, so no note-write site can emit metadata for an unserved commit
-        // (heddle#316).
-        if note_served.contains(&state_id)
-            && git_notes::read_note(&repo, git_oid)?.is_none()
-            && let Some(state) = bridge.heddle_repo.store().get_state(&state_id)?
-        {
-            let note = git_notes::note_for_state(bridge.heddle_repo, &state, false)?;
-            git_notes::write_note(&repo, git_oid, &note)?;
-        }
-    }
-
-    // Retract the notes for every mapped target that is NOT served under the
-    // downward-closure rule. The mirror copies `refs/notes/*`
-    // (`collect_ref_updates`) alongside branches and tags, so a note left for an
-    // unserved commit keeps leaking its metadata even after its branch/tag were
-    // retracted. This is the notes-ref sibling of the branch/tag retraction
-    // above (heddle#316). Considering EVERY pre-purge target — not just the
-    // `embargoed_oids` the ref-rooted purge dropped — catches an orphaned note an
-    // ancestor embargo stranded on a deleted thread's commit. Guard the
-    // degenerate case where a still-served state maps to the same git OID by
-    // keeping any OID a served target maps to.
-    let served_note_oids: HashSet<ObjectId> = pre_purge_targets
-        .iter()
-        .copied()
-        .chain(bridge.mapping.iter().map(|(c, o)| (*c, *o)))
-        .filter(|(c, _)| note_served.contains(c))
-        .map(|(_, oid)| oid)
-        .collect();
-    let notes_to_retract: HashSet<ObjectId> = pre_purge_targets
-        .iter()
-        .filter(|(c, _)| !note_served.contains(c))
-        .map(|(_, oid)| *oid)
-        .filter(|oid| !served_note_oids.contains(oid))
-        .collect();
-    git_notes::remove_notes(&repo, &notes_to_retract)?;
-
     // THE PROJECTION (heddle#316 r13): the desired heddle-owned ref-set for this
     // audience — heads lagged to the served frontier, tags at served markers — as
     // a pure function of the post-purge served `mapping` + audience + ownership.
@@ -823,7 +763,18 @@ fn export_scoped(
     // pass while another keeps serving it. The mirror MATERIALIZES this desired
     // set; downstream `plan_destination_reconcile` then reconciles each
     // destination against it — one projection, one reconcile, all destinations.
-    let desired = project_desired_refs(bridge.heddle_repo, &bridge.mapping, &threads, &markers)?;
+    let mut desired = project_desired_refs(
+        bridge.heddle_repo,
+        &bridge.mapping,
+        &threads,
+        &markers,
+        &note_served,
+        &frontier_reachable,
+        &bridge.commit_parent_overrides,
+    )?;
+    if let Some(notes_oid) = git_notes::rebuild_notes(&repo, &desired.notes)? {
+        desired.refs.insert(git_notes::NOTES_REF.into(), notes_oid);
+    }
 
     // The downward-closure served set over the WHOLE-MIRROR frontier — the SAME
     // closure the purge ran over (every thread tip + every marker state). A state is
@@ -859,6 +810,26 @@ fn export_scoped(
     // pre-existing ref as foreign — which would silently stop embargo retraction.
     let mut managed_record = read_projection_managed_refs(bridge.heddle_repo.heddle_dir())?;
     materialize_projection_managed_refs(&repo, &managed_record)?;
+    // Pre-reconciler exports recorded their generated notes tip in the residual
+    // store but not the mirror ownership map. Accept that exact generated tip
+    // as the migration ownership token; a changed on-disk tip stays foreign.
+    if !managed_record.contains_key(git_notes::NOTES_REF)
+        && let Some(prior) = prior_heddle_notes_tip
+        && direct_ref_oid(&repo, git_notes::NOTES_REF) == Some(prior)
+        && let Ok(commit) = repo.read_commit(&prior)
+        && commit.author.starts_with(b"Heddle <heddle@local> ")
+        && commit.message.starts_with(b"heddle: ")
+    {
+        managed_record.insert(git_notes::NOTES_REF.into(), prior);
+    }
+    let current_generation = bridge.heddle_repo.oplog().head_id().map_err(|error| {
+        GitProjectionError::Git(format!("check export source generation: {error}"))
+    })?;
+    if current_generation != source_generation {
+        return Err(GitProjectionError::Git(
+            "export source changed during projection; retry".into(),
+        ));
+    }
 
     // Reconcile the mirror's HEADS via the shared `reconcile_ref` decision. Iterate
     // the CURRENT threads: a dropped thread's stale branch is intentionally NOT
@@ -1065,6 +1036,67 @@ fn export_scoped(
             &mut managed_record,
         )?);
 
+    // The notes ref is an exact, history-free target, so it uses the same
+    // desired/actual/last-published plan and expected-old writes as destinations.
+    let notes_name = git_notes::NOTES_REF.to_string();
+    let desired_notes = desired
+        .get(git_notes::NOTES_REF)
+        .map(|target| RefUpdate {
+            name: "heddle".into(),
+            target: *target,
+            namespace: RefNamespace::Note,
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    let actual_notes = direct_ref_oid(&repo, git_notes::NOTES_REF)
+        .map(|oid| [(notes_name.clone(), oid)].into_iter().collect())
+        .unwrap_or_default();
+    let owned_notes = managed_record
+        .get(git_notes::NOTES_REF)
+        .map(|oid| [(notes_name.clone(), *oid)].into_iter().collect())
+        .unwrap_or_default();
+    match plan_destination_reconcile(
+        &repo,
+        &desired_notes,
+        None,
+        &actual_notes,
+        &owned_notes,
+        false,
+    ) {
+        Ok(plan) => {
+            for write in plan.writes {
+                let constraint = write.old.map_or(RefPrecondition::MustNotExist, |old| {
+                    RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(old))
+                });
+                match set_reference(
+                    &repo,
+                    &write.full_name,
+                    write.new,
+                    constraint,
+                    "heddle: rebuild served state notes",
+                ) {
+                    Ok(()) => {
+                        managed_record.insert(write.full_name, write.new);
+                    }
+                    Err(err) => stats
+                        .failed_refs
+                        .push((write.full_name, failed_set_reason(err))),
+                }
+            }
+            for delete in plan.deletes {
+                match delete_reference_matching(&repo, &delete.full_name, delete.old) {
+                    Ok(()) => {
+                        managed_record.remove(&delete.full_name);
+                    }
+                    Err(err) => stats
+                        .failed_refs
+                        .push((delete.full_name, failed_delete_reason(err))),
+                }
+            }
+        }
+        Err(err) => stats.failed_refs.push((notes_name, failed_set_reason(err))),
+    }
+
     // Persist the updated ownership record so the next reconcile — and the push
     // frontier (`collect_managed_ref_updates`) — read heddle's managed set by
     // name and recorded tip. A diverged on-disk tip is not a managed update.
@@ -1074,6 +1106,11 @@ fn export_scoped(
         .into_iter()
         .filter(|update| update.namespace == RefNamespace::Note)
     {
+        if update.name == "heddle"
+            && managed_record.get(git_notes::NOTES_REF) != Some(&update.target)
+        {
+            continue;
+        }
         residual_store.capture_object_closure_from_git_repo(&repo, &update.target)?;
         residual_store.record_note_ref(&update.name, update.target)?;
     }
@@ -1365,15 +1402,28 @@ fn peel_to_commit_oid(repo: &SleyRepository, mut oid: ObjectId) -> Option<Object
 ///   state is not served (embargoed, withheld for a withheld ancestor, or
 ///   retargeted to a never-minted Private state) is ABSENT.
 ///
-/// Notes (`refs/notes/heddle`) are the history-bearing member of the desired set
-/// and are projected by content rebuild (backfill + [`git_notes::remove_notes`])
-/// upstream rather than a target swap, so they are not enumerated here.
+/// Notes are canonical entries over mapped, served states reachable from the
+/// same desired roots. Their parentless commit target is added during materialization.
+struct DesiredProjection {
+    refs: std::collections::HashMap<String, ObjectId>,
+    notes: Vec<(ObjectId, Vec<u8>)>,
+}
+
+impl DesiredProjection {
+    fn get(&self, name: &str) -> Option<&ObjectId> {
+        self.refs.get(name)
+    }
+}
+
 fn project_desired_refs(
     heddle_repo: &HeddleRepository,
     mapping: &SyncMapping,
     threads: &[String],
     markers: &[MarkerName],
-) -> GitProjectionResult<std::collections::HashMap<String, ObjectId>> {
+    note_served: &HashSet<StateId>,
+    frontier_reachable: &[StateId],
+    parent_overrides: &std::collections::HashMap<StateId, Vec<ObjectId>>,
+) -> GitProjectionResult<DesiredProjection> {
     let mut desired = std::collections::HashMap::new();
     for track_name in threads {
         let Some(tip) = heddle_repo
@@ -1401,7 +1451,40 @@ fn project_desired_refs(
             desired.insert(name.git_ref(), git_oid);
         }
     }
-    Ok(desired)
+    let mut note_states: Vec<StateId> = frontier_reachable
+        .iter()
+        .copied()
+        .filter(|state| note_served.contains(state) && mapping.get_git(state).is_some())
+        .collect();
+    note_states.sort_by_key(ToString::to_string);
+    note_states.dedup();
+    let mut notes = Vec::with_capacity(note_states.len());
+    for state_id in note_states {
+        let git_oid = mapping.get_git(&state_id).ok_or_else(|| {
+            GitProjectionError::Git(format!("served note state {state_id} lost its Git mapping"))
+        })?;
+        let state = heddle_repo.store().get_state(&state_id)?.ok_or_else(|| {
+            GitProjectionError::Git(format!("served note state {state_id} is missing"))
+        })?;
+        let rewrites_parents = parent_overrides.get(&state_id).is_some_and(|parents| {
+            state.parents.len() != parents.len()
+                || state
+                    .parents
+                    .iter()
+                    .zip(parents)
+                    .any(|(state_parent, git_parent)| {
+                        mapping.get_git(state_parent) != Some(*git_parent)
+                    })
+        });
+        let payload = git_notes::note_for_state(heddle_repo, &state, rewrites_parents)?
+            .to_json_bytes()
+            .map_err(|error| GitProjectionError::Git(format!("note serialize: {error}")))?;
+        notes.push((git_oid, payload));
+    }
+    Ok(DesiredProjection {
+        refs: desired,
+        notes,
+    })
 }
 
 fn install_native_annotated_tags(
@@ -1575,9 +1658,202 @@ fn state_to_signature(state: &objects::object::State) -> Signature {
 
 #[cfg(test)]
 mod tests {
-    use objects::object::{Attribution, ContentHash, Principal, State};
+    use std::process::Command;
+
+    use objects::object::{
+        Attribution, ContentHash, Principal, State, StateVisibility, VisibilityTier,
+    };
+    use repo::VisibilityCommitKind;
 
     use super::*;
+
+    #[test]
+    fn export_rebuilds_notes_without_hidden_history() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let repo = HeddleRepository::init_default(temp.path()).expect("init");
+        let author = Attribution::human(Principal::new("Test", "test@example.com"));
+        let capture = |name: &str| {
+            std::fs::write(temp.path().join("story.txt"), name).expect("write story");
+            repo.snapshot_with_attribution(Some(name.to_string()), None, author.clone())
+                .expect("snapshot")
+                .state_id
+        };
+        let a = capture("A");
+        let b = capture("B");
+        let mut bridge = GitProjection::new(&repo);
+        let destination = temp.path().join("export.git");
+        bridge.export_to_path(&destination).expect("publish B");
+        let exported = SleyRepository::open(&destination).expect("open destination");
+        let a_oid = bridge.mapping.get_git(&a).expect("A mapped");
+        let b_oid = bridge.mapping.get_git(&b).expect("B mapped");
+        let initial_notes = exported
+            .list_notes(&sley::notes::NotesRef::expand(git_notes::NOTES_REF))
+            .expect("list notes");
+        let a_blob = initial_notes
+            .iter()
+            .find(|note| note.annotated == a_oid)
+            .expect("A note")
+            .blob;
+        let a_bytes = exported.read_object(&a_blob).expect("A blob").body.clone();
+        let b_blob = initial_notes
+            .into_iter()
+            .find(|note| note.annotated == b_oid)
+            .expect("B note")
+            .blob;
+        let b_bytes = exported.read_object(&b_blob).expect("B blob").body.clone();
+        let expected_b = git_notes::note_for_state(
+            &repo,
+            &repo
+                .store()
+                .get_state(&b)
+                .expect("read B")
+                .expect("B state"),
+            false,
+        )
+        .expect("B note payload")
+        .to_json_bytes()
+        .expect("serialize B note");
+        assert_eq!(b_bytes, expected_b, "served note bytes must stay canonical");
+
+        // Model an export made before notes entered the mirror ownership map.
+        // Its generated notes tip is still recorded in the residual store.
+        let mut legacy_record =
+            read_projection_managed_refs(repo.heddle_dir()).expect("mirror record");
+        legacy_record.remove(git_notes::NOTES_REF);
+        write_projection_managed_refs(repo.heddle_dir(), &legacy_record).expect("legacy record");
+
+        let c = capture("C");
+        let private = StateVisibility {
+            state: b,
+            tier: VisibilityTier::Private {
+                scope_label: "embargo".into(),
+            },
+            embargo_until: None,
+            declarer: Principal::new("Test", "test@example.com"),
+            declared_at: chrono::Utc::now(),
+            signature: None,
+            supersedes: None,
+        };
+        repo.commit_state_visibility(private, VisibilityCommitKind::Set)
+            .expect("narrow B visibility");
+        let foreign = exported
+            .find_reference("refs/heads/main")
+            .expect("read main")
+            .expect("main ref");
+        set_reference(
+            &exported,
+            "refs/heads/foreign",
+            match foreign.target {
+                ReferenceTarget::Direct(oid) => oid,
+                _ => panic!("main is direct"),
+            },
+            sley::RefPrecondition::MustNotExist,
+            "test: foreign ref",
+        )
+        .expect("write foreign ref");
+
+        bridge
+            .export_to_path(&destination)
+            .expect("re-export after narrowing");
+        let notes_tip = exported
+            .find_reference(git_notes::NOTES_REF)
+            .expect("read notes ref")
+            .expect("notes ref")
+            .target;
+        let ReferenceTarget::Direct(notes_oid) = notes_tip else {
+            panic!("notes ref is direct");
+        };
+        let reachable = Command::new("git")
+            .arg("--git-dir")
+            .arg(&destination)
+            .args(["rev-list", "--objects", git_notes::NOTES_REF])
+            .output()
+            .expect("walk notes closure");
+        assert!(reachable.status.success(), "git rev-list: {reachable:?}");
+        let reachable = String::from_utf8(reachable.stdout).expect("object list");
+        assert!(
+            !reachable
+                .lines()
+                .any(|line| line.starts_with(&b_blob.to_string())),
+            "B's old note blob {b_blob} remains reachable through notes history:\n{reachable}"
+        );
+        assert!(
+            exported
+                .read_commit(&notes_oid)
+                .expect("notes commit")
+                .parents
+                .is_empty(),
+            "rebuilt notes commit must be parentless"
+        );
+        let entries = git_notes::read_all_notes(&exported).expect("read visible notes");
+        assert!(!entries.contains_key(&b_oid), "B note must be absent");
+        let served_a_blob = exported
+            .list_notes(&sley::notes::NotesRef::expand(git_notes::NOTES_REF))
+            .expect("list rebuilt notes")
+            .into_iter()
+            .find(|note| note.annotated == a_oid)
+            .expect("served A note")
+            .blob;
+        assert_eq!(
+            exported
+                .read_object(&served_a_blob)
+                .expect("served A blob")
+                .body
+                .as_slice(),
+            a_bytes,
+            "a served state's note payload must remain byte-identical"
+        );
+        assert!(
+            !entries.values().any(|note| note.state_id == c.to_string()),
+            "C must be withheld by its Private ancestor"
+        );
+        assert!(
+            exported
+                .find_reference("refs/heads/foreign")
+                .expect("foreign ref")
+                .is_some()
+        );
+
+        bridge.export_to_path(&destination).expect("repeat export");
+        assert_eq!(
+            exported
+                .find_reference(git_notes::NOTES_REF)
+                .expect("repeat notes")
+                .expect("notes")
+                .target,
+            ReferenceTarget::Direct(notes_oid),
+            "repeat export must preserve the notes tip"
+        );
+        let a_note = git_notes::read_note(&exported, a_oid)
+            .expect("read A note")
+            .expect("A note");
+        git_notes::write_note(&exported, b_oid, &a_note).expect("out-of-band notes edit");
+        let out_of_band = exported
+            .find_reference(git_notes::NOTES_REF)
+            .expect("read external tip")
+            .expect("external tip")
+            .target;
+        let result = bridge.export_to_path(&destination);
+        assert!(
+            result.is_err()
+                || exported
+                    .find_reference(git_notes::NOTES_REF)
+                    .expect("read preserved tip")
+                    .expect("notes ref")
+                    .target
+                    == out_of_band,
+            "out-of-band notes edit must be preserved or reported"
+        );
+        assert_eq!(
+            exported
+                .find_reference(git_notes::NOTES_REF)
+                .expect("read final tip")
+                .expect("notes ref")
+                .target,
+            out_of_band,
+            "reconcile must not clobber an out-of-band notes tip"
+        );
+    }
 
     fn fidelity_state() -> State {
         State::new(

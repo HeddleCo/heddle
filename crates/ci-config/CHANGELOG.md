@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.4](https://github.com/HeddleCo/heddle/compare/heddle-ci-config-v0.25.3...heddle-ci-config-v0.25.4) - 2026-09-25
+
+### Other
+
+- update Cargo.toml dependencies
+
 ### Changed
 
 - The on-disk contract is a canonical `TreadleDefinition` protobuf

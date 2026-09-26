@@ -52,7 +52,7 @@ crypto = { workspace = true, optional = true }
 heddle-object-model = { workspace = true, optional = true }
 heddle-pack = { workspace = true, optional = true }
 wire = { workspace = true, optional = true }
-biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.25.3", optional = true }
+biscuit-verifier = { package = "heddle-biscuit-verifier", path = "../biscuit-verifier", version = "0.25.4", optional = true }
 chrono = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 heddle-perf-contract = { workspace = true, optional = true }

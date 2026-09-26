@@ -897,7 +897,18 @@ impl<'a> GitProjection<'a> {
         target_path: &Path,
     ) -> GitProjectionResult<super::git_util::ExportStats> {
         self.init_scratch_repo()?;
+        let source_generation = self.heddle_repo.oplog().head_id().map_err(|error| {
+            GitProjectionError::Git(format!("read export source generation: {error}"))
+        })?;
         let stats = self.export()?;
+        if self.heddle_repo.oplog().head_id().map_err(|error| {
+            GitProjectionError::Git(format!("check export source generation: {error}"))
+        })? != source_generation
+        {
+            return Err(GitProjectionError::Git(
+                "export source changed during projection; retry".into(),
+            ));
+        }
         // A colocated Git checkout is the durable Git-side checkpoint now that
         // the projection itself is ephemeral. Keep it current before this
         // scratch repository is dropped so the next command does not mistake
@@ -906,6 +917,7 @@ impl<'a> GitProjection<'a> {
         self.copy_projection_to_path(
             target_path,
             &format!("heddle: export from {}", self.heddle_repo.root().display()),
+            source_generation,
         )?;
         Ok(stats)
     }
@@ -919,6 +931,7 @@ impl<'a> GitProjection<'a> {
         &mut self,
         target_path: &Path,
         log_message: &str,
+        source_generation: u64,
     ) -> GitProjectionResult<()> {
         let projection_repo = self.open_git_repo()?;
         let target_repo = if target_path.exists() {
@@ -954,6 +967,14 @@ impl<'a> GitProjection<'a> {
             &previously_exported,
             false,
         )?;
+        if self.heddle_repo.oplog().head_id().map_err(|error| {
+            GitProjectionError::Git(format!("check export source generation: {error}"))
+        })? != source_generation
+        {
+            return Err(GitProjectionError::Git(
+                "export source changed before destination reconciliation; retry".into(),
+            ));
+        }
         for write in &plan.writes {
             let constraint = match write.old {
                 Some(old) => RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(old)),
@@ -2490,10 +2511,10 @@ pub fn materialize_projection_managed_refs(
 
 /// The mirror refs heddle MANAGES, as [`RefUpdate`]s — [`collect_ref_updates`]
 /// filtered to names in the managed-refs `record` whose on-disk tip still equals
-/// the recorded OID, PLUS every `refs/notes/*` ref (heddle's metadata namespace,
-/// always heddle-managed and content-rebuilt rather than target-claimed through
-/// the reconcile). The export/push frontier MUST source from this rather than
-/// the raw [`collect_ref_updates`] so a foreign branch/tag heddle never wrote —
+/// the recorded OID, including `refs/notes/heddle`. Other imported note refs
+/// retain their existing transport behavior. The export/push frontier MUST
+/// source from this rather than the raw [`collect_ref_updates`] so a
+/// foreign branch/tag heddle never wrote —
 /// even one pointing at a heddle-minted commit — never enters the served
 /// frontier nor the destination's desired set (heddle#316). Name membership
 /// alone is not enough: a Git-side writer can advance a managed ref, and
@@ -2508,7 +2529,7 @@ pub fn collect_managed_ref_updates(
     Ok(collect_ref_updates(repo)?
         .into_iter()
         .filter(|update| {
-            matches!(update.namespace, RefNamespace::Note)
+            (update.namespace == RefNamespace::Note && update.name != "heddle")
                 || record.get(&full_ref_name(update)) == Some(&update.target)
         })
         .collect())
@@ -2844,17 +2865,25 @@ pub fn plan_destination_reconcile(
             // In the desired set: land it at the served target. A ref this push
             // publishes is heddle-owned at its new target — record it. The
             // overwrite funnels through ONE ownership gate ([`WriteVerdict`]): the
-            // only per-namespace axis is move-classification — branch/note resolve
-            // fast-forward-vs-fork topology, a tag is free-move (its target may be
-            // an annotated-tag-object OID, not a commit) with the SAME ownership
-            // gate baked into [`classify_tag_move`]. An out-of-band destination tip
+            // only per-namespace axis is move-classification — branches and
+            // notes may fast-forward; the parentless Heddle notes rebuild is an
+            // owned non-FF replacement. Tags are free-move with the SAME
+            // ownership gate. An out-of-band destination tip
             // heddle never recorded is spared at EVERY namespace unless `--force`.
             let (verdict, force_write) = match update.namespace {
                 RefNamespace::Branch | RefNamespace::Note => {
                     let movement = classify_ref_move(mirror_repo, old, update.target, recorded)?;
+                    let owned_notes_rebuild = update.namespace == RefNamespace::Note
+                        && update.name == "heddle"
+                        && matches!(movement, RefMove::Diverged)
+                        && recorded == old;
                     (
-                        verdict_from_move(movement),
-                        matches!(movement, RefMove::Rewind),
+                        if owned_notes_rebuild {
+                            WriteVerdict::Write
+                        } else {
+                            verdict_from_move(movement)
+                        },
+                        matches!(movement, RefMove::Rewind) || owned_notes_rebuild,
                     )
                 }
                 RefNamespace::Tag | RefNamespace::Heddle => {
@@ -3825,6 +3854,7 @@ mod tests {
         let mut record = HashMap::new();
         record.insert("refs/heads/main".to_string(), owned);
         record.insert("refs/heads/kept".to_string(), owned);
+        record.insert("refs/notes/heddle".to_string(), notes);
 
         let updates = collect_managed_ref_updates(&repo, &record).expect("collect managed updates");
         let mut names: Vec<String> = updates.iter().map(full_ref_name).collect();
@@ -3842,6 +3872,14 @@ mod tests {
         assert!(
             main.is_none(),
             "must not serve the on-disk foreign tip under refs/heads/main, got {main:?}"
+        );
+        record.remove("refs/notes/heddle");
+        assert!(
+            collect_managed_ref_updates(&repo, &record)
+                .expect("collect without owned notes")
+                .iter()
+                .all(|update| update.namespace != RefNamespace::Note),
+            "an unowned notes tip must not enter the publish frontier"
         );
     }
 

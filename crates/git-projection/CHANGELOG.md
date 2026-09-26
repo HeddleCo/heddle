@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.4](https://github.com/HeddleCo/heddle/compare/heddle-git-projection-v0.25.3...heddle-git-projection-v0.25.4) - 2026-09-25
+
+### Other
+
+- Merge origin/main into embargo notes rebuild release branch
+
 ## [0.25.3] - 2026-09-25
 
 ### Other

@@ -5,7 +5,7 @@
 //! (change_id, agent, confidence, status) without polluting the commit
 //! message — and so without changing the commit SHA.
 //!
-//! This is the history-carrying half of the export identity model. The
+//! This is the portable half of the export identity model. The
 //! `git-projection-mapping.json` sidecar is a local served/export cache; notes are
 //! the portable source that survives plain Git clones and exports.
 //!
@@ -14,7 +14,7 @@
 //! payload codec for projection callers.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,13 +24,70 @@ use objects::{
     store::ObjectStore,
 };
 use repo::Repository as HeddleRepository;
-use sley::{ObjectId, Repository};
+use sley::{CommitObject, EntryKind, GitObjectType, ObjectId, Repository, TreeEditor};
 
 use super::git_core::{GitProjectionError, GitProjectionResult, git_err};
 
 /// The notes ref heddle uses. Git-compatible notes readers can opt into
 /// this location, while Heddle reads and writes it natively.
 pub const NOTES_REF: &str = "refs/notes/heddle";
+
+/// Encode the complete served note set without reading or parenting on the
+/// current notes ref. The fixed identity makes the target stable across exports.
+/// Ref ownership and compare-and-swap are handled by the caller's reconciler.
+pub fn rebuild_notes(
+    repo: &Repository,
+    entries: &[(ObjectId, Vec<u8>)],
+) -> GitProjectionResult<Option<ObjectId>> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let mut notes = entries.to_vec();
+    notes.sort_by_key(|(oid, _)| oid.to_hex());
+    if notes.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(GitProjectionError::Git(
+            "multiple served states project to the same Git note target".into(),
+        ));
+    }
+    let mut root = TreeEditor::new();
+    if notes.len() < 256 {
+        for (annotated, bytes) in &notes {
+            let blob = repo.write_blob(bytes.clone()).map_err(git_err)?;
+            root.upsert(annotated.to_hex().into_bytes(), EntryKind::Blob, blob);
+        }
+    } else {
+        let mut groups: BTreeMap<String, TreeEditor> = BTreeMap::new();
+        for (annotated, bytes) in &notes {
+            let hex = annotated.to_hex();
+            let (prefix, suffix) = hex.split_at(2);
+            let blob = repo.write_blob(bytes.clone()).map_err(git_err)?;
+            groups
+                .entry(prefix.to_string())
+                .or_default()
+                .upsert(suffix, EntryKind::Blob, blob);
+        }
+        for (prefix, subtree) in groups {
+            root.upsert(
+                prefix.into_bytes(),
+                EntryKind::Tree,
+                repo.write_tree(subtree).map_err(git_err)?,
+            );
+        }
+    }
+    let tree = repo.write_tree(root).map_err(git_err)?;
+    let identity = b"Heddle <heddle@local> 0 +0000".to_vec();
+    let commit = CommitObject {
+        tree,
+        parents: Vec::new(),
+        author: identity.clone(),
+        committer: identity,
+        encoding: None,
+        message: b"heddle: state metadata\n".to_vec(),
+    };
+    repo.write_raw_object(GitObjectType::Commit, commit.write())
+        .map(Some)
+        .map_err(git_err)
+}
 
 /// A V4 tree keeps private per-entry salts that Git cannot reconstruct. Keep
 /// the source identity for lineage, but let Git import mint a state over the
@@ -84,44 +141,6 @@ pub fn write_note(
         &commit_oid,
         &json,
         "heddle: state metadata",
-        &git_projection_notes_identity(),
-        sley::notes::notes_ref_expected(&refs, &notes_ref).map_err(git_err)?,
-    )
-    .map_err(git_err)?;
-    Ok(())
-}
-
-/// Retract the notes attached to `commit_oids` from `refs/notes/heddle`.
-///
-/// The notes ref copies to the public mirror alongside branches and tags
-/// (`collect_ref_updates` picks up `refs/notes/*`), so a note left behind for a
-/// commit that has since been embargoed/retracted is a metadata leak: the
-/// mirror keeps publishing a note whose payload (and tree entry) references the
-/// withheld commit. This is the notes-ref sibling of the branch/tag retraction
-/// the exporter already performs (heddle#316).
-///
-/// Writes a single new notes commit dropping every present entry, then advances
-/// `refs/notes/heddle` to it. A genuine fast-forward (the new commit descends
-/// from the prior notes head), so it survives the bridge's FF guard on push.
-/// No-op — no new commit, no ref churn — when the notes ref is absent or none
-/// of `commit_oids` actually has an entry.
-pub fn remove_notes(
-    repo: &Repository,
-    commit_oids: &std::collections::HashSet<ObjectId>,
-) -> GitProjectionResult<()> {
-    if commit_oids.is_empty() {
-        return Ok(());
-    }
-    let notes_ref = notes_ref();
-    let refs = repo.references();
-    let annotated: Vec<ObjectId> = commit_oids.iter().copied().collect();
-    sley::notes::remove_notes_for(
-        repo.git_dir(),
-        repo.object_format(),
-        &refs,
-        &notes_ref,
-        &annotated,
-        "heddle: retract state metadata",
         &git_projection_notes_identity(),
         sley::notes::notes_ref_expected(&refs, &notes_ref).map_err(git_err)?,
     )
