@@ -8577,6 +8577,34 @@ fn daemon_status_json_matches_command_catalog_when_absent() {
 }
 
 #[test]
+fn daemon_status_exposes_incomplete_timeline_upload_without_a_running_daemon() {
+    let temp = TempDir::new().expect("directory");
+    heddle(&["init"], Some(temp.path())).expect("initialize repository");
+    let repository = Repository::open(temp.path()).expect("repository");
+    let _store = repo::device_runs::RunStore::open(repository.heddle_dir()).expect("run store");
+    let connection = repo::local_metadata::open(repository.heddle_dir()).expect("metadata");
+    connection.execute(
+        "INSERT INTO timeline_upload_runs(run,origin,origin_biscuit,target_deployment,registration_operation_id,upload_incomplete) VALUES('run_1',X'',X'',X'','', 'outbox_overflow')",
+        [],
+    ).expect("incomplete upload status");
+    let output = heddle_output(&["daemon", "status", "--output", "json"], Some(temp.path()))
+        .expect("status command");
+    assert!(
+        output.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).expect("JSON status");
+    assert_eq!(json["timeline_pending_requests"], 0);
+    assert_eq!(json["timeline_incomplete_runs"], 1);
+    let human = heddle(&["daemon", "status"], Some(temp.path())).expect("human status");
+    assert!(
+        human.contains("1 upload_incomplete"),
+        "incomplete status is invisible: {human}"
+    );
+}
+
+#[test]
 fn agent_presence_explain_json_detects_harness_without_active_presence() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();
