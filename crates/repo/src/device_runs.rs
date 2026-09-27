@@ -53,11 +53,16 @@ pub(crate) fn initialize_schema(connection: &Connection) -> rusqlite::Result<()>
             CREATE INDEX IF NOT EXISTS runs_reader ON runs(principal_id,reader_agent_id,id);
             CREATE TABLE IF NOT EXISTS run_harness_bindings (native_key TEXT PRIMARY KEY, run TEXT NOT NULL, active INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS run_timeline (run TEXT NOT NULL, position INTEGER NOT NULL, record BLOB NOT NULL, PRIMARY KEY(run,position));
+            CREATE TABLE IF NOT EXISTS run_report_events (run TEXT NOT NULL, source_key TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY(run,source_key), UNIQUE(run,position));
             CREATE TABLE IF NOT EXISTS run_controls (sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, run TEXT NOT NULL, request BLOB NOT NULL, principal TEXT NOT NULL, done INTEGER NOT NULL DEFAULT 0);
             CREATE INDEX IF NOT EXISTS pending_run_controls ON run_controls(run, done, sequence);
             CREATE TABLE IF NOT EXISTS run_permissions (run TEXT NOT NULL, id TEXT NOT NULL, digest BLOB NOT NULL, record BLOB NOT NULL, expires INTEGER NOT NULL, closed INTEGER NOT NULL DEFAULT 0, decision INTEGER, PRIMARY KEY(run,id));
             CREATE TABLE IF NOT EXISTS run_policies (spool TEXT PRIMARY KEY, policy BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS run_commands (id TEXT PRIMARY KEY, method TEXT NOT NULL, body BLOB NOT NULL, principal TEXT NOT NULL);")
+}
+
+pub(crate) fn migrate_report_event_schema(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch("CREATE TABLE run_report_events (run TEXT NOT NULL, source_key TEXT NOT NULL, position INTEGER NOT NULL, PRIMARY KEY(run,source_key), UNIQUE(run,position));")
 }
 
 /// Existing stores must gain queryable identity before admitting run readers.
@@ -293,6 +298,91 @@ impl RunStore {
         )?;
         if stored != body {
             bail!("timeline position reused with different event");
+        }
+        tx.commit()?;
+        self.committed()?;
+        Ok(())
+    }
+    /// Assign positions and insert a report's events in one write transaction.
+    /// Source keys identify append-only checkpoints independently of wall time.
+    pub fn append_report_timeline(
+        &self,
+        run: &api::heddle::api::v1alpha2::RecordRef,
+        events: &[(String, TimelineRecord)],
+    ) -> Result<()> {
+        valid_id(&run.id)?;
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if load_run(&tx, &run.id)?.is_none_or(|stored| stored.r#ref.as_ref() != Some(run)) {
+            bail!("timeline run unavailable");
+        }
+        let unkeyed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_timeline t WHERE t.run=?1 AND NOT EXISTS(SELECT 1 FROM run_report_events e WHERE e.run=t.run AND e.position=t.position))",
+            [&run.id],
+            |row| row.get(0),
+        )?;
+        if unkeyed {
+            bail!("run timeline predates report checkpoint keys");
+        }
+        let mut next: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(position)+1,0) FROM run_timeline WHERE run=?1",
+            [&run.id],
+            |row| row.get(0),
+        )?;
+        for (source_key, template) in events {
+            valid_id(source_key)?;
+            if template.run.as_ref() != Some(run) {
+                bail!("report event targets another run");
+            }
+            let prior: Option<i64> = tx
+                .query_row(
+                    "SELECT position FROM run_report_events WHERE run=?1 AND source_key=?2",
+                    params![&run.id, source_key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let position = if let Some(position) = prior {
+                position
+            } else {
+                if next == i64::MAX {
+                    bail!("timeline position exhausted");
+                }
+                let position = next;
+                next += 1;
+                position
+            };
+            let mut record = template.clone();
+            record.position = position as u64;
+            record.r#ref = Some(api::heddle::api::v1alpha2::RecordRef {
+                spool: run.spool.clone(),
+                id: format!("{}:{position}", run.id),
+            });
+            if record.encode_to_vec().len() > 256 * 1024 {
+                bail!("timeline event exceeds observation frame budget");
+            }
+            let body = record.encode_to_vec();
+            if prior.is_some() {
+                let stored: Vec<u8> = tx.query_row(
+                    "SELECT record FROM run_timeline WHERE run=?1 AND position=?2",
+                    params![&run.id, position],
+                    |row| row.get(0),
+                )?;
+                // A reconnect can start a fresh report for the same Run.
+                // The first opening wins; later report openings are not a
+                // second run-start event.
+                if stored != body && source_key != "opened" {
+                    bail!("report checkpoint changed after publication");
+                }
+            } else {
+                tx.execute(
+                    "INSERT INTO run_timeline(run,position,record) VALUES(?1,?2,?3)",
+                    params![&run.id, position, body],
+                )?;
+                tx.execute(
+                    "INSERT INTO run_report_events(run,source_key,position) VALUES(?1,?2,?3)",
+                    params![&run.id, source_key, position],
+                )?;
+            }
         }
         tx.commit()?;
         self.committed()?;
