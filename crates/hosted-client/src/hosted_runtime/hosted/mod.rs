@@ -43,7 +43,15 @@ mod test_https;
 pub mod test_server;
 mod thread_identity;
 mod thread_review;
+mod timeline_origin;
+pub use timeline_origin::{
+    PreparedTimelineOrigin, prepare_timeline_origin, sign_owner_timeline_acceptance,
+};
+mod timeline_upload;
+pub use timeline_upload::TimelineUploadFailureKind;
+mod timeline_drain;
 pub use thread_review::ReviewSnapshot;
+pub use timeline_drain::drain_timeline_outbox_once;
 mod user;
 
 #[cfg(test)]

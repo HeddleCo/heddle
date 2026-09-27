@@ -39,7 +39,8 @@ pub mod whoami;
 
 pub use device_flow::AgentTemplate;
 pub use hosted::{
-    HostedAuthMode, HostedClient, HostedSession, ReviewSnapshot, ServerStream,
-    authenticated_run_agent, resolve_active_bearer, resolve_hosted_credential,
+    HostedAuthMode, HostedClient, HostedSession, PreparedTimelineOrigin, ReviewSnapshot,
+    ServerStream, TimelineUploadFailureKind, authenticated_run_agent, prepare_timeline_origin,
+    resolve_active_bearer, resolve_hosted_credential, sign_owner_timeline_acceptance,
 };
 pub use websocket::connect_websocket;
