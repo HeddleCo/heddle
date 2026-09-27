@@ -104,32 +104,10 @@ pub(crate) fn publish(
         supported_controls,
         ..Default::default()
     };
-    // Identical report flushes should not wake every device observation again.
-    let mut previous = store.run(
+    let previous = store.run(
         &report.heddle_session_id,
         repo::device_runs::RunReader::Owner,
     )?;
-    if let Some(previous) = previous.as_mut() {
-        previous.version.clear();
-        previous.pending_permissions.clear();
-        previous.artifacts.clear();
-    }
-    if previous.as_ref() != Some(&record) {
-        if reader_agent.is_empty() {
-            store.put_run(record)?;
-        } else {
-            store.put_run_from_credential(record, &reader_agent)?;
-        }
-    }
-    if report.harness.harness.as_deref() == Some("claude-code")
-        && let Some(key) = report.native_actor_key.as_deref()
-    {
-        store.bind_harness(
-            key,
-            &report.heddle_session_id,
-            *status == ActorPresenceStatus::Active,
-        )?;
-    }
     let mut events = Vec::new();
     let run_ref = v2::RecordRef {
         spool: Some(spool.clone()),
@@ -245,7 +223,43 @@ pub(crate) fn publish(
             report.head_state_at_close.as_deref(),
         )?;
     }
-    store.append_report_timeline(&run_ref, &events)?;
+    let origin = if previous.is_none() {
+        record.thread.as_ref().and_then(|thread| {
+            match hosted_client::client::prepare_timeline_origin(
+                thread,
+                &run_ref,
+                &record.principal_id,
+            ) {
+                Ok(origin) => origin,
+                Err(error) => {
+                    tracing::warn!(?error, "hosted timeline origin unavailable");
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
+    store.publish_report(
+        record,
+        (!reader_agent.is_empty()).then_some(reader_agent.as_str()),
+        &events,
+        origin.as_ref().map(|prepared| {
+            (
+                &prepared.origin,
+                prepared.origin_credential_biscuit.as_slice(),
+            )
+        }),
+    )?;
+    if report.harness.harness.as_deref() == Some("claude-code")
+        && let Some(key) = report.native_actor_key.as_deref()
+    {
+        store.bind_harness(
+            key,
+            &report.heddle_session_id,
+            *status == ActorPresenceStatus::Active,
+        )?;
+    }
     if report.closed_at.is_some() {
         retain_final_report(repo, &run_ref, report)?;
     }
