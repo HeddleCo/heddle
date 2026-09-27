@@ -571,7 +571,7 @@ pub(crate) fn registered(tx: &Transaction<'_>, operation_id: &str) -> rusqlite::
 
 pub(crate) fn deny_registration(tx: &Transaction<'_>, operation_id: &str) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE timeline_upload_runs SET registered=-1 WHERE registration_operation_id=?1",
+        "UPDATE timeline_upload_runs SET registered=-1,upload_incomplete='registration_denied' WHERE registration_operation_id=?1",
         [operation_id],
     )?;
     Ok(())
