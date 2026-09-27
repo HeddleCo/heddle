@@ -214,6 +214,7 @@ fn signed_capability(args: CapabilityArgs<'_>) -> SignedOwnerCapability {
                 include_descendants: false,
             }),
             action: args.action,
+            timeline_acceptance: None,
         }],
         not_before_unix_seconds: args.not_before,
         expires_at_unix_seconds: args.expires_at,
