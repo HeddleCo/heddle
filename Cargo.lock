@@ -2758,6 +2758,7 @@ dependencies = [
  "notify",
  "proptest",
  "prost 0.14.1",
+ "prost-types 0.14.1",
  "rand 0.10.3",
  "rmp-serde",
  "rusqlite",

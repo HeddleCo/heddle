@@ -173,46 +173,202 @@ impl RunStore {
         }
         self.put_run_with_reader(run, Some(agent))
     }
-    fn put_run_with_reader(&self, mut run: RunRecord, agent: Option<&str>) -> Result<RunRecord> {
-        let id = run
-            .r#ref
-            .as_ref()
-            .context("run reference required")?
-            .id
-            .clone();
-        valid_id(&id)?;
+    fn put_run_with_reader(&self, run: RunRecord, agent: Option<&str>) -> Result<RunRecord> {
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String)> = tx
-            .query_row(
-                "SELECT principal_id,reader_agent_id FROM runs WHERE id=?1",
-                [&id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        let reader_agent = if let Some((principal, previous_agent)) = existing {
-            if !principal.is_empty() && principal != run.principal_id {
-                bail!("run principal cannot change");
-            }
-            if previous_agent != agent.unwrap_or_default() {
-                bail!("run agent cannot change");
-            }
-            previous_agent
-        } else {
-            agent.unwrap_or_default().to_string()
-        };
-        permissions::populate(&tx, &mut run)?;
-        run.version.clear();
-        run.version = blake3::hash(&run.encode_to_vec()).as_bytes().to_vec();
-        if run.encode_to_vec().len() > 240 * 1024 {
-            bail!("run record exceeds observation frame budget");
-        }
-        tx.execute("INSERT INTO runs(id,thread,principal_id,reader_agent_id,record) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET thread=excluded.thread,principal_id=excluded.principal_id,record=excluded.record WHERE runs.record!=excluded.record",params![id,run.thread.as_ref().and_then(|thread|thread.id.as_ref()).map(|id|hex::encode(&id.value)).unwrap_or_default(),&run.principal_id,reader_agent,run.encode_to_vec()])?;
+        let run = put_run_in_tx(&tx, run, agent)?;
         tx.commit()?;
         // Explicit idempotent retry can repair a prior post-commit marker failure.
         self.committed()?;
         Ok(run)
     }
+    /// Publish the local run, ordered events, endorsement and upload work in
+    /// one transaction. The hook never waits for a hosted response.
+    pub fn publish_report(
+        &self,
+        run: RunRecord,
+        agent: Option<&str>,
+        events: &[(String, TimelineRecord)],
+        creation_origin: Option<(
+            &api::heddle::api::v1alpha2::TimelineOriginEndorsement,
+            &[u8],
+        )>,
+    ) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let run = put_run_in_tx(&tx, run, agent)?;
+        let reference = run.r#ref.as_ref().context("run reference required")?;
+        append_report_in_tx(&tx, reference, events)?;
+        crate::device_run_outbox::append_in_tx(&tx, &run, creation_origin)?;
+        tx.commit()?;
+        self.committed()?;
+        Ok(())
+    }
+    /// An existing origin is reused unchanged; a later credential cannot
+    /// relabel or replace the original signer.
+    pub fn has_upload_origin(&self, run: &str) -> Result<bool> {
+        Ok(self
+            .connection()?
+            .query_row(
+                "SELECT length(origin)>0 FROM timeline_upload_runs WHERE run=?1",
+                [run],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+    pub fn upload_health(&self) -> Result<crate::device_run_outbox::TimelineUploadHealth> {
+        Ok(crate::device_run_outbox::health(&self.connection()?)?)
+    }
+    pub fn next_timeline_registration(
+        &self,
+        now_millis: i64,
+    ) -> Result<Option<crate::device_run_outbox::PendingTimelineRegistration>> {
+        crate::device_run_outbox::next_registration(&self.connection()?, now_millis)
+    }
+    pub fn next_timeline_upload(
+        &self,
+        now_millis: i64,
+    ) -> Result<Option<crate::device_run_outbox::PendingTimelineUpload>> {
+        crate::device_run_outbox::next_upload(&self.connection()?, now_millis)
+    }
+    pub fn acknowledge_timeline_upload(
+        &self,
+        operation: &str,
+        ack: &api::heddle::api::v1alpha2::UploadScrubbedTimelineAck,
+    ) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::device_run_outbox::acknowledge(&tx, operation, ack)?;
+        tx.commit()?;
+        self.committed()?;
+        Ok(())
+    }
+    pub fn attach_timeline_acceptance(
+        &self,
+        operation: &str,
+        acceptance: &api::heddle::api::v1alpha2::TimelineAdmissionAcceptance,
+    ) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::device_run_outbox::attach_acceptance(&tx, operation, acceptance)?;
+        tx.commit()?;
+        self.committed()?;
+        Ok(())
+    }
+    pub fn repair_timeline_gap(&self, operation: &str, expected_position: u64) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::device_run_outbox::repair_gap(&tx, operation, expected_position)?;
+        tx.commit()?;
+        self.committed()?;
+        Ok(())
+    }
+    pub fn register_timeline_origin(&self, operation: &str) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::device_run_outbox::registered(&tx, operation)?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn retry_timeline_registration(&self, operation: &str, now_millis: i64) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::device_run_outbox::retry_registration(&tx, operation, now_millis)?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn deny_timeline_registration(&self, operation: &str) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::device_run_outbox::deny_registration(&tx, operation)?;
+        tx.commit()?;
+        self.committed()?;
+        Ok(())
+    }
+    pub fn retry_timeline_upload(&self, operation: &str, now_millis: i64) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::device_run_outbox::retry(&tx, operation, now_millis)?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn deny_timeline_upload(&self, operation: &str, reason: &str) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::device_run_outbox::deny(&tx, operation, reason)?;
+        tx.commit()?;
+        self.committed()?;
+        Ok(())
+    }
+    pub fn repair_timeline_upload(&self, run_id: &str) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(run) = load_run(&tx, run_id)? {
+            crate::device_run_outbox::append_in_tx(&tx, &run, None)?;
+        }
+        tx.commit()?;
+        self.committed()?;
+        Ok(())
+    }
+    pub fn incomplete_timeline_runs(&self, limit: usize) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut query = connection.prepare("SELECT run FROM timeline_upload_runs WHERE upload_incomplete='outbox_overflow' LIMIT ?1")?;
+        Ok(query
+            .query_map([limit as i64], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+    pub fn pending_timeline_runs(&self, limit: usize) -> Result<Vec<String>> {
+        let connection = self.connection()?;
+        let mut query = connection
+            .prepare("SELECT DISTINCT run FROM timeline_upload_outbox WHERE terminal=0 LIMIT ?1")?;
+        Ok(query
+            .query_map([limit as i64], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+fn put_run_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    mut run: RunRecord,
+    agent: Option<&str>,
+) -> Result<RunRecord> {
+    let id = run
+        .r#ref
+        .as_ref()
+        .context("run reference required")?
+        .id
+        .clone();
+    valid_id(&id)?;
+    let existing: Option<(String, String)> = tx
+        .query_row(
+            "SELECT principal_id,reader_agent_id FROM runs WHERE id=?1",
+            [&id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let reader_agent = if let Some((principal, previous_agent)) = existing {
+        if !principal.is_empty() && principal != run.principal_id {
+            bail!("run principal cannot change");
+        }
+        if previous_agent != agent.unwrap_or_default() {
+            bail!("run agent cannot change");
+        }
+        previous_agent
+    } else {
+        agent.unwrap_or_default().to_string()
+    };
+    permissions::populate(tx, &mut run)?;
+    run.version.clear();
+    run.version = blake3::hash(&run.encode_to_vec()).as_bytes().to_vec();
+    if run.encode_to_vec().len() > 240 * 1024 {
+        bail!("run record exceeds observation frame budget");
+    }
+    tx.execute("INSERT INTO runs(id,thread,principal_id,reader_agent_id,record) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET thread=excluded.thread,principal_id=excluded.principal_id,record=excluded.record WHERE runs.record!=excluded.record",params![id,run.thread.as_ref().and_then(|thread|thread.id.as_ref()).map(|id|hex::encode(&id.value)).unwrap_or_default(),&run.principal_id,reader_agent,run.encode_to_vec()])?;
+    Ok(run)
+}
+
+impl RunStore {
     pub fn run(&self, id: &str, reader: RunReader<'_>) -> Result<Option<RunRecord>> {
         let (owner, principal, agent) = reader.scope();
         self.connection()?
@@ -310,84 +466,96 @@ impl RunStore {
         run: &api::heddle::api::v1alpha2::RecordRef,
         events: &[(String, TimelineRecord)],
     ) -> Result<()> {
-        valid_id(&run.id)?;
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        if load_run(&tx, &run.id)?.is_none_or(|stored| stored.r#ref.as_ref() != Some(run)) {
-            bail!("timeline run unavailable");
-        }
-        let unkeyed: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_timeline t WHERE t.run=?1 AND NOT EXISTS(SELECT 1 FROM run_report_events e WHERE e.run=t.run AND e.position=t.position))",
-            [&run.id],
-            |row| row.get(0),
-        )?;
-        if unkeyed {
-            bail!("run timeline predates report checkpoint keys");
-        }
-        let mut next: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(position)+1,0) FROM run_timeline WHERE run=?1",
-            [&run.id],
-            |row| row.get(0),
-        )?;
-        for (source_key, template) in events {
-            valid_id(source_key)?;
-            if template.run.as_ref() != Some(run) {
-                bail!("report event targets another run");
-            }
-            let prior: Option<i64> = tx
-                .query_row(
-                    "SELECT position FROM run_report_events WHERE run=?1 AND source_key=?2",
-                    params![&run.id, source_key],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let position = if let Some(position) = prior {
-                position
-            } else {
-                if next == i64::MAX {
-                    bail!("timeline position exhausted");
-                }
-                let position = next;
-                next += 1;
-                position
-            };
-            let mut record = template.clone();
-            record.position = position as u64;
-            record.r#ref = Some(api::heddle::api::v1alpha2::RecordRef {
-                spool: run.spool.clone(),
-                id: format!("{}:{position}", run.id),
-            });
-            if record.encode_to_vec().len() > 256 * 1024 {
-                bail!("timeline event exceeds observation frame budget");
-            }
-            let body = record.encode_to_vec();
-            if prior.is_some() {
-                let stored: Vec<u8> = tx.query_row(
-                    "SELECT record FROM run_timeline WHERE run=?1 AND position=?2",
-                    params![&run.id, position],
-                    |row| row.get(0),
-                )?;
-                // A reconnect can start a fresh report for the same Run.
-                // The first opening wins; later report openings are not a
-                // second run-start event.
-                if stored != body && source_key != "opened" {
-                    bail!("report checkpoint changed after publication");
-                }
-            } else {
-                tx.execute(
-                    "INSERT INTO run_timeline(run,position,record) VALUES(?1,?2,?3)",
-                    params![&run.id, position, body],
-                )?;
-                tx.execute(
-                    "INSERT INTO run_report_events(run,source_key,position) VALUES(?1,?2,?3)",
-                    params![&run.id, source_key, position],
-                )?;
-            }
-        }
+        append_report_in_tx(&tx, run, events)?;
         tx.commit()?;
         self.committed()?;
         Ok(())
     }
+}
+
+fn append_report_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    run: &api::heddle::api::v1alpha2::RecordRef,
+    events: &[(String, TimelineRecord)],
+) -> Result<()> {
+    valid_id(&run.id)?;
+    if load_run(tx, &run.id)?.is_none_or(|stored| stored.r#ref.as_ref() != Some(run)) {
+        bail!("timeline run unavailable");
+    }
+    let unkeyed: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_timeline t WHERE t.run=?1 AND NOT EXISTS(SELECT 1 FROM run_report_events e WHERE e.run=t.run AND e.position=t.position))",
+            [&run.id],
+            |row| row.get(0),
+        )?;
+    if unkeyed {
+        bail!("run timeline predates report checkpoint keys");
+    }
+    let mut next: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(position)+1,0) FROM run_timeline WHERE run=?1",
+        [&run.id],
+        |row| row.get(0),
+    )?;
+    for (source_key, template) in events {
+        valid_id(source_key)?;
+        if template.run.as_ref() != Some(run) {
+            bail!("report event targets another run");
+        }
+        let prior: Option<i64> = tx
+            .query_row(
+                "SELECT position FROM run_report_events WHERE run=?1 AND source_key=?2",
+                params![&run.id, source_key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let position = if let Some(position) = prior {
+            position
+        } else {
+            if next == i64::MAX {
+                bail!("timeline position exhausted");
+            }
+            let position = next;
+            next += 1;
+            position
+        };
+        let mut record = template.clone();
+        record.position = position as u64;
+        record.r#ref = Some(api::heddle::api::v1alpha2::RecordRef {
+            spool: run.spool.clone(),
+            id: format!("{}:{position}", run.id),
+        });
+        if record.encode_to_vec().len() > 256 * 1024 {
+            bail!("timeline event exceeds observation frame budget");
+        }
+        let body = record.encode_to_vec();
+        if prior.is_some() {
+            let stored: Vec<u8> = tx.query_row(
+                "SELECT record FROM run_timeline WHERE run=?1 AND position=?2",
+                params![&run.id, position],
+                |row| row.get(0),
+            )?;
+            // A reconnect can start a fresh report for the same Run.
+            // The first opening wins; later report openings are not a
+            // second run-start event.
+            if stored != body && source_key != "opened" {
+                bail!("report checkpoint changed after publication");
+            }
+        } else {
+            tx.execute(
+                "INSERT INTO run_timeline(run,position,record) VALUES(?1,?2,?3)",
+                params![&run.id, position, body],
+            )?;
+            tx.execute(
+                "INSERT INTO run_report_events(run,source_key,position) VALUES(?1,?2,?3)",
+                params![&run.id, source_key, position],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+impl RunStore {
     /// One bounded keyset for run summaries and their timeline events. Filters
     /// apply before LIMIT; a long unrelated run never hides a requested run.
     pub fn observation_page(

@@ -6,7 +6,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 
 pub const DATABASE_NAME: &str = "metadata.sqlite3";
 pub const CHANGE_MARKER_NAME: &str = "metadata.sqlite3.changed";
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 pub const CHANGE_WINDOW: i64 = 4096;
 
 /// Publish an external sidecar change into the same committed device change
@@ -74,7 +74,7 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
         }
         return Ok(connection);
     }
-    if version != 0 && version != 1 && version != 2 {
+    if !(0..=3).contains(&version) {
         return Err(Error::Schema(version));
     }
     // WAL activation itself can return SQLITE_BUSY without honoring the busy
@@ -93,6 +93,7 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
         0 => {
             crate::thread_replication::initialize_schema(&tx)?;
             crate::device_runs::initialize_schema(&tx)?;
+            crate::device_run_outbox::initialize_schema(&tx)?;
             crate::device_artifacts::initialize_schema(&tx)?;
             crate::device_evidence::initialize_schema(&tx)?;
             crate::device_operations::initialize_schema(&tx)?;
@@ -108,10 +109,16 @@ pub fn open(heddle_dir: &Path) -> Result<Connection, Error> {
             crate::device_runs::migrate_reader_schema(&tx)
                 .map_err(|error| Error::Initialization(error.to_string()))?;
             crate::device_runs::migrate_report_event_schema(&tx)?;
+            crate::device_run_outbox::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         2 => {
             crate::device_runs::migrate_report_event_schema(&tx)?;
+            crate::device_run_outbox::initialize_schema(&tx)?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        }
+        3 => {
+            crate::device_run_outbox::initialize_schema(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         SCHEMA_VERSION => {}
@@ -131,7 +138,7 @@ pub fn open_existing(heddle_dir: &Path) -> Result<Option<Connection>, Error> {
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     configure(&connection)?;
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if version == 1 || version == 2 {
+    if version == 1 || version == 2 || version == 3 {
         drop(connection);
         return open(heddle_dir).map(Some);
     }
@@ -314,6 +321,46 @@ mod tests {
                 .changes
                 .len(),
             2
+        );
+    }
+
+    #[test]
+    fn version_three_store_adds_timeline_outbox_without_losing_runs() {
+        let directory = tempfile::tempdir().expect("store");
+        let db = open(directory.path()).expect("current schema");
+        db.execute(
+            "INSERT INTO runs(id,thread,record) VALUES('legacy-run','thread',x'01')",
+            [],
+        )
+        .expect("legacy local run");
+        db.execute_batch(
+            "DROP TABLE timeline_upload_event_map;
+             DROP TABLE timeline_upload_outbox;
+             DROP TABLE timeline_upload_runs;
+             PRAGMA user_version=3;",
+        )
+        .expect("simulate version three");
+        drop(db);
+        let migrated = open_existing(directory.path())
+            .expect("migrate")
+            .expect("store");
+        let version: i64 = migrated
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("schema version");
+        assert_eq!(version, SCHEMA_VERSION);
+        let local_runs: i64 = migrated
+            .query_row(
+                "SELECT COUNT(*) FROM runs WHERE id='legacy-run'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("retained runs");
+        assert_eq!(local_runs, 1);
+        assert_eq!(
+            crate::device_run_outbox::health(&migrated)
+                .expect("new outbox")
+                .pending_requests,
+            0
         );
     }
 

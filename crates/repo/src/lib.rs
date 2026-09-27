@@ -46,6 +46,8 @@ pub mod device_catalog;
 pub mod device_evidence;
 pub mod device_operations;
 pub mod device_page_cursors;
+pub mod device_run_outbox;
+pub mod device_run_projection;
 pub mod device_runs;
 pub mod device_watch;
 #[cfg(feature = "tree-sitter-symbols")]
