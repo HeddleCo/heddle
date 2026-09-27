@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.5](https://github.com/HeddleCo/heddle/compare/heddle-docsgen-v0.25.4...heddle-docsgen-v0.25.5) - 2026-09-27
+
+### Fixed
+
+- *(git-projection)* history-clean notes rebuild (embargo leak) + release heddle 0.25.4 (heddle-api 0.31.0-alpha.3) ([#1835](https://github.com/HeddleCo/heddle/pull/1835))
+
+### Other
+
+- *(release)* heddle 0.25.3 ([#1832](https://github.com/HeddleCo/heddle/pull/1832))
+- v2 cutover cascade → main (netd/#1747 reconciled into v2 transport) ([#1777](https://github.com/HeddleCo/heddle/pull/1777))
+- heddle v0.15.3
+- heddle v0.15.2
+- *(release)* heddle 0.15.1 (adopt api 0.17 + cv 0.6, via release-plz) ([#1573](https://github.com/HeddleCo/heddle/pull/1573))
+- Port agent docs generator to Rust ([#1571](https://github.com/HeddleCo/heddle/pull/1571))
+
 ## [0.25.4](https://github.com/HeddleCo/heddle/compare/heddle-docsgen-v0.25.3...heddle-docsgen-v0.25.4) - 2026-09-25
 
 ### Other

@@ -528,7 +528,11 @@ with open(out_path, encoding="utf-8") as handle:
     stdout = handle.read()
 with open(err_path, encoding="utf-8") as handle:
     stderr = handle.read()
-if int(exit_code_text) == 0 and stderr.strip():
+import_progress = args[:2] == ["import", "local"] and all(
+    line.startswith(("[1/3] ", "[2/3] ", "[3/3] ", "[done] "))
+    for line in stderr.splitlines()
+)
+if int(exit_code_text) == 0 and stderr.strip() and not import_progress:
     raise SystemExit(f"successful JSON command wrote stderr: {' '.join(args)}: {stderr!r}")
 output = None
 if stdout.strip():
@@ -853,10 +857,10 @@ PYJSON
 
   # Prove adoption as a separate native-authority transition.
   if [[ "$shape" == "complex-git" ]]; then
-    run_json "$transcript" "$clone_path" "$shape.00.adopt-native" adopt
+    run_json "$transcript" "$clone_path" "$shape.00.adopt-native" import local
     run_json "$transcript" "$clone_path" "$shape.00.adopt-native-marker" thread marker show v1.0.0
   else
-    run_json "$transcript" "$clone_path" "$shape.00.adopt-native" adopt --ref main
+    run_json "$transcript" "$clone_path" "$shape.00.adopt-native" import local --ref main
   fi
   assert_source_authority "$clone_path" native
   stamp_identity_cursor "$clone_path"

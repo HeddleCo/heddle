@@ -413,7 +413,7 @@ PYJSON
 assert_transcript_claims() {
   local transcript="$1"
   for needle in \
-    "adopt" \
+    "import local" \
     "capture" \
     "undo" \
     "pull" \
@@ -672,10 +672,10 @@ run_shape() {
 
   # Prove adoption as a separate native-authority transition.
   if [[ "$shape" == "complex-git" ]]; then
-    run_text "$transcript" "$clone_path" adopt --output text
+    run_text "$transcript" "$clone_path" import local --output text
     run_text "$transcript" "$clone_path" thread marker list --output text
   else
-    run_text "$transcript" "$clone_path" adopt --ref main --output text
+    run_text "$transcript" "$clone_path" import local --ref main --output text
   fi
   assert_source_authority "$clone_path" native
   printf 'native authority proof for %s\n' "$shape" > "$clone_path/native-authority-proof.txt"
