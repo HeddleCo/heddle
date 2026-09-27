@@ -172,9 +172,7 @@ async fn uploader_client() -> Result<(HostedClient, Vec<u8>)> {
         .context("timeline deployment identity pin unavailable")?
         .public_key_bytes()?
         .to_vec();
-    let credential = config::credentials::resolve_credential_for_server(&device.server)?
-        .context("timeline uploader has no persisted device bearer")?;
-    let bearer = validated_device_bearer(&device, credential)?;
+    let bearer = validated_device_bearer(&device)?;
     let session = HostedSession::build(
         &UserConfig::load_default()?,
         Some(device.server.clone()),
@@ -187,38 +185,33 @@ async fn uploader_client() -> Result<(HostedClient, Vec<u8>)> {
     Ok((client, target_key))
 }
 
-fn validated_device_bearer(
-    device: &repo::identity::DeviceIdentity,
-    credential: config::credentials::ServerCredential,
-) -> Result<HostedAuthMode> {
+fn validated_device_bearer(device: &repo::identity::DeviceIdentity) -> Result<HostedAuthMode> {
     let device_signer = Ed25519Signer::from_pem(&device.private_key_pem)?;
     ensure!(
         hex::encode(device_signer.public_key()) == device.public_key,
         "timeline uploader key differs from enrolled device"
     );
-    let bearer_key = credential
-        .private_key_pem
+    let token = device
+        .credential_token
         .as_deref()
-        .context("timeline uploader bearer has no proof key")?;
-    let bearer_signer = Ed25519Signer::from_pem(bearer_key)?;
+        .context("timeline uploader has no retained enrolled bearer")?;
+    let subject = device
+        .credential_subject
+        .as_deref()
+        .context("timeline uploader retained bearer has no subject")?;
     ensure!(
-        bearer_signer.public_key() == device_signer.public_key(),
-        "timeline uploader bearer is not the enrolled device credential"
-    );
-    ensure!(
-        crate::hosted_runtime::device_flow::authenticated_subject(&credential.token)?
-            == credential.subject,
+        crate::hosted_runtime::device_flow::authenticated_subject(token)? == subject,
         "timeline uploader bearer subject differs from its credential"
     );
     ensure!(
-        crate::hosted_runtime::device_flow::effective_pop_public_key_hex(&credential.token)?
+        crate::hosted_runtime::device_flow::effective_pop_public_key_hex(token)?
             .eq_ignore_ascii_case(&device.public_key),
         "timeline uploader bearer proof key differs from enrolled device"
     );
     Ok(HostedAuthMode::PresentedDevice {
-        token: credential.token,
-        proof_key_pem: bearer_key.to_owned(),
-        subject: credential.subject,
+        token: token.to_owned(),
+        proof_key_pem: device.private_key_pem.clone(),
+        subject: subject.to_owned(),
     })
 }
 
@@ -227,7 +220,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uploader_presents_the_exact_enrolled_device_bearer() {
+    fn uploader_presents_the_exact_retained_device_bearer() {
         let signer = Ed25519Signer::from_seed(&[23; 32]).expect("device key");
         let root = crate::hosted_runtime::root_mint::mint_independent_root(
             crate::hosted_runtime::root_mint::IndependentRootMint {
@@ -245,24 +238,28 @@ mod tests {
             private_key_pem: root.private_key_pem.clone(),
             server: "api.example.test".into(),
             linked_at: String::new(),
+            credential_token: Some(root.token.clone()),
+            credential_subject: Some(root.subject.clone()),
         };
-        let credential = config::credentials::ServerCredential {
-            mint_root_attachment: None,
-            token: root.token.clone(),
-            subject: root.subject.clone(),
-            device_id: None,
-            credential_id: Some("device-credential".into()),
-            private_key_pem: Some(root.private_key_pem.clone()),
-            expires_at: Some(root.expires_at.to_rfc3339()),
-        };
-        let bearer = validated_device_bearer(&device, credential.clone()).expect("device bearer");
+        let bearer = validated_device_bearer(&device).expect("device bearer");
         let HostedAuthMode::PresentedDevice { token, .. } = bearer else {
             panic!("expected stored device bearer");
         };
-        assert_eq!(token, root.token);
+        assert!(token == root.token);
         let other = Ed25519Signer::from_seed(&[24; 32]).expect("other key");
-        let mut substituted = credential;
-        substituted.private_key_pem = Some(other.to_pem().expect("other PEM"));
-        assert!(validated_device_bearer(&device, substituted).is_err());
+        let other_root = crate::hosted_runtime::root_mint::mint_independent_root(
+            crate::hosted_runtime::root_mint::IndependentRootMint {
+                seed: &other.to_seed(),
+                subject: "device@example.test",
+                ttl: crate::hosted_runtime::root_mint::ACCOUNT_ROOT_TTL,
+                credential_id: None,
+                session_id: None,
+                expires_at: None,
+            },
+        )
+        .expect("other bearer");
+        let mut substituted = device;
+        substituted.credential_token = Some(other_root.token);
+        assert!(validated_device_bearer(&substituted).is_err());
     }
 }
