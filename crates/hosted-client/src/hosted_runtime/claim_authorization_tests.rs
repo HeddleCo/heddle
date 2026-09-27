@@ -201,6 +201,7 @@ fn sign_request(
                     credential_id: vec![1],
                     client_data_json: vec![2],
                     attestation_object: vec![3],
+                    label: None,
                 },
             )),
             device_binding: Some(PasskeyProof::default()),
