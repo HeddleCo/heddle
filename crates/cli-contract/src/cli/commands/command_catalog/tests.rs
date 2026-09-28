@@ -1887,6 +1887,7 @@ fn json_discriminator_table_starts_with_bounded_command_slice() {
             // (Spool epic P9) emits a monorepo summary record.
             "clone",
             "continue",
+            "context",
             "context set",
             "context get",
             "context list",
