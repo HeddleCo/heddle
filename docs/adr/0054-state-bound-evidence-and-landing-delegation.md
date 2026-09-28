@@ -53,3 +53,22 @@ State, or who made the claim. A confidence threshold appears automatable but
 lets the actor seeking authority influence the authority decision. Hosted-only
 approval would weaken local-first and offline work. State-bound attestations plus
 bounded principal delegation keep proof, authority, and transport distinct.
+
+## Amendment (2026-09-28)
+
+For the v1 milestone, the spool review policy serves as the Landing Delegation
+Policy. Issuing or changing it is a signed spool-policy write: a current-tip-only,
+owner-authorized action that requires being online. The checkpointed owner
+authority design is recorded in [HeddleCo/weft PR 2351](https://github.com/HeddleCo/weft/pull/2351);
+this boundary is part of the [milestone epic HeddleCo/heddle#1844](https://github.com/HeddleCo/heddle/issues/1844).
+
+Using an unexpired policy offline has only a local source-history effect: it
+advances the local repository's target and records the exact policy version and
+evidence set. It is never an owner-authorized or hosted effect. For hosted
+destinations, `requires_fresh_hosted_authorization` defaults to `true`.
+
+Publishing that local result to a hosted spool is a fresh Weft admission against
+the current policy, checkpoint, and revocation state. If Weft rejects it, the
+local landing stays local, is labelled "landed locally, not accepted", and is
+never rewritten. Policy validity bounds only local evaluation; it never
+substitutes for hosted admission. There is no age-based lease.

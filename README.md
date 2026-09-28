@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)](https://www.rust-lang.org)
 
-Heddle is an agent-native version control CLI written in Rust. It keeps its own state model and writes Git-compatible state through the checkout's real `.git`, adding:
+Heddle is the everyday version control for humans and agents. It runs in your existing Git repository with no migration. Git remains first-class for storage, hosting, CI, and teammates using plain `git`; capture, review, ready, and land decisions happen in Heddle Threads, with Git history as their faithful projection. Raw Git remains an escape hatch, not a second workflow. The Rust CLI adds:
 
 - thread-first agent workflows (lightweight named work units with lifecycle, freshness, and promotion semantics)
 - local captures with automatic Git-compatible checkpoints and explicit human and agent attribution
@@ -163,7 +163,7 @@ In Git-overlay repositories, `heddle land` projects a landed thread as one atomi
 | Concept | Description |
 |---------|-------------|
 | **State** | Immutable snapshot of a repository at a point in time |
-| **ChangeId** | Per-state identifier. Each state carries a *logical* ChangeId (the same value is carried forward across rewrites) and a *physical* ChangeId minted fresh for that state. The `hd-…` shown in output is the **physical** id; the logical id is internal and not surfaced (see [Identifiers in output](#identifiers-in-output)) |
+| **ChangeId** | Rewrite-stable logical change identifier (`hc-…`). It is carried forward across rewrites, but is not yet accepted as a command argument (see [Identifiers in output](#identifiers-in-output)) |
 | **ContentHash** | BLAKE3 hash of object contents for integrity and deduplication |
 | **Thread** | Mutable named reference to a state |
 | **Marker** | Immutable named reference to a state |
@@ -172,13 +172,14 @@ In Git-overlay repositories, `heddle land` projects a landed thread as one atomi
 
 ### Identifiers in output
 
-History commands render up to three distinct identifiers. They are not interchangeable:
+History commands render distinct identifiers. They are not interchangeable:
 
-- **`hd-…` change id** (e.g. `hd-wgqnj47xyh40`) — the **physical ChangeId**, minted fresh for each state. It is the handle for *this specific state*: pass it to commands that take a change as an argument — `heddle show <id>`, `heddle query --attribution` reports it per line, and `heddle log <id>` selects by it (resolution matches the physical id of a recorded state). Prefixes are accepted, so a short `hd-…` is enough as long as it is unambiguous. It is **not** a lineage handle that survives rewrites: amending or rebasing produces a *new* state with a *new* `hd-…`, so an `hd-…` captured before a rebase still resolves to the pre-rebase state, not the rewritten one. Heddle does track a separate stable *logical* ChangeId that is carried forward across a rewrite, but it is internal — it is not rendered in output and is not accepted as a command argument, so the displayed `hd-…` is the only id you can pass, and it identifies one state rather than a lineage.
-- **`(……)` content hash** (e.g. `(61408ef9)`, shown beside the change id by `heddle log --verbose` and `heddle show`) — the short form of the **ContentHash**, a BLAKE3 digest of the state's contents. It is *not* a Git commit sha. Because it is content-addressed, it changes whenever the state's content changes, so it pins an exact snapshot but is not a stable handle to "the change". Use it for integrity/equality checks, not as a command argument.
-- **Git checkpoint sha** (shown on the `Git checkpoint:` line under `heddle log --verbose` / `heddle show`) — the actual Git commit that binds the state into Git history. This is the handle for any Git-compatible client; Heddle commands take the `hd-…` change id instead.
+- **`hs-…` State ID** — identifies one immutable state. A rewrite creates a new State ID, so the old ID still names the state before the rewrite. Heddle commands that accept a state identifier use this ID; unambiguous prefixes can be used where supported.
+- **`hc-…` ChangeId** — the logical identifier carried forward across rewrites. It identifies the continuing change, but is not yet usable as a command argument.
+- **`(……)` content hash** (for example, `(61408ef9)`, shown by `heddle log --verbose` and `heddle show`) — a short BLAKE3 digest of the state's contents. It is not a Git commit SHA or a command argument.
+- **Git checkpoint SHA** (shown on the `Git checkpoint:` line by `heddle log --verbose` and `heddle show`) — the Git commit that binds the state into Git history for Git-compatible clients.
 
-Rule of thumb: hand `hd-…` change ids to Heddle, and the checkpoint sha to a Git-compatible client.
+Rule of thumb: use `hs-…` State IDs with Heddle commands and checkpoint SHAs with Git-compatible clients. The rewrite-stable `hc-…` ChangeId is not yet usable as a command argument.
 
 ## Agent-friendly output
 

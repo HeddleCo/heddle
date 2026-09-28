@@ -1,11 +1,13 @@
 # Heddle
 
-Heddle is a local-first, agent-native version control context. It is useful without a hosted account and is intended to be the everyday VCS interface for both humans and agents; hosted products add coordination and visibility around the same core ideas.
+Heddle is the everyday version control for humans and agents. It runs in your existing Git repository with no migration, and Git remains first-class for storage, hosting, CI and teammates who use plain `git`. The decisions (capture, review, ready, land) happen in Heddle Threads, and Git history is their faithful projection. Raw Git is always available as an escape hatch, but it is not a second workflow.
+
+Heddle is local-first and useful without a hosted account; hosted products add coordination and visibility around the same core ideas.
 
 ## Language
 
 **Heddle**:
-The local-first, self-contained agent-native version control system and OSS CLI. It is the everyday VCS interface for humans and agents; raw Git is an escape hatch and interoperability boundary, not a parallel workflow.
+The local-first, self-contained agent-native version control system and OSS CLI. It is the everyday VCS interface for humans and agents in existing Git repositories without migration; raw Git remains an escape hatch within first-class Git interoperability, not a second workflow.
 _Avoid_: Git add-on, hosted-only Heddle, web app, hosted backend
 
 **Local-First**:
@@ -73,7 +75,7 @@ The state produced when actors make incompatible resolution claims against the s
 _Avoid_: last-write-wins resolution, latest resolver wins, hidden conflict
 
 **Thread**:
-The canonical unit of work and human product decision, carrying an evolving source tip with its captures, timeline, and collaboration from local attempt through ready review and landing. A ready Thread replaces the branch-plus-pull-request as workflow truth; Git representations are projections.
+The canonical unit of work and human product decision, carrying an evolving source tip with its captures, timeline, and collaboration from local attempt through ready review and landing. A ready Thread carries the workflow decision; Git history is its faithful projection for storage, hosting, CI, and teammates using plain `git`.
 _Avoid_: Git branch, pull request, chat thread
 
 **Thread Checkout**:
@@ -121,7 +123,7 @@ The promise to preserve source fidelity, support everyday interoperability, and 
 _Avoid_: Git feature parity, Git porcelain clone, raw Git as parallel workflow
 
 **Git Overlay**:
-A Heddle sidecar operating on an existing Git checkout. It remains a first-class Repository Source Authority indefinitely: active Git reads and writes use the checkout's real `.git`, while Heddle stores Captures, Threads, provenance, discussions, and Git Projection Mapping under `.heddle`.
+A Heddle sidecar operating on an existing Git checkout. It remains a first-class Repository Source Authority indefinitely, so existing Git repositories need no migration: active Git reads and writes use the checkout's real `.git`, while Heddle stores Captures, Threads, provenance, discussions, and Git Projection Mapping under `.heddle`.
 _Avoid_: copied Git mirror, imported-only Git repo, hidden Git checkout
 
 **Repository Source Authority**:
@@ -141,7 +143,7 @@ The retired bare Git repository formerly stored at `.heddle/git`. Current-format
 _Avoid_: active Git store, projection cache, current repository component
 
 **Git Checkpoint (internal operation, not a CLI verb)**:
-The Git commit that binds a Heddle State into the Git history of a Git Overlay checkout. The `capture` flow writes it automatically through to the checkout's real `.git`; it is the Git-facing handle shown to raw Git tooling, while the Heddle-facing handle remains the `hd-...` State ID.
+The Git commit that binds a Heddle State into the Git history of a Git Overlay checkout. The `capture` flow writes it automatically through to the checkout's real `.git`; it is the Git-facing handle shown to raw Git tooling, while the Heddle-facing handle remains the `hs-...` State ID.
 _Avoid_: Heddle capture, bridge mirror commit, native state id
 
 **Raw Git Object Residual**:
