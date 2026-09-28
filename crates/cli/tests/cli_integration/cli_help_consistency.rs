@@ -369,3 +369,15 @@ fn git_concepts_topic_explains_authority_and_current_surface() {
         "main help should link the git concept map from Start here: {top}"
     );
 }
+
+#[test]
+fn git_commit_unknown_command_suggests_capture() {
+    let output = heddle_output(&["commit"], None).expect("invoke Git-shaped verb");
+    assert_eq!(output.status.code(), Some(64));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("similar subcommand exists: 'capture'"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("'complete'"), "{stderr}");
+}

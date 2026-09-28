@@ -119,6 +119,107 @@ fn initialize_git_overlay(path: &std::path::Path) {
     heddle(&["init"], Some(path)).unwrap();
 }
 
+fn land_details_fixture(thread_name: &str) -> (TempDir, std::path::PathBuf) {
+    let temp = TempDir::new().unwrap();
+    init_git_repo_with_branch(temp.path(), "main");
+    std::fs::write(temp.path().join("README.md"), "base\n").unwrap();
+    git_commit_all(temp.path(), "base");
+    initialize_git_overlay(temp.path());
+    heddle(
+        &["bridge", "git", "import", "--ref", "main"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let checkout = temp.path().with_extension("land-details");
+    heddle(
+        &[
+            "start",
+            thread_name,
+            "--task",
+            "Improve search results",
+            "--path",
+            checkout.to_str().unwrap(),
+        ],
+        Some(temp.path()),
+    )
+    .unwrap();
+    std::fs::write(checkout.join("first.txt"), "first\n").unwrap();
+    heddle(&["capture", "-m", "Add search index"], Some(&checkout)).unwrap();
+    std::fs::write(checkout.join("second.txt"), "second\n").unwrap();
+    heddle(&["capture", "-m", "Rank search results"], Some(&checkout)).unwrap();
+    (temp, checkout)
+}
+
+fn assert_no_machine_identity(text: &str) {
+    for token in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
+        let is_hex = token.len() == 64 && token.bytes().all(|c| c.is_ascii_hexdigit());
+        let is_uuid = token.len() == 36 && uuid::Uuid::parse_str(token).is_ok();
+        assert!(!is_hex && !is_uuid, "human text exposed {token}: {text}");
+    }
+}
+
+#[test]
+fn land_two_captures_writes_human_git_subject() {
+    let (temp, _checkout) = land_details_fixture("feature/search");
+    heddle(&["land", "--thread", "feature/search"], Some(temp.path())).unwrap();
+    let subject = git_stdout(temp.path(), &["log", "-1", "--format=%s"]);
+    assert_eq!(subject, "Improve search results");
+    assert!(
+        subject.chars().count() <= 72,
+        "subject is too long: {subject}"
+    );
+    assert_no_machine_identity(&subject);
+    let message = git_stdout(temp.path(), &["log", "-1", "--format=%B"]);
+    assert!(message.contains("Heddle-State:"), "{message}");
+    assert!(message.contains("Heddle-Change:"), "{message}");
+}
+
+#[test]
+fn land_ready_thread_show_and_status_text_hide_machine_ids() {
+    let thread_name = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let (temp, checkout) = land_details_fixture(thread_name);
+    for (args, cwd) in [
+        (&["ready"][..], checkout.as_path()),
+        (&["-v", "ready"][..], checkout.as_path()),
+        (&["thread", "show"][..], checkout.as_path()),
+        (&["-v", "thread", "show"][..], checkout.as_path()),
+        (&["thread", "list"][..], checkout.as_path()),
+        (&["-v", "thread", "list"][..], checkout.as_path()),
+        (&["status"][..], checkout.as_path()),
+        (&["-v", "status"][..], checkout.as_path()),
+    ] {
+        let output = heddle_output(args, Some(cwd)).unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_no_machine_identity(&text);
+    }
+    let machine = json(&checkout, &["--output", "json", "ready"]);
+    assert_eq!(machine["report"]["thread"], thread_name);
+    let land = heddle_output(&["-v", "land", "--thread", thread_name], Some(temp.path())).unwrap();
+    assert!(
+        land.status.success(),
+        "{}",
+        String::from_utf8_lossy(&land.stderr)
+    );
+    assert_no_machine_identity(&String::from_utf8_lossy(&land.stdout));
+}
+
+#[test]
+fn status_and_thread_show_agree_after_two_capture_land() {
+    let (temp, checkout) = land_details_fixture("feature/search");
+    heddle(&["land", "--thread", "feature/search"], Some(temp.path())).unwrap();
+    let status = heddle(&["status"], Some(&checkout)).unwrap();
+    let show = heddle(&["thread", "show"], Some(&checkout)).unwrap();
+    assert!(show.contains("Status: clean"), "{show}");
+    assert!(
+        !status.contains("dirty"),
+        "status disagrees with thread show: {status}\n{show}"
+    );
+}
+
 #[test]
 fn capture_writes_one_git_overlay_checkpoint_without_replacing_git_history() {
     let temp = TempDir::new().unwrap();
