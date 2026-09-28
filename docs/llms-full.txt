@@ -1924,689 +1924,27 @@ confidence multipliers:
 Source: docs/STABILITY.md
 ========================================================================
 
-# Heddle 1.0 stability criterion
+# Heddle compatibility promise
 
-> **Status:** strawman. Every `<TBD: maintainer>` marker is a policy
-> decision the maintainer must set before this document can gate the
-> dogfood cutover. The grounded sections (current state, format
-> inventory, what `cargo deny` already enforces) are
-> citations against today's tree; the placeholders are the proposals
-> the maintainer is being asked to confirm or override.
+**Owner decision: 2026-09-28.** These commitments apply now, before 1.0.
 
-Heddle 1.0 is the version HeddleCo bets its own development on. That
-bet is the entire point of the dogfood cutover (epic E7), and it
-needs an objective gate: a checklist a reviewer can run against the
-tree and either pass or fail, not a vibe.
+## Stable
 
-This document defines that gate across five axes:
+- **Heddle source objects:** the content-addressed object format, including States and Changes, preserves existing object identity and readability. A new encoding must not silently reinterpret or invalidate stored objects; any incompatible format needs an explicit version and migration path.
+- **Identifiers:** `hs-` State IDs and `hc-` ChangeIds retain their meanings. A State ID names one immutable State; a ChangeId carries logical change identity across rewrites. Stored identities remain interpretable.
+- **Git checkpoints:** `Heddle-State` and `Heddle-Change` commit trailers retain their names and meanings.
+- **Git round-trip:** importing local Git history and exporting it reproduces byte-identical Git commit, tree, blob, and tag objects, with the same object IDs and a valid object graph. The [round-trip oracle](../README.md) is the compatibility gate.
 
-1. **Quality metrics** — coverage, performance, bug count, soak.
-2. **API stability** — which crates' public Rust APIs are frozen at 1.0.
-3. **Format stability** — what on-disk and on-the-wire formats promise.
-4. **SemVer policy** — how breaking changes are signalled.
-5. **Deprecation policy** — how long deprecated surfaces are kept.
+Changes that would break these promises require an explicit new version and a path for existing repositories; they cannot arrive as silent changes to the current format.
 
-Each axis names the concrete artefact in the tree that backs it, so
-when the criterion fires "Heddle is not 1.0-ready" or "Heddle is
-1.0-ready" the answer is grep-checkable.
+## Unstable until 1.0
 
-## Where we are today (grounded baseline)
+- **CLI verbs and flags:** command names, arguments, flags, and human output may change before 1.0. The `--output json` machine contract keeps its existing, separate version rule: the `heddle-cli` crate version is its contract version. Catalogued output shapes, including `output_kind`, discriminators, and exit codes, are stable within a pre-1.0 minor release; breaking changes bump the minor version and additive changes bump the patch version. See [the JSON contract](exit-codes.md#schemacontract-stability) and `heddle <command> --schema`.
+- **Hosted wire API:** `heddle-api` remains in `0.31.0-alpha.*`; its alpha wire surfaces have no compatibility promise yet.
+- **Hosted features:** behavior, availability, and policy may change before 1.0.
+- **Other formats and Rust APIs:** no compatibility freeze is declared here for sidecars, refs, oplog internals, or published Rust APIs beyond the stable source-object commitment above.
 
-This section is fact, not policy. The maintainer doesn't tune it —
-they tune the 1.0 targets the next sections propose against it.
-
-- **Workspace shape.** 18 crates in
-  [`Cargo.toml`](../Cargo.toml) `[workspace].members`. All sit at
-  version `0.2.4` (last release: `0.2.4 - 2026-05-14`, see
-  [`CHANGELOG.md`](../CHANGELOG.md)). Per-crate version sync is
-  handled by [`release-plz.toml`](../release-plz.toml) workspace
-  mode.
-- **Public release vehicle.** Only `heddle-cli` is the user-facing
-  CLI binary (workspace `default-members = ["crates/cli"]` in
-  [`Cargo.toml`](../Cargo.toml), crates.io badge in
-  [`README.md`](../README.md) points at `heddle-cli`). All 17
-  publishable crates listed in
-  [`release-plz.toml`](../release-plz.toml) are marked
-  `release = true`, but only `heddle-cli`'s surface is curated as a
-  product surface today — the rest publish because the workspace
-  dependency graph requires it for `cargo publish` to resolve.
-- **Coverage today.** `cargo llvm-cov` against the OSS feature set
-  (`git-overlay,native,semantic,zstd`) ran on `main` at SHA
-  `f0086130` on 2026-05-15 (workflow run
-  [25934018627](https://github.com/HeddleCo/heddle/actions/runs/25934018627))
-  and reported **72.02 % line coverage** workspace-wide
-  (130 573 regions / 36 227 missed → 72.26 % region; 81 841 lines /
-  22 896 missed → 72.02 % line; 7 872 fns / 2 399 missed → 69.52 %
-  function). Per-crate breakdown is in the run's "Generate coverage
-  summary" step. The current scheduled/manual gate enforces per-crate floors
-  before its optional Codecov upload; the policy and current thresholds are in
-  [`docs/contributor-guide/coverage.md`](contributor-guide/coverage.md), and the
-  implementation is [`.github/workflows/coverage.yml`](../.github/workflows/coverage.yml).
-- **Performance baseline.** Two perf surfaces today:
-  - Snapshot-time microbench *cargo-test* harness at
-    [`crates/cli/tests/performance.rs`](../crates/cli/tests/performance.rs)
-    (asserts on phase timings). Relevant PRs run the deterministic 1,000-file
-    smoke contract; pushes to `main`, the weekly schedule, and manual runs keep
-    the full 10k/100k release contract in
-    [`.github/workflows/perf-core-loop.yml`](../.github/workflows/perf-core-loop.yml).
-  - A real Criterion benchmark crate-target at
-    [`crates/cli/benches/local_ops.rs`](../crates/cli/benches/local_ops.rs)
-    (declared via `[[bench]]` in `crates/cli/Cargo.toml`). Run with
-    `cargo bench -p heddle-cli`. Not currently invoked by any CI
-    workflow.
-  There is no Bencher/Codspeed trend integration. Criterion exists only in
-  `heddle-cli`, not in the workspace crates whose performance characteristics
-  most matter for 1.0 (objects, repo, refs, oplog).
-- **Soak / long-running tests.** No continuous long-running soak
-  harness today. One large-blob *stress* fixture exists at
-  [`crates/cli/tests/cli_integration/realworld_git.rs:242`](../crates/cli/tests/cli_integration/realworld_git.rs)
-  (`realworld_git_large_binary_blob_stress_without_git_on_path`,
-  gated `#[ignore]` and run only on demand via
-  `HEDDLE_LARGE_BLOB_MB`), but there is no scheduled CI job that
-  loops commit/undo over hours or days.
-- **Supply-chain gate.** `cargo deny check all` runs in the required
-  `Rust Tests / Static contracts` job on every PR and push to `main`, plus a
-  weekly Monday advisory refresh — see
-  [`.github/workflows/rust-tests.yml`](../.github/workflows/rust-tests.yml) and
-  [`deny.toml`](../deny.toml). The license allow-list, banned-crates list (no
-  OpenSSL/native-tls — rustls only), source policy, RustSec advisory DB, and
-  yanked-crate refusal are all enforced by that single policy engine.
-- **Format-version constants in the tree** (non-exhaustive — these
-  are the ones currently named `FORMAT_VERSION` / `VERSION`; see
-  files listed for the authoritative source):
-  - Oplog layout: V5 manifest (`HDOPV5\0\0`, manifest version 2) over binary-tiered
-    immutable V4 packed containers (`LMOPLOG\0`, StateId record schema 4) in
-    [`crates/oplog/src/oplog/segmented_oplog.rs`](../crates/oplog/src/oplog/segmented_oplog.rs)
-    and [`packed_oplog.rs`](../crates/oplog/src/oplog/packed_oplog.rs).
-  - Operation dedup file: `DEDUP_FORMAT_VERSION = 1` in
-    [`crates/repo/src/operation_dedup.rs:36`](../crates/repo/src/operation_dedup.rs).
-  - Operation-index bucket: `INDEX_FORMAT_VERSION = 1` in
-    [`crates/refs/src/refs/operation_index.rs:38`](../crates/refs/src/refs/operation_index.rs).
-  - Ref-summary index header: `"heddle-ref-summary-v1"` in
-    [`crates/refs/src/refs/ref_summary_index.rs:14`](../crates/refs/src/refs/ref_summary_index.rs).
-  - State-context blob: `FORMAT_VERSION = 2` in
-    [`crates/objects/src/object/state_context.rs:163`](../crates/objects/src/object/state_context.rs).
-  - Per-object sidecar blobs at `FORMAT_VERSION = 1`:
-    `DiscussionsBlob`, `RiskSignalBlob`, `RedactionsBlob`,
-    `ReviewSignaturesBlob`, `FileProvenance`, `StructuredConflict`
-    (`crates/objects/src/object/*.rs`).
-- **Hosted API contract.** The `heddle.api.v1alpha1` protobuf source,
-  descriptors, policy, and generated SDK sources are owned by
-  [`HeddleCo/api`](https://github.com/HeddleCo/api). Heddle consumes the
-  published `heddle-api@0.2.1` registry package and does not own a schema copy.
-  The remaining Weft/Tapestry cutovers are tracked by
-  [ADR 0048](adr/0048-net-new-public-api-contract.md); service maturity labels
-  in the descriptor do not prove a live deployment.
-- **Content-addressing primitives.** `ContentHash` is a 32-byte
-  BLAKE3 digest
-  ([`crates/objects/src/object/hash.rs:13`](../crates/objects/src/object/hash.rs));
-  `ChangeId` is a 128-bit random identifier
-  ([`crates/objects/src/object/hash.rs:99`](../crates/objects/src/object/hash.rs)).
-- **Compatibility posture today.** From
-  [`AGENTS.md`](../AGENTS.md) §"Compatibility": "Heddle is still
-  moving quickly. Prefer the current model over preserving legacy
-  behavior. Do not add backwards-compatibility shims unless the user
-  explicitly asks for them." That posture is the thing 1.0 ends.
-
-## 1. Quality metrics
-
-The 1.0 gate is a conjunction: **every** metric below must clear its
-threshold on a green CI run before the cutover. A single regressing
-crate or a single open S0 bug fails the gate. This is intentional —
-the dogfood bet is whole-product, not best-crate.
-
-### 1.1 Test coverage
-
-**Workspace floor.**
-
-<TBD: maintainer> — current workspace line coverage is **72.02 %**
-(run 25934018627). Proposed 1.0 floor: **80 % line / 75 % function**,
-measured by `cargo llvm-cov --workspace --features
-git-overlay,native,semantic,zstd` (the same invocation the CI job
-already uses).
-
-Tradeoff: 80 % is a credible "the core paths are exercised" number
-for a 0.2 → 1.0 step without forcing test theatre on glue/CLI
-plumbing crates where the integration tests in
-[`crates/cli/tests/`](../crates/cli/tests/) carry the real signal.
-Setting it higher (e.g. 90 %) would force test additions in code
-that's better verified end-to-end; setting it lower leaves the
-floor below what we already have, which doesn't gate anything.
-
-**Per-crate floor.**
-
-<TBD: maintainer> — proposed: **65 % line per crate** for the
-storage-format and identity-bearing crates (`heddle-objects`,
-`heddle-refs`, `heddle-oplog`, `heddle-repo`, `heddle-crypto`,
-`heddle-wire`), and **no floor** for the rest. The
-distinction is "if this crate is wrong, on-disk or on-wire data is
-wrong" vs. "if this crate is wrong, the CLI prints a worse string".
-The integration-test crates and CLI dispatch crates are better
-exercised by `cli_integration.rs`, `core_functionality.rs`, and
-`comprehensive.rs` than by unit coverage.
-
-Tradeoff: a uniform per-crate floor would force coverage in
-`heddle-cli` (which is mostly thin command dispatch and `render_*`
-output) where the meaningful tests live higher up the stack.
-
-**How the gate is enforced.**
-
-<TBD: maintainer> — proposed: add a `coverage-floor` step to the
-existing `coverage` job in
-[`.github/workflows/rust-tests.yml`](../.github/workflows/rust-tests.yml)
-that fails when `cargo llvm-cov report --summary-only` reports below
-the floor. Today the job uploads to Codecov but does not fail the
-build on a delta. The floor enforcement is a one-line `awk` test on
-the existing `coverage-summary.txt` artifact; no new tool is needed.
-
-### 1.2 Performance budgets
-
-<TBD: maintainer> — no perf-regression gate exists today. Proposed
-1.0 envelope, measured at p50 on the standard CI runner
-(`blacksmith-4vcpu-ubuntu-2404-arm` per the workflow), against a
-fixed corpus:
-
-| Operation | Corpus | Budget (p50) |
-|---|---|---|
-| `heddle status` | 10 k tracked files, clean tree | <TBD: maintainer> ms |
-| `heddle capture` | 100 changed files | <TBD: maintainer> ms |
-| `heddle log --oneline -n 1000` | 10 k-state history | <TBD: maintainer> ms |
-| `heddle import local --ref <branch>` | linux.git head | <TBD: maintainer> s |
-| Snapshot 1 000 small files | synthetic | <TBD: maintainer> ms |
-
-Tradeoffs:
-
-- **Absolute budgets vs. ratchet.** A ratchet ("don't get more than
-  10 % slower than the previous run") is easier to land — it doesn't
-  require establishing absolutes — but it doesn't answer "is Heddle
-  fast enough for the bet?". An absolute budget does, at the cost of
-  picking numbers somewhat arbitrarily on the first pass. Proposed:
-  start with the ratchet (10 % regression on the existing
-  `performance.rs` snapshot timings), promote to absolutes as the
-  bench corpus stabilises.
-- **Where the bench harness lives.** Two seeds exist:
-  [`crates/cli/tests/performance.rs`](../crates/cli/tests/performance.rs)
-  (cargo-test, timing-assertion shape, runs every CI) and
-  [`crates/cli/benches/local_ops.rs`](../crates/cli/benches/local_ops.rs)
-  (real Criterion, runs only on demand via `cargo bench`). Neither
-  covers `crates/objects`, `crates/repo`, `crates/refs`,
-  `crates/oplog` — the formats most sensitive to 1.0 perf claims.
-  Proposed: keep `performance.rs` as the cheap test-suite gate;
-  expand `local_ops.rs` (or peer Criterion benches under each
-  format crate) into a CI-invoked `cargo bench --no-run` smoke check
-  + a nightly perf-regression workflow that runs the suite and
-  compares against a stored baseline.
-- **What gets gated, what gets observed.** Not every CLI verb needs
-  a budget. Proposed: budget the verbs in the AGENTS.md "core thread
-  workflow" (`status`, `capture`, `log`, `show`, `start`,
-  `merge --preview`) plus the Git Projection import/export/sync entry
-  points; track the rest as observed timings without a
-  fail-the-build gate.
-
-### 1.3 Maximum known-bug count by severity
-
-<TBD: maintainer> — proposed thresholds at the 1.0 gate, evaluated
-on open issues in `HeddleCo/heddle` with the corresponding label:
-
-- **S0 (data loss / corruption / silent wrong answer):** **0 open**.
-  Hard gate. No exceptions.
-- **S1 (crash, hang, or feature-broken on a documented path):**
-  **<TBD: maintainer — proposed ≤ 2 open with workaround documented
-  in the issue>**. Open S1s with no workaround block the gate.
-- **S2 (UX regression, recoverable error, cosmetic-but-confusing):**
-  **<TBD: maintainer — proposed ≤ 10 open>**.
-- **S3 (papercut, minor copy nit):** no count limit, but each must be
-  triaged (a label, not an unlabelled "Backlog" card).
-
-Tradeoff: tighter S1 (e.g. zero open) makes the gate punitive —
-every CLI verb has at least one edge case, and the marginal harm of
-"`heddle diff` is slow on a 10 GB tree" is not "do not bet the
-company on this". Looser S0 (e.g. "documented") is not acceptable —
-a data-corruption bug with a documented workaround is still a data-
-corruption bug.
-
-The severity rubric itself needs writing (it does not exist in the
-repo today): proposed home is `docs/SEVERITY.md`, owned by
-maintainer, written before this gate fires.
-
-### 1.4 Soak / long-running test
-
-<TBD: maintainer> — no soak harness exists today. Proposed: a
-**24-hour** soak that runs `heddle capture` / `heddle undo` /
-`heddle undo --redo` in a loop against a synthetic
-repository, asserts that no `fsck` errors appear at the end, asserts
-that the oplog is replayable from zero, and asserts that
-`heddle maintenance gc --prune` does not delete anything reachable.
-
-Tradeoffs:
-
-- **24 h vs. 7 days.** 24 h catches the obvious unbounded-growth and
-  flush-ordering bugs. 7 days catches the subtle ones (slow leaks,
-  fragment compaction). Proposed: 24 h as the gate, 7 days as
-  observed/reported but not blocking; promote to gate after the
-  first 1.0.x release that ships clean.
-- **Where it runs.** Daily cron on the same `blacksmith-4vcpu`
-  runner as `rust-tests.yml`. Cheaper than a dedicated runner; the
-  runner cost dominates over the rare cancellation.
-- **What's exercised.** Proposed: commit/undo/redo loop plus a
-  Git Projection sync loop against a fixture upstream. Projection
-  reconciliation is the most state-rich Git interop path and benefits
-  most from a long run.
-
-## 2. API stability commitment
-
-"API stability" here means: **a downstream crate that depends on
-this crate's published `0.x` or `1.0` release can upgrade across
-patch and minor versions without source-breaking changes to the
-items it consumes.** It does **not** mean "the crate's surface is
-final and cannot grow."
-
-### 2.1 What's stable at 1.0
-
-<TBD: maintainer> — proposed split. The maintainer decides which
-crates are committed to the stability contract and which remain
-`0.x` indefinitely.
-
-**Proposed `1.0` (stable Rust API):**
-
-- `heddle-objects` — `ContentHash`, `ChangeId`, blob/tree/state
-  types, format constants. Anything that downstream tooling or
-  alternative storage backends must agree on.
-- `heddle-wire` — native Heddle wire/protocol types and transfer
-  planners. The hosted protobuf boundary is gated separately (§3.6) and is
-  released from `HeddleCo/api`.
-
-Rationale: these are the Heddle-owned surfaces an independent local
-implementer cannot route around. Hosted consumers rely on the separately owned
-`heddle-api` package and its compatibility policy instead.
-
-**Proposed remain `0.x` (no API-stability commitment):**
-
-- `heddle-cli` — the CLI binary's *Rust* surface is not the
-  product; the CLI surface (verbs, flags, JSON shapes) is, and
-  that's covered by `heddle doctor docs` and the runtime schema
-  registry (`heddle <command> --schema`) plus the conventions in
-  [`CONTRIBUTING.md`](../CONTRIBUTING.md).
-- All other workspace crates are internal-shaped today and may absorb churn
-  from ongoing work (hosted control plane, semantic diff evolution).
-  Promoting any of these to 1.0 is a follow-up
-  decision after the first 1.0.x release proves the stability
-  contract is workable on the stable crates above.
-
-Tradeoff: a wider 1.0 scope (for example, freezing every workspace crate) is a
-stronger ecosystem signal but raises the cost of every internal
-refactor — and most of these crates are pre-product-shaped. A
-narrower scope is honest about which surfaces are actually being
-consumed externally.
-
-### 2.2 What "stable" means concretely
-
-For the crates in §2.1's stable list:
-
-- **Removing or renaming a `pub` item is a breaking change.** Major
-  version bump required (§4).
-- **Changing a `pub` function or method signature is a breaking
-  change.** Adding optional fields to a `#[non_exhaustive]` struct
-  is not, by Rust SemVer convention; adding a required field to a
-  struct without `#[non_exhaustive]` is.
-- **Items marked `#[doc(hidden)]` are not part of the stable surface
-  even if they are `pub`.** Consumers relying on `doc(hidden)` items
-  do so at their own risk.
-- **MSRV (minimum supported Rust version) bumps are minor.** The
-  current MSRV is Rust 1.85 per [`README.md`](../README.md)
-  §Prerequisites; bumps are announced in the CHANGELOG.
-
-### 2.3 CLI surface stability
-
-The CLI is the user-facing product. Its stability commitments are
-already partially enforced by the meta-tests in
-[`crates/cli/tests/`](../crates/cli/tests/) — see
-[`CONTRIBUTING.md`](../CONTRIBUTING.md) §"Tests new contributors
-meet first":
-
-- `render_lint.rs` — `println!`/`print!` only inside `render_*` /
-  `write_*` functions. The render ratchet ensures stdout shape is
-  intentional.
-- `tier_coverage.rs` — every `Commands` enum variant must be
-  classified `Everyday` / `Advanced` / `Hidden`. Hidden verbs are
-  not part of the stability commitment.
-- `op_id_coverage.rs` — state-changing CLI verbs must thread `--op-id` and
-  behave idempotently on replay. The separate descriptor-driven
-  descriptor audits in `HeddleCo/api` govern hosted protobuf RPC effect,
-  signing, and retry-key declarations.
-- `heddle doctor docs` — flag names referenced in tracked markdown
-  must match the live binary.
-- Runtime JSON schema registry — every `--output json`-capable verb
-  registered in the command contract table
-  ([`crates/cli-contract/src/cli/commands/command_catalog/mod.rs`](../crates/cli-contract/src/cli/commands/command_catalog/mod.rs))
-  must produce a schema, retrievable at runtime with `heddle
-  <command> --schema`. A unit test asserts every JSON-capable command
-  has a resolvable schema. The output shapes are contracts; changes
-  must be additive (`null` for missing fields, empty arrays
-  explicit).
-
-<TBD: maintainer> — for 1.0, proposed additional commitments:
-
-- Tier-`Everyday` verb names + their documented flags are frozen.
-  Renames require a major bump and a deprecation cycle (§5).
-- Tier-`Advanced` verbs may rename in a major bump without a
-  deprecation cycle, but the JSON output schema (when `--output json`
-  is passed) is frozen on the same terms as `Everyday`.
-- Tier-`Hidden` verbs are explicitly *not* covered — they exist for
-  internal use and may change at any time.
-
-## 3. Format stability
-
-These are the formats Heddle promises to keep readable across 1.0.x
-patch and minor versions. "Readable" means a Heddle ≥ 1.x.y binary
-can read data written by any Heddle 1.x.z binary where z ≤ y, and
-that any breaking format change goes through the SemVer process in
-§4.
-
-### 3.1 Object format
-
-The on-disk object store (`.heddle/objects/`) holds content-
-addressed blobs, trees, and states, each addressed by a 32-byte
-BLAKE3 digest (`ContentHash`, defined at
-[`crates/objects/src/object/hash.rs:13`](../crates/objects/src/object/hash.rs)).
-Pack files are produced by the pack builder under
-[`crates/objects/src/store/pack/`](../crates/objects/src/store/pack/).
-
-**1.0 commitment.**
-
-<TBD: maintainer> — proposed:
-
-- The BLAKE3 content-addressing scheme is frozen at 1.0. A change
-  to the hash function (e.g. BLAKE3 → BLAKE3-keyed) is a major-
-  version event for the whole product and requires a documented
-  migration.
-- The pack file binary layout (header, object framing, checksum) is
-  frozen at 1.0.x for forward-readability; new pack-level features
-  ride a version byte in the pack header, and 1.x readers must
-  refuse unknown major-version packs cleanly (no silent
-  misinterpretation).
-- The set of object types is *open* — adding a new object type is
-  not a breaking change as long as old readers refuse it cleanly.
-- The encoding of an existing object type's body is frozen.
-
-Tradeoff: an "open object type set" lets us add (for example) new
-sidecar shapes without major bumps. A "closed" object set is
-stronger but conflicts directly with the way new product features
-are landing today (see the 0.2.x sidecar additions in
-[`CHANGELOG.md`](../CHANGELOG.md): redactions, discussions, risk
-signals, structured conflicts, state context, state reviews — each
-of which added a new sidecar blob type at `FORMAT_VERSION = 1`).
-
-### 3.2 Sidecar blob formats
-
-Sidecar blobs are versioned individually via a `FORMAT_VERSION` byte
-in their encoded body. The current inventory (non-exhaustive — see
-[`crates/objects/src/object/`](../crates/objects/src/object/) for
-the authoritative list):
-
-| Blob | File | Current `FORMAT_VERSION` |
-|---|---|---|
-| `StateContext` | `state_context.rs` | 2 |
-| `DiscussionsBlob` | `discussion.rs` | 1 |
-| `RiskSignalBlob` | `risk_signal.rs` | 1 |
-| `RedactionsBlob` | `redaction.rs` | 1 |
-| `ReviewSignaturesBlob` | `state_review.rs` | 1 |
-| `FileProvenance` | `state_provenance.rs` | 1 |
-| `StructuredConflict` | `structured_conflict.rs` | 1 |
-
-**1.0 commitment.**
-
-<TBD: maintainer> — proposed:
-
-- A bump to a sidecar's `FORMAT_VERSION` must be backwards-
-  compatible within a 1.0.x minor: a v2 reader reads v1 blobs, and
-  a v1 reader refuses v2 blobs with a typed error (the current code
-  already does the latter — see e.g.
-  [`state_context.rs:173`](../crates/objects/src/object/state_context.rs)).
-- A non-backwards-compatible sidecar change is a major-version
-  event.
-
-### 3.3 Ref format
-
-Refs are stored under `.heddle/refs/`. The packed-refs encoding and
-the `ref_summary_index` header (`"heddle-ref-summary-v1"` at
-[`crates/refs/src/refs/ref_summary_index.rs:14`](../crates/refs/src/refs/ref_summary_index.rs))
-identify the format generation.
-
-**1.0 commitment.**
-
-<TBD: maintainer> — proposed: the ref-summary index header version
-suffix (`-v1` → `-v2`) gates compatibility. 1.0.x readers must
-accept any `-v1` index; 1.x.y readers may produce a higher version
-suffix only if older readers cleanly reject it (the current
-`ref_summary_index.rs` does so).
-
-The thread / marker / HEAD ref-name conventions (no embedded NULs,
-no `..`, no leading `-`, etc.) are part of the stability surface;
-they're enforced in `crates/refs/` today but should be enumerated
-explicitly before 1.0. <TBD: maintainer — explicit enumeration of
-ref-name rules to live in this doc or in a sibling
-`docs/REF_FORMAT.md`>.
-
-### 3.4 Oplog format
-
-The oplog at `.heddle/oplog/` uses the V5 layout accepted by
-[ADR-0050](adr/0050-segmented-oplog-publication.md). `oplog.manifest` is the
-atomic authority over one immutable base and at most 64 binary-tiered immutable
-append containers. Containers use magic `LMOPLOG\0`, container version 4, and
-StateId-native record schema 4. A repository containing only a current V4
-`oplog.bin` remains valid and becomes the base of the first V5 manifest.
-
-**1.0 commitment.**
-
-<TBD: maintainer> — proposed:
-
-- 1.0 ships at the V5 manifest / V4 container layout (or whatever layout the 1.0
-  cut takes). Pre-1.0 oplog versions are not required to be
-  readable post-1.0; the cutover replays the oplog into the new
-  format at upgrade time.
-- Any oplog version bump within 1.x.y must be forward-compatible
-  with a 1.0.x reader's "refuse unknown version" path (the current
-  code already enforces this — see
-  [`packed_oplog.rs:102`](../crates/oplog/src/oplog/packed_oplog.rs)).
-
-### 3.5 Operation dedup and operation index
-
-`DEDUP_FORMAT_VERSION = 1`
-([`crates/repo/src/operation_dedup.rs:36`](../crates/repo/src/operation_dedup.rs))
-and `INDEX_FORMAT_VERSION = 1`
-([`crates/refs/src/refs/operation_index.rs:38`](../crates/refs/src/refs/operation_index.rs))
-gate the dedup-store and operation-index files. Both are derived
-state — they can be rebuilt from the oplog — so the 1.0 commitment
-here is weaker: <TBD: maintainer — proposed: format bumps are
-allowed within 1.0.x as long as the on-upgrade rebuild path is
-exercised by the test suite and runs in O(oplog size).>
-
-### 3.6 Hosted API protocol
-
-The target gRPC services are generated from `HeddleCo/api` under
-`heddle.api.v1alpha1`. This alpha package is intentionally incompatible with
-the still-live `heddle.v1` package and is planned for a coordinated hard
-cutover without a compatibility shim. It is not yet the deployed Weft/Tapestry
-contract. The cutover requires consumers to exact-pin pre-1.0 SDK versions.
-Breaking changes increment the minor version and require a checked-in report
-plus coordinated consumer release candidates. At 1.0 the package advances to
-`heddle.api.v1`; later incompatible generations use a new package rather than
-changing `v1`. ADR 0048 records the current blockers and cutover checklist.
-
-**1.0 commitment.**
-
-<TBD: maintainer> — proposed:
-
-- Additive changes must pass Buf lint, descriptor audits, deterministic
-  generation, and downstream compile fixtures.
-- Removed names and field tags are reserved and never reused, including during
-  breaking pre-1.0 releases.
-- Once `heddle.api.v1` ships, breaking checks are non-overridable except by a
-  new package generation.
-
-## 4. SemVer policy
-
-Heddle follows [SemVer 2.0.0](https://semver.org/) once 1.0 ships,
-with these clarifications.
-
-### 4.1 What is a breaking change
-
-For the crates in §2.1's stable list:
-
-- Removing or renaming a `pub` item.
-- Changing a `pub` function or method signature in a non-additive
-  way.
-- Adding a required field to a non-`#[non_exhaustive]` struct.
-- Adding a variant to a non-`#[non_exhaustive]` enum.
-- Bumping the major-version segment of a format identifier (oplog
-  `VERSION`, sidecar `FORMAT_VERSION`, ref-summary header,
-  `heddle.vN` proto package).
-- Removing a Tier-`Everyday` CLI verb or any flag it documents.
-- Changing the wire shape of any JSON output covered by the runtime
-  schema registry (`heddle <command> --schema`).
-
-For the crates **not** in §2.1's stable list, there is no breaking-
-change contract within 0.x — they may break their Rust API on any
-release.
-
-### 4.2 How breaking changes are signalled
-
-- **In the CHANGELOG.** Every breaking change gets a `BREAKING:`
-  line under the relevant version heading in
-  [`CHANGELOG.md`](../CHANGELOG.md). The existing changelog already
-  uses Keep-a-Changelog headings (`### Added` / `### Changed` /
-  etc.); add `### Breaking` as the dominant heading on any release
-  that contains one.
-- **In the version number.** Breaking changes bump the major
-  version (1.x → 2.0). Patch and minor releases must not contain
-  breaking changes to stable surfaces.
-- **In the deprecation cycle.** See §5.
-
-### 4.3 Workspace-wide versioning
-
-All publishable crates currently move in lockstep via
-[`release-plz.toml`](../release-plz.toml) workspace mode. This is
-intentional: it keeps the matrix of "which combinations of crate
-versions are valid" small. <TBD: maintainer — proposed: keep this
-lockstep through 1.0 and re-evaluate per-crate independence as a
-follow-up after the first 1.0.x release.>
-
-Tradeoff: per-crate independent versioning lets a hot fix to
-`heddle-objects` ship without bumping every other crate. Lockstep
-versioning means every fix releases the whole workspace —
-operationally simpler, but a 17-crate release every time something
-small changes.
-
-## 5. Deprecation policy
-
-The 1.0 contract is "things that were stable stay stable for a
-predictable window after they're scheduled for removal." This
-section sets that window.
-
-### 5.1 Deprecation cycle
-
-When a stable item is to be removed:
-
-1. **Mark it deprecated.** For Rust items: `#[deprecated(since =
-   "1.x.y", note = "...")]`. For CLI verbs/flags: emit a stderr
-   warning on every invocation (stderr is unrestricted per
-   [`CONTRIBUTING.md`](../CONTRIBUTING.md) §"Render discipline").
-   For format constants: bump the format-version and ship a writer
-   that produces the new version but a reader that still accepts
-   the old.
-2. **Announce in the CHANGELOG.** `### Deprecated` heading under the
-   release that introduces the deprecation. Include the planned
-   removal release.
-3. **Wait.**
-4. **Remove in a major release.** Bump the major-version segment.
-   Removal in a minor or patch release is not permitted for stable
-   surfaces.
-
-### 5.2 Minimum support window
-
-<TBD: maintainer> — proposed:
-
-- **Rust APIs in stable crates (§2.1):** **2 minor releases** OR
-  **6 calendar months**, whichever is longer. Removal lands in the
-  first major release after both conditions are met.
-- **Tier-`Everyday` CLI verbs / flags:** **3 minor releases** OR
-  **9 calendar months**. CLI consumers (scripts, agents) are the
-  hardest to migrate and the slowest to notice — a longer cycle is
-  proportionate.
-- **Tier-`Advanced` CLI verbs / flags:** same as Rust APIs: 2
-  minors / 6 months.
-- **JSON output fields covered by the runtime schema registry
-  (`heddle <command> --schema`):** same as Tier-`Everyday`. JSON
-  shape changes are silently breaking for agents and need the
-  longer window.
-- **Hosted API fields:** compatibility and deprecation are governed by the
-  `HeddleCo/api` release policy (§3.6), not by Heddle's crate lifecycle.
-- **Sidecar / oplog format versions:** at least one minor release
-  after the new format ships before the old format reader can be
-  removed. The reader removal is itself a breaking change (§4.1).
-
-Tradeoffs: a shorter window (e.g. one minor) is operationally
-cheaper but burns confidence quickly when consumers can't keep up. A
-longer window (e.g. 4 minors) is friendlier to consumers but
-accumulates deprecated code paths that are themselves a
-maintenance liability — and every deprecated path is a place where
-the type system can't tell you you've made a mistake.
-
-### 5.3 Emergency exceptions
-
-Some changes can't wait. The CHANGELOG must be explicit about which
-of these applies:
-
-- **Security advisories** — a RustSec or in-house security finding
-  that's actively exploitable. Patch immediately; document in the
-  CHANGELOG as `### Security`. No deprecation cycle.
-- **Data-corruption bugs** — a code path that can write data the
-  reader can't recover. Patch immediately; document in the
-  CHANGELOG. No deprecation cycle.
-- **Spec ambiguity** — two implementations disagree on the meaning
-  of a stable surface. Pick one; document the resolution in the
-  CHANGELOG; treat the loser as deprecated under the normal cycle.
-
-## How this criterion is used
-
-The 1.0 cutover gate (epic E7) passes when **all of the following
-are simultaneously true on a single green CI run on `main`**:
-
-- §1.1 coverage thresholds met workspace-wide and per stable crate.
-- §1.2 performance budgets all green (or, on the ratchet variant,
-  no >10 % regression vs. the previous green run).
-- §1.3 known-bug counts within thresholds, with severity labels
-  audited within the last 7 days.
-- §1.4 soak test green for the most recent 24-h run.
-- §2 stable crates compile and pass tests with no items marked
-  `#[doc(hidden)]` that downstream consumers (`weft`) depend on.
-- §3 format-version constants match the 1.0 baseline this document
-  fixes; any in-flight bumps have shipped to a 0.2.x first.
-- §4 the CHANGELOG has a `## 1.0.0` heading with no `### Breaking`
-  entries deferred from earlier 0.2.x releases.
-- §5 there are no deprecated items past their minimum-support
-  window still present in the stable crates.
-
-A reviewer can run this checklist in a single sitting. That's the
-point.
-
-## Open follow-ups
-
-- The severity rubric `docs/SEVERITY.md` does not exist yet and is
-  referenced from §1.3. Filing follow-up issue: <TBD: maintainer to
-  open or assign>.
-- The ref-name rule enumeration referenced in §3.3 is not yet
-  written. Filing follow-up issue: <TBD: maintainer to open or
-  assign>.
-- A standing perf-corpus repository (the input to §1.2's bench
-  budgets) does not yet exist. Filing follow-up issue: <TBD:
-  maintainer to open or assign>.
-- The decision in §2.1 about which crates promote to 1.0 may
-  change after maintainer review. Whichever set is chosen, the
-  `[package.metadata.docs.rs]` block in each stable crate should
-  add `rustdoc-args = ["--cfg", "docsrs"]` so docs.rs builds get
-  the full stable surface. <TBD: maintainer to confirm.>
+Existing CI and release gates still apply. This document sets no additional coverage, performance, known-bug, soak, or deprecation-window threshold for 1.0.
 
 ========================================================================
 Source: docs/THREAD_AGENT_EXPERIENCE.md
@@ -2719,7 +2057,7 @@ Related ADRs:
 
 ## Vocabulary
 
-Use the glossary terms in `CONTEXT.md` exactly.
+Use the glossary terms in `CONTEXT.md` and `docs/glossary.md` exactly.
 
 - Git Overlay: Heddle sidecar over an existing Git checkout. Active Git reads and writes use the checkout's real `.git`.
 - Bridge Mirror: the retired bare Git repository formerly stored at `.heddle/git`; the term is historical and names no current runtime component.
@@ -2939,8 +2277,8 @@ Target rows describe the next model and must not be cited as shipped behavior.
 - Repository capability terms are `plain-git`, `git-overlay`, and
   `native-heddle`. Human labels such as `Git + Heddle` or `Git + Heddle
   isolated checkout` describe the operator context; they are not new state
-  machines. Use `CONTEXT.md` as the glossary for Git Overlay, Git Projection Mapping,
-  Git Checkpoint, Repository Verification State, and Machine-Contract Proof. Use
+  machines. Use `CONTEXT.md` for Git Overlay, Git Projection Mapping,
+  Git Checkpoint, and Repository Verification State; use `docs/glossary.md` for Machine-Contract Proof. Use
   Bridge Mirror only for historical context; it is not a runtime component.
 - In Git-overlay mode, active Git reads and writes use the checkout's real
   `.git`. Heddle stores Git Projection Mapping metadata under
@@ -4031,8 +3369,7 @@ declared discriminators, `exit_codes`) are stable for that minor.
   the **major** post-1.0.
 - Additive changes (new fields with default `null`, new optional exit codes
   added to `exit_codes`) bump the **patch**.
-- See [`STABILITY.md`](STABILITY.md) for the broader 1.0 stability gate
-  this rule is one component of.
+- See [`STABILITY.md`](STABILITY.md) for the current compatibility promise.
 
 ## Coverage
 
@@ -4052,6 +3389,426 @@ The lint in
 [`crates/cli/tests/cli_integration/oss_cli_polish.rs`](../crates/cli/tests/cli_integration/oss_cli_polish.rs)
 (`exit_codes_declared_have_doc_entry`) asserts every non-`Ok` code that
 appears in any command's `exit_codes` is documented in the table above.
+
+========================================================================
+Source: docs/glossary.md
+========================================================================
+
+# Heddle domain glossary
+
+The remaining domain terms from [CONTEXT.md](../CONTEXT.md).
+
+**Agent Identity Assurance**:
+The evidence level behind Agent attribution: unknown, claimed by local input, observed through an authenticated harness integration, or attested by a signed binding from a policy-trusted provider, harness, or runner. Heddle pursues broad coverage and displays it honestly, but Heddle-owned ambient detection is capped at observed and model identity is not correctness evidence.
+_Avoid_: verified agent without level, model trust score, inferred identity
+
+**Conflict ID**:
+The stable opaque identity of one source-conflict episode across candidate additions, anchor movement, and resolution attempts. It names the continuing conflict, not any exact candidate set or file location.
+_Avoid_: hunk hash, path-derived ID, Conflict Version ID
+
+**Conflict Version ID**:
+The content address of one exact immutable version of a conflict's anchor, base, candidate set, and status. Resolutions cite the version they considered so a stale resolution cannot silently close a conflict changed by concurrent work.
+_Avoid_: Conflict ID, mutable conflict record, latest version alias
+
+**Conflict Working Candidate**:
+The marker-free ordinary file content materialized for continued work while a source conflict remains open, initially using the current Thread's content for each unresolved region plus every conflict-free merge result. Capturing an edited working candidate adds an attributed Conflict Candidate without resolving the conflict; resolution is a separate operation.
+_Avoid_: conflict markers, automatic resolution, canonical winner
+
+**Source Resolution Conflict**:
+The state produced when actors make incompatible resolution claims against the same Conflict Version. Neither claim wins by ordering; both remain visible and readiness stays blocked until a later resolution explicitly considers them.
+_Avoid_: last-write-wins resolution, latest resolver wins, hidden conflict
+
+**Writer Lease**:
+Exclusive, scoped authority to advance one Thread's source lineage, managed ambiently by a harness integration during normal agent work. Declared fan-out receives separate Child Threads; unexpected writer contention fails closed with a machine-readable recovery action rather than silently forking.
+_Avoid_: agent presence, filesystem lock, manual heartbeat workflow
+
+**Thread Refresh**:
+A controlled update of a Child Thread onto a moved parent: a true fast-forward when the child has no unique work, otherwise a provenance-preserving replay when conflict-free. It runs only at transactional or harness-declared idle boundaries; conflicts, changed intent or policy, and ambiguous side effects block it instead of changing files beneath an active worker.
+_Avoid_: background rebase, asynchronous checkout mutation, unconditional fast-forward
+
+**Landing Delegation Policy**:
+A signed, versioned delegation from a principal permitting a bounded class of ready Threads to land within explicit scope, impact ceilings, proof requirements, destination, and validity. Evaluation fails closed and records the exact policy version; missing evidence requires human judgment, agent confidence cannot grant authority, and policy changes cannot authorize themselves.
+_Avoid_: confidence threshold, agent approval, automatic trust
+
+**Offline Delegated Landing**:
+A local landing authorized without contacting Weft by an unexpired Landing Delegation Policy and locally verifiable required evidence, unless the policy explicitly requires fresh hosted authorization. Weft independently accepts or rejects later publication without rewriting the local landing.
+_Avoid_: cached hosted approval, unconditional offline authority, automatic rollback
+
+**Gitlink**:
+A source tree entry representing a Git submodule pointer to a commit in another repository. Its durable meaning is the entry path and format-aware target Git object ID, not ordinary file bytes.
+_Avoid_: submodule blob, heddle-submodule blob, submodule file
+
+**Gitlink Placeholder**:
+A filesystem presentation of a Gitlink in a native Heddle worktree. It is not source history content; unchanged placeholder bytes preserve the Gitlink during capture, while edited placeholder bytes become an ordinary file replacement.
+_Avoid_: submodule file, synthetic source file, magic blob
+
+**Sley**:
+Heddle's native Git-format engine. Sley owns Git object identity semantics and Git operation behavior, while Heddle owns the stable durable encoding of Heddle source history objects.
+_Avoid_: external Git adapter, optional Git backend, Git subprocess wrapper
+
+**Repository Source Authority**:
+The durable repository choice of Git Overlay or native Heddle as the owner of source objects, refs, and worktree behavior. It is stored in repository config; the presence of `.git` only makes Git Projection available and does not select authority.
+_Avoid_: inferred Git mode, `.git`-presence authority, projection availability
+
+**Native Heddle Repository**:
+A repository whose source history is stored in Heddle's native object model under `.heddle`. Git interoperability is an explicit projection, import, or export path rather than the active source store.
+_Avoid_: adopted Git Overlay, hidden Git repository, Git-backed Heddle repository
+
+**Repository Adoption**:
+The explicit transition from Git Overlay source storage into a Native Heddle Repository when native storage is desired. Adoption is not initialization, routine product maturity, or a prerequisite for continued first-class Heddle use.
+_Avoid_: Git Overlay initialization, sidecar setup, ordinary Git import
+
+**Bridge Mirror**:
+The retired bare Git repository formerly stored at `.heddle/git`. Current-format repositories never create, read, repair, or migrate it; Git projection uses reconstructable Heddle state plus Raw Git Object Residuals. Use this term only for historical design context.
+_Avoid_: active Git store, projection cache, current repository component
+
+**Raw Git Object Residual**:
+Verbatim Git object bytes preserved because Heddle cannot reconstruct them byte-for-byte from native state, such as lossy imports or identities that were not representable in Heddle's normalized model. Residuals are an exception path for Git fidelity, not the normal source of Git-overlay state.
+_Avoid_: bridge mirror, active Git store, reconstructed object
+
+**Machine-Contract Proof**:
+The verification dimension that proves command catalog metadata, JSON envelopes, schema introspection, documentation drift checks, and op-id support agree. It should be derived from the command contract source of truth, not hand-maintained counters.
+_Avoid_: hardcoded schema summary, docs-only checklist
+
+**CRDT Collaboration Record**:
+A concurrently editable collaboration artifact, such as a discussion or context annotation, that can merge independent local edits without replacing Heddle's immutable source history model.
+_Avoid_: CRDT state model, CRDT source history
+
+**Discussion ID**:
+An opaque stable UUIDv7 identifier for a discussion. Human-readable meaning belongs in discussion titles, anchors, and list output, not in the identifier.
+_Avoid_: discussion slug, content-addressed discussion id
+
+**Collaboration Operation ID**:
+An opaque stable content-addressed identifier for a collaboration operation. It is distinct from a source history ChangeId even if it uses familiar Heddle short-prefix UX. After a hosted push or pull, a published turn's id is the envelope a clone materializes from the hosted snapshot (author, timestamp, and `turn_op_key`); the originator's pre-push local-only id is retired so every machine agrees.
+_Avoid_: change id for collaboration
+
+**Collaboration Idempotency Key**:
+A stable command-attempt key used to deduplicate retried collaboration writes that have the same intended effect. It is separate from the collaboration operation ID, which hashes the exact canonical operation envelope bytes.
+_Avoid_: semantic operation id, normalized operation hash
+
+**Discussion Title**:
+A human-readable summary of a discussion. Broad anchors such as repository and thread discussions require a title; precise code anchors may derive one from the anchor and first turn.
+_Avoid_: slug, subject line
+
+**Context Extraction**:
+The explicit act of distilling a discussion into a context annotation. Decision turns do not automatically become context annotations.
+_Avoid_: automatic context extraction
+
+**Discussion Turn**:
+An append-only contribution to a discussion. Corrections are represented by later turns rather than editing the original turn.
+_Avoid_: editable message
+
+**Discussion Turn Kind**:
+The structured purpose of a discussion turn from a controlled set such as comment, question, answer, blocker, decision, handoff, or status. Turn kind gives agents and inbox views signal without replacing the turn body.
+_Avoid_: message type explosion
+
+**Discussion Turn Reference**:
+A structured link from one discussion turn to an earlier collaboration operation it answers, supersedes, hands off from, or otherwise responds to. It is a workflow edge, not a quotation of the earlier turn body.
+_Avoid_: text heuristic, quoted reply
+
+**Discussion Reopen**:
+An explicit operation that moves a resolved discussion back into active conversation while preserving the earlier resolution in the discussion history.
+_Avoid_: unresolve, edit resolution
+
+**Resolution Conflict**:
+A discussion state where concurrent resolution operations make incompatible claims about how the discussion was closed. A resolution conflict remains attention-worthy until a later operation chooses the intended resolution.
+_Avoid_: last-write-wins resolution, hidden resolution
+
+**Resolution Conflict Resolution**:
+A collaboration operation that chooses the intended outcome among incompatible resolution operations by citing the conflicting operations. It is distinct from ordinary discussion resolve or reopen operations.
+_Avoid_: silent winner, ordinary resolve
+
+**Collaboration Conflict Resolution**:
+A collaboration operation that resolves an explicit collaboration conflict by citing the conflict kind, conflicting operations, chosen outcome, and authority context. Resolution conflicts and visibility conflicts use this shared pattern with kind-specific payloads.
+_Avoid_: implicit conflict winner, last-write-wins
+
+**Collaboration Attestation**:
+A collaboration operation that signs or asserts a claim about earlier collaboration operations without mutating them. It can upgrade trust in old history while preserving content-addressed operation identity.
+_Avoid_: patching signature, rewriting operation
+
+**Collaboration Redaction**:
+A privileged collaboration operation or hosted policy action that suppresses sensitive operation content from normal views or sync while preserving enough audit metadata to explain what was redacted. It is not general editing.
+_Avoid_: edit, delete, rewrite
+
+**Visibility Conflict**:
+A collaboration state where concurrent visibility operations make incompatible policy-sensitive claims about who may see or act on a record. The effective view stays at the most restrictive safe visibility until a later operation resolves the conflict.
+_Avoid_: last-write-wins visibility, silent visibility change
+
+**Agent Resolution**:
+A discussion resolution operation performed by an agent under capability policy. Agent resolutions carry agent attribution, confidence, and an explicit resolution kind.
+_Avoid_: automatic closure
+
+**Agent Coordination Discussion**:
+A discussion used by agents working in parallel threads to exchange durable questions, blockers, decisions, and handoff context. Agent coordination discussions are visible to the delegating human or policy scope by default.
+_Avoid_: ephemeral agent chat, thread-local note
+
+**Agent Handoff**:
+A coordination pattern where an agent transfers durable context, blockers, or next steps through discussions and attention targets. It is not a separate Heddle primitive unless future lifecycle needs justify one.
+_Avoid_: handoff object
+
+**Capability-Interrupted Agent**:
+An agent whose in-flight work was interrupted because capability refresh removed authority needed for the task. It is not a completed agent, and it should be distinguishable from ordinary blockers in machine-readable state.
+_Avoid_: done agent, generic blocked agent
+
+**Agent Task Assignment**:
+Operational metadata that defines an agent's delegated work and execution policy, such as whether offline continuation is allowed. Its identifier can be referenced by collaboration operations as optional provenance, but it is not repository collaboration history in v1.
+_Avoid_: discussion task, collaboration assignment
+
+**Agent Harness**:
+An external runtime that selects models and drives agent prompts, tools, and processes. Heddle integrates with harnesses ambiently and owns the durable work lifecycle, but does not require agent execution to run through Heddle.
+_Avoid_: Heddle runner, VCS orchestrator
+
+**Identity Cursor**:
+The current harness identity published into the workspace sidecar `.heddle/identity` by installed hooks. Fields use ACP names (`provider`, `model`, `thought_level`, `session`, `parent`). Each capture freezes that cursor onto that state. Mid-thread `/model` or `/effort` updates the cursor only; earlier states keep the pair they froze. Session segments rotate when a published provider, model, or thought_level changes. Empty → set is attach, not a rotate. Unpublished fields are omitted. Heddle does not invent a model from hoped-for env or `/proc`.
+_Avoid_: model of the thread, hoped-for env, /proc hunt, Cursor-guesses-Sonnet
+
+**Agent Timeline**:
+A navigable Heddle-native history of an agent run's tool-call activity, cursor movement, branches, and linked source captures. It supports seeking to a recorded state and using that point as the origin of an alternate Heddle Thread without rewriting prior timeline or source history.
+_Avoid_: raw transcript, runner log, chat history
+
+**Timeline Retention Policy**:
+An explicit user or organization policy permitting selected operational Timeline detail to be compacted while preserving identities, tombstones, fork points, decisions, and honest loss-of-materialization status. Without one, recorded states remain navigable and are never silently removed by age-based maintenance.
+_Avoid_: automatic garbage collection, silent expiry, cache eviction
+
+**Forensic Session Material**:
+Raw agent traces and optional session transcripts that Heddle retains only after explicit local-retention consent. They remain local unless separately disclosed through Weft's Private State Substrate after a PII warning; normal push, readiness, and Timeline sync imply neither consent.
+_Avoid_: agent timeline, default review evidence, required transcript
+
+**Forensic Retention Consent**:
+An explicit, scoped choice permitting Heddle to retain raw traces or session transcripts. It is independent of Forensic Disclosure Consent and is not implied by automatic scrubbed Timeline recording.
+_Avoid_: timeline capture, repository privacy setting, upload consent
+
+**Forensic Disclosure Consent**:
+An explicit, scoped choice permitting retained Forensic Session Material to be encrypted and sent to Weft. It is independent of local retention and must identify the destination and PII risk.
+_Avoid_: push consent, private-repository setting, retention consent
+
+**FacetKind**:
+The typed history-graph domain a durable fact belongs to. Source History is the only facet Git Projection, checkout, and land may select; confidential runtime, collaboration, agent timeline, and forensic material are adjacent facets with their own identities and laws.
+_Avoid_: env/* thread, name-prefix convention
+
+**Private State Substrate**:
+Weft's reusable encrypted storage, recipient-policy, authorization, audit, and purge primitive for typed confidential objects. Runtime Profiles and opt-in Forensic Session Material share this security substrate without sharing schemas or graph laws.
+_Avoid_: VisibilityTier::Private, private Source History, environment-version schema
+
+**Runtime Profile**:
+A confidential-runtime facet: a typed `EnvProfileRef` pointing at immutable `EnvProfileVersion` versions of named encrypted slots. It is not a Source History state or tree, cannot be checked out, landed, or selected by Git Projection, and must not be stored as an `env/*` source thread. Ciphertext bytes may reuse a byte store only if ownership, reachability, authorization, sync, purge, and projection stay facet-aware.
+_Avoid_: env thread, encrypted source state, VisibilityTier::Private as encryption
+
+**Runtime Profile Recipient**:
+A versioned encryption public descriptor created or imported by a selected provider and endorsed by the principal's signing identity. The default is not an X25519 key derived from the signing seed. A software-exportable key is an explicit weaker-custody fallback.
+_Avoid_: derived encryption subkey, signing-seed HKDF
+
+**Policy Broker**:
+The authorization boundary that resolves scoped decrypt requests and runs a child with the selected values without returning values or key material to its caller. It holds provider handles rather than exporting private keys. Hardware protects custody; the broker enforces authorization, revocation, and audit. Same-UID callers are cooperative, not an adversarial boundary.
+_Avoid_: daemon-as-key-holder, CLI-held unwrap as agent isolation
+
+**Timeline Operation**:
+An immutable event in an agent timeline, such as creating a timeline step, moving a cursor, opening a timeline branch, or linking a tool capture. Timeline operations use Heddle-native attribution, versioned durable encoding, and explicit operation kinds rather than mutable log rows.
+_Avoid_: latest timeline JSON, append-only text log
+
+**Timeline Step**:
+The durable timeline unit for one OpenCode tool call. A timeline step records the native tool call identity, scrubbed summary, result status, side-effect classification, and links to any tool capture without making raw tool payloads the default shared record.
+_Avoid_: raw tool invocation, console transcript
+
+**Timeline Cursor**:
+The explicit position of a human, agent, or runner within an agent timeline. Seeking may materialize a linked source state without rewriting history; the first source mutation from a historical point automatically creates a Timeline Branch and an alternate Heddle Thread.
+_Avoid_: UI scroll position, implicit last step
+
+**Timeline Branch**:
+A divergent continuation of an agent timeline from a prior timeline point, used for retries, alternate attempts, or reviewable forks of agent execution. Heddle creates one automatically, together with an alternate Heddle Thread, when source work resumes from a historical Timeline Cursor.
+_Avoid_: source branch, Git branch, thread fork
+
+**Native Tool Call ID**:
+The stable identifier emitted by the OpenCode adapter or another native tool runtime for a single tool invocation. Heddle uses it to correlate timeline steps, deduplicate retries, and link tool captures; it is not a human display label or a source history change id.
+_Avoid_: display name, request log line, change id
+
+**Tool Capture**:
+An automatic recovery point linked to a tool call that changed repository or worktree state, including a failed call that partially changed tracked state. It remains inspectable and recoverable without becoming a meaningful source-history boundary by itself.
+_Avoid_: screenshot, raw command archive, tool transcript
+
+**Task Provenance**:
+Metadata that explains why or under which local delegation an agent produced collaboration operations. It is distinct from agent attribution, which names the actor that authored an operation.
+_Avoid_: agent attribution, task authority
+
+**Hosted Task Provenance Alias**:
+A Weft-minted hosted-safe identifier that groups collaboration operations from the same local agent task within a specific Weft repository and policy scope. It is provenance for hosted views, not task assignment authority or runner lifecycle state.
+_Avoid_: raw task assignment id, hosted task assignment
+
+**Cross-Domain Provenance View**:
+A derived view that correlates source attribution, collaboration operations, task assignment metadata, and sync metadata. It is not collaboration content unless a human or agent explicitly writes commentary about the relationship.
+_Avoid_: provenance discussion, task record
+
+**Durable Async Coordination**:
+The local Heddle collaboration model where humans and agents exchange persistent records that can be read, queried, merged, and reconciled without live connectivity.
+_Avoid_: real-time chat, presence
+
+**Attention Target**:
+A structured target for attention or readiness, such as a principal, agent, thread, role, or current checkout context. It may be entered through human-friendly mention syntax, but the durable meaning is the resolved target.
+_Avoid_: raw @mention text, display-name routing
+
+**Server-Validated Local Capability**:
+A locally minted Biscuit capability whose maximum permission scope has been validated by Weft. Heddle can derive attenuated child capabilities locally, but hosted trust comes from Weft validating the root capability's scope.
+_Avoid_: self-sovereign hosted token, locally trusted hosted token
+
+**Capability Refresh**:
+The automatic act of replacing the active server-validated local capability after Weft reports that hosted policy or grants have changed. Refresh creates a new capability identity linked to the prior active capability, is user-visible, affects future policy context and sync attempts, and does not mutate existing immutable Biscuit tokens or rewrite existing operation provenance.
+_Avoid_: mutating a biscuit, silently rewriting capability history
+
+**Derived Capability Narrowing**:
+The automatic reduction of effective scope for locally derived capabilities when the refreshed root capability is narrower. Heddle treats derived capability effectiveness as capped by the current server-validated root rather than mutating previously minted child Biscuits.
+_Avoid_: mutating child biscuits, stale derived authority
+
+**Operation Capability Context**:
+The capability context recorded in a collaboration operation when it is created. It contains capability identity and a canonical scope summary as local provenance about the actor's claimed authority and policy view at creation time, not full token material.
+_Avoid_: hosted acceptance, remote grant
+
+**Hosted Acceptance Context**:
+Sync metadata describing the capability context Weft accepted for a collaboration operation on a specific remote. It stores acceptance facts such as capability identity, accepted scope summary, remote identity, accepted time, and policy or grant version when available, not full token material.
+_Avoid_: operation capability context, creation authority
+
+**Capability-Aware Local Filtering**:
+Local CLI filtering that uses the active server-validated local capability to decide which collaboration records to show by default. It is policy context, not a hard security boundary over local filesystem data.
+_Avoid_: local access control, local hosted enforcement
+
+**Expired Capability Context**:
+A cached capability context whose freshness window has passed without a successful Weft refresh. It may be used for degraded local reads with clear labeling, but it is not presented as current hosted authority.
+_Avoid_: current permission, valid hosted scope
+
+**Restricted Collaboration Record**:
+A collaboration record that Heddle filters according to active capability policy. In the OSS local store, restriction does not imply encryption unless a future encrypted storage mode says so explicitly.
+_Avoid_: encrypted discussion
+
+**Collaboration Validity**:
+The acceptance state of a collaboration operation. Local validity means Heddle can parse and structurally apply the operation; hosted validity means Weft accepts it under hosted policy.
+_Avoid_: valid without scope
+
+**Unknown Collaboration Author**:
+A degraded local attribution state used when Heddle cannot resolve a principal or agent for a collaboration operation. Unknown authorship is visible and low-trust, and Weft may reject it under hosted policy.
+_Avoid_: anonymous trusted author
+
+**Import Actor**:
+The principal or agent that imported external or orphaned collaboration history into Heddle. It is distinct from the original author metadata carried by the imported content.
+_Avoid_: original author, anonymous importer
+
+**Repository Collaboration Log**:
+A repository-level collection of collaboration records that can reconcile independent local edits. Discussions are records in this log; their turns, resolutions, and anchor changes are part of the record's history.
+_Avoid_: state discussion blob, per-turn CRDT
+
+**Collaboration Store**:
+The Heddle-native local storage for collaboration operations, indexes, and derived views. It uses repository-local content-addressed objects and rebuildable indexes rather than an embedded database as the durable source of truth.
+_Avoid_: collaboration database, SQLite collaboration store
+
+**Collaboration Store Layout**:
+The local filesystem layout rooted at `.heddle/collaboration/`, with durable operations under `ops/` and rebuildable indexes, views, sync metadata, and temporary files under separate subdirectories.
+_Avoid_: collaboration in source objects, collaboration in oplog
+
+**Collaboration Retention**:
+The policy for keeping or removing locally valid collaboration operations. In v1, locally valid collaboration operations are retained even when Weft rejects them under hosted policy; cleanup only removes temporary artifacts or rebuilds disposable indexes and views.
+_Avoid_: collaboration garbage collection
+
+**Collaboration Sync Lane**:
+The Weft-backed repository synchronization lane that exchanges collaboration operations separately from immutable source objects while remaining part of normal Heddle push and pull behavior.
+_Avoid_: separate discussion product sync, chat sync
+
+**Collaboration Sync Metadata**:
+Local metadata about whether collaboration operations are pending, accepted, rejected, blocked by hosted-invalid causal history, or cursor-synced with Weft. A hosted rejection is sync metadata about a retained local operation, not collaboration content.
+_Avoid_: rejection operation
+
+**Unresolved Collaboration Operation**:
+A structurally valid local collaboration operation whose cited causal parents are not available locally. It is retained as pending/unresolved but is not applied to materialized views until parents arrive or an explicit import/orphan rule accounts for the gap.
+_Avoid_: applied orphan operation, missing-parent success
+
+**Invalid Collaboration Artifact**:
+Malformed or unverifiable collaboration bytes retained for diagnostics or quarantine. It is not a locally valid collaboration operation and is not applied to materialized views.
+_Avoid_: valid operation, silently deleted operation
+
+**Collaboration Import Root**:
+An explicit operation that introduces imported or orphaned collaboration history as a new causal root with recorded source, reason, and trust level.
+_Avoid_: silent orphan apply, missing parent workaround
+
+**Hosted Rejection Reason**:
+Sync metadata explaining why Weft rejected a collaboration operation, with a stable machine-readable code and a human display message. It is not collaboration content and may be refreshed by later sync attempts.
+_Avoid_: rejection comment, rejection turn
+
+**Hosted-Valid Continuation**:
+A new collaboration operation that continues a collaboration record without citing a hosted-rejected local operation or its hosted-invalid descendants as causal parents. It creates a Weft-acceptable causal path while preserving the rejected local history.
+_Avoid_: rewriting rejection, deleting rejected parent
+
+**Heddle-Hosted Collaboration**:
+Collaboration records shared through a Heddle remote backed by Weft. Heddle discussions, context, and attention do not project through Git hosting or Git bridge surfaces.
+_Avoid_: Git-hosted discussions, Git notes collaboration
+
+**Local-Only Collaboration**:
+Collaboration records that exist only in the local repository because no Heddle remote is configured or synchronized. Heddle should label this state when users might assume Git push shared the collaboration records.
+_Avoid_: unsynced Git comments
+
+**Linked Collaboration**:
+Collaboration records that are causally or semantically tied to source content being synchronized, such as discussions anchored to pushed states, changes, changed paths or symbols, active blockers or questions for the pushed thread, and operations that continue those records.
+_Avoid_: unrelated discussion sync
+
+**Live Collaboration Sync**:
+Iroh-backed synchronization that keeps already-synced collaboration records up to date while a Weft connection is active. Live sync updates the durable repository collaboration log; it is not a separate chat transport.
+_Avoid_: chat stream, presence
+
+**Collaboration Watch**:
+An explicit foreground command mode that keeps collaboration records current through live sync and renders updates for humans or agents. It is the first live-sync lifecycle before daemon ownership exists.
+_Avoid_: invisible background sync
+
+**Collaboration Operation**:
+An immutable event in the repository collaboration log, such as opening a discussion, appending a turn, resolving a discussion, retargeting an anchor, or changing visibility. Collaboration operations carry Heddle-style attribution for the acting principal, agent, capability context, and originating work context when known.
+_Avoid_: document overwrite, latest discussion document
+
+**Primary Collaboration Record**:
+The single collaboration record that a collaboration operation primarily targets for indexing and materialization. Operations may reference other records or source anchors, but they do not have multiple primary records.
+_Avoid_: multi-record operation target, implicit target
+
+**Compensating Collaboration Operation**:
+A later collaboration operation that corrects, reverses, or supersedes an earlier collaboration operation without erasing it.
+_Avoid_: undo discussion, delete turn
+
+**Causal Ordering**:
+The ordering relationship between collaboration operations based on which prior operations each operation observed. Concurrent operations can both be valid without one overwriting the other.
+_Avoid_: global total order
+
+**Collaboration View**:
+A derived current view of collaboration records produced from collaboration operations. Views are caches or query outputs, not the durable source of truth.
+_Avoid_: source-of-truth discussion document
+
+**Attention Severity**:
+The readiness impact of an attention item, such as blocker, warning, or informational. Only targeted or high-severity attention items should block readiness.
+_Avoid_: priority
+
+**Attention Target**:
+The principal, agent, or thread expected to notice an attention item. Principal, agent, and thread targets are distinct because they represent accountability, actor identity, and work-unit relevance respectively.
+_Avoid_: assignee string, text mention
+
+**Weft**:
+The hosted store and policy-verification boundary for Heddle repositories. Weft serves the governed Iroh RPC contract to equal Heddle and Tapestry clients; it verifies client authority and coordinates shared state without owning either client's workflow.
+_Avoid_: Heddle server, Heddle core
+
+**Iroh Hosted Transport**:
+The shared hosted call transport used by native Heddle clients, browser WebAssembly clients, and Weft application endpoints. It carries the governed protobuf contract over operation-scoped Iroh QUIC streams while keeping framing, call context, failures, and replay policy behind one interface.
+_Avoid_: gRPC replacement contract, pack-only transport, browser WebTransport
+
+**Hosted Client Parity**:
+The requirement that Heddle and Tapestry address the same governed Weft operations over the Iroh RPC contract. A client's current interface or key capability may change how an operation is prepared or authorized, but does not make that operation exclusive to the client.
+_Avoid_: Tapestry-only operation, CLI-only hosted API, web workflow authority
+
+**Human-Signable Action**:
+An exact canonical hosted operation proposed by an agent or client that lacks the required human key, with its payload digest, scope, expiry, and idempotency identity fixed before approval. It has no effect until a human reviews and signs it in a capable client and submits those same bytes for Weft verification.
+_Avoid_: agent approval, unsigned mutation, mutable approval request
+
+**Passkey-Capable Client**:
+A client able to perform human-key operations with a passkey while keeping the private key inside its authenticator boundary. Tapestry has this capability natively in the browser today; that is a temporary signing-surface advantage, not ownership of the underlying Weft operation.
+_Avoid_: Tapestry authority, server-held human key, browser-only operation
+
+**Weft Relay**:
+The Weft-operated Iroh relay that gives browser clients secure-WebSocket access and gives native clients a fallback path when direct UDP connectivity is unavailable. It forwards encrypted Iroh traffic and is distinct from the Weft application endpoint that terminates calls and enforces hosted policy.
+_Avoid_: WebTransport endpoint, application proxy, hosted authorization service
+
+**Tapestry**:
+The browser client for Heddle collaboration, review, onboarding, and operational visibility. It is an equal client of Weft's Iroh RPC contract and currently provides native passkey ceremonies for human-key operations and Human-Signable Actions.
+_Avoid_: Heddle web, Heddle core
 
 ========================================================================
 Source: docs/heddleignore.md

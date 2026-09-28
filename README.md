@@ -66,7 +66,7 @@ Heddle's CLI follows five operating principles — verification, disposability, 
 - First-class history graph UX in the CLI
 - Partial clone and lazy object retrieval
 
-The 1.0 stability criterion — coverage thresholds, performance budgets, format/API stability, SemVer, and deprecation policy — lives in [docs/STABILITY.md](docs/STABILITY.md).
+The current compatibility promise and surfaces that remain unstable until 1.0 live in [docs/STABILITY.md](docs/STABILITY.md).
 
 ## Installation
 

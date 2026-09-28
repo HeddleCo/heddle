@@ -11,7 +11,7 @@ Related ADRs:
 
 ## Vocabulary
 
-Use the glossary terms in `CONTEXT.md` exactly.
+Use the glossary terms in `CONTEXT.md` and `docs/glossary.md` exactly.
 
 - Git Overlay: Heddle sidecar over an existing Git checkout. Active Git reads and writes use the checkout's real `.git`.
 - Bridge Mirror: the retired bare Git repository formerly stored at `.heddle/git`; the term is historical and names no current runtime component.

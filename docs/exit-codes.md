@@ -67,8 +67,7 @@ declared discriminators, `exit_codes`) are stable for that minor.
   the **major** post-1.0.
 - Additive changes (new fields with default `null`, new optional exit codes
   added to `exit_codes`) bump the **patch**.
-- See [`STABILITY.md`](STABILITY.md) for the broader 1.0 stability gate
-  this rule is one component of.
+- See [`STABILITY.md`](STABILITY.md) for the current compatibility promise.
 
 ## Coverage
 

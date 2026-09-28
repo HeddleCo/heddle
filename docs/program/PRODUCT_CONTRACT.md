@@ -91,7 +91,7 @@ delivery (CLI / future daemon / tests)
 - Requiring a hosted account or always-on network for local VCS.
 - Last-write-wins collaboration on source history (source history is immutable; collaboration is a separate log).
 - Persistent Bridge Mirror (`.heddle/git`) in any runtime role (retired; overlay uses real `.git` and explicit projection uses residuals).
-- 1.0 API freeze until `docs/STABILITY.md` thresholds are set and met (currently strawman / TBD).
+- A general 1.0 API freeze; `docs/STABILITY.md` names the narrower compatibility surfaces stable now.
 - Partial clone / lazy object fetch (planned).
 - Hosted builds/workflows/artifacts in this OSS repo (planned / weft).
 
@@ -102,6 +102,5 @@ delivery (CLI / future daemon / tests)
 | `heddle-core` is the embeddable facade | Partial: status/verify/diff/merge/save/query/fsck/thread_shaping extracted; large CLI command surface still owns domain logic (`thread`, `clone`, `workflow`, remotes, undo, …) |
 | No runtime git process | Enforced for scanned runtime dirs; `crates/core` not in git-process lint dirs yet; optional `watchman` spawn exists for fsmonitor |
 | CLI is thin clap→facade→render | Not yet: `crates/cli` ~200k LOC; many `cmd_*` handlers still fuse compute + render |
-| Stability 1.0 gates | `docs/STABILITY.md` still has `<TBD: maintainer>` thresholds |
+| Stability 1.0 gates | `docs/STABILITY.md` now states the owner's compatibility decision; program numeric gates remain in `RELEASE_GATES.md` |
 | ARCHITECTURE.md “hosted namespaces in this codebase” | Hosted server moved to weft; this repo keeps client/proto foundation |
-| `docs/STABILITY.md` version numbers | Document cites 0.2.x; workspace package version is `0.10.0` |

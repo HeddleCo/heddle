@@ -18,10 +18,10 @@ for parseable `git fetch --porcelain` output.
 ## 1. Why this is a transport backend, not a second Git engine
 
 The domain model names Sley as Heddle's native Git-format engine and assigns Git
-object identity and Git operation behavior to it (`CONTEXT.md:23-25`). Git Overlay
+object identity and Git operation behavior to it (see [Sley](../glossary.md)). Git Overlay
 uses the checkout's real `.git` repository as source authority
-(`CONTEXT.md:27-32`), while explicit native-to-Git bridge work can use the bare
-Bridge Mirror at `.heddle/git` (`CONTEXT.md:43-45`). The workspace currently pins
+([CONTEXT.md](../../CONTEXT.md)); the bare Bridge Mirror at `.heddle/git` is
+retired (see [the glossary](../glossary.md)). The workspace currently pins
 both `sley` and `sley-transport` at 0.5.2 (`Cargo.toml:61-62`). None of those
 ownership rules should change.
 
