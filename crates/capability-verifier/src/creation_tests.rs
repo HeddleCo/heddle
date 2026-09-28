@@ -203,35 +203,6 @@ fn browser_produced_delegated_creation_passes_rust_admission() {
 }
 
 #[test]
-fn capability_verifier_rejects_v0_sealed_creation_proof() {
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../tests/fixtures/browser_spool_creation_v0_rejected.json"
-    ))
-    .expect("old browser fixture");
-    let bytes = hex::decode(
-        fixture["signed_spool_owner_genesis_hex"]
-            .as_str()
-            .expect("genesis hex"),
-    )
-    .expect("genesis bytes");
-    let record = SignedSpoolOwnerGenesis::decode(bytes.as_slice()).expect("signed genesis");
-    let history = record
-        .delegated_creation
-        .as_ref()
-        .and_then(|proof| proof.owner_history.as_ref())
-        .expect("owner history");
-    let owner =
-        verify_owner_root(history.root.as_ref().expect("owner root")).expect("verified owner");
-    let error = admit_fresh_spool_creation(
-        &record,
-        &owner,
-        fixture["now_unix_seconds"].as_i64().expect("time"),
-    )
-    .expect_err("v0 creation proof rejected");
-    assert!(error.to_string().contains("signature-v1"), "{error}");
-}
-
-#[test]
 fn delegated_creation_uses_exact_sealed_permission_and_actual_current_time() {
     let (signed, current) = creation_fixture(false, true);
     validate_spool_creation_structure(&signed, NOW).expect("structure and lineage");

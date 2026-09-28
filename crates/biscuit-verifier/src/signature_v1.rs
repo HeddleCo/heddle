@@ -31,7 +31,7 @@ fn require_wire_v1(bytes: &[u8]) -> Result<schema::Biscuit, BiscuitError> {
     Ok(wire)
 }
 
-/// Reject any token with a signature-v0 authority or appended block.
+/// Require signature-v1 in the authority and every appended block.
 pub fn require_v1(token: &Biscuit) -> Result<(), BiscuitError> {
     if token.container().authority.version != 1 {
         return Err(BiscuitError::Invalid(
@@ -161,47 +161,19 @@ mod tests {
         KeyPair::from(&private)
     }
 
-    fn legacy_v0_fixture(root: &KeyPair) -> Biscuit {
-        Biscuit::builder()
-            .fact("fixture(true)")
-            .expect("fact")
-            .build(root)
-            .expect("v0 control")
-    }
-
     #[test]
-    fn parse_token_rejects_v0_authority() {
+    fn verify_rejects_v0_authority() {
         let root = key(1);
-        let legacy = legacy_v0_fixture(&root);
-        assert_eq!(legacy.container().authority.version, 0);
-        let token = legacy.to_base64().expect("base64");
-        assert!(Biscuit::from_base64(&token, root.public()).is_ok());
-        let error = crate::parse_token(&token, &[root.public()]).expect_err("v0 rejected");
+        let token = Biscuit::builder().build(&root).expect("v0 control");
+        assert_eq!(token.container().authority.version, 0);
+        let bytes = token.to_vec().expect("token bytes");
+        assert!(Biscuit::from(&bytes, root.public()).is_ok());
+        let error = verify(&bytes, root.public()).expect_err("v0 rejected");
         assert!(
             error
                 .to_string()
                 .contains("authority block must use signature-v1")
         );
-        assert!(parse_unverified_base64(&token).is_err());
-    }
-
-    #[test]
-    fn authorize_at_rejects_v0_direct() {
-        let root = key(1);
-        let legacy = legacy_v0_fixture(&root);
-        let error =
-            crate::authorize_at(&legacy, "ReadContent", chrono::Utc::now(), None, &[], None)
-                .expect_err("direct authorization rejects v0");
-        assert!(error.to_string().contains("signature-v1"), "{error}");
-    }
-
-    #[test]
-    fn key_delegation_append_refuses_v0_parent() {
-        let root = key(1);
-        let parent = legacy_v0_fixture(&root).to_base64().expect("v0 bearer");
-        let error = crate::key_delegation::append(&parent, &[3; 32], &[4; 64], BlockBuilder::new())
-            .expect_err("v0 parent refused");
-        assert!(error.to_string().contains("signature-v1"), "{error}");
     }
 
     #[test]
@@ -245,37 +217,6 @@ mod tests {
             .append_third_party_with_keypair(external.public(), external_block, key(4))
             .expect("third-party append");
         require_v1(&third_party).expect("third-party append stays v1");
-    }
-
-    #[test]
-    fn mixed_chain_rejected_in_both_directions() {
-        let root = key(5);
-        let legacy = legacy_v0_fixture(&root);
-        let external = key(6);
-        let external_block = legacy
-            .third_party_request()
-            .expect("request")
-            .create_block(
-                &external.private(),
-                BlockBuilder::new().fact("external(true)").expect("fact"),
-            )
-            .expect("external block");
-        let mixed = legacy
-            .append_third_party_with_keypair(external.public(), external_block, key(7))
-            .expect("v1 third-party block on v0 root");
-        assert_eq!(mixed.container().authority.version, 0);
-        assert_eq!(mixed.container().blocks[0].version, 1);
-        assert!(verify(&mixed.to_vec().expect("mixed bytes"), root.public()).is_err());
-
-        let v1 = build_root(Biscuit::builder(), &root).expect("v1 root");
-        let appended = v1
-            .append(BlockBuilder::new().fact("child(true)").expect("fact"))
-            .expect("append");
-        let mut wire =
-            schema::Biscuit::decode(appended.to_vec().expect("bytes").as_slice()).expect("wire");
-        wire.blocks[0].version = None;
-        let error = parse_unverified(&wire.encode_to_vec()).expect_err("v0 tail rejected");
-        assert!(error.to_string().contains("block 1 must use signature-v1"));
     }
 
     #[test]

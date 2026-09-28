@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reject signature-v0 subject Biscuits and sealed owner evidence through the shared verifier.
+- Verify signature-v1 subject Biscuits and sealed owner evidence through the shared verifier.
 - Pin heddle-api 0.31.0-alpha.8.
 
 ## [0.21.6](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.21.5...heddleco-capability-verifier-v0.21.6) - 2026-09-28

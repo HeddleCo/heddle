@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Mint only signature-v1 root credentials and refuse stored v0 credentials with login recovery guidance.
+- Mint signature-v1 root credentials and verify signature-v1 bearers at the shared boundary.
 
 ## [0.25.7](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.25.6...heddle-hosted-client-v0.25.7) - 2026-09-28
 

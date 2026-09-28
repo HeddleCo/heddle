@@ -79,10 +79,7 @@ pub(crate) async fn login(
 }
 
 fn credential_is_reusable(resolved: &ResolvedHostedCredential) -> bool {
-    let Some(token) = resolved.token.as_ref() else {
-        return false;
-    };
-    if biscuit_verifier::signature_v1::parse_unverified_base64(token.id.as_bytes()).is_err() {
+    if resolved.token.is_none() {
         return false;
     }
     match resolved.expires_at.as_deref() {
@@ -179,32 +176,4 @@ pub(crate) fn store_agent_root(
             expires_at: Some(expires_at.to_rfc3339()),
         },
     )
-}
-
-#[cfg(test)]
-mod signature_v1_tests {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE};
-
-    use super::*;
-
-    #[test]
-    fn login_does_not_reuse_v0_credential() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../biscuit-verifier/tests/fixtures/timeline-origin-collision-v0.json"
-        ))
-        .expect("v0 fixture");
-        let bytes =
-            hex::decode(fixture["a_chain_hex"].as_str().expect("chain hex")).expect("chain bytes");
-        let credential = ResolvedHostedCredential {
-            mint_root_attachment: None,
-            token: Some(wire::AuthToken::new(URL_SAFE.encode(bytes), "legacy")),
-            proof_key_pem: None,
-            renewable: None,
-            subject: Some("legacy".into()),
-            credential_id: None,
-            expires_at: None,
-            source: super::super::hosted::CredentialSource::Keystore,
-        };
-        assert!(!credential_is_reusable(&credential));
-    }
 }

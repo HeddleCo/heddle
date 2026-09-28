@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Build signature-v1 Biscuit roots and reject every token containing a signature-v0 block.
+- Mint signature-v1 Biscuit roots and verify signature-v1 blocks at the shared boundary.
 - Pin heddle-api 0.31.0-alpha.8.
 
 ## [0.25.6](https://github.com/HeddleCo/heddle/compare/heddle-biscuit-verifier-v0.25.5...heddle-biscuit-verifier-v0.25.6) - 2026-09-28

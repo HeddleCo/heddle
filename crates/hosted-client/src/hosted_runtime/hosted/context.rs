@@ -80,13 +80,9 @@ impl CallContextFactory {
             Vec::new()
         } else {
             biscuit_verifier::signature_v1::parse_unverified_base64(&self.bearer_capability)
-                .map_err(|error| HostedError::Framing(format!(
-                    "invalid stored Biscuit: {error}; run `heddle auth login` to re-authenticate"
-                )))?
+                .map_err(|error| HostedError::Framing(format!("invalid stored Biscuit: {error}")))?
                 .to_vec()
-                .map_err(|error| HostedError::Framing(format!(
-                    "invalid stored Biscuit: {error}; run `heddle auth login` to re-authenticate"
-                )))?
+                .map_err(|error| HostedError::Framing(format!("invalid stored Biscuit: {error}")))?
         };
         Ok(match &self.signer {
             Some(signer) => thread_api::credentials::Credentials::Signed {
@@ -325,13 +321,9 @@ impl CallContextFactory {
             Vec::new()
         } else {
             biscuit_verifier::signature_v1::parse_unverified_base64(&self.bearer_capability)
-                .map_err(|error| HostedError::Framing(format!(
-                    "invalid stored Biscuit: {error}; run `heddle auth login` to re-authenticate"
-                )))?
+                .map_err(|error| HostedError::Framing(format!("invalid stored Biscuit: {error}")))?
                 .to_vec()
-                .map_err(|error| HostedError::Framing(format!(
-                    "invalid stored Biscuit: {error}; run `heddle auth login` to re-authenticate"
-                )))?
+                .map_err(|error| HostedError::Framing(format!("invalid stored Biscuit: {error}")))?
         };
         Ok(CallContext {
             deadline: Some(deadline(self.timeout)?),
@@ -525,7 +517,6 @@ fn deadline(timeout: Duration) -> Result<Timestamp> {
 
 #[cfg(test)]
 mod tests {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE};
     #[test]
     fn stored_mint_association_recognizes_exact_owner_and_passkey_shapes() {
         use api::heddle::api::v1alpha2::{
@@ -587,29 +578,6 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
-
-    #[test]
-    fn hosted_call_context_refuses_v0_bearer() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../biscuit-verifier/tests/fixtures/timeline-origin-collision-v0.json"
-        ))
-        .expect("v0 fixture");
-        let bytes =
-            hex::decode(fixture["a_chain_hex"].as_str().expect("chain hex")).expect("chain bytes");
-        let factory = CallContextFactory {
-            bearer_capability: URL_SAFE.encode(bytes).into_bytes(),
-            ..CallContextFactory::default()
-        };
-        let error = factory
-            .streaming("/heddle.api.v1alpha2.SyncService/Fetch", "v0")
-            .expect_err("v0 hosted call refused");
-        assert!(error.to_string().contains("heddle auth login"), "{error}");
-        let error = match factory.native_credentials() {
-            Err(error) => error,
-            Ok(_) => panic!("v0 native credentials accepted"),
-        };
-        assert!(error.to_string().contains("heddle auth login"), "{error}");
-    }
 
     #[derive(Deserialize)]
     struct Vector {

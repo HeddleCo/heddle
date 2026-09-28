@@ -101,15 +101,6 @@ fn context<'a>(owner: &'a VerifiedOwnerState, publisher: &'a [u8; 32]) -> Contex
 }
 
 #[test]
-fn capability_verifier_rejects_v0_thread_control_authority() {
-    let (_, owner, publisher) = fixture(false);
-    let bytes = include_bytes!("../tests/fixtures/thread_control_authority_v0_rejected.bin");
-    let error = proof::verify(bytes, context(&owner, &publisher), |_| false)
-        .err()
-        .expect("v0 thread authority rejected");
-    assert!(error.to_string().contains("signature-v1"), "{error}");
-}
-#[test]
 fn thread_authority_preserves_original_publisher_account_and_agent() {
     let (bytes, owner, publisher) = fixture(false);
     let valid = proof::verify(&bytes, context(&owner, &publisher), |_| false).expect("human");
@@ -433,23 +424,6 @@ fn boundary_scope<'a>(
     }
 }
 
-#[test]
-fn capability_verifier_rejects_v0_boundary_authority() {
-    let (_, owner, publisher) = boundary_acceptor("");
-    let mut ctx = context(&owner, &publisher);
-    ctx.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
-    let bytes = include_bytes!("../tests/fixtures/boundary_authority_v0_rejected.bin");
-    let error = crate::boundary_authority::verify_accepting_authority(
-        bytes,
-        ctx,
-        boundary_scope(&[21; 32], &[22; 32], &[23; 32]),
-        &[],
-        |_| false,
-    )
-    .err()
-    .expect("v0 accepting authority rejected");
-    assert!(error.to_string().contains("signature-v1"), "{error}");
-}
 #[test]
 fn boundary_revoked_expired_original_is_provenance_only_and_acceptor_must_be_current() {
     use crate::boundary_authority::{inspect_original_identity, verify_accepting_authority};

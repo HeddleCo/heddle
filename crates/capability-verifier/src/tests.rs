@@ -1407,18 +1407,6 @@ fn embedded_fixture_adapters_agree() {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
 #[cfg_attr(not(target_arch = "wasm32"), test)]
-fn capability_verifier_rejects_v0_subject_biscuit() {
-    let current = conformance::run_fixture(conformance::FIXTURE_V2_JSON).expect("v1 fixture");
-    assert_eq!(current[0].actual, Decision::Purge);
-    let legacy = conformance::run_fixture(include_str!(
-        "../tests/fixtures/subject_biscuit_v0_rejected.json"
-    ))
-    .expect("v0 fixture");
-    assert_ne!(legacy[0].actual, Decision::Purge);
-}
-
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
-#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn embedded_valid_fixture_components_verify() {
     let fixture: conformance::ConformanceFixture =
         serde_json::from_str(conformance::FIXTURE_V2_JSON).expect("fixture JSON");

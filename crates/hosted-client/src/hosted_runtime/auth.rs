@@ -791,11 +791,7 @@ pub(crate) fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetada
     use biscuit_auth::builder::{BlockBuilder, Term};
 
     let biscuit = biscuit_verifier::signature_v1::parse_unverified_base64(token.as_bytes())
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "stored credential is invalid: {error}; run `heddle auth login` to re-authenticate"
-            )
-        })?;
+        .context("parsing credential token as a Biscuit")?;
     let block_count = biscuit.block_count();
     let authority_source = biscuit
         .print_block_source(0)
@@ -937,21 +933,17 @@ fn auth_status(server: Option<&str>) -> Result<AuthStatus> {
     // `auth status` reflects what a hosted op would actually use — including a
     // `HEDDLE_CREDENTIAL` that overrides the keystore.
     let resolved = resolve_hosted_credential(Some(&server))?;
-    auth_status_output(&server, &resolved)
+    Ok(auth_status_output(&server, &resolved))
 }
 
-fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> Result<AuthStatus> {
+fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> AuthStatus {
     let source = resolved.source.label();
-    if let Some(token) = resolved.token.as_ref() {
-        biscuit_verifier::signature_v1::parse_unverified_base64(token.id.as_bytes())
-            .map_err(|error| anyhow::anyhow!(
-                "stored credential is invalid: {error}; run `heddle auth login` to re-authenticate"
-            ))?;
+    if resolved.token.is_some() {
         let proof_key_available = resolved
             .proof_key_pem
             .as_deref()
             .is_some_and(|pem| Ed25519Signer::from_pem(pem).is_ok());
-        Ok(AuthStatus {
+        AuthStatus {
             server: server.to_string(),
             authenticated: true,
             source,
@@ -961,9 +953,9 @@ fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> Resu
             expires_at: resolved.expires_at.clone(),
             recommended_action: (!proof_key_available)
                 .then(|| format!("heddle auth login --server {server}")),
-        })
+        }
     } else {
-        Ok(AuthStatus {
+        AuthStatus {
             server: server.to_string(),
             authenticated: false,
             source,
@@ -972,7 +964,7 @@ fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> Resu
             credential_id: None,
             expires_at: None,
             recommended_action: Some(format!("heddle auth login --server {server}")),
-        })
+        }
     }
 }
 
@@ -2970,7 +2962,7 @@ mod tests {
             expires_at: credential.expires_at,
             source: crate::hosted_runtime::hosted::CredentialSource::Keystore,
         };
-        let output = auth_status_output("api.S", &resolved).expect("v1 status");
+        let output = auth_status_output("api.S", &resolved);
 
         assert!(output.authenticated);
         assert_eq!(output.source, "keystore");
@@ -2981,34 +2973,6 @@ mod tests {
                 .as_deref()
                 .is_some_and(|action| action.contains("auth login --server api.S"))
         );
-    }
-
-    #[test]
-    fn auth_status_refuses_v0_keystore_credential() {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE};
-
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../biscuit-verifier/tests/fixtures/timeline-origin-collision-v0.json"
-        ))
-        .expect("v0 fixture");
-        let bytes =
-            hex::decode(fixture["a_chain_hex"].as_str().expect("chain hex")).expect("chain bytes");
-        let resolved = crate::hosted_runtime::hosted::ResolvedHostedCredential {
-            mint_root_attachment: None,
-            token: Some(wire::AuthToken::new(
-                URL_SAFE.encode(bytes),
-                "credential-store",
-            )),
-            proof_key_pem: None,
-            renewable: None,
-            subject: Some("legacy".into()),
-            credential_id: None,
-            expires_at: None,
-            source: crate::hosted_runtime::hosted::CredentialSource::Keystore,
-        };
-        let error =
-            auth_status_output("api.S", &resolved).expect_err("v0 keystore credential refused");
-        assert!(error.to_string().contains("heddle auth login"), "{error}");
     }
 
     #[tokio::test]

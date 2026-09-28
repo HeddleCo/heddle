@@ -21,23 +21,6 @@ fn build_root_emits_v1_authority() {
 }
 
 #[test]
-fn headless_token_metadata_refuses_v0_with_login_message() {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE};
-
-    let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../biscuit-verifier/tests/fixtures/timeline-origin-collision-v0.json"
-    ))
-    .expect("v0 collision fixture");
-    let bytes =
-        hex::decode(fixture["a_chain_hex"].as_str().expect("chain hex")).expect("chain bytes");
-    let bearer = URL_SAFE.encode(bytes);
-    let error = headless_token_metadata(&bearer)
-        .err()
-        .expect("v0 stored credential refused");
-    assert!(error.to_string().contains("heddle auth login"), "{error}");
-}
-
-#[test]
 fn agent_root_is_signed_by_the_same_seed_weft_will_register() {
     let _process_env_guard = crate::test_process_env::shared_blocking();
     let signer = Ed25519Signer::generate().expect("seed");
