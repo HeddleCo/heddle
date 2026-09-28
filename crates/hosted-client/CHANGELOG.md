@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.7](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.25.6...heddle-hosted-client-v0.25.7) - 2026-09-28
+
+### Other
+
+- Prove producer owner acceptance round-trips through the shared format-3 verifier.
+
 ## [0.25.6](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.25.5...heddle-hosted-client-v0.25.6) - 2026-09-28
 
 ### Other

@@ -42,6 +42,9 @@ mod creation_tests;
 #[path = "passkey_delegation_tests.rs"]
 mod passkey_delegation_tests;
 
+#[path = "timeline_tests.rs"]
+mod timeline_tests;
+
 struct TestKey {
     seed: [u8; 32],
     signing: SigningKey,

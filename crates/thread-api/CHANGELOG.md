@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.7](https://github.com/HeddleCo/heddle/compare/heddle-thread-api-v0.25.6...heddle-thread-api-v0.25.7) - 2026-09-28
+
+### Other
+
+- Update the workspace dependency versions.
+
 ## [0.25.6](https://github.com/HeddleCo/heddle/compare/heddle-thread-api-v0.25.5...heddle-thread-api-v0.25.6) - 2026-09-28
 
 ### Other

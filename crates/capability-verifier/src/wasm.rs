@@ -5,10 +5,13 @@ use serde::Serialize;
 use wasm_bindgen::prelude::*;
 
 use crate::{
-    Decision, Denial, PurgeContext, VerificationLimits,
-    conformance::{run_fixture, run_keyring_fixture, run_transfer_fixture},
-    verify_owner_root, verify_purge_authorization_bytes,
-    wire::{PurgeOperationSigningBody, SignedOwnerRoot, SignedSpoolOwnerGenesis},
+    Decision, Denial, PurgeContext, TimelineAcceptanceContext, VerificationLimits,
+    conformance::{run_fixture, run_keyring_fixture, run_timeline_fixture, run_transfer_fixture},
+    verify_owner_root, verify_purge_authorization_bytes, verify_timeline_acceptance,
+    wire::{
+        PurgeOperationSigningBody, SignedOwnerRoot, SignedSpoolOwnerGenesis,
+        TimelineAdmissionAcceptance, TimelineOriginEndorsement,
+    },
 };
 
 const MAX_OWNER_ROOT_BYTES: usize = 64 * 1024;
@@ -138,4 +141,63 @@ pub fn run_transfer_fixture_binding(fixture_json: &str) -> Result<String, JsErro
 #[wasm_bindgen(js_name = runKeyringFixture)]
 pub fn run_keyring_fixture_binding(fixture_json: &str) -> Result<String, JsError> {
     json(&run_keyring_fixture(fixture_json).map_err(js_error)?)
+}
+
+/// Run the format-3 timeline owner-acceptance fixture adapter as JSON.
+#[wasm_bindgen(js_name = runTimelineFixture)]
+pub fn run_timeline_fixture_binding(fixture_json: &str) -> Result<String, JsError> {
+    json(&run_timeline_fixture(fixture_json).map_err(js_error)?)
+}
+
+/// Verify one owner-derived format-3 timeline acceptance against current state.
+/// All protobuf inputs must have canonical encodings. `false` denies malformed
+/// or invalid evidence; an invalid verifier TTL is a caller configuration error.
+#[wasm_bindgen(js_name = verifyTimelineAcceptance)]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_timeline_acceptance_binding(
+    origin_bytes: &[u8],
+    acceptance_bytes: &[u8],
+    accepted_state_hash: &[u8],
+    spool_path_segments: Vec<String>,
+    request_sha256: &[u8],
+    first_position: u64,
+    event_count: u32,
+    revoked_capability_ids_hex: Vec<String>,
+    revoked_subject_ids_hex: Vec<String>,
+    now_unix_seconds: i64,
+    max_capability_ttl_seconds: i64,
+) -> Result<bool, JsError> {
+    let limits = VerificationLimits::new(max_capability_ttl_seconds).map_err(js_error)?;
+    let verified = (|| -> crate::Result<()> {
+        let origin: TimelineOriginEndorsement = canonical_message(origin_bytes, 4096)?;
+        let acceptance: TimelineAdmissionAcceptance = canonical_message(acceptance_bytes, 8192)?;
+        let state_hash = fixed::<32>(accepted_state_hash, "accepted owner state hash")?;
+        let request_sha256 = fixed::<32>(request_sha256, "request digest")?;
+        let revoked_capability_ids = revoked_capability_ids_hex
+            .iter()
+            .map(|id| hex::decode(id).map_err(|error| crate::Error::Invalid(error.to_string())))
+            .collect::<crate::Result<Vec<_>>>()?;
+        let revoked_subject_ids = revoked_subject_ids_hex
+            .iter()
+            .map(|id| hex::decode(id).map_err(|error| crate::Error::Invalid(error.to_string())))
+            .collect::<crate::Result<Vec<_>>>()?;
+        verify_timeline_acceptance(
+            &origin,
+            &acceptance,
+            &TimelineAcceptanceContext {
+                accepted_state_hash: &state_hash,
+                spool_path_segments: &spool_path_segments,
+                request_sha256: &request_sha256,
+                first_position,
+                event_count,
+                revoked_capability_ids: &revoked_capability_ids,
+                revoked_subject_ids: &revoked_subject_ids,
+                now_unix_seconds,
+                limits,
+            },
+        )?;
+        Ok(())
+    })()
+    .is_ok();
+    Ok(verified)
 }

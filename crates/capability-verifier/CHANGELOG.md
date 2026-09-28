@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.6](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.21.5...heddleco-capability-verifier-v0.21.6) - 2026-09-28
+
+### Other
+
+- Verify exact format-3 timeline owner capabilities and acceptance in Rust and WASM.
+
 ## [0.21.5](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.21.4...heddleco-capability-verifier-v0.21.5) - 2026-09-28
 
 ### Other

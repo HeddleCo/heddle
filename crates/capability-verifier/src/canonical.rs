@@ -8,13 +8,15 @@ use crate::{
         AuthorizationSignature, AuthorizationVerificationKey, CapabilityPrincipal, OwnerCapability,
         OwnerKeyBinding, OwnerKeyTransition, OwnerRoot, RecoveryGuardian, RecoveryPolicy,
         ResourceOwnershipTransfer, ResourceTransferAuditRecord, ResourceTransferHandoff,
-        SpoolCapabilityGrant, SpoolSelector,
+        SpoolCapabilityGrant, SpoolSelector, TimelineAcceptanceScope,
+        timeline_origin_credential_identity::Identity,
     },
 };
 
 pub(crate) const OWNER_ROOT_DOMAIN: &[u8] = b"heddle-owner-root-v1";
 pub(crate) const OWNER_TRANSITION_DOMAIN: &[u8] = b"heddle-owner-key-transition-v1";
 pub(crate) const OWNER_CAPABILITY_DOMAIN: &[u8] = b"heddle-owner-capability-v1";
+pub(crate) const OWNER_CAPABILITY_V3_DOMAIN: &[u8] = b"heddle-owner-capability-v3";
 pub(crate) const OWNER_BINDING_DOMAIN: &[u8] = b"heddle-owner-key-binding-v1";
 pub(crate) const TRANSFER_HANDOFF_DOMAIN: &[u8] = b"heddle-resource-transfer-handoff-v1";
 pub(crate) const TRANSFER_ACCEPTANCE_DOMAIN: &[u8] = b"heddle-resource-transfer-acceptance-v1";
@@ -233,6 +235,47 @@ fn grant(encoder: &mut Encoder, value: &SpoolCapabilityGrant) -> Result<()> {
         required(&value.spool, "SpoolCapabilityGrant.spool")?,
     )?;
     encoder.i32(value.action);
+    if let Some(scope) = &value.timeline_acceptance {
+        if value.action != crate::wire::SpoolCapabilityAction::AcceptTimelineOrigin as i32 {
+            return Err(Error::Invalid(
+                "timeline scope has another action".to_owned(),
+            ));
+        }
+        encoder.bool(true);
+        timeline_scope(encoder, scope)?;
+    } else if value.action == crate::wire::SpoolCapabilityAction::AcceptTimelineOrigin as i32 {
+        return Err(Error::Invalid("timeline grant has no scope".to_owned()));
+    }
+    Ok(())
+}
+
+fn timeline_scope(encoder: &mut Encoder, scope: &TimelineAcceptanceScope) -> Result<()> {
+    encoder.bytes(&scope.principal_account_uuid)?;
+    let identity = required(
+        &scope.credential_identity,
+        "TimelineAcceptanceScope.credential_identity",
+    )?;
+    match identity.identity.as_ref() {
+        Some(Identity::ServerIssued(value)) => {
+            encoder.raw(&[1]);
+            encoder.bytes(&value.credential_id)?;
+        }
+        Some(Identity::OfflineDerived(value)) => {
+            encoder.raw(&[2]);
+            encoder.bytes(&value.issued_ancestor_credential_id)?;
+            encoder.bytes(&value.terminal_revocation_id)?;
+            encoder.bytes(&value.derivation_path_sha256)?;
+        }
+        None => {
+            return Err(Error::Invalid(
+                "timeline credential identity has no variant".to_owned(),
+            ));
+        }
+    }
+    encoder.bytes(&scope.effective_pop_key_sha256)?;
+    encoder.u32(scope.credential_class);
+    encoder.bytes(&scope.thread_id)?;
+    encoder.bytes(&scope.origin_sha256)?;
     Ok(())
 }
 
