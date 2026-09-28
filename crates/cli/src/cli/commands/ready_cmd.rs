@@ -63,6 +63,7 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     if args.dry_run.enabled() {
         return emit_ready_dry_run(cli, &repo, &args);
     }
+    repo.authorize_checkout_writer()?;
     let user_config = UserConfig::load_default().unwrap_or_default();
     let ctx = execution_context_from_cli_parts(start, Some(repo), &user_config);
     let repo = ctx.require_repo()?;

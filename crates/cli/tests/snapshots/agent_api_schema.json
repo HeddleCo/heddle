@@ -142,12 +142,6 @@
       },
       "title": {
         "type": "string"
-      },
-      "token": {
-        "type": [
-          "string",
-          "null"
-        ]
       }
     },
     "required": [
@@ -248,12 +242,6 @@
           },
           "title": {
             "type": "string"
-          },
-          "token": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         },
         "required": [

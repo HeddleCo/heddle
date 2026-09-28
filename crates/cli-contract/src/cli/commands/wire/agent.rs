@@ -208,8 +208,6 @@ pub struct AgentFanoutLaneOutput {
     pub task: Option<AgentTaskOutput>,
     pub session_id: Option<String>,
     pub lease_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
     pub status: String,
 }
 

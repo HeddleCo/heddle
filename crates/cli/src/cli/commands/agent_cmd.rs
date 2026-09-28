@@ -22,7 +22,9 @@ use repo::{
     ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStatus,
     AgentTaskStore, AgentUsageSummary, Repository, Thread, ThreadConfidenceSummary,
     ThreadFreshness, ThreadId, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
-    ThreadVerificationSummary, validate_task_id,
+    ThreadVerificationSummary,
+    checkout_writer::{remove_checkout_writer_credential, write_checkout_writer_credential},
+    validate_task_id,
 };
 use verbs::{
     AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, FanoutLaneAvailability,
@@ -442,6 +444,9 @@ pub fn cmd_agent_release(cli: &Cli, args: AgentReleaseArgs) -> Result<()> {
     };
     let outcome = store.release(&args.lease, &args.token, status, Utc::now())?;
     let lease = authorized_lease_outcome(outcome, &args.lease)?;
+    if let Some(path) = lease.path.as_deref() {
+        remove_checkout_writer_credential(path, &args.lease)?;
+    }
     render_agent_reservation_envelope(&repo, &lease, None)
 }
 
@@ -514,7 +519,6 @@ fn cmd_agent_fanout_plan(cli: &Cli, args: AgentFanoutPlanArgs) -> Result<()> {
                 task: None,
                 session_id: None,
                 lease_id: None,
-                token: None,
                 status: "planned".to_string(),
             })
             .collect(),
@@ -643,6 +647,7 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                     )));
                 }
             };
+            write_checkout_writer_credential(&checkout_path, &grant.lease.lease_id, &grant.token)?;
             outputs.push(AgentFanoutLaneOutput {
                 thread: lane.thread.clone(),
                 path: checkout_path.display().to_string(),
@@ -650,7 +655,6 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                 task: Some(AgentTaskOutput::from(&child)),
                 session_id,
                 lease_id: Some(grant.lease.lease_id),
-                token: Some(grant.token),
                 status: "started".to_string(),
             });
         }
@@ -1234,6 +1238,8 @@ pub async fn cmd_agent_capture(
         )));
     }
 
+    repo.install_checkout_writer_credential(&plan.lease, &args.token)?;
+
     let presence = presence_for_lease(&repo, &lease)?;
     super::snapshot::cmd_snapshot(
         cli,
@@ -1269,6 +1275,7 @@ pub async fn cmd_agent_ready(cli: &Cli, args: crate::cli::cli_args::AgentReadyAr
         &args.token,
     )?;
     let plan = plan_agent_ready(&lease, &options).map_err(|err| anyhow!(err))?;
+    repo.install_checkout_writer_credential(&options.lease, &args.token)?;
 
     super::ready_cmd::cmd_ready(
         cli,
