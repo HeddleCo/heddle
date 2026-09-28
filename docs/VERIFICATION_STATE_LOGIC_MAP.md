@@ -20,8 +20,8 @@ Target rows describe the next model and must not be cited as shipped behavior.
 - Repository capability terms are `plain-git`, `git-overlay`, and
   `native-heddle`. Human labels such as `Git + Heddle` or `Git + Heddle
   isolated checkout` describe the operator context; they are not new state
-  machines. Use `CONTEXT.md` as the glossary for Git Overlay, Git Projection Mapping,
-  Git Checkpoint, Repository Verification State, and Machine-Contract Proof. Use
+  machines. Use `CONTEXT.md` for Git Overlay, Git Projection Mapping,
+  Git Checkpoint, and Repository Verification State; use `docs/glossary.md` for Machine-Contract Proof. Use
   Bridge Mirror only for historical context; it is not a runtime component.
 - In Git-overlay mode, active Git reads and writes use the checkout's real
   `.git`. Heddle stores Git Projection Mapping metadata under

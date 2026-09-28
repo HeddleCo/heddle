@@ -130,8 +130,8 @@ settle it. This does not change the append-only finding.
 The `prune` boolean is deliberately ignored for the loose-copy step
 (`crates/cli/src/cli/commands/gc.rs:134-145`). This conflicts with the CLI help's
 “unreachable objects” wording (`crates/cli-args/src/cli/cli_args/commands_main.rs:504-525`)
-and with future-looking undo/stability prose
-(`docs/undo.md:99-103`, `docs/STABILITY.md:243-250`). The implementation is the
+and with future-looking undo prose
+(`docs/undo.md:99-103`). The implementation is the
 source of truth for this report: there is no native history pruning today.
 
 The redaction check is the correct precedent. GC snapshots every redaction
@@ -143,7 +143,7 @@ equally mechanical assertion, described below.
 ### Hosted retention is not implemented here
 
 Agent timelines are a local foundation. The domain model says hosted projection
-is planned (`CONTEXT.md:163-180`), and the architecture is explicit that the
+is planned (see [Agent Timeline](../glossary.md)), and the architecture is explicit that the
 planned `AgentGatewayService` and `AgentService` are not registered in Weft
 (`docs/ARCHITECTURE.md:215-226`). The timeline ADR likewise says Weft timeline
 ingest and querying are not live (`docs/adr/0039-versioned-agent-timeline-operations.md:5-18`).
@@ -473,7 +473,7 @@ bytes installed under the old content address.
 Timeline signing is not settled. The current timeline envelope contains schema,
 kind, labels, and body but no actor or signature fields
 (`crates/object-model/src/object/timeline.rs:296-303`), despite domain prose
-saying timeline operations use native attribution (`CONTEXT.md:167-169`). It is
+saying timeline operations use native attribution (see [Timeline Operation](../glossary.md)). It is
 **UNKNOWN** whether a future signature verifies the full payload, a digest, or a
 separate envelope. Ratifying the timeline signing schema and defining what proof
 survives payload deletion are prerequisites to tombstone pruning.

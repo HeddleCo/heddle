@@ -8,7 +8,8 @@ This is the Heddle CLI/local model repository. Agent skills should treat this
 repo as the source of truth for Heddle-native version-control concepts,
 cross-repo collaboration contracts, and local CLI behavior.
 
-- **Domain glossary**: `CONTEXT.md` at the repo root.
+- **Everyday language**: `CONTEXT.md` at the repo root.
+- **Full domain glossary**: `docs/glossary.md`.
 - **Architecture decisions**: `docs/adr/`.
 - **Repo operating guidance**: `AGENTS.md` and the relevant files under `.agents/`.
 - **Implementation roadmaps and design notes**: `docs/design/`.
@@ -33,13 +34,13 @@ Read `AGENTS.md` first. Then read the `.agents/*.md` files relevant to the work 
 - `.agents/code-review.md` and `.agents/review-pitfalls.md` for review methodology and known false-positive traps.
 - `.agents/web-copy.md` when editing web copy or user-facing hosted product surfaces.
 
-Then read `CONTEXT.md` if it exists, and read any ADRs in `docs/adr/` that touch the area you are about to work in.
+Then read `CONTEXT.md`, consult `docs/glossary.md` for other domain terms, and read any ADRs in `docs/adr/` that touch the area you are about to work in.
 
 ## Use the Glossary's Vocabulary
 
-When output names a domain concept in an issue title, refactor proposal, hypothesis, or test name, use the term as defined in `CONTEXT.md`. Do not drift to synonyms the glossary explicitly avoids. For Git and verification work, use the exact `Git Overlay`, `Git Projection Mapping`, `Git Checkpoint`, `Repository Verification State`, and `Machine-Contract Proof` terms from the glossary. Use `Bridge Mirror` only when discussing legacy mirror migration or repair.
+When output names a domain concept in an issue title, refactor proposal, hypothesis, or test name, use the term as defined in `CONTEXT.md` or `docs/glossary.md`. Do not drift to synonyms the glossary explicitly avoids. For Git and verification work, use the exact `Git Overlay`, `Git Projection Mapping`, `Git Checkpoint`, `Repository Verification State`, and `Machine-Contract Proof` terms from those files. Use `Bridge Mirror` only when discussing legacy mirror migration or repair.
 
-If a needed domain concept is missing, create or update `CONTEXT.md` only when the term has been resolved with enough confidence to record.
+If a needed domain concept is missing, add it to the appropriate glossary only when the term has been resolved with enough confidence to record.
 
 ## Flag ADR Conflicts
 

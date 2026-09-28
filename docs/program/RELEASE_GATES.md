@@ -1,6 +1,6 @@
 # Release gates (program)
 
-Interim gates for this program until maintainer locks 1.0 numbers in `docs/STABILITY.md`.
+Interim gates for this program. The compatibility decision in `docs/STABILITY.md` sets no additional numeric 1.0 thresholds.
 Every gate is executable from the repo root with checked-in tooling.
 
 ## G1 — Oracle correctness

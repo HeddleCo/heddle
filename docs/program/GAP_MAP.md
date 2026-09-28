@@ -9,7 +9,7 @@ Grouped by owning subsystem. Severity: **P0** blocks trustworthy certification, 
 | M1 | No single curated suite manifest with skip/TODO/oracle applicability | program harness | Deterministic reporting | **Shipped** — `scripts/program/manifest.toml` + runner (Wave 0/1; see `BASELINE.md`) |
 | M2 | No machine-readable baseline artifacts with env/commit/classification | program harness | Reproducible reporting | **Shipped** — `run-baseline.sh` + JSONL/`summary.json` under `artifacts/baseline/` |
 | M3 | Perf claims lack paired alternating trials + equal-work checks | program harness | Truthful measurement | **Shipped** (harness) — `paired-bench.py` + `core-loop-bench.sh` + profile-before-optimize rule; equal-work **re-stamp** and multi-host samples still open (Wave 6) |
-| M4 | Stability thresholds still TBD | product/docs | Release gates | **Open** — derive interim gates from oracles already in CI; `docs/STABILITY.md` still TBD |
+| M4 | Stability thresholds undecided in the original program | product/docs | Release gates | **Resolved for compatibility** — `docs/STABILITY.md` now states the owner's promise; program-specific numeric gates remain in `RELEASE_GATES.md` |
 
 ## P0 — correctness contracts
 
