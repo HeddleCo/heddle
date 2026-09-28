@@ -122,7 +122,7 @@ pub fn verify_timeline_acceptance(
         || scope.credential_identity != origin.credential_identity
         || scope.effective_pop_key_sha256 != origin.effective_pop_key_sha256
         || scope.credential_class != origin.credential_class as u32
-        
+        || scope.thread_id != origin.thread_id
         || scope.origin_sha256 != origin_digest
     {
         return Err(Error::CapabilityDenied(
