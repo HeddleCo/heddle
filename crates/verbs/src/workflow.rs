@@ -469,7 +469,8 @@ pub fn integrated_land_next_action(
 /// Checkpoint / squash message for land write-through.
 ///
 /// Precedence: explicit message → task/name for a squash → capture intent →
-/// task/name. An opaque thread identity is never a Git subject.
+/// task/name. Generated fallbacks avoid opaque identities; explicit messages
+/// are kept as supplied, subject to Git subject formatting.
 pub fn land_checkpoint_message(
     explicit: Option<&str>,
     prefer_land_subject: bool,
@@ -477,7 +478,7 @@ pub fn land_checkpoint_message(
     intent: Option<&str>,
     task: Option<&str>,
 ) -> String {
-    if let Some(message) = explicit.filter(|message| !subject_has_machine_identity(message)) {
+    if let Some(message) = explicit {
         return git_subject_message(message);
     }
     let task = task.filter(|task| !subject_has_machine_identity(task));
@@ -954,7 +955,7 @@ mod tests {
         );
         assert_eq!(
             land_checkpoint_message(Some("  "), true, "t", Some("intent"), None),
-            "t"
+            ""
         );
         assert_eq!(
             land_checkpoint_message(None, false, "t", Some("intent"), Some("task")),
@@ -986,16 +987,18 @@ mod tests {
     }
 
     #[test]
-    fn land_checkpoint_rejects_embedded_hex_in_explicit_subject() {
+    fn land_checkpoint_honors_explicit_message_with_64_hex_identity() {
         let id = "a".repeat(64);
+        let explicit = format!("Revert {id}");
         let subject = land_checkpoint_message(
-            Some(&format!("Land hs-{id}")),
+            Some(&explicit),
             true,
             "search",
             None,
             Some("Improve search results"),
         );
-        assert_eq!(subject, "Improve search results");
+        assert_eq!(subject.lines().next(), Some(explicit.as_str()));
+        assert_eq!(subject, explicit);
     }
 
     #[test]
