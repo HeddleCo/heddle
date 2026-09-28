@@ -1398,6 +1398,75 @@ mod tests {
     }
 
     #[test]
+    fn discarded_origins_do_not_starve_later_repairable_uploads() {
+        let (directory, store, mut run, mut origin) = fixture();
+        let mut connection = crate::local_metadata::open(directory.path()).expect("database");
+        let tx = connection.transaction().expect("transaction");
+        for index in 0..9 {
+            let id = format!("overflow_{index}");
+            run.r#ref.as_mut().expect("run reference").id = id.clone();
+            origin.run_id = id;
+            append_with_limits(&tx, &run, Some((&origin, &[])), MAX_PENDING_BYTES, 0)
+                .expect("local overflow run");
+        }
+        tx.commit().expect("commit overflow runs");
+        drop(connection);
+
+        run.r#ref.as_mut().expect("run reference").id = "valid_tail".into();
+        origin.run_id = "valid_tail".into();
+        store
+            .publish_report(run.clone(), None, &[], Some((&origin, &[])))
+            .expect("publish after capacity frees");
+        let initial = store
+            .next_timeline_upload(i64::MAX)
+            .expect("initial query")
+            .expect("initial snapshot");
+        store
+            .acknowledge_timeline_upload(
+                &initial.request.client_operation_id,
+                &UploadScrubbedTimelineAck {
+                    run: initial.request.run.clone(),
+                    run_revision: initial.request.run_revision,
+                    run_version: vec![8; 32],
+                    next_position: initial.request.first_position,
+                    accepted_event_count: 0,
+                    operation: initial.request.run.clone(),
+                },
+            )
+            .expect("initial snapshot ack");
+        let mut events = (0..256)
+            .map(|index| {
+                (
+                    format!("unsupported:{index}"),
+                    local_event(&run, "StatusLine"),
+                )
+            })
+            .collect::<Vec<_>>();
+        events.push(("tail".into(), local_event(&run, "Stop")));
+        store
+            .publish_report(run, None, &events, None)
+            .expect("local events after capacity frees");
+        let slots = store.incomplete_timeline_runs(8).expect("repair slots");
+        assert!(slots.contains(&"valid_tail".to_string()));
+        for pending_run in slots {
+            store
+                .repair_timeline_upload(&pending_run)
+                .expect("repair pending run");
+        }
+        let pending = store
+            .next_timeline_upload(i64::MAX)
+            .expect("upload query")
+            .expect("valid tail uploads");
+        assert_eq!(pending.request.run.expect("run reference").id, "valid_tail");
+        assert_eq!(pending.request.events.len(), 1);
+        assert_eq!(
+            pending.request.events[0].kind,
+            UploadTimelineEventKind::TurnFinished as i32
+        );
+        assert_eq!(store.upload_health().expect("health").incomplete_runs, 9);
+    }
+
+    #[test]
     fn full_upload_bytes_ignore_every_local_free_text_field() {
         let mut requests = Vec::new();
         for text in ["private command alpha", "secret file path beta"] {

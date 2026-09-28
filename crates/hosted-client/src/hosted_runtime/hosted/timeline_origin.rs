@@ -73,10 +73,6 @@ pub fn prepare_timeline_origin(
         "run principal credential revoked"
     );
     authority.verify_publisher(&inspected.proof_public_key)?;
-    ensure!(
-        signer.public_key() == inspected.proof_public_key,
-        "run principal proof key differs from the verified chain"
-    );
     let account = authority
         .owner
         .owner
@@ -95,7 +91,8 @@ pub fn prepare_timeline_origin(
     let deployment_key = descriptor_trust::load_automatic_pin(&canonical_server)?
         .context("hosted deployment has no verified local identity pin")?
         .public_key_bytes()?;
-    let (identity, agent, proof_key_sha256) = frozen_origin_identity(&parsed, &inspected, now)?;
+    let (identity, agent, proof_key_sha256) =
+        frozen_origin_identity(&parsed, &inspected, signer.public_key(), now)?;
     let offline_derived = matches!(identity, Identity::OfflineDerived(_));
     let spool = thread.spool.as_ref().context("run Thread has no Spool")?;
     ensure!(
@@ -140,12 +137,20 @@ pub fn prepare_timeline_origin(
 fn frozen_origin_identity(
     parsed: &biscuit_auth::Biscuit,
     inspected: &biscuit_verifier::InspectedCredential,
+    signing_key: &[u8],
     now: i64,
 ) -> Result<(Identity, bool, Vec<u8>)> {
+    ensure!(
+        signing_key == inspected.proof_public_key,
+        "run principal proof key differs from the verified chain"
+    );
     ensure!(
         inspected.expires_at_unix_seconds == 0 || inspected.expires_at_unix_seconds > now as u64,
         "run principal credential expired"
     );
+    let at = chrono::DateTime::from_timestamp(now, 0).context("invalid run creation time")?;
+    biscuit_verifier::authorize_at(parsed, "", at, None, &[], None)
+        .context("run principal credential restrictions failed")?;
     let issued_id = inspected
         .credential_id
         .as_deref()
@@ -440,10 +445,16 @@ mod tests {
 
     type RealIdentity = (Identity, bool, Vec<u8>, Vec<Vec<u8>>);
 
-    fn real_identity(token: &str, root: biscuit_auth::PublicKey, now: i64) -> Result<RealIdentity> {
+    fn real_identity(
+        token: &str,
+        root: biscuit_auth::PublicKey,
+        signer: &Ed25519Signer,
+        now: i64,
+    ) -> Result<RealIdentity> {
         let parsed = biscuit_verifier::parse_token(token, &[root])?;
         let inspected = biscuit_verifier::inspect_verified_credential(&parsed, &root)?;
-        let (identity, agent, hash) = frozen_origin_identity(&parsed, &inspected, now)?;
+        let (identity, agent, hash) =
+            frozen_origin_identity(&parsed, &inspected, signer.public_key(), now)?;
         let ids = parsed
             .revocation_identifiers()
             .iter()
@@ -466,9 +477,9 @@ mod tests {
             BlockBuilder::new().fact("agent(\"B\")").expect("B marker"),
         );
         let (a_identity, a_agent, a_key, a_ids) =
-            real_identity(&a, root, 1_800_000_000).expect("A identity");
+            real_identity(&a, root, &a_signer, 1_800_000_000).expect("A identity");
         let (b_identity, b_agent, b_key, b_ids) =
-            real_identity(&b, root, 1_800_000_000).expect("B identity");
+            real_identity(&b, root, &b_signer, 1_800_000_000).expect("B identity");
         assert!(a_agent && b_agent);
         assert_eq!(a_key, a_signer.public_key());
         assert_eq!(b_key, b_signer.public_key());
@@ -495,9 +506,9 @@ mod tests {
         let child_signer = Ed25519Signer::from_seed(&[22; 32]).expect("child signer");
         let child = real_child(&issued, &signer, &child_signer, BlockBuilder::new());
         let (direct, direct_agent, _, _) =
-            real_identity(&issued, root, 1_800_000_000).expect("direct");
+            real_identity(&issued, root, &signer, 1_800_000_000).expect("direct");
         let (delegated, delegated_agent, key, _) =
-            real_identity(&child, root, 1_800_000_000).expect("child");
+            real_identity(&child, root, &child_signer, 1_800_000_000).expect("child");
         assert!(matches!(direct, Identity::ServerIssued(_)) && !direct_agent);
         assert!(matches!(delegated, Identity::OfflineDerived(_)) && delegated_agent);
         assert_eq!(key, child_signer.public_key());
@@ -506,15 +517,40 @@ mod tests {
             .expect("date")
             .timestamp();
         assert!(
-            real_identity(&child, root, expires)
+            real_identity(&child, root, &child_signer, expires)
                 .expect_err("expired at creation")
                 .to_string()
                 .contains("expired")
         );
-        let (rotated, rotated_root, _) = real_issued_chain(23);
-        let (_, _, rotated_key, _) =
-            real_identity(&rotated, rotated_root, 1_800_000_000).expect("rotated issued root");
-        assert_ne!(Sha256::digest(key), Sha256::digest(rotated_key));
+    }
+
+    #[test]
+    fn expired_signed_child_block_refuses_origin_at_creation() {
+        let (issued, root, signer) = real_issued_chain(31);
+        let child_signer = Ed25519Signer::from_seed(&[32; 32]).expect("child signer");
+        let child = real_child(
+            &issued,
+            &signer,
+            &child_signer,
+            BlockBuilder::new()
+                .check("check if time($now), $now < 2020-01-01T00:00:00Z")
+                .expect("time restriction"),
+        );
+        assert!(real_identity(&child, root, &child_signer, 1_800_000_000).is_err());
+    }
+
+    #[test]
+    fn principal_key_rotated_after_chain_issuance_refuses_origin_at_creation() {
+        let (issued, root, issued_signer) = real_issued_chain(41);
+        let rotated_signer = Ed25519Signer::from_seed(&[42; 32]).expect("rotated signer");
+        real_identity(&issued, root, &issued_signer, 1_800_000_000)
+            .expect("original key matches issued chain");
+        assert!(
+            real_identity(&issued, root, &rotated_signer, 1_800_000_000)
+                .expect_err("rotated proof key must be refused")
+                .to_string()
+                .contains("proof key differs")
+        );
     }
 
     #[test]

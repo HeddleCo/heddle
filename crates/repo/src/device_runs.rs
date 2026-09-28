@@ -321,7 +321,7 @@ impl RunStore {
     }
     pub fn incomplete_timeline_runs(&self, limit: usize) -> Result<Vec<String>> {
         let connection = self.connection()?;
-        let mut query = connection.prepare("SELECT run FROM timeline_upload_runs WHERE upload_incomplete IN ('outbox_overflow','scan_pending') LIMIT ?1")?;
+        let mut query = connection.prepare("SELECT run FROM timeline_upload_runs WHERE length(origin)>0 AND upload_incomplete IN ('outbox_overflow','scan_pending') LIMIT ?1")?;
         Ok(query
             .query_map([limit as i64], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
