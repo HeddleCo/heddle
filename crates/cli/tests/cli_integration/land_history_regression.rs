@@ -167,6 +167,65 @@ fn plain_land_after_parent_advance_preserves_git_history() {
 }
 
 #[test]
+fn ordinary_sibling_land_preserves_previous_git_main() {
+    let fixture = GitOverlayFixture::imported_main();
+    let root = fixture.path();
+    std::fs::create_dir(root.join("src")).expect("create sources");
+    for name in ["a", "b", "c"] {
+        std::fs::write(
+            root.join(format!("src/{name}.rs")),
+            format!("pub fn {name}() -> u32 {{ 1 }}\n"),
+        )
+        .expect("seed source");
+    }
+    fixture.json(&["--output", "json", "capture", "-m", "seed sources"]);
+    let one = root.with_file_name("ordinary-one");
+    let two = root.with_file_name("ordinary-two");
+    for (name, path) in [("feature/one", &one), ("feature/two", &two)] {
+        fixture.json(&[
+            "--output",
+            "json",
+            "start",
+            name,
+            "--path",
+            path.to_str().expect("checkout path"),
+        ]);
+    }
+    std::fs::write(root.join("README.md"), "base\nparent moves\n").expect("move parent");
+    fixture.json(&["--output", "json", "capture", "-m", "parent moves"]);
+    fixture.json(&["--output", "json", "thread", "refresh", "feature/two"]);
+    std::fs::write(two.join("src/c.rs"), "pub fn c() -> u32 { 2 }\n").expect("edit two");
+    fixture.json_at(&two, &["--output", "json", "capture", "-m", "two"]);
+    std::fs::write(one.join("src/a.rs"), "pub fn a() -> u32 { 2 }\n").expect("edit one");
+    fixture.json_at(&one, &["--output", "json", "capture", "-m", "one"]);
+    let first = fixture.json(&["--output", "json", "land", "--thread", "feature/two"]);
+    assert_eq!(first["status"], "landed", "{first}");
+    let before = git_text(root, &["rev-parse", "HEAD"]);
+    let land = heddle_output_env(
+        &["--output", "json", "land", "--thread", "feature/one"],
+        Some(root),
+        &[],
+    )
+    .expect("land ordinary sibling");
+    let after = git_text(root, &["rev-parse", "HEAD"]);
+    let ancestry = Command::new("git")
+        .args(["merge-base", "--is-ancestor", &before, "HEAD"])
+        .current_dir(root)
+        .status()
+        .expect("check main ancestry");
+    assert!(
+        ancestry.success(),
+        "ordinary sibling rewrote main: {before} -> {after}; {land:?}"
+    );
+    if !land.status.success() {
+        assert_eq!(
+            after, before,
+            "failed ordinary sibling land moved main: {land:?}"
+        );
+    }
+}
+
+#[test]
 fn verification_blocked_land_leaves_git_refs_and_oplog_byte_identical() {
     let (fixture, _, _) = r7_fanout();
     let repository = Repository::open(fixture.path()).expect("open target");
