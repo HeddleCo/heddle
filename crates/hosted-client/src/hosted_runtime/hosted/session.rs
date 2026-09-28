@@ -7,8 +7,10 @@ use crypto::{Ed25519Signer, Signer as _};
 use wire::{AuthToken, ProtocolError};
 
 use super::{
-    HostedClient, RenewableAuthorityCredential, credential::server_keys_match,
-    resolve_hosted_credential, resolver::resolve_and_verify_endpoint_descriptor,
+    HostedClient, RenewableAuthorityCredential,
+    credential::{require_v1_bearer, server_keys_match},
+    resolve_hosted_credential,
+    resolver::resolve_and_verify_endpoint_descriptor,
 };
 
 pub enum HostedAuthMode {
@@ -114,6 +116,7 @@ impl HostedSession {
         }
         if config.auth_proof_key_pem.is_some() {
             if let Some(token) = config.token.as_ref() {
+                require_v1_bearer(token)?;
                 let subject = crate::hosted_runtime::device_flow::authenticated_subject(&token.id)
                     .context("reading the hosted bearer token's authenticated principal")?;
                 if resolved_credential_subject

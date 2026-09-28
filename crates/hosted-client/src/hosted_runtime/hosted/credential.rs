@@ -145,7 +145,7 @@ pub fn resolve_active_bearer() -> Result<Option<AuthToken>> {
     Ok(resolved.token)
 }
 
-fn require_v1_bearer(token: &AuthToken) -> Result<()> {
+pub(super) fn require_v1_bearer(token: &AuthToken) -> Result<()> {
     biscuit_verifier::signature_v1::parse_unverified_base64(token.id.as_bytes()).map_err(
         |error| {
             anyhow::anyhow!(

@@ -197,6 +197,31 @@ fn credential_store_root_attaches_matching_proof() {
 }
 
 #[test]
+#[allow(clippy::disallowed_methods)] // Deliberately mint a v0 credential for this rejection test.
+fn credential_store_v0_with_proof_key_points_to_login() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
+    with_isolated_env(|_| {
+        let signer = Ed25519Signer::generate().expect("legacy proof key");
+        let pem = signer.to_pem().expect("legacy PEM");
+        let token = biscuit_auth::Biscuit::builder()
+            .fact("user(\"alice\")")
+            .expect("user fact")
+            .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
+            .expect("proof key fact")
+            .build(&biscuit_auth::KeyPair::new())
+            .expect("mint legacy v0 token")
+            .to_base64()
+            .expect("encode legacy token");
+        store_credential(&token, "alice", Some(pem));
+
+        let error = build_session(&UserConfig::default())
+            .err()
+            .expect("stored v0 credential must fail locally");
+        assert!(error.to_string().contains("heddle auth login"), "{error}");
+    });
+}
+
+#[test]
 fn credential_store_derived_child_attaches_matching_leaf_key() {
     let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
