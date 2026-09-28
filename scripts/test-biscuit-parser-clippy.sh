@@ -30,7 +30,7 @@ fn main() {
 }
 RUST
 
-if (cd "$probe_dir" && cargo clippy --quiet --offline -- -D warnings) > "$probe_dir/output" 2>&1; then
+if (cd "$probe_dir" && cargo clippy --quiet --offline --color never -- -D warnings) > "$probe_dir/output" 2>&1; then
     echo "banned Biscuit parsers passed clippy -D warnings" >&2
     exit 1
 fi
