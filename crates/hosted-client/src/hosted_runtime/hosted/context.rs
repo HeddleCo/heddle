@@ -10,6 +10,8 @@ use api::{
     },
     signing,
 };
+#[cfg(test)]
+use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use config::ClientConfig;
 use crypto::{Ed25519Signer, Signer as _};
 #[cfg(feature = "telemetry")]
@@ -77,9 +79,14 @@ impl CallContextFactory {
         let biscuit = if self.bearer_capability.is_empty() {
             Vec::new()
         } else {
-            biscuit_auth::UnverifiedBiscuit::from_base64(&self.bearer_capability)
-                .and_then(|token| token.to_vec())
-                .map_err(|error| HostedError::Framing(format!("invalid stored Biscuit: {error}")))?
+            biscuit_verifier::signature_v1::parse_unverified_base64(&self.bearer_capability)
+                .map_err(|error| HostedError::Framing(format!(
+                    "invalid stored Biscuit: {error}; run `heddle auth login` to re-authenticate"
+                )))?
+                .to_vec()
+                .map_err(|error| HostedError::Framing(format!(
+                    "invalid stored Biscuit: {error}; run `heddle auth login` to re-authenticate"
+                )))?
         };
         Ok(match &self.signer {
             Some(signer) => thread_api::credentials::Credentials::Signed {
@@ -314,13 +321,18 @@ impl CallContextFactory {
     }
 
     fn base(&self, method: &str, client_operation_id: String) -> Result<CallContext> {
-        let bearer_capability =
-            match biscuit_auth::UnverifiedBiscuit::from_base64(&self.bearer_capability)
-                .and_then(|token| token.to_vec())
-            {
-                Ok(raw) => raw,
-                Err(_) => self.bearer_capability.clone(),
-            };
+        let bearer_capability = if self.bearer_capability.is_empty() {
+            Vec::new()
+        } else {
+            biscuit_verifier::signature_v1::parse_unverified_base64(&self.bearer_capability)
+                .map_err(|error| HostedError::Framing(format!(
+                    "invalid stored Biscuit: {error}; run `heddle auth login` to re-authenticate"
+                )))?
+                .to_vec()
+                .map_err(|error| HostedError::Framing(format!(
+                    "invalid stored Biscuit: {error}; run `heddle auth login` to re-authenticate"
+                )))?
+        };
         Ok(CallContext {
             deadline: Some(deadline(self.timeout)?),
             // Stored credentials keep the Biscuit's URL-safe base64 text, but
@@ -513,6 +525,7 @@ fn deadline(timeout: Duration) -> Result<Timestamp> {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE};
     #[test]
     fn stored_mint_association_recognizes_exact_owner_and_passkey_shapes() {
         use api::heddle::api::v1alpha2::{
@@ -574,6 +587,29 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
+
+    #[test]
+    fn hosted_call_context_refuses_v0_bearer() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../biscuit-verifier/tests/fixtures/timeline-origin-collision-v0.json"
+        ))
+        .expect("v0 fixture");
+        let bytes =
+            hex::decode(fixture["a_chain_hex"].as_str().expect("chain hex")).expect("chain bytes");
+        let factory = CallContextFactory {
+            bearer_capability: URL_SAFE.encode(bytes).into_bytes(),
+            ..CallContextFactory::default()
+        };
+        let error = factory
+            .streaming("/heddle.api.v1alpha2.SyncService/Fetch", "v0")
+            .expect_err("v0 hosted call refused");
+        assert!(error.to_string().contains("heddle auth login"), "{error}");
+        let error = match factory.native_credentials() {
+            Err(error) => error,
+            Ok(_) => panic!("v0 native credentials accepted"),
+        };
+        assert!(error.to_string().contains("heddle auth login"), "{error}");
+    }
 
     #[derive(Deserialize)]
     struct Vector {
@@ -654,8 +690,17 @@ mod tests {
     fn configured_factory_places_bearer_and_verifiable_request_proof_in_context() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().unwrap();
+        let token = biscuit_auth::Biscuit::builder()
+            .build_v1(&biscuit_auth::KeyPair::new())
+            .expect("v1 bearer")
+            .to_base64()
+            .expect("bearer text");
+        let raw = biscuit_verifier::signature_v1::parse_unverified_base64(&token)
+            .expect("v1 bearer")
+            .to_vec()
+            .expect("bearer bytes");
         let config = ClientConfig::default()
-            .with_token(wire::AuthToken::new("token", "alice"))
+            .with_token(wire::AuthToken::new(token.clone(), "alice"))
             .with_auth_proof_key_pem(signer.to_pem().unwrap())
             .with_authenticated_principal("principal:alice");
         let signed = CallContextFactory::from_client_config(&config)
@@ -666,7 +711,7 @@ mod tests {
                 "",
             )
             .unwrap();
-        assert_eq!(signed.context.bearer_capability, b"token");
+        assert_eq!(signed.context.bearer_capability, raw);
         let proof = signed.context.request_proof.unwrap();
         let canonical = signing::unary_bytes(
             &proof.signing_identity,
@@ -680,7 +725,7 @@ mod tests {
         let bearer = signed.context.bearer_proof.unwrap();
         crypto::pop::verify_pop(
             signer.public_key(),
-            "token",
+            &token,
             &bearer.timestamp_seconds.to_string(),
             "POST",
             "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
@@ -695,12 +740,13 @@ mod tests {
         let _process_env_guard = crate::test_process_env::shared_blocking();
         let authority = biscuit_auth::KeyPair::new();
         let token = biscuit_auth::Biscuit::builder()
-            .build(&authority)
+            .build_v1(&authority)
             .expect("test Biscuit")
             .to_base64()
             .expect("base64 Biscuit");
-        let expected = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
-            .and_then(|biscuit| biscuit.to_vec())
+        let expected = biscuit_verifier::signature_v1::parse_unverified_base64(token.as_bytes())
+            .expect("v1 Biscuit")
+            .to_vec()
             .expect("raw Biscuit");
         let signed = CallContextFactory::default()
             .with_bearer_capability(token.into_bytes())
@@ -800,13 +846,22 @@ mod tests {
     fn as_enrolling_device_key_keeps_the_bearer_and_rewrites_request_identity() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
         let signer = Ed25519Signer::generate().unwrap();
+        let token = biscuit_auth::Biscuit::builder()
+            .build_v1(&biscuit_auth::KeyPair::new())
+            .expect("v1 bearer")
+            .to_base64()
+            .expect("bearer text");
+        let raw = biscuit_verifier::signature_v1::parse_unverified_base64(&token)
+            .expect("v1 bearer")
+            .to_vec()
+            .expect("bearer bytes");
         let factory = CallContextFactory::default()
-            .with_bearer_capability(b"agent-root".to_vec())
+            .with_bearer_capability(token.as_bytes().to_vec())
             .with_signing_key_pem(&signer.to_pem().unwrap(), "principal:agent-key:abc")
             .unwrap();
         let enrollment = factory.as_enrolling_device_key().unwrap();
         let expected = CallContextFactory::device_key_principal(signer.public_key());
-        assert_eq!(enrollment.bearer_capability(), b"agent-root");
+        assert_eq!(enrollment.bearer_capability(), token.as_bytes());
         assert_eq!(enrollment.signing_identity(), Some(expected.as_str()));
         let signed = enrollment
             .unary(
@@ -820,7 +875,7 @@ mod tests {
             proof.signing_identity,
             CallContextFactory::device_key_principal(signer.public_key())
         );
-        assert_eq!(signed.context.bearer_capability, b"agent-root");
+        assert_eq!(signed.context.bearer_capability, raw);
     }
 
     #[test]
@@ -894,7 +949,7 @@ mod tests {
             )
             .expect("test mint key"),
         );
-        let token = biscuit_auth::Biscuit::builder().code(format!("user(\"{account}\"); session(\"original-session\"); device_pop_key(\"{}\"); right(\"spool\", \"acme\", \"admin\");",hex::encode(agent.public_key())).as_str()).expect("authority facts").build(&pair).expect("existing token").to_base64().expect("base64");
+        let token = biscuit_auth::Biscuit::builder().code(format!("user(\"{account}\"); session(\"original-session\"); device_pop_key(\"{}\"); right(\"spool\", \"acme\", \"admin\");",hex::encode(agent.public_key())).as_str()).expect("authority facts").build_v1(&pair).expect("existing token").to_base64().expect("base64");
         let factory = CallContextFactory::default()
             .with_bearer_capability(token.into_bytes())
             .with_signing_key_pem(

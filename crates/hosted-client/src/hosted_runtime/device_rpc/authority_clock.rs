@@ -3,6 +3,8 @@
 use std::{sync::Mutex, time::Duration};
 
 use anyhow::{Context, Result};
+#[cfg(test)]
+use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use tokio::{sync::watch, task::JoinHandle};
 
 #[derive(Debug, Default)]
@@ -81,7 +83,7 @@ mod tests {
                 .as_str(),
             )
             .expect("authority expiration")
-            .build(&key)
+            .build_v1(&key)
             .expect("signed root");
         let token = root
             .append(

@@ -46,11 +46,14 @@ pub fn append(
             .as_str(),
         )
         .internal_ctx("append child proof-key fact")?;
-    token
+    let delegated = token
         .append(block)
-        .internal_ctx("append child proof-key block")?
+        .internal_ctx("append child proof-key block")?;
+    let encoded = delegated
         .to_base64()
-        .internal_ctx("encode delegated bearer")
+        .internal_ctx("encode delegated bearer")?;
+    crate::signature_v1::parse_unverified_base64(encoded.as_bytes())?;
+    Ok(encoded)
 }
 
 /// Require an actual signed-block descendant of the exact current bearer.
@@ -83,8 +86,7 @@ fn parse(parent: &str) -> Result<UnverifiedBiscuit, BiscuitError> {
             "parent credential is empty or oversized".into(),
         ));
     }
-    UnverifiedBiscuit::from_base64(parent.as_bytes())
-        .map_err(|error| BiscuitError::Invalid(error.to_string()))
+    crate::signature_v1::parse_unverified_base64(parent.as_bytes())
 }
 fn last_id(token: &UnverifiedBiscuit) -> Result<Vec<u8>, BiscuitError> {
     token
@@ -113,10 +115,14 @@ mod tests {
         let signer = SigningKey::from_bytes(&[11; 32]);
         let child = SigningKey::from_bytes(&[12; 32]);
         let now = DateTime::from_timestamp(1_800_000_000, 0).expect("fixture timestamp");
-        let token = Biscuit::builder().code(format!(
+        let builder = Biscuit::builder().code(format!(
             "user(\"00000000-0000-0000-0000-000000000011\"); session(\"fixture-session\"); device_pop_key(\"{}\"); root_established(true); right(\"spool\", \"org/project\", \"admin\"); check if time($now), $now < {};",
             hex::encode(signer.verifying_key().as_bytes()),(now + chrono::Duration::hours(1)).to_rfc3339()
-        ).as_str()).expect("authority facts").build_with_key_pair(&root, Default::default(), &key(13)).expect("deterministic parent").to_base64().expect("parent encoding");
+        ).as_str()).expect("authority facts");
+        let token = crate::signature_v1::build_root_with_key_pair(builder, &root, &key(13))
+            .expect("deterministic parent")
+            .to_base64()
+            .expect("parent encoding");
         (token, signer, child, now)
     }
     #[test]
@@ -191,8 +197,8 @@ mod tests {
     #[test]
     fn device_delegation_browser_third_party_fixture() {
         let (parent, signer, child, now) = fixture();
-        let token =
-            Biscuit::from_base64(&parent, |_| Ok(key(11).public())).expect("original fixture");
+        let token = crate::signature_v1::verify_base64(&parent, |_| Ok(key(11).public()))
+            .expect("original fixture");
         let parent_id = token.revocation_identifiers()[0].to_vec();
         let retain_key = signer.verifying_key().to_bytes();
         let retain_signature = signer

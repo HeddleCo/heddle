@@ -28,6 +28,8 @@
 use std::{fmt, fs::File, io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};
+#[cfg(test)]
+use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use chrono::Utc;
 use config::credentials::ServerCredential;
 use crypto::{Ed25519Signer, Signer};
@@ -382,7 +384,7 @@ mod tests {
             .expect("expiry fact")
             .check(format!("check if time($now), $now < {}", expires_at.to_rfc3339()).as_str())
             .expect("expiry check")
-            .build(&KeyPair::new())
+            .build_v1(&KeyPair::new())
             .expect("build token")
             .to_base64()
             .expect("encode token")

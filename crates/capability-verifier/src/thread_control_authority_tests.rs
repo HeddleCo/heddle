@@ -55,7 +55,7 @@ fn fixture_mint_method_with_facts(
     } else {
         ""
     };
-    let token = Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); session(\"original-session\"); credential_id(\"original-credential\"); device_pop_key(\"{}\"); {} {extra} check if operation(\"{operation}\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};", hex::encode(publisher), agent_fact, expiry.to_rfc3339()).as_str()).expect("facts").build(&pair).expect("token");
+    let token = Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); session(\"original-session\"); credential_id(\"original-credential\"); device_pop_key(\"{}\"); {} {extra} check if operation(\"{operation}\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {};", hex::encode(publisher), agent_fact, expiry.to_rfc3339()).as_str()).expect("facts").build_v1(&pair).expect("token");
     let attachment = attached.then(|| {
         let body = crate::wire::MintRootAttachment {
             format_version: 1,
@@ -98,6 +98,16 @@ fn context<'a>(owner: &'a VerifiedOwnerState, publisher: &'a [u8; 32]) -> Contex
         spool_path: "acme/project",
         now: NOW,
     }
+}
+
+#[test]
+fn capability_verifier_rejects_v0_thread_control_authority() {
+    let (_, owner, publisher) = fixture(false);
+    let bytes = include_bytes!("../tests/fixtures/thread_control_authority_v0_rejected.bin");
+    let error = proof::verify(bytes, context(&owner, &publisher), |_| false)
+        .err()
+        .expect("v0 thread authority rejected");
+    assert!(error.to_string().contains("signature-v1"), "{error}");
 }
 #[test]
 fn thread_authority_preserves_original_publisher_account_and_agent() {
@@ -395,7 +405,7 @@ fn boundary_acceptor(clauses: &str) -> (Vec<u8>, VerifiedOwnerState, [u8; 32]) {
         &PrivateKey::from_bytes(&key.seed, Algorithm::Ed25519).expect("current owner"),
     );
     let publisher = key.signing.verifying_key().to_bytes();
-    let token=Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); subject_kind(\"user\"); subject_user_uuid(\"11111111-1111-1111-1111-111111111111\"); session(\"accepting-session\"); credential_id(\"accepting-credential\"); device_pop_key(\"{}\"); check if operation(\"PublishContent\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {}; {clauses}",hex::encode(publisher),chrono::DateTime::from_timestamp(NOW+1000,0).expect("expiry").to_rfc3339()).as_str()).expect("current bounded authority").build(&pair).expect("owner credential");
+    let token=Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); subject_kind(\"user\"); subject_user_uuid(\"11111111-1111-1111-1111-111111111111\"); session(\"accepting-session\"); credential_id(\"accepting-credential\"); device_pop_key(\"{}\"); check if operation(\"PublishContent\"); check if resource(\"spool\", \"acme/project\"); check if time($now), $now < {}; {clauses}",hex::encode(publisher),chrono::DateTime::from_timestamp(NOW+1000,0).expect("expiry").to_rfc3339()).as_str()).expect("current bounded authority").build_v1(&pair).expect("owner credential");
     (
         proof::encode(
             envelope.owner.as_ref().expect("owner history"),
@@ -421,6 +431,24 @@ fn boundary_scope<'a>(
         publisher,
         agent_id: Some("original-session"),
     }
+}
+
+#[test]
+fn capability_verifier_rejects_v0_boundary_authority() {
+    let (_, owner, publisher) = boundary_acceptor("");
+    let mut ctx = context(&owner, &publisher);
+    ctx.method = "/heddle.api.v1alpha2.SyncService/PublishContent";
+    let bytes = include_bytes!("../tests/fixtures/boundary_authority_v0_rejected.bin");
+    let error = crate::boundary_authority::verify_accepting_authority(
+        bytes,
+        ctx,
+        boundary_scope(&[21; 32], &[22; 32], &[23; 32]),
+        &[],
+        |_| false,
+    )
+    .err()
+    .expect("v0 accepting authority rejected");
+    assert!(error.to_string().contains("signature-v1"), "{error}");
 }
 #[test]
 fn boundary_revoked_expired_original_is_provenance_only_and_acceptor_must_be_current() {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 use biscuit_auth::{Biscuit, KeyPair};
+use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use crypto::{Ed25519Signer, Signer, thread_operation::SignedOperation};
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 use objects::object::{
@@ -22,7 +23,7 @@ fn credential(root: &KeyPair) -> Credentials {
         .expect("right")
         .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
         .expect("proof key")
-        .build(root)
+        .build_v1(root)
         .expect("owner-minted Biscuit");
     Credentials::Signed {
         signer: Arc::new(signer),
@@ -364,6 +365,6 @@ async fn call_context_carries_the_serialized_biscuit_returned_by_credential_cere
         .context(method, &[])
         .await
         .expect("signed context");
-    Biscuit::from(&context.bearer_capability, root.public())
+    biscuit_verifier::signature_v1::verify(&context.bearer_capability, root.public())
         .expect("CallContext carries raw serialized Biscuit bytes");
 }

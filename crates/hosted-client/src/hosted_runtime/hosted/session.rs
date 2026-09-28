@@ -286,7 +286,8 @@ fn enforce_bearer_proof(config: &ClientConfig) -> Result<()> {
 }
 
 fn required_leaf_pop_key(token: &str) -> Result<Option<String>> {
-    let Ok(biscuit) = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes()) else {
+    let Ok(biscuit) = biscuit_verifier::signature_v1::parse_unverified_base64(token.as_bytes())
+    else {
         return Ok(None);
     };
     if !biscuit_declares_pop_binding(&biscuit)? {

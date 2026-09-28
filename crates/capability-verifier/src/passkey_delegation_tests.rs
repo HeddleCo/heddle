@@ -114,7 +114,7 @@ fn temporary_passkey_thread_landing_is_exact_method_and_spool_bound() {
             hex::encode(publisher), expiry.to_rfc3339(),
         ))
         .expect("land authority facts")
-        .build(&pair)
+        .build_v1(&pair)
         .expect("temporary land credential");
     let root = signed_root(
         OWNER_UUID,
@@ -165,7 +165,7 @@ fn temporary_passkey_thread_landing_is_exact_method_and_spool_bound() {
             hex::encode(publisher), expiry.to_rfc3339(),
         ))
         .expect("stack authority facts")
-        .build(&pair)
+        .build_v1(&pair)
         .expect("temporary stack credential");
     let stack_bytes = proof::encode(
         &OwnerHistory {
@@ -249,7 +249,7 @@ fn expired_revoked_passkey_work_keeps_provenance_without_current_authority() {
             hex::encode(publisher), expiry.to_rfc3339(),
         ))
         .expect("credential facts")
-        .build(&pair)
+        .build_v1(&pair)
         .expect("temporary credential");
     let root = signed_root(
         OWNER_UUID,

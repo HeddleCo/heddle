@@ -350,8 +350,9 @@ fn protocol_error(error: impl std::fmt::Display) -> ProtocolError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use api::v2::client::Rpc as _;
+
+    use super::*;
 
     #[test]
     fn public_source_shape_uses_the_url_as_its_provider_identity() {

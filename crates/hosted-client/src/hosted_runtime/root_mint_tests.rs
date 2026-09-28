@@ -15,14 +15,26 @@ fn build_root_emits_v1_authority() {
     let signer = Ed25519Signer::generate().expect("seed");
     let root = mint_agent_root(&signer.to_seed()).expect("root");
     let authority = authority_keypair(&signer.to_seed()).expect("authority");
-    let parsed = biscuit_auth::Biscuit::from_base64(&root.token, authority.public())
+    let parsed = biscuit_verifier::signature_v1::verify_base64(&root.token, authority.public())
         .expect("valid signature");
     assert_eq!(parsed.container().authority.version, 1);
+}
 
-    let legacy = biscuit_auth::Biscuit::builder()
-        .build(&authority)
-        .expect("legacy control");
-    assert_eq!(legacy.container().authority.version, 0);
+#[test]
+fn headless_token_metadata_refuses_v0_with_login_message() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE};
+
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../biscuit-verifier/tests/fixtures/timeline-origin-collision-v0.json"
+    ))
+    .expect("v0 collision fixture");
+    let bytes =
+        hex::decode(fixture["a_chain_hex"].as_str().expect("chain hex")).expect("chain bytes");
+    let bearer = URL_SAFE.encode(bytes);
+    let error = headless_token_metadata(&bearer)
+        .err()
+        .expect("v0 stored credential refused");
+    assert!(error.to_string().contains("heddle auth login"), "{error}");
 }
 
 #[test]
@@ -40,7 +52,7 @@ fn agent_root_is_signed_by_the_same_seed_weft_will_register() {
     .expect("mint agent root");
 
     let authority = authority_keypair(&signer.to_seed()).expect("authority");
-    biscuit_auth::Biscuit::from_base64(root.token.as_bytes(), authority.public())
+    biscuit_verifier::signature_v1::verify_base64(root.token.as_bytes(), authority.public())
         .expect("Weft verifies a client-minted root against the registered public key");
     let metadata = headless_token_metadata(&root.token).expect("metadata");
     assert!(!metadata.is_derived);
@@ -114,7 +126,7 @@ fn remint_cannot_escape_the_registered_key_session() {
     );
 
     let authority = authority_keypair(&signer.to_seed()).expect("authority");
-    biscuit_auth::Biscuit::from_base64(renewed.token.as_bytes(), authority.public())
+    biscuit_verifier::signature_v1::verify_base64(renewed.token.as_bytes(), authority.public())
         .expect("reminted root still verifies with the registered key");
 }
 
@@ -210,16 +222,13 @@ fn locally_bound_account_credential_preserves_the_parent_authority() {
     }
 }
 
-fn authorize_restricted_root(
-    token: &str,
-    seed: &[u8; 32],
-    operation: &str,
-) -> Result<(), biscuit_auth::error::Token> {
+fn authorize_restricted_root(token: &str, seed: &[u8; 32], operation: &str) -> anyhow::Result<()> {
     use biscuit_auth::{builder::AuthorizerBuilder, datalog::RunLimits};
 
     let authority = authority_keypair(seed).expect("authority");
     let root_public = authority.public();
-    let biscuit = biscuit_auth::Biscuit::from_base64(token.as_bytes(), move |_| Ok(root_public))?;
+    let biscuit =
+        biscuit_verifier::signature_v1::verify_base64(token.as_bytes(), move |_| Ok(root_public))?;
     let mut authorizer = AuthorizerBuilder::new()
         .set_limits(RunLimits {
             max_facts: 1000,
@@ -230,5 +239,5 @@ fn authorize_restricted_root(
         .fact(format!(r#"operation("{operation}")"#).as_str())?
         .policy("allow if true")?
         .build(&biscuit)?;
-    authorizer.authorize().map(|_| ())
+    authorizer.authorize().map(|_| ()).map_err(Into::into)
 }

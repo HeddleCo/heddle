@@ -4,7 +4,23 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
+use biscuit_auth::{Biscuit, KeyPair};
+use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use tempfile::TempDir;
+
+fn write_hosted_credential(heddle_home: &Path, subject: &str) {
+    let token = Biscuit::builder()
+        .fact(format!("user(\"{subject}\")").as_str())
+        .expect("credential subject fact")
+        .build_v1(&KeyPair::new())
+        .expect("v1 credential")
+        .to_base64()
+        .expect("encode credential");
+    let credentials = format!(
+        "[defaults]\nserver = \"api.heddle.test\"\n\n[servers.\"api.heddle.test\"]\ntoken = \"{token}\"\nsubject = \"{subject}\"\n"
+    );
+    fs::write(heddle_home.join("credentials.toml"), credentials).expect("store hosted login");
+}
 
 fn isolated_command(repo: &Path, home: &Path, heddle_home: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_heddle"));
@@ -469,8 +485,7 @@ fn capture_derives_principal_from_hosted_account_when_none_is_local() {
         .expect("run init without principal");
     assert_success(&init, "init without local principal");
 
-    let credentials = "[defaults]\nserver = \"api.heddle.test\"\n\n[servers.\"api.heddle.test\"]\ntoken = \"token\"\nsubject = \"luke@example.com\"\n";
-    fs::write(heddle_home.join("credentials.toml"), credentials).expect("store hosted login");
+    write_hosted_credential(&heddle_home, "luke@example.com");
 
     fs::write(repo.join("notes.txt"), "after login\n").expect("worktree change");
     let capture = isolated_command(
@@ -537,8 +552,7 @@ fn unclaimed_hosted_account_guides_claim_without_fabricating_email() {
         .expect("run init without principal");
     assert_success(&init, "init without local principal");
 
-    let credentials = "[defaults]\nserver = \"api.heddle.test\"\n\n[servers.\"api.heddle.test\"]\ntoken = \"token\"\nsubject = \"agent-key:abc\"\n";
-    fs::write(heddle_home.join("credentials.toml"), credentials).expect("store hosted login");
+    write_hosted_credential(&heddle_home, "agent-key:abc");
 
     fs::write(repo.join("notes.txt"), "after agent login\n").expect("worktree change");
     let capture = isolated_command(
@@ -579,8 +593,7 @@ fn claimed_agent_account_supplies_its_verified_invite_identity() {
         .expect("run init without principal");
     assert_success(&init, "init without local principal");
 
-    let credentials = "[defaults]\nserver = \"api.heddle.test\"\n\n[servers.\"api.heddle.test\"]\ntoken = \"token\"\nsubject = \"agent-key:abc\"\n";
-    fs::write(heddle_home.join("credentials.toml"), credentials).expect("store hosted login");
+    write_hosted_credential(&heddle_home, "agent-key:abc");
     let claim_state = format!(
         "format = \"heddle-agent-claim\"\nversion = 3\nserver = \"api.heddle.test\"\nowner_id = \"7ed1b633-64dd-4b78-b3a8-7f8e08fc4a28\"\nsubject = \"agent-key:abc\"\npet_name = \"quiet-otter\"\naccount_email = \"human@example.com\"\nnode_id = \"{}\"\ncreated_at = \"2026-09-22T00:00:00Z\"\nsecret_hash = \"00\"\nexpires_at_millis = 1\nstatus = \"consent_issued\"\nprepared_handle = \"human-handle\"\nprepared_nonce_hash = \"00\"\ncommand_receipts = []\n",
         "11".repeat(32)

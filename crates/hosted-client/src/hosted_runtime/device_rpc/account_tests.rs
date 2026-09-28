@@ -513,7 +513,7 @@ async fn real_account_rpc_composes_private_views_and_enforces_scoped_mutations()
             .expect("resource restriction"),
     )
     .expect("same-key attenuation");
-    let verified = biscuit_auth::Biscuit::from_base64(&scoped, |_| Ok(key))
+    let verified = biscuit_verifier::signature_v1::verify_base64(&scoped, |_| Ok(key))
         .expect("verified scoped credential");
     biscuit_verifier::authorize_at(
         &verified,

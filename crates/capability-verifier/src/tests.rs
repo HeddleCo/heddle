@@ -1,5 +1,6 @@
 use biscuit_auth::{Biscuit, KeyPair, PrivateKey, builder::Algorithm};
 use ed25519_dalek::{Signer, SigningKey};
+use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use prost::Message;
 use sha2::{Digest, Sha256};
 #[cfg(target_arch = "wasm32")]
@@ -295,8 +296,9 @@ fn subject_biscuit(capability: &OwnerCapability, signer: &TestKey) -> Vec<u8> {
     }
     let private = PrivateKey::from_bytes(&signer.seed, Algorithm::Ed25519).expect("Biscuit key");
     builder
-        .build(&KeyPair::from(&private))
-        .and_then(|value| value.to_vec())
+        .build_v1(&KeyPair::from(&private))
+        .expect("subject Biscuit root")
+        .to_vec()
         .expect("subject Biscuit")
 }
 
@@ -1401,6 +1403,18 @@ fn embedded_fixture_adapters_agree() {
             outcome.name, outcome.expected_accept, outcome.accepted
         );
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn capability_verifier_rejects_v0_subject_biscuit() {
+    let current = conformance::run_fixture(conformance::FIXTURE_V2_JSON).expect("v1 fixture");
+    assert_eq!(current[0].actual, Decision::Purge);
+    let legacy = conformance::run_fixture(include_str!(
+        "../tests/fixtures/subject_biscuit_v0_rejected.json"
+    ))
+    .expect("v0 fixture");
+    assert_ne!(legacy[0].actual, Decision::Purge);
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]

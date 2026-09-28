@@ -1,5 +1,6 @@
 use std::{ffi::OsString, sync::MutexGuard};
 
+use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use chrono::{Duration, Utc};
 use config::credentials::{self, ServerCredential};
 use crypto::{Ed25519Signer, Signer as _};
@@ -141,7 +142,7 @@ fn store_device_cred(server: &str, expires_at: Option<chrono::DateTime<Utc>>) ->
             .expect("expiry fact");
     }
     let token = builder
-        .build(&biscuit_auth::KeyPair::new())
+        .build_v1(&biscuit_auth::KeyPair::new())
         .expect("build token")
         .to_base64()
         .expect("encode token");
@@ -403,8 +404,8 @@ fn provisioned_agent_retains_registered_session_and_rejects_changed_key() {
         super::root_mint::authority_session_fact(&stored.token).expect("registered session"),
         "fixture-agent-session"
     );
-    let biscuit =
-        biscuit_auth::UnverifiedBiscuit::from_base64(&stored.token).expect("registered Biscuit");
+    let biscuit = biscuit_verifier::signature_v1::parse_unverified_base64(&stored.token)
+        .expect("registered Biscuit");
     assert!(
         biscuit
             .print_block_source(0)

@@ -2,6 +2,8 @@
 //! never turns approval into an independent credential-minting root.
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE};
+#[cfg(test)]
+use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use chrono::Utc;
 use crypto::{Ed25519Signer, Signer};
 use prost::Message;
@@ -410,7 +412,7 @@ mod tests {
         let expiry = chrono::DateTime::from_timestamp(now + 300, 0).expect("expiry");
         let token = biscuit_auth::Biscuit::builder()
             .code(format!("user(\"{account}\"); session(\"parent-session\"); device_pop_key(\"{}\"); check if time($now), $now < {};", hex::encode(subject.public_key()), expiry.to_rfc3339()).as_str())
-            .expect("fixture facts").build(&root).expect("credential").to_vec().expect("bytes");
+            .expect("fixture facts").build_v1(&root).expect("credential").to_vec().expect("bytes");
         let binding = api::RootAttachmentBinding {
             format_version: 2,
             account_id: account.clone(),

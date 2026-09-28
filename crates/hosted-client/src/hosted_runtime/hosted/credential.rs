@@ -138,7 +138,22 @@ pub fn resolve_hosted_credential(server_key: Option<&str>) -> Result<ResolvedHos
 
 pub fn resolve_active_bearer() -> Result<Option<AuthToken>> {
     let server = credentials::default_server()?;
-    Ok(resolve_hosted_credential(server.as_deref())?.token)
+    let resolved = resolve_hosted_credential(server.as_deref())?;
+    if let Some(token) = resolved.token.as_ref() {
+        require_v1_bearer(token)?;
+    }
+    Ok(resolved.token)
+}
+
+fn require_v1_bearer(token: &AuthToken) -> Result<()> {
+    biscuit_verifier::signature_v1::parse_unverified_base64(token.id.as_bytes()).map_err(
+        |error| {
+            anyhow::anyhow!(
+                "stored credential is invalid: {error}; run `heddle auth login` to re-authenticate"
+            )
+        },
+    )?;
+    Ok(())
 }
 
 /// Resolve run attribution from the locally active, proof-key-held credential.
@@ -192,6 +207,9 @@ pub fn hosted_account_principal() -> Option<(String, String)> {
             .and_then(|store| store.servers.keys().next().cloned())
     });
     let resolved = resolve_hosted_credential(server.as_deref()).ok()?;
+    if let Some(token) = resolved.token.as_ref() {
+        require_v1_bearer(token).ok()?;
+    }
     let subject = resolved
         .subject
         .as_deref()
@@ -219,7 +237,12 @@ pub fn hosted_account_is_unclaimed() -> bool {
     };
     let subject_is_agent = resolve_hosted_credential(Some(&server))
         .ok()
-        .and_then(|resolved| resolved.subject)
+        .and_then(|resolved| {
+            if let Some(token) = resolved.token.as_ref() {
+                require_v1_bearer(token).ok()?;
+            }
+            resolved.subject
+        })
         .is_some_and(|subject| subject.starts_with("agent-key:"));
     if !subject_is_agent {
         return false;
@@ -256,11 +279,50 @@ pub(crate) fn server_keys_match(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE};
+    use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
     use crypto::{Ed25519Signer, Signer};
 
     use super::{
-        CredentialSource, credential_env_path, resolve_hosted_credential, server_keys_match,
+        CredentialSource, credential_env_path, resolve_active_bearer, resolve_hosted_credential,
+        server_keys_match,
     };
+
+    #[test]
+    fn stored_v0_cannot_supply_capture_principal_or_active_bearer() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        with_isolated_env(|_| {
+            let fixture: serde_json::Value = serde_json::from_str(include_str!(
+                "../../../../biscuit-verifier/tests/fixtures/timeline-origin-collision-v0.json"
+            ))
+            .expect("v0 fixture");
+            let bytes = hex::decode(fixture["a_chain_hex"].as_str().expect("chain hex"))
+                .expect("chain bytes");
+            config::credentials::store_server_credential(
+                "api.heddle.test",
+                config::credentials::ServerCredential {
+                    mint_root_attachment: None,
+                    token: URL_SAFE.encode(bytes),
+                    subject: "luke@example.com".into(),
+                    device_id: None,
+                    credential_id: None,
+                    private_key_pem: None,
+                    expires_at: None,
+                },
+            )
+            .expect("store v0 credential");
+            assert!(super::hosted_account_principal().is_none());
+            let mut credential = config::credentials::get_server_credential("api.heddle.test")
+                .expect("load v0 credential")
+                .expect("stored v0 credential");
+            credential.subject = "agent-key:legacy".into();
+            config::credentials::store_server_credential("api.heddle.test", credential)
+                .expect("store v0 agent credential");
+            assert!(!super::hosted_account_is_unclaimed());
+            let error = resolve_active_bearer().expect_err("v0 active bearer refused");
+            assert!(error.to_string().contains("heddle auth login"), "{error}");
+        });
+    }
 
     fn mint_authority_token(subject: &str, signer: &Ed25519Signer) -> String {
         biscuit_auth::Biscuit::builder()
@@ -268,7 +330,7 @@ mod tests {
             .expect("user fact")
             .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
             .expect("proof key fact")
-            .build(&biscuit_auth::KeyPair::new())
+            .build_v1(&biscuit_auth::KeyPair::new())
             .expect("mint token")
             .to_base64()
             .expect("encode token")
@@ -499,11 +561,12 @@ mod tests {
     fn hosted_account_principal_reads_stored_login() {
         let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|_| {
+            let signer = Ed25519Signer::generate().expect("proof key");
             config::credentials::store_server_credential(
                 "api.heddle.test",
                 config::credentials::ServerCredential {
                     mint_root_attachment: None,
-                    token: "token".to_string(),
+                    token: mint_authority_token("luke@example.com", &signer),
                     subject: "luke@example.com".to_string(),
                     device_id: None,
                     credential_id: None,
@@ -523,11 +586,12 @@ mod tests {
     fn hosted_account_principal_uses_claimed_invite_identity() {
         let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|_| {
+            let signer = Ed25519Signer::generate().expect("proof key");
             config::credentials::store_server_credential(
                 "api.heddle.test",
                 config::credentials::ServerCredential {
                     mint_root_attachment: None,
-                    token: "token".to_string(),
+                    token: mint_authority_token("agent-key:abc", &signer),
                     subject: "agent-key:abc".to_string(),
                     device_id: None,
                     credential_id: None,

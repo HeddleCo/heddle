@@ -115,7 +115,8 @@ impl RenewableAuthorityCredential {
         let credential_id = credential.credential_id.clone()?;
         let signer = Ed25519Signer::from_pem(credential.private_key_pem.as_ref()?).ok()?;
         let biscuit =
-            biscuit_auth::UnverifiedBiscuit::from_base64(credential.token.as_bytes()).ok()?;
+            biscuit_verifier::signature_v1::parse_unverified_base64(credential.token.as_bytes())
+                .ok()?;
         if biscuit.block_count() != 1 {
             return None;
         }

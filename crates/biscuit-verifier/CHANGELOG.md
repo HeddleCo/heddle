@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0](https://github.com/HeddleCo/heddle/compare/heddle-biscuit-verifier-v0.25.7...heddle-biscuit-verifier-v0.26.0) - 2026-09-28
+
+### Changed
+
+- Build signature-v1 Biscuit roots and reject every token containing a signature-v0 block.
+- Pin heddle-api 0.31.0-alpha.8.
+
 ## [0.25.6](https://github.com/HeddleCo/heddle/compare/heddle-biscuit-verifier-v0.25.5...heddle-biscuit-verifier-v0.25.6) - 2026-09-28
 
 ### Other

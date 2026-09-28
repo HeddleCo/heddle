@@ -3,6 +3,7 @@ use crypto::{
     thread_operation::{SignedGenesis, SignedOperation},
     thread_ownership_claim::SignedOwnershipClaim,
 };
+use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use objects::{
     object::{
         Attribution, CollaborationActor, Principal, State,
@@ -55,7 +56,7 @@ fn acceptance(
     } else {
         ""
     };
-    let token=biscuit_auth::Biscuit::builder().code(format!("user(\"{}\"); session(\"claim-agent\"); device_pop_key(\"{}\"); {agent_fact} check if operation(\"{method}\"); check if resource(\"spool\",\"acme/project\"); expires_at(2100-01-01T00:00:00Z);",uuid::Uuid::from_bytes([9;16]),hex::encode(key.public_key()))).expect("facts").build(&pair).expect("actual Biscuit");
+    let token=biscuit_auth::Biscuit::builder().code(format!("user(\"{}\"); session(\"claim-agent\"); device_pop_key(\"{}\"); {agent_fact} check if operation(\"{method}\"); check if resource(\"spool\",\"acme/project\"); expires_at(2100-01-01T00:00:00Z);",uuid::Uuid::from_bytes([9;16]),hex::encode(key.public_key()))).expect("facts").build_v1(&pair).expect("actual Biscuit");
     let envelope = metadata::prepare_control_authority(
         authority,
         &key.public_key().try_into().expect("key"),
@@ -116,7 +117,7 @@ fn explicit_claim_preserves_identity_cutoff_and_conflicts_fail_closed() {
         &biscuit_auth::PrivateKey::from_bytes(&[71; 32], biscuit_auth::Algorithm::Ed25519)
             .expect("device root"),
     );
-    let token=biscuit_auth::Biscuit::builder().code(format!("user(\"{}\"); session(\"device-source\"); device_pop_key(\"{}\"); expires_at(2100-01-01T00:00:00Z);",uuid::Uuid::from_bytes([9;16]),hex::encode(account.public_key()))).expect("device facts").build(&pair).expect("device Biscuit");
+    let token=biscuit_auth::Biscuit::builder().code(format!("user(\"{}\"); session(\"device-source\"); device_pop_key(\"{}\"); expires_at(2100-01-01T00:00:00Z);",uuid::Uuid::from_bytes([9;16]),hex::encode(account.public_key()))).expect("device facts").build_v1(&pair).expect("device Biscuit");
     crate::identity::source_author::publish(
         home.path(),
         &authority,

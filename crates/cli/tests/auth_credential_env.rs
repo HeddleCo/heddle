@@ -4,8 +4,10 @@
 
 use std::{path::Path, process::Command};
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE};
 use biscuit_auth::KeyPair;
 use crypto::{Ed25519Signer, Signer};
+use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -23,7 +25,7 @@ fn write_env_credential(path: &Path) {
         .expect("expiry fact")
         .check(format!("check if time($now), $now < {}", expires_at.to_rfc3339()).as_str())
         .expect("expiry check")
-        .build(&KeyPair::new())
+        .build_v1(&KeyPair::new())
         .expect("build credential token")
         .to_base64()
         .expect("encode credential token");
@@ -184,4 +186,57 @@ fn auth_family_agrees_for_env_only_and_absent_credentials() {
         "derive-agent should report the absent credential without exposing credential material",
     );
     assert!(!absent_child.exists());
+}
+
+#[test]
+fn stored_v0_credential_is_refused_with_login_recovery() {
+    let home = TempDir::new().expect("isolated Heddle home");
+    let credential_path = home.path().join("legacy.hcred");
+    write_env_credential(&credential_path);
+    let mut credential: Value =
+        serde_json::from_slice(&std::fs::read(&credential_path).expect("credential file"))
+            .expect("credential JSON");
+    let collision_fixture: Value = serde_json::from_str(include_str!(
+        "../../biscuit-verifier/tests/fixtures/timeline-origin-collision-v0.json"
+    ))
+    .expect("v0 fixture");
+    let legacy = hex::decode(
+        collision_fixture["a_chain_hex"]
+            .as_str()
+            .expect("legacy token bytes"),
+    )
+    .expect("legacy token hex");
+    credential["token"] = Value::String(URL_SAFE.encode(legacy));
+    std::fs::write(
+        &credential_path,
+        serde_json::to_vec(&credential).expect("credential JSON"),
+    )
+    .expect("legacy credential file");
+
+    for args in [
+        &["auth", "status", "--server", SERVER][..],
+        &["whoami", "--server", SERVER][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_heddle"))
+            .arg("--output")
+            .arg("json")
+            .args(args)
+            .current_dir(home.path())
+            .env("HOME", home.path())
+            .env("HEDDLE_HOME", home.path())
+            .env("HEDDLE_CREDENTIAL", &credential_path)
+            .env_remove("HEDDLE_CONFIG")
+            .output()
+            .expect("run CLI with legacy credential");
+        assert!(!output.status.success(), "{args:?} accepted v0");
+        let output_text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output_text.contains("heddle auth login"),
+            "{args:?}: {output_text}"
+        );
+    }
 }

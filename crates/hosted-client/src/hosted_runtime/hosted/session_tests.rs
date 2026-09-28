@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use config::{UserConfig, credentials};
 use crypto::{Ed25519Signer, Signer};
 
@@ -18,7 +19,7 @@ fn mint_pop_token(subject: &str, signer: &Ed25519Signer) -> String {
         .expect("user fact")
         .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
         .expect("proof key fact")
-        .build(&biscuit_auth::KeyPair::new())
+        .build_v1(&biscuit_auth::KeyPair::new())
         .expect("mint token")
         .to_base64()
         .expect("encode token")
@@ -28,7 +29,7 @@ fn mint_unbound_token(subject: &str) -> String {
     biscuit_auth::Biscuit::builder()
         .fact(format!("user(\"{subject}\")").as_str())
         .expect("user fact")
-        .build(&biscuit_auth::KeyPair::new())
+        .build_v1(&biscuit_auth::KeyPair::new())
         .expect("mint unbound token")
         .to_base64()
         .expect("encode unbound token")
@@ -359,13 +360,21 @@ fn unbound_biscuit_without_pop_key_keeps_token_only_behavior() {
 }
 
 #[test]
-fn opaque_unbound_bearer_keeps_token_only_behavior() {
+fn opaque_unbound_bearer_is_refused() {
     let _process_env_guard = crate::test_process_env::exclusive_blocking();
     with_isolated_env(|_| {
         store_credential("not-a-biscuit", "opaque", None);
 
         let session = build_session(&UserConfig::default()).expect("opaque bearer session");
-        assert_token_only(&session);
+        let error = CallContextFactory::from_client_config(session.client_config())
+            .expect("call context factory")
+            .unary(
+                "/heddle.api.v1alpha2.IdentityService/ObserveIdentity",
+                &[],
+                "",
+            )
+            .expect_err("opaque bearer refused");
+        assert!(error.to_string().contains("heddle auth login"));
     });
 }
 

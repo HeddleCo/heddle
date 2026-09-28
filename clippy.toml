@@ -1,0 +1,13 @@
+disallowed-methods = [
+  { path = "biscuit_auth::Biscuit::from", reason = "use heddle_biscuit_verifier::signature_v1::verify" },
+  { path = "biscuit_auth::Biscuit::from_base64", reason = "use heddle_biscuit_verifier::signature_v1::verify_base64" },
+  { path = "biscuit_auth::UnverifiedBiscuit::from", reason = "use heddle_biscuit_verifier::signature_v1::parse_unverified" },
+  { path = "biscuit_auth::UnverifiedBiscuit::from_base64", reason = "use heddle_biscuit_verifier::signature_v1::parse_unverified_base64" },
+  { path = "biscuit_auth::UnverifiedBiscuit::verify", reason = "use heddle_biscuit_verifier::signature_v1::verify" },
+  { path = "biscuit_auth::UnverifiedBiscuit::check_signature", reason = "use heddle_biscuit_verifier::signature_v1::verify" },
+  { path = "biscuit_auth::UnverifiedBiscuit::unsafe_deprecated_deserialize", reason = "legacy Biscuit tokens are forbidden" },
+  { path = "biscuit_auth::BiscuitBuilder::build", reason = "use heddle_biscuit_verifier::signature_v1::build_root" },
+  { path = "biscuit_auth::BiscuitBuilder::build_with_rng", reason = "use a signature-v1 root builder" },
+  { path = "biscuit_auth::BiscuitBuilder::build_with_key_pair", reason = "use heddle_biscuit_verifier::signature_v1::build_root_with_key_pair" },
+  { path = "biscuit_auth::BiscuitBuilder::build_with_symbols", reason = "use a signature-v1 root builder" },
+]

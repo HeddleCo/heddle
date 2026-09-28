@@ -5,6 +5,8 @@ use std::{collections::BTreeSet, io::Read, path::Path};
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha2 as identity;
 use base64::Engine;
+#[cfg(test)]
+use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use config::{UserConfig, credentials, credentials::ServerCredential};
 use crypto::{Ed25519Signer, Signer};
 use objects::{HeddleError, RecoveryDetails};
@@ -703,7 +705,7 @@ fn validate_scope_narrowing(parent_token: &str, child: &[(String, String)]) -> R
 fn agent_scope_blocks(token: &str) -> Result<Vec<Vec<(String, String)>>> {
     use biscuit_auth::builder::{BlockBuilder, Term};
 
-    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+    let biscuit = biscuit_verifier::signature_v1::parse_unverified_base64(token.as_bytes())
         .context("parsing parent Biscuit scopes")?;
     let mut blocks = Vec::new();
     for index in 1..biscuit.block_count() {
@@ -788,8 +790,12 @@ pub(crate) fn install_credential_file(path: &Path) -> Result<String> {
 pub(crate) fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetadata> {
     use biscuit_auth::builder::{BlockBuilder, Term};
 
-    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
-        .context("parsing credential token as a Biscuit")?;
+    let biscuit = biscuit_verifier::signature_v1::parse_unverified_base64(token.as_bytes())
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "stored credential is invalid: {error}; run `heddle auth login` to re-authenticate"
+            )
+        })?;
     let block_count = biscuit.block_count();
     let authority_source = biscuit
         .print_block_source(0)
@@ -931,17 +937,21 @@ fn auth_status(server: Option<&str>) -> Result<AuthStatus> {
     // `auth status` reflects what a hosted op would actually use — including a
     // `HEDDLE_CREDENTIAL` that overrides the keystore.
     let resolved = resolve_hosted_credential(Some(&server))?;
-    Ok(auth_status_output(&server, &resolved))
+    auth_status_output(&server, &resolved)
 }
 
-fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> AuthStatus {
+fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> Result<AuthStatus> {
     let source = resolved.source.label();
-    if resolved.token.is_some() {
+    if let Some(token) = resolved.token.as_ref() {
+        biscuit_verifier::signature_v1::parse_unverified_base64(token.id.as_bytes())
+            .map_err(|error| anyhow::anyhow!(
+                "stored credential is invalid: {error}; run `heddle auth login` to re-authenticate"
+            ))?;
         let proof_key_available = resolved
             .proof_key_pem
             .as_deref()
             .is_some_and(|pem| Ed25519Signer::from_pem(pem).is_ok());
-        AuthStatus {
+        Ok(AuthStatus {
             server: server.to_string(),
             authenticated: true,
             source,
@@ -951,9 +961,9 @@ fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> Auth
             expires_at: resolved.expires_at.clone(),
             recommended_action: (!proof_key_available)
                 .then(|| format!("heddle auth login --server {server}")),
-        }
+        })
     } else {
-        AuthStatus {
+        Ok(AuthStatus {
             server: server.to_string(),
             authenticated: false,
             source,
@@ -962,7 +972,7 @@ fn auth_status_output(server: &str, resolved: &ResolvedHostedCredential) -> Auth
             credential_id: None,
             expires_at: None,
             recommended_action: Some(format!("heddle auth login --server {server}")),
-        }
+        })
     }
 }
 
@@ -1580,11 +1590,11 @@ fn verify_issued_service_biscuit(
 ) -> Result<String> {
     let root = biscuit_auth::PublicKey::from_bytes(root_key, biscuit_auth::Algorithm::Ed25519)
         .context("invalid verified parent Biscuit root key")?;
-    let parent = biscuit_auth::Biscuit::from(parent_raw, root)
+    let parent = biscuit_verifier::signature_v1::verify(parent_raw, root)
         .context("active parent Biscuit signature failed local verification")?;
     let root = biscuit_auth::PublicKey::from_bytes(root_key, biscuit_auth::Algorithm::Ed25519)
         .context("invalid verified issued Biscuit root key")?;
-    let issued = biscuit_auth::Biscuit::from(issued_raw, root)
+    let issued = biscuit_verifier::signature_v1::verify(issued_raw, root)
         .context("issued service Biscuit signature failed local verification")?;
     if issued.block_count() != parent.block_count() + 1 {
         bail!("issued service credential must append exactly one block to its parent");
@@ -2131,7 +2141,7 @@ mod tests {
             .expect("session")
             .fact(format!("device_pop_key(\"{}\")", hex::encode(&root_key)).as_str())
             .expect("parent proof key")
-            .build(&root)
+            .build_v1(&root)
             .expect("parent Biscuit")
             .to_base64()
             .expect("parent token");
@@ -2262,7 +2272,7 @@ mod tests {
             .expect("sibling proof key")
             .fact(r#"session("another")"#)
             .expect("sibling session")
-            .build(&root)
+            .build_v1(&root)
             .expect("sibling parent")
             .to_base64()
             .expect("sibling token");
@@ -2485,7 +2495,7 @@ mod tests {
             .expect("expiry fact")
             .check(format!("check if time($now), $now < {}", expires_at.to_rfc3339()).as_str())
             .expect("expiry check")
-            .build(&root)
+            .build_v1(&root)
             .expect("build parent")
             .to_base64()
             .expect("encode parent");
@@ -2513,8 +2523,9 @@ mod tests {
         use biscuit_auth::{builder::AuthorizerBuilder, datalog::RunLimits};
 
         let root_public = root.public();
-        let biscuit = biscuit_auth::Biscuit::from_base64(token, move |_| Ok(root_public))
-            .expect("verify runner Biscuit");
+        let biscuit =
+            biscuit_verifier::signature_v1::verify_base64(token, move |_| Ok(root_public))
+                .expect("verify runner Biscuit");
         let mut builder = AuthorizerBuilder::new()
             .set_limits(RunLimits {
                 max_facts: 1000,
@@ -2584,8 +2595,9 @@ mod tests {
                 installed.credential_id.is_none(),
                 "derived tokens must not auto-rotate into an unattenuated token"
             );
-            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(installed.token.as_bytes())
-                .expect("parse installed child");
+            let parsed =
+                biscuit_verifier::signature_v1::parse_unverified_base64(installed.token.as_bytes())
+                    .expect("parse installed child");
             assert_eq!(parsed.block_count(), 2);
             assert!(
                 parsed
@@ -2624,8 +2636,9 @@ mod tests {
             );
             let subagent_signer =
                 Ed25519Signer::from_pem(subagent_private_key).expect("parse subagent PoP key");
-            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(subagent.token.as_bytes())
-                .expect("parse subagent");
+            let parsed =
+                biscuit_verifier::signature_v1::parse_unverified_base64(subagent.token.as_bytes())
+                    .expect("parse subagent");
             assert_eq!(
                 parsed.block_count(),
                 3,
@@ -2700,8 +2713,9 @@ mod tests {
 
             let child_signer =
                 Ed25519Signer::from_pem(&loaded.proof_key_pem).expect("parse child key");
-            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(loaded.token.as_bytes())
-                .expect("token is a Biscuit");
+            let parsed =
+                biscuit_verifier::signature_v1::parse_unverified_base64(loaded.token.as_bytes())
+                    .expect("token is a Biscuit");
             assert!(
                 parsed
                     .print_block_source(1)
@@ -2753,8 +2767,9 @@ mod tests {
             );
             let child_signer =
                 Ed25519Signer::from_pem(&loaded.proof_key_pem).expect("parse runner PoP key");
-            let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(loaded.token.as_bytes())
-                .expect("runner token is a Biscuit");
+            let parsed =
+                biscuit_verifier::signature_v1::parse_unverified_base64(loaded.token.as_bytes())
+                    .expect("runner token is a Biscuit");
             let authority = parsed.print_block_source(0).expect("authority block");
             let attenuation = parsed.print_block_source(1).expect("runner block");
             assert!(
@@ -2939,7 +2954,12 @@ mod tests {
     #[test]
     fn auth_status_qualifies_a_credential_without_a_proof_key() {
         let _process_env_guard = crate::test_process_env::exclusive_blocking();
-        let credential = sample_credential();
+        let mut credential = sample_credential();
+        credential.token = biscuit_auth::Biscuit::builder()
+            .build_v1(&biscuit_auth::KeyPair::new())
+            .expect("v1 credential")
+            .to_base64()
+            .expect("bearer");
         let resolved = crate::hosted_runtime::hosted::ResolvedHostedCredential {
             mint_root_attachment: None,
             token: Some(wire::AuthToken::new(credential.token, "credential-store")),
@@ -2950,7 +2970,7 @@ mod tests {
             expires_at: credential.expires_at,
             source: crate::hosted_runtime::hosted::CredentialSource::Keystore,
         };
-        let output = auth_status_output("api.S", &resolved);
+        let output = auth_status_output("api.S", &resolved).expect("v1 status");
 
         assert!(output.authenticated);
         assert_eq!(output.source, "keystore");
@@ -2961,6 +2981,34 @@ mod tests {
                 .as_deref()
                 .is_some_and(|action| action.contains("auth login --server api.S"))
         );
+    }
+
+    #[test]
+    fn auth_status_refuses_v0_keystore_credential() {
+        use base64::{Engine as _, engine::general_purpose::URL_SAFE};
+
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../biscuit-verifier/tests/fixtures/timeline-origin-collision-v0.json"
+        ))
+        .expect("v0 fixture");
+        let bytes =
+            hex::decode(fixture["a_chain_hex"].as_str().expect("chain hex")).expect("chain bytes");
+        let resolved = crate::hosted_runtime::hosted::ResolvedHostedCredential {
+            mint_root_attachment: None,
+            token: Some(wire::AuthToken::new(
+                URL_SAFE.encode(bytes),
+                "credential-store",
+            )),
+            proof_key_pem: None,
+            renewable: None,
+            subject: Some("legacy".into()),
+            credential_id: None,
+            expires_at: None,
+            source: crate::hosted_runtime::hosted::CredentialSource::Keystore,
+        };
+        let error =
+            auth_status_output("api.S", &resolved).expect_err("v0 keystore credential refused");
+        assert!(error.to_string().contains("heddle auth login"), "{error}");
     }
 
     #[tokio::test]
@@ -3011,7 +3059,7 @@ mod tests {
                 .expect("expiry fact")
                 .check(format!("check if time($now), $now < {}", expires_at.to_rfc3339()).as_str())
                 .expect("expiry check")
-                .build(&biscuit_auth::KeyPair::new())
+                .build_v1(&biscuit_auth::KeyPair::new())
                 .expect("build device token")
                 .to_base64()
                 .expect("encode device token");

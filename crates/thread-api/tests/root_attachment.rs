@@ -1,5 +1,6 @@
 #![cfg(feature = "root-attachment")]
 use biscuit_auth::{Biscuit, KeyPair};
+use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use chrono::{DateTime, Utc};
 use crypto::{Ed25519Signer, Signer};
 use heddle_thread_api::{contract::*, root_attachment};
@@ -23,7 +24,7 @@ fn attached_endpoint_requires_trusted_root_exact_credential_and_subject_possessi
         .expect("expiry")
         .check(format!("check if time($now), $now < {}", deadline.to_rfc3339()).as_str())
         .expect("expiry check")
-        .build(&root)
+        .build_v1(&root)
         .expect("root credential")
         .to_vec()
         .expect("raw credential");
@@ -148,7 +149,7 @@ fn delegated_attachment_preserves_ancestor_expiry_and_proof_key_chain() {
             .as_str(),
         )
         .expect("root proof key")
-        .build(&root)
+        .build_v1(&root)
         .expect("root token");
     let parent_id = token
         .revocation_identifiers()
@@ -350,7 +351,7 @@ fn attached_endpoint_rejects_different_credential_account() {
         .expect("session")
         .fact(format!("device_pop_key(\"{}\")", hex::encode(subject.public_key())).as_str())
         .expect("subject")
-        .build(&root)
+        .build_v1(&root)
         .expect("valid root credential")
         .to_vec()
         .expect("credential");

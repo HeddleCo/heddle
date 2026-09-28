@@ -1,6 +1,8 @@
 //! Signature-verified metadata extraction without implying operation authority.
 use biscuit_auth::{Biscuit, PublicKey};
 
+#[cfg(test)]
+use crate::signature_v1::BiscuitBuilderV1Ext as _;
 use crate::{BiscuitError, BiscuitFacts, authorizer_limits};
 
 /// A selector retains its storage namespace; device IDs and proof keys are
@@ -121,6 +123,7 @@ pub fn inspect_verified_credential(
     biscuit: &Biscuit,
     root: &PublicKey,
 ) -> Result<InspectedCredential, BiscuitError> {
+    crate::signature_v1::require_v1(biscuit)?;
     let mut authorizer = biscuit_auth::builder::AuthorizerBuilder::new()
         .set_limits(authorizer_limits())
         .build(biscuit)
@@ -168,7 +171,7 @@ mod tests {
     fn fixture() -> (Biscuit, PublicKey) {
         let key =
             KeyPair::from(&PrivateKey::from_bytes(&[17; 32], Algorithm::Ed25519).expect("root"));
-        let token=Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); subject_kind(\"user\"); subject_user_uuid(\"11111111-1111-1111-1111-111111111111\"); session(\"inspect-scoped\"); device(\"registered-device\"); credential_id(\"issued-credential\"); device_pop_key(\"{}\"); expires_at(2000-01-01T00:00:00Z); check if operation(\"ReadContent\"); check if resource(\"spool\", \"private/one\"); check if time($t), $t < 2000-01-01T00:00:00Z;",hex::encode(key.public().to_bytes())).as_str()).expect("expired scoped facts").build(&key).expect("token");
+        let token=Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); subject_kind(\"user\"); subject_user_uuid(\"11111111-1111-1111-1111-111111111111\"); session(\"inspect-scoped\"); device(\"registered-device\"); credential_id(\"issued-credential\"); device_pop_key(\"{}\"); expires_at(2000-01-01T00:00:00Z); check if operation(\"ReadContent\"); check if resource(\"spool\", \"private/one\"); check if time($t), $t < 2000-01-01T00:00:00Z;",hex::encode(key.public().to_bytes())).as_str()).expect("expired scoped facts").build_v1(&key).expect("token");
         (token, key.public())
     }
     #[test]
@@ -238,7 +241,8 @@ mod tests {
                 .expect("untrusted appended selectors"),
         )
         .expect("delegated");
-        let verified = Biscuit::from_base64(&delegated, root).expect("signature chain");
+        let verified =
+            crate::signature_v1::verify_base64(&delegated, root).expect("signature chain");
         let inspected =
             inspect_verified_credential(&verified, &root).expect("original authority selectors");
         assert_eq!(inspected.device_id.as_deref(), Some("registered-device"));

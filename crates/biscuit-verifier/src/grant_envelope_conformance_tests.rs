@@ -16,6 +16,7 @@ use super::{
     envelope::{GrantEnvelope, SignedGrantEnvelope},
     verify_client_minted_at_with_resource,
 };
+use crate::signature_v1::BiscuitBuilderV1Ext as _;
 
 const SUBJECT: &str = "grant-envelope-property-subject";
 const OPERATION: &str = "GrantEnvelopeProperty";
@@ -241,7 +242,7 @@ fn client_token(assertions: &[Right], device: &KeyPair) -> String {
         builder = builder.fact(fact.as_str()).expect("add generated right");
     }
     builder
-        .build(device)
+        .build_v1(device)
         .expect("build generated client token")
         .to_base64()
         .expect("encode generated client token")

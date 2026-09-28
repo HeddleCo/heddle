@@ -13,4 +13,4 @@ serde_json = "1"
 [workspace]
 
 [patch.crates-io]
-heddle-api = { git = "https://github.com/HeddleCo/api.git", rev = "b92b6a781f515408bb0e2f6a49a9de18c8243ff6", version = "=0.31.0-alpha.6" }
+heddle-api = { git = "https://github.com/HeddleCo/api.git", rev = "67c8e13d94586754a93b0bae457910491ca96b74", version = "=0.31.0-alpha.8" }

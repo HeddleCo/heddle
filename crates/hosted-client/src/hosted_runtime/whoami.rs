@@ -385,7 +385,7 @@ fn project_current_identity(
 }
 
 fn token_resource_scopes(token: &str) -> Result<Vec<(String, String)>> {
-    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+    let biscuit = biscuit_verifier::signature_v1::parse_unverified_base64(token.as_bytes())
         .context("parsing Biscuit token scopes")?;
     let mut seen = std::collections::BTreeSet::new();
     let mut scopes = Vec::new();
@@ -412,7 +412,7 @@ fn token_resource_scopes(token: &str) -> Result<Vec<(String, String)>> {
 }
 
 fn token_operation_ceiling(token: &str) -> Result<Option<Vec<String>>> {
-    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+    let biscuit = biscuit_verifier::signature_v1::parse_unverified_base64(token.as_bytes())
         .context("parsing Biscuit token operation ceiling")?;
     let mut intersection: Option<std::collections::BTreeSet<String>> = None;
     for index in 1..biscuit.block_count() {

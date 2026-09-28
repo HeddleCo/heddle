@@ -6,6 +6,8 @@ use std::{io::Read, path::Path};
 
 use anyhow::{Context, Result, bail};
 use api::heddle::api::v1alpha2::{OwnerState, SignedOwnerMintRootAttachment};
+#[cfg(test)]
+use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use objects::{fs_atomic, lock::RepoLock};
 use prost::Message;
 
@@ -474,7 +476,7 @@ mod tests {
         .expect("private key");
         let keypair = biscuit_auth::KeyPair::from(&private);
         let token = biscuit_auth::Biscuit::builder()
-            .build(&keypair)
+            .build_v1(&keypair)
             .expect("token")
             .seal()
             .expect("seal");
@@ -498,7 +500,7 @@ mod tests {
             "request does not mutate enrollment"
         );
         let other = biscuit_auth::Biscuit::builder()
-            .build(&keypair)
+            .build_v1(&keypair)
             .expect("other token")
             .seal()
             .expect("seal other");
@@ -711,7 +713,7 @@ mod tests {
         .expect("local device signing authority");
         let keypair = biscuit_auth::KeyPair::from(&private);
         let token = biscuit_auth::Biscuit::builder()
-            .build(&keypair)
+            .build_v1(&keypair)
             .expect("locally minted credential");
         let proof = crate::thread_replication::metadata::prepare_control_authority(
             &stored,

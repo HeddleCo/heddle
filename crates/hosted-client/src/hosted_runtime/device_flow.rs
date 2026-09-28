@@ -12,6 +12,8 @@
 //! chain).
 
 use anyhow::{Context, Result, bail};
+#[cfg(test)]
+use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use chrono::{DateTime, Utc};
 use crypto::{Ed25519Signer, Signer};
 
@@ -249,7 +251,7 @@ pub(crate) fn pop_delegation_payload(
 pub(crate) fn effective_pop_public_key_hex(token_b64: &str) -> Result<String> {
     use biscuit_auth::builder::{BlockBuilder, Term};
 
-    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token_b64.as_bytes())
+    let biscuit = biscuit_verifier::signature_v1::parse_unverified_base64(token_b64.as_bytes())
         .context("parse Biscuit while resolving its proof key")?;
     let authority_source = biscuit
         .print_block_source(0)
@@ -333,7 +335,7 @@ pub(crate) fn effective_pop_public_key_hex(token_b64: &str) -> Result<String> {
 pub(crate) fn authenticated_subject(token_b64: &str) -> Result<String> {
     use biscuit_auth::builder::{BlockBuilder, Term};
 
-    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token_b64.as_bytes())
+    let biscuit = biscuit_verifier::signature_v1::parse_unverified_base64(token_b64.as_bytes())
         .context("parse Biscuit while resolving its authenticated subject")?;
     let authority_source = biscuit
         .print_block_source(0)
@@ -560,7 +562,7 @@ mod tests {
         builder = builder
             .check(format!("check if time($now), $now < {}", exp.to_rfc3339()).as_str())
             .expect("expiry check");
-        let biscuit = builder.build(&kp).expect("build parent biscuit");
+        let biscuit = builder.build_v1(&kp).expect("build parent biscuit");
         (biscuit.to_base64().expect("to_base64"), kp, parent_pop)
     }
 
@@ -595,16 +597,17 @@ mod tests {
             "alice"
         );
 
-        let attenuated = biscuit_auth::UnverifiedBiscuit::from_base64(authority_token.as_bytes())
-            .expect("parse authority token")
-            .append(
-                biscuit_auth::builder::BlockBuilder::new()
-                    .fact(r#"user("mallory")"#)
-                    .expect("attenuation-local user fact"),
-            )
-            .expect("append attenuation")
-            .to_base64()
-            .expect("encode attenuation");
+        let attenuated =
+            biscuit_verifier::signature_v1::parse_unverified_base64(authority_token.as_bytes())
+                .expect("parse authority token")
+                .append(
+                    biscuit_auth::builder::BlockBuilder::new()
+                        .fact(r#"user("mallory")"#)
+                        .expect("attenuation-local user fact"),
+                )
+                .expect("append attenuation")
+                .to_base64()
+                .expect("encode attenuation");
         assert_eq!(
             authenticated_subject(&attenuated).expect("authority remains authoritative"),
             "alice"
@@ -613,7 +616,7 @@ mod tests {
         let missing = Biscuit::builder()
             .fact(r#"session("sess-1")"#)
             .expect("session fact")
-            .build(&KeyPair::new())
+            .build_v1(&KeyPair::new())
             .expect("build missing-subject token")
             .to_base64()
             .expect("encode missing-subject token");
@@ -624,7 +627,7 @@ mod tests {
             .expect("first user fact")
             .fact(r#"user("mallory")"#)
             .expect("second user fact")
-            .build(&KeyPair::new())
+            .build_v1(&KeyPair::new())
             .expect("build duplicate-subject token")
             .to_base64()
             .expect("encode duplicate-subject token");
@@ -640,7 +643,7 @@ mod tests {
             .expect("user fact")
             .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
             .expect("root PoP fact")
-            .build(&KeyPair::new())
+            .build_v1(&KeyPair::new())
             .expect("build root")
             .append(
                 biscuit_auth::builder::BlockBuilder::new()
@@ -668,7 +671,7 @@ mod tests {
             .expect("first root PoP fact")
             .fact(format!("device_pop_key(\"{}\")", hex::encode(second.public_key())).as_str())
             .expect("second root PoP fact")
-            .build(&KeyPair::new())
+            .build_v1(&KeyPair::new())
             .expect("build root")
             .to_base64()
             .expect("encode root");
@@ -689,7 +692,7 @@ mod tests {
             .expect("root PoP fact")
             .fact(r#"pop_delegation("parent", "child", "signature")"#)
             .expect("misplaced delegation fact")
-            .build(&KeyPair::new())
+            .build_v1(&KeyPair::new())
             .expect("build malformed root")
             .to_base64()
             .expect("encode malformed root");
@@ -757,9 +760,10 @@ mod tests {
         root: &KeyPair,
         operation: &str,
         now: DateTime<Utc>,
-    ) -> Result<(), biscuit_auth::error::Token> {
+    ) -> anyhow::Result<()> {
         let root_public = root.public();
-        let biscuit = Biscuit::from_base64(token, move |_| Ok(root_public))?;
+        let biscuit =
+            biscuit_verifier::signature_v1::verify_base64(token, move |_| Ok(root_public))?;
         let mut authorizer = AuthorizerBuilder::new()
             .set_limits(RunLimits {
                 max_facts: 1000,
@@ -770,7 +774,7 @@ mod tests {
             .fact(format!("operation({})", biscuit_string(operation)).as_str())?
             .policy("allow if true")?
             .build(&biscuit)?;
-        authorizer.authorize().map(|_| ())
+        authorizer.authorize().map(|_| ()).map_err(Into::into)
     }
 
     #[test]
@@ -831,8 +835,8 @@ mod tests {
         // the unverified path so we don't need the parent's root
         // key). The verifier round-trip is exercised in the
         // integration tests.
-        let parsed =
-            biscuit_auth::UnverifiedBiscuit::from_base64(attenuated.as_bytes()).expect("parse");
+        let parsed = biscuit_verifier::signature_v1::parse_unverified_base64(attenuated.as_bytes())
+            .expect("parse");
         assert!(parsed.block_count() >= 2, "expected attenuation block");
     }
 
@@ -1001,7 +1005,7 @@ mod tests {
             server_authorizes(&subagent, &root, "GetState", Utc::now()).is_err(),
             "a child cannot widen its parent's operation set"
         );
-        let parsed = biscuit_auth::UnverifiedBiscuit::from_base64(subagent.as_bytes())
+        let parsed = biscuit_verifier::signature_v1::parse_unverified_base64(subagent.as_bytes())
             .expect("parse subagent");
         assert_eq!(parsed.block_count(), 3, "authority plus two agent hops");
         let parent_source = parsed.print_block_source(1).expect("parent block source");
@@ -1019,9 +1023,10 @@ mod tests {
         operation: &str,
         resource: (&str, &str),
         now: DateTime<Utc>,
-    ) -> Result<(), biscuit_auth::error::Token> {
+    ) -> anyhow::Result<()> {
         let root_public = root.public();
-        let biscuit = Biscuit::from_base64(token, move |_| Ok(root_public))?;
+        let biscuit =
+            biscuit_verifier::signature_v1::verify_base64(token, move |_| Ok(root_public))?;
         let mut authorizer = AuthorizerBuilder::new()
             .set_limits(RunLimits {
                 max_facts: 1000,
@@ -1040,7 +1045,7 @@ mod tests {
             )?
             .policy("allow if true")?
             .build(&biscuit)?;
-        authorizer.authorize().map(|_| ())
+        authorizer.authorize().map(|_| ()).map_err(Into::into)
     }
 
     #[test]
