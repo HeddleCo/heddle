@@ -220,7 +220,7 @@ pub(super) fn verify_original(
         biscuit_auth::Algorithm::Ed25519,
     )
     .map_err(|error| invalid(error.to_string()))?;
-    let token = Biscuit::from(&envelope.sealed_biscuit, key)
+    let token = heddle_biscuit_verifier::signature_v1::verify(&envelope.sealed_biscuit, key)
         .map_err(|error| invalid(format!("original Thread credential: {error}")))?;
     if !matches!(token.seal(), Err(biscuit_auth::error::Token::AlreadySealed)) {
         return Err(invalid("public Thread authority must be sealed"));

@@ -99,8 +99,7 @@ pub(crate) fn mint_independent_root(mint: IndependentRootMint<'_>) -> Result<Ind
     builder = builder
         .check(format!("check if time($now), $now < {expiry}").as_str())
         .context("independent-root expiry check")?;
-    let token = builder
-        .build(&authority)
+    let token = biscuit_verifier::signature_v1::build_root(builder, &authority)
         .context("signing the independent-root authority block")?
         .to_base64()
         .context("encoding the independent-root token")?;
@@ -181,7 +180,7 @@ pub(crate) fn local_agent_credential_needs_refresh(
 pub(crate) fn authority_session_fact(token: &str) -> Result<String> {
     use biscuit_auth::builder::{BlockBuilder, Term};
 
-    let biscuit = biscuit_auth::UnverifiedBiscuit::from_base64(token.as_bytes())
+    let biscuit = biscuit_verifier::signature_v1::parse_unverified_base64(token.as_bytes())
         .context("parsing independent-root session")?;
     let source = biscuit
         .print_block_source(0)

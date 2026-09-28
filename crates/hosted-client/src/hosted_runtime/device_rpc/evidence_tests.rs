@@ -25,7 +25,7 @@ pub(super) async fn roundtrip(
     let public =
         biscuit_auth::PublicKey::from_bytes(signer.public_key(), biscuit_auth::Algorithm::Ed25519)
             .expect("public key");
-    let token = biscuit_auth::Biscuit::from_base64(minted.token, public).expect("token");
+    let token = biscuit_verifier::signature_v1::verify_base64(minted.token, public).expect("token");
     let envelope = repo::thread_replication::metadata::prepare_control_authority(
         &authority,
         &signer.public_key().try_into().expect("publisher"),

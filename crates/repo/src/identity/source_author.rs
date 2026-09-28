@@ -3,6 +3,8 @@
 use std::{io::Read, path::Path};
 
 use anyhow::{Context, Result, ensure};
+#[cfg(test)]
+use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use objects::object::{CollaborationActor, thread_replication::SourceAuthor};
 use prost::Message;
 const MAX_BYTES: usize = 96 * 1024;
@@ -154,7 +156,7 @@ mod tests {
                 .expect("root"),
         );
         let account = uuid::Uuid::from_bytes([9; 16]);
-        let token=biscuit_auth::Biscuit::builder().code(format!("user(\"{account}\"); subject_kind(\"user\"); subject_user_uuid(\"{account}\"); session(\"source-author\"); device_pop_key(\"{}\"); expires_at(2100-01-01T00:00:00Z); check if operation(\"PublishContent\");",hex::encode(key))).expect("facts").build(&pair).expect("signed token");
+        let token=biscuit_auth::Biscuit::builder().code(format!("user(\"{account}\"); subject_kind(\"user\"); subject_user_uuid(\"{account}\"); session(\"source-author\"); device_pop_key(\"{}\"); expires_at(2100-01-01T00:00:00Z); check if operation(\"PublishContent\");",hex::encode(key))).expect("facts").build_v1(&pair).expect("signed token");
         publish(home.path(), &authority, &key, &key, &token, 100)
             .expect("retain original device authority");
         let original = load(home.path(), &key, spool).expect("offline original");
@@ -170,8 +172,9 @@ mod tests {
         assert_eq!(actor.agent_id, None);
         let proof = api::heddle::api::v1alpha2::ThreadControlAuthority::decode(envelope.as_slice())
             .expect("portable envelope");
-        let sealed = biscuit_auth::Biscuit::from(&proof.sealed_biscuit, pair.public())
-            .expect("sealed signature");
+        let sealed =
+            heddle_biscuit_verifier::signature_v1::verify(&proof.sealed_biscuit, pair.public())
+                .expect("sealed signature");
         assert!(
             matches!(
                 sealed.seal(),

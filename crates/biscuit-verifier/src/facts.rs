@@ -16,6 +16,8 @@ use biscuit_auth::{
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 
 use super::BiscuitError;
+#[cfg(test)]
+use crate::signature_v1::BiscuitBuilderV1Ext as _;
 
 #[cfg(test)]
 mod authz_walk_regression_tests;
@@ -762,6 +764,7 @@ struct VerifiedDelegationChain {
 /// expiry, or consult revocations; portable evidence callers must distinguish
 /// structural lineage from current permission.
 pub fn verify_proof_key_lineage(biscuit: &Biscuit) -> Result<String, BiscuitError> {
+    crate::signature_v1::require_v1(biscuit)?;
     let mut authorizer = biscuit_auth::builder::AuthorizerBuilder::new()
         .set_limits(super::authorizer_limits())
         .build(biscuit)
@@ -1569,7 +1572,7 @@ mod reserved_predicate_tests {
                 .as_str(),
             )
             .expect("self-asserted request fact")
-            .build(&keypair)
+            .build_v1(&keypair)
             .expect("build token");
 
         let error = reject_reserved_request_facts(&biscuit)
@@ -1595,7 +1598,7 @@ mod reserved_predicate_tests {
                 .as_str(),
             )
             .expect("self-asserted native request fact")
-            .build(&keypair)
+            .build_v1(&keypair)
             .expect("build token");
         assert!(
             matches!(
@@ -1612,7 +1615,7 @@ mod reserved_predicate_tests {
         let biscuit = BiscuitBuilder::new()
             .fact("user(\"alice\")")
             .expect("subject fact")
-            .build(&keypair)
+            .build_v1(&keypair)
             .expect("build token");
 
         reject_reserved_request_facts(&biscuit)

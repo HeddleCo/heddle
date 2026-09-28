@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use biscuit_auth::{
-    Biscuit, PublicKey,
+    PublicKey,
     builder::{Algorithm, AuthorizerBuilder},
 };
 use prost::Message;
@@ -280,7 +280,7 @@ pub(crate) fn verify_subject_biscuit_with_revocations(
         .ok_or_else(|| Error::Invalid("capability subject has no key".to_owned()))?;
     let public = PublicKey::from_bytes(&key.public_key, Algorithm::Ed25519)
         .map_err(|error| Error::Biscuit(error.to_string()))?;
-    let biscuit = Biscuit::from(bytes, move |_| Ok(public))
+    let biscuit = heddle_biscuit_verifier::signature_v1::verify(bytes, move |_| Ok(public))
         .map_err(|error| Error::Biscuit(error.to_string()))?;
     if biscuit
         .revocation_identifiers()

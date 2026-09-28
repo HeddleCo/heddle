@@ -44,7 +44,7 @@ fn creation_fixture(
     let pair =
         KeyPair::from(&PrivateKey::from_bytes(&mint.seed, Algorithm::Ed25519).expect("mint key"));
     let expiry = chrono::DateTime::from_timestamp(NOW + 100, 0).expect("expiry");
-    let parent = Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); session(\"agent-session\"); device_pop_key(\"{}\"); right(\"spool\", \"acme\", \"admin\"); check if time($now), $now < {};", hex::encode(creator.wire().public_key), expiry.to_rfc3339()).as_str()).expect("facts").build(&pair).expect("parent token").to_base64().expect("base64");
+    let parent = Biscuit::builder().code(format!("user(\"11111111-1111-1111-1111-111111111111\"); session(\"agent-session\"); device_pop_key(\"{}\"); right(\"spool\", \"acme\", \"admin\"); check if time($now), $now < {};", hex::encode(creator.wire().public_key), expiry.to_rfc3339()).as_str()).expect("facts").build_v1(&pair).expect("parent token").to_base64().expect("base64");
     let child_key = creator.signing.verifying_key().to_bytes();
     let signature = creator
         .signing
@@ -60,7 +60,8 @@ fn creation_fixture(
         creation_restrictions(&statement).expect("creation restriction"),
     )
     .expect("narrow child");
-    let child = biscuit_auth::UnverifiedBiscuit::from_base64(&child).expect("child");
+    let child =
+        heddle_biscuit_verifier::signature_v1::parse_unverified_base64(&child).expect("child");
     let child = if sealed {
         child.seal().expect("sealed")
     } else {

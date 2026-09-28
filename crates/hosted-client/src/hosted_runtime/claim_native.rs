@@ -109,7 +109,8 @@ pub(crate) fn handle_with_authority(
                 &request.browser_public_key,
             )?;
             let ceremony_biscuit =
-                biscuit_auth::UnverifiedBiscuit::from_base64(delegated.as_bytes())?.to_vec()?;
+                biscuit_verifier::signature_v1::parse_unverified_base64(delegated.as_bytes())?
+                    .to_vec()?;
             PrepareAccountClaimResponse {
                 receipt: Some(receipt(&state, &operation, now)?),
                 owner_root: Some(root),

@@ -256,6 +256,7 @@ pub(crate) fn server_keys_match(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
     use crypto::{Ed25519Signer, Signer};
 
     use super::{
@@ -268,7 +269,7 @@ mod tests {
             .expect("user fact")
             .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
             .expect("proof key fact")
-            .build(&biscuit_auth::KeyPair::new())
+            .build_v1(&biscuit_auth::KeyPair::new())
             .expect("mint token")
             .to_base64()
             .expect("encode token")
@@ -499,11 +500,12 @@ mod tests {
     fn hosted_account_principal_reads_stored_login() {
         let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|_| {
+            let signer = Ed25519Signer::generate().expect("proof key");
             config::credentials::store_server_credential(
                 "api.heddle.test",
                 config::credentials::ServerCredential {
                     mint_root_attachment: None,
-                    token: "token".to_string(),
+                    token: mint_authority_token("luke@example.com", &signer),
                     subject: "luke@example.com".to_string(),
                     device_id: None,
                     credential_id: None,
@@ -523,11 +525,12 @@ mod tests {
     fn hosted_account_principal_uses_claimed_invite_identity() {
         let _process_env_guard = crate::test_process_env::exclusive_blocking();
         with_isolated_env(|_| {
+            let signer = Ed25519Signer::generate().expect("proof key");
             config::credentials::store_server_credential(
                 "api.heddle.test",
                 config::credentials::ServerCredential {
                     mint_root_attachment: None,
-                    token: "token".to_string(),
+                    token: mint_authority_token("agent-key:abc", &signer),
                     subject: "agent-key:abc".to_string(),
                     device_id: None,
                     credential_id: None,

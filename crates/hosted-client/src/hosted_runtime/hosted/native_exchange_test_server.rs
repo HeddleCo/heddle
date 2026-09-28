@@ -6,7 +6,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use super::{CallContextFactory, HostedClient};
 use api::{
     StreamingShape,
     framing::{
@@ -20,6 +19,8 @@ use crypto::Ed25519Signer;
 use iroh::{Endpoint, RelayMode, endpoint::presets};
 use prost::Message;
 use tokio::task::JoinHandle;
+
+use super::{CallContextFactory, HostedClient};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PublicationCapture {

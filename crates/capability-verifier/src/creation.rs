@@ -374,7 +374,7 @@ pub fn validate_spool_creation_structure(
     };
     let root = PublicKey::from_bytes(&mint.public_key, biscuit_auth::Algorithm::Ed25519)
         .map_err(|error| invalid(error.to_string()))?;
-    let token = Biscuit::from(&proof.sealed_biscuit, root)
+    let token = heddle_biscuit_verifier::signature_v1::verify(&proof.sealed_biscuit, root)
         .map_err(|error| invalid(format!("creation credential signature: {error}")))?;
     let effective = heddle_biscuit_verifier::facts::verify_proof_key_lineage(&token)
         .map_err(|error| invalid(format!("creation proof-key lineage: {error}")))?;

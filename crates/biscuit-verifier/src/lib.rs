@@ -9,13 +9,16 @@ use std::time::Duration;
 
 pub use biscuit_auth::PublicKey;
 use biscuit_auth::{
-    Biscuit, UnverifiedBiscuit,
+    Biscuit,
     builder::{Algorithm, AuthorizerBuilder, BlockBuilder, Term},
     datalog::RunLimits,
 };
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
 use thiserror::Error;
+
+#[cfg(test)]
+use crate::signature_v1::BiscuitBuilderV1Ext as _;
 
 pub mod delegation;
 pub mod edge;
@@ -24,6 +27,7 @@ pub mod facts;
 pub mod inspection;
 pub mod key_delegation;
 pub mod resource;
+pub mod signature_v1;
 
 #[cfg(test)]
 mod grant_envelope_conformance_tests;
@@ -140,8 +144,7 @@ pub fn parse_token(token_b64: &str, trust_list: &[PublicKey]) -> Result<Biscuit,
 pub fn unverified_authority_device_pop_key(
     token_b64: &str,
 ) -> Result<Option<PublicKey>, BiscuitError> {
-    let token = UnverifiedBiscuit::from_base64(token_b64.as_bytes())
-        .map_err(|error| BiscuitError::Invalid(error.to_string()))?;
+    let token = signature_v1::parse_unverified_base64(token_b64.as_bytes())?;
     let source = token
         .print_block_source(0)
         .map_err(|error| BiscuitError::Invalid(error.to_string()))?;
@@ -198,7 +201,7 @@ pub fn parse_token_with_root(
     let mut last_error = None;
     for public_key in trust_list {
         let public_key = *public_key;
-        match Biscuit::from_base64(token_b64, move |_| Ok(public_key)) {
+        match signature_v1::verify_base64(token_b64, move |_| Ok(public_key)) {
             Ok(biscuit) => return Ok((biscuit, public_key)),
             Err(error) => last_error = Some(error.to_string()),
         }
@@ -251,6 +254,7 @@ pub fn authorize_at_with_extra_facts(
     resource: Option<(&str, &str)>,
     extra_facts: &[String],
 ) -> Result<BiscuitFacts, BiscuitError> {
+    signature_v1::require_v1(biscuit)?;
     let mut builder = AuthorizerBuilder::new()
         .set_limits(authorizer_limits())
         .code(HEDDLE_RULES)
@@ -732,7 +736,7 @@ mod tests {
                 .as_str(),
             )
             .expect("human authority")
-            .build(&root)
+            .build_v1(&root)
             .expect("signed authority");
         let mut parent_signer = signing;
         for seed in [41, 42] {
@@ -879,8 +883,8 @@ mod tests {
             facts.limits_identity_disclosure,
             "explicit ceilings retain the limited self view"
         );
-        let narrowed_parent =
-            Biscuit::from_base64(&narrowed, |_| Ok(root.public())).expect("narrowed parent");
+        let narrowed_parent = crate::signature_v1::verify_base64(&narrowed, |_| Ok(root.public()))
+            .expect("narrowed parent");
         let parent_id = narrowed_parent
             .revocation_identifiers()
             .last()
@@ -963,7 +967,7 @@ mod tests {
                 .as_str(),
             )
             .expect("scoped authority statement")
-            .build(&root)
+            .build_v1(&root)
             .expect("signed authority")
             .to_base64()
             .expect("credential encoding");
@@ -1073,7 +1077,7 @@ mod tests {
         let token = Biscuit::builder()
             .fact(format!("device_pop_key({root_hex:?})").as_str())
             .expect("add authority selector")
-            .build(&root)
+            .build_v1(&root)
             .expect("build token")
             .append(
                 BlockBuilder::new()

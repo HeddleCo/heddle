@@ -6,6 +6,7 @@ use std::{path::Path, process::Command};
 
 use biscuit_auth::KeyPair;
 use crypto::{Ed25519Signer, Signer};
+use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -23,7 +24,7 @@ fn write_env_credential(path: &Path) {
         .expect("expiry fact")
         .check(format!("check if time($now), $now < {}", expires_at.to_rfc3339()).as_str())
         .expect("expiry check")
-        .build(&KeyPair::new())
+        .build_v1(&KeyPair::new())
         .expect("build credential token")
         .to_base64()
         .expect("encode credential token");
@@ -50,7 +51,6 @@ fn write_env_credential(path: &Path) {
             .expect("restrict credential fixture");
     }
 }
-
 fn run_json(home: &Path, credential: Option<&Path>, args: &[&str]) -> Value {
     let mut command = Command::new(env!("CARGO_BIN_EXE_heddle"));
     command

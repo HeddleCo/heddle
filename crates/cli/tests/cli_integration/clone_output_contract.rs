@@ -27,6 +27,7 @@ mod fixture {
     };
     use biscuit_auth::KeyPair;
     use crypto::{Ed25519Signer, Signer};
+    use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
     use iroh::{Endpoint, RelayMode, SecretKey, endpoint::presets};
     use prost::Message;
     use rcgen::{CertifiedKey, generate_simple_self_signed};
@@ -266,7 +267,7 @@ mod fixture {
             .expect("credential subject fact")
             .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
             .expect("credential proof-key fact")
-            .build(&KeyPair::new())
+            .build_v1(&KeyPair::new())
             .expect("mint test credential")
             .to_base64()
             .expect("encode test credential");

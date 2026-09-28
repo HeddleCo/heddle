@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.25.7...heddle-repo-v0.26.0) - 2026-09-28
+
+### Changed
+
+- Require signature-v1 Biscuit blocks in local owner and thread evidence.
+
 ## [0.25.7](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.25.6...heddle-repo-v0.25.7) - 2026-09-28
 
 ### Other

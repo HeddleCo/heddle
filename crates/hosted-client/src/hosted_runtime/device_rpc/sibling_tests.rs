@@ -39,7 +39,7 @@ pub(super) async fn roundtrip(
     let public =
         biscuit_auth::PublicKey::from_bytes(sibling.public_key(), biscuit_auth::Algorithm::Ed25519)
             .expect("public");
-    let token = biscuit_auth::Biscuit::from_base64(encoded, public)
+    let token = biscuit_verifier::signature_v1::verify_base64(encoded, public)
         .expect("signed token")
         .seal()
         .expect("sealed");
@@ -199,7 +199,7 @@ pub(super) async fn roundtrip(
         biscuit_auth::Algorithm::Ed25519,
     )
     .expect("temporary public");
-    let token = biscuit_auth::Biscuit::from_base64(encoded, public)
+    let token = biscuit_verifier::signature_v1::verify_base64(encoded, public)
         .expect("temporary token")
         .seal()
         .expect("sealed temporary token");

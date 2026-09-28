@@ -11,6 +11,16 @@ use crate::hosted_runtime::{
 };
 
 #[test]
+fn build_root_emits_v1_authority() {
+    let signer = Ed25519Signer::generate().expect("seed");
+    let root = mint_agent_root(&signer.to_seed()).expect("root");
+    let authority = authority_keypair(&signer.to_seed()).expect("authority");
+    let parsed = biscuit_verifier::signature_v1::verify_base64(&root.token, authority.public())
+        .expect("valid signature");
+    assert_eq!(parsed.container().authority.version, 1);
+}
+
+#[test]
 fn agent_root_is_signed_by_the_same_seed_weft_will_register() {
     let _process_env_guard = crate::test_process_env::shared_blocking();
     let signer = Ed25519Signer::generate().expect("seed");
@@ -25,7 +35,7 @@ fn agent_root_is_signed_by_the_same_seed_weft_will_register() {
     .expect("mint agent root");
 
     let authority = authority_keypair(&signer.to_seed()).expect("authority");
-    biscuit_auth::Biscuit::from_base64(root.token.as_bytes(), authority.public())
+    biscuit_verifier::signature_v1::verify_base64(root.token.as_bytes(), authority.public())
         .expect("Weft verifies a client-minted root against the registered public key");
     let metadata = headless_token_metadata(&root.token).expect("metadata");
     assert!(!metadata.is_derived);
@@ -99,7 +109,7 @@ fn remint_cannot_escape_the_registered_key_session() {
     );
 
     let authority = authority_keypair(&signer.to_seed()).expect("authority");
-    biscuit_auth::Biscuit::from_base64(renewed.token.as_bytes(), authority.public())
+    biscuit_verifier::signature_v1::verify_base64(renewed.token.as_bytes(), authority.public())
         .expect("reminted root still verifies with the registered key");
 }
 
@@ -195,16 +205,13 @@ fn locally_bound_account_credential_preserves_the_parent_authority() {
     }
 }
 
-fn authorize_restricted_root(
-    token: &str,
-    seed: &[u8; 32],
-    operation: &str,
-) -> Result<(), biscuit_auth::error::Token> {
+fn authorize_restricted_root(token: &str, seed: &[u8; 32], operation: &str) -> anyhow::Result<()> {
     use biscuit_auth::{builder::AuthorizerBuilder, datalog::RunLimits};
 
     let authority = authority_keypair(seed).expect("authority");
     let root_public = authority.public();
-    let biscuit = biscuit_auth::Biscuit::from_base64(token.as_bytes(), move |_| Ok(root_public))?;
+    let biscuit =
+        biscuit_verifier::signature_v1::verify_base64(token.as_bytes(), move |_| Ok(root_public))?;
     let mut authorizer = AuthorizerBuilder::new()
         .set_limits(RunLimits {
             max_facts: 1000,
@@ -215,5 +222,5 @@ fn authorize_restricted_root(
         .fact(format!(r#"operation("{operation}")"#).as_str())?
         .policy("allow if true")?
         .build(&biscuit)?;
-    authorizer.authorize().map(|_| ())
+    authorizer.authorize().map(|_| ()).map_err(Into::into)
 }

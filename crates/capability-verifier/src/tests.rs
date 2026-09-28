@@ -1,5 +1,6 @@
 use biscuit_auth::{Biscuit, KeyPair, PrivateKey, builder::Algorithm};
 use ed25519_dalek::{Signer, SigningKey};
+use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use prost::Message;
 use sha2::{Digest, Sha256};
 #[cfg(target_arch = "wasm32")]
@@ -295,8 +296,9 @@ fn subject_biscuit(capability: &OwnerCapability, signer: &TestKey) -> Vec<u8> {
     }
     let private = PrivateKey::from_bytes(&signer.seed, Algorithm::Ed25519).expect("Biscuit key");
     builder
-        .build(&KeyPair::from(&private))
-        .and_then(|value| value.to_vec())
+        .build_v1(&KeyPair::from(&private))
+        .expect("subject Biscuit root")
+        .to_vec()
         .expect("subject Biscuit")
 }
 

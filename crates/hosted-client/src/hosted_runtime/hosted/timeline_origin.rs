@@ -7,6 +7,8 @@ use api::heddle::api::v1alpha2::{
     TimelineServerIssuedCredential, UploadScrubbedTimelineRequest,
     timeline_admission_acceptance::Authority, timeline_origin_credential_identity::Identity,
 };
+#[cfg(test)]
+use biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
 use crypto::{Ed25519Signer, Signer};
 use prost::Message;
 use sha2::{Digest, Sha256};
@@ -424,7 +426,7 @@ mod tests {
         let token = Biscuit::builder().code(format!(
             "user(\"11111111-1111-1111-1111-111111111111\"); session(\"run-origin\"); credential_id(\"issued-ancestor\"); device_pop_key(\"{}\"); expires_at(2030-01-01T00:00:00Z);",
             hex::encode(proof.public_key())
-        ).as_str()).expect("authority facts").build(&root).expect("issued biscuit").to_base64().expect("bearer");
+        ).as_str()).expect("authority facts").build_v1(&root).expect("issued biscuit").to_base64().expect("bearer");
         (token, root.public(), proof)
     }
 
@@ -465,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_v0_style_block_and_redelegation_use_real_signed_chain_identity() {
+    fn offline_v1_block_and_redelegation_use_real_signed_chain_identity() {
         let (issued, root, signer) = real_issued_chain(11);
         let a_signer = Ed25519Signer::from_seed(&[12; 32]).expect("A signer");
         let b_signer = Ed25519Signer::from_seed(&[13; 32]).expect("B signer");

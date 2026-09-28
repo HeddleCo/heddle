@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.25.7...heddle-hosted-client-v0.26.0) - 2026-09-28
+
+### Changed
+
+- Mint signature-v1 root credentials and verify signature-v1 bearers at the shared boundary.
+
 ## [0.25.7](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.25.6...heddle-hosted-client-v0.25.7) - 2026-09-28
 
 ### Other

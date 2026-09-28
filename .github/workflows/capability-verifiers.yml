@@ -34,6 +34,9 @@ jobs:
         run: scripts/check-publish-pipeline.sh
       - name: Clippy
         run: cargo clippy --locked -p heddleco-capability-verifier -p heddle-biscuit-verifier --all-targets -- -D warnings
+      - name: Prove raw Biscuit parsers are banned
+        working-directory: .
+        run: bash scripts/test-biscuit-parser-clippy.sh
       - name: Public crate documentation
         env:
           RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links

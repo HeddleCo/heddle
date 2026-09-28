@@ -214,12 +214,9 @@ fn timeline_subject_biscuit(capability: &OwnerCapability, signer: &TestKey) -> V
     let next_private =
         PrivateKey::from_bytes(&[0x55; 32], Algorithm::Ed25519).expect("next Biscuit key");
     builder
-        .build_with_key_pair(
-            &KeyPair::from(&private),
-            biscuit_auth::datalog::SymbolTable::new(),
-            &KeyPair::from(&next_private),
-        )
-        .and_then(|biscuit| biscuit.to_vec())
+        .build_v1_with_key_pair(&KeyPair::from(&private), &KeyPair::from(&next_private))
+        .expect("subject Biscuit root")
+        .to_vec()
         .expect("subject Biscuit")
 }
 
@@ -433,8 +430,11 @@ impl TimelineFixture {
         let key = subject.key.as_ref().expect("key");
         let public =
             PublicKey::from_bytes(&key.public_key, Algorithm::Ed25519).expect("public key");
-        let biscuit = Biscuit::from(self.bundle.subject_biscuit.as_slice(), move |_| Ok(public))
-            .expect("subject Biscuit");
+        let biscuit = heddle_biscuit_verifier::signature_v1::verify(
+            self.bundle.subject_biscuit.as_slice(),
+            move |_| Ok(public),
+        )
+        .expect("subject Biscuit");
         let next_private =
             PrivateKey::from_bytes(&[0x56; 32], Algorithm::Ed25519).expect("next Biscuit key");
         self.bundle.subject_biscuit = biscuit
@@ -457,9 +457,12 @@ impl TimelineFixture {
         let key = subject.key.as_ref().expect("key");
         let public =
             PublicKey::from_bytes(&key.public_key, Algorithm::Ed25519).expect("public key");
-        Biscuit::from(self.bundle.subject_biscuit.as_slice(), move |_| Ok(public))
-            .expect("subject Biscuit")
-            .revocation_identifiers()[0]
+        heddle_biscuit_verifier::signature_v1::verify(
+            self.bundle.subject_biscuit.as_slice(),
+            move |_| Ok(public),
+        )
+        .expect("subject Biscuit")
+        .revocation_identifiers()[0]
             .to_vec()
     }
 
@@ -880,11 +883,6 @@ fn timeline_v3_parity_fixture_is_current() {
         ]
     });
     let json = serde_json::to_string_pretty(&fixture).expect("fixture JSON") + "\n";
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(path) = std::env::var_os("HEDDLE_TIMELINE_FIXTURE_OUTPUT") {
-        std::fs::write(path, json).expect("write requested fixture");
-        return;
-    }
     assert_eq!(
         json,
         include_str!("../conformance/fixtures/timeline-v3.json")

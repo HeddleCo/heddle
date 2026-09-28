@@ -112,7 +112,7 @@ pub fn sign_delegated_spool_creation(
         &signature,
         creation::creation_restrictions(&statement)?,
     )?;
-    let sealed = biscuit_auth::UnverifiedBiscuit::from_base64(&narrowed)?
+    let sealed = heddle_biscuit_verifier::signature_v1::parse_unverified_base64(&narrowed)?
         .seal()?
         .to_vec()?;
     let creator_signature = crate::sign_canonical(
