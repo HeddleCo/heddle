@@ -211,6 +211,158 @@ fn timeline_is_immutable_and_shares_bounded_filtered_pagination() {
 }
 
 #[test]
+fn concurrent_report_appends_allocate_distinct_positions_in_one_transaction() {
+    let (_directory, store, run) = fixture();
+    let reference = run.r#ref.expect("run reference");
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let mut workers = Vec::new();
+    for key in ["checkpoint:0", "checkpoint:1"] {
+        let store = store.clone();
+        let reference = reference.clone();
+        let barrier = barrier.clone();
+        workers.push(std::thread::spawn(move || {
+            let event = TimelineRecord {
+                run: Some(reference.clone()),
+                kind: "turn_started".into(),
+                ..Default::default()
+            };
+            barrier.wait();
+            store.append_report_timeline(&reference, &[(key.into(), event)])
+        }));
+    }
+    barrier.wait();
+    for worker in workers {
+        worker.join().expect("worker").expect("append");
+    }
+    let events = store
+        .latest_timeline("run-1", 10, RunReader::Owner)
+        .expect("events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].position, 0);
+    assert_eq!(events[1].position, 1);
+}
+
+#[test]
+fn report_replay_keeps_positions_and_rejects_changed_checkpoint() {
+    let (_directory, store, run) = fixture();
+    let reference = run.r#ref.expect("run reference");
+    let event = TimelineRecord {
+        run: Some(reference.clone()),
+        kind: "turn_started".into(),
+        ..Default::default()
+    };
+    store
+        .append_report_timeline(&reference, &[("checkpoint:0".into(), event.clone())])
+        .expect("first");
+    store
+        .append_report_timeline(&reference, &[("checkpoint:0".into(), event.clone())])
+        .expect("replay");
+    assert_eq!(
+        store
+            .latest_timeline("run-1", 10, RunReader::Owner)
+            .expect("events")
+            .len(),
+        1
+    );
+    let mut changed = event;
+    changed.kind = "turn_finished".into();
+    assert!(
+        store
+            .append_report_timeline(&reference, &[("checkpoint:0".into(), changed)])
+            .is_err()
+    );
+}
+
+#[test]
+fn report_append_rolls_back_every_event_when_later_event_is_invalid() {
+    let (_directory, store, run) = fixture();
+    let reference = run.r#ref.expect("run reference");
+    let valid = TimelineRecord {
+        run: Some(reference.clone()),
+        kind: "turn_started".into(),
+        ..Default::default()
+    };
+    let mut invalid = valid.clone();
+    invalid.run.as_mut().expect("run").id = "another-run".into();
+    assert!(
+        store
+            .append_report_timeline(
+                &reference,
+                &[
+                    ("checkpoint:0".into(), valid.clone()),
+                    ("checkpoint:1".into(), invalid)
+                ]
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .latest_timeline("run-1", 10, RunReader::Owner)
+            .expect("events")
+            .is_empty()
+    );
+    store
+        .append_report_timeline(&reference, &[("checkpoint:0".into(), valid)])
+        .expect("retry after rollback");
+    assert_eq!(
+        store
+            .last_timeline_position("run-1", RunReader::Owner)
+            .expect("position"),
+        Some(0)
+    );
+}
+
+#[test]
+fn report_append_refuses_unkeyed_legacy_prefix() {
+    let (_directory, store, run) = fixture();
+    let reference = run.r#ref.expect("run reference");
+    let legacy = TimelineRecord {
+        r#ref: Some(RecordRef {
+            spool: reference.spool.clone(),
+            id: "run-1:0".into(),
+        }),
+        run: Some(reference.clone()),
+        position: 0,
+        kind: "session_opened".into(),
+        ..Default::default()
+    };
+    store.put_timeline(&legacy).expect("legacy event");
+    let error = store
+        .append_report_timeline(&reference, &[("opened".into(), legacy)])
+        .expect_err("no key inference");
+    assert!(
+        error
+            .to_string()
+            .contains("predates report checkpoint keys")
+    );
+    assert_eq!(
+        store
+            .last_timeline_position("run-1", RunReader::Owner)
+            .expect("position"),
+        Some(0)
+    );
+}
+
+#[test]
+fn version_two_run_store_adds_checkpoint_keys_on_open() {
+    let directory = tempfile::tempdir().expect("directory");
+    let path = directory.path().join(crate::local_metadata::DATABASE_NAME);
+    let connection = rusqlite::Connection::open(&path).expect("legacy database");
+    connection.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE run_timeline (run TEXT NOT NULL, position INTEGER NOT NULL, record BLOB NOT NULL, PRIMARY KEY(run,position)); PRAGMA user_version=2;").expect("version two schema");
+    drop(connection);
+    RunStore::open_existing(directory.path())
+        .expect("open")
+        .expect("store");
+    let connection = rusqlite::Connection::open(path).expect("migrated database");
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("version");
+    assert_eq!(version, crate::local_metadata::SCHEMA_VERSION);
+    let exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='run_report_events')", [], |row| row.get(0)).expect("checkpoint table");
+    assert!(exists);
+}
+
+#[test]
 fn existing_run_rows_migrate_to_queryable_principals() {
     let directory = tempfile::tempdir().expect("directory");
     let connection =

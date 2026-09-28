@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.6](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.25.5...heddle-hosted-client-v0.25.6) - 2026-09-28
+
+### Other
+
+- surface re-enrollment for older device identities and retain exact uploader authority
+
 ## [0.25.5](https://github.com/HeddleCo/heddle/compare/heddle-hosted-client-v0.25.4...heddle-hosted-client-v0.25.5) - 2026-09-27
 
 ### Other

@@ -104,57 +104,22 @@ pub(crate) fn publish(
         supported_controls,
         ..Default::default()
     };
-    // Identical report flushes should not wake every device observation again.
-    let mut previous = store.run(
+    let previous = store.run(
         &report.heddle_session_id,
         repo::device_runs::RunReader::Owner,
     )?;
-    if let Some(previous) = previous.as_mut() {
-        previous.version.clear();
-        previous.pending_permissions.clear();
-        previous.artifacts.clear();
-    }
-    if previous.as_ref() != Some(&record) {
-        if reader_agent.is_empty() {
-            store.put_run(record)?;
-        } else {
-            store.put_run_from_credential(record, &reader_agent)?;
-        }
-    }
-    if report.harness.harness.as_deref() == Some("claude-code")
-        && let Some(key) = report.native_actor_key.as_deref()
-    {
-        store.bind_harness(
-            key,
-            &report.heddle_session_id,
-            *status == ActorPresenceStatus::Active,
-        )?;
-    }
-    let last_record = store
-        .latest_timeline(
-            &report.heddle_session_id,
-            1,
-            repo::device_runs::RunReader::Owner,
-        )?
-        .pop();
-    let mut next = last_record
-        .as_ref()
-        .map_or(0, |record| record.position.saturating_add(1));
-    let mut last_at = last_record
-        .as_ref()
-        .and_then(|record| record.recorded_at.as_ref())
-        .map(|time| (time.seconds, time.nanos));
+    let mut events = Vec::new();
     let run_ref = v2::RecordRef {
         spool: Some(spool.clone()),
         id: report.heddle_session_id.clone(),
     };
-    let emit = |position: u64,
-                kind: &str,
-                summary: String,
-                detail: Option<String>,
-                tool_name: Option<String>,
-                recorded_at: &str,
-                captured: Option<&str>|
+    let mut emit = |source_key: String,
+                    kind: &str,
+                    summary: String,
+                    detail: Option<String>,
+                    tool_name: Option<String>,
+                    recorded_at: &str,
+                    captured: Option<&str>|
      -> Result<()> {
         let at = timestamp_parts(recorded_at)?;
         let captured_revision =
@@ -169,46 +134,36 @@ pub(crate) fn publish(
                         },
                     )),
                 });
-        store.put_timeline(&v2::TimelineRecord {
-            r#ref: Some(v2::RecordRef {
-                spool: Some(spool.clone()),
-                id: format!("{}:{position}", report.heddle_session_id),
-            }),
-            run: Some(run_ref.clone()),
-            position,
-            kind: kind.into(),
-            summary,
-            detail,
-            tool_name,
-            recorded_at: Some(prost_types::Timestamp {
-                seconds: at.0,
-                nanos: at.1,
-            }),
-            captured_revision,
-            ..Default::default()
-        })
+        events.push((
+            source_key,
+            v2::TimelineRecord {
+                run: Some(run_ref.clone()),
+                kind: kind.into(),
+                summary,
+                detail,
+                tool_name,
+                recorded_at: Some(prost_types::Timestamp {
+                    seconds: at.0,
+                    nanos: at.1,
+                }),
+                captured_revision,
+                ..Default::default()
+            },
+        ));
+        Ok(())
     };
-    if next == 0 {
-        emit(
-            0,
-            "session_opened",
-            "Harness session opened".into(),
-            None,
-            None,
-            &report.opened_at,
-            None,
-        )?;
-        last_at = Some(timestamp_parts(&report.opened_at)?);
-        next = 1;
-    }
-    // A reconnect may start a fresh report with one checkpoint under the same
-    // Run. Checkpoint time determines which events are new; position remains
-    // append-only and breaks ties for display.
-    for checkpoint in &report.progress {
-        let at = timestamp_parts(&checkpoint.recorded_at)?;
-        if last_at.is_some_and(|last| at <= last) {
-            continue;
-        }
+    emit(
+        "opened".into(),
+        "session_opened",
+        "Harness session opened".into(),
+        None,
+        None,
+        &report.opened_at,
+        None,
+    )?;
+    // Source index, rather than device clock, identifies an append-only
+    // checkpoint across report retries and reconnects.
+    for (index, checkpoint) in report.progress.iter().enumerate() {
         let kind = checkpoint.status.as_deref().unwrap_or("progress");
         let detail = if kind == "UserPromptSubmit" {
             None
@@ -248,7 +203,7 @@ pub(crate) fn publish(
             _ => format!("{}: {} paths", kind, checkpoint.touched_paths.len()),
         });
         emit(
-            next,
+            format!("checkpoint:{}:{index}", report.opened_at),
             kind,
             summary,
             detail,
@@ -256,22 +211,54 @@ pub(crate) fn publish(
             &checkpoint.recorded_at,
             checkpoint.captured_revision.as_deref(),
         )?;
-        last_at = Some(at);
-        next = next.saturating_add(1);
     }
     if let Some(closed_at) = report.closed_at.as_deref() {
-        let closing_at = timestamp_parts(closed_at)?;
-        if last_at.is_none_or(|last| closing_at > last) {
-            emit(
-                next,
-                "session_closed",
-                "Harness session closed".into(),
-                None,
-                None,
-                closed_at,
-                report.head_state_at_close.as_deref(),
-            )?;
-        }
+        emit(
+            "closed".into(),
+            "session_closed",
+            "Harness session closed".into(),
+            None,
+            None,
+            closed_at,
+            report.head_state_at_close.as_deref(),
+        )?;
+    }
+    let origin = if previous.is_none() {
+        record.thread.as_ref().and_then(|thread| {
+            match hosted_client::client::prepare_timeline_origin(
+                thread,
+                &run_ref,
+                &record.principal_id,
+            ) {
+                Ok(origin) => origin,
+                Err(error) => {
+                    tracing::warn!(?error, "hosted timeline origin unavailable");
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
+    store.publish_report(
+        record,
+        (!reader_agent.is_empty()).then_some(reader_agent.as_str()),
+        &events,
+        origin.as_ref().map(|prepared| {
+            (
+                &prepared.origin,
+                prepared.origin_credential_biscuit.as_slice(),
+            )
+        }),
+    )?;
+    if report.harness.harness.as_deref() == Some("claude-code")
+        && let Some(key) = report.native_actor_key.as_deref()
+    {
+        store.bind_harness(
+            key,
+            &report.heddle_session_id,
+            *status == ActorPresenceStatus::Active,
+        )?;
     }
     if report.closed_at.is_some() {
         retain_final_report(repo, &run_ref, report)?;
@@ -669,5 +656,60 @@ mod tests {
                 .state,
             run.state
         );
+    }
+
+    #[test]
+    fn checkpoints_with_equal_or_older_device_time_keep_position_order() {
+        let (_directory, repo, store, _run) = fixture();
+        let report: SessionReportEnvelope = serde_json::from_value(json!({
+            "version": 1,
+            "heddle_session_id": "run-1",
+            "repo_root": repo.root().display().to_string(),
+            "opened_at": "2026-01-02T00:00:00Z",
+            "transport_mode": "direct",
+            "transcript_mode": "off",
+            "owns_session": true,
+            "harness": {"harness": "claude-code"},
+            "progress": [
+                {"recorded_at": "2026-01-02T00:00:00Z", "status": "Stop"},
+                {"recorded_at": "2026-01-01T23:59:59Z", "status": "Stop"}
+            ]
+        }))
+        .expect("report");
+        publish(&repo, &report, &ActorPresenceStatus::Active).expect("publish");
+        publish(&repo, &report, &ActorPresenceStatus::Active).expect("retry");
+        let events = store
+            .latest_timeline("run-1", 10, repo::device_runs::RunReader::Owner)
+            .expect("events");
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.position)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(
+            events[1].recorded_at.as_ref().expect("time").seconds,
+            events[0].recorded_at.as_ref().expect("time").seconds
+        );
+        assert!(
+            events[2].recorded_at.as_ref().expect("time").seconds
+                < events[1].recorded_at.as_ref().expect("time").seconds
+        );
+        let mut reconnect = report.clone();
+        reconnect.opened_at = "2026-01-03T00:00:00Z".into();
+        reconnect.progress = vec![wire::ProgressCheckpoint {
+            status: Some("Stop".into()),
+            recorded_at: "2026-01-02T23:59:59Z".into(),
+            ..Default::default()
+        }];
+        publish(&repo, &reconnect, &ActorPresenceStatus::Active).expect("reconnect");
+        publish(&repo, &reconnect, &ActorPresenceStatus::Active).expect("reconnect retry");
+        let events = store
+            .latest_timeline("run-1", 10, repo::device_runs::RunReader::Owner)
+            .expect("events after reconnect");
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[3].position, 3);
     }
 }

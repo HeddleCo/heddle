@@ -17,6 +17,7 @@ chrono.workspace = true
 config.workspace = true
 heddle-cli-render.workspace = true
 hosted-client.workspace = true
+heddle-fs-prims.workspace = true
 ingest.workspace = true
 objects.workspace = true
 prost-types.workspace = true

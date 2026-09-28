@@ -128,6 +128,11 @@ pub async fn authenticated_keepalive() -> anyhow::Result<()> {
     result.context("reading authenticated weft identity")
 }
 
+#[cfg(feature = "client")]
+pub async fn drain_timeline_outbox_once() -> anyhow::Result<()> {
+    crate::hosted_runtime::hosted::drain_timeline_outbox_once().await
+}
+
 /// The persisted device node id, or `None` when the identity has
 /// never been minted. Does not mint one as a side effect, so a status
 /// probe stays read-only.

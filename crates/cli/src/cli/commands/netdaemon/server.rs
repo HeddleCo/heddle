@@ -130,6 +130,7 @@ pub async fn run_network_daemon() -> Result<()> {
         keepalive_stopped,
         retry_jitter,
     ));
+    let timeline_drain = tokio::spawn(run_timeline_drain(keepalive_stop.subscribe()));
 
     let advertised = EndpointState {
         version: NETWORK_DAEMON_PROTOCOL_VERSION,
@@ -168,6 +169,7 @@ pub async fn run_network_daemon() -> Result<()> {
 
     let _ = keepalive_stop.send(true);
     let _ = keepalive.await;
+    let _ = timeline_drain.await;
 
     // Cleanup ordering: stop the claim bridge, close the endpoint (which
     // tears the router down), then unlink our own discovery file (only if
@@ -196,6 +198,27 @@ pub async fn run_network_daemon() -> Result<()> {
     match loop_result {
         Ok(result) => result.map_err(Into::into),
         Err(join_error) => bail!("netd control loop panicked: {join_error}"),
+    }
+}
+
+async fn run_timeline_drain(mut stopped: watch::Receiver<bool>) {
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {}
+            _ = stopped.changed() => return,
+        }
+        match tokio::time::timeout(
+            Duration::from_secs(35),
+            hosted_client::network::drain_timeline_outbox_once(),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "hosted timeline drain failed"),
+            Err(_) => tracing::warn!("hosted timeline drain timed out"),
+        }
     }
 }
 

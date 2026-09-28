@@ -52,7 +52,7 @@ pub struct LocalIdentity {
 }
 
 /// Globally-recorded device identity, written at `heddle auth login`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct DeviceIdentity {
     /// Hex-encoded ed25519 public key (the server-registered device key).
     pub public_key: String,
@@ -65,6 +65,29 @@ pub struct DeviceIdentity {
     pub server: String,
     /// RFC 3339 link timestamp.
     pub linked_at: String,
+    /// Exact bearer retained at enrollment so an installed agent credential
+    /// cannot replace the device's independent upload authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_subject: Option<String>,
+}
+
+impl std::fmt::Debug for DeviceIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DeviceIdentity")
+            .field("public_key", &self.public_key)
+            .field("private_key_pem", &"<redacted>")
+            .field("server", &self.server)
+            .field("linked_at", &self.linked_at)
+            .field(
+                "credential_token",
+                &self.credential_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("credential_subject", &self.credential_subject)
+            .finish()
+    }
 }
 
 /// `<heddle_home>` — `$HEDDLE_HOME` if set, else `$HOME/.heddle`, else
@@ -133,8 +156,35 @@ fn link_device_key_at(
         private_key_pem: private_key_pem.to_string(),
         server: server.to_string(),
         linked_at: now_rfc3339(),
+        credential_token: None,
+        credential_subject: None,
     };
     write_device(path, &identity)
+}
+
+/// Retain the bearer verified during enrollment or renewal under the same
+/// lock as device login/logout. An agent credential can then replace the
+/// default keystore entry without changing this device's upload identity.
+pub fn retain_device_bearer(
+    server: &str,
+    publisher: &[u8],
+    token: &str,
+    subject: &str,
+) -> std::io::Result<()> {
+    let path = device_identity_path();
+    let _lock = acquire_device_lock(&path)?;
+    let mut device = read_device_record(&path)?.ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "device enrollment missing")
+    })?;
+    if device.server != server || device.public_key != hex::encode(publisher) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "device bearer belongs to another enrolled key or server",
+        ));
+    }
+    device.credential_token = Some(token.to_owned());
+    device.credential_subject = Some(subject.to_owned());
+    write_device(&path, &device)
 }
 
 /// Remove the recorded device signing identity when it belongs to `server` —
@@ -365,6 +415,30 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn enrolled_device_bearer_survives_active_credential_changes() {
+        let signer = Ed25519Signer::from_seed(&[87; 32]).expect("device signer");
+        link_device_key(signer.public_key(), &signer.to_pem().expect("PEM"), "api.S")
+            .expect("enroll device");
+        assert!(retain_device_bearer("api.other", signer.public_key(), "bearer", "owner").is_err());
+        retain_device_bearer("api.S", signer.public_key(), "exact-bearer", "owner")
+            .expect("retain bearer");
+        let device = load_device(&device_identity_path())
+            .expect("load device")
+            .expect("enrolled device");
+        assert_eq!(device.credential_token.as_deref(), Some("exact-bearer"));
+        assert_eq!(device.credential_subject.as_deref(), Some("owner"));
+        assert!(!format!("{device:?}").contains("exact-bearer"));
+        let other = Ed25519Signer::from_seed(&[88; 32]).expect("other signer");
+        assert!(retain_device_bearer("api.S", other.public_key(), "other", "owner").is_err());
+        assert!(unlink_device_key("api.S").expect("logout"));
+        assert!(
+            load_device(&device_identity_path())
+                .expect("load after logout")
+                .is_none()
+        );
+    }
+
     fn signed_state_with(signer: &dyn Signer) -> (State, objects::object::StateSignature) {
         let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
         let state = State::new(Tree::new().hash(), vec![], attribution);
@@ -442,6 +516,8 @@ mod tests {
                 private_key_pem: device_signer.to_pem().expect("device pem"),
                 server: "api.example".to_string(),
                 linked_at: now_rfc3339(),
+                credential_token: None,
+                credential_subject: None,
             },
         )
         .expect("link device key");
@@ -495,6 +571,8 @@ mod tests {
                 private_key_pem: "not a valid pem".to_string(),
                 server: "api.example".to_string(),
                 linked_at: now_rfc3339(),
+                credential_token: None,
+                credential_subject: None,
             },
         )
         .expect("write device identity");
@@ -521,6 +599,8 @@ mod tests {
                 private_key_pem: signer.to_pem().expect("pem"),
                 server: "api.example".to_string(),
                 linked_at: now_rfc3339(),
+                credential_token: None,
+                credential_subject: None,
             },
         )
         .expect("write device identity");
@@ -586,6 +666,8 @@ mod tests {
                 private_key_pem: signer.to_pem().expect("device pem"),
                 server: server.to_string(),
                 linked_at: now_rfc3339(),
+                credential_token: None,
+                credential_subject: None,
             },
         )
         .expect("write device identity");
@@ -789,6 +871,8 @@ mod tests {
                 private_key_pem: signer.to_pem().expect("pem"),
                 server: "api.example".to_string(),
                 linked_at: now_rfc3339(),
+                credential_token: None,
+                credential_subject: None,
             },
         )
         .expect("write device identity");

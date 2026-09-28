@@ -23,6 +23,12 @@ pub enum HostedAuthMode {
         proof_key_pem: String,
         subject: String,
     },
+    /// Present the enrolled device's persisted bearer, including a paired-device credential.
+    PresentedDevice {
+        token: String,
+        proof_key_pem: String,
+        subject: String,
+    },
     CredentialFallback,
 }
 
@@ -61,6 +67,17 @@ impl HostedSession {
                 subject,
             } => (
                 Some(AuthToken::new(token, "independent-root")),
+                Some(proof_key_pem),
+                None,
+                Some(subject),
+                None,
+            ),
+            HostedAuthMode::PresentedDevice {
+                token,
+                proof_key_pem,
+                subject,
+            } => (
+                Some(AuthToken::new(token, "presented-credential")),
                 Some(proof_key_pem),
                 None,
                 Some(subject),

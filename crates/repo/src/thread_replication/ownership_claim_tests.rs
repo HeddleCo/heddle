@@ -102,6 +102,8 @@ fn explicit_claim_preserves_identity_cutoff_and_conflicts_fail_closed() {
         private_key_pem: account.to_pem().expect("device key material"),
         server: "https://test.invalid".into(),
         linked_at: "2026-09-09T00:00:00Z".into(),
+        credential_token: None,
+        credential_subject: None,
     };
     objects::fs_atomic::write_file_atomic_secret(
         &home.path().join(crate::identity::DEVICE_IDENTITY_FILE),

@@ -98,6 +98,8 @@ fn write_device(home: &Path) {
         private_key_pem: signer.to_pem().expect("PEM"),
         server: "https://test.invalid".to_string(),
         linked_at: "2026-08-14T12:00:00Z".to_string(),
+        credential_token: None,
+        credential_subject: None,
     };
     let path = home.join(repo::identity::DEVICE_IDENTITY_FILE);
     std::fs::write(&path, toml::to_string(&device).expect("device TOML")).expect("write device");

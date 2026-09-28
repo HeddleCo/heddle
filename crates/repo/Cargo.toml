@@ -12,13 +12,13 @@ categories.workspace = true
 [dependencies]
 anyhow.workspace = true
 biscuit-auth.workspace = true
-heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.25.5" }
+heddle-biscuit-verifier = { path = "../biscuit-verifier", version = "0.25.6" }
 base32.workspace = true
 api = { workspace = true }
 blake3.workspace = true
 chrono.workspace = true
 hex.workspace = true
-heddleco-capability-verifier = { path = "../capability-verifier", version = "0.21.4" }
+heddleco-capability-verifier = { path = "../capability-verifier", version = "0.21.5" }
 ignore.workspace = true
 heddle-perf-contract.workspace = true
 libc.workspace = true
@@ -97,6 +97,7 @@ async-source = ["objects/async-source"]
 hex.workspace = true
 objects = { workspace = true, features = ["async-source", "memory-backend"] }
 proptest.workspace = true
+prost-types.workspace = true
 tempfile.workspace = true
 
 [lib]
