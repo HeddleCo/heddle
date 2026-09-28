@@ -8,7 +8,7 @@ import {
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-type FixtureKind = "purge" | "transfer" | "keyring";
+type FixtureKind = "purge" | "transfer" | "keyring" | "timeline";
 
 type CorpusCase = {
   id: string;
@@ -70,6 +70,7 @@ const fixtureDefinitions: Array<{
   { kind: "purge", filename: "v2.json" },
   { kind: "transfer", filename: "transfer-v2.json" },
   { kind: "keyring", filename: "keyring-v2.json" },
+  { kind: "timeline", filename: "timeline-v3.json" },
 ];
 
 function cloneJson(value: unknown): unknown {
@@ -201,7 +202,9 @@ function evaluateWasm(testCase: CorpusCase): Outcome {
     ? wasm.runPurgeFixture
     : testCase.fixture_kind === "transfer"
     ? wasm.runTransferFixture
-    : wasm.runKeyringFixture;
+    : testCase.fixture_kind === "keyring"
+    ? wasm.runKeyringFixture
+    : wasm.runTimelineFixture;
   try {
     return { id: testCase.id, ok: JSON.parse(runner(testCase.fixture_json)) };
   } catch (error) {
@@ -259,6 +262,36 @@ for (const value of purgeFixture.cases) {
     divergences.push(
       `direct-binding-${String(testCase.name)}: expected=${JSON.stringify(testCase.expected)} actual=${JSON.stringify(actual)}`,
     );
+  }
+}
+
+const timelineFixtureCase = corpusCases.find((testCase) => testCase.id === "base-timeline");
+if (!timelineFixtureCase) throw new Error("base timeline fixture is missing");
+const timelineFixture = asRecord(JSON.parse(timelineFixtureCase.fixture_json), "timeline fixture");
+if (!Array.isArray(timelineFixture.cases) || typeof timelineFixture.max_capability_ttl_seconds !== "number") {
+  throw new Error("timeline fixture limits or cases are invalid");
+}
+for (const value of timelineFixture.cases) {
+  const testCase = asRecord(value, "timeline fixture case");
+  const bytes = (field: string): Uint8Array => {
+    const hex = testCase[field];
+    if (typeof hex !== "string") throw new Error(`${field} is not hex`);
+    return new Uint8Array(Buffer.from(hex, "hex"));
+  };
+  const pathSegments = testCase.spool_path_segments;
+  const revokedCapabilities = testCase.revoked_capability_ids_hex;
+  const revokedSubjects = testCase.revoked_subject_ids_hex;
+  if (!Array.isArray(pathSegments) || !Array.isArray(revokedCapabilities) || !Array.isArray(revokedSubjects)) {
+    throw new Error("timeline fixture path or revocations are invalid");
+  }
+  const actual = wasm.verifyTimelineAcceptance(
+    bytes("origin_hex"), bytes("acceptance_hex"), bytes("current_owner_state_hash_hex"),
+    pathSegments, bytes("request_sha256_hex"), BigInt(Number(testCase.first_position)),
+    Number(testCase.event_count), revokedCapabilities, revokedSubjects,
+    BigInt(Number(testCase.now_unix_seconds)), BigInt(timelineFixture.max_capability_ttl_seconds),
+  );
+  if (actual !== testCase.expected_accept) {
+    divergences.push(`direct-timeline-${String(testCase.name)}: expected=${String(testCase.expected_accept)} actual=${String(actual)}`);
   }
 }
 

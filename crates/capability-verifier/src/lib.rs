@@ -19,6 +19,7 @@ mod owner;
 pub mod passkey_delegation;
 pub mod service_scope;
 pub mod thread_control_authority;
+mod timeline;
 mod transfer;
 
 #[cfg(target_arch = "wasm32")]
@@ -44,6 +45,7 @@ pub use owner::{
     apply_transition_with_timelock, effective_recovery_window, verify_owner_key_binding,
     verify_owner_root, verify_spool_owner_genesis, verify_transition_timelock,
 };
+pub use timeline::{TimelineAcceptanceContext, verify_timeline_acceptance};
 pub use transfer::{
     TransferOwner, VerifiedResourceTransfer, resource_transfer_audit_hash,
     verify_resource_transfer, verify_transfer_audit_chain,
@@ -55,7 +57,7 @@ pub mod wire {
 }
 
 /// The exact API contract version used by this release line.
-pub const HEDDLE_API_REQUIREMENT: &str = "0.31.0-alpha.1";
+pub const HEDDLE_API_REQUIREMENT: &str = "0.31.0-alpha.6";
 
 #[cfg(test)]
 mod tests;

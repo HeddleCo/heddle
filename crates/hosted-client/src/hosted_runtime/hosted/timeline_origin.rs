@@ -640,4 +640,93 @@ mod tests {
             golden["offline_derived"].as_str().expect("derived golden")
         );
     }
+
+    #[test]
+    fn producer_owner_acceptance_verifies_with_shared_format_three_verifier() {
+        use heddleco_capability_verifier::{
+            TimelineAcceptanceContext, VerificationLimits, verify_timeline_acceptance,
+        };
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../capability-verifier/conformance/fixtures/timeline-v3.json"
+        ))
+        .expect("shared v3 fixture");
+        let case = &fixture["cases"][0];
+        let origin = TimelineOriginEndorsement::decode(
+            hex::decode(case["origin_hex"].as_str().expect("origin hex"))
+                .expect("hex")
+                .as_slice(),
+        )
+        .expect("origin");
+        let prior = TimelineAdmissionAcceptance::decode(
+            hex::decode(case["acceptance_hex"].as_str().expect("acceptance hex"))
+                .expect("hex")
+                .as_slice(),
+        )
+        .expect("acceptance");
+        let Authority::OwnerDerivedCapability(bytes) = prior.authority.expect("owner authority")
+        else {
+            panic!("owner authority required");
+        };
+        let bundle = OwnerAuthorizationBundle::decode(bytes.as_slice()).expect("owner bundle");
+        let spool = SpoolRef {
+            id: origin.spool_id.clone(),
+        };
+        let request = UploadScrubbedTimelineRequest {
+            client_operation_id: uuid::Uuid::from_u128(10).to_string(),
+            thread: Some(ThreadRef {
+                spool: Some(spool.clone()),
+                id: Some(ThreadId {
+                    value: origin.thread_id.clone(),
+                }),
+            }),
+            run: Some(RecordRef {
+                spool: Some(spool),
+                id: origin.run_id.clone(),
+            }),
+            canonicalization_version: 1,
+            run_revision: 1,
+            snapshot: Some(UploadRunSummary {
+                state: State::Running as i32,
+                harness: "codex".into(),
+            }),
+            events: Vec::new(),
+            origin: Some(origin.clone()),
+            acceptance: None,
+            first_position: 0,
+            origin_credential_biscuit: Vec::new(),
+        };
+        let signer = Ed25519Signer::from_seed(&[4; 32]).expect("subject signer");
+        let acceptance = sign_owner_timeline_acceptance(&request, &bundle, &signer)
+            .expect("producer acceptance");
+        let state_hash: [u8; 32] = hex::decode(
+            case["current_owner_state_hash_hex"]
+                .as_str()
+                .expect("state hash"),
+        )
+        .expect("hex")
+        .try_into()
+        .expect("32-byte state hash");
+        let request_digest = api::timeline_upload::logical_request_digest(
+            &request,
+            i128::from(chrono::Utc::now().timestamp_micros()),
+        )
+        .expect("request digest");
+        let path = vec!["acme".to_owned(), "verifier".to_owned()];
+        verify_timeline_acceptance(
+            &origin,
+            &acceptance,
+            &TimelineAcceptanceContext {
+                accepted_state_hash: &state_hash,
+                spool_path_segments: &path,
+                request_sha256: &request_digest,
+                first_position: 0,
+                event_count: 0,
+                revoked_capability_ids: &[],
+                revoked_subject_ids: &[],
+                now_unix_seconds: 1_000_000,
+                limits: VerificationLimits::new(3600).expect("limits"),
+            },
+        )
+        .expect("producer acceptance verifies");
+    }
 }

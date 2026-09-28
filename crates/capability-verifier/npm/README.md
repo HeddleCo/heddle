@@ -10,14 +10,23 @@ standard `wasm-bindgen` initializer plus:
 - `verifierVersion()`;
 - `verifyOwnerRoot(signedOwnerRootBytes)`;
 - `verifyPurgeAuthorization(...)`;
+- `verifyTimelineAcceptance(...)`;
 - `runPurgeFixture(fixtureJson)`;
-- `runTransferFixture(fixtureJson)`; and
-- `runKeyringFixture(fixtureJson)`.
+- `runTransferFixture(fixtureJson)`;
+- `runKeyringFixture(fixtureJson)`; and
+- `runTimelineFixture(fixtureJson)`.
 
 `verifyPurgeAuthorization` accepts canonical protobuf bytes as `Uint8Array`,
 path segments as `string[]`, and both Unix seconds and maximum TTL as `bigint`.
 It returns the crate's stable `Decision` serialized as JSON. Call the package's
 default async initializer before using any verifier function.
+
+`verifyTimelineAcceptance` takes canonical origin and acceptance protobuf
+bytes, the caller's pinned current owner-state hash, exact Spool path, actual
+request digest and position range, current capability and subject Biscuit
+revocation IDs as hex arrays, admission time, and TTL ceiling. It returns a
+boolean. The caller verifies original credential provenance and the uploader's
+transport proof independently.
 
 The publish root is this `npm/` directory. `npm run pack:binding` from the
 repository root builds it and shows the exact npm tarball payload.

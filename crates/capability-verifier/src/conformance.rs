@@ -5,12 +5,13 @@ use prost::Message;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Decision, Error, PurgeContext, Result, TransferOwner, VerificationLimits,
-    verify_clone_keyring_bytes, verify_owner_root, verify_purge_authorization_bytes,
-    verify_resource_transfer,
+    Decision, Error, PurgeContext, Result, TimelineAcceptanceContext, TransferOwner,
+    VerificationLimits, verify_clone_keyring_bytes, verify_owner_root,
+    verify_purge_authorization_bytes, verify_resource_transfer, verify_timeline_acceptance,
     wire::{
         CloneAuthorizationKeyring, PurgeOperationSigningBody, ResourceOwnershipTransfer,
-        SignedOwnerRoot, SignedSpoolOwnerGenesis,
+        SignedOwnerRoot, SignedSpoolOwnerGenesis, TimelineAdmissionAcceptance,
+        TimelineOriginEndorsement,
     },
 };
 
@@ -133,6 +134,116 @@ pub struct GuardOutcome {
     pub accepted: bool,
     /// Whether actual and expected are identical.
     pub matches: bool,
+}
+
+/// Format-3 timeline owner-acceptance corpus shared by native and WASM.
+#[derive(Debug, Deserialize)]
+pub struct TimelineConformanceFixture {
+    /// Exactly three for this adapter.
+    pub format_version: u32,
+    /// Maximum owner capability lifetime.
+    pub max_capability_ttl_seconds: i64,
+    /// Independent acceptance cases.
+    pub cases: Vec<TimelineConformanceCase>,
+}
+
+/// One exact timeline acceptance and independently supplied current evidence.
+#[derive(Debug, Deserialize)]
+pub struct TimelineConformanceCase {
+    /// Stable case name.
+    pub name: String,
+    /// Expected authorization result.
+    pub expected_accept: bool,
+    /// Canonical encoded origin endorsement.
+    pub origin_hex: String,
+    /// Canonical encoded acceptance.
+    pub acceptance_hex: String,
+    /// Independently pinned owner state hash.
+    pub current_owner_state_hash_hex: String,
+    /// Actual canonical Spool path.
+    pub spool_path_segments: Vec<String>,
+    /// Actual upload digest.
+    pub request_sha256_hex: String,
+    /// Actual upload start.
+    pub first_position: u64,
+    /// Actual upload event count.
+    pub event_count: u32,
+    /// Current revoked capability IDs.
+    pub revoked_capability_ids_hex: Vec<String>,
+    /// Current revoked subject Biscuit IDs.
+    pub revoked_subject_ids_hex: Vec<String>,
+    /// Admission time.
+    pub now_unix_seconds: i64,
+}
+
+/// Evaluate the format-3 corpus using the same pure verifier as production.
+pub fn run_timeline_fixture(json: &str) -> Result<Vec<GuardOutcome>> {
+    if json.len() > MAX_FIXTURE_BYTES {
+        return Err(Error::TooLarge {
+            limit: MAX_FIXTURE_BYTES,
+        });
+    }
+    let fixture: TimelineConformanceFixture =
+        serde_json::from_str(json).map_err(|error| Error::Invalid(error.to_string()))?;
+    if fixture.format_version != 3 {
+        return Err(Error::Invalid(
+            "timeline fixture version must be 3".to_owned(),
+        ));
+    }
+    let limits = VerificationLimits::new(fixture.max_capability_ttl_seconds)?;
+    fixture
+        .cases
+        .into_iter()
+        .map(|case| {
+            let actual = (|| -> Result<()> {
+                let origin_bytes = hex_bytes(&case.origin_hex, 4096)?;
+                let acceptance_bytes = hex_bytes(&case.acceptance_hex, 8192)?;
+                let origin = TimelineOriginEndorsement::decode(origin_bytes.as_slice())?;
+                let acceptance = TimelineAdmissionAcceptance::decode(acceptance_bytes.as_slice())?;
+                if origin.encode_to_vec() != origin_bytes
+                    || acceptance.encode_to_vec() != acceptance_bytes
+                {
+                    return Err(Error::NonCanonicalProtobuf);
+                }
+                let state_hash =
+                    fixed::<32>(&case.current_owner_state_hash_hex, "current owner state")?;
+                let request_sha256 = fixed::<32>(&case.request_sha256_hex, "request digest")?;
+                let revoked_capability_ids = case
+                    .revoked_capability_ids_hex
+                    .iter()
+                    .map(|value| hex_bytes(value, 64))
+                    .collect::<Result<Vec<_>>>()?;
+                let revoked_subject_ids = case
+                    .revoked_subject_ids_hex
+                    .iter()
+                    .map(|value| hex_bytes(value, 64))
+                    .collect::<Result<Vec<_>>>()?;
+                verify_timeline_acceptance(
+                    &origin,
+                    &acceptance,
+                    &TimelineAcceptanceContext {
+                        accepted_state_hash: &state_hash,
+                        spool_path_segments: &case.spool_path_segments,
+                        request_sha256: &request_sha256,
+                        first_position: case.first_position,
+                        event_count: case.event_count,
+                        revoked_capability_ids: &revoked_capability_ids,
+                        revoked_subject_ids: &revoked_subject_ids,
+                        now_unix_seconds: case.now_unix_seconds,
+                        limits,
+                    },
+                )?;
+                Ok(())
+            })()
+            .is_ok();
+            Ok(GuardOutcome {
+                name: case.name,
+                expected_accept: case.expected_accept,
+                accepted: actual,
+                matches: actual == case.expected_accept,
+            })
+        })
+        .collect()
 }
 
 fn hex_bytes(value: &str, maximum_bytes: usize) -> Result<Vec<u8>> {
@@ -316,3 +427,5 @@ pub const FIXTURE_V2_JSON: &str = include_str!("../conformance/fixtures/v2.json"
 pub const TRANSFER_FIXTURE_V2_JSON: &str = include_str!("../conformance/fixtures/transfer-v2.json");
 /// Self-rooted clone-keyring v2 fixture matrix embedded in the crate.
 pub const KEYRING_FIXTURE_V2_JSON: &str = include_str!("../conformance/fixtures/keyring-v2.json");
+/// Format-3 timeline owner-acceptance fixture embedded in the crate.
+pub const TIMELINE_FIXTURE_V3_JSON: &str = include_str!("../conformance/fixtures/timeline-v3.json");

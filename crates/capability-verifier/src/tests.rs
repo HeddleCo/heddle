@@ -42,6 +42,9 @@ mod creation_tests;
 #[path = "passkey_delegation_tests.rs"]
 mod passkey_delegation_tests;
 
+#[path = "timeline_tests.rs"]
+mod timeline_tests;
+
 struct TestKey {
     seed: [u8; 32],
     signing: SigningKey,
@@ -778,6 +781,91 @@ fn recovery_transition(
         authorizations,
         next_authority_key_proof: Some(next.sign(OWNER_TRANSITION_DOMAIN, &body)),
         next_recovery_key_proofs: Vec::new(),
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn recovery_retires_historical_purge_issuers_after_multiple_rotations() {
+    let original = TestKey::new(1);
+    let paper = TestKey::new(2);
+    let social = TestKey::new(3);
+    let guardians = [
+        (&paper, RecoveryGuardianKind::Paper),
+        (&social, RecoveryGuardianKind::Social),
+    ];
+    let root = signed_root_with_policy(
+        OWNER_UUID,
+        &original,
+        &guardians,
+        recovery_policy(&guardians, Some(1)),
+    );
+    let mut state = verify_owner_root(&root).expect("root");
+    let subject_key = TestKey::new(5);
+    let original_grant = signed_capability(CapabilityArgs {
+        state: &state,
+        issuer: &original,
+        subject: &subject_key,
+        spool_uuid: SPOOL,
+        action: SpoolCapabilityAction::Purge as i32,
+        parent_capability_id: Vec::new(),
+        not_before: NOW,
+        expires_at: NOW + 100,
+        nonce: 0x61,
+    });
+    let mut historical_grants = vec![original_grant];
+    let mut current_key = original;
+    for (index, byte) in [12, 13, 14].into_iter().enumerate() {
+        let next_key = TestKey::new(byte);
+        let rotate = rotation(&state, &current_key, &next_key);
+        if index > 0 {
+            historical_grants.push(signed_capability(CapabilityArgs {
+                state: &state,
+                issuer: &current_key,
+                subject: &subject_key,
+                spool_uuid: SPOOL,
+                action: SpoolCapabilityAction::Purge as i32,
+                parent_capability_id: Vec::new(),
+                not_before: NOW,
+                expires_at: NOW + 100,
+                nonce: 0x61 + index as u8,
+            }));
+        }
+        state = apply_accepted_transition(&state, &rotate, NOW, limits()).expect("rotation");
+        current_key = next_key;
+    }
+    for grant in &historical_grants {
+        assert!(
+            verify_capability_chain(&state, std::slice::from_ref(grant), NOW, limits()).is_ok()
+        );
+    }
+    let recovered_key = TestKey::new(15);
+    let recover = recovery_transition(
+        &state,
+        &[&paper, &social],
+        &recovered_key,
+        state.recovery_policy().clone(),
+        NOW,
+    );
+    verify_transition_timelock(&state, &recover, NOW - 1).expect("veto elapsed");
+    state = apply_accepted_transition(&state, &recover, NOW, limits()).expect("recovery");
+    let recovered_grant = signed_capability(CapabilityArgs {
+        state: &state,
+        issuer: &recovered_key,
+        subject: &subject_key,
+        spool_uuid: SPOOL,
+        action: SpoolCapabilityAction::Purge as i32,
+        parent_capability_id: Vec::new(),
+        not_before: NOW,
+        expires_at: NOW + 100,
+        nonce: 0x64,
+    });
+    assert!(verify_capability_chain(&state, &[recovered_grant], NOW, limits()).is_ok());
+    for grant in historical_grants {
+        assert!(
+            verify_capability_chain(&state, &[grant], NOW, limits()).is_err(),
+            "recovery must retire every earlier PURGE issuer"
+        );
     }
 }
 

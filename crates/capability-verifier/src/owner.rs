@@ -599,11 +599,12 @@ pub fn apply_transition(
     }
     next.issuers
         .get_mut(&state.state_hash())
-        .expect("verified current issuer")
+        .ok_or_else(|| Error::BrokenChain("current owner issuer is missing".to_owned()))?
         .valid_until = Some(transition.previous_key_valid_until_unix_seconds);
     if kind == OwnerKeyTransitionKind::Recover {
         for issuer in next.issuers.values_mut() {
             issuer.retained_mint_authority = false;
+            issuer.valid_until = Some(0);
         }
     }
     next.issuers.insert(

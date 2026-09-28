@@ -1,8 +1,8 @@
 # heddleco-capability-verifier
 
 `heddleco-capability-verifier` is the canonical, transport-free verifier for
-Heddle owner authorization v2. Weft, Heddle, and browser Worker WASM consumers
-can pass the same public evidence and get the same purge allow/deny decision.
+Heddle owner authorization. Weft, Heddle, and browser Worker WASM consumers
+can pass the same public evidence for purge or exact timeline acceptance.
 
 The crate is intentionally pure. It does not read a clock, filesystem,
 database, environment variable, key store, or network. It does not generate
@@ -15,13 +15,13 @@ Heddle workspace. The standalone line ended at version 0.19 with
 `heddle-api = "0.31.0-alpha.1"`. Rust and npm package names remain the same.
 This crate has no dependency on Heddle repository, checkout, daemon, or
 transport code. The adjacent `heddle-biscuit-verifier` handles ordinary
-access; owner authority continues to use the purge-only rules below.
+access; owner authority uses the separate signed operations below.
 
 ## Contract
 
-Version 0.20 consumes `heddle-api = "0.31.0-alpha.1"`. Public proof types come
+Version 0.21.6 consumes `heddle-api = "0.31.0-alpha.6"`. Public proof types come
 from `heddle.api.v1alpha2`; the durable signing formats keep their own versions.
-The verifier implements the purge-only owner contract:
+The verifier implements the owner contract:
 
 - `verify_spool_owner_genesis` verifies the owner signature over
   `SHA-256(owner_public_key.public_key || spool_uuid)` and returns the exact
@@ -31,6 +31,11 @@ The verifier implements the purge-only owner contract:
   recovery, policy-change, and deferred-claim signer sets checked exactly;
 - a direct capability must carry the singular PURGE action for one exact spool
   selector; capability and Biscuit attenuation cannot grant purge;
+- `verify_timeline_acceptance` accepts only one direct format-3
+  `ACCEPT_TIMELINE_ORIGIN` capability and its single-block subject Biscuit. It
+  checks the v3 signature domain, current pinned owner state, rotation and
+  recovery windows, capability and Biscuit revocations, exact origin/Thread
+  scope, and the subject signature over the acceptance transcript;
 - `canonical_purge_operation` implements the
   `heddle-purge-operation-v2` signing body and binds the leaf subject signature
   to the spool, purge identity, payload digest, and capability id; and
@@ -48,7 +53,7 @@ own local TOFU pin after verifying the evidence.
 ## Using the verifier
 
 The caller selects its previously pinned genesis evidence and current state
-hash; neither may be learned from the purge sidecar being checked.
+hash; neither may be learned from the authorization bundle being checked.
 
 ```rust,no_run
 use heddleco_capability_verifier::{
@@ -75,8 +80,14 @@ crate with `wasm-bindgen`; it is not a second verifier implementation. Build
 the publish payload with `npm run build`, call the package's default async
 initializer once, then use `verifyPurgeAuthorization` with canonical protobuf
 bytes and caller-pinned owner context. The binding also exposes
-`verifyOwnerRoot` and the three fixture adapters. Exact generated TypeScript
+`verifyOwnerRoot`, `verifyTimelineAcceptance`, and the four fixture adapters. Exact generated TypeScript
 signatures ship in the package.
+
+For timeline acceptance, the caller supplies a previously verified original
+endorsement, the actual logical request digest and position range, the exact
+Thread's Spool path, the independently pinned current owner state hash, and
+current revocation sets. The caller still verifies original credential
+provenance and the uploader's independent transport proof.
 
 The Rust crate and npm package versions move together. Publishing is handled by
 the release orchestrator after CI has built the WebAssembly and checked the npm
@@ -107,12 +118,12 @@ UTF-8 bytes, and a 67,108,864-byte raw purge payload. Unknown versions/actions,
 non-canonical ids or protobuf, duplicate/gapped/forked history, and oversized
 input fail closed.
 
-Portable v2 fixtures under `conformance/fixtures/` cover a valid owner-anchored
+Portable fixtures under `conformance/fixtures/` cover a valid owner-anchored
 purge plus absent evidence, invalid signatures, expiry, wrong spool, wrong
 action, attenuation, forged genesis, broken transition chains, transfer
-completeness, and clone-keyring forks. The same adapters run natively and under
+completeness, clone-keyring forks, and format-3 timeline acceptance. The same adapters run natively and under
 `wasm32-unknown-unknown` in CI. The differential harness under
-`owner-authorization-conformance/` deterministically mutates all three fixture
+`owner-authorization-conformance/` deterministically mutates all four fixture
 sets with seeds `38322398`, `1138`, `247`, and `836`, then compares native Rust
 with the publishable WebAssembly binding on the identical corpus. It requires
 no cross-repository checkout or PAT.

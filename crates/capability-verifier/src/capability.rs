@@ -10,7 +10,10 @@ use prost::Message;
 
 use crate::{
     Error, Result, VerificationLimits,
-    canonical::{OWNER_CAPABILITY_DOMAIN, capability_body, capability_without_id, digest, key_id},
+    canonical::{
+        OWNER_CAPABILITY_DOMAIN, OWNER_CAPABILITY_V3_DOMAIN, capability_body,
+        capability_without_id, digest, key_id,
+    },
     crypto::verify_signature,
     owner::{VerifiedOwnerState, apply_accepted_transition, apply_transition, verify_owner_root},
     wire::{
@@ -251,7 +254,11 @@ fn expected_grants(capability: &OwnerCapability) -> Result<BTreeSet<(String, Str
         .collect()
 }
 
-fn verify_subject_biscuit(capability: &OwnerCapability, bytes: &[u8]) -> Result<()> {
+pub(crate) fn verify_subject_biscuit_with_revocations(
+    capability: &OwnerCapability,
+    bytes: &[u8],
+    revoked_ids: &[Vec<u8>],
+) -> Result<()> {
     let subject = capability
         .subject
         .as_ref()
@@ -275,6 +282,15 @@ fn verify_subject_biscuit(capability: &OwnerCapability, bytes: &[u8]) -> Result<
         .map_err(|error| Error::Biscuit(error.to_string()))?;
     let biscuit = Biscuit::from(bytes, move |_| Ok(public))
         .map_err(|error| Error::Biscuit(error.to_string()))?;
+    if biscuit
+        .revocation_identifiers()
+        .iter()
+        .any(|id| revoked_ids.iter().any(|revoked| id.as_slice() == revoked))
+    {
+        return Err(Error::CapabilityDenied(
+            "subject Biscuit is revoked".to_owned(),
+        ));
+    }
     if biscuit.block_count() != 1 {
         return Err(Error::CapabilityDenied(
             "purge is direct-only; subject Biscuit attenuation is forbidden".to_owned(),
@@ -305,10 +321,61 @@ fn verify_subject_biscuit(capability: &OwnerCapability, bytes: &[u8]) -> Result<
             capability.not_before_unix_seconds, capability.expires_at_unix_seconds
         ),
     ]);
-    for (spool, path, descendants, action) in expected_grants(capability)? {
-        expected.insert(format!(
-            "owner_grant(\"{spool}\", \"{path}\", {descendants}, {action})"
-        ));
+    if capability.format_version == 3 {
+        let grant = capability
+            .grants
+            .first()
+            .ok_or_else(|| Error::Invalid("timeline grant missing".to_owned()))?;
+        let selector = grant
+            .spool
+            .as_ref()
+            .ok_or_else(|| Error::Invalid("timeline selector missing".to_owned()))?;
+        let scope = grant
+            .timeline_acceptance
+            .as_ref()
+            .ok_or_else(|| Error::Invalid("timeline scope missing".to_owned()))?;
+        use crate::wire::timeline_origin_credential_identity::Identity;
+        let prefix = format!(
+            "\"{}\", \"{}\", \"{}\", ",
+            hex::encode(&selector.root_spool_uuid),
+            path_hex(&selector.path_segments),
+            hex::encode(&scope.principal_account_uuid)
+        );
+        let suffix = format!(
+            "\"{}\", {}, \"{}\", \"{}\")",
+            hex::encode(&scope.effective_pop_key_sha256),
+            scope.credential_class,
+            hex::encode(&scope.thread_id),
+            hex::encode(&scope.origin_sha256)
+        );
+        let fact = match scope
+            .credential_identity
+            .as_ref()
+            .and_then(|value| value.identity.as_ref())
+        {
+            Some(Identity::ServerIssued(value)) => format!(
+                "owner_timeline_accept_server({prefix}\"{}\", {suffix}",
+                hex::encode(&value.credential_id)
+            ),
+            Some(Identity::OfflineDerived(value)) => format!(
+                "owner_timeline_accept_offline({prefix}\"{}\", \"{}\", \"{}\", {suffix}",
+                hex::encode(&value.issued_ancestor_credential_id),
+                hex::encode(&value.terminal_revocation_id),
+                hex::encode(&value.derivation_path_sha256)
+            ),
+            None => {
+                return Err(Error::Invalid(
+                    "timeline credential identity missing".to_owned(),
+                ));
+            }
+        };
+        expected.insert(fact);
+    } else {
+        for (spool, path, descendants, action) in expected_grants(capability)? {
+            expected.insert(format!(
+                "owner_grant(\"{spool}\", \"{path}\", {descendants}, {action})"
+            ));
+        }
     }
     if lines.len() != expected.len() || actual != expected {
         return Err(Error::CapabilityDenied(
@@ -324,6 +391,121 @@ fn verify_subject_biscuit(capability: &OwnerCapability, bytes: &[u8]) -> Result<
         .code(OWNER_RULES)
         .map_err(|error| Error::Biscuit(error.to_string()))?;
     Ok(())
+}
+
+pub(crate) fn verify_timeline_capability_chain(
+    state: &VerifiedOwnerState,
+    chain: &[SignedOwnerCapability],
+    now_unix_seconds: i64,
+    limits: VerificationLimits,
+) -> Result<VerifiedCapability> {
+    if chain.len() != 1 {
+        return Err(Error::CapabilityDenied(
+            "timeline acceptance requires one direct capability".to_owned(),
+        ));
+    }
+    let signed = &chain[0];
+    let capability = signed
+        .capability
+        .as_ref()
+        .ok_or_else(|| Error::Invalid("signed capability has no body".to_owned()))?;
+    if capability.format_version != 3
+        || capability.owner_id.len() != 32
+        || capability.issuer_state_hash.len() != 32
+        || capability.nonce.len() != 32
+        || capability.capability_id.len() != 32
+        || capability.not_before_unix_seconds < 0
+        || capability.expires_at_unix_seconds <= capability.not_before_unix_seconds
+        || capability
+            .expires_at_unix_seconds
+            .saturating_sub(capability.not_before_unix_seconds)
+            > limits.max_capability_ttl_seconds()
+        || !capability.parent_capability_id.is_empty()
+        || capability.grants.len() != 1
+    {
+        return Err(Error::Invalid(
+            "owner timeline capability has invalid v3 fields or lifetime".to_owned(),
+        ));
+    }
+    let subject = capability
+        .subject
+        .as_ref()
+        .ok_or_else(|| Error::Invalid("timeline capability has no subject".to_owned()))?;
+    let kind = CapabilityPrincipalKind::try_from(subject.kind)
+        .map_err(|_| Error::Invalid("unknown capability principal".to_owned()))?;
+    if kind == CapabilityPrincipalKind::Unspecified
+        || kind == CapabilityPrincipalKind::AnyAnonymous
+        || subject.principal_id.is_empty()
+        || subject.key.as_ref().is_none_or(|key| {
+            key.algorithm != AuthorizationKeyAlgorithm::Ed25519 as i32 || key.public_key.len() != 32
+        })
+    {
+        return Err(Error::Invalid(
+            "timeline capability subject is invalid".to_owned(),
+        ));
+    }
+    let grant = &capability.grants[0];
+    let selector = grant
+        .spool
+        .as_ref()
+        .ok_or_else(|| Error::Invalid("timeline grant has no selector".to_owned()))?;
+    validate_selector(selector)?;
+    if grant.action != SpoolCapabilityAction::AcceptTimelineOrigin as i32 {
+        return Err(Error::CapabilityDenied(
+            "format-3 capability must grant timeline acceptance".to_owned(),
+        ));
+    }
+    let scope = grant
+        .timeline_acceptance
+        .as_ref()
+        .ok_or_else(|| Error::Invalid("timeline grant has no scope".to_owned()))?;
+    if scope.principal_account_uuid.len() != 16
+        || scope.effective_pop_key_sha256.len() != 32
+        || scope.thread_id.len() != 32
+        || scope.origin_sha256.len() != 32
+        || !matches!(scope.credential_class, 1 | 2)
+    {
+        return Err(Error::Invalid(
+            "timeline scope has invalid field lengths".to_owned(),
+        ));
+    }
+    heddle_api::timeline_upload::validate_credential_identity(
+        scope
+            .credential_identity
+            .as_ref()
+            .ok_or_else(|| Error::Invalid("timeline credential identity missing".to_owned()))?,
+    )
+    .map_err(|error| Error::Invalid(error.to_string()))?;
+    let expected = digest(
+        OWNER_CAPABILITY_V3_DOMAIN,
+        &capability_without_id(capability)?,
+    );
+    if capability.capability_id.as_slice() != expected {
+        return Err(Error::Invalid(
+            "capability id does not match canonical v3 body".to_owned(),
+        ));
+    }
+    if capability.owner_id.as_slice() != state.owner_id() {
+        return Err(Error::BrokenChain(
+            "capability names another owner".to_owned(),
+        ));
+    }
+    if now_unix_seconds < capability.not_before_unix_seconds {
+        return Err(Error::NotYetValid);
+    }
+    if now_unix_seconds > capability.expires_at_unix_seconds {
+        return Err(Error::Expired);
+    }
+    let signer = state.issuer_at(&capability.issuer_state_hash, now_unix_seconds)?;
+    verify_signature(
+        signer,
+        signed.signature.as_ref().ok_or(Error::InvalidSignature)?,
+        OWNER_CAPABILITY_V3_DOMAIN,
+        &capability_body(capability)?,
+    )?;
+    Ok(VerifiedCapability {
+        signed: signed.clone(),
+    })
 }
 
 /// Verify the single direct PURGE capability accepted by owner-authz v2.
@@ -405,11 +587,46 @@ pub fn verify_authorization_bundle_for_state(
     verify_bundle(bundle, Some(accepted_state_hash), now_unix_seconds, limits)
 }
 
+pub(crate) fn verify_timeline_bundle_for_state(
+    bundle: &OwnerAuthorizationBundle,
+    accepted_state_hash: &[u8; 32],
+    now_unix_seconds: i64,
+    limits: VerificationLimits,
+    revoked_subject_ids: &[Vec<u8>],
+) -> Result<VerifiedAuthorizationBundle> {
+    verify_bundle_inner(
+        bundle,
+        Some(accepted_state_hash),
+        now_unix_seconds,
+        limits,
+        true,
+        revoked_subject_ids,
+    )
+}
+
 fn verify_bundle(
     bundle: &OwnerAuthorizationBundle,
     accepted_state_hash: Option<&[u8; 32]>,
     now_unix_seconds: i64,
     limits: VerificationLimits,
+) -> Result<VerifiedAuthorizationBundle> {
+    verify_bundle_inner(
+        bundle,
+        accepted_state_hash,
+        now_unix_seconds,
+        limits,
+        false,
+        &[],
+    )
+}
+
+fn verify_bundle_inner(
+    bundle: &OwnerAuthorizationBundle,
+    accepted_state_hash: Option<&[u8; 32]>,
+    now_unix_seconds: i64,
+    limits: VerificationLimits,
+    timeline: bool,
+    revoked_subject_ids: &[Vec<u8>],
 ) -> Result<VerifiedAuthorizationBundle> {
     if bundle.encoded_len() > limits.max_bundle_bytes() {
         return Err(Error::TooLarge {
@@ -439,9 +656,21 @@ fn verify_bundle(
             "bundle does not end at the caller's current owner state".to_owned(),
         ));
     }
-    let capability =
-        verify_capability_chain(&state, &bundle.capability_chain, now_unix_seconds, limits)?;
-    verify_subject_biscuit(capability.capability(), &bundle.subject_biscuit)?;
+    let capability = if timeline {
+        verify_timeline_capability_chain(
+            &state,
+            &bundle.capability_chain,
+            now_unix_seconds,
+            limits,
+        )?
+    } else {
+        verify_capability_chain(&state, &bundle.capability_chain, now_unix_seconds, limits)?
+    };
+    verify_subject_biscuit_with_revocations(
+        capability.capability(),
+        &bundle.subject_biscuit,
+        revoked_subject_ids,
+    )?;
     Ok(VerifiedAuthorizationBundle {
         owner_state: state,
         capability,

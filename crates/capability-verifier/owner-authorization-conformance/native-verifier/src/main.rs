@@ -3,7 +3,7 @@
 use std::{env, fs, process::ExitCode};
 
 use heddleco_capability_verifier::conformance::{
-    run_fixture, run_keyring_fixture, run_transfer_fixture,
+    run_fixture, run_keyring_fixture, run_timeline_fixture, run_transfer_fixture,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +26,7 @@ enum FixtureKind {
     Purge,
     Transfer,
     Keyring,
+    Timeline,
 }
 
 #[derive(Serialize)]
@@ -89,6 +90,9 @@ fn evaluate(kind: FixtureKind, fixture_json: &str) -> Result<Value, String> {
         ),
         FixtureKind::Keyring => serde_json::to_value(
             run_keyring_fixture(fixture_json).map_err(|error| error.to_string())?,
+        ),
+        FixtureKind::Timeline => serde_json::to_value(
+            run_timeline_fixture(fixture_json).map_err(|error| error.to_string())?,
         ),
     }
     .map_err(|error| error.to_string())
