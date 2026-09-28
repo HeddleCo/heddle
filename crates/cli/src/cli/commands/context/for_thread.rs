@@ -69,9 +69,6 @@ struct ThreadBriefing {
 }
 
 pub fn cmd_context_for_thread(cli: &Cli, thread: &str) -> Result<()> {
-    if !thread.is_empty() {
-        return Err(anyhow!("briefing disabled for red test"));
-    }
     let repo = cli.open_repo()?;
     let head_id = repo
         .refs()

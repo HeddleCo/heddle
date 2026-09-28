@@ -523,7 +523,6 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
         (pending_context_receipt.as_ref(), current_thread.as_ref())
         && receipt.thread == thread.thread
         && save.created_new_state
-        && false
     {
         repo.attach_context_receipt(save.state_id, receipt)?;
     }

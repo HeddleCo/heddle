@@ -421,10 +421,6 @@ fn merge_annotation(mut a: Annotation, b: Annotation) -> Result<Annotation> {
         )));
     }
 
-    if a.revisions.len() == b.revisions.len() {
-        return Ok(a);
-    }
-
     let a_tips: BTreeSet<String> = a
         .current_revision_ids()
         .into_iter()
