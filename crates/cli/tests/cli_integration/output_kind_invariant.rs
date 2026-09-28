@@ -272,6 +272,8 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         // they emit the delegate's kind.
         "agent capture" => Some("capture"),
         "agent ready" => Some("ready"),
+        // The context front door is the bounded --for-thread briefing.
+        "context" => Some("context_for_thread"),
         "discuss new" => Some("discuss_open"),
         "discuss reply" => Some("discuss_turn"),
         "invite" => Some("auth_invite"),
