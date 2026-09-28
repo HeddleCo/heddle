@@ -11,6 +11,21 @@ use crate::hosted_runtime::{
 };
 
 #[test]
+fn build_root_emits_v1_authority() {
+    let signer = Ed25519Signer::generate().expect("seed");
+    let root = mint_agent_root(&signer.to_seed()).expect("root");
+    let authority = authority_keypair(&signer.to_seed()).expect("authority");
+    let parsed = biscuit_auth::Biscuit::from_base64(&root.token, authority.public())
+        .expect("valid signature");
+    assert_eq!(parsed.container().authority.version, 1);
+
+    let legacy = biscuit_auth::Biscuit::builder()
+        .build(&authority)
+        .expect("legacy control");
+    assert_eq!(legacy.container().authority.version, 0);
+}
+
+#[test]
 fn agent_root_is_signed_by_the_same_seed_weft_will_register() {
     let _process_env_guard = crate::test_process_env::shared_blocking();
     let signer = Ed25519Signer::generate().expect("seed");
