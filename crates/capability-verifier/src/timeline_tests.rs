@@ -12,7 +12,8 @@ use crate::{
 const PRINCIPAL: &str = "11111111-1111-1111-1111-111111111111";
 const SPOOL_ID: &str = "22222222-2222-2222-2222-222222222222";
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn api_origin_v3_byte_vectors_match_both_identity_variants() {
     use crate::wire::TimelineOfflineDerivedCredential;
     let golden: serde_json::Value =
@@ -55,7 +56,8 @@ fn api_origin_v3_byte_vectors_match_both_identity_variants() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn v3_capability_body_matches_contract_field_order_and_identity_tags() {
     fn counted(into: &mut Vec<u8>, bytes: &[u8]) {
         into.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
@@ -419,6 +421,48 @@ impl TimelineFixture {
             .to_vec();
     }
 
+    fn attenuate_subject(&mut self) {
+        use biscuit_auth::{PublicKey, builder::BlockBuilder};
+        let subject = self.bundle.capability_chain[0]
+            .capability
+            .as_ref()
+            .expect("capability")
+            .subject
+            .as_ref()
+            .expect("subject");
+        let key = subject.key.as_ref().expect("key");
+        let public =
+            PublicKey::from_bytes(&key.public_key, Algorithm::Ed25519).expect("public key");
+        let biscuit = Biscuit::from(self.bundle.subject_biscuit.as_slice(), move |_| Ok(public))
+            .expect("subject Biscuit");
+        let next_private =
+            PrivateKey::from_bytes(&[0x56; 32], Algorithm::Ed25519).expect("next Biscuit key");
+        self.bundle.subject_biscuit = biscuit
+            .append_with_keypair(&KeyPair::from(&next_private), BlockBuilder::new())
+            .expect("attenuation")
+            .to_vec()
+            .expect("attenuated bytes");
+        self.refresh_acceptance_authority();
+    }
+
+    fn subject_revocation_id(&self) -> Vec<u8> {
+        use biscuit_auth::PublicKey;
+        let subject = self.bundle.capability_chain[0]
+            .capability
+            .as_ref()
+            .expect("capability")
+            .subject
+            .as_ref()
+            .expect("subject");
+        let key = subject.key.as_ref().expect("key");
+        let public =
+            PublicKey::from_bytes(&key.public_key, Algorithm::Ed25519).expect("public key");
+        Biscuit::from(self.bundle.subject_biscuit.as_slice(), move |_| Ok(public))
+            .expect("subject Biscuit")
+            .revocation_identifiers()[0]
+            .to_vec()
+    }
+
     fn verify(
         &self,
         now: i64,
@@ -443,7 +487,61 @@ impl TimelineFixture {
     }
 }
 
-#[test]
+fn recovered_away_fixture(rotations: &[u8]) -> TimelineFixture {
+    let mut fixture = TimelineFixture::new();
+    let paper = TestKey::new(2);
+    let social = TestKey::new(3);
+    let guardians = [
+        (&paper, RecoveryGuardianKind::Paper),
+        (&social, RecoveryGuardianKind::Social),
+    ];
+    fixture.bundle.owner_root = Some(signed_root_with_policy(
+        OWNER_UUID,
+        &fixture.owner,
+        &guardians,
+        recovery_policy(&guardians, Some(1)),
+    ));
+    let mut state =
+        verify_owner_root(fixture.bundle.owner_root.as_ref().expect("root")).expect("root state");
+    fixture.capability_mut().owner_id = state.owner_id().to_vec();
+    fixture.capability_mut().issuer_state_hash = state.state_hash().to_vec();
+    let mut current_key = TestKey::new(1);
+    for byte in rotations {
+        let next_key = TestKey::new(*byte);
+        let rotate = rotation(&state, &current_key, &next_key);
+        state =
+            apply_accepted_transition(&state, &rotate, NOW, limits()).expect("accepted rotation");
+        fixture.bundle.owner_state_chain.push(rotate);
+        current_key = next_key;
+    }
+    fixture.capability_mut().not_before_unix_seconds = NOW;
+    fixture.resign();
+    if !rotations.is_empty() {
+        fixture.state_hash = state.state_hash();
+        assert!(
+            fixture.verify(NOW, &[], &[]).is_ok(),
+            "rotation overlap control"
+        );
+    }
+    let recovered_key = TestKey::new(20);
+    let recover = recovery_transition(
+        &state,
+        &[&paper, &social],
+        &recovered_key,
+        state.recovery_policy().clone(),
+        NOW,
+    );
+    verify_transition_timelock(&state, &recover, NOW - 1).expect("recovery veto window elapsed");
+    state = apply_accepted_transition(&state, &recover, NOW, limits()).expect("accepted recovery");
+    fixture.bundle.owner_state_chain.push(recover);
+    fixture.state_hash = state.state_hash();
+    // The historical key signs a new grant after recovery has been accepted.
+    fixture.resign();
+    fixture
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn producer_layout_round_trips_through_format_three_verifier() {
     let fixture = TimelineFixture::new();
     assert_eq!(
@@ -467,7 +565,8 @@ fn producer_layout_round_trips_through_format_three_verifier() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn timeline_scope_action_format_lifetime_and_revocations_fail_closed() {
     let mut fixture = TimelineFixture::new();
     fixture.capability_mut().grants[0]
@@ -594,7 +693,8 @@ fn timeline_scope_action_format_lifetime_and_revocations_fail_closed() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn current_owner_state_and_rotation_window_are_checked() {
     let mut fixture = TimelineFixture::new();
     let root_state =
@@ -618,76 +718,31 @@ fn current_owner_state_and_rotation_window_are_checked() {
     assert!(fixture.verify(NOW, &[], &[]).is_err(), "unpinned state");
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn recovery_and_subject_biscuit_revocation_or_attenuation_reject_acceptance() {
-    use biscuit_auth::{PublicKey, builder::BlockBuilder};
     let fixture = TimelineFixture::new();
-    let subject = fixture.bundle.capability_chain[0]
-        .capability
-        .as_ref()
-        .expect("capability")
-        .subject
-        .as_ref()
-        .expect("subject");
-    let key = subject.key.as_ref().expect("key");
-    let public = PublicKey::from_bytes(&key.public_key, Algorithm::Ed25519).expect("public key");
-    let biscuit = Biscuit::from(fixture.bundle.subject_biscuit.as_slice(), move |_| {
-        Ok(public)
-    })
-    .expect("subject Biscuit");
-    let revoked = biscuit.revocation_identifiers()[0].to_vec();
+    let revoked = fixture.subject_revocation_id();
     assert!(
         fixture.verify(NOW, &[], &[revoked]).is_err(),
         "revoked subject Biscuit"
     );
     let mut attenuated = TimelineFixture::new();
-    attenuated.bundle.subject_biscuit = biscuit
-        .append(BlockBuilder::new())
-        .expect("attenuation")
-        .to_vec()
-        .expect("attenuated bytes");
-    attenuated.acceptance.authority = Some(Authority::OwnerDerivedCapability(
-        attenuated.bundle.encode_to_vec(),
-    ));
-    attenuated.acceptance.signature = attenuated
-        .subject
-        .signing
-        .sign(
-            &heddle_api::timeline_upload::acceptance_signing_bytes(&attenuated.acceptance)
-                .expect("attenuated acceptance bytes"),
-        )
-        .to_bytes()
-        .to_vec();
+    attenuated.attenuate_subject();
     assert!(
         attenuated.verify(NOW, &[], &[]).is_err(),
         "attenuated subject Biscuit"
     );
 
-    let mut recovered = TimelineFixture::new();
-    let paper = TestKey::new(2);
-    let social = TestKey::new(3);
-    let next = TestKey::new(12);
-    let root_state =
-        verify_owner_root(recovered.bundle.owner_root.as_ref().expect("root")).expect("state");
-    let transition = recovery_transition(
-        &root_state,
-        &[&paper, &social],
-        &next,
-        root_state.recovery_policy().clone(),
-        NOW - 1,
-    );
-    let state = apply_accepted_transition(&root_state, &transition, NOW, limits())
-        .expect("accepted recovery");
-    recovered.bundle.owner_state_chain.push(transition);
-    recovered.state_hash = state.state_hash();
-    recovered.resign();
+    let recovered = recovered_away_fixture(&[]);
     assert!(
         recovered.verify(NOW, &[], &[]).is_err(),
         "recovery retires old issuer immediately"
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn direct_grant_shape_validity_start_and_issuer_signature_are_checked() {
     let mut fixture = TimelineFixture::new();
     fixture.capability_mut().parent_capability_id = vec![17; 32];
@@ -739,7 +794,8 @@ fn direct_grant_shape_validity_start_and_issuer_signature_are_checked() {
     );
 }
 
-#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
 fn timeline_v3_parity_fixture_is_current() {
     fn case(
         name: &str,
@@ -747,6 +803,7 @@ fn timeline_v3_parity_fixture_is_current() {
         expected_accept: bool,
         now: i64,
         revoked: Vec<String>,
+        revoked_subjects: Vec<String>,
     ) -> serde_json::Value {
         serde_json::json!({
             "name": name, "expected_accept": expected_accept,
@@ -755,7 +812,7 @@ fn timeline_v3_parity_fixture_is_current() {
             "current_owner_state_hash_hex": hex::encode(fixture.state_hash),
             "spool_path_segments": path(), "request_sha256_hex": hex::encode([11; 32]),
             "first_position": 4, "event_count": 1,
-            "revoked_capability_ids_hex": revoked, "revoked_subject_ids_hex": [],
+            "revoked_capability_ids_hex": revoked, "revoked_subject_ids_hex": revoked_subjects,
             "now_unix_seconds": now,
         })
     }
@@ -781,6 +838,21 @@ fn timeline_v3_parity_fixture_is_current() {
     let mut wrong_format = TimelineFixture::new();
     wrong_format.capability_mut().format_version = 2;
     wrong_format.resign();
+    let recovered = recovered_away_fixture(&[]);
+    let recovered_away = recovered_away_fixture(&[12]);
+    let recovered_after_rotations = recovered_away_fixture(&[12, 13, 14]);
+    let mut retired = TimelineFixture::new();
+    let root_state =
+        verify_owner_root(retired.bundle.owner_root.as_ref().expect("root")).expect("state");
+    let rotate = rotation(&root_state, &retired.owner, &TestKey::new(12));
+    retired.state_hash = apply_accepted_transition(&root_state, &rotate, NOW, limits())
+        .expect("rotation")
+        .state_hash();
+    retired.bundle.owner_state_chain.push(rotate);
+    retired.refresh_acceptance_authority();
+    let mut attenuated = TimelineFixture::new();
+    attenuated.attenuate_subject();
+    let revoked_subject = hex::encode(valid.subject_revocation_id());
     let revoked_id = hex::encode(
         &valid.bundle.capability_chain[0]
             .capability
@@ -791,17 +863,24 @@ fn timeline_v3_parity_fixture_is_current() {
     let fixture = serde_json::json!({
         "format_version": 3, "max_capability_ttl_seconds": 3600,
         "cases": [
-            case("producer-layout-accepted", &valid, true, NOW, vec![]),
-            case("offline-derived-accepted", &offline, true, NOW, vec![]),
-            case("wrong-thread", &wrong_thread, false, NOW, vec![]),
-            case("wrong-origin", &wrong_origin, false, NOW, vec![]),
-            case("wrong-action", &wrong_action, false, NOW, vec![]),
-            case("format-two-rejected", &wrong_format, false, NOW, vec![]),
-            case("expired", &valid, false, NOW + 1001, vec![]),
-            case("revoked", &valid, false, NOW, vec![revoked_id]),
+            case("producer-layout-accepted", &valid, true, NOW, vec![], vec![]),
+            case("offline-derived-accepted", &offline, true, NOW, vec![], vec![]),
+            case("wrong-thread", &wrong_thread, false, NOW, vec![], vec![]),
+            case("wrong-origin", &wrong_origin, false, NOW, vec![], vec![]),
+            case("wrong-action", &wrong_action, false, NOW, vec![], vec![]),
+            case("format-two-rejected", &wrong_format, false, NOW, vec![], vec![]),
+            case("expired", &valid, false, NOW + 1001, vec![], vec![]),
+            case("revoked", &valid, false, NOW, vec![revoked_id], vec![]),
+            case("subject-revoked", &valid, false, NOW, vec![], vec![revoked_subject]),
+            case("subject-attenuated", &attenuated, false, NOW, vec![], vec![]),
+            case("recovered-root-issuer", &recovered, false, NOW, vec![], vec![]),
+            case("recovered-away-issuer", &recovered_away, false, NOW, vec![], vec![]),
+            case("recovered-after-three-rotations", &recovered_after_rotations, false, NOW, vec![], vec![]),
+            case("retired-issuer", &retired, false, NOW + 101, vec![], vec![]),
         ]
     });
     let json = serde_json::to_string_pretty(&fixture).expect("fixture JSON") + "\n";
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(path) = std::env::var_os("HEDDLE_TIMELINE_FIXTURE_OUTPUT") {
         std::fs::write(path, json).expect("write requested fixture");
         return;
@@ -812,4 +891,16 @@ fn timeline_v3_parity_fixture_is_current() {
     );
     let outcomes = crate::conformance::run_timeline_fixture(&json).expect("timeline corpus");
     assert!(outcomes.iter().all(|outcome| outcome.matches));
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(not(target_arch = "wasm32"), test)]
+fn review_recovery_retires_every_pre_recovery_issuer() {
+    for rotations in [&[12][..], &[12, 13, 14][..]] {
+        let fixture = recovered_away_fixture(rotations);
+        assert!(
+            fixture.verify(NOW, &[], &[]).is_err(),
+            "recovery must retire every older issuer while rotation overlaps remain"
+        );
+    }
 }
