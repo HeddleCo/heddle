@@ -102,6 +102,7 @@ const SWEPT: &[&str] = &[
     "thread ownership claim",
     "thread ownership resolve",
     "context set",
+    "context",
     "context get",
     "context list",
     "context history",
