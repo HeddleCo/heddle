@@ -23,7 +23,10 @@ use repo::{
     AgentTaskStore, AgentUsageSummary, Repository, Thread, ThreadConfidenceSummary,
     ThreadFreshness, ThreadId, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
     ThreadVerificationSummary,
-    checkout_writer::{remove_checkout_writer_credential, write_checkout_writer_credential},
+    checkout_writer::{
+        lock_checkout_writer_handoff, remove_checkout_writer_credential,
+        write_checkout_writer_credential,
+    },
     validate_task_id,
 };
 use verbs::{
@@ -200,6 +203,12 @@ fn load_task_for_reservation(
 pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     ThreadId::new(args.thread.as_str()).map_err(|err| anyhow!(thread_name_invalid_advice(&err)))?;
     let repo = cli.open_repo()?;
+    let thread_name = args.thread.clone();
+    let reservation_path = existing_thread_execution_path(&repo, &thread_name)?;
+    let _handoff_lock = reservation_path
+        .as_deref()
+        .map(|path| lock_checkout_writer_handoff(repo.heddle_dir(), path))
+        .transpose()?;
     let anchor = match &args.anchor {
         Some(spec) => repo.resolve_state(spec)?.ok_or_else(|| {
             anyhow!(RecoveryAdvice::invalid_usage(
@@ -229,7 +238,6 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     let anchor_full = anchor.to_string_full();
     let anchor_short = anchor.short();
     let anchor_root = state.tree.short();
-    let thread_name = args.thread.clone();
     let task_record = match args.task_id.as_deref() {
         Some(task_id) => Some(load_task_for_reservation(
             &repo,
@@ -243,7 +251,6 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     };
 
     let lease_store = WriterLeaseStore::new(repo.heddle_dir());
-    let reservation_path = existing_thread_execution_path(&repo, &thread_name)?;
     if let Some(owner) = lease_store.live_owner(&thread_name, reservation_path.as_deref())? {
         return Err(anyhow!(live_owner_conflict_advice(
             &thread_name,
@@ -438,12 +445,35 @@ pub fn cmd_agent_heartbeat(cli: &Cli, args: AgentHeartbeatArgs) -> Result<()> {
 pub fn cmd_agent_release(cli: &Cli, args: AgentReleaseArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let store = WriterLeaseStore::new(repo.heddle_dir());
+    let current = store.load(&args.lease)?;
+    let _handoff_lock = current
+        .as_ref()
+        .and_then(|lease| lease.path.as_deref())
+        .map(|path| lock_checkout_writer_handoff(repo.heddle_dir(), path))
+        .transpose()?;
     let status = match args.status {
         AgentReleaseStatusArg::Complete => WriterLeaseStatus::Complete,
         AgentReleaseStatusArg::Abandoned => WriterLeaseStatus::Abandoned,
     };
     let outcome = store.release(&args.lease, &args.token, status, Utc::now())?;
-    let lease = authorized_lease_outcome(outcome, &args.lease)?;
+    let lease = match outcome {
+        WriterLeaseAuthOutcome::Authorized(lease) | WriterLeaseAuthOutcome::Inactive(lease) => {
+            lease
+        }
+        other => authorized_lease_outcome(other, &args.lease)?,
+    };
+    if lease.path != current.and_then(|lease| lease.path) {
+        return Err(anyhow!(RecoveryAdvice::safety_refusal(
+            "writer_lease_checkout_changed",
+            "writer lease checkout changed during release",
+            "Inspect the reservation before retrying cleanup.",
+            "the lease checkout changed while release was in progress",
+            "removing a credential from the wrong checkout could revoke another writer",
+            "the credential was left in place; the lease release may already be recorded",
+            "heddle agent list",
+            vec!["heddle agent list".to_string()],
+        )));
+    }
     if let Some(path) = lease.path.as_deref() {
         remove_checkout_writer_credential(path, &args.lease)?;
     }
@@ -624,6 +654,7 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                     entry.winning_attach_rule = Some(attach_rule.to_string());
                 })?;
             }
+            let _handoff_lock = lock_checkout_writer_handoff(repo.heddle_dir(), &checkout_path)?;
             let lease = WriterLeaseStore::new(repo.heddle_dir()).reserve(
                 WriterLeaseDraft {
                     thread: lane.thread.clone(),
@@ -1044,6 +1075,13 @@ fn render_agent_list(output: AgentReservationListOutput, json: bool) -> Result<(
             "    lease expires: {}",
             crate::cli::style::dim(&entry.lease_expires_at)
         );
+        if entry.status == "abandoned" && entry.path.is_some() {
+            println!(
+                "    Next: heddle agent release --lease {} --token <token> --status abandoned",
+                crate::cli::style::human_text(&entry.lease_id)
+            );
+            println!("    Read <token> from that lane's .heddle/writer-credential.json.");
+        }
     }
     Ok(())
 }

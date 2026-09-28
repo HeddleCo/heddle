@@ -63,7 +63,22 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     if args.dry_run.enabled() {
         return emit_ready_dry_run(cli, &repo, &args);
     }
-    repo.authorize_checkout_writer()?;
+    let mut thread = match args.thread.as_deref() {
+        Some(thread_id) => load_thread(&repo, thread_id)?,
+        None => current_thread(&repo)?.ok_or_else(|| {
+            anyhow::anyhow!(RecoveryAdvice::no_current_thread(
+                "ready",
+                Some("--thread"),
+                "heddle ready --thread <name>",
+            ))
+        })?,
+    };
+    let selected_path = if thread.execution_path.as_os_str().is_empty() {
+        thread.materialized_path.as_deref()
+    } else {
+        Some(thread.execution_path.as_path())
+    };
+    repo.authorize_checkout_writer_for(&thread.thread, selected_path)?;
     let user_config = UserConfig::load_default().unwrap_or_default();
     let ctx = execution_context_from_cli_parts(start, Some(repo), &user_config);
     let repo = ctx.require_repo()?;
@@ -118,17 +133,6 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
         )?;
     }
     let manager = thread_manager(repo);
-    let mut thread = match args.thread.clone() {
-        Some(thread_id) => load_thread(repo, &thread_id)?,
-        None => current_thread(repo)?.ok_or_else(|| {
-            anyhow::anyhow!(RecoveryAdvice::no_current_thread(
-                "ready",
-                Some("--thread"),
-                "heddle ready --thread <name>",
-            ))
-        })?,
-    };
-
     // Reuse the status computed at the top only when no bootstrap capture ran
     // (`had_current_state`): between the initial preflight and here, the only
     // mutation is bootstrap binding or capture, which fires iff

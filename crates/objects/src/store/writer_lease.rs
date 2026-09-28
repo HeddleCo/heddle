@@ -317,11 +317,11 @@ impl WriterLeaseStore {
         let Some(mut lease) = self.load_path(&path)? else {
             return Ok(WriterLeaseAuthOutcome::Missing);
         };
-        if lease.status != WriterLeaseStatus::Active {
-            return Ok(WriterLeaseAuthOutcome::Inactive(lease));
-        }
         if token_hash(token) != lease.token_hash {
             return Ok(WriterLeaseAuthOutcome::TokenMismatch);
+        }
+        if lease.status != WriterLeaseStatus::Active {
+            return Ok(WriterLeaseAuthOutcome::Inactive(lease));
         }
         lease.status = status;
         lease.completed_at = Some(now);

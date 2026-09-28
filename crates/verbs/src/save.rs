@@ -1406,7 +1406,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     let previous_state_started = Instant::now();
     let (previous_state, previous_state_profile) =
         repo.current_state_for_worktree_status_profiled()?;
-    let previous_state_ms = previous_state_started.elapsed().as_millis();
+    let mut previous_state_ms = previous_state_started.elapsed().as_millis();
     let native_thread_name = match repo.head_ref()? {
         refs::Head::Attached { thread } => Some(thread.to_string()),
         refs::Head::Detached { .. } => None,
@@ -1416,16 +1416,40 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     {
         repo.create_native_thread(name, previous.state_id, None, "")?;
     }
+    let expected_writer_lease = repo.checkout_writer_lease_id()?;
+    let (pre_snapshot_ran, hooks_ran) = if plan_creates_new_state(&plan, previous_state.is_some()) {
+        run_pre_snapshot_hooks(repo, &plan)?
+    } else {
+        (false, false)
+    };
     let actor = format!("cli:{}", std::process::id());
     let _checkout_writer = match native_thread_name.as_deref() {
         Some(name) => match repo.native_thread(name) {
-            Ok(replica) => Some(repo.acquire_checkout_writer(replica.thread_id(), &actor)?),
+            Ok(replica) => Some(repo.acquire_checkout_writer(
+                replica.thread_id(),
+                &actor,
+                expected_writer_lease.as_deref(),
+            )?),
             Err(_) => None,
         },
         None => match repo::thread_replication::checkout::ThreadCheckout::open(repo.root()) {
-            Ok(checkout) => Some(repo.acquire_checkout_writer(checkout.binding.thread, &actor)?),
+            Ok(checkout) => Some(repo.acquire_checkout_writer(
+                checkout.binding.thread,
+                &actor,
+                expected_writer_lease.as_deref(),
+            )?),
             Err(_) => None,
         },
+    };
+    // A hook may wait while another writer changes the checkout. Re-read HEAD
+    // after taking the lock so the capture uses the state it now owns.
+    let (previous_state, previous_state_profile) = if hooks_ran {
+        let reread_started = Instant::now();
+        let current = repo.current_state_for_worktree_status_profiled()?;
+        previous_state_ms += reread_started.elapsed().as_millis();
+        current
+    } else {
+        (previous_state, previous_state_profile)
     };
     let has_current = previous_state.is_some();
     let mut created_new_state = false;
@@ -1441,7 +1465,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     let mut state = if plan_creates_new_state(&plan, has_current) {
         created_new_state = true;
         let state_create_started = Instant::now();
-        let execution = create_heddle_state(repo, &plan)?;
+        let execution = create_heddle_state(repo, &plan, pre_snapshot_ran)?;
         state_create_ms = state_create_started.elapsed().as_millis();
         snapshot_profile = execution.profile;
         thread_metadata_ms = execution.thread_metadata_ms;
@@ -1631,50 +1655,61 @@ struct CreatedState {
     heavy_impact_paths: Vec<String>,
 }
 
-fn create_heddle_state(repo: &Repository, plan: &SavePlan) -> Result<CreatedState> {
+fn run_pre_snapshot_hooks(repo: &Repository, plan: &SavePlan) -> Result<(bool, bool)> {
+    if !plan.run_hooks {
+        return Ok((false, false));
+    }
+    let hook_manager = HookManager::new(repo);
+    let hook_ctx = HookContext::new(repo);
+    let pre_snapshot_ran = hook_manager.run(Hook::PreSnapshot, &hook_ctx)?;
+    let pre_capture_payload = serde_json::json!({
+        "thread": current_thread_name(repo),
+        "intent": plan.intent.clone().unwrap_or_default(),
+    });
+    let pre_capture_response = hook_manager.run_with_payload(
+        Hook::PreSnapshot,
+        &hook_ctx,
+        &pre_capture_payload,
+        std::time::Duration::from_secs(5),
+    )?;
+    let pre_capture_ran = pre_capture_response.is_some();
+    if let Some(resp) = pre_capture_response
+        && !resp.abort.is_empty()
+    {
+        return Err(anyhow!(HeddleError::recovery(
+            RecoveryDetails::safety_refusal(
+                "hook_veto",
+                format!("pre_capture hook vetoed: {}", resp.abort),
+                "Inspect `pre_capture` with `heddle hook list`, update the hook policy or inputs, then retry.",
+                format!("pre_capture hook vetoed capture: {}", resp.abort),
+                "capture would continue after repository policy explicitly aborted the operation",
+                "the operation stopped at the hook boundary before the protected action ran",
+            )
+            .with_recovery_commands(vec!["heddle hook list".to_string()]),
+        )));
+    }
+    Ok((pre_snapshot_ran, pre_snapshot_ran || pre_capture_ran))
+}
+
+fn create_heddle_state(
+    repo: &Repository,
+    plan: &SavePlan,
+    pre_snapshot_ran: bool,
+) -> Result<CreatedState> {
     let hook_manager = HookManager::new(repo);
     let hook_ctx = HookContext::new(repo);
     let mut post_hook_worktree_changes = None;
 
-    if plan.run_hooks {
-        let pre_snapshot_ran = hook_manager.run(Hook::PreSnapshot, &hook_ctx)?;
-        let pre_capture_payload = serde_json::json!({
-            "thread": current_thread_name(repo),
-            "intent": plan.intent.clone().unwrap_or_default(),
-        });
-        let pre_capture_response = hook_manager.run_with_payload(
-            Hook::PreSnapshot,
-            &hook_ctx,
-            &pre_capture_payload,
-            std::time::Duration::from_secs(5),
-        )?;
-        if let Some(resp) = pre_capture_response
-            && !resp.abort.is_empty()
-        {
-            return Err(anyhow!(HeddleError::recovery(
-                RecoveryDetails::safety_refusal(
-                    "hook_veto",
-                    format!("pre_capture hook vetoed: {}", resp.abort),
-                    "Inspect `pre_capture` with `heddle hook list`, update the hook policy or inputs, then retry.",
-                    format!("pre_capture hook vetoed capture: {}", resp.abort),
-                    "capture would continue after repository policy explicitly aborted the operation",
-                    "the operation stopped at the hook boundary before the protected action ran",
-                )
-                .with_recovery_commands(vec!["heddle hook list".to_string()]),
-            )));
-        }
-        if pre_snapshot_ran && plan.supplied_tree.is_none() {
-            // Hooks can mutate paths outside capture's preflight set. Rewalk
-            // authoritatively so a settled monitor token cannot vouch for a
-            // tree built from that stale set. No-hook captures keep the fast path.
-            let authoritative_options = WorktreeStatusOptions {
-                fsmonitor: repo::FsMonitorSettings {
-                    mode: repo::FsMonitorMode::Off,
-                },
-            };
-            post_hook_worktree_changes =
-                Some(capture_worktree_status(repo, &authoritative_options)?);
-        }
+    if pre_snapshot_ran && plan.supplied_tree.is_none() {
+        // Hooks can mutate paths outside capture's preflight set. Rewalk
+        // authoritatively so a settled monitor token cannot vouch for a
+        // tree built from that stale set. No-hook captures keep the fast path.
+        let authoritative_options = WorktreeStatusOptions {
+            fsmonitor: repo::FsMonitorSettings {
+                mode: repo::FsMonitorMode::Off,
+            },
+        };
+        post_hook_worktree_changes = Some(capture_worktree_status(repo, &authoritative_options)?);
     }
     let mut execution = if let Some(tree) = plan.supplied_tree.clone() {
         repo.snapshot_tree_with_attribution_profiled(

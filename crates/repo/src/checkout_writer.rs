@@ -83,6 +83,26 @@ fn foreign_writer_error(lease: &str) -> Error {
     ))
 }
 
+fn checkout_writer_lock(heddle_dir: &Path, root: &Path) -> Result<RepoLock> {
+    let root = root.canonicalize()?;
+    let path_key = ContentHash::compute_typed(
+        "checkout-writer-path-v2",
+        root.as_os_str().as_encoded_bytes(),
+    );
+    Ok(RepoLock::at(
+        heddle_dir
+            .join("locks")
+            .join(format!("checkout-{}.lock", path_key.to_hex())),
+    ))
+}
+
+/// Keep lease handoff and credential cleanup outside an active checkout mutation.
+pub fn lock_checkout_writer_handoff(heddle_dir: &Path, root: &Path) -> Result<WriteLockGuard> {
+    checkout_writer_lock(heddle_dir, root)?
+        .write()
+        .map_err(|error| Error::Invalid(error.to_string()))
+}
+
 /// Keep this guard on the acquiring thread until all checkout mutations finish.
 /// A temporary CLI lease is released on drop; an authenticated persistent agent
 /// lease remains owned by that agent between commands.
@@ -150,18 +170,44 @@ impl Repository {
         Ok(Some(credential))
     }
 
+    /// Remember which lane credential a capture started with before running hooks.
+    pub fn checkout_writer_lease_id(&self) -> Result<Option<String>> {
+        Ok(self
+            .read_checkout_writer_credential()?
+            .map(|credential| credential.lease))
+    }
+
     /// Verify a command that may mutate thread state without saving a tree.
     /// Save itself takes the checkout mutation lock and authenticates again.
-    pub fn authorize_checkout_writer(&self) -> Result<()> {
+    pub fn authorize_checkout_writer_for(
+        &self,
+        thread: &str,
+        selected_path: Option<&Path>,
+    ) -> Result<()> {
         let store = WriterLeaseStore::new(self.heddle_dir());
-        let thread = self.current_lane()?.unwrap_or_default();
-        let owner = store.live_owner(&thread, Some(self.root()))?;
+        let owner = store.live_owner(thread, selected_path)?;
+        let root = self.root().canonicalize()?;
+        if let Some(owner) = &owner
+            && (owner.path.as_deref().is_some_and(|path| path != root)
+                || (owner.path.is_none() && self.current_lane()?.as_deref() != Some(thread)))
+        {
+            return Err(foreign_writer_error(&owner.lease_id));
+        }
+        if owner.is_none()
+            && selected_path
+                .map(|path| path.canonicalize())
+                .transpose()?
+                .as_deref()
+                != Some(root.as_path())
+            && self.current_lane()?.as_deref() != Some(thread)
+        {
+            return Ok(());
+        }
         match (owner, self.read_checkout_writer_credential()?) {
             (None, None) => Ok(()),
             (Some(owner), None) => Err(foreign_writer_error(&owner.lease_id)),
             (None, Some(_)) => Err(credential_error("lane writer lease is no longer active")),
             (Some(owner), Some(credential)) if owner.lease_id == credential.lease => {
-                let root = self.root().canonicalize()?;
                 match store.authenticate_and_renew(
                     &credential.lease,
                     &credential.token,
@@ -185,6 +231,7 @@ impl Repository {
     /// Install authority supplied to an explicit agent command only when it
     /// owns this physical checkout and its attached lane.
     pub fn install_checkout_writer_credential(&self, lease: &str, token: &str) -> Result<()> {
+        let _mutation_lock = lock_checkout_writer_handoff(self.heddle_dir(), self.root())?;
         let root = self.root().canonicalize()?;
         let store = WriterLeaseStore::new(self.heddle_dir());
         match store.authenticate_and_renew(lease, token, Utc::now())? {
@@ -202,19 +249,10 @@ impl Repository {
 
     fn checkout_mutation_lock(&self) -> Result<WriteLockGuard> {
         // Shared worktrees have distinct roots but one object/lease store.
-        let root = self.root().canonicalize()?;
-        let path_key = ContentHash::compute_typed(
-            "checkout-writer-path-v2",
-            root.as_os_str().as_encoded_bytes(),
-        );
-        RepoLock::at(
-            self.heddle_dir()
-                .join("locks")
-                .join(format!("checkout-{}.lock", path_key.to_hex())),
-        )
-        .try_write()
-        .map_err(|error| Error::Invalid(error.to_string()))?
-        .ok_or_else(|| Error::Invalid("checkout already has an active mutation".into()))
+        checkout_writer_lock(self.heddle_dir(), self.root())?
+            .try_write()
+            .map_err(|error| Error::Invalid(error.to_string()))?
+            .ok_or_else(|| Error::Invalid("checkout already has an active mutation".into()))
     }
     /// Claim a temporary writer for a normal CLI mutation. An existing agent's
     /// live reservation must instead be authenticated with its actual token.
@@ -222,13 +260,24 @@ impl Repository {
         &self,
         thread: ContentHash,
         actor: &str,
+        expected_lease: Option<&str>,
     ) -> Result<CheckoutWriterGuard> {
         if actor.is_empty() {
             return Err(Error::Invalid("checkout writer actor is required".into()));
         }
         let mutation_lock = self.checkout_mutation_lock()?;
         let store = WriterLeaseStore::new(self.heddle_dir());
-        if let Some(credential) = self.read_checkout_writer_credential()? {
+        let credential = self.read_checkout_writer_credential()?;
+        if credential
+            .as_ref()
+            .map(|credential| credential.lease.as_str())
+            != expected_lease
+        {
+            return Err(credential_error(
+                "lane writer authority changed during capture",
+            ));
+        }
+        if let Some(credential) = credential {
             self.authenticate_writer_with_lock(
                 &store,
                 thread,

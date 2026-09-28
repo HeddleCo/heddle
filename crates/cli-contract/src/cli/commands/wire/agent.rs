@@ -140,6 +140,8 @@ pub struct AgentReservationOutput {
     pub heartbeat_at: String,
     pub lease_expires_at: String,
     pub liveness: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_command: Option<String>,
 }
 
 // ---- agent tasks & fan-out -------------------------------------------------
@@ -281,6 +283,14 @@ impl From<&objects::store::WriterLease> for AgentReservationOutput {
 
 impl From<verbs::AgentReservationReport> for AgentReservationOutput {
     fn from(report: verbs::AgentReservationReport) -> Self {
+        let recovery_command = if report.status == "abandoned" && report.path.is_some() {
+            Some(format!(
+                "heddle agent release --lease {} --token <token> --status abandoned",
+                report.lease_id
+            ))
+        } else {
+            None
+        };
         Self {
             lease_id: report.lease_id,
             actor_session_id: report.actor_session_id,
@@ -293,6 +303,7 @@ impl From<verbs::AgentReservationReport> for AgentReservationOutput {
             heartbeat_at: report.heartbeat_at,
             lease_expires_at: report.lease_expires_at,
             liveness: report.liveness,
+            recovery_command,
         }
     }
 }

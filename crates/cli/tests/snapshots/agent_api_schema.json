@@ -919,6 +919,12 @@
               "null"
             ]
           },
+          "recovery_command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "status": {
             "type": "string"
           },
@@ -1488,6 +1494,12 @@
               "null"
             ]
           },
+          "recovery_command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "status": {
             "type": "string"
           },
@@ -2028,6 +2040,12 @@
         "type": "string"
       },
       "path": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "recovery_command": {
         "type": [
           "string",
           "null"

@@ -486,17 +486,17 @@ fn checkout_mutations_share_exclusive_leases_and_release_temporary_writers() {
     let store = WriterLeaseStore::new(repository.heddle_dir());
     for _ in 0..2 {
         let guard = repository
-            .acquire_checkout_writer(thread, "agent-a")
+            .acquire_checkout_writer(thread, "agent-a", None)
             .expect("root writer");
         assert!(
             repository
-                .acquire_checkout_writer(thread, "agent-b")
+                .acquire_checkout_writer(thread, "agent-b", None)
                 .is_err(),
             "same physical checkout must exclude another writer"
         );
         let sibling_guard = sibling
             .repository
-            .acquire_checkout_writer(thread, "agent-b")
+            .acquire_checkout_writer(thread, "agent-b", None)
             .expect("separate checkout may write same Thread");
         sibling_guard.finish().expect("release sibling");
         guard.finish().expect("release root");
@@ -515,7 +515,7 @@ fn checkout_mutations_share_exclusive_leases_and_release_temporary_writers() {
     assert!(
         sibling
             .repository
-            .acquire_checkout_writer(thread, "cli")
+            .acquire_checkout_writer(thread, "cli", None)
             .is_err(),
         "CLI cannot bypass persistent agent reservation"
     );

@@ -120,7 +120,7 @@ fn fanout_lane_claude_stop_hook_captures_immediately() {
 }
 
 #[test]
-fn fanout_second_writer_is_refused_with_typed_recovery_action() {
+fn fanout_invalid_writer_credential_is_refused_with_typed_recovery_action() {
     let (_main, path, _) = fanout_lane();
     let credential_path = path.join(".heddle/writer-credential.json");
     let mut credential: Value =
@@ -140,7 +140,7 @@ fn fanout_second_writer_is_refused_with_typed_recovery_action() {
 }
 
 #[test]
-fn fanout_foreign_ready_is_refused_with_typed_recovery_action() {
+fn fanout_invalid_ready_credential_is_refused_with_typed_recovery_action() {
     let (_main, path, _) = fanout_lane();
     let credential_path = path.join(".heddle/writer-credential.json");
     let mut credential: Value =
@@ -241,6 +241,51 @@ fn expired_lane_credential_can_be_released_and_recovered() {
         list.contains("agent release") && list.contains(lease),
         "{list}"
     );
+    let json_list: Value =
+        serde_json::from_str(&heddle(&["--output", "json", "agent", "list"], Some(&path)).unwrap())
+            .unwrap();
+    assert!(
+        json_list["reservations"][0]["recovery_command"]
+            .as_str()
+            .is_some_and(|command| command.contains(lease)),
+        "{json_list}"
+    );
+    let wrong_token = heddle_output(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "release",
+            "--lease",
+            lease,
+            "--token",
+            "wrong-token",
+            "--status",
+            "abandoned",
+        ],
+        Some(&path),
+    )
+    .unwrap();
+    assert!(!wrong_token.status.success());
+    assert!(credential_path.exists(), "wrong token removed credential");
+    let fresh: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output", "json", "agent", "reserve", "--thread", "lane/one",
+            ],
+            Some(&path),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(path.join("blocked.txt"), "blocked").unwrap();
+    assert!(
+        !heddle_output(&["capture", "-m", "stale credential"], Some(&path))
+            .unwrap()
+            .status
+            .success(),
+        "stale credential authorized fresh lease"
+    );
     heddle(
         &[
             "agent",
@@ -257,11 +302,36 @@ fn expired_lane_credential_can_be_released_and_recovered() {
     .expect("release expired lease");
     assert!(!credential_path.exists(), "expired credential remains");
     fs::write(path.join("recovered.txt"), "recovered").unwrap();
-    heddle(&["capture", "-m", "recovered"], Some(&path)).expect("capture after cleanup");
+    heddle(
+        &[
+            "agent",
+            "capture",
+            "--lease",
+            fresh["reservation"]["lease_id"].as_str().unwrap(),
+            "--token",
+            fresh["token"].as_str().unwrap(),
+            "-m",
+            "recovered",
+        ],
+        Some(&path),
+    )
+    .expect("new holder capture after cleanup");
+    fs::write(path.join("plain-after-recovery.txt"), "plain capture").unwrap();
+    heddle(&["capture", "-m", "plain after recovery"], Some(&path))
+        .expect("plain capture with fresh credential");
 }
 
 #[test]
 fn capture_rechecks_authority_after_lease_handoff_during_hook() {
+    assert_capture_aborts_after_release_during_hook(true);
+}
+
+#[test]
+fn capture_cannot_claim_a_temporary_lease_after_release_during_hook() {
+    assert_capture_aborts_after_release_during_hook(false);
+}
+
+fn assert_capture_aborts_after_release_during_hook(replace: bool) {
     use std::time::{Duration, Instant};
 
     let (_main, path, _) = fanout_lane();
@@ -321,17 +391,24 @@ fn capture_rechecks_authority_after_lease_handoff_during_hook() {
         ],
         Some(&path),
     );
-    let reserve = heddle(&["agent", "reserve", "--thread", "lane/one"], Some(&path));
+    let reserve =
+        replace.then(|| heddle(&["agent", "reserve", "--thread", "lane/one"], Some(&path)));
     fs::write(&resume, "resume").unwrap();
     let result = capture.wait_with_output().unwrap();
     release.expect("release while capture waits at hook");
-    reserve.expect("replacement reservation while capture waits at hook");
+    if let Some(reserve) = reserve {
+        reserve.expect("replacement reservation while capture waits at hook");
+    }
     assert!(
         !result.status.success(),
         "revoked capture committed: {result:?}"
     );
     let error: Value = serde_json::from_slice(&result.stderr).unwrap();
-    assert_eq!(error["kind"], "writer_lease_credential_invalid", "{error}");
+    assert!(
+        error["kind"] == "writer_lease_credential_invalid"
+            || error["kind"] == "writer_lease_owned_by_other",
+        "{error}"
+    );
 }
 
 #[test]
