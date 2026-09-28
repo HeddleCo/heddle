@@ -106,6 +106,57 @@ pub struct SuppliedRevisionOutput {
     pub content: String,
 }
 
+/// JSON payload for the bounded `context --for-thread` briefing.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "ThreadBriefingSchema")]
+pub struct ThreadBriefingOutput {
+    pub output_kind: &'static str,
+    pub thread: String,
+    pub intent: Vec<ThreadBriefingIntentOutput>,
+    pub annotations: Vec<ThreadBriefingAnnotationOutput>,
+    pub discussions: Vec<ThreadBriefingDiscussionOutput>,
+    pub blockers: Vec<String>,
+    pub omitted_annotations: usize,
+    pub omitted_discussions: usize,
+    pub briefing_hash: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ThreadBriefingIntentOutput {
+    pub version: String,
+    pub outcome: String,
+    pub acceptance_criteria: Vec<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ThreadBriefingAnnotationOutput {
+    pub target: String,
+    pub scope: String,
+    pub status: &'static str,
+    pub annotation_id: String,
+    pub revisions: Vec<ThreadBriefingRevisionOutput>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ThreadBriefingRevisionOutput {
+    pub revision_id: String,
+    pub kind: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub attribution: String,
+    pub created_at: i64,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ThreadBriefingDiscussionOutput {
+    pub title: String,
+    pub anchor: String,
+    pub blocking: bool,
+    pub status: &'static str,
+    pub turns: Vec<String>,
+    pub omitted_turns: usize,
+}
+
 /// Explicit native Thread ownership status and transitions.
 #[derive(Serialize, JsonSchema)]
 #[schemars(rename = "ThreadOwnershipSchema")]

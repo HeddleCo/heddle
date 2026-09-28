@@ -1981,7 +1981,7 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["context"],
         front_door(
             json_discriminators(
-                opaque_schemas(READ_JSON, &["context --for-thread"]),
+                documented_schemas(READ_JSON, &["context --for-thread"]),
                 &[json_discriminator(
                     Some("context --for-thread"),
                     "output_kind",

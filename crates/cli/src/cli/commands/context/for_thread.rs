@@ -4,6 +4,11 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow};
+use heddle_cli_contract::cli::commands::wire::thread::{
+    ThreadBriefingAnnotationOutput as AnnotationItem,
+    ThreadBriefingDiscussionOutput as DiscussionItem, ThreadBriefingIntentOutput as IntentItem,
+    ThreadBriefingOutput as ThreadBriefing, ThreadBriefingRevisionOutput as RevisionItem,
+};
 use objects::{
     object::{
         AnnotationStatus, CollaborationAnchor, ContentHash, ContextTarget, ThreadName,
@@ -17,7 +22,6 @@ use objects::{
 use repo::{
     CollaborationStore, ContextConsumptionReceipt, Repository, SuppliedAnnotation, SuppliedRevision,
 };
-use serde::Serialize;
 
 use super::super::{
     next_action::{NextActionValidationContext, write_full_command_json},
@@ -28,45 +32,6 @@ use crate::cli::{Cli, should_output_json, style};
 const MAX_ANNOTATIONS: usize = 64;
 const MAX_DISCUSSIONS: usize = 32;
 const MAX_TURNS_PER_DISCUSSION: usize = 8;
-
-#[derive(Serialize)]
-struct IntentItem {
-    version: String,
-    outcome: String,
-    acceptance_criteria: Vec<String>,
-}
-
-#[derive(Serialize)]
-struct AnnotationItem {
-    target: String,
-    scope: String,
-    status: &'static str,
-    annotation_id: String,
-    revisions: Vec<super::RevisionOutput>,
-}
-
-#[derive(Serialize)]
-struct DiscussionItem {
-    title: String,
-    anchor: String,
-    blocking: bool,
-    status: &'static str,
-    turns: Vec<String>,
-    omitted_turns: usize,
-}
-
-#[derive(Serialize)]
-struct ThreadBriefing {
-    output_kind: &'static str,
-    thread: String,
-    intent: Vec<IntentItem>,
-    annotations: Vec<AnnotationItem>,
-    discussions: Vec<DiscussionItem>,
-    blockers: Vec<String>,
-    omitted_annotations: usize,
-    omitted_discussions: usize,
-    briefing_hash: String,
-}
 
 pub fn cmd_context_for_thread(cli: &Cli, thread: &str) -> Result<()> {
     let repo = cli.open_repo()?;
@@ -220,7 +185,7 @@ fn annotation_items(
                 .revisions
                 .iter()
                 .filter(|revision| current_ids.contains(revision.revision_id.as_str()))
-                .map(|revision| super::RevisionOutput {
+                .map(|revision| RevisionItem {
                     revision_id: revision.revision_id.clone(),
                     kind: revision.kind.to_string(),
                     content: revision.content.clone(),
