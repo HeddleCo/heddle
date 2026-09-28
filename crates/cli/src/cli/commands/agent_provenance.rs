@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Provider, model, and policy provenance commands.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 // The provenance wire payloads live in cli-contract so the schema registry
 // registers the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
@@ -39,9 +39,11 @@ pub async fn begin(
             NextActionValidationContext::without_repo(&["agent", "provenance", "begin"]),
         )?;
     } else {
-        println!("Session: {}", session.id);
-        let segment = session.current_segment().unwrap();
-        println!("Segment: {}", segment.id);
+        println!("Session: {}", crate::cli::style::human_text(&session.id));
+        let segment = session
+            .current_segment()
+            .context("new session has no segment")?;
+        println!("Segment: {}", crate::cli::style::human_text(&segment.id));
     }
 
     Ok(())
@@ -76,7 +78,7 @@ pub async fn segment(
             NextActionValidationContext::without_repo(&["agent", "provenance", "end"]),
         )?;
     } else {
-        println!("Segment: {}", segment.id);
+        println!("Segment: {}", crate::cli::style::human_text(&segment.id));
     }
 
     Ok(())
@@ -98,7 +100,10 @@ pub async fn end(cli: &Cli, session_id: Option<String>) -> Result<()> {
             NextActionValidationContext::without_repo(&["agent", "provenance", "segment"]),
         )?;
     } else {
-        println!("Session ended: {}", session.id);
+        println!(
+            "Session ended: {}",
+            crate::cli::style::human_text(&session.id)
+        );
     }
 
     Ok(())
@@ -133,8 +138,11 @@ pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
             NextActionValidationContext::without_repo(&["agent", "provenance", "show"]),
         )?;
     } else {
-        println!("Session: {}", session.id);
-        println!("Principal: {}", session.principal);
+        println!("Session: {}", crate::cli::style::human_text(&session.id));
+        println!(
+            "Principal: {}",
+            crate::cli::style::human_text(&session.principal.to_string())
+        );
         println!(
             "Created: {}",
             session.created_at.format("%Y-%m-%d %H:%M:%S UTC")
@@ -153,9 +161,15 @@ pub async fn show(cli: &Cli, session_id: Option<String>) -> Result<()> {
         println!();
         println!("Segments:");
         for (i, seg) in session.segments.iter().enumerate() {
-            println!("  {}. {} ({}/{})", i + 1, seg.id, seg.provider, seg.model);
+            println!(
+                "  {}. {} ({}/{})",
+                i + 1,
+                crate::cli::style::human_text(&seg.id),
+                seg.provider,
+                seg.model
+            );
             if let Some(ref policy) = seg.policy_id {
-                println!("     Policy: {}", policy);
+                println!("     Policy: {}", crate::cli::style::human_text(policy));
             }
         }
     }
@@ -189,7 +203,7 @@ pub async fn list(cli: &Cli, active_only: bool) -> Result<()> {
         for session in sessions {
             println!(
                 "  {} [{}] - {} segments - {}",
-                session.id,
+                crate::cli::style::human_text(&session.id),
                 session_list_status(session.is_active()),
                 session.segments.len(),
                 session.created_at.format("%Y-%m-%d %H:%M")

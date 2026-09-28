@@ -190,9 +190,13 @@ pub fn build_commit_message(
     merge_state_id: &str,
     attribution: &Attribution,
 ) -> String {
-    let subject = base_message.lines().next().unwrap_or(base_message).trim();
+    let subject = if crate::subject_has_machine_identity(base_message) {
+        "Merge thread".to_string()
+    } else {
+        crate::git_subject_message(base_message)
+    };
     let mut out = String::new();
-    out.push_str(subject);
+    out.push_str(&subject);
     out.push_str("\n\n");
     out.push_str(&format!("Heddle merge state: {merge_state_id}\n"));
     out.push('\n');
@@ -393,16 +397,15 @@ mod tests {
     }
 
     #[test]
-    fn build_commit_message_uses_only_first_subject_line() {
+    fn build_commit_message_keeps_detail_below_subject() {
         let attribution = Attribution::human(Principal::new("Test", "test@example.com"));
         let msg = build_commit_message(
-            "Merge thread 'x'\n\nlonger body\nthat we drop",
+            "Merge thread 'x'\n\nlonger body\nthat we keep",
             "deadbeef",
             &attribution,
         );
-        // Subject line should be just the first line.
         assert!(msg.starts_with("Merge thread 'x'\n\n"));
-        assert!(!msg.contains("longer body"));
+        assert!(msg.contains("longer body\nthat we keep\n\n"));
     }
 
     #[test]

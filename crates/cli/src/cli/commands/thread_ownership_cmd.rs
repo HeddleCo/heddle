@@ -130,7 +130,11 @@ pub(super) fn cmd_thread_ownership(
                     })?
                 );
             } else {
-                println!("Thread {name} claimed by current account ({id}).");
+                println!(
+                    "Thread {} claimed by current account ({}).",
+                    crate::cli::style::thread_label(&name, None),
+                    crate::cli::style::human_text(&id.to_string())
+                );
             }
             Ok(())
         }

@@ -468,28 +468,117 @@ pub fn integrated_land_next_action(
 
 /// Checkpoint / squash message for land write-through.
 ///
-/// Precedence: explicit non-empty message → land subject when preferred →
-/// current intent → task → `Land <thread_id>`.
+/// Precedence: explicit message → task/name for a squash → capture intent →
+/// task/name. Generated fallbacks avoid opaque identities; explicit messages
+/// are kept as supplied, subject to Git subject formatting.
 pub fn land_checkpoint_message(
     explicit: Option<&str>,
     prefer_land_subject: bool,
-    thread_id: &str,
+    thread_name: &str,
     intent: Option<&str>,
     task: Option<&str>,
 ) -> String {
-    if let Some(message) = explicit.filter(|message| !message.trim().is_empty()) {
-        return message.to_string();
+    if let Some(message) = explicit {
+        return git_subject_message(message);
     }
-    if prefer_land_subject {
-        return format!("Land {thread_id}");
+    let task = task.filter(|task| !subject_has_machine_identity(task));
+    let name = (!looks_like_machine_identity(thread_name)).then_some(thread_name);
+    let intent = intent.filter(|intent| !subject_has_machine_identity(intent));
+    let chosen = if prefer_land_subject {
+        task.or(name).or(intent)
+    } else {
+        intent.or(task).or(name)
+    };
+    git_subject_message(chosen.unwrap_or("Land thread"))
+}
+
+/// Keep Git's first line brief while retaining the full intent in the body.
+pub fn git_subject_message(message: &str) -> String {
+    let chosen = message.trim();
+    let first_line = chosen.lines().next().unwrap_or(chosen);
+    let subject = first_line.trim();
+    let detail = chosen[first_line.len()..].trim();
+    if subject.chars().count() <= 72 {
+        return if detail.is_empty() {
+            subject.to_string()
+        } else {
+            format!("{subject}\n\n{detail}")
+        };
     }
-    if let Some(intent) = intent.filter(|intent| !intent.trim().is_empty()) {
-        return intent.to_string();
+    let prefix: String = subject.chars().take(72).collect();
+    let short = prefix
+        .rsplit_once(char::is_whitespace)
+        .map(|(head, _)| head)
+        .filter(|head| !head.is_empty())
+        .unwrap_or(&prefix);
+    format!("{}\n\n{chosen}", short.trim_end())
+}
+
+/// Match tapestry's identity-label rule for values that should not be names.
+pub fn looks_like_machine_identity(value: &str) -> bool {
+    let text = value.trim();
+    if text.is_empty() {
+        return true;
     }
-    if let Some(task) = task.filter(|task| !task.trim().is_empty()) {
-        return task.to_string();
+    let uuid = text.len() == 36
+        && text.bytes().enumerate().all(|(i, byte)| {
+            if [8, 13, 18, 23].contains(&i) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_hexdigit()
+            }
+        });
+    let long_hex = text.len() >= 16 && text.bytes().all(|byte| byte.is_ascii_hexdigit());
+    let prefixed = ["principal:", "agent:", "device:", "device-key:"]
+        .iter()
+        .any(|prefix| text.to_ascii_lowercase().starts_with(prefix));
+    let keyed = text.split_once(':').is_some_and(|(key, value)| {
+        key.len() >= 8
+            && key
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+            && value
+                .split(|ch: char| !ch.is_ascii_hexdigit())
+                .any(|part| part.len() >= 16)
+    });
+    uuid || long_hex || prefixed || keyed || text.starts_with("spool:git:")
+}
+
+/// Find a long hex identity or UUID even when a label is attached to it.
+pub fn machine_identity_span(text: &str) -> Option<(usize, usize)> {
+    for (start, ch) in text.char_indices() {
+        if !ch.is_ascii_hexdigit() {
+            continue;
+        }
+        let rest = &text[start..];
+        if rest.as_bytes().get(..36).is_some_and(|candidate| {
+            candidate.iter().copied().enumerate().all(|(index, byte)| {
+                if [8, 13, 18, 23].contains(&index) {
+                    byte == b'-'
+                } else {
+                    byte.is_ascii_hexdigit()
+                }
+            })
+        }) {
+            return Some((start, start + 36));
+        }
+        let hex_len = rest.bytes().take_while(u8::is_ascii_hexdigit).count();
+        if hex_len >= 16 {
+            return Some((start, start + hex_len));
+        }
     }
-    format!("Land {thread_id}")
+    None
+}
+
+/// Detect an opaque identity anywhere in the first line of a Git message.
+pub fn subject_has_machine_identity(message: &str) -> bool {
+    let subject = message.lines().next().unwrap_or_default();
+    subject.trim().is_empty()
+        || machine_identity_span(subject).is_some()
+        || subject
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+            .filter(|token| !token.is_empty())
+            .any(looks_like_machine_identity)
 }
 
 /// Whether a change id matches a short or full display form from operator text.
@@ -866,7 +955,7 @@ mod tests {
         );
         assert_eq!(
             land_checkpoint_message(Some("  "), true, "t", Some("intent"), None),
-            "Land t"
+            ""
         );
         assert_eq!(
             land_checkpoint_message(None, false, "t", Some("intent"), Some("task")),
@@ -876,10 +965,49 @@ mod tests {
             land_checkpoint_message(None, false, "t", None, Some("task")),
             "task"
         );
-        assert_eq!(
-            land_checkpoint_message(None, false, "t", None, None),
-            "Land t"
+        assert_eq!(land_checkpoint_message(None, false, "t", None, None), "t");
+    }
+
+    #[test]
+    fn land_checkpoint_subject_uses_task_instead_of_hex_thread_id() {
+        let id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let subject = land_checkpoint_message(
+            None,
+            true,
+            id,
+            Some("First capture intent"),
+            Some("Improve search results"),
         );
+        assert_eq!(subject, "Improve search results");
+        assert!(!subject.contains(id));
+        assert_eq!(
+            land_checkpoint_message(None, true, id, Some("Add search index"), None),
+            "Add search index"
+        );
+    }
+
+    #[test]
+    fn land_checkpoint_honors_explicit_message_with_64_hex_identity() {
+        let id = "a".repeat(64);
+        let explicit = format!("Revert {id}");
+        let subject = land_checkpoint_message(
+            Some(&explicit),
+            true,
+            "search",
+            None,
+            Some("Improve search results"),
+        );
+        assert_eq!(subject.lines().next(), Some(explicit.as_str()));
+        assert_eq!(subject, explicit);
+    }
+
+    #[test]
+    fn land_checkpoint_long_task_keeps_subject_short_and_detail_in_body() {
+        let task = "Improve search ranking so results from multiple sources stay relevant and readable for people";
+        let message = land_checkpoint_message(None, true, "feature/search", None, Some(task));
+        let subject = message.lines().next().unwrap_or_default();
+        assert!(subject.chars().count() <= 72, "{message}");
+        assert!(message.contains(&format!("\n\n{task}")), "{message}");
     }
 
     #[test]

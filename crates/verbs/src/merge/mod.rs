@@ -1582,13 +1582,20 @@ fn preview_merge_message(
 fn default_merge_message(repo: &Repository, thread: Option<&Thread>, track_name: &str) -> String {
     if let Some(intent) =
         thread.and_then(|thread| state_intent(repo, thread.current_state.as_deref()))
+        && !crate::subject_has_machine_identity(&intent)
     {
         return intent;
     }
+    let name = if crate::looks_like_machine_identity(track_name) {
+        "thread"
+    } else {
+        track_name
+    };
     thread
         .and_then(|thread| thread.task.clone())
-        .map(|task| format!("Merge thread '{}' ({task})", track_name))
-        .unwrap_or_else(|| format!("Merge thread '{}'", track_name))
+        .filter(|task| !crate::looks_like_machine_identity(task))
+        .map(|task| format!("Merge thread '{}' ({task})", name))
+        .unwrap_or_else(|| format!("Merge thread '{}'", name))
 }
 
 fn merge_preview_message(

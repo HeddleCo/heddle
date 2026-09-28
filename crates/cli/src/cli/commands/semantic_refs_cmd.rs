@@ -125,14 +125,20 @@ fn parse_anchor(spec: &str) -> Result<SymbolAnchor> {
 
 fn render_human(output: &SemanticRefsOutput) {
     if !output.body.index_present {
-        println!("No attached semantic index at {}.", output.body.state_id);
+        println!(
+            "No attached semantic index at {}.",
+            crate::cli::style::state_id(&output.body.state_id)
+        );
         return;
     }
     match output.body.kind {
         SemanticGraphQueryKind::ImportersOf => {
             let path = output.body.path.as_deref().unwrap_or_default();
             if output.body.importers.is_empty() {
-                println!("No importers of {path} at {}.", output.body.state_id);
+                println!(
+                    "No importers of {path} at {}.",
+                    crate::cli::style::state_id(&output.body.state_id)
+                );
                 return;
             }
             println!(
@@ -154,7 +160,10 @@ fn render_human(output: &SemanticRefsOutput) {
                 .map(|anchor| format!("{}:{}", anchor.file, anchor.symbol))
                 .unwrap_or_default();
             if output.body.refs.is_empty() {
-                println!("{label} of {target} at {}: none.", output.body.state_id);
+                println!(
+                    "{label} of {target} at {}: none.",
+                    crate::cli::style::state_id(&output.body.state_id)
+                );
                 return;
             }
             println!(

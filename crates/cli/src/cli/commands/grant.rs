@@ -161,7 +161,12 @@ async fn list_connected(
     } else {
         println!("ID\tROLE\tSPOOL");
         for row in rows {
-            println!("{}\t{}\t{}", row.id, row.role, row.spool);
+            println!(
+                "{}\t{}\t{}",
+                crate::cli::style::human_text(&row.id),
+                row.role,
+                row.spool
+            );
         }
     }
     Ok(())

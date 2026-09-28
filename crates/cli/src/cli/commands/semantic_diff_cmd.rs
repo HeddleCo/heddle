@@ -81,15 +81,16 @@ fn render_human(output: &SemanticDiffOutput) {
     if output.deltas.is_empty() {
         println!(
             "No symbol changes between {} and {}.",
-            output.from_state, output.to_state
+            crate::cli::style::state_id(&output.from_state),
+            crate::cli::style::state_id(&output.to_state)
         );
         return;
     }
 
     println!(
         "Symbol changes between {} and {} ({}):",
-        output.from_state,
-        output.to_state,
+        crate::cli::style::state_id(&output.from_state),
+        crate::cli::style::state_id(&output.to_state),
         output.deltas.len()
     );
     for delta in &output.deltas {

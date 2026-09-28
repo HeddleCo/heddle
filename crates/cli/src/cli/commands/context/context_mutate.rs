@@ -278,7 +278,10 @@ pub async fn cmd_context_edit(
             })
         );
     } else {
-        println!("Revised annotation {}", annotation_id);
+        println!(
+            "Revised annotation {}",
+            crate::cli::style::human_text(&annotation_id)
+        );
     }
 
     Ok(())

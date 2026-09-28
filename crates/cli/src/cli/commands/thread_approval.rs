@@ -424,9 +424,10 @@ pub async fn cmd_review_approve(cli: &Cli, args: &ReviewApproveArgs) -> Result<(
             } else {
                 println!(
                     "Already approved Thread '{}' at {}",
-                    thread, output.source_revision
+                    crate::cli::style::human_text(&thread),
+                    crate::cli::style::human_text(&output.source_revision)
                 );
-                println!("  review id: {}", output.id);
+                println!("  review id: {}", crate::cli::style::human_text(&output.id));
             }
             return Ok(());
         }
@@ -496,9 +497,16 @@ pub async fn cmd_review_approve(cli: &Cli, args: &ReviewApproveArgs) -> Result<(
             NextActionValidationContext::without_repo(&["review", "approve"]),
         )?;
     } else {
-        println!("Approved Thread '{}' at {}", thread, output.source_revision);
-        println!("  review id: {}", output.id);
-        println!("  compared base: {}", output.base_revision);
+        println!(
+            "Approved Thread '{}' at {}",
+            crate::cli::style::human_text(&thread),
+            crate::cli::style::human_text(&output.source_revision)
+        );
+        println!("  review id: {}", crate::cli::style::human_text(&output.id));
+        println!(
+            "  compared base: {}",
+            crate::cli::style::human_text(&output.base_revision)
+        );
     }
     Ok(())
 }

@@ -153,7 +153,13 @@ pub(crate) fn cmd_thread_captures(
         return Ok(());
     }
 
-    println!("{}", style::section(&format!("Saved states on {thread}")));
+    println!(
+        "{}",
+        style::section(&format!(
+            "Saved states on {}",
+            style::thread_label(thread, None)
+        ))
+    );
     if captures.is_empty() {
         println!("{}", style::dim("  No saved states on this thread yet."));
         return Ok(());
@@ -165,8 +171,8 @@ pub(crate) fn cmd_thread_captures(
             .unwrap_or_else(|| "None".to_string());
         println!(
             "  {} {} {}",
-            style::accent(&capture.state_id),
-            capture.message,
+            style::state_id(&capture.state_id),
+            style::human_text(&capture.message),
             style::dim(&format!("confidence {confidence}"))
         );
         println!("    {}", style::dim(&capture.created_at));
@@ -376,10 +382,16 @@ fn render_repository_context_lines(context: Option<&crate::cli::render::Reposito
         println!("Parent repo: {}", parent_repository);
     }
     if let Some(target_thread) = &context.target_thread {
-        println!("Target thread: {}", target_thread);
+        println!(
+            "Target thread: {}",
+            style::thread_label(target_thread, None)
+        );
     }
     if let Some(parent_thread) = &context.parent_thread {
-        println!("Parent thread: {}", parent_thread);
+        println!(
+            "Parent thread: {}",
+            style::thread_label(parent_thread, None)
+        );
     }
 }
 
@@ -584,7 +596,7 @@ type ThreadSection = (&'static str, ThreadSectionPredicate);
 fn format_compact_thread_list(threads: &[ThreadSummary]) -> String {
     let name_width = threads
         .iter()
-        .map(|thread| thread.name.len())
+        .map(|thread| style::thread_label(&thread.name, thread.task.as_deref()).len())
         .max()
         .unwrap_or(0);
     let mut rows = Vec::new();
@@ -602,7 +614,10 @@ fn format_compact_thread_list(threads: &[ThreadSummary]) -> String {
 
 fn format_compact_thread_row(entry: &ThreadSummary, name_width: usize) -> String {
     let marker = if entry.is_current { "*" } else { " " };
-    let name = format!("{:<name_width$}", entry.name);
+    let name = format!(
+        "{:<name_width$}",
+        style::thread_label(&entry.name, entry.task.as_deref())
+    );
     let mut cols = vec![format!("{marker} {name}")];
     if let Some(state) = entry
         .current_state
@@ -630,6 +645,7 @@ fn compact_thread_location(entry: &ThreadSummary) -> Option<String> {
         .or(entry.execution_path.as_deref())
         .filter(|path| !path.trim().is_empty())
         .map(compact_checkout_path)
+        .map(|path| style::human_text(&path))
 }
 
 fn compact_checkout_path(path: &str) -> String {
@@ -749,8 +765,8 @@ fn render_thread_entry(entry: &ThreadSummary, verbose: bool) {
         println!(
             "{} {} {} {} {}{}",
             prefix,
-            style::bold(&entry.name),
-            style::dim(state),
+            style::bold(&style::thread_label(&entry.name, entry.task.as_deref())),
+            style::state_id(state),
             style::thread_state(&entry.coordination_status.to_string()),
             style::dim(thread_human_visibility(entry)),
             liveness,
@@ -759,16 +775,16 @@ fn render_thread_entry(entry: &ThreadSummary, verbose: bool) {
         println!(
             "{} {} {} {}{}",
             prefix,
-            style::bold(&entry.name),
+            style::bold(&style::thread_label(&entry.name, entry.task.as_deref())),
             style::thread_state(&entry.coordination_status.to_string()),
             style::dim(thread_human_visibility(entry)),
             liveness,
         );
     }
     if let Some(path) = &entry.path {
-        println!("    path: {}", path);
+        println!("    path: {}", style::human_text(path));
     } else if let Some(path) = &entry.execution_path {
-        println!("    execution root: {}", path);
+        println!("    execution root: {}", style::human_text(path));
     }
     if verbose && let Some(git_branch_tip) = &entry.git_branch_tip {
         println!(
@@ -820,7 +836,10 @@ fn render_thread_entry(entry: &ThreadSummary, verbose: bool) {
         println!("    parent: {}", parent);
     }
     if verbose && !entry.child_threads.is_empty() {
-        println!("    children: {}", entry.child_threads.join(", "));
+        println!(
+            "    children: {}",
+            style::human_text(&entry.child_threads.join(", "))
+        );
     }
     if verbose && entry.promotion_suggested && !entry.heavy_impact_paths.is_empty() {
         println!(
@@ -2271,37 +2290,44 @@ pub(crate) fn show_thread_summary(
         }
         println!();
         if summary.is_current {
-            println!("Thread: {} {}", summary.name, style::dim("(current)"));
+            println!(
+                "Thread: {} {}",
+                style::thread_label(&summary.name, summary.task.as_deref()),
+                style::dim("(current)")
+            );
         } else {
-            println!("Thread: {}", summary.name);
+            println!(
+                "Thread: {}",
+                style::thread_label(&summary.name, summary.task.as_deref())
+            );
         }
         println!("Status: {}", summary.coordination_status);
         if cli.verbose > 0
             && let Some(base) = &summary.base_state
         {
-            println!("Base: {}", base);
+            println!("Base: {}", style::human_text(base));
         }
         if cli.verbose > 0
             && let Some(base_root) = &summary.base_root
             && !base_root.is_empty()
         {
-            println!("Base tree: {}", base_root);
+            println!("Base tree: {}", style::human_text(base_root));
         }
         if cli.verbose > 0
             && let Some(current) = &summary.current_state
         {
-            println!("Current: {}", current);
+            println!("Current: {}", style::human_text(current));
         }
         if cli.verbose > 0
             && let Some(git_branch_tip) = &summary.git_branch_tip
         {
-            println!("Git tip: {}", git_branch_tip);
+            println!("Git tip: {}", style::human_text(git_branch_tip));
             println!("History: {}", git_history_label(summary.history_imported));
         }
         if let Some(path) = &summary.path {
-            println!("Path: {}", path);
+            println!("Path: {}", style::human_text(path));
         } else if let Some(path) = &summary.execution_path {
-            println!("Execution root: {}", path);
+            println!("Execution root: {}", style::human_text(path));
         }
         if let Some(mode) = &summary.thread_mode {
             let checkout = if summary.is_isolated {
@@ -2333,18 +2359,24 @@ pub(crate) fn show_thread_summary(
             println!("Sync: {}", freshness);
         }
         if let Some(target) = &summary.target_thread {
-            println!("Target thread: {}", target);
+            println!("Target thread: {}", style::thread_label(target, None));
         }
         if cli.verbose > 0
             && let Some(parent) = &summary.parent_thread
         {
-            println!("Parent thread: {}", parent);
+            println!("Parent thread: {}", style::thread_label(parent, None));
         }
         if cli.verbose > 0 && !summary.child_threads.is_empty() {
-            println!("Child threads: {}", summary.child_threads.join(", "));
+            println!(
+                "Child threads: {}",
+                style::human_text(&summary.child_threads.join(", "))
+            );
         }
         if cli.verbose > 0 && !summary.sibling_threads.is_empty() {
-            println!("Sibling threads: {}", summary.sibling_threads.join(", "));
+            println!(
+                "Sibling threads: {}",
+                style::human_text(&summary.sibling_threads.join(", "))
+            );
         }
         if cli.verbose > 0 && summary.stack_depth > 0 {
             println!("Stack depth: {}", summary.stack_depth);
@@ -2362,10 +2394,10 @@ pub(crate) fn show_thread_summary(
                 println!("Actor: {text}");
             }
             if let Some(session_id) = &summary.session_id {
-                println!("Session: {}", session_id);
+                println!("Session: {}", style::human_text(session_id));
             }
             if let Some(session) = &summary.heddle_session_id {
-                println!("Heddle session: {}", session);
+                println!("Heddle session: {}", style::human_text(session));
             }
             if let Some(harness) = &summary.harness {
                 println!("Harness: {}", harness);
@@ -2390,7 +2422,7 @@ pub(crate) fn show_thread_summary(
         if cli.verbose > 0
             && let Some(attach_reason) = &summary.attach_reason
         {
-            println!("Attach: {}", attach_reason);
+            println!("Attach: {}", style::human_text(attach_reason));
         }
         if cli.verbose > 0
             && let Some(usage_summary) = &summary.usage_summary
@@ -2416,16 +2448,18 @@ pub(crate) fn show_thread_summary(
             }
         }
         if let Some(task) = &summary.task {
-            println!("Task: {}", task);
+            println!("Task: {}", style::human_text(task));
         }
         if cli.verbose > 0 {
             if let Some(task) = &summary.task_summary {
                 println!(
                     "Task assignment: {} [{}] {}",
-                    task.task_id, task.status, task.title
+                    style::human_text(&task.task_id),
+                    task.status,
+                    task.title
                 );
             } else if let Some(task_id) = &summary.task_assignment_id {
-                println!("Task assignment: {}", task_id);
+                println!("Task assignment: {}", style::human_text(task_id));
             }
         }
         let captures = if cli.verbose > 0 {
@@ -2437,7 +2471,11 @@ pub(crate) fn show_thread_summary(
             println!();
             println!("{}", style::section("Recent saved states"));
             for capture in captures {
-                println!("  {} {}", style::accent(&capture.state_id), capture.message);
+                println!(
+                    "  {} {}",
+                    style::state_id(&capture.state_id),
+                    style::human_text(&capture.message)
+                );
             }
         }
         if summary.promotion_suggested && !summary.heavy_impact_paths.is_empty() {
@@ -2664,7 +2702,17 @@ fn render_thread_op(cli: &Cli, output: ThreadOpOutput) -> Result<()> {
             NextActionValidationContext::without_repo(emitting),
         )?;
     } else {
-        println!("{}", style::accent(&output.message));
+        let task = output
+            .thread
+            .as_ref()
+            .and_then(|thread| thread.task.as_deref());
+        let label = style::thread_label(&output.name, task);
+        let message = if output.name.is_empty() {
+            output.message.clone()
+        } else {
+            output.message.replace(&output.name, &label)
+        };
+        println!("{}", style::accent(&style::human_text(&message)));
         if let Some(thread) = &output.thread {
             if let Some(path) = &thread.path {
                 println!("Path: {}", style::dim(path));

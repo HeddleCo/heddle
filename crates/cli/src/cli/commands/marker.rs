@@ -81,7 +81,11 @@ fn cmd_marker_list(cli: &Cli, repo: &Repository, filter: Option<String>) -> Resu
         )?;
     } else {
         for entry in &output.markers {
-            println!("{} -> {}", entry.name, entry.state_id);
+            println!(
+                "{} -> {}",
+                entry.name,
+                crate::cli::style::state_id(&entry.state_id)
+            );
         }
         if output.markers.is_empty() {
             println!("No markers");
@@ -193,7 +197,11 @@ fn cmd_marker_delete_prefix(cli: &Cli, repo: &Repository, prefix: String) -> Res
     } else {
         println!("{}", output.message);
         for entry in &output.deleted {
-            println!("  {} -> {}", entry.name, entry.state_id);
+            println!(
+                "  {} -> {}",
+                entry.name,
+                crate::cli::style::state_id(&entry.state_id)
+            );
         }
     }
 

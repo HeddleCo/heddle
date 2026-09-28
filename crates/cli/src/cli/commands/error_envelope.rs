@@ -88,18 +88,26 @@ fn print_error_with_hint_inner(cli: &Cli, err: &anyhow::Error, config: Option<&C
     } else {
         eprintln!(
             "Error: {}",
-            classification
-                .human_error
-                .as_deref()
-                .unwrap_or(error.as_str())
+            crate::cli::style::human_text(
+                classification
+                    .human_error
+                    .as_deref()
+                    .unwrap_or(error.as_str())
+            )
         );
-        eprintln!("Next: {}", classification.primary_command);
+        eprintln!(
+            "Next: {}",
+            crate::cli::style::human_text(&classification.primary_command)
+        );
         // Always surface the rest of the typed recovery commands in
         // text mode. JSON callers got them in `recovery_commands`;
         // human readers shouldn't have to re-run with --output json
         // to discover the escape hatch (e.g. `--force` variants).
         if classification.recovery_commands.len() > 1 {
-            eprintln!("Also: {}", classification.recovery_commands[1..].join(", "));
+            eprintln!(
+                "Also: {}",
+                crate::cli::style::human_text(&classification.recovery_commands[1..].join(", "))
+            );
         }
         if matches!(
             kind.as_str(),
@@ -108,15 +116,32 @@ fn print_error_with_hint_inner(cli: &Cli, err: &anyhow::Error, config: Option<&C
         {
             eprintln!(
                 "Paths: {}",
-                compact_dirty_worktree_condition(&classification.unsafe_condition)
+                crate::cli::style::human_text(&compact_dirty_worktree_condition(
+                    &classification.unsafe_condition
+                ))
             );
-            eprintln!("Reason: {}", classification.would_change);
-            eprintln!("Kept: {}", classification.preserved);
+            eprintln!(
+                "Reason: {}",
+                crate::cli::style::human_text(&classification.would_change)
+            );
+            eprintln!(
+                "Kept: {}",
+                crate::cli::style::human_text(&classification.preserved)
+            );
         } else if cli.verbose > 0 {
-            eprintln!("Unsafe: {}", classification.unsafe_condition);
-            eprintln!("Would change: {}", classification.would_change);
-            eprintln!("Preserved: {}", classification.preserved);
-            eprintln!("Hint: {hint}");
+            eprintln!(
+                "Unsafe: {}",
+                crate::cli::style::human_text(&classification.unsafe_condition)
+            );
+            eprintln!(
+                "Would change: {}",
+                crate::cli::style::human_text(&classification.would_change)
+            );
+            eprintln!(
+                "Preserved: {}",
+                crate::cli::style::human_text(&classification.preserved)
+            );
+            eprintln!("Hint: {}", crate::cli::style::human_text(&hint));
         }
     }
 }

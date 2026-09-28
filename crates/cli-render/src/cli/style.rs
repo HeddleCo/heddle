@@ -277,7 +277,37 @@ pub fn confidence(value: Option<f32>, formatted: &str) -> String {
 /// label in the spec was about *visual treatment*, which the
 /// terminal grants for free.
 pub fn state_id(id: &str) -> String {
-    dim(id)
+    dim(&human_text(id))
+}
+
+/// Keep opaque identities in machine output; terminal lines use short labels.
+pub fn human_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some((start, end)) = verbs::machine_identity_span(rest) {
+        out.push_str(&rest[..start]);
+        let id = &rest[start..end];
+        if !["hs-", "hc-", "id-"]
+            .iter()
+            .any(|prefix| out.ends_with(prefix))
+        {
+            out.push_str(if id.len() >= 64 { "hs-" } else { "id-" });
+        }
+        out.push_str(&id[..8]);
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A thread's visible name, falling back to its task for opaque names.
+pub fn thread_label(name: &str, task: Option<&str>) -> String {
+    if !verbs::looks_like_machine_identity(name) {
+        return human_text(name);
+    }
+    task.filter(|task| !verbs::looks_like_machine_identity(task))
+        .map(human_text)
+        .unwrap_or_else(|| "Untitled thread".to_string())
 }
 
 /// Principal styling: name in bold, email dimmed. Returns the
@@ -501,5 +531,19 @@ mod tests {
     fn state_id_uncolored_is_identity() {
         force_for_test(false);
         assert_eq!(state_id("hs-abc123"), "hs-abc123");
+    }
+
+    #[test]
+    fn embedded_machine_ids_are_shortened_in_human_text() {
+        let hex = "a".repeat(64);
+        let git_oid = "b".repeat(40);
+        let uuid = "12345678-1234-1234-1234-123456789abc";
+        let rendered = human_text(&format!(
+            "state=hs-{hex}; git={git_oid}; thread={uuid}; x-{uuid}"
+        ));
+        assert!(!rendered.contains(&hex), "{rendered}");
+        assert!(!rendered.contains(&git_oid), "{rendered}");
+        assert!(!rendered.contains(uuid), "{rendered}");
+        assert!(rendered.contains("state=hs-aaaaaaaa"), "{rendered}");
     }
 }

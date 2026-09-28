@@ -345,10 +345,12 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
     if let Some(thread_repo) = thread_repo.as_ref() {
         let status_options = worktree_status_options(Some(thread_repo.config()));
         if worktree_dirty(thread_repo, &status_options)? {
-            let capture_message = args
-                .message
-                .clone()
-                .or_else(|| Some(format!("Land {}", thread.thread)));
+            let capture_message = Some(land_checkpoint_message(
+                &repo,
+                &thread,
+                args.message.as_deref(),
+                true,
+            )?);
             create_snapshot(
                 thread_repo,
                 &user_config,
@@ -574,7 +576,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 &merge_thread,
                 args.message.as_deref(),
                 land_collapse_state.is_some(),
-            );
+            )?;
             let checkpoint = create_git_checkpoint(
                 &repo,
                 GitCheckpointRequest {
@@ -874,7 +876,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             &merge_thread,
             args.message.as_deref(),
             land_collapse_state.is_some(),
-        );
+        )?;
         let checkpoint = create_git_checkpoint(
             &repo,
             GitCheckpointRequest {
@@ -1209,10 +1211,14 @@ fn collapse_thread_for_land(
     if sources.len() <= 1 {
         return Ok(None);
     }
-    let intent = message
-        .filter(|message| !message.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| format!("Land {}", thread.thread));
+    let first_intent = sources.iter().find_map(|state| state.intent.as_deref());
+    let intent = core_land_checkpoint_message(
+        message,
+        true,
+        &thread.thread,
+        first_intent,
+        thread.task.as_deref(),
+    );
     let result = collapse_resolved_states(
         repo,
         user_config,
@@ -1303,20 +1309,33 @@ fn land_checkpoint_message(
     thread: &Thread,
     explicit: Option<&str>,
     prefer_land_subject: bool,
-) -> String {
-    let intent = thread
-        .current_state
-        .as_deref()
-        .and_then(|state| repo.resolve_state(state).ok().flatten())
-        .and_then(|state_id| repo.store().get_state(&state_id).ok().flatten())
-        .and_then(|state| state.intent);
-    core_land_checkpoint_message(
+) -> Result<String> {
+    if explicit.is_some_and(|message| !verbs::subject_has_machine_identity(message))
+        || (prefer_land_subject
+            && (thread
+                .task
+                .as_deref()
+                .is_some_and(|task| !verbs::subject_has_machine_identity(task))
+                || !verbs::looks_like_machine_identity(&thread.thread)))
+    {
+        return Ok(core_land_checkpoint_message(
+            explicit,
+            prefer_land_subject,
+            &thread.thread,
+            None,
+            thread.task.as_deref(),
+        ));
+    }
+    let intent = thread_source_states(repo, thread)?
+        .into_iter()
+        .find_map(|state| state.intent);
+    Ok(core_land_checkpoint_message(
         explicit,
         prefer_land_subject,
-        &thread.id,
+        &thread.thread,
         intent.as_deref(),
         thread.task.as_deref(),
-    )
+    ))
 }
 
 fn resolve_thread(
@@ -2068,15 +2087,15 @@ fn write_sync_output(cli: &Cli, repo: &Repository, output: &SyncOutput) -> Resul
         )?;
     } else {
         let message = match output.operator.status.as_str() {
-            "blocked" => style::warn(&output.operator.message),
-            "current" | "refreshed" => style::accent(&output.operator.message),
-            _ => output.operator.message.clone(),
+            "blocked" => style::warn(&style::human_text(&output.operator.message)),
+            "current" | "refreshed" => style::accent(&style::human_text(&output.operator.message)),
+            _ => style::human_text(&output.operator.message),
         };
         println!("{message}");
         if !output.operator.blockers.is_empty() {
             println!("{}", style::warn("Blocked by"));
             for blocker in &output.operator.blockers {
-                println!("  - {}", style::warn(blocker));
+                println!("  - {}", style::warn(&style::human_text(blocker)));
             }
         }
         if let Some(next) = output
@@ -2170,7 +2189,12 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
             "blocked" => style::warn_marker(),
             _ => style::working_marker(),
         };
-        println!("{marker} {}", output.operator.message);
+        let task = thread_manager(repo)
+            .find_by_thread(&output.thread)?
+            .and_then(|thread| thread.task);
+        let label = style::thread_label(&output.thread, task.as_deref());
+        let message = output.operator.message.replace(&output.thread, &label);
+        println!("{marker} {}", style::human_text(&message));
         let blocked = output.operator.status == "blocked";
         let verbose = cli.verbose > 0;
         if blocked && !verbose {
@@ -2199,7 +2223,7 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
                 }
             }
         } else {
-            println!("  {}", style::field("thread", &style::bold(&output.thread)));
+            println!("  {}", style::field("thread", &style::bold(&label)));
             if output.integrated {
                 println!("  {}", style::field("landed", "on parent"));
             } else {
@@ -2244,14 +2268,17 @@ fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Resul
             if !output.siblings_restacked.is_empty() {
                 println!(
                     "  {}",
-                    style::field("siblings restacked", &output.siblings_restacked.join(", "))
+                    style::field(
+                        "siblings restacked",
+                        &style::human_text(&output.siblings_restacked.join(", "))
+                    )
                 );
             }
             for blocker in &output.operator.blockers {
-                println!("  blocker: {}", style::warn(blocker));
+                println!("  blocker: {}", style::warn(&style::human_text(blocker)));
             }
             for warning in &output.operator.warnings {
-                println!("  warning: {}", style::warn(warning));
+                println!("  warning: {}", style::warn(&style::human_text(warning)));
             }
             println!(
                 "Workspace: {}",
@@ -3323,7 +3350,7 @@ fn write_multi_land_output(
         } else {
             style::warn_marker()
         };
-        println!("{marker} {}", output.message);
+        println!("{marker} {}", style::human_text(&output.message));
         if let Some(head) = &output.git_head {
             println!(
                 "  {}",
@@ -3338,20 +3365,26 @@ fn write_multi_land_output(
             };
             println!(
                 "  {peer_marker} {} — {}",
-                style::bold(&peer.thread),
+                style::bold(&style::human_text(&peer.thread)),
                 peer.status
             );
             for blocker in &peer.blockers {
-                println!("      blocker: {}", style::warn(blocker));
+                println!(
+                    "      blocker: {}",
+                    style::warn(&style::human_text(blocker))
+                );
             }
             for warning in &peer.warnings {
-                println!("      warning: {}", style::warn(warning));
+                println!(
+                    "      warning: {}",
+                    style::warn(&style::human_text(warning))
+                );
             }
             for failure in &peer.siblings_restack_failed {
                 println!(
                     "      sibling restack failed: {} — {}",
-                    style::bold(&failure.thread),
-                    style::warn(&failure.message)
+                    style::bold(&style::human_text(&failure.thread)),
+                    style::warn(&style::human_text(&failure.message))
                 );
             }
         }

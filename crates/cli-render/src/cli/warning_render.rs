@@ -9,6 +9,10 @@ pub struct StderrWarningSink;
 
 impl WarningSink for StderrWarningSink {
     fn warn(&self, warning: Warning) {
-        eprintln!("{} {}", super::style::warn_marker(), warning.message);
+        eprintln!(
+            "{} {}",
+            super::style::warn_marker(),
+            super::style::human_text(&warning.message)
+        );
     }
 }

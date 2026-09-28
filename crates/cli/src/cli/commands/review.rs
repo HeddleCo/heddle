@@ -4,6 +4,11 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow};
+// The review wire payloads live in cli-contract so the schema registry
+// registers the real serialization types.
+pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
+    HealthEntry, NextStateView, ReviewHealthOutput, ReviewNextOutput, ReviewSignOutput,
+};
 use objects::object::{ReviewKind, ReviewScope, StateId, SymbolAnchor};
 use repo::{HistoryQuery, operation_dedup::OperationDedupStore};
 use verbs::review::{
@@ -18,12 +23,6 @@ use super::{
 use crate::cli::{
     cli_args::{Cli, ReviewCommands, ReviewHealthArgs, ReviewNextArgs, ReviewSignArgs},
     should_output_json,
-};
-
-// The review wire payloads live in cli-contract so the schema registry
-// registers the real serialization types.
-pub(crate) use heddle_cli_contract::cli::commands::wire::collab::{
-    HealthEntry, NextStateView, ReviewHealthOutput, ReviewNextOutput, ReviewSignOutput,
 };
 
 pub async fn run(cli: &Cli, command: &ReviewCommands) -> Result<()> {
@@ -107,9 +106,9 @@ async fn run_sign(cli: &Cli, args: &ReviewSignArgs) -> Result<()> {
     } else {
         println!(
             "signed state {} as {} (signature_id {})",
-            response.state_id.to_string_full(),
+            crate::cli::style::state_id(&response.state_id.to_string_full()),
             args.kind.as_wire(),
-            response.signature_id
+            crate::cli::style::human_text(&response.signature_id)
         );
     }
     Ok(())
@@ -202,7 +201,10 @@ async fn run_next(cli: &Cli, args: &ReviewNextArgs) -> Result<()> {
     } else {
         match &next_state {
             Some(view) => {
-                println!("next pending review: {}", view.state_id);
+                println!(
+                    "next pending review: {}",
+                    crate::cli::style::state_id(&view.state_id)
+                );
                 if !view.headline.is_empty() {
                     println!("  {}", view.headline);
                 }
