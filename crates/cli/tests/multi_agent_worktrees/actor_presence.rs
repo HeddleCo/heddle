@@ -2,6 +2,196 @@
 use super::*;
 
 #[test]
+fn fresh_git_overlay_fanout_has_isolated_git_and_launch_commands() {
+    let main = TempDir::new().expect("fixture");
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).expect("git output")
+    };
+    git(main.path(), &["init", "-b", "main"]);
+    git(main.path(), &["config", "user.name", "Fanout Test"]);
+    git(main.path(), &["config", "user.email", "fanout@example.com"]);
+    fs::write(main.path().join("base.txt"), "base\n").expect("base file");
+    git(main.path(), &["add", "base.txt"]);
+    git(main.path(), &["commit", "-m", "base"]);
+    let parent_git = git(main.path(), &["rev-parse", "--absolute-git-dir"]);
+    heddle(&["init"], Some(main.path())).expect("overlay init");
+
+    let started: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "fanout",
+                "start",
+                "--title",
+                "Coordinate",
+                "--lane",
+                "feature/a=Implement A",
+                "--harness",
+                "claude-code",
+                "--lane",
+                "feature/b=Implement B",
+                "--harness",
+                "codex",
+                "--lane",
+                "feature/c=Implement C",
+                "--harness",
+                "opencode",
+            ],
+            Some(main.path()),
+        )
+        .expect("fresh overlay fanout"),
+    )
+    .expect("fanout JSON");
+    let lanes = started["lanes"].as_array().expect("lanes");
+    assert_eq!(lanes.len(), 3);
+    assert_eq!(started["commands"].as_array().expect("commands").len(), 3);
+    for (index, lane) in lanes.iter().enumerate() {
+        let path = std::path::Path::new(lane["path"].as_str().expect("checkout path"));
+        assert!(path.starts_with(main.path().join(".heddle/threads")));
+        let child_git = git(path, &["rev-parse", "--absolute-git-dir"]);
+        assert_ne!(
+            child_git.trim(),
+            parent_git.trim(),
+            "child must own git metadata"
+        );
+        assert!(git(path, &["log", "-1", "--format=%s"]).contains("base"));
+        fs::write(path.join("lane.txt"), format!("lane {index}\n")).expect("lane edit");
+        assert!(git(path, &["status", "--short"]).contains("lane.txt"));
+        fs::write(path.join("base.txt"), format!("base lane {index}\n")).expect("tracked edit");
+        assert!(git(path, &["diff"]).contains("base lane"));
+        let command = &started["commands"][index];
+        assert_eq!(command["cwd"].as_str(), lane["path"].as_str());
+        assert!(
+            command["command"]
+                .as_str()
+                .expect("command")
+                .contains("writer-credential.json")
+        );
+        assert!(command["argv"].as_array().expect("argv").iter().any(|arg| {
+            arg.as_str()
+                .is_some_and(|arg| arg.contains(lane["title"].as_str().expect("title")))
+        }));
+    }
+    assert!(
+        git(main.path(), &["status", "--short"]).is_empty(),
+        "parent sees child contents"
+    );
+    let parent_capture = heddle_output(
+        &["capture", "-m", "should find no child content"],
+        Some(main.path()),
+    )
+    .expect("parent capture attempt");
+    assert!(
+        !parent_capture.status.success(),
+        "parent capture swept child contents"
+    );
+    let first = std::path::Path::new(lanes[0]["path"].as_str().expect("first path"));
+    fs::write(first.join("capture.txt"), "captured\n").expect("capture edit");
+    let credential: Value = serde_json::from_slice(
+        &fs::read(first.join(".heddle/writer-credential.json")).expect("credential file"),
+    )
+    .expect("credential JSON");
+    let lease = credential["lease"].as_str().expect("lease");
+    let token = credential["token"].as_str().expect("token");
+    let captured = heddle_output_with_env(
+        &["agent", "capture", "--lease", lease, "-m", "lane capture"],
+        Some(first),
+        &[("HEDDLE_RESERVATION_TOKEN", token)],
+    )
+    .expect("lane capture command");
+    assert!(
+        captured.status.success(),
+        "lane capture: {}",
+        String::from_utf8_lossy(&captured.stderr)
+    );
+    let log: Value =
+        serde_json::from_str(&heddle(&["--output", "json", "log"], Some(first)).expect("lane log"))
+            .expect("log JSON");
+    assert!(log.to_string().contains("lane capture"));
+    heddle(
+        &["thread", "drop", "feature/b", "--force"],
+        Some(main.path()),
+    )
+    .expect("drop lane");
+    assert!(!std::path::Path::new(lanes[1]["path"].as_str().expect("dropped path")).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn fanout_run_launches_harness_in_lane_with_file_credential() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let main = setup_repo("base.txt", "base");
+    let bin = TempDir::new().expect("fake harness directory");
+    let fake = bin.path().join("codex");
+    fs::write(&fake, "#!/bin/sh\ntest -n \"$HEDDLE_RESERVATION_TOKEN\" || exit 2\ntest -f \"$HEDDLE_WRITER_CREDENTIAL_FILE\" || exit 3\npwd > \"$FANOUT_LAUNCH_MARKER\"\n")
+        .expect("fake harness");
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).expect("executable harness");
+    let marker = bin.path().join("launched");
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").expect("PATH")
+    );
+    let output = heddle_output_with_env(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "fanout",
+            "start",
+            "--title",
+            "Coordinate",
+            "--lane",
+            "feature/run=Implement run",
+            "--harness",
+            "codex",
+            "--run",
+        ],
+        Some(main.path()),
+        &[
+            ("PATH", &path),
+            (
+                "FANOUT_LAUNCH_MARKER",
+                marker.to_str().expect("marker path"),
+            ),
+        ],
+    )
+    .expect("run fanout");
+    assert!(
+        output.status.success(),
+        "run fanout: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let started: Value = serde_json::from_slice(&output.stdout).expect("JSON output");
+    assert_eq!(
+        fs::read_to_string(marker).expect("launch marker").trim(),
+        started["lanes"][0]["path"].as_str().expect("lane path")
+    );
+    let credential_path =
+        std::path::Path::new(started["lanes"][0]["path"].as_str().expect("lane path"))
+            .join(".heddle/writer-credential.json");
+    let credential: Value = serde_json::from_slice(&fs::read(credential_path).expect("credential"))
+        .expect("credential JSON");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout)
+            .contains(credential["token"].as_str().expect("token"))
+    );
+}
+
+#[test]
 fn start_registers_thread_with_agent_metadata() {
     let main = setup_repo("base.txt", "base");
 
