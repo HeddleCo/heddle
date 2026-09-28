@@ -10,6 +10,7 @@ use heddle_cli_contract::cli::commands::wire::thread::{
     ThreadBriefingOutput as ThreadBriefing, ThreadBriefingRevisionOutput as RevisionItem,
 };
 use objects::{
+    HeddleError,
     object::{
         AnnotationStatus, CollaborationAnchor, ContentHash, ContextTarget, ThreadName,
         thread_replication::{
@@ -26,6 +27,7 @@ use repo::{
 use super::super::{
     next_action::{NextActionValidationContext, write_full_command_json},
     thread::find_thread_summary,
+    thread_cmd::thread_not_found_advice,
 };
 use crate::cli::{Cli, should_output_json, style};
 
@@ -38,13 +40,14 @@ pub fn cmd_context_for_thread(cli: &Cli, thread: &str) -> Result<()> {
     let head_id = repo
         .refs()
         .get_thread(&ThreadName::new(thread))?
-        .ok_or_else(|| anyhow!("Thread {thread:?} not found"))?;
+        .ok_or_else(|| anyhow!(thread_not_found_advice(thread, "brief thread context")))?;
     let head = repo
         .store()
         .get_state(&head_id)?
-        .ok_or_else(|| anyhow!("Thread {thread:?} has no local source state"))?;
-    let summary = find_thread_summary(&repo, thread)?
-        .ok_or_else(|| anyhow!("Thread {thread:?} has no local summary"))?;
+        .ok_or(HeddleError::StateNotFound(head_id))?;
+    let summary = find_thread_summary(&repo, thread)?.ok_or_else(|| {
+        HeddleError::InvalidObject(format!("Thread {thread:?} has no local summary"))
+    })?;
     let changed_paths: BTreeSet<String> = summary.changed_paths.iter().cloned().collect();
     let base_id = summary
         .base_state
@@ -143,10 +146,16 @@ fn intent_items(repo: &Repository, thread: &str) -> Result<Vec<IntentItem>> {
     for (version, signed) in replica.metadata_frontier(&Property::Intent)? {
         let operation = signed.verify()?;
         let ThreadOperationBody::Metadata(bytes) = operation.body else {
-            return Err(anyhow!("Thread intent frontier contains another operation"));
+            return Err(HeddleError::InvalidObject(
+                "Thread intent frontier contains another operation".into(),
+            )
+            .into());
         };
         let Control::Intent(intent) = ThreadControl::decode(&bytes)?.control else {
-            return Err(anyhow!("Thread intent frontier contains another property"));
+            return Err(HeddleError::InvalidObject(
+                "Thread intent frontier contains another property".into(),
+            )
+            .into());
         };
         items.push(IntentItem {
             version: version.to_string(),

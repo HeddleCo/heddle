@@ -10,6 +10,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use objects::{
+    HeddleError,
     object::{State, StateId, ThreadName, Tree},
     store::{ObjectStore, WriterLeaseStatus, WriterLeaseStore},
     worktree::WorktreeStatus,
@@ -2207,7 +2208,7 @@ fn capture_constraints_supplied(
         let state = repo
             .store()
             .get_state(&id)?
-            .ok_or_else(|| anyhow!("Thread source state is missing"))?;
+            .ok_or(HeddleError::StateNotFound(id))?;
         if let Some(receipt) = repo.context_receipt(&id)?
             && receipt.thread == thread
         {
