@@ -1411,7 +1411,13 @@ const CONTRACTS: &[CommandContractEntry] = &[
         &["agent", "fanout", "start"],
         surface(
             json_discriminators(
-                documented_schemas(WORKTREE_MUTATION, &["agent fanout start"]),
+                documented_schemas(
+                    CommandContract {
+                        writes_git_refs: true,
+                        ..WORKTREE_MUTATION
+                    },
+                    &["agent fanout start"],
+                ),
                 &[json_discriminator(
                     Some("agent fanout start"),
                     "output_kind",

@@ -11,6 +11,24 @@
       "command": {
         "type": "string"
       },
+      "credential_file": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "cwd": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "harness": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "lane_thread": {
         "type": "string"
       }
@@ -195,6 +213,24 @@
           },
           "command": {
             "type": "string"
+          },
+          "credential_file": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cwd": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harness": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "lane_thread": {
             "type": "string"

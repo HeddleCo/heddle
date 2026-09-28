@@ -1547,9 +1547,42 @@ pub struct AgentFanoutStartArgs {
     #[arg(long, value_name = "THREAD=TITLE")]
     pub lane: Vec<String>,
 
+    /// Harness for each --lane, in the same order.
+    #[arg(long, value_enum, value_name = "claude-code|codex|opencode")]
+    pub harness: Vec<FanoutHarnessArg>,
+
+    /// Launch each lane's harness after creating its checkout.
+    #[arg(long)]
+    pub run: bool,
+
     /// Optional collaboration discussion id to store on task assignments.
     #[arg(long)]
     pub coordination_discussion_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum FanoutHarnessArg {
+    ClaudeCode,
+    Codex,
+    Opencode,
+}
+
+impl FanoutHarnessArg {
+    pub fn executable(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude",
+            Self::Codex => "codex",
+            Self::Opencode => "opencode",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude-code",
+            Self::Codex => "codex",
+            Self::Opencode => "opencode",
+        }
+    }
 }
 
 /// Arguments for `agent capture` under a current reservation lease.

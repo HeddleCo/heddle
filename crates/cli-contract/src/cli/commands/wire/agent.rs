@@ -218,6 +218,12 @@ pub struct AgentFanoutCommandOutput {
     pub lane_thread: String,
     pub command: String,
     pub argv: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_file: Option<String>,
 }
 
 // ---- agent provenance ------------------------------------------------------
