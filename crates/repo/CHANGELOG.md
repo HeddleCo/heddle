@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.6](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.25.5...heddle-repo-v0.25.6) - 2026-09-28
+
+### Other
+
+- recover timeline uploads with fresh acceptance and bound all pending evidence
+
 ## [0.25.5](https://github.com/HeddleCo/heddle/compare/heddle-repo-v0.25.4...heddle-repo-v0.25.5) - 2026-09-27
 
 ### Other

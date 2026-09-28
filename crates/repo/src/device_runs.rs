@@ -220,6 +220,14 @@ impl RunStore {
     pub fn upload_health(&self) -> Result<crate::device_run_outbox::TimelineUploadHealth> {
         Ok(crate::device_run_outbox::health(&self.connection()?)?)
     }
+    pub fn require_timeline_reenrollment(&self) -> Result<()> {
+        let mut connection = self.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        crate::device_run_outbox::require_reenrollment(&tx)?;
+        tx.commit()?;
+        self.committed()?;
+        Ok(())
+    }
     pub fn next_timeline_registration(
         &self,
         now_millis: i64,
@@ -313,7 +321,7 @@ impl RunStore {
     }
     pub fn incomplete_timeline_runs(&self, limit: usize) -> Result<Vec<String>> {
         let connection = self.connection()?;
-        let mut query = connection.prepare("SELECT run FROM timeline_upload_runs WHERE upload_incomplete='outbox_overflow' LIMIT ?1")?;
+        let mut query = connection.prepare("SELECT run FROM timeline_upload_runs WHERE upload_incomplete IN ('outbox_overflow','scan_pending') LIMIT ?1")?;
         Ok(query
             .query_map([limit as i64], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)

@@ -91,7 +91,7 @@ fn append_with_limits(
         )
         .optional()?;
     if existing.is_none() {
-        let (origin_bytes, biscuit, target, incomplete) = match creation_origin {
+        let (mut origin_bytes, mut biscuit, mut target, mut incomplete) = match creation_origin {
             Some((origin, biscuit)) => {
                 api::timeline_upload::validate_origin(origin)?;
                 ensure!(origin.run_id == reference.id, "origin binds another run");
@@ -104,9 +104,21 @@ fn append_with_limits(
             }
             None => (Vec::new(), Vec::new(), Vec::new(), "origin_unavailable"),
         };
+        let registration_operation_id = uuid::Uuid::now_v7().to_string();
+        if !origin_bytes.is_empty() {
+            let (count, used) = pending_usage(tx)?;
+            let added =
+                origin_bytes.len() + biscuit.len() + target.len() + registration_operation_id.len();
+            if count >= request_limit || used.saturating_add(added as i64) > byte_limit {
+                origin_bytes.clear();
+                biscuit.clear();
+                target.clear();
+                incomplete = "outbox_overflow";
+            }
+        }
         tx.execute(
             "INSERT INTO timeline_upload_runs(run,origin,origin_biscuit,target_deployment,registration_operation_id,upload_incomplete) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![reference.id, origin_bytes, biscuit, target, uuid::Uuid::now_v7().to_string(), incomplete],
+            params![reference.id, origin_bytes, biscuit, target, registration_operation_id, incomplete],
         )?;
     }
     let (origin_bytes, old_revision, old_snapshot, last_local, next_upload, incomplete) = match existing {
@@ -121,8 +133,8 @@ fn append_with_limits(
         || matches!(
             incomplete.as_str(),
             "missing_local_prefix"
-                | "registration_denied"
-                | "upload_denied"
+                | "needs_current_acceptance"
+                | "acceptance_overflow"
                 | "resource_gone"
                 | "conflict"
         )
@@ -185,10 +197,24 @@ fn append_with_limits(
             }
         }
     }
+    let has_more: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM run_timeline WHERE run=?1 AND position>?2)",
+        params![reference.id, scanned],
+        |row| row.get(0),
+    )?;
+    let scan_state = if has_more { "scan_pending" } else { "" };
+    let visible_state = if matches!(
+        incomplete.as_str(),
+        "registration_denied" | "re-enroll this device"
+    ) {
+        incomplete.as_str()
+    } else {
+        scan_state
+    };
     if projected.is_empty() && revision == old_revision {
         tx.execute(
-            "UPDATE timeline_upload_runs SET last_local_position=?2,upload_incomplete='' WHERE run=?1 AND upload_incomplete IN ('','outbox_overflow')",
-            params![reference.id, scanned],
+            "UPDATE timeline_upload_runs SET last_local_position=?2,upload_incomplete=?3 WHERE run=?1 AND upload_incomplete IN ('','outbox_overflow','scan_pending')",
+            params![reference.id, scanned, scan_state],
         )?;
         return Ok(());
     }
@@ -213,11 +239,7 @@ fn append_with_limits(
         return Ok(());
     }
     let bytes = request.encode_to_vec();
-    let (count, used): (i64, i64) = tx.query_row(
-        "SELECT COUNT(*),COALESCE(SUM(length(request)),0) FROM timeline_upload_outbox",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+    let (count, used) = pending_usage(tx)?;
     if count >= request_limit || used.saturating_add(bytes.len() as i64) > byte_limit {
         mark_incomplete(tx, &reference.id, "outbox_overflow")?;
         return Ok(());
@@ -236,8 +258,8 @@ fn append_with_limits(
         )?;
     }
     tx.execute(
-        "UPDATE timeline_upload_runs SET run_revision=?2,snapshot=?3,last_local_position=?4,next_upload_position=?5,upload_incomplete='' WHERE run=?1",
-        params![reference.id, revision, snapshot_bytes, scanned, next],
+        "UPDATE timeline_upload_runs SET run_revision=?2,snapshot=?3,last_local_position=?4,next_upload_position=?5,upload_incomplete=?6 WHERE run=?1",
+        params![reference.id, revision, snapshot_bytes, scanned, next, visible_state],
     )?;
     Ok(())
 }
@@ -248,6 +270,19 @@ fn mark_incomplete(tx: &Transaction<'_>, run: &str, reason: &str) -> rusqlite::R
         params![run, reason],
     )?;
     Ok(())
+}
+
+fn pending_usage(tx: &Transaction<'_>) -> rusqlite::Result<(i64, i64)> {
+    tx.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM timeline_upload_outbox WHERE terminal=0)
+             + (SELECT COUNT(*) FROM timeline_upload_runs WHERE registered=0 AND length(origin)>0),
+           (SELECT COALESCE(SUM(length(request)+length(acceptance)),0) FROM timeline_upload_outbox WHERE terminal=0)
+             + (SELECT COALESCE(SUM(length(origin)+length(origin_biscuit)+length(target_deployment)+length(registration_operation_id)),0)
+                FROM timeline_upload_runs WHERE registered=0 AND length(origin)>0)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
 }
 
 pub struct PendingTimelineUpload {
@@ -264,6 +299,7 @@ pub struct PendingTimelineRegistration {
 pub struct TimelineUploadHealth {
     pub pending_requests: u64,
     pub incomplete_runs: u64,
+    pub incomplete_reasons: Vec<String>,
 }
 
 pub(crate) fn health(connection: &rusqlite::Connection) -> rusqlite::Result<TimelineUploadHealth> {
@@ -273,10 +309,25 @@ pub(crate) fn health(connection: &rusqlite::Connection) -> rusqlite::Result<Time
         [],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
+    let mut query = connection.prepare("SELECT DISTINCT upload_incomplete FROM timeline_upload_runs WHERE upload_incomplete!='' ORDER BY upload_incomplete")?;
+    let incomplete_reasons = query
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(TimelineUploadHealth {
         pending_requests: pending as u64,
         incomplete_runs: incomplete as u64,
+        incomplete_reasons,
     })
+}
+
+pub(crate) fn require_reenrollment(tx: &Transaction<'_>) -> rusqlite::Result<()> {
+    tx.execute(
+        "UPDATE timeline_upload_runs SET upload_incomplete='re-enroll this device'
+         WHERE upload_incomplete IN ('','registration_denied')
+           AND (registered=0 OR EXISTS(SELECT 1 FROM timeline_upload_outbox q WHERE q.run=timeline_upload_runs.run AND q.terminal=0))",
+        [],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn next_registration(
@@ -336,6 +387,7 @@ pub(crate) fn next_upload(
         "SELECT q.request,r.target_deployment,q.acceptance FROM timeline_upload_outbox q
          JOIN timeline_upload_runs r ON r.run=q.run
          WHERE q.terminal=0 AND q.due_millis<=?1
+           AND r.upload_incomplete NOT IN ('needs_current_acceptance','acceptance_overflow')
            AND NOT EXISTS(SELECT 1 FROM timeline_upload_outbox earlier WHERE earlier.run=q.run
              AND (earlier.first_position<q.first_position OR (earlier.first_position=q.first_position AND earlier.rowid<q.rowid)))
          ORDER BY q.rowid LIMIT 1",
@@ -370,20 +422,53 @@ pub(crate) fn attach_acceptance(
     operation_id: &str,
     acceptance: &TimelineAdmissionAcceptance,
 ) -> Result<()> {
-    let bytes: Vec<u8> = tx.query_row(
-        "SELECT request FROM timeline_upload_outbox WHERE operation_id=?1 AND terminal=0",
+    let (bytes, old_acceptance, run_id): (Vec<u8>, Vec<u8>, String) = tx.query_row(
+        "SELECT request,acceptance,run FROM timeline_upload_outbox WHERE operation_id=?1 AND terminal=0",
         [operation_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
+    let blocked: Option<String> = tx
+        .query_row(
+            "SELECT q.operation_id FROM timeline_upload_outbox q
+         JOIN timeline_upload_runs r ON r.run=q.run
+         WHERE q.run=?1 AND q.terminal=0
+           AND r.upload_incomplete IN ('needs_current_acceptance','acceptance_overflow')
+         ORDER BY q.first_position,q.rowid LIMIT 1",
+            [&run_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    ensure!(
+        blocked.is_none_or(|head| head == operation_id),
+        "fresh acceptance must resume the blocked prefix"
+    );
     let mut request = UploadScrubbedTimelineRequest::decode(bytes.as_slice())?;
     request.acceptance = Some(acceptance.clone());
     api::timeline_upload::validate_upload(
         &request,
         i128::from(chrono::Utc::now().timestamp_micros()),
     )?;
+    let evidence = acceptance.encode_to_vec();
+    let (_, used) = pending_usage(tx)?;
+    if used
+        .saturating_sub(old_acceptance.len() as i64)
+        .saturating_add(evidence.len() as i64)
+        > MAX_PENDING_BYTES
+    {
+        mark_incomplete(tx, &run_id, "acceptance_overflow")?;
+        tx.execute(
+            "UPDATE timeline_upload_outbox SET due_millis=?2 WHERE operation_id=?1",
+            params![operation_id, i64::MAX],
+        )?;
+        return Ok(());
+    }
     tx.execute(
-        "UPDATE timeline_upload_outbox SET acceptance=?2,due_millis=0 WHERE operation_id=?1",
-        params![operation_id, acceptance.encode_to_vec()],
+        "UPDATE timeline_upload_outbox SET acceptance=?2,due_millis=0,terminal=0 WHERE operation_id=?1",
+        params![operation_id, evidence],
+    )?;
+    tx.execute(
+        "UPDATE timeline_upload_runs SET upload_incomplete='' WHERE run=?1 AND upload_incomplete IN ('needs_current_acceptance','upload_denied','acceptance_overflow')",
+        [&run_id],
     )?;
     Ok(())
 }
@@ -420,7 +505,7 @@ pub(crate) fn acknowledge(
         [operation_id],
     )?;
     tx.execute(
-        "UPDATE timeline_upload_runs SET acked_position=?2 WHERE run=?1",
+        "UPDATE timeline_upload_runs SET acked_position=?2,upload_incomplete=CASE WHEN upload_incomplete IN ('registration_denied','needs_current_acceptance','re-enroll this device') THEN '' ELSE upload_incomplete END WHERE run=?1",
         params![row.0, row.2],
     )?;
     Ok(())
@@ -486,11 +571,7 @@ pub(crate) fn repair_gap(
         return Ok(());
     }
     let bytes = request.encode_to_vec();
-    let (count, used): (i64, i64) = tx.query_row(
-        "SELECT COUNT(*),COALESCE(SUM(length(request)),0) FROM timeline_upload_outbox",
-        [],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
+    let (count, used) = pending_usage(tx)?;
     if count >= MAX_PENDING_REQUESTS || used.saturating_add(bytes.len() as i64) > MAX_PENDING_BYTES
     {
         mark_incomplete(tx, &run_id, "outbox_overflow")?;
@@ -550,20 +631,21 @@ pub(crate) fn retry_registration(
 }
 
 pub(crate) fn deny(tx: &Transaction<'_>, operation_id: &str, reason: &str) -> rusqlite::Result<()> {
+    let recoverable = reason == "upload_denied";
     tx.execute(
-        "UPDATE timeline_upload_outbox SET terminal=1 WHERE operation_id=?1",
-        [operation_id],
+        "UPDATE timeline_upload_outbox SET terminal=?2 WHERE operation_id=?1",
+        params![operation_id, !recoverable],
     )?;
     tx.execute(
         "UPDATE timeline_upload_runs SET upload_incomplete=?2 WHERE run=(SELECT run FROM timeline_upload_outbox WHERE operation_id=?1)",
-        params![operation_id, reason],
+        params![operation_id, if recoverable { "needs_current_acceptance" } else { reason }],
     )?;
     Ok(())
 }
 
 pub(crate) fn registered(tx: &Transaction<'_>, operation_id: &str) -> rusqlite::Result<()> {
     tx.execute(
-        "UPDATE timeline_upload_runs SET registered=1 WHERE registration_operation_id=?1",
+        "UPDATE timeline_upload_runs SET registered=1,upload_incomplete=CASE WHEN upload_incomplete='registration_denied' THEN '' ELSE upload_incomplete END WHERE registration_operation_id=?1",
         [operation_id],
     )?;
     Ok(())
@@ -944,5 +1026,400 @@ mod tests {
             )
             .expect("stored logical request");
         assert_eq!(stored, original.encode_to_vec());
+    }
+
+    fn acceptance_for(
+        request: &UploadScrubbedTimelineRequest,
+        origin: &TimelineOriginEndorsement,
+        authority: Vec<u8>,
+    ) -> TimelineAdmissionAcceptance {
+        let now = i128::from(chrono::Utc::now().timestamp_micros());
+        TimelineAdmissionAcceptance {
+            origin_sha256: api::timeline_upload::origin_digest(origin)
+                .expect("origin digest")
+                .to_vec(),
+            uploader_device_public_key: origin.uploader_device_public_key.clone(),
+            deployment_public_key: origin.deployment_public_key.clone(),
+            request_sha256: api::timeline_upload::logical_request_digest(request, now)
+                .expect("request digest")
+                .to_vec(),
+            first_position: request.first_position,
+            event_count: request.events.len() as u32,
+            authority: Some(Authority::OwnerDerivedCapability(authority)),
+            signature: vec![8; 64],
+        }
+    }
+
+    #[test]
+    fn denied_upload_resumes_the_same_logical_request_with_fresh_acceptance() {
+        let (directory, store, mut run, origin) = fixture();
+        store
+            .publish_report(run.clone(), None, &[], Some((&origin, &[])))
+            .expect("publish");
+        run.state = State::Completed as i32;
+        store
+            .publish_report(run, None, &[], None)
+            .expect("later revision");
+        let original = store
+            .next_timeline_upload(i64::MAX)
+            .expect("queue")
+            .expect("upload")
+            .request;
+        let original_bytes = original.encode_to_vec();
+        store
+            .deny_timeline_upload(&original.client_operation_id, "upload_denied")
+            .expect("denial");
+        assert!(
+            store
+                .next_timeline_upload(i64::MAX)
+                .expect("query")
+                .is_none()
+        );
+        assert_eq!(
+            store.upload_health().expect("health").incomplete_reasons,
+            ["needs_current_acceptance"]
+        );
+        let connection = crate::local_metadata::open(directory.path()).expect("database");
+        let later_bytes: Vec<u8> = connection
+            .query_row(
+                "SELECT request FROM timeline_upload_outbox ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("later request");
+        let later =
+            UploadScrubbedTimelineRequest::decode(later_bytes.as_slice()).expect("later upload");
+        assert!(
+            store
+                .attach_timeline_acceptance(
+                    &later.client_operation_id,
+                    &acceptance_for(&later, &origin, vec![9])
+                )
+                .is_err()
+        );
+        let acceptance = acceptance_for(&original, &origin, vec![9]);
+        store
+            .attach_timeline_acceptance(&original.client_operation_id, &acceptance)
+            .expect("renew authority");
+        let resumed = store
+            .next_timeline_upload(i64::MAX)
+            .expect("queue")
+            .expect("resumed")
+            .request;
+        assert_eq!(resumed.client_operation_id, original.client_operation_id);
+        assert_eq!(resumed.acceptance, Some(acceptance));
+        let mut unchanged = resumed;
+        unchanged.acceptance = None;
+        assert_eq!(unchanged.encode_to_vec(), original_bytes);
+    }
+
+    #[test]
+    fn registration_denial_clears_after_successful_upload_but_gone_and_conflict_do_not_resume() {
+        for reason in ["resource_gone", "conflict"] {
+            let (_directory, store, run, origin) = fixture();
+            store
+                .publish_report(run, None, &[], Some((&origin, &[])))
+                .expect("publish");
+            let original = store
+                .next_timeline_upload(i64::MAX)
+                .expect("queue")
+                .expect("upload")
+                .request;
+            store
+                .deny_timeline_upload(&original.client_operation_id, reason)
+                .expect("terminal denial");
+            assert!(
+                store
+                    .attach_timeline_acceptance(
+                        &original.client_operation_id,
+                        &acceptance_for(&original, &origin, vec![9])
+                    )
+                    .is_err()
+            );
+            assert!(
+                store
+                    .next_timeline_upload(i64::MAX)
+                    .expect("query")
+                    .is_none()
+            );
+        }
+        let (_directory, store, run, origin) = fixture();
+        store
+            .publish_report(run, None, &[], Some((&origin, &[])))
+            .expect("publish");
+        let registration = store
+            .next_timeline_registration(i64::MAX)
+            .expect("registration")
+            .expect("pending");
+        store
+            .deny_timeline_registration(&registration.request.client_operation_id)
+            .expect("registration denied");
+        let pending = store
+            .next_timeline_upload(i64::MAX)
+            .expect("queue")
+            .expect("upload");
+        let ack = UploadScrubbedTimelineAck {
+            run: pending.request.run.clone(),
+            run_revision: pending.request.run_revision,
+            run_version: vec![8; 32],
+            next_position: pending.request.first_position + pending.request.events.len() as u64,
+            accepted_event_count: pending.request.events.len() as u32,
+            operation: pending.request.run.clone(),
+        };
+        store
+            .acknowledge_timeline_upload(&pending.request.client_operation_id, &ack)
+            .expect("upload succeeds");
+        assert_eq!(store.upload_health().expect("health").incomplete_runs, 0);
+    }
+
+    #[test]
+    fn unsupported_scan_pages_reach_later_valid_events() {
+        let (_directory, store, mut run, origin) = fixture();
+        store
+            .publish_report(
+                run.clone(),
+                None,
+                &[("start".into(), local_event(&run, "session_opened"))],
+                Some((&origin, &[])),
+            )
+            .expect("start");
+        let mut events = (0..512)
+            .map(|index| {
+                (
+                    format!("unsupported:{index}"),
+                    local_event(&run, "StatusLine"),
+                )
+            })
+            .collect::<Vec<_>>();
+        events.push(("valid".into(), local_event(&run, "Stop")));
+        events.push(("finish".into(), local_event(&run, "session_closed")));
+        run.state = State::Completed as i32;
+        store
+            .publish_report(run, None, &events, None)
+            .expect("local tail");
+        let mut kinds = Vec::new();
+        for _ in 0..8 {
+            for pending_run in store.incomplete_timeline_runs(8).expect("continuation") {
+                store
+                    .repair_timeline_upload(&pending_run)
+                    .expect("scan next page");
+            }
+            let Some(pending) = store.next_timeline_upload(i64::MAX).expect("queue") else {
+                continue;
+            };
+            kinds.extend(pending.request.events.iter().map(|event| event.kind));
+            let ack = UploadScrubbedTimelineAck {
+                run: pending.request.run.clone(),
+                run_revision: pending.request.run_revision,
+                run_version: vec![8; 32],
+                next_position: pending.request.first_position + pending.request.events.len() as u64,
+                accepted_event_count: pending.request.events.len() as u32,
+                operation: pending.request.run.clone(),
+            };
+            store
+                .acknowledge_timeline_upload(&pending.request.client_operation_id, &ack)
+                .expect("ack");
+        }
+        assert_eq!(
+            kinds,
+            [
+                UploadTimelineEventKind::RunStarted as i32,
+                UploadTimelineEventKind::TurnFinished as i32,
+                UploadTimelineEventKind::RunFinished as i32
+            ]
+        );
+        assert_eq!(store.upload_health().expect("health").incomplete_runs, 0);
+    }
+
+    #[test]
+    fn acceptance_evidence_cannot_exceed_the_pending_byte_budget() {
+        let (directory, store, run, origin) = fixture();
+        store
+            .publish_report(run, None, &[], Some((&origin, &[])))
+            .expect("publish");
+        let original = store
+            .next_timeline_upload(i64::MAX)
+            .expect("queue")
+            .expect("upload")
+            .request;
+        let first_acceptance = acceptance_for(&original, &origin, vec![9]);
+        store
+            .attach_timeline_acceptance(&original.client_operation_id, &first_acceptance)
+            .expect("initial evidence");
+        let acceptance = acceptance_for(&original, &origin, vec![9; 4000]);
+        let mut connection = crate::local_metadata::open(directory.path()).expect("database");
+        let tx = connection.transaction().expect("transaction");
+        let (_, used) = pending_usage(&tx).expect("usage");
+        let added = acceptance.encoded_len() as i64 - first_acceptance.encoded_len() as i64;
+        let fill = MAX_PENDING_BYTES - used - added + 1;
+        let mut left = fill;
+        for index in 0..300 {
+            if left <= 0 {
+                break;
+            }
+            let len = left.min(260_000);
+            tx.execute("INSERT INTO timeline_upload_outbox(operation_id,run,request,first_position,next_position) VALUES(?1,'run_1',zeroblob(?2),?3,?3)", params![format!("filler:{index}"), len, index + 1]).expect("fill pending outbox");
+            left -= len;
+        }
+        assert_eq!(left, 0);
+        tx.commit().expect("commit");
+        store
+            .attach_timeline_acceptance(&original.client_operation_id, &acceptance)
+            .expect("refuse without altering request");
+        assert_eq!(
+            store.upload_health().expect("health").incomplete_reasons,
+            ["acceptance_overflow"]
+        );
+        let connection = crate::local_metadata::open(directory.path()).expect("database");
+        let stored: i64 = connection
+            .query_row(
+                "SELECT length(acceptance) FROM timeline_upload_outbox WHERE operation_id=?1",
+                [&original.client_operation_id],
+                |row| row.get(0),
+            )
+            .expect("stored evidence");
+        assert_eq!(stored, first_acceptance.encoded_len() as i64);
+    }
+
+    #[test]
+    fn review_67236028_byte_acceptance_scenario_is_refused() {
+        const ATTEMPTED_BYTES: i64 = 67_236_028;
+        const ACCEPTANCES: usize = 32;
+        let (directory, store, run, origin) = fixture();
+        store
+            .publish_report(run, None, &[], Some((&origin, &[])))
+            .expect("publish");
+        let original = store
+            .next_timeline_upload(i64::MAX)
+            .expect("queue")
+            .expect("upload")
+            .request;
+        let mut requests = vec![original.clone()];
+        let evidence_size = acceptance_for(&original, &origin, vec![9; 4000]).encoded_len() as i64;
+        let base_target = ATTEMPTED_BYTES - evidence_size * ACCEPTANCES as i64;
+        assert!(base_target < MAX_PENDING_BYTES);
+        let mut connection = crate::local_metadata::open(directory.path()).expect("database");
+        let tx = connection.transaction().expect("transaction");
+        for _ in 1..ACCEPTANCES {
+            let mut request = original.clone();
+            request.client_operation_id = uuid::Uuid::now_v7().to_string();
+            tx.execute(
+                "INSERT INTO timeline_upload_outbox(operation_id,run,request,first_position,next_position) VALUES(?1,'run_1',?2,0,0)",
+                params![request.client_operation_id, request.encode_to_vec()],
+            ).expect("queued logical request");
+            requests.push(request);
+        }
+        let (_, used) = pending_usage(&tx).expect("usage");
+        let mut fill = base_target - used;
+        assert!(fill > 0);
+        for index in 0..300 {
+            if fill == 0 {
+                break;
+            }
+            let len = fill.min(260_000);
+            tx.execute(
+                "INSERT INTO timeline_upload_outbox(operation_id,run,request,first_position,next_position) VALUES(?1,'run_1',zeroblob(?2),?3,?3)",
+                params![format!("filler:{index}"), len, index + 1],
+            ).expect("fill pending outbox");
+            fill -= len;
+        }
+        assert_eq!(fill, 0);
+        assert_eq!(
+            pending_usage(&tx).expect("usage").1 + evidence_size * ACCEPTANCES as i64,
+            ATTEMPTED_BYTES
+        );
+        tx.commit().expect("commit");
+        let mut refused = false;
+        for request in requests {
+            let acceptance = acceptance_for(&request, &origin, vec![9; 4000]);
+            store
+                .attach_timeline_acceptance(&request.client_operation_id, &acceptance)
+                .expect("bounded attachment");
+            if store.upload_health().expect("health").incomplete_runs > 0 {
+                refused = true;
+                break;
+            }
+        }
+        assert!(refused, "the full attempted evidence set exceeded 64 MiB");
+        assert_eq!(
+            store.upload_health().expect("health").incomplete_reasons,
+            ["acceptance_overflow"]
+        );
+        let mut connection = crate::local_metadata::open(directory.path()).expect("database");
+        let tx = connection.transaction().expect("transaction");
+        assert!(pending_usage(&tx).expect("bounded usage").1 <= MAX_PENDING_BYTES);
+    }
+
+    #[test]
+    fn pending_registration_evidence_is_reserved_before_queuing() {
+        let (directory, _store, mut run, mut origin) = fixture();
+        run.r#ref.as_mut().expect("reference").id = "run_2".into();
+        origin.run_id = "run_2".into();
+        let mut connection = crate::local_metadata::open(directory.path()).expect("database");
+        let tx = connection.transaction().expect("transaction");
+        append_with_limits(&tx, &run, Some((&origin, &[7; 4096])), 1024, 10)
+            .expect("local run remains publishable");
+        tx.commit().expect("commit");
+        let connection = crate::local_metadata::open(directory.path()).expect("database");
+        let (length, reason): (i64, String) = connection.query_row("SELECT length(origin),upload_incomplete FROM timeline_upload_runs WHERE run='run_2'", [], |row| Ok((row.get(0)?, row.get(1)?))).expect("incomplete run");
+        assert_eq!(length, 0);
+        assert_eq!(reason, "outbox_overflow");
+        let mut count_limited = run;
+        count_limited.r#ref.as_mut().expect("reference").id = "run_3".into();
+        origin.run_id = "run_3".into();
+        drop(connection);
+        let mut connection = crate::local_metadata::open(directory.path()).expect("database");
+        let tx = connection.transaction().expect("transaction");
+        append_with_limits(
+            &tx,
+            &count_limited,
+            Some((&origin, &[])),
+            MAX_PENDING_BYTES,
+            0,
+        )
+        .expect("count refusal");
+        tx.commit().expect("commit");
+        let connection = crate::local_metadata::open(directory.path()).expect("database");
+        let reason: String = connection
+            .query_row(
+                "SELECT upload_incomplete FROM timeline_upload_runs WHERE run='run_3'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count status");
+        assert_eq!(reason, "outbox_overflow");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM timeline_upload_outbox", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("queue"),
+            0
+        );
+    }
+
+    #[test]
+    fn full_upload_bytes_ignore_every_local_free_text_field() {
+        let mut requests = Vec::new();
+        for text in ["private command alpha", "secret file path beta"] {
+            let (_directory, store, mut run, origin) = fixture();
+            run.harness = text.into();
+            run.model = text.into();
+            run.agent_id = text.into();
+            let mut event = local_event(&run, "tool.execute.before");
+            event.summary = text.into();
+            event.detail = Some(text.into());
+            event.tool_name = Some(text.into());
+            store
+                .publish_report(run, None, &[(text.into(), event)], Some((&origin, &[])))
+                .expect("local publication");
+            let mut request = store
+                .next_timeline_upload(i64::MAX)
+                .expect("queue")
+                .expect("upload")
+                .request;
+            request.client_operation_id = uuid::Uuid::from_u128(42).to_string();
+            requests.push(request.encode_to_vec());
+        }
+        assert_eq!(requests[0], requests[1]);
     }
 }

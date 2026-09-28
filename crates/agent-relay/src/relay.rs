@@ -1098,6 +1098,7 @@ impl HarnessBridgeRuntime {
     }
 
     fn open_session(&mut self, params: OpenSessionParams) -> Result<OpenSessionResult> {
+        let _report_lock = self.reports.mutation_lock().write()?;
         if self.user_config.harness.mode == HarnessMode::Off {
             return Err(anyhow!("harness integration is disabled in user config"));
         }
@@ -1305,6 +1306,7 @@ impl HarnessBridgeRuntime {
     }
 
     fn update_progress(&mut self, params: UpdateProgressParams) -> Result<SessionMutationResult> {
+        let _report_lock = self.reports.mutation_lock().write()?;
         let mut report = self
             .reports
             .load(&params.heddle_session_id)?
@@ -1580,6 +1582,7 @@ impl HarnessBridgeRuntime {
     }
 
     fn record_usage(&mut self, params: RecordUsageParams) -> Result<SessionMutationResult> {
+        let _report_lock = self.reports.mutation_lock().write()?;
         let mut report = self
             .reports
             .load(&params.heddle_session_id)?
@@ -1618,6 +1621,7 @@ impl HarnessBridgeRuntime {
         &mut self,
         params: RecordTouchedPathsParams,
     ) -> Result<SessionMutationResult> {
+        let _report_lock = self.reports.mutation_lock().write()?;
         let mut report = self
             .reports
             .load(&params.heddle_session_id)?
@@ -1628,6 +1632,7 @@ impl HarnessBridgeRuntime {
     }
 
     fn close_session(&mut self, params: CloseSessionParams) -> Result<CloseSessionResult> {
+        let _report_lock = self.reports.mutation_lock().write()?;
         let mut report = self
             .reports
             .load(&params.heddle_session_id)?
@@ -1680,6 +1685,7 @@ impl HarnessBridgeRuntime {
     // JSON-lines harness bridge entrypoint (phase 1 free deletion).
     #[cfg_attr(not(test), allow(dead_code))]
     fn flush_reports(&mut self, params: FlushReportsParams) -> Result<FlushReportsResult> {
+        let _report_lock = self.reports.mutation_lock().write()?;
         let mut flushed = 0usize;
         let session_ids = match params.heddle_session_id {
             Some(session_id) => vec![session_id],
@@ -3083,6 +3089,10 @@ impl SessionReportStore {
         self.dir.join("outbox.jsonl")
     }
 
+    fn mutation_lock(&self) -> heddle_fs_prims::lock::RepoLock {
+        heddle_fs_prims::lock::RepoLock::at(self.dir.join("mutation.lock"))
+    }
+
     fn load(&self, heddle_session_id: &str) -> Result<Option<SessionReportEnvelope>> {
         let path = self.session_path(heddle_session_id);
         if !path.exists() {
@@ -3559,6 +3569,54 @@ mod tests {
             .unwrap();
         assert!(!attached.created_session);
         assert_eq!(created.heddle_session_id, attached.heddle_session_id);
+    }
+
+    #[test]
+    fn concurrent_hooks_keep_every_checkpoint_from_the_same_report() {
+        let (_temp, repo) = init_repo();
+        let mut runtime = HarnessBridgeRuntime::new(repo, UserConfig::default(), test_bridge());
+        let opened = runtime
+            .open_session(OpenSessionParams {
+                harness: Some("claude-code".into()),
+                ..OpenSessionParams::default()
+            })
+            .expect("open report");
+        let root = runtime.repo.root().to_path_buf();
+        let gate = std::sync::Arc::new(std::sync::Barrier::new(12));
+        let handles = (0..12)
+            .map(|index| {
+                let gate = gate.clone();
+                let root = root.clone();
+                let session_id = opened.heddle_session_id.clone();
+                std::thread::spawn(move || {
+                    let repo = Repository::open(&root).expect("shared repo");
+                    let mut hook =
+                        HarnessBridgeRuntime::new(repo, UserConfig::default(), test_bridge());
+                    gate.wait();
+                    hook.update_progress(UpdateProgressParams {
+                        heddle_session_id: session_id,
+                        status: Some("Stop".into()),
+                        message: Some(format!("hook {index}")),
+                        ..UpdateProgressParams::default()
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().expect("hook thread").expect("hook published");
+        }
+        let report = runtime
+            .reports
+            .load(&opened.heddle_session_id)
+            .expect("read report")
+            .expect("saved report");
+        assert_eq!(report.progress.len(), 12);
+        let messages = report
+            .progress
+            .iter()
+            .filter_map(|checkpoint| checkpoint.message.as_deref())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(messages.len(), 12);
     }
 
     #[test]

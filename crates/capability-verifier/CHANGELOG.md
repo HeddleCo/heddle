@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.5](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.21.4...heddleco-capability-verifier-v0.21.5) - 2026-09-28
+
+### Other
+
+- pin heddle-api 0.31.0-alpha.6
+
 ## [0.21.4](https://github.com/HeddleCo/heddle/compare/heddleco-capability-verifier-v0.21.3...heddleco-capability-verifier-v0.21.4) - 2026-09-27
 
 ### Other

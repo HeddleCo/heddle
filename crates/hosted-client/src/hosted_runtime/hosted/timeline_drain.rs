@@ -35,6 +35,11 @@ pub async fn drain_timeline_outbox_once() -> Result<()> {
             if registration.is_none() && upload.is_none() {
                 continue;
             }
+            if let Some(device) =
+                repo::identity::load_device(&repo::identity::device_identity_path())?
+            {
+                require_retained_bearer(&store, &device)?;
+            }
             let (client, target_key) =
                 match tokio::time::timeout(Duration::from_secs(10), uploader_client()).await {
                     Ok(Ok(value)) => value,
@@ -126,6 +131,17 @@ pub async fn drain_timeline_outbox_once() -> Result<()> {
             .id
             .to_string();
     }
+}
+
+fn require_retained_bearer(
+    store: &RunStore,
+    device: &repo::identity::DeviceIdentity,
+) -> Result<()> {
+    if device.credential_token.is_none() || device.credential_subject.is_none() {
+        store.require_timeline_reenrollment()?;
+        anyhow::bail!("timeline uploader: re-enroll this device");
+    }
+    Ok(())
 }
 
 async fn process_registration(
@@ -261,5 +277,33 @@ mod tests {
         let mut substituted = device;
         substituted.credential_token = Some(other_root.token);
         assert!(validated_device_bearer(&substituted).is_err());
+    }
+
+    #[test]
+    fn older_enrolled_identity_requires_reenrollment_in_upload_health() {
+        let directory = tempfile::tempdir().expect("directory");
+        let store = RunStore::open(directory.path()).expect("store");
+        let connection = repo::local_metadata::open(directory.path()).expect("database");
+        connection.execute("INSERT INTO timeline_upload_runs(run,origin,origin_biscuit,target_deployment,registration_operation_id) VALUES('run-1',X'01',X'',X'02','registration')", []).expect("pending registration");
+        let signer = Ed25519Signer::from_seed(&[23; 32]).expect("device key");
+        let device = repo::identity::DeviceIdentity {
+            public_key: hex::encode(signer.public_key()),
+            private_key_pem: signer.to_pem().expect("pem"),
+            server: "api.example.test".into(),
+            linked_at: String::new(),
+            credential_token: None,
+            credential_subject: None,
+        };
+        assert!(
+            require_retained_bearer(&store, &device)
+                .expect_err("older device must be visible")
+                .to_string()
+                .contains("re-enroll this device")
+        );
+        assert_eq!(
+            store.upload_health().expect("health").incomplete_reasons,
+            ["re-enroll this device"]
+        );
+        assert!(validated_device_bearer(&device).is_err());
     }
 }

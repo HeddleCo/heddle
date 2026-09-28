@@ -55,6 +55,7 @@ struct DaemonStatusOutput {
     materialized_threads: Vec<MaterializedThreadStatus>,
     timeline_pending_requests: u64,
     timeline_incomplete_runs: u64,
+    timeline_upload_incomplete_reasons: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +138,7 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
                     materialized_threads,
                     timeline_pending_requests: upload_health.pending_requests,
                     timeline_incomplete_runs: upload_health.incomplete_runs,
+                    timeline_upload_incomplete_reasons: upload_health.incomplete_reasons.clone(),
                 };
                 write_full_command_json(
                     &output,
@@ -188,6 +190,7 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
                     materialized_threads,
                     timeline_pending_requests: upload_health.pending_requests,
                     timeline_incomplete_runs: upload_health.incomplete_runs,
+                    timeline_upload_incomplete_reasons: upload_health.incomplete_reasons.clone(),
                 };
                 write_full_command_json(
                     &output,
@@ -225,6 +228,9 @@ pub fn cmd_daemon_status(cli: &Cli) -> Result<()> {
             "Timeline upload: {} pending, {} upload_incomplete",
             upload_health.pending_requests, upload_health.incomplete_runs
         );
+        for reason in &upload_health.incomplete_reasons {
+            println!("  {reason}");
+        }
     }
     Ok(())
 }
