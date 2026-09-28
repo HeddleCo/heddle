@@ -6,12 +6,11 @@ use refs::RefExpectation;
 use sley::{
     ObjectId as SleyObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
 };
-use sley_refs::ReflogEntry;
 
 use crate::{
     git_core::{
-        GitProjection, GitProjectionError, GitProjectionResult, git_err,
-        thread_is_unclaimed_bootstrap,
+        GitProjection, GitProjectionError, GitProjectionResult, RefRewriteAuthorization, git_err,
+        set_reference_authorized, thread_is_unclaimed_bootstrap,
     },
     git_util::FailedRefExportReason,
 };
@@ -204,12 +203,13 @@ pub(crate) fn force_rewind_track_to_branch(
     git_oid: SleyObjectId,
 ) -> GitProjectionResult<()> {
     let branch_ref = format!("refs/heads/{track_name}");
-    set_ref(
+    set_reference_authorized(
         repo,
         &branch_ref,
         git_oid,
         RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(expected_old)),
         "heddle: retract embargoed thread frontier",
+        RefRewriteAuthorization::ManagedProjectionWithdrawal,
     )
 }
 
@@ -265,29 +265,18 @@ pub(crate) fn set_ref(
     precondition: RefPrecondition,
     message: &str,
 ) -> GitProjectionResult<()> {
-    let old_oid = match &precondition {
-        RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
-        | RefPrecondition::ExistingMustMatch(ReferenceTarget::Direct(oid)) => *oid,
-        _ => SleyObjectId::null(repo.object_format()),
-    };
-    let refs = repo.references();
-    let mut tx = refs.transaction();
-    tx.update_to(
+    set_reference_authorized(
+        repo,
         name,
-        ReferenceTarget::Direct(oid),
+        oid,
         precondition.clone(),
-        Some(ReflogEntry {
-            old_oid,
-            new_oid: oid,
-            committer: git_projection_identity(),
-            message: message.as_bytes().to_vec(),
-        }),
-    );
-    tx.commit()
-        .map_err(|err| GitProjectionError::RefExportFailed {
-            name: name.to_string(),
-            reason: classify_failed_ref_write(repo, name, &precondition, oid, git_err(err)),
-        })
+        message,
+        RefRewriteAuthorization::None,
+    )
+    .map_err(|err| GitProjectionError::RefExportFailed {
+        name: name.to_string(),
+        reason: classify_failed_ref_write(repo, name, &precondition, oid, err),
+    })
 }
 
 /// Classify a failed ref write into the export's [`FailedRefExportReason`]
@@ -403,14 +392,6 @@ fn peeled_oid(
         Ok(commit_oid) => Ok(Some(commit_oid)),
         Err(_) => Ok(None),
     }
-}
-
-fn git_projection_identity() -> Vec<u8> {
-    let seconds = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    format!("Heddle <heddle@local> {seconds} +0000").into_bytes()
 }
 
 #[cfg(test)]

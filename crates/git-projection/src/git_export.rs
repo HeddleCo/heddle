@@ -22,11 +22,11 @@ use crate::{
     facet_gate::require_source_history_projection,
     git_core::{
         GitProjection, GitProjectionError, GitProjectionResult, LocalGitIdentity, RefNamespace,
-        RefUpdate, SyncMapping, collect_ref_updates, copy_reachable_objects,
-        count_exported_commits, delete_reference_if_present, delete_reference_matching,
+        RefRewriteAuthorization, RefUpdate, SyncMapping, collect_ref_updates,
+        copy_reachable_objects, count_exported_commits, delete_reference_authorized,
         git_config_identity_with_global_fallback, git_err, materialize_projection_managed_refs,
         plan_destination_reconcile, principal_lacks_identity, read_projection_managed_refs,
-        set_reference, write_projection_managed_refs,
+        set_reference, set_reference_authorized, write_projection_managed_refs,
     },
     git_notes,
     git_reconstruct::{
@@ -856,7 +856,8 @@ fn export_scoped(
         let branch_ref = format!("refs/heads/{track_name}");
         let in_scope = thread.is_none() || thread == Some(track_name.as_str());
         let desired_oid = desired.get(&branch_ref).copied();
-        let existing_oid = branch_tip_oid(&repo, &branch_ref);
+        let existing_raw_oid = direct_ref_oid(&repo, &branch_ref);
+        let existing_oid = existing_raw_oid.and_then(|oid| peel_to_commit_oid(&repo, oid));
         let managed_oid = managed_record.get(&branch_ref).copied();
         match reconcile_ref(
             ReconcileNs::Head,
@@ -917,7 +918,19 @@ fn export_scoped(
                     },
                 ));
             }
-            ReconcileOp::Delete => match delete_reference_if_present(&repo, &branch_ref) {
+            ReconcileOp::Delete => match existing_raw_oid
+                .ok_or_else(|| {
+                    GitProjectionError::Git(format!("branch {branch_ref} has no direct tip"))
+                })
+                .and_then(|expected_old| {
+                    delete_reference_authorized(
+                        &repo,
+                        &branch_ref,
+                        Some(expected_old),
+                        false,
+                        RefRewriteAuthorization::ManagedProjectionWithdrawal,
+                    )
+                }) {
                 Ok(()) => {
                     managed_record.remove(&branch_ref);
                 }
@@ -1009,7 +1022,17 @@ fn export_scoped(
                         .push((tag_ref.clone(), failed_set_reason(err))),
                 }
             }
-            ReconcileOp::Delete => match delete_reference_if_present(&repo, &tag_ref) {
+            ReconcileOp::Delete => match existing_raw_oid
+                .ok_or_else(|| GitProjectionError::Git(format!("tag {tag_ref} has no direct tip")))
+                .and_then(|expected_old| {
+                    delete_reference_authorized(
+                        &repo,
+                        &tag_ref,
+                        Some(expected_old),
+                        false,
+                        RefRewriteAuthorization::ManagedProjectionWithdrawal,
+                    )
+                }) {
                 Ok(()) => {
                     managed_record.remove(&tag_ref);
                 }
@@ -1068,12 +1091,13 @@ fn export_scoped(
                 let constraint = write.old.map_or(RefPrecondition::MustNotExist, |old| {
                     RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(old))
                 });
-                match set_reference(
+                match set_reference_authorized(
                     &repo,
                     &write.full_name,
                     write.new,
                     constraint,
                     "heddle: rebuild served state notes",
+                    RefRewriteAuthorization::RebuildServedNotes,
                 ) {
                     Ok(()) => {
                         managed_record.insert(write.full_name, write.new);
@@ -1084,7 +1108,13 @@ fn export_scoped(
                 }
             }
             for delete in plan.deletes {
-                match delete_reference_matching(&repo, &delete.full_name, delete.old) {
+                match delete_reference_authorized(
+                    &repo,
+                    &delete.full_name,
+                    Some(delete.old),
+                    false,
+                    RefRewriteAuthorization::RebuildServedNotes,
+                ) {
                     Ok(()) => {
                         managed_record.remove(&delete.full_name);
                     }
@@ -1350,19 +1380,6 @@ fn served_state_ids(
         }
     }
     Ok(served)
-}
-
-/// Resolve `ref_name` to its tip commit OID in the mirror, or `None` when the
-/// ref is absent or unpeelable.
-fn branch_tip_oid(repo: &SleyRepository, ref_name: &str) -> Option<ObjectId> {
-    let oid = repo
-        .find_reference(ref_name)
-        .ok()
-        .flatten()?
-        .peeled_oid(repo)
-        .ok()
-        .flatten()?;
-    peel_to_commit_oid(repo, oid)
 }
 
 fn direct_ref_oid(repo: &SleyRepository, ref_name: &str) -> Option<ObjectId> {

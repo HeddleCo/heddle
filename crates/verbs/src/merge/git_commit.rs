@@ -10,7 +10,10 @@
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, anyhow};
-use heddle_git_projection::{git_core::LocalGitIdentity, git_export};
+use heddle_git_projection::{
+    git_core::{LocalGitIdentity, RefRewriteAuthorization, set_reference_with_identity_authorized},
+    git_export,
+};
 use objects::{
     HeddleError, RecoveryDetails,
     object::{Attribution, StateId},
@@ -22,7 +25,6 @@ use sley::{
     CommitObject, GitObjectType, IndexWriteOptions, ObjectId as GitObjectId, RefPrecondition,
     ReferenceTarget, Repository as SleyRepository,
 };
-use sley_refs::ReflogEntry;
 
 /// Outcome of `--git-commit --preview` — what *would* be committed if
 /// the merge ran for real.
@@ -336,20 +338,16 @@ fn update_head_ref(
         .as_ref()
         .map(|name| name.as_str().to_string())
         .unwrap_or_else(|| "HEAD".to_string());
-    let refs = git.references();
-    let mut tx = refs.transaction();
-    tx.update_to(
-        ref_name,
-        ReferenceTarget::Direct(new_head),
+    set_reference_with_identity_authorized(
+        git,
+        &ref_name,
+        new_head,
         RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(old_head)),
-        Some(ReflogEntry {
-            old_oid: old_head,
-            new_oid: new_head,
-            committer: identity.to_signature(seconds).to_ident_bytes(),
-            message: b"heddle: merge --git-commit".to_vec(),
-        }),
-    );
-    tx.commit().context("failed to update Git HEAD")?;
+        "heddle: merge --git-commit",
+        identity.to_signature(seconds).to_ident_bytes(),
+        RefRewriteAuthorization::None,
+    )
+    .context("failed to update Git HEAD")?;
     Ok(())
 }
 

@@ -9,7 +9,10 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use heddle_git_projection::git_core::{open_repo as open_git_repo, set_reference};
+use heddle_git_projection::git_core::{
+    RefRewriteAuthorization, delete_reference_authorized, open_repo as open_git_repo,
+    set_reference_authorized,
+};
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     lock::{RepoLock, WriteLockGuard},
@@ -26,9 +29,8 @@ use repo::{
     refresh_thread_freshness,
 };
 use sley::{
-    BString as GitByteString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions,
-    IndexWriteOptions, ObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
-    Signature,
+    BString as GitByteString, GitObjectType, GitTime, HeadUpdateOptions, IndexWriteOptions,
+    ObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository, Signature,
 };
 use sley_refs::ReflogEntry;
 
@@ -1144,12 +1146,13 @@ fn restore_git_state(repo: &Repository, branch: &str, state: &GitState) -> Heddl
     if branch != "HEAD" {
         let ref_name = format!("refs/heads/{branch}");
         match state.checkout_branch_oid {
-            Some(oid) => set_reference(
+            Some(oid) => set_reference_authorized(
                 &git,
                 &ref_name,
                 oid,
                 RefPrecondition::Any,
                 "heddle: rollback git checkpoint",
+                RefRewriteAuthorization::UndoRollback,
             )
             .map_err(|error| apply_error(anyhow!(error)))?,
             None => delete_ref_if_present(&git, &ref_name).map_err(apply_error)?,
@@ -1169,7 +1172,7 @@ fn restore_git_state(repo: &Repository, branch: &str, state: &GitState) -> Heddl
 
 fn delete_ref_if_present(git: &SleyRepository, ref_name: &str) -> Result<()> {
     if ref_target_oid(git, ref_name)?.is_some() {
-        delete_reference_matching(git, ref_name, None)?;
+        delete_reference_matching(git, ref_name, None, RefRewriteAuthorization::UndoRollback)?;
     }
     Ok(())
 }
@@ -1203,6 +1206,7 @@ fn apply_git_checkpoint_undo(
                             previous_oid,
                             new_oid,
                             "heddle: undo git checkpoint",
+                            RefRewriteAuthorization::Undo,
                         )
                     })?;
                 }
@@ -1221,6 +1225,7 @@ fn apply_git_checkpoint_undo(
                         &git_checkout_repo(repo)?,
                         &format!("refs/heads/{branch}"),
                         Some(new_oid),
+                        RefRewriteAuthorization::Undo,
                     )
                 })?;
             }
@@ -1255,17 +1260,19 @@ fn apply_git_checkpoint_redo(
                         new_oid,
                         previous_oid,
                         "heddle: redo git checkpoint",
+                        RefRewriteAuthorization::Redo,
                     )
                 })?;
             }
             None => {
                 steps.git_restore_snapshot(repo, branch, &snapshot, || {
-                    set_reference(
+                    set_reference_authorized(
                         &git_checkout_repo(repo)?,
                         &format!("refs/heads/{branch}"),
                         new_oid,
                         RefPrecondition::Any,
                         "heddle: redo git checkpoint",
+                        RefRewriteAuthorization::Redo,
                     )
                     .map_err(|error| anyhow!(error))
                 })?;
@@ -1369,6 +1376,7 @@ fn set_attached_git_head(
     target: ObjectId,
     expected: ObjectId,
     log_message: &str,
+    authorization: RefRewriteAuthorization,
 ) -> Result<()> {
     let ref_name = if branch == "HEAD" {
         "HEAD".to_string()
@@ -1381,6 +1389,7 @@ fn set_attached_git_head(
         target,
         RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(expected)),
         log_message,
+        authorization,
     )
     .map_err(|error| anyhow!("failed to update Git HEAD for branch '{branch}': {error}"))
 }
@@ -1413,6 +1422,7 @@ fn delete_reference_matching(
     repo: &SleyRepository,
     name: &str,
     expected: Option<ObjectId>,
+    authorization: RefRewriteAuthorization,
 ) -> Result<()> {
     let current = ref_target_oid(repo, name)?;
     if current.is_none() {
@@ -1430,29 +1440,8 @@ fn delete_reference_matching(
                 .unwrap_or_else(|| "missing".to_string())
         ));
     }
-    let refs = repo.references();
-    match refs
-        .read_ref(name)
-        .map_err(|error| anyhow!("failed to inspect Git reference '{name}': {error}"))?
-    {
-        Some(ReferenceTarget::Direct(oid)) => repo
-            .delete_ref(DeleteRef {
-                name: FullName::new(name)
-                    .map_err(|error| anyhow!("invalid Git reference '{name}': {error}"))?,
-                expected_old: Some(expected.unwrap_or(oid)),
-                expected: None,
-                reflog: None,
-                reflog_committer: None,
-            })
-            .map_err(|error| anyhow!("failed to delete Git reference '{name}': {error}")),
-        Some(ReferenceTarget::Symbolic(_)) => refs
-            .delete_symbolic_ref(name)
-            .map(|_| ())
-            .map_err(|error| anyhow!("failed to delete Git reference '{name}': {error}")),
-        None => Err(anyhow!(
-            "failed to delete Git reference '{name}': ref is missing"
-        )),
-    }
+    delete_reference_authorized(repo, name, expected.or(current), false, authorization)
+        .map_err(|error| anyhow!("failed to delete Git reference '{name}': {error}"))
 }
 
 fn git_signature() -> Signature {
@@ -1485,6 +1474,7 @@ fn set_reference_with_reflog(
     target: ObjectId,
     constraint: RefPrecondition,
     log_message: &str,
+    authorization: RefRewriteAuthorization,
 ) -> Result<()> {
     let refs = repo.references();
     let old_oid = match refs
@@ -1502,14 +1492,7 @@ fn set_reference_with_reflog(
             .and_then(|head| head.symbolic_target.map(|target| target.to_string()))
             .as_deref()
             == Some(name);
-    let mut tx = refs.transaction();
-    tx.update_to(
-        name.to_string(),
-        ReferenceTarget::Direct(target),
-        constraint,
-        Some(reflog.clone()),
-    );
-    tx.commit()
+    set_reference_authorized(repo, name, target, constraint, log_message, authorization)
         .map_err(|error| anyhow!("failed to update Git reference '{name}': {error}"))?;
     if should_append_head_reflog {
         refs.append_reflog("HEAD", &reflog)

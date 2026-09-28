@@ -26,7 +26,7 @@ use objects::{
 use repo::Repository as HeddleRepository;
 use sley::{CommitObject, EntryKind, GitObjectType, ObjectId, Repository, TreeEditor};
 
-use super::git_core::{GitProjectionError, GitProjectionResult, git_err};
+use super::git_core::{GitProjectionError, GitProjectionResult, git_err, write_heddle_note_bytes};
 
 /// The notes ref heddle uses. Git-compatible notes readers can opt into
 /// this location, while Heddle reads and writes it natively.
@@ -131,21 +131,7 @@ pub fn write_note(
     let json = note
         .to_json_bytes()
         .map_err(|error| GitProjectionError::Git(format!("note serialize: {error}")))?;
-    let notes_ref = notes_ref();
-    let refs = repo.references();
-    sley::notes::upsert_note_bytes_for(
-        repo.git_dir(),
-        repo.object_format(),
-        &refs,
-        &notes_ref,
-        &commit_oid,
-        &json,
-        "heddle: state metadata",
-        &git_projection_notes_identity(),
-        sley::notes::notes_ref_expected(&refs, &notes_ref).map_err(git_err)?,
-    )
-    .map_err(git_err)?;
-    Ok(())
+    write_heddle_note_bytes(repo, commit_oid, &json)
 }
 
 /// Look up the note attached to `commit_oid`, if any.
@@ -195,7 +181,7 @@ pub fn read_all_notes(repo: &Repository) -> GitProjectionResult<HashMap<ObjectId
     Ok(out)
 }
 
-fn git_projection_notes_identity() -> sley::notes::NotesCommitIdentity {
+pub(crate) fn git_projection_notes_identity() -> sley::notes::NotesCommitIdentity {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
