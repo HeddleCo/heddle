@@ -44,6 +44,9 @@ fn json_mode_keeps_stdout_clean_on_every_catalog_command() {
     let catalog = cli::cli::commands::build_command_catalog();
     let mut checked = 0_usize;
     let mut violations: Vec<String> = Vec::new();
+    // Copy one initialized store so each command still gets its own repo.
+    let seed = TempDir::new().expect("seed repository directory");
+    let _repo = Repository::init_default(seed.path()).expect("seed repository");
 
     for entry in &catalog.commands {
         if !entry.supports_json || entry.has_subcommands {
@@ -54,9 +57,19 @@ fn json_mode_keeps_stdout_clean_on_every_catalog_command() {
         }
 
         let temp = TempDir::new().expect("scratch temp dir");
-        // Ignore init failure — the per-command run below will produce an
-        // error envelope on stderr that we still want to check.
-        let _ = heddle(&["init"], Some(temp.path()));
+        for item in walkdir::WalkDir::new(seed.path()).min_depth(1) {
+            let item = item.expect("seed repository entry");
+            let relative = item
+                .path()
+                .strip_prefix(seed.path())
+                .expect("seed relative path");
+            let destination = temp.path().join(relative);
+            if item.file_type().is_dir() {
+                std::fs::create_dir(&destination).expect("copy seed directory");
+            } else {
+                std::fs::copy(item.path(), &destination).expect("copy seed file");
+            }
+        }
 
         let mut argv: Vec<&str> = vec!["--output", "json"];
         for segment in &entry.path {
