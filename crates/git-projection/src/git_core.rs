@@ -1229,8 +1229,22 @@ impl<'a> GitProjection<'a> {
             self.set_commit_parent_override(*state_id, vec![previous]);
         }
 
+        if checkpoint_summary.is_some()
+            && let Some(previous) = checkout.previous_branch
+            && let Some(mapped) = self.mapping.get_git(state_id)
+            && checkout.object_repo.read_object(&mapped).is_ok()
+        {
+            ensure_commit_update_fast_forward(
+                &checkout.object_repo,
+                &checkout.branch_ref,
+                previous,
+                mapped,
+            )?;
+        }
+
         let identity = git_config_identity_with_global_fallback(self.heddle_repo.root())?;
         let audience = AudienceTier::Public;
+        let mut pending_notes = Vec::new();
         for reachable in self.sort_states_topologically(&[*state_id])? {
             let message_override = self
                 .commit_message_overrides
@@ -1287,7 +1301,7 @@ impl<'a> GitProjection<'a> {
                             )
                     });
                 let note = git_notes::note_for_state(self.heddle_repo, &state, rewrites_parents)?;
-                git_notes::write_note(&checkout.object_repo, git_oid, &note)?;
+                pending_notes.push((git_oid, note));
             }
         }
 
@@ -1296,6 +1310,19 @@ impl<'a> GitProjection<'a> {
                 WriteThroughSkipReason::NoMappedCommit,
             ));
         };
+        if checkpoint_summary.is_some()
+            && let Some(previous) = checkout.previous_branch
+        {
+            ensure_commit_update_fast_forward(
+                &checkout.object_repo,
+                &checkout.branch_ref,
+                previous,
+                git_oid,
+            )?;
+        }
+        for (git_oid, note) in pending_notes {
+            git_notes::write_note(&checkout.object_repo, git_oid, &note)?;
+        }
         materialize_active_checkout_closure(
             self.heddle_repo,
             &self.mapping,
@@ -2270,7 +2297,6 @@ fn full_ref_name(update: &RefUpdate) -> String {
     GitRefName::content_full_name(update.namespace, &update.name)
 }
 
-#[cfg(test)]
 pub fn ensure_commit_update_fast_forward(
     repo: &SleyRepository,
     name: &str,
@@ -4088,6 +4114,66 @@ mod tests {
 
         ensure_commit_update_fast_forward(&repo, "refs/heads/main", old, new)
             .expect("descendant update should be allowed");
+    }
+
+    #[test]
+    fn checkpoint_non_fast_forward_leaves_branch_and_notes_refs_unchanged() {
+        use objects::object::{Attribution, Principal};
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let heddle = HeddleRepository::init_default(tmp.path()).expect("init Heddle");
+        let base = heddle
+            .head()
+            .expect("read Heddle head")
+            .expect("base state");
+        let git = SleyRepository::init(tmp.path()).expect("init Git");
+        git.write_raw_object(GitObjectType::Tree, Vec::new())
+            .expect("empty tree");
+        let root = test_commit(&git, "root", &[]);
+        let previous = test_commit(&git, "previous main", &[root]);
+        set_reference(
+            &git,
+            "refs/heads/main",
+            previous,
+            RefPrecondition::Any,
+            "test: main",
+        )
+        .expect("set main");
+        write_head_symref(git.git_dir(), "refs/heads/main").expect("attach Git HEAD");
+
+        std::fs::write(tmp.path().join("story.txt"), "sibling change\n")
+            .expect("write Heddle change");
+        let state = heddle
+            .snapshot_with_attribution(
+                Some("sibling change".to_string()),
+                None,
+                Attribution::human(Principal::new("Test", "test@example.com")),
+            )
+            .expect("capture sibling state");
+        let mut bridge = GitProjection::new(&heddle);
+        bridge.mapping.insert(base, root);
+
+        let error = bridge
+            .write_through_current_checkout_with_message(state.state_id, "checkpoint".to_string())
+            .expect_err("checkpoint must refuse a non-fast-forward main update");
+        assert!(
+            matches!(error, GitProjectionError::NonFastForwardRef { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            git.find_reference("refs/heads/main")
+                .expect("main ref")
+                .expect("main exists")
+                .peeled_oid(&git)
+                .expect("main oid"),
+            Some(previous)
+        );
+        assert!(
+            git.find_reference(git_notes::NOTES_REF)
+                .expect("notes ref")
+                .is_none(),
+            "a refused checkpoint must not publish its Git note"
+        );
     }
 
     fn test_commit(repo: &SleyRepository, message: &str, parents: &[ObjectId]) -> ObjectId {

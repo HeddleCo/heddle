@@ -81,6 +81,7 @@ pub fn cmd_collapse(
         repo,
         &user_config,
         &resolved_states,
+        resolved_states[0].parents.clone(),
         into.clone(),
         confidence,
         published_ref,
@@ -126,16 +127,15 @@ pub(crate) fn collapse_resolved_states(
     repo: &repo::Repository,
     user_config: &UserConfig,
     resolved_states: &[State],
+    parents: Vec<StateId>,
     into: String,
     confidence: Option<f32>,
     published_ref: CollapsePublishedRef,
 ) -> Result<State> {
-    let first_state = &resolved_states[0];
     let last_state = &resolved_states[resolved_states.len() - 1];
     let attribution = resolve_attribution(repo, user_config)?;
 
-    let mut new_state =
-        State::new_collapse_of(last_state.tree, first_state.parents.clone(), attribution);
+    let mut new_state = State::new_collapse_of(last_state.tree, parents, attribution);
     new_state = new_state.with_intent(into);
     new_state = new_state.with_lineage(
         resolved_states

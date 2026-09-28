@@ -49,10 +49,30 @@ pub(crate) fn preflight_checkpoint(
 }
 
 pub(crate) fn preflight_land_checkpoint(repo: &Repository, thread_id: &str) -> Result<()> {
-    if let Some(advice) = land_checkpoint_preflight_advice(repo, thread_id) {
+    if repo.capability() != RepositoryCapability::GitOverlay {
+        return Ok(());
+    }
+    let facts = gather_mutation_facts(repo);
+    let trust = preflight_verify_with_worktree_status(repo, &facts.worktree_status);
+    if let Some(advice) = land_checkpoint_preflight_advice(repo, thread_id, &trust) {
         return Err(anyhow!(advice));
     }
-    Ok(())
+    if !trust.verified {
+        return Err(anyhow!(repository_verification_blocked_advice(
+            "land_verification_blocked",
+            format!("Refusing to land '{thread_id}': repository verification is blocked"),
+            "retrying the land",
+            &trust,
+            format!(
+                "repository verification reports {}: {}",
+                trust.status, trust.summary
+            ),
+            "land would change Heddle and Git history before the verification blocker was checked",
+            "Git refs, Heddle refs, the oplog, index, and worktree files were left unchanged",
+            None,
+        )));
+    }
+    preflight_checkpoint(repo, "land", &facts)
 }
 
 fn preflight_checkpoint_like_with_worktree_status(
@@ -105,10 +125,6 @@ pub(crate) fn preflight_git_checkpoint_identity_for_principal(
     )))
 }
 
-pub(crate) fn preflight_verify(repo: &Repository) -> RepositoryVerificationState {
-    build_repository_verification_state(repo)
-}
-
 pub(crate) fn preflight_verify_with_worktree_status(
     repo: &Repository,
     worktree_status: &GitOverlayWorktreeStatus,
@@ -120,12 +136,15 @@ pub(crate) fn post_verify(repo: &Repository) -> RepositoryVerificationState {
     build_repository_verification_state(repo)
 }
 
-fn land_checkpoint_preflight_advice(repo: &Repository, thread_id: &str) -> Option<RecoveryAdvice> {
-    if repo.capability() != RepositoryCapability::GitOverlay {
-        return None;
-    }
-    let trust = preflight_verify(repo);
-    if trust.remote_drift == "remote_diverged" {
+fn land_checkpoint_preflight_advice(
+    repo: &Repository,
+    thread_id: &str,
+    trust: &RepositoryVerificationState,
+) -> Option<RecoveryAdvice> {
+    if matches!(
+        trust.remote_drift.as_str(),
+        "remote_diverged" | "remote_behind"
+    ) {
         let remote_decision = repo
             .git_remote_tracking_status()
             .ok()

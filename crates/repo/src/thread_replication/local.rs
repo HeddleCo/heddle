@@ -737,9 +737,8 @@ fn classify_attached_source(
             }
             by_thread.insert(thread, super::hash(&operation)?);
         }
-        let mut unique = by_thread.into_iter();
-        match (unique.next(), unique.next()) {
-            (None, _) => {
+        match by_thread.into_iter().next() {
+            None => {
                 // Pull/FF can land a foreign tip before this Thread has an
                 // admitted op for it. `admit_local_capture_parents` records
                 // that ancestry; classify must not refuse first.
@@ -751,7 +750,10 @@ fn classify_attached_source(
                 }
                 local_parent = true;
             }
-            (Some((source_thread, source_operation)), None) => {
+            Some((source_thread, source_operation)) => {
+                // Multiple Threads can carry the same revision after a sibling
+                // refresh. The revision is the integration input; any accepted
+                // operation for it proves possession. Pick one deterministically.
                 let candidate = (source_thread, source_operation, *parent);
                 if let Some(existing) = &foreign {
                     if existing.0 != candidate.0 || existing.2 != candidate.2 {
@@ -762,11 +764,6 @@ fn classify_attached_source(
                 } else {
                     foreign = Some(candidate);
                 }
-            }
-            (Some(_), Some(_)) => {
-                return Err(Error::Invalid(
-                    "local integration source revision is admitted on multiple Threads".into(),
-                ));
             }
         }
     }
