@@ -38,15 +38,15 @@ fn format_fsck_text(report: &FsckReport) -> String {
             if let Some(obj) = &error.object {
                 text.push_str(&format!(
                     "  {} {} {}\n",
-                    style::error(&format!("[{}]", error.kind)),
-                    error.message,
-                    style::dim(&format!("({obj})"))
+                    style::error(&format!("[{}]", style::human_text(&error.kind))),
+                    style::human_text(&error.message),
+                    style::dim(&format!("({})", style::human_text(obj)))
                 ));
             } else {
                 text.push_str(&format!(
                     "  {} {}\n",
-                    style::error(&format!("[{}]", error.kind)),
-                    error.message
+                    style::error(&format!("[{}]", style::human_text(&error.kind))),
+                    style::human_text(&error.message)
                 ));
             }
         }
@@ -59,13 +59,18 @@ fn format_fsck_text(report: &FsckReport) -> String {
         };
         text.push_str(&format!(
             "  {}\n",
-            style::field("Repair", &format!("{target}: {status}"))
+            style::field(
+                "Repair",
+                &format!("{}: {status}", style::human_text(target))
+            )
         ));
         for repair in &report.repairs {
             if repair.count > 0 || repair.repaired {
                 text.push_str(&format!(
                     "    {} {} ({})\n",
-                    repair.name, repair.detail, repair.count
+                    style::human_text(&repair.name),
+                    style::human_text(&repair.detail),
+                    repair.count
                 ));
             }
         }
@@ -73,7 +78,10 @@ fn format_fsck_text(report: &FsckReport) -> String {
     if let Some(provenance) = &report.provenance {
         text.push_str(&format!(
             "  {}\n",
-            style::field("Provenance registry", &provenance.registry_status)
+            style::field(
+                "Provenance registry",
+                &style::human_text(&provenance.registry_status)
+            )
         ));
         for state in &provenance.states {
             let short = state
@@ -84,18 +92,24 @@ fn format_fsck_text(report: &FsckReport) -> String {
             text.push_str(&format!(
                 "    {short} {:<24} {}\n",
                 state.display_status(),
-                state.detail
+                style::human_text(&state.detail)
             ));
         }
     }
     for warning in &report.warnings {
-        text.push_str(&format!("{} {}\n", style::warn_marker(), warning));
+        text.push_str(&format!(
+            "{} {}\n",
+            style::warn_marker(),
+            style::human_text(warning)
+        ));
     }
     text
 }
 
 #[cfg(test)]
 mod tests {
+    use verbs::FsckError;
+
     use super::*;
 
     #[test]
@@ -115,5 +129,29 @@ mod tests {
         let text = format_fsck_text(&report);
         assert!(text.contains("repository is valid (2 objects checked)"));
         assert!(text.contains("legacy object retained"));
+    }
+
+    #[test]
+    fn text_renderer_shortens_corrupt_object_id() {
+        let id = "a".repeat(64);
+        let report = FsckReport {
+            valid: false,
+            errors: vec![FsckError {
+                kind: "missing_tree".to_string(),
+                message: format!("missing tree object {id}"),
+                object: Some(id.clone()),
+            }],
+            warnings: Vec::new(),
+            objects_checked: 1,
+            git_projection_checked: false,
+            provenance: None,
+            repair_target: None,
+            repaired: false,
+            repairs: Vec::new(),
+        };
+        let text = format_fsck_text(&report);
+        assert!(text.contains("hs-aaaaaaaa"), "{text}");
+        assert!(!text.contains(&id), "{text}");
+        assert!(serde_json::to_string(&report).unwrap().contains(&id));
     }
 }

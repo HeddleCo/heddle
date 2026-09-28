@@ -647,7 +647,7 @@ fn render_short_status(output: &StatusOutput) {
     if let (Some(remote), Some(local)) = (&output.native_remote, &output.current_state) {
         println!(
             "{} {}  {} {}  {}",
-            style::bold(short_status_subject(output)),
+            style::bold(&short_status_subject(output)),
             style::state_id(local),
             remote.name,
             style::state_id(&remote.head),
@@ -656,7 +656,7 @@ fn render_short_status(output: &StatusOutput) {
     } else if output.changes.is_empty() {
         println!(
             "{} {}",
-            style::bold(short_status_subject(output)),
+            style::bold(&short_status_subject(output)),
             style::thread_state(&short_status_health(output))
         );
     }
@@ -676,12 +676,13 @@ fn short_status_health(output: &StatusOutput) -> String {
     }
 }
 
-fn short_status_subject(output: &StatusOutput) -> &str {
-    output
+fn short_status_subject(output: &StatusOutput) -> String {
+    let subject = output
         .thread
         .as_deref()
         .or_else(|| output.current_state.as_ref().map(|_| "detached"))
-        .unwrap_or("repository")
+        .unwrap_or("repository");
+    style::thread_label(subject, output.task.as_deref())
 }
 
 fn render_short_plain_git_status(output: &PlainGitStatusReport) {
@@ -754,7 +755,9 @@ fn format_compact_status(output: &StatusOutput) -> String {
         lines.push(format!("Identity: {}", style::warn(notice)));
     }
     if compact_status_is_dirty(output) {
-        let count = output.changed_path_count.max(compact_change_count(output));
+        let count = output
+            .worktree_changed_path_count
+            .max(compact_change_count(output));
         let path_word = if count == 1 { "path" } else { "paths" };
         lines.push(format!("dirty  {count} {path_word}"));
         for path in &output.changes.modified {
@@ -792,13 +795,7 @@ fn format_compact_status(output: &StatusOutput) -> String {
 
 fn compact_status_header(output: &StatusOutput) -> String {
     let mut parts = Vec::new();
-    parts.push(style::bold(
-        output
-            .thread
-            .as_deref()
-            .or_else(|| output.current_state.as_ref().map(|_| "detached"))
-            .unwrap_or("repository"),
-    ));
+    parts.push(style::bold(&short_status_subject(output)));
     parts.push(compact_capability_label(&output.repository_capability).to_string());
     if let Some(state) = output
         .current_state
@@ -838,7 +835,7 @@ fn compact_capability_label(capability: &str) -> &str {
 
 fn compact_status_is_dirty(output: &StatusOutput) -> bool {
     has_status_changes(output)
-        || output.changed_path_count > 0
+        || output.worktree_changed_path_count > 0
         || matches!(
             output.thread_health.as_str(),
             "dirty_worktree" | "uncaptured"
@@ -905,7 +902,7 @@ fn render_status_header(output: &StatusOutput) {
         output
             .thread
             .as_ref()
-            .map(|thread| style::bold(thread))
+            .map(|thread| style::bold(&style::thread_label(thread, output.task.as_deref())))
             .unwrap_or_else(|| style::warn("detached HEAD"))
     );
     println!("Repository: {}", output.repository_label);
@@ -993,7 +990,10 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
     if let Some(thread) = &output.thread {
         // Thread name is a primary identifier for the user's
         // current focus — bold it so it reads as the page header.
-        println!("Thread: {}", style::bold(thread));
+        println!(
+            "Thread: {}",
+            style::bold(&style::thread_label(thread, output.task.as_deref()))
+        );
     } else {
         println!("HEAD detached");
     }
@@ -1024,13 +1024,13 @@ fn render_status_thread(output: &StatusOutput, verbose: bool) {
         println!("Coordination: {}", human_coordination_status(output));
     }
     if verbose && let Some(base) = &output.base_state {
-        println!("Base: {}", style::dim(base));
+        println!("Base: {}", style::state_id(base));
     }
     if verbose
         && let Some(base_root) = &output.base_root
         && !base_root.is_empty()
     {
-        println!("Base tree: {}", style::dim(base_root));
+        println!("Base tree: {}", style::state_id(base_root));
     }
 
     if let Some(state) = &output.state {
@@ -1143,7 +1143,7 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
             println!("{}", style::dim("Worktree"));
             emitted = true;
         }
-        println!("Target thread: {}", target);
+        println!("Target thread: {}", style::thread_label(target, None));
     }
     if let Some(parent) = &output.parent_thread {
         if !emitted {
@@ -1151,7 +1151,7 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
             println!("{}", style::dim("Worktree"));
             emitted = true;
         }
-        println!("Parent thread: {}", parent);
+        println!("Parent thread: {}", style::thread_label(parent, None));
     }
     if !output.child_threads.is_empty() {
         if !emitted {
@@ -1159,7 +1159,10 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
             println!("{}", style::dim("Worktree"));
             emitted = true;
         }
-        println!("Child threads: {}", output.child_threads.join(", "));
+        println!(
+            "Child threads: {}",
+            style::human_text(&output.child_threads.join(", "))
+        );
     }
     if verbose
         && let Some(actor) = &output.actor
@@ -1188,7 +1191,7 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
                 println!("{}", style::dim("Worktree"));
                 emitted = true;
             }
-            println!("Session: {}", session_id);
+            println!("Session: {}", style::human_text(session_id));
         }
         if let Some(heddle_session_id) = &output.heddle_session_id {
             if !emitted {
@@ -1196,7 +1199,7 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
                 println!("{}", style::dim("Worktree"));
                 emitted = true;
             }
-            println!("Heddle session: {}", heddle_session_id);
+            println!("Heddle session: {}", style::human_text(heddle_session_id));
         }
         if let Some(harness) = &output.harness {
             if !emitted {
@@ -1236,7 +1239,7 @@ fn render_status_details(output: &StatusOutput, verbose: bool) {
                 println!("{}", style::dim("Worktree"));
                 emitted = true;
             }
-            println!("Attach: {}", attach_reason);
+            println!("Attach: {}", style::human_text(attach_reason));
         }
     }
     if verbose && let Some(usage_summary) = &output.usage_summary {

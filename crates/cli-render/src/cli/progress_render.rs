@@ -124,10 +124,10 @@ impl TerminalSink {
         if io::stderr().is_terminal() {
             // `\r` to column 0, `\x1b[K` clears to end of line so a shorter line
             // doesn't leave stale trailing characters.
-            eprint!("\r{}\x1b[K", style::dim(line));
+            eprint!("\r{}\x1b[K", style::dim(&style::human_text(line)));
             io::stderr().flush().ok();
         } else {
-            eprintln!("{}", style::dim(line));
+            eprintln!("{}", style::dim(&style::human_text(line)));
         }
     }
 }

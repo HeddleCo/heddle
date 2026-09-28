@@ -276,11 +276,10 @@ fn render_state(output: &ShowOutput, verbose: bool) {
         style::state_id(&output.state_id),
         style::dim(&labeled_content_hash_prefix(&output.content_hash))
     );
-    println!("Full ID: {}", style::dim(&output.state_id_full));
-    println!("Tree: {}", style::dim(&output.tree));
+    println!("Tree: {}", style::state_id(&output.tree));
 
     if !output.parents.is_empty() {
-        let dimmed: Vec<String> = output.parents.iter().map(|p| style::dim(p)).collect();
+        let dimmed: Vec<String> = output.parents.iter().map(|p| style::state_id(p)).collect();
         println!("Parents: {}", dimmed.join(", "));
     } else {
         println!("Parents: {}", style::dim("(root state)"));
@@ -290,7 +289,7 @@ fn render_state(output: &ShowOutput, verbose: bool) {
 
     if let Some(intent) = &output.intent {
         // Intent line carries the human-meaningful summary; bold it.
-        println!("Intent: {}", style::bold(intent));
+        println!("Intent: {}", style::bold(&style::human_text(intent)));
     }
 
     // Render `Confidence: —` for an absent value rather than skipping
@@ -319,10 +318,10 @@ fn render_state(output: &ShowOutput, verbose: bool) {
             style::dim(&format!("{}/{}", agent.provider, agent.model))
         );
         if let Some(session) = &agent.session_id {
-            println!("  Session: {}", style::dim(session));
+            println!("  Session: {}", style::dim(&style::human_text(session)));
         }
         if let Some(policy) = &agent.policy_id {
-            println!("  Policy: {}", style::dim(policy));
+            println!("  Policy: {}", style::dim(&style::human_text(policy)));
         }
     }
 

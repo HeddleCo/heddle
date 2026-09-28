@@ -151,11 +151,19 @@ fn land_details_fixture(thread_name: &str) -> (TempDir, std::path::PathBuf) {
 }
 
 fn assert_no_machine_identity(text: &str) {
-    for token in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-')) {
-        let is_hex = token.len() == 64 && token.bytes().all(|c| c.is_ascii_hexdigit());
-        let is_uuid = token.len() == 36 && uuid::Uuid::parse_str(token).is_ok();
-        assert!(!is_hex && !is_uuid, "human text exposed {token}: {text}");
-    }
+    assert!(
+        !text
+            .as_bytes()
+            .windows(64)
+            .any(|window| window.iter().all(u8::is_ascii_hexdigit)),
+        "human text exposed a full hex ID: {text}"
+    );
+    assert!(
+        !text.as_bytes().windows(36).any(|window| {
+            std::str::from_utf8(window).is_ok_and(|token| uuid::Uuid::parse_str(token).is_ok())
+        }),
+        "human text exposed a UUID: {text}"
+    );
 }
 
 #[test]
@@ -213,11 +221,14 @@ fn status_and_thread_show_agree_after_two_capture_land() {
     heddle(&["land", "--thread", "feature/search"], Some(temp.path())).unwrap();
     let status = heddle(&["status"], Some(&checkout)).unwrap();
     let show = heddle(&["thread", "show"], Some(&checkout)).unwrap();
+    let machine = json(&checkout, &["--output", "json", "status"]);
     assert!(show.contains("Status: clean"), "{show}");
     assert!(
         !status.contains("dirty"),
         "status disagrees with thread show: {status}\n{show}"
     );
+    assert_eq!(machine["changed_path_count"], 0, "{machine}");
+    assert_eq!(machine["thread_changed_path_count"], 0, "{machine}");
 }
 
 #[test]

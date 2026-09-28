@@ -571,12 +571,12 @@ fn render_doctor(cli: &Cli, output: &DoctorOutput) {
     if let Some(thread) = &output.thread {
         println!(
             "Thread: {} [{} · {}]",
-            thread.name,
+            crate::cli::style::thread_label(&thread.name, thread.task.as_deref()),
             doctor_thread_visibility(thread),
             thread.coordination_status
         );
         if let Some(path) = thread.path.as_ref().or(thread.execution_path.as_ref()) {
-            println!("Execution root: {path}");
+            println!("Execution root: {}", crate::cli::style::human_text(path));
         }
         if let Some(actor) = &thread.actor
             && let Some(text) =
@@ -589,10 +589,13 @@ fn render_doctor(cli: &Cli, output: &DoctorOutput) {
         // noise for humans running `heddle doctor`.
         if cli.verbose > 0 {
             if let Some(session_id) = &thread.session_id {
-                println!("Session: {session_id}");
+                println!("Session: {}", crate::cli::style::human_text(session_id));
             }
             if let Some(heddle_session_id) = &thread.heddle_session_id {
-                println!("Heddle session: {heddle_session_id}");
+                println!(
+                    "Heddle session: {}",
+                    crate::cli::style::human_text(heddle_session_id)
+                );
             }
             if let Some(harness) = &thread.harness {
                 println!("Harness: {harness}");
@@ -604,9 +607,16 @@ fn render_doctor(cli: &Cli, output: &DoctorOutput) {
 
     if let Some(state) = &output.state {
         if cli.verbose > 0 {
-            println!("State: {} ({})", state.state_id, state.tree);
+            println!(
+                "State: {} ({})",
+                crate::cli::style::state_id(&state.state_id),
+                crate::cli::style::state_id(&state.tree)
+            );
         } else {
-            println!("Captured state: {}", state.state_id);
+            println!(
+                "Captured state: {}",
+                crate::cli::style::state_id(&state.state_id)
+            );
         }
         if let Some(intent) = &state.intent {
             if cli.verbose > 0 {

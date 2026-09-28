@@ -429,12 +429,24 @@ fn cmd_redact_show(cli: &Cli, repo: &Repository, args: RedactShowArgs) -> Result
             NextActionValidationContext::without_repo(&["redact", "show"]),
         )?;
     } else {
-        println!("redaction {}", output.redaction_id);
-        println!("  blob:        {}", output.blob);
-        println!("  state:       {}", output.state);
+        println!(
+            "redaction {}",
+            crate::cli::style::human_text(&output.redaction_id)
+        );
+        println!(
+            "  blob:        {}",
+            crate::cli::style::human_text(&output.blob)
+        );
+        println!(
+            "  state:       {}",
+            crate::cli::style::state_id(&output.state)
+        );
         println!("  path:        {}", output.path);
         println!("  reason:      {}", output.reason);
-        println!("  redactor:    {}", output.redactor);
+        println!(
+            "  redactor:    {}",
+            crate::cli::style::human_text(&output.redactor)
+        );
         println!("  redacted-at: {}", output.redacted_at);
         println!(
             "  purged-at:   {}",
@@ -445,13 +457,16 @@ fn cmd_redact_show(cli: &Cli, repo: &Repository, args: RedactShowArgs) -> Result
             println!("  sig-algo:    {}", algo);
         }
         if let Some(supersedes) = &output.supersedes {
-            println!("  supersedes:  {}", supersedes);
+            println!(
+                "  supersedes:  {}",
+                crate::cli::style::human_text(supersedes)
+            );
         }
         println!();
         println!("stub that readers see:");
         println!("---");
         for line in output.stub_preview.lines() {
-            println!("{}", line);
+            println!("{}", crate::cli::style::human_text(line));
         }
     }
     Ok(())

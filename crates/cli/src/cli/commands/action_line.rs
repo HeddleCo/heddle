@@ -59,7 +59,7 @@ fn format_bold_action(label: &str, action: &str, indent: usize) -> Option<String
         "{}{}: {}",
         " ".repeat(indent),
         label,
-        style::bold(action)
+        style::bold(&style::human_text(action))
     ))
 }
 
@@ -71,6 +71,6 @@ fn format_dim_action(label: &str, action: &str, indent: usize) -> Option<String>
         "{}{}: {}",
         " ".repeat(indent),
         label,
-        style::dim(action)
+        style::dim(&style::human_text(action))
     ))
 }

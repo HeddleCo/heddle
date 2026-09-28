@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use chrono::{TimeZone, Utc};
 use verbs::QueryReport;
 
-use crate::cli::render::write_stdout;
+use crate::cli::{render::write_stdout, style};
 
 pub fn query_json(report: &QueryReport) -> Result<()> {
     let mut text = serde_json::to_string(report).context("serialize query output")?;
@@ -28,13 +28,16 @@ fn format_query_text(report: &QueryReport) -> String {
                 .unwrap_or_else(|| hit.timestamp_secs.to_string());
             text.push_str(&format!(
                 "#{} {} {} <{}>",
-                hit.seq, ts, hit.verb, hit.actor_email
+                hit.seq,
+                ts,
+                style::human_text(&hit.verb),
+                style::human_text(&hit.actor_email)
             ));
             if let Some(thread) = &hit.thread {
-                text.push_str(&format!(" thread={thread}"));
+                text.push_str(&format!(" thread={}", style::thread_label(thread, None)));
             }
             if let Some(state_id) = &hit.state_id {
-                text.push_str(&format!(" -> {state_id}"));
+                text.push_str(&format!(" -> {}", style::human_text(state_id)));
             }
             text.push('\n');
         }
@@ -78,5 +81,27 @@ mod tests {
             hits: Vec::new(),
         };
         assert_eq!(format_query_text(&report), "(no matches)\n");
+    }
+
+    #[test]
+    fn text_renderer_hides_full_thread_and_state_ids() {
+        let id = "a".repeat(64);
+        let report = QueryReport {
+            output_kind: "query",
+            hits: vec![QueryHit {
+                seq: 1,
+                timestamp_secs: 0,
+                verb: "capture".to_string(),
+                actor_email: "agent@example.com".to_string(),
+                operation_id: None,
+                thread: Some(id.clone()),
+                symbols: Vec::new(),
+                signal_kinds: Vec::new(),
+                state_id: Some(id.clone()),
+            }],
+        };
+        let text = format_query_text(&report);
+        assert!(!text.contains(&id), "{text}");
+        assert!(serde_json::to_string(&report).unwrap().contains(&id));
     }
 }

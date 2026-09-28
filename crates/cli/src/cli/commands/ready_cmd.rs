@@ -557,7 +557,12 @@ fn write_ready_output_inner(
             } else {
                 style::warn_marker()
             };
-            println!("{marker} {}", output.operator.message);
+            let label = style::thread_label(&output.report.thread, output.report.task.as_deref());
+            let message = output
+                .operator
+                .message
+                .replace(&output.report.thread, &label);
+            println!("{marker} {}", style::human_text(&message));
         }
         if blocked && !verbose {
             // Conflict/blocked ready→land: one human line + Next; jargon under -v/JSON.
@@ -756,7 +761,13 @@ fn write_preview_report(output: &ReadyOutput, recommended_action: Option<&str>) 
     let summary = output.readiness_summary();
     println!();
     println!("{}", style::section("Readiness"));
-    println!("  {}", style::field("thread", &style::bold(&report.thread)));
+    println!(
+        "  {}",
+        style::field(
+            "thread",
+            &style::bold(&style::thread_label(&report.thread, report.task.as_deref()))
+        )
+    );
     println!(
         "  {}",
         style::field("status", &style::thread_state(&summary.status))

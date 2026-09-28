@@ -977,24 +977,27 @@ fn render_agent_fanout_output(output: AgentFanoutOutput, json: bool) -> Result<(
     if let Some(parent_task) = &output.parent_task {
         println!(
             "  parent task: {}",
-            crate::cli::style::accent(&parent_task.task_id)
+            crate::cli::style::accent(&crate::cli::style::human_text(&parent_task.task_id))
         );
     }
     for lane in &output.lanes {
         println!(
             "  {} [{}] {}",
-            crate::cli::style::accent(&lane.thread),
+            crate::cli::style::accent(&crate::cli::style::thread_label(&lane.thread, None)),
             lane.status,
             crate::cli::style::dim(&lane.path),
         );
         if let Some(task) = &lane.task {
-            println!("    task: {}", crate::cli::style::dim(&task.task_id));
+            println!(
+                "    task: {}",
+                crate::cli::style::dim(&crate::cli::style::human_text(&task.task_id))
+            );
         }
     }
     if output.output_kind == "agent_fanout_plan" {
         println!("Commands:");
         for command in &output.commands {
-            println!("  {}", command.command);
+            println!("  {}", crate::cli::style::human_text(&command.command));
         }
     }
     Ok(())
@@ -1017,13 +1020,16 @@ fn render_agent_list(output: AgentReservationListOutput, json: bool) -> Result<(
     for entry in entries {
         println!(
             "  {} [{}; {}] thread={}",
-            crate::cli::style::accent(&entry.lease_id),
+            crate::cli::style::accent(&crate::cli::style::human_text(&entry.lease_id)),
             entry.status,
             entry.liveness,
-            entry.thread,
+            crate::cli::style::thread_label(&entry.thread, None),
         );
         if let Some(actor_session_id) = &entry.actor_session_id {
-            println!("    actor: {}", crate::cli::style::dim(actor_session_id));
+            println!(
+                "    actor: {}",
+                crate::cli::style::dim(&crate::cli::style::human_text(actor_session_id))
+            );
         }
         if let Some(path) = &entry.path
             && !path.is_empty()

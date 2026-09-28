@@ -8,7 +8,7 @@
 //! Mirrors `merge_store_integrity.rs` (the heddle#90 lock for the merge
 //! engine). Each test introduces targeted corruption (deletes the loose
 //! tree object backing a captured state) and asserts the CLI command
-//! fails loud with a diagnostic naming the missing hash and pointing at
+//! fails loud with a diagnostic naming the missing tree and pointing at
 //! `heddle maintenance fsck` — pre-fix the same scenario produced silent, plausible-
 //! looking output that masked store corruption.
 
@@ -38,8 +38,8 @@ fn current_state_tree_hex(repo_root: &Path) -> String {
     state.tree.to_hex()
 }
 
-/// Assert the CLI error names the missing-tree diagnostic, includes the
-/// missing hash so the operator can correlate with `heddle maintenance fsck` output,
+/// Assert the CLI error names the missing-tree diagnostic, includes a
+/// short hash so the operator can correlate with `heddle maintenance fsck` output,
 /// and points at the recovery command so they have a next step instead
 /// of just a stack trace. Used by every test in this module — the
 /// contract is the same regardless of which command surfaced the error.
@@ -50,8 +50,8 @@ fn assert_missing_tree_error(err: &str, tree_hex: &str) {
          store corruption from a normal absent-state case; got: {err}"
     );
     assert!(
-        err.contains(tree_hex),
-        "error must include the missing tree's hash so the operator can correlate \
+        err.contains(&format!("hs-{}", &tree_hex[..8])) && !err.contains(tree_hex),
+        "error must include the missing tree's short hash so the operator can correlate \
          with `heddle maintenance fsck` output; got: {err}"
     );
     assert!(

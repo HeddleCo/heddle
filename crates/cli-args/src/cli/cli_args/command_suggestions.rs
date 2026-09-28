@@ -8,8 +8,12 @@
 /// Suggested replacement for an unrecognized top-level subcommand.
 pub fn suggested_command(unknown: &str) -> Option<&'static str> {
     match unknown.trim().to_ascii_lowercase().as_str() {
-        "save" | "add" => Some("capture"),
-        "stash" => Some("start"),
+        "save" | "add" | "commit" => Some("capture"),
+        "stash" | "branch" => Some("start"),
+        "checkout" | "switch" => Some("thread switch"),
+        "merge" => Some("land"),
+        "fetch" => Some("pull"),
+        "reset" => Some("undo"),
         "presence" => Some("agent presence"),
         "timeline" => Some("agent timeline"),
         "collapse" => Some("thread collapse"),
@@ -38,8 +42,28 @@ mod tests {
     }
 
     #[test]
+    fn git_commit_suggests_capture_before_clap_fuzzy_match() {
+        assert_eq!(suggested_command("commit"), Some("capture"));
+        assert_eq!(suggested_command("COMMIT"), Some("capture"));
+    }
+
+    #[test]
     fn stash_suggests_start() {
         assert_eq!(suggested_command("stash"), Some("start"));
+    }
+
+    #[test]
+    fn git_concept_verbs_suggest_their_heddle_actions() {
+        for (git, heddle) in [
+            ("branch", "start"),
+            ("checkout", "thread switch"),
+            ("switch", "thread switch"),
+            ("merge", "land"),
+            ("fetch", "pull"),
+            ("reset", "undo"),
+        ] {
+            assert_eq!(suggested_command(git), Some(heddle));
+        }
     }
 
     #[test]

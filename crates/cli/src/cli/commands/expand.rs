@@ -173,7 +173,7 @@ fn print_human(output: &ExpandOutput) {
                 "  {}. {} {} {}",
                 index + 1,
                 style::state_id(&capture.state_id),
-                style::bold(intent),
+                style::bold(&style::human_text(intent)),
                 style::dim(&format!(
                     "confidence {}",
                     format_confidence(Some(confidence))
@@ -183,7 +183,7 @@ fn print_human(output: &ExpandOutput) {
                 "  {}. {} {}",
                 index + 1,
                 style::state_id(&capture.state_id),
-                style::bold(intent),
+                style::bold(&style::human_text(intent)),
             ),
         }
     }

@@ -444,15 +444,19 @@ fn print_timeline_action(cli: &Cli, repo: &Repository, output: TimelineActionOut
             let step = output.from_step_id.as_deref().unwrap_or("cursor");
             println!(
                 "Forked timeline branch {} from {}/{}",
-                style::bold(branch),
-                parent,
-                step
+                style::bold(&style::human_text(branch)),
+                style::human_text(parent),
+                style::human_text(step)
             );
         }
         "reset" => {
             let branch = output.cursor_branch_id.as_deref().unwrap_or("-");
             let step = output.cursor_step_id.as_deref().unwrap_or("-");
-            println!("Reset timeline cursor to {branch}/{step}");
+            println!(
+                "Reset timeline cursor to {}/{}",
+                style::human_text(branch),
+                style::human_text(step)
+            );
             if let Some(status) = &output.materialization_status {
                 println!(
                     "Materialization: {}{}",
@@ -498,7 +502,7 @@ fn print_timeline_status(cli: &Cli, repo: &Repository, output: TimelineStatusOut
 
     println!(
         "Timeline {}: {} step{} on {} branch{}",
-        style::bold(&output.thread),
+        style::bold(&style::thread_label(&output.thread, None)),
         output.step_count,
         plural(output.step_count),
         output.branch_count,
@@ -507,8 +511,8 @@ fn print_timeline_status(cli: &Cli, repo: &Repository, output: TimelineStatusOut
     if let Some(step) = &output.cursor_step_id {
         println!(
             "Cursor: {}/{}",
-            output.cursor_branch_id.as_deref().unwrap_or("-"),
-            step
+            style::human_text(output.cursor_branch_id.as_deref().unwrap_or("-")),
+            style::human_text(step)
         );
     } else {
         println!("Cursor: none");
@@ -535,8 +539,8 @@ fn print_timeline_recording(
     println!(
         "Recorded timeline {} {} ({})",
         output.action,
-        style::bold(&output.step_id),
-        output.operation_id
+        style::bold(&style::human_text(&output.step_id)),
+        style::human_text(&output.operation_id)
     );
     Ok(())
 }

@@ -730,13 +730,13 @@ fn emit_wait_line(cli: &Cli, line: DiscussWaitLineOutput) -> Result<()> {
         "applied" => println!(
             "applied {} {} ({})",
             line.event_type,
-            line.discussion_id.as_deref().unwrap_or("-"),
+            crate::cli::style::human_text(line.discussion_id.as_deref().unwrap_or("-")),
             line.event_id
         ),
         "unchanged" => println!(
             "already had {} {} ({})",
             line.event_type,
-            line.discussion_id.as_deref().unwrap_or("-"),
+            crate::cli::style::human_text(line.discussion_id.as_deref().unwrap_or("-")),
             line.event_id
         ),
         "skipped" => println!("{}", format_wait_skip(&line)),
@@ -789,7 +789,7 @@ fn emit_write(
             anchor_label(&output.discussion.anchor)
         );
         if cli.verbose > 0 {
-            println!("{}", output.operation_id);
+            println!("{}", crate::cli::style::human_text(&output.operation_id));
         }
     }
     Ok(())
@@ -814,8 +814,15 @@ fn emit_show(cli: &Cli, output: &DiscussionShowOutput) -> Result<()> {
         return Ok(());
     }
     let discussion = &output.discussion;
-    println!("discussion {} [{}]", discussion.id, discussion.status);
-    println!("  title: {}", discussion.title);
+    println!(
+        "discussion {} [{}]",
+        crate::cli::style::human_text(&discussion.id),
+        discussion.status
+    );
+    println!(
+        "  title: {}",
+        crate::cli::style::human_text(&discussion.title)
+    );
     let anchor_status = match discussion.anchor_status {
         "current" => String::new(),
         status => format!(" [{status}]"),
@@ -827,17 +834,22 @@ fn emit_show(cli: &Cli, output: &DiscussionShowOutput) -> Result<()> {
     );
     println!("  visibility: {}", discussion.visibility);
     if let Some(thread_ref) = &discussion.thread_ref {
-        println!("  thread: {thread_ref}");
+        println!("  thread: {}", crate::cli::style::human_text(thread_ref));
     }
-    println!("  heads: {}", discussion.head_operation_ids.join(", "));
+    println!(
+        "  heads: {}",
+        crate::cli::style::human_text(&discussion.head_operation_ids.join(", "))
+    );
     for turn in &discussion.turns {
         let actor = turn.agent.as_deref().unwrap_or(&turn.author_name);
         println!(
             "  {} {} @ {}",
-            turn.operation_id, actor, turn.occurred_at_ms
+            crate::cli::style::human_text(&turn.operation_id),
+            crate::cli::style::human_text(actor),
+            turn.occurred_at_ms
         );
         for line in turn.body.lines() {
-            println!("    {line}");
+            println!("    {}", crate::cli::style::human_text(line));
         }
     }
     Ok(())
@@ -1153,13 +1165,18 @@ fn format_wait_skip(line: &DiscussWaitLineOutput) -> String {
         .as_deref()
         .filter(|reason| !reason.is_empty())
     {
-        Some(reason) => format!("skipped {} ({}) — {reason}", line.event_type, line.event_id),
+        Some(reason) => format!(
+            "skipped {} ({}) — {}",
+            line.event_type,
+            line.event_id,
+            crate::cli::style::human_text(reason)
+        ),
         None => format!("skipped {} ({})", line.event_type, line.event_id),
     }
 }
 
 fn anchor_label(value: &AnchorOutput) -> String {
-    match value {
+    let label = match value {
         AnchorOutput::Repository => "repository".to_string(),
         AnchorOutput::State { state_id } => state_id.clone(),
         AnchorOutput::Source {
@@ -1193,7 +1210,8 @@ fn anchor_label(value: &AnchorOutput) -> String {
         AnchorOutput::Change { change_id } => change_id.clone(),
         AnchorOutput::Path { path, .. } => path.clone(),
         AnchorOutput::Symbol { path, symbol, .. } => format!("{path}:{symbol}"),
-    }
+    };
+    crate::cli::style::human_text(&label)
 }
 
 #[cfg(test)]

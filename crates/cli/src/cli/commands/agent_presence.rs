@@ -148,15 +148,30 @@ fn render_actor_list(report: &ActorListReport) {
 }
 
 fn render_actor_show(actor: &ActorEntryReport) {
-    println!("Agent presence: {}", actor.session_id);
-    println!("Thread: {}", actor.thread);
+    println!(
+        "Agent presence: {}",
+        crate::cli::style::human_text(&actor.session_id)
+    );
+    println!(
+        "Thread: {}",
+        crate::cli::style::thread_label(&actor.thread, None)
+    );
     println!("Status: {}", actor.status);
-    println!("Base state: {}", actor.base_state);
+    println!(
+        "Base state: {}",
+        crate::cli::style::state_id(&actor.base_state)
+    );
     if let Some(heddle_session_id) = &actor.heddle_session_id {
-        println!("Heddle session: {}", heddle_session_id);
+        println!(
+            "Heddle session: {}",
+            crate::cli::style::human_text(heddle_session_id)
+        );
     }
     if let Some(client_instance_id) = &actor.client_instance_id {
-        println!("Client instance: {}", client_instance_id);
+        println!(
+            "Client instance: {}",
+            crate::cli::style::human_text(client_instance_id)
+        );
     }
     if let Some(native_actor_key) = &actor.native_actor_key {
         println!("Native actor: {}", native_actor_key);
@@ -229,11 +244,15 @@ pub async fn complete(cli: &Cli, session_id: Option<String>) -> Result<()> {
             NextActionValidationContext::without_repo(&["agent", "presence", "complete"]),
         )?;
     } else {
-        println!("Agent presence '{}' marked as complete.", plan.session_id);
+        println!(
+            "Agent presence '{}' marked as complete.",
+            crate::cli::style::human_text(&plan.session_id)
+        );
         if let Some(thread) = summary {
             println!(
                 "Thread '{}' is {}.",
-                thread.name, thread.coordination_status
+                crate::cli::style::thread_label(&thread.name, thread.task.as_deref()),
+                thread.coordination_status
             );
             if let Some(action) = recommended_action {
                 print_next(&action);
@@ -291,13 +310,25 @@ pub async fn explain(cli: &Cli, session_id: Option<String>) -> Result<()> {
             NextActionValidationContext::without_repo(&["agent", "presence", "explain"]),
         )?;
     } else {
-        println!("Agent presence: {}", entry.session_id);
-        println!("Thread: {}", entry.thread);
+        println!(
+            "Agent presence: {}",
+            crate::cli::style::human_text(&entry.session_id)
+        );
+        println!(
+            "Thread: {}",
+            crate::cli::style::thread_label(&entry.thread, None)
+        );
         if let Some(heddle_session_id) = &entry.heddle_session_id {
-            println!("Heddle session: {}", heddle_session_id);
+            println!(
+                "Heddle session: {}",
+                crate::cli::style::human_text(heddle_session_id)
+            );
         }
         if let Some(client_instance_id) = &entry.client_instance_id {
-            println!("Client instance: {}", client_instance_id);
+            println!(
+                "Client instance: {}",
+                crate::cli::style::human_text(client_instance_id)
+            );
         }
         if let Some(native_actor_key) = &entry.native_actor_key {
             println!("Native actor: {}", native_actor_key);

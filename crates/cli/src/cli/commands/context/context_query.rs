@@ -277,11 +277,18 @@ pub async fn cmd_context_history(
         )?;
     } else {
         println!("{} {}", output.target_kind, output.target);
-        println!("annotation: {}", output.annotation_id);
+        println!(
+            "annotation: {}",
+            crate::cli::style::human_text(&output.annotation_id)
+        );
         println!("scope: {}", output.scope);
         println!("status: {}", output.status);
         for revision in &output.revisions {
-            println!("--- [{}] {} ---", revision.kind, revision.revision_id);
+            println!(
+                "--- [{}] {} ---",
+                revision.kind,
+                crate::cli::style::human_text(&revision.revision_id)
+            );
             if !revision.tags.is_empty() {
                 println!("tags: {}", revision.tags.join(", "));
             }

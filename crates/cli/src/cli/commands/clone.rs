@@ -2295,7 +2295,11 @@ async fn clone_monorepo_connected(
         );
         for placed in &summary.placed {
             let rel = monorepo_rel_display(&placed.rel_path);
-            println!("  {} <- {}", style::dim(&rel), placed.spool_id);
+            println!(
+                "  {} <- {}",
+                style::dim(&rel),
+                style::human_text(&placed.spool_id)
+            );
         }
         if let Some(header) = summary.skipped_header() {
             println!("  {header}");
@@ -2303,7 +2307,7 @@ async fn clone_monorepo_connected(
                 println!(
                     "    {} ({}) at {} — {}",
                     sk.mount_name,
-                    sk.child_spool_id,
+                    style::human_text(&sk.child_spool_id),
                     sk.rel_path.display(),
                     sk.reason_label(),
                 );
