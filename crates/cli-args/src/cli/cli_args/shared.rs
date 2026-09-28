@@ -334,7 +334,8 @@ mod tests {
         .command
         {
             Commands::Context {
-                command: ContextCommands::Get(args),
+                for_thread: None,
+                command: Some(ContextCommands::Get(args)),
             } => {
                 assert_eq!(args.scope.path.as_deref(), Some("src/auth.rs"));
                 assert_eq!(args.scope.symbol.as_deref(), Some("verify"));

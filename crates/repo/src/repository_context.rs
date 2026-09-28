@@ -2,14 +2,14 @@
 //! Context annotation helpers for attaching metadata to file and state targets.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
 use objects::{
     object::{
-        Annotation, AnnotationScope, Blob, ContentHash, ContextBlob, ContextTarget, EntryType,
-        State, Tree, TreeEntry,
+        Annotation, AnnotationRevision, AnnotationScope, Blob, ContentHash, ContextBlob,
+        ContextTarget, EntryType, State, Tree, TreeEntry,
     },
     store::ObjectStore,
 };
@@ -134,6 +134,24 @@ impl Repository {
             }
         }
         Ok(None)
+    }
+
+    /// Human-facing locations with unresolved concurrent annotation edits.
+    pub fn context_divergences(&self, state: &State) -> Result<Vec<String>> {
+        let Some(root) = self.inherit_parent_context(state)? else {
+            return Ok(Vec::new());
+        };
+        let mut locations = Vec::new();
+        for entry in self.list_context_entries(&root, None)? {
+            for annotation in entry.blob.annotations {
+                if !annotation.divergent_revision_ids.is_empty() {
+                    locations.push(entry.target.path().unwrap_or("state context").to_string());
+                }
+            }
+        }
+        locations.sort();
+        locations.dedup();
+        Ok(locations)
     }
 
     // --- private helpers ---
@@ -299,15 +317,14 @@ impl Repository {
 
     /// Build a unioned context tree across multiple parent states for a
     /// merge snapshot. Annotations from every parent appear in the result;
-    /// when the same `annotation_id` is present on more than one parent the
-    /// revision with the latest `created_at` wins (with a stable tiebreak
-    /// on revision_id so the merge stays deterministic).
+    /// when the same `annotation_id` is present on more than one parent,
+    /// all revisions survive and concurrent live tips remain explicit.
     ///
     /// Targets that only exist on one side propagate unchanged (single-blob
     /// pointer copy via the existing tree). Targets present on both sides
     /// are merged blob-by-blob: annotations are deduped by id, the per-id
-    /// revisions are picked by latest-`created_at`, and the resulting blob
-    /// is rewritten via `set_context_blob`.
+    /// revisions are unioned, and the resulting blob is rewritten via
+    /// `set_context_blob`.
     ///
     /// Returns `None` when none of the parents has any context.
     pub fn union_parent_contexts(&self, parents: &[&State]) -> Result<Option<ContentHash>> {
@@ -322,7 +339,7 @@ impl Repository {
             return Ok(None);
         }
         if roots.len() == 1 {
-            return Ok(Some(roots.pop().expect("len == 1")));
+            return Ok(roots.pop());
         }
         if roots.iter().all(|r| *r == roots[0]) {
             // All parents pointed at the same context tree; pointer copy.
@@ -330,8 +347,7 @@ impl Repository {
         }
 
         // Walk every parent and merge by `context_entry_key`. Each entry's
-        // blob gets unioned into a running map; ties are broken by the
-        // revision-comparator below.
+        // blob gets unioned into a running map.
         let mut merged: BTreeMap<String, (ContextTarget, ContextBlob)> = BTreeMap::new();
         for parent_root in &roots {
             for entry in self.list_context_entries(parent_root, None)? {
@@ -341,7 +357,7 @@ impl Repository {
                         merged.insert(key, (entry.target, entry.blob));
                     }
                     Some((target, existing)) => {
-                        let merged_blob = merge_context_blobs(existing, entry.blob);
+                        let merged_blob = merge_context_blobs(existing, entry.blob)?;
                         merged.insert(key, (target, merged_blob));
                     }
                 }
@@ -366,12 +382,12 @@ impl Repository {
     }
 }
 
-/// Merge two `ContextBlob`s by unioning their annotations on
-/// `annotation_id`. When an id appears in both, the annotation with the
-/// later current-revision `created_at` wins; ties are broken by
-/// `revision_id` to keep the result deterministic. The resulting blob
-/// preserves `format_version` from `left`.
-fn merge_context_blobs(left: ContextBlob, right: ContextBlob) -> ContextBlob {
+/// Preserve every unique revision and every non-dominated live tip. Metadata
+/// that cannot be combined without losing a side refuses the merge.
+fn merge_context_blobs(left: ContextBlob, right: ContextBlob) -> Result<ContextBlob> {
+    if left.format_version != right.format_version {
+        return Err(HeddleError::InvalidObject("context format mismatch".into()));
+    }
     let format_version = left.format_version;
     let mut by_id: BTreeMap<String, Annotation> = BTreeMap::new();
     for annotation in left.annotations.into_iter().chain(right.annotations) {
@@ -380,43 +396,88 @@ fn merge_context_blobs(left: ContextBlob, right: ContextBlob) -> ContextBlob {
                 by_id.insert(annotation.annotation_id.clone(), annotation);
             }
             Some(existing) => {
-                let winner = pick_newer_annotation(existing, annotation);
-                by_id.insert(winner.annotation_id.clone(), winner);
+                let merged = merge_annotation(existing, annotation)?;
+                by_id.insert(merged.annotation_id.clone(), merged);
             }
         }
     }
-    ContextBlob {
+    Ok(ContextBlob {
         format_version,
         annotations: by_id.into_values().collect(),
-    }
+    })
 }
 
-fn pick_newer_annotation(a: Annotation, b: Annotation) -> Annotation {
-    let ts_a = a
-        .current_revision()
-        .map(|r| r.created_at)
-        .unwrap_or(i64::MIN);
-    let ts_b = b
-        .current_revision()
-        .map(|r| r.created_at)
-        .unwrap_or(i64::MIN);
-    if ts_a > ts_b {
-        a
-    } else if ts_b > ts_a {
-        b
-    } else {
-        // Deterministic tiebreak on the revision_id of each side's current
-        // revision (lexicographic — revision_ids are stable strings).
-        let rev_a = a
-            .current_revision()
-            .map(|r| r.revision_id.as_str())
-            .unwrap_or("");
-        let rev_b = b
-            .current_revision()
-            .map(|r| r.revision_id.as_str())
-            .unwrap_or("");
-        if rev_a >= rev_b { a } else { b }
+fn merge_annotation(mut a: Annotation, b: Annotation) -> Result<Annotation> {
+    let mut a_metadata = a.clone();
+    a_metadata.revisions.clear();
+    a_metadata.divergent_revision_ids.clear();
+    let mut b_metadata = b.clone();
+    b_metadata.revisions.clear();
+    b_metadata.divergent_revision_ids.clear();
+    if a_metadata != b_metadata {
+        return Err(HeddleError::InvalidObject(format!(
+            "concurrent annotation metadata differs: {}",
+            a.annotation_id
+        )));
     }
+
+    if a.revisions.len() == b.revisions.len() {
+        return Ok(a);
+    }
+
+    let a_tips: BTreeSet<String> = a
+        .current_revision_ids()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let b_tips: BTreeSet<String> = b
+        .current_revision_ids()
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+    let a_ids: BTreeSet<&str> = a.revisions.iter().map(|r| r.revision_id.as_str()).collect();
+    let b_ids: BTreeSet<&str> = b.revisions.iter().map(|r| r.revision_id.as_str()).collect();
+    let mut tips = a_tips.union(&b_tips).cloned().collect::<BTreeSet<_>>();
+    tips.retain(|id| {
+        !(a_ids.contains(id.as_str()) && !a_tips.contains(id))
+            && !(b_ids.contains(id.as_str()) && !b_tips.contains(id))
+    });
+
+    let mut revisions: BTreeMap<String, AnnotationRevision> = BTreeMap::new();
+    for revision in a.revisions.into_iter().chain(b.revisions) {
+        match revisions.get(&revision.revision_id) {
+            Some(existing) if existing != &revision => {
+                return Err(HeddleError::InvalidObject(format!(
+                    "annotation revision ID has conflicting content: {}",
+                    revision.revision_id
+                )));
+            }
+            Some(_) => {}
+            None => {
+                revisions.insert(revision.revision_id.clone(), revision);
+            }
+        }
+    }
+    a.revisions = revisions.into_values().collect();
+    a.revisions.sort_by(|left, right| {
+        (left.created_at, &left.revision_id).cmp(&(right.created_at, &right.revision_id))
+    });
+    if tips.len() == 1
+        && let Some(tip) = tips.iter().next()
+        && let Some(index) = a
+            .revisions
+            .iter()
+            .position(|revision| &revision.revision_id == tip)
+    {
+        let current = a.revisions.remove(index);
+        a.revisions.push(current);
+    }
+    a.divergent_revision_ids = if tips.len() > 1 {
+        tips.into_iter().collect()
+    } else {
+        Vec::new()
+    };
+    Ok(a)
 }
 
 fn context_entry_key(target: &ContextTarget) -> String {
@@ -775,12 +836,31 @@ mod tests {
     }
 
     #[test]
-    fn union_parent_contexts_dedupes_same_id_with_newest_revision_wins() {
+    fn union_parent_contexts_keeps_concurrent_revision_histories_and_marks_divergence() {
         let (_dir, repo) = setup();
-        let older = ann_with_id("ann-shared", "older content", 1);
-        let newer = ann_with_id("ann-shared", "newer content", 9);
-        let left = state_with_context(&repo, "src/lib.rs", vec![older]);
-        let right = state_with_context(&repo, "src/lib.rs", vec![newer]);
+        let base = ann_with_id("ann-shared", "shared base", 1);
+        let mut agent_a = base.clone();
+        agent_a.revise(
+            AnnotationKind::Rationale,
+            "agent A edit".into(),
+            vec![],
+            "a@example.com".into(),
+            2,
+            None,
+            None,
+        );
+        let mut agent_b = base;
+        agent_b.revise(
+            AnnotationKind::Rationale,
+            "agent B edit".into(),
+            vec![],
+            "b@example.com".into(),
+            3,
+            None,
+            None,
+        );
+        let left = state_with_context(&repo, "src/lib.rs", vec![agent_a]);
+        let right = state_with_context(&repo, "src/lib.rs", vec![agent_b]);
         let merged = repo
             .union_parent_contexts(&[&left, &right])
             .unwrap()
@@ -789,10 +869,69 @@ mod tests {
         assert_eq!(entries.len(), 1);
         let blob = &entries[0].blob;
         assert_eq!(blob.annotations.len(), 1);
-        let revision = blob.annotations[0]
-            .current_revision()
-            .expect("annotation has a revision");
-        assert_eq!(revision.content, "newer content");
+        let annotation = &blob.annotations[0];
+        assert_eq!(annotation.revisions.len(), 3, "both agents' edits survive");
+        let contents: Vec<_> = annotation
+            .revisions
+            .iter()
+            .map(|r| r.content.as_str())
+            .collect();
+        assert!(contents.contains(&"agent A edit"));
+        assert!(contents.contains(&"agent B edit"));
+        assert_eq!(annotation.divergent_revision_ids.len(), 2);
+        let state = state_with_context(&repo, "src/lib.rs", vec![annotation.clone()]);
+        assert_eq!(
+            repo.context_divergences(&state).unwrap(),
+            vec!["src/lib.rs"]
+        );
+        let reversed = repo
+            .union_parent_contexts(&[&right, &left])
+            .unwrap()
+            .unwrap();
+        let reversed_blob = repo
+            .get_context_blob(&reversed, &ContextTarget::file("src/lib.rs").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(reversed_blob.annotations[0], *annotation);
+    }
+
+    #[test]
+    fn union_parent_contexts_does_not_mark_observed_successor_as_divergent() {
+        let (_dir, repo) = setup();
+        let mut first = ann_with_id("ann-shared", "base", 1);
+        first.revise(
+            AnnotationKind::Rationale,
+            "first edit".into(),
+            vec![],
+            "a@example.com".into(),
+            20,
+            None,
+            None,
+        );
+        let mut successor = first.clone();
+        successor.revise(
+            AnnotationKind::Rationale,
+            "successor".into(),
+            vec![],
+            "b@example.com".into(),
+            10,
+            None,
+            None,
+        );
+        let left = state_with_context(&repo, "src/lib.rs", vec![first]);
+        let right = state_with_context(&repo, "src/lib.rs", vec![successor]);
+        let merged = repo
+            .union_parent_contexts(&[&left, &right])
+            .unwrap()
+            .unwrap();
+        let blob = repo
+            .get_context_blob(&merged, &ContextTarget::file("src/lib.rs").unwrap())
+            .unwrap()
+            .unwrap();
+        let annotation = &blob.annotations[0];
+        assert_eq!(annotation.revisions.len(), 3);
+        assert!(annotation.divergent_revision_ids.is_empty());
+        assert_eq!(annotation.current_revision().unwrap().content, "successor");
     }
 
     #[cfg(feature = "tree-sitter-symbols")]

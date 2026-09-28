@@ -876,6 +876,7 @@ fn pull_one_annotation(
                 || annotation.supersedes_annotation_id != server.supersedes_annotation_id
                 || annotation.supersedes_rewrite_pct != server.supersedes_rewrite_pct;
             annotation.revisions = new_revisions;
+            annotation.divergent_revision_ids.clear();
             annotation.status = server.status;
             annotation.supersedes_annotation_id = server.supersedes_annotation_id.clone();
             annotation.supersedes_rewrite_pct = server.supersedes_rewrite_pct;
@@ -892,6 +893,7 @@ fn pull_one_annotation(
                 visibility: server.visibility.clone(),
                 resolved_from_discussion: server.resolved_from_discussion.clone(),
                 anchor_status: server.anchor_status.clone(),
+                divergent_revision_ids: Vec::new(),
             });
             true
         }

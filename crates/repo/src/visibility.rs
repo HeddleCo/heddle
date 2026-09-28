@@ -90,6 +90,7 @@ mod tests {
             visibility: vis,
             resolved_from_discussion: None,
             anchor_status: objects::object::AnnotationAnchorStatus::default(),
+            divergent_revision_ids: Vec::new(),
         }
     }
 

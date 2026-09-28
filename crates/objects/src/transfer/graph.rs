@@ -526,7 +526,8 @@ fn walk_state_closure_with_exclusions(
                 StateAttachmentBody::RiskSignals(hash)
                 | StateAttachmentBody::ReviewSignatures(hash)
                 | StateAttachmentBody::Discussions(hash)
-                | StateAttachmentBody::StructuredConflicts(hash) => {
+                | StateAttachmentBody::StructuredConflicts(hash)
+                | StateAttachmentBody::ContextConsumption(hash) => {
                     walk_blob_filtered(store, hash, &excluded_hashes, &mut seen_hashes, &mut visit)?
                 }
                 StateAttachmentBody::SemanticIndex(root) => walk_semantic_index_closure(
@@ -1131,7 +1132,8 @@ fn collect_excluded(
                 StateAttachmentBody::RiskSignals(hash)
                 | StateAttachmentBody::ReviewSignatures(hash)
                 | StateAttachmentBody::Discussions(hash)
-                | StateAttachmentBody::StructuredConflicts(hash) => {
+                | StateAttachmentBody::StructuredConflicts(hash)
+                | StateAttachmentBody::ContextConsumption(hash) => {
                     excluded_hashes.insert(hash);
                 }
                 StateAttachmentBody::SemanticIndex(root) => {

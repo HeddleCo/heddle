@@ -37,6 +37,7 @@ pub mod clone_intent;
 mod collaboration_store;
 #[cfg(feature = "tree-sitter-symbols")]
 mod context_anchor_travel;
+mod context_consumption;
 #[cfg(feature = "tree-sitter-symbols")]
 mod context_snapshot_travel;
 pub mod daemon;
@@ -187,6 +188,7 @@ pub use collaboration_store::{
     CollaborationIntegrityReport, CollaborationStore, CollaborationWriteDisposition,
     CollaborationWriteOutcome,
 };
+pub use context_consumption::{ContextConsumptionReceipt, SuppliedAnnotation, SuppliedRevision};
 pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use fsmonitor::{
     ChangeMonitorReport, LocalMonitorShutdownGuard, run_local_monitor_helper,

@@ -34,15 +34,15 @@ use cli::{
         commands::{
             LogCommandOptions, SnapshotAgentOverrides, build_command_catalog, cmd_abort, cmd_adopt,
             cmd_agent, cmd_blame, cmd_capture_split, cmd_clone, cmd_complete, cmd_completions,
-            cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_get,
-            cmd_context_history, cmd_context_list, cmd_context_rm, cmd_context_set,
-            cmd_context_suggest, cmd_context_supersede, cmd_continue, cmd_daemon_serve,
-            cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss, cmd_doctor, cmd_doctor_docs,
-            cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log, cmd_maintenance,
-            cmd_netd_serve, cmd_netd_status, cmd_netd_stop, cmd_pull, cmd_push, cmd_query,
-            cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_revert, cmd_review, cmd_shell,
-            cmd_show, cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread, cmd_undo,
-            cmd_undo_recover, cmd_verify, cmd_watch, command_path,
+            cmd_context_audit, cmd_context_check, cmd_context_edit, cmd_context_for_thread,
+            cmd_context_get, cmd_context_history, cmd_context_list, cmd_context_rm,
+            cmd_context_set, cmd_context_suggest, cmd_context_supersede, cmd_continue,
+            cmd_daemon_serve, cmd_daemon_status, cmd_daemon_stop, cmd_diff, cmd_discuss,
+            cmd_doctor, cmd_doctor_docs, cmd_hook, cmd_init, cmd_integration, cmd_land, cmd_log,
+            cmd_maintenance, cmd_netd_serve, cmd_netd_status, cmd_netd_stop, cmd_pull, cmd_push,
+            cmd_query, cmd_ready, cmd_redo, cmd_remote, cmd_resolve, cmd_revert, cmd_review,
+            cmd_shell, cmd_show, cmd_snapshot, cmd_start, cmd_status, cmd_sync_smart, cmd_thread,
+            cmd_undo, cmd_undo_recover, cmd_verify, cmd_watch, command_path,
             command_runtime_contract_for_command, print_error_with_hint,
             print_or_suggest_parse_error, print_parse_error_json_envelope,
             recover_incomplete_land_if_present, schema_for_verb,
@@ -735,87 +735,107 @@ async fn async_main() -> Result<()> {
         #[cfg(feature = "client")]
         Commands::Whoami { server } => cmd_hosted_whoami(&cli, server.clone()).await,
 
-        Commands::Context { command } => match command {
-            ContextCommands::Set(args) => cmd_context_set(&cli, args).await,
-            ContextCommands::Get(args) => cmd_context_get(&cli, args).await,
-            ContextCommands::List(args) => {
-                cmd_context_list(
-                    &cli,
-                    args.prefix.clone(),
-                    args.tag.clone(),
-                    args.revision.state.clone(),
-                    args.include_superseded,
-                )
-                .await
+        Commands::Context {
+            for_thread,
+            command,
+        } => {
+            if for_thread.is_some() && command.is_some() {
+                return Err(anyhow::anyhow!(
+                    "--for-thread cannot be combined with a context subcommand"
+                ));
             }
-            ContextCommands::History(args) => {
-                let (file, state_target, historical) = cli::cli::split_path_and_revision(
-                    args.scope.path.as_deref(),
-                    args.revision.state.as_deref(),
-                );
-                cmd_context_history(
-                    &cli,
-                    args.annotation_id.clone(),
-                    file.map(str::to_owned),
-                    state_target.map(str::to_owned),
-                    historical.map(str::to_owned),
-                )
-                .await
+            if let Some(thread) = for_thread {
+                cmd_context_for_thread(&cli, thread)
+            } else if let Some(command) = command {
+                match command {
+                    ContextCommands::Set(args) => cmd_context_set(&cli, args).await,
+                    ContextCommands::Get(args) => cmd_context_get(&cli, args).await,
+                    ContextCommands::List(args) => {
+                        cmd_context_list(
+                            &cli,
+                            args.prefix.clone(),
+                            args.tag.clone(),
+                            args.revision.state.clone(),
+                            args.include_superseded,
+                        )
+                        .await
+                    }
+                    ContextCommands::History(args) => {
+                        let (file, state_target, historical) = cli::cli::split_path_and_revision(
+                            args.scope.path.as_deref(),
+                            args.revision.state.as_deref(),
+                        );
+                        cmd_context_history(
+                            &cli,
+                            args.annotation_id.clone(),
+                            file.map(str::to_owned),
+                            state_target.map(str::to_owned),
+                            historical.map(str::to_owned),
+                        )
+                        .await
+                    }
+                    ContextCommands::Edit(args) => {
+                        let (file, state_target, _) = cli::cli::split_path_and_revision(
+                            args.scope.path.as_deref(),
+                            args.revision.state.as_deref(),
+                        );
+                        cmd_context_edit(
+                            &cli,
+                            args.annotation_id.clone(),
+                            file.map(str::to_owned),
+                            state_target.map(str::to_owned),
+                            args.kind.clone(),
+                            args.tag.clone(),
+                            args.message.body.clone(),
+                            args.message.file.clone(),
+                        )
+                        .await
+                    }
+                    ContextCommands::Supersede(args) => cmd_context_supersede(&cli, args).await,
+                    ContextCommands::Rm(args) => cmd_context_rm(&cli, args).await,
+                    ContextCommands::Check(args) => {
+                        let (file, state_target, historical) = cli::cli::split_path_and_revision(
+                            args.scope.path.as_deref(),
+                            args.revision.state.as_deref(),
+                        );
+                        cmd_context_check(
+                            &cli,
+                            file.map(str::to_owned),
+                            state_target.map(str::to_owned),
+                            args.tag.clone(),
+                            historical.map(str::to_owned),
+                        )
+                        .await
+                    }
+                    ContextCommands::Suggest(args) => {
+                        cmd_context_suggest(&cli, args.revision.state.clone(), args.limit).await
+                    }
+                    ContextCommands::Audit(args) => {
+                        cmd_context_audit(&cli, args.revision.state.clone()).await
+                    }
+                    #[cfg(all(feature = "git-overlay", feature = "ingest"))]
+                    ContextCommands::Reason { command } => match command {
+                        cli::cli::cli_args::ContextReasonCommands::Git(args) => {
+                            cmd_context_reason_git(
+                                &cli,
+                                &args.path,
+                                args.max_sessions_per_commit,
+                                args.min_match_confidence,
+                                args.limit,
+                                args.claude_home.clone(),
+                                args.codex_home.clone(),
+                                args.opencode_home.clone(),
+                                args.dry_run.enabled(),
+                            )
+                        }
+                    },
+                }
+            } else {
+                Err(anyhow::anyhow!(
+                    "choose a context subcommand or --for-thread <THREAD>"
+                ))
             }
-            ContextCommands::Edit(args) => {
-                let (file, state_target, _) = cli::cli::split_path_and_revision(
-                    args.scope.path.as_deref(),
-                    args.revision.state.as_deref(),
-                );
-                cmd_context_edit(
-                    &cli,
-                    args.annotation_id.clone(),
-                    file.map(str::to_owned),
-                    state_target.map(str::to_owned),
-                    args.kind.clone(),
-                    args.tag.clone(),
-                    args.message.body.clone(),
-                    args.message.file.clone(),
-                )
-                .await
-            }
-            ContextCommands::Supersede(args) => cmd_context_supersede(&cli, args).await,
-            ContextCommands::Rm(args) => cmd_context_rm(&cli, args).await,
-            ContextCommands::Check(args) => {
-                let (file, state_target, historical) = cli::cli::split_path_and_revision(
-                    args.scope.path.as_deref(),
-                    args.revision.state.as_deref(),
-                );
-                cmd_context_check(
-                    &cli,
-                    file.map(str::to_owned),
-                    state_target.map(str::to_owned),
-                    args.tag.clone(),
-                    historical.map(str::to_owned),
-                )
-                .await
-            }
-            ContextCommands::Suggest(args) => {
-                cmd_context_suggest(&cli, args.revision.state.clone(), args.limit).await
-            }
-            ContextCommands::Audit(args) => {
-                cmd_context_audit(&cli, args.revision.state.clone()).await
-            }
-            #[cfg(all(feature = "git-overlay", feature = "ingest"))]
-            ContextCommands::Reason { command } => match command {
-                cli::cli::cli_args::ContextReasonCommands::Git(args) => cmd_context_reason_git(
-                    &cli,
-                    &args.path,
-                    args.max_sessions_per_commit,
-                    args.min_match_confidence,
-                    args.limit,
-                    args.claude_home.clone(),
-                    args.codex_home.clone(),
-                    args.opencode_home.clone(),
-                    args.dry_run.enabled(),
-                ),
-            },
-        },
+        }
 
         Commands::Integration { command } => cmd_integration(&cli, command.clone()),
 
@@ -1280,10 +1300,11 @@ fn invocation_is_observe_only(command: &Commands) -> bool {
         } => *dry_run,
         #[cfg(all(feature = "git-overlay", feature = "ingest"))]
         Commands::Context {
+            for_thread: None,
             command:
-                ContextCommands::Reason {
+                Some(ContextCommands::Reason {
                     command: cli::cli::cli_args::ContextReasonCommands::Git(args),
-                },
+                }),
         } => args.dry_run.enabled(),
         _ => false,
     }

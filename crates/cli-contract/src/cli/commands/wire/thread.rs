@@ -78,6 +78,32 @@ pub struct ThreadShowOutput {
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
     pub recovery_commands: Vec<String>,
+    pub constraints_supplied: Vec<ConstraintsSuppliedOutput>,
+    pub constraints_supplied_truncated: bool,
+}
+
+#[derive(Clone, Serialize, JsonSchema)]
+pub struct ConstraintsSuppliedOutput {
+    pub capture: String,
+    pub capture_intent: Option<String>,
+    pub actor: Option<String>,
+    pub briefing_hash: String,
+    pub intent_versions: Vec<String>,
+    pub annotations: Vec<SuppliedAnnotationOutput>,
+}
+
+#[derive(Clone, Serialize, JsonSchema)]
+pub struct SuppliedAnnotationOutput {
+    pub target: String,
+    pub annotation_id: String,
+    pub revisions: Vec<SuppliedRevisionOutput>,
+}
+
+#[derive(Clone, Serialize, JsonSchema)]
+pub struct SuppliedRevisionOutput {
+    pub revision_id: String,
+    pub kind: String,
+    pub content: String,
 }
 
 /// Explicit native Thread ownership status and transitions.

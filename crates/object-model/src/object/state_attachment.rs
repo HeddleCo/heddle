@@ -35,6 +35,8 @@ pub enum StateAttachmentBody {
     /// Content hash of the state's `SemanticIndexRoot` blob (heddle#1067).
     SemanticIndex(ContentHash),
     Signature(StateSignature),
+    /// Exact pre-turn constraints supplied before this capture.
+    ContextConsumption(ContentHash),
 }
 
 /// The kind of a [`StateAttachmentBody`], with the payload projected away.
@@ -53,6 +55,7 @@ pub enum StateAttachmentKind {
     StructuredConflicts,
     SemanticIndex,
     Signature,
+    ContextConsumption,
 }
 
 impl StateAttachmentBody {
@@ -67,6 +70,7 @@ impl StateAttachmentBody {
             StateAttachmentBody::Discussions(_) => StateAttachmentKind::Discussions,
             StateAttachmentBody::StructuredConflicts(_) => StateAttachmentKind::StructuredConflicts,
             StateAttachmentBody::SemanticIndex(_) => StateAttachmentKind::SemanticIndex,
+            StateAttachmentBody::ContextConsumption(_) => StateAttachmentKind::ContextConsumption,
             StateAttachmentBody::Signature(_) => StateAttachmentKind::Signature,
         }
     }
@@ -98,4 +102,3 @@ impl StateAttachment {
         StateAttachmentId::from_hash(ContentHash::compute_typed("state-attachment", &bytes))
     }
 }
-

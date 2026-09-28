@@ -14,6 +14,8 @@ use support::*;
 mod basics;
 #[path = "cli_integration/capture_vocabulary.rs"]
 mod capture_vocabulary;
+#[path = "cli_integration/context_for_thread.rs"]
+mod context_for_thread;
 #[path = "cli_integration/fault_injection.rs"]
 mod fault_injection;
 #[path = "cli_integration/first_use_resume_transcript.rs"]
