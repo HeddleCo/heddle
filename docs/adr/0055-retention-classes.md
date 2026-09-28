@@ -1,19 +1,19 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # Retention classes
 
 **Immutability is a promise about meaning, not bytes.** Heddle preserves the
 identity, decisions, and provenance of meaningful history. Physical copies and
-selected operational detail may be reclaimed under the rules below. This is a
-proposed contract, not a description of a shipped reachability collector.
+selected operational detail may be reclaimed under the rules below. Accepted
+on 2026-09-28, this contract does not describe a shipped reachability collector.
 
 ## Decision
 
 | Class | Boundary and authority | Reclamation rule |
 | --- | --- | --- |
-| **Source history** | A landed State, its Changes, content needed to materialize it, signed provenance, and state-bound review decisions/evidence. Landing promotes these records permanently, including ancestors and merged branches. The repository owner controls explicit repository deletion or a separately authorized purge; Weft verifies hosted authority. | Never age out and never collect merely because a ref moved or a pack was rewritten. Only explicit deletion/purge can erase them; shared objects survive while another retained record needs them. A purge must disclose the affected IDs and verification loss before execution. |
+| **Source history** | A landed State, its Changes, content needed to materialize it, signed provenance, and state-bound review decisions/evidence. Landing promotes these records permanently, including ancestors and merged branches. The repository owner controls explicit repository deletion or a separately authorized purge; Weft verifies hosted authority. | Never age out and never collect merely because a ref moved or a pack was rewritten. Only explicit deletion/purge can erase them; shared objects survive while another retained record needs them. A targeted purge cannot invalidate landed descendants or review proof: removing their dependencies requires explicit deletion of the whole affected closure, with its IDs and verification loss disclosed before execution. |
 | **Working history** | Unlanded captures, their source closure, undo/redo positions, and active or abandoned Threads. The user or an authorized organization sets a versioned, visible working-history policy. Landing promotes the relevant closure to source history first. | Default: retain without an age limit. An explicit policy may compact an abandoned Thread only after **30 days from the later of abandonment and its last capture**, with no live checkout, cursor, pin, review, pending sync, or recovery reference. A shorter policy may not skip that grace period. Keep a durable Thread/capture tombstone and fork/decision summary; materialization loss is explicit. |
 | **Tool and agent activity** | Tool input/output detail, run summaries, and Agent Timeline operations, excluding source captures and evidence promoted above. The user or authorized organization sets the **Timeline Retention Policy**; hosted Thread policy is its narrower per-Thread bound. Raw forensic session material also requires its separate consent. | Default: retain recorded Timeline detail while its Thread exists; no age clock or Spool-wide expiry. A policy may `DISCARD` at admission or later, or `BOUNDED` from first admission; it may only shorten an existing deadline. Preserve identities, fork points, decisions, and an honest tombstone/status where the container survives. Thread/Spool deletion, `DeleteAccount`, and billing-lock deletion remove the container and its timeline metadata under their explicit lifecycle. |
 | **Derived artifacts** | Indexes, physical pack layouts, caches, and rebuildable build outputs. The local store or hosted operator chooses representation and eviction. | Disposable at any time **only if** the retained canonical records can still be read or rebuilt. Repacking cannot change the retained object set. A build output promised as a durable deliverable must first be classified and billed as retained material, not treated as a cache. |
@@ -87,7 +87,9 @@ ordinary reachability GC.
 
 Hosted storage metering counts retained canonical source, working, and
 operational payload bytes, plus durable tombstones, receipts and replay fences,
-attributed to the billing owner. Count a canonical object or physical pack
+attributed to the billing owner. Retained build deliverables count as retained
+material too. Only usage above the existing billing-policy allowance is charged.
+Count a canonical object or physical pack
 representation once, including its live encoded bytes; do not charge separately
 for redundant loose copies, indexes, caches, or transient build outputs.
 Expiring payloads stop counting after erasure, while retained metadata still
@@ -96,7 +98,7 @@ counts. Today's Weft usage rollup covers `object_location`,
 for adding its payload and fence accounting. Metering and lifecycle deletion
 must cover every newly retained store before it ships.
 
-## Migration and owner questions
+## Migration
 
 Pre-1.0, make a clean cut: classify existing records, add durable landing and
 policy roots, and rebuild indexes/packs. Until classification and tombstone-aware
@@ -104,15 +106,18 @@ readers are complete, retain all existing canonical history and run only the
 current representation cleanup. Do not infer expiry from old timestamps or
 silently apply a new default to preexisting Threads.
 
-1. **Working-history default:** Ratify indefinite retention until an explicit
-   policy, with a minimum 30-day abandoned-Thread grace? **Recommend yes**;
-   it preserves the existing promise while enabling opt-in compaction.
-2. **Purge scope:** May a targeted source-history purge invalidate a landed
-   descendant or review proof? **Recommend no**; require explicit deletion of
-   the whole affected closure and show its IDs before authorization.
-3. **Hosted billing boundary:** Should durable tombstones/replay fences and
-   retained build deliverables count as customer storage? **Recommend yes**;
-   exclude only rebuildable service overhead and transient outputs.
+## Decisions (2026-09-28)
+
+1. **Working-history default:** Retain working history indefinitely by default.
+   An explicit policy may compact an abandoned Thread only after the minimum
+   30-day grace described above.
+2. **Purge scope:** A targeted purge may not invalidate landed descendants or
+   review proof. Removal requires explicit deletion of the affected closure,
+   with its IDs shown before authorization.
+3. **Hosted billing boundary:** Count durable tombstones, replay fences, and
+   retained build deliverables as storage. Charge only overage under the
+   existing billing policy; exclude rebuildable service overhead and transient
+   outputs.
 
 ## Grounding
 
