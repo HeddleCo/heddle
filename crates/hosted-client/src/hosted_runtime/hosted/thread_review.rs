@@ -240,3 +240,94 @@ fn invalid(message: &str) -> ProtocolError {
 fn native_error(error: impl std::fmt::Display) -> ProtocolError {
     invalid(&error.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{super::test_server, *};
+
+    async fn review_request_fits_budget(target: Option<&str>) {
+        let _guard = crate::test_process_env::shared().await;
+        let (client, server) = test_server::start().await;
+        let result = match target {
+            Some(target) => {
+                client
+                    .observe_landing_assessment("acme", "feature", target)
+                    .await
+            }
+            None => client.observe_review("acme", "feature").await,
+        };
+        client.close().await;
+        server.await.expect("native hosted server");
+        let snapshot = result.expect("review request must satisfy weft's shared item budget");
+        assert_eq!(snapshot.overview.name, "feature");
+        assert_eq!(
+            snapshot.overview.landing_assessment.is_some(),
+            target.is_some()
+        );
+    }
+
+    // Show, list and approve all build their request through observe_review;
+    // readiness selects its landing target through observe_landing_assessment.
+    #[tokio::test]
+    async fn review_show_request_fits_shared_budget() {
+        review_request_fits_budget(None).await;
+    }
+    #[tokio::test]
+    async fn review_list_request_fits_shared_budget() {
+        review_request_fits_budget(None).await;
+    }
+    #[tokio::test]
+    async fn review_approve_request_fits_shared_budget() {
+        review_request_fits_budget(None).await;
+    }
+    #[tokio::test]
+    async fn review_readiness_request_fits_shared_budget() {
+        review_request_fits_budget(Some("main")).await;
+    }
+
+    #[tokio::test]
+    async fn native_hosted_server_rejects_128_review_rows() {
+        let _guard = crate::test_process_env::shared().await;
+        let (client, server) = test_server::start().await;
+        let reference = client
+            .resolve_thread_ref("acme", "feature")
+            .await
+            .expect("Thread");
+        let remote = client.native().await.expect("native client");
+        let mut observation = remote
+            .observe::<rpc::ThreadServiceObserveThread>(
+                contract::ObserveThreadRequest {
+                    thread: Some(reference),
+                    sections: vec![contract::ThreadSection::Review as i32],
+                    pages: Some(contract::ThreadPages {
+                        reviews: Some(contract::PageRequest {
+                            size: 128,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    observe: Some(contract::ObserveOptions {
+                        mode: contract::ObservationMode::Once as i32,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                None,
+            )
+            .await
+            .expect("open observation");
+        let error = observation
+            .next_commit()
+            .await
+            .err()
+            .expect("128 rows must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("Thread section pages exceed shared item budget"),
+            "{error}"
+        );
+        client.close().await;
+        server.await.expect("native hosted server");
+    }
+}

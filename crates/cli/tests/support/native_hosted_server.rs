@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Minimal v2 Weft fixture for adopt publication round-trip tests.
+//! Minimal v2 Weft fixture for publication and bounded Thread review tests.
 
 use std::{
     net::Ipv4Addr,
@@ -173,6 +173,7 @@ async fn serve_call(
                     implemented_methods: vec![
                         "/heddle.api.v1alpha2.WorkspaceService/ResolveResources".into(),
                         "/heddle.api.v1alpha2.ThreadService/ObserveThreads".into(),
+                        "/heddle.api.v1alpha2.ThreadService/ObserveThread".into(),
                         "/heddle.api.v1alpha2.SyncService/PublishContent".into(),
                         "/heddle.api.v1alpha2.SyncService/Fetch".into(),
                     ],
@@ -206,12 +207,15 @@ async fn serve_call(
                     id: fixture.spool.to_string(),
                 };
                 let entity = if let Some(name) = thread_name {
-                    assert_eq!(name, fixture.thread_name);
+                    let thread_id = if name == fixture.thread_name {
+                        fixture.thread_id.clone()
+                    } else {
+                        assert_eq!(name, "main", "fixture's landing target");
+                        vec![24; 32]
+                    };
                     v2::entity_ref::Entity::Thread(v2::ThreadRef {
                         spool: Some(spool),
-                        id: Some(v2::ThreadId {
-                            value: fixture.thread_id.clone(),
-                        }),
+                        id: Some(v2::ThreadId { value: thread_id }),
                     })
                 } else {
                     v2::entity_ref::Entity::Spool(spool)
@@ -233,8 +237,22 @@ async fn serve_call(
             other => panic!("unexpected hosted unary method: {other}"),
         },
         StreamingShape::ServerStreaming => {
-            assert_eq!(method, "/heddle.api.v1alpha2.ThreadService/ObserveThreads");
-            serve_observe_threads(&mut send, server_key, &fixture).await;
+            match method.as_str() {
+                "/heddle.api.v1alpha2.ThreadService/ObserveThreads" => {
+                    serve_observe_threads(&mut send, server_key, &fixture).await;
+                }
+                "/heddle.api.v1alpha2.ThreadService/ObserveThread" => {
+                    // Share the review fixture's weft admission check and pagination.
+                    hosted_client::hosted_runtime::hosted::test_server::serve_native_thread_review(
+                        &mut send,
+                        &mut recv,
+                        &mut request,
+                        server_key,
+                    )
+                    .await;
+                }
+                other => panic!("unexpected hosted observation method: {other}"),
+            }
         }
         StreamingShape::Bidirectional => {
             let buffered = request.split_off(prelude_len);

@@ -198,3 +198,27 @@ async fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
     hosted.close().await;
     server.await.expect("hosted test server");
 }
+
+#[tokio::test]
+async fn native_hosted_review_verbs_fit_weft_budget() {
+    let (client, server, _) =
+        native_hosted_server::start(uuid::Uuid::from_bytes([22; 16]), "feature", [23; 32]).await;
+    // These are the two observation entry points used by the four review verbs.
+    // The native server checks every page, including continuation requests.
+    for verb in ["show", "list", "readiness", "approve"] {
+        let snapshot = if verb == "readiness" {
+            client
+                .observe_landing_assessment("acme/widgets", "feature", "main")
+                .await
+        } else {
+            client.observe_review("acme/widgets", "feature").await
+        };
+        assert!(
+            snapshot.is_ok(),
+            "review {verb}: {}",
+            snapshot.err().expect("failure")
+        );
+    }
+    client.close().await;
+    server.await.expect("native hosted server");
+}

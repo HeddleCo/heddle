@@ -28,6 +28,9 @@ use super::{
     CallContextFactory, HostedClient, HostedDiscussion, HostedDiscussionTurn, HostedResolution,
 };
 
+mod thread_pages;
+pub use thread_pages::thread_section_page_sizes;
+
 const OBSERVE_COLLABORATION_METHOD: &str =
     "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration";
 
@@ -1249,7 +1252,7 @@ async fn serve_native_identity_observation(
     }
 }
 
-async fn serve_native_thread_review(
+pub async fn serve_native_thread_review(
     send: &mut iroh::endpoint::SendStream,
     recv: &mut iroh::endpoint::RecvStream,
     request: &mut Vec<u8>,
@@ -1262,6 +1265,15 @@ async fn serve_native_thread_review(
         .ok()
         .and_then(|frame| v2::ObserveThreadRequest::decode(frame.body).ok())
         .expect("native review observation request");
+    let _sizes = match thread_section_page_sizes(&body, 64) {
+        Ok(sizes) => sizes,
+        Err(failure) => {
+            send.write_chunk(Bytes::from(encode_stream_failure(&failure).unwrap()))
+                .await
+                .unwrap();
+            return;
+        }
+    };
     assert!(body.sections.contains(&(v2::ThreadSection::Review as i32)));
     let landing_target = body.landing_target.clone();
     let thread = body.thread.expect("review Thread identity");
