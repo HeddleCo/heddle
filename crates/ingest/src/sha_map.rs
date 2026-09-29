@@ -56,7 +56,7 @@
 
 use std::path::Path;
 
-use objects::object::{ContentHash, StateId};
+use objects::object::{ChangeId, ContentHash, StateId};
 use rusqlite::{Connection, OptionalExtension, params};
 use tracing::{debug, warn};
 
@@ -119,6 +119,14 @@ pub enum ShaMapError {
         existing: String,
         incoming: String,
     },
+    #[error("Git commits {existing} and {incoming} declare the same ChangeId {change_id}")]
+    ChangeIdCollision {
+        change_id: String,
+        existing: String,
+        incoming: String,
+    },
+    #[error("original State {original} has conflicting Git import rewrites")]
+    RewriteConflict { original: String },
     #[error("serialize lossy tree entries: {0}")]
     LossySerialize(#[from] serde_json::Error),
     #[error("corrupt stored {kind:?} mapping for git={git}: {heddle_repr:?}: {reason}")]
@@ -285,6 +293,79 @@ impl ShaMap {
     /// already mapped to `git_sha`.
     pub fn insert_commit(&mut self, git_sha: &str, heddle: StateId) -> Result<(), ShaMapError> {
         self.insert_raw(MapKind::Commit, git_sha, heddle.to_string_full())
+    }
+
+    /// Claim a logical identity for exactly one Git commit. Kept on disk so
+    /// large imports and restarted conversions make the same collision check.
+    pub fn claim_change_id(
+        &mut self,
+        git_sha: &str,
+        change_id: ChangeId,
+    ) -> Result<(), ShaMapError> {
+        let git_sha = normalize_git_sha(git_sha)?;
+        let change_id = change_id.to_string_full();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO git_import_change_ids (change_id, git_sha) VALUES (?, ?)",
+            params![change_id, git_sha],
+        )?;
+        let existing: String = self.conn.query_row(
+            "SELECT git_sha FROM git_import_change_ids WHERE change_id = ?",
+            params![change_id],
+            |row| row.get(0),
+        )?;
+        if existing != git_sha {
+            return Err(ShaMapError::ChangeIdCollision {
+                change_id,
+                existing,
+                incoming: git_sha,
+            });
+        }
+        Ok(())
+    }
+
+    /// Record a certified Git-parent repair for descendants with embedded
+    /// notes that still point at the original State identity.
+    pub fn record_rewritten_state(
+        &mut self,
+        original: StateId,
+        actual: StateId,
+    ) -> Result<(), ShaMapError> {
+        let original = original.to_string_full();
+        let actual = actual.to_string_full();
+        self.conn.execute(
+            "INSERT OR IGNORE INTO git_import_rewrites (original_state, actual_state) VALUES (?, ?)",
+            params![original, actual],
+        )?;
+        let stored: String = self.conn.query_row(
+            "SELECT actual_state FROM git_import_rewrites WHERE original_state = ?",
+            params![original],
+            |row| row.get(0),
+        )?;
+        if stored != actual {
+            return Err(ShaMapError::RewriteConflict { original });
+        }
+        Ok(())
+    }
+
+    pub fn get_rewritten_state(&self, original: StateId) -> Result<Option<StateId>, ShaMapError> {
+        let stored: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT actual_state FROM git_import_rewrites WHERE original_state = ?",
+                params![original.to_string_full()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        stored
+            .map(|value| {
+                StateId::parse(&value).map_err(|error| ShaMapError::CorruptStoredValue {
+                    git: original.to_string_full(),
+                    kind: MapKind::Commit,
+                    heddle_repr: value,
+                    reason: error.to_string(),
+                })
+            })
+            .transpose()
     }
 
     /// Remove one commit identity inside the caller's active import batch.
@@ -550,6 +631,14 @@ fn initialize_schema(conn: &Connection) -> Result<(), ShaMapError> {
             lossy_entries TEXT
         );
         CREATE INDEX IF NOT EXISTS sha_map_heddle_repr ON sha_map(heddle_repr);
+        CREATE TABLE IF NOT EXISTS git_import_change_ids (
+            change_id TEXT PRIMARY KEY NOT NULL,
+            git_sha TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS git_import_rewrites (
+            original_state TEXT PRIMARY KEY NOT NULL,
+            actual_state TEXT NOT NULL
+        );
         "#,
     )?;
     if !sha_map_has_column(conn, "lossy_entries")? {
@@ -569,16 +658,16 @@ fn sha_map_has_column(conn: &Connection, column: &str) -> Result<bool, ShaMapErr
     Ok(false)
 }
 
-/// Lowercase a 40-char git SHA-1. Returns an error for anything else.
+/// Lowercase a full Git SHA-1 or SHA-256 OID. Returns an error otherwise.
 ///
 /// This rejects abbreviated SHAs on purpose — the importer writes full
 /// SHAs, and callers passing short ones are almost always confused.
 fn normalize_git_sha(sha: &str) -> Result<String, ShaMapError> {
     let trimmed = sha.trim();
-    if trimmed.len() != 40 {
+    if !matches!(trimmed.len(), 40 | 64) {
         return Err(ShaMapError::InvalidGitSha {
             sha: trimmed.to_string(),
-            reason: "expected 40-char full SHA-1",
+            reason: "expected full SHA-1 or SHA-256 OID",
         });
     }
     if !trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -633,6 +722,34 @@ mod tests {
         assert_eq!(m.get_commit(sha).unwrap(), Some(cid));
         assert_eq!(m.len(), 1);
         assert_eq!(m.commit_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn change_ids_are_unique_per_git_commit_and_rewrites_survive_reopen() {
+        let temp = TempDir::new().expect("temp directory");
+        let path = temp.path().join("map.sqlite");
+        let first_oid = "a".repeat(40);
+        let second_oid = "b".repeat(64);
+        let change_id = ChangeId::from_bytes([7; 16]);
+        let old_state = StateId::from_bytes([8; 32]);
+        let new_state = StateId::from_bytes([9; 32]);
+        {
+            let mut map = ShaMap::open(&path).expect("open");
+            map.claim_change_id(&first_oid, change_id).expect("claim");
+            map.claim_change_id(&first_oid, change_id)
+                .expect("idempotent claim");
+            assert!(matches!(
+                map.claim_change_id(&second_oid, change_id),
+                Err(ShaMapError::ChangeIdCollision { .. })
+            ));
+            map.record_rewritten_state(old_state, new_state)
+                .expect("rewrite");
+        }
+        let map = ShaMap::open(&path).expect("reopen");
+        assert_eq!(
+            map.get_rewritten_state(old_state).expect("lookup"),
+            Some(new_state)
+        );
     }
 
     #[test]

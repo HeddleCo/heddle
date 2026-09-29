@@ -22,7 +22,7 @@ use std::{
 };
 
 use objects::{
-    object::{AnnotatedTag, AnnotatedTagMarker, Blob, ContentHash, Tree, TreeEntry},
+    object::{AnnotatedTag, AnnotatedTagMarker, Blob, ContentHash, HeddleNote, Tree, TreeEntry},
     store::{
         CompressionConfig, ObjectStore,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, StreamingPackBuilder},
@@ -45,7 +45,7 @@ use crate::{
     oplog_emit::{OplogEmitStats, OplogEmitter},
     ref_emit::{RefEmitStats, RefEmitter},
     sha_map::ShaMap,
-    state_writer::state_from_commit,
+    state_writer::state_from_commit_with_rewrites,
 };
 
 static IMPORT_RUN_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -65,6 +65,8 @@ pub struct ImportStats {
     /// New Heddle states written during this import. Re-runs can inspect the
     /// same commits while creating zero new states.
     pub states_created: usize,
+    /// Embedded State identities rebuilt to match actual Git parents.
+    pub native_identity_changes: usize,
     /// Time spent installing the native pack and publishing its authoritative
     /// loose state bodies.
     pub state_store_write_ms: u128,
@@ -532,6 +534,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             refs_seen,
             commits_imported: commits.len(),
             states_created: packed_stats.states,
+            native_identity_changes: packed_stats.native_identity_changes,
             state_store_write_ms: packed_stats.state_store_write_ms,
             trees_imported: packed_stats.trees,
             blobs_imported: packed_stats.blobs,
@@ -560,6 +563,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
 struct PackedImportStats {
     object_count: usize,
     states: usize,
+    native_identity_changes: usize,
     state_store_write_ms: u128,
     trees: usize,
     blobs: usize,
@@ -994,7 +998,25 @@ impl<'a, B: ImportPackSink> PackedImport<'a, B> {
             parents.push(root_parent);
         }
 
-        let state = state_from_commit(commit, tree, parents, git_lossy)?;
+        let state =
+            state_from_commit_with_rewrites(commit, tree, parents, git_lossy, |original| {
+                self.map.get_rewritten_state(original).map_err(Into::into)
+            })?;
+        self.map.claim_change_id(&commit.sha, state.change_id)?;
+        if let Some(note_bytes) = &commit.heddle_note {
+            let note = HeddleNote::from_json_bytes(note_bytes).map_err(|error| {
+                IngestError::Git(format!(
+                    "parse Heddle note for commit {}: {error}",
+                    commit.sha
+                ))
+            })?;
+            if let Some(original) = note.source_state
+                && original.id() != state.id()
+            {
+                self.map.record_rewritten_state(original.id(), state.id())?;
+                self.stats.native_identity_changes += 1;
+            }
+        }
         let data = state
             .encode_current_msgpack()
             .map_err(|e| IngestError::Other(format!("serialize state for import pack: {e}")))?;
@@ -1603,6 +1625,59 @@ mod tests {
             refs.get_thread(&ThreadName::new("feature/x"))
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn distinct_git_commits_cannot_claim_the_same_change_id() {
+        let gitdir = TempDir::new().expect("Git temp dir");
+        let heddledir = TempDir::new().expect("Heddle temp dir");
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(gitdir.path())
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .expect("git command");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q", "--initial-branch=main"]);
+        let trailer = format!(
+            "Heddle-Change-Id: {}",
+            objects::object::ChangeId::from_bytes([7; 16]).to_string_full()
+        );
+        std::fs::write(gitdir.path().join("file"), "one").expect("first content");
+        run(&["add", "file"]);
+        run(&["commit", "-q", "-m", "first", "-m", &trailer]);
+        std::fs::write(gitdir.path().join("file"), "two").expect("second content");
+        run(&["add", "file"]);
+        run(&["commit", "-q", "-m", "second", "-m", &trailer]);
+
+        let git = GitSource::open(gitdir.path()).expect("Git source");
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(heddledir.path());
+        refs.init().expect("refs");
+        let mut map = ShaMap::new();
+        let result = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run());
+        assert!(
+            matches!(
+                &result,
+                Err(IngestError::ShaMap(
+                    crate::sha_map::ShaMapError::ChangeIdCollision { .. }
+                ))
+            ),
+            "{result:?}"
+        );
+        assert_eq!(
+            refs.get_thread(&ThreadName::new("main"))
+                .expect("thread read"),
+            None,
+            "collision must not publish a ref"
         );
     }
 
