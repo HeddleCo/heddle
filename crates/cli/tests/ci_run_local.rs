@@ -291,6 +291,50 @@ fn refuses_to_sign_when_a_named_state_check_mutates_its_checkout() {
 }
 
 #[test]
+fn record_refuses_mutation_of_captured_file_hidden_by_exclude() {
+    let fixture = Fixture::new(vec![sh("mutating", "echo changed > source.txt")]);
+    std::fs::write(fixture.repo.root().join("source.txt"), "original\n").expect("source");
+    let capture = fixture.run(&["capture", "-m", "capture source"]);
+    assert!(capture.status.success(), "{}", stderr(&capture));
+    std::fs::create_dir_all(fixture.repo.heddle_dir().join("info")).expect("info directory");
+    std::fs::write(
+        fixture.repo.heddle_dir().join("info/exclude"),
+        "source.txt\n",
+    )
+    .expect("exclude captured source");
+
+    let output = fixture.run(&["ci", "run", "--record"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("refusing to sign a stale tree digest"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn named_state_refuses_mutation_of_captured_file_hidden_by_exclude() {
+    let fixture = Fixture::new(vec![sh("mutating", "echo changed > source.txt")]);
+    std::fs::write(fixture.repo.root().join("source.txt"), "original\n").expect("source");
+    let capture = fixture.run(&["capture", "-m", "capture source"]);
+    assert!(capture.status.success(), "{}", stderr(&capture));
+    std::fs::create_dir_all(fixture.repo.heddle_dir().join("info")).expect("info directory");
+    std::fs::write(
+        fixture.repo.heddle_dir().join("info/exclude"),
+        "source.txt\n",
+    )
+    .expect("exclude captured source");
+
+    let output = fixture.run(&["ci", "run", "--local", "--state", "HEAD"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("refusing to sign a stale tree digest"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn missing_device_identity_fails_before_running_checks() {
     let fixture = Fixture::new(vec![sh("would-run", "touch ran.txt")]);
     std::fs::remove_file(fixture.home.join(repo::identity::DEVICE_IDENTITY_FILE))

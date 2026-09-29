@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use objects::{
-    object::{ContentHash, State},
+    object::{ContentHash, State, Tree},
     store::ObjectStore,
 };
 use repo::{AudienceTier, CheckoutMaterialization, Repository};
@@ -15,6 +15,7 @@ pub(crate) struct EvaluationTarget {
     pub(crate) state: State,
     pub(crate) tree_digest: ContentHash,
     worktree_fingerprint: ContentHash,
+    comparison_tree: Tree,
     checkout: Option<tempfile::TempDir>,
 }
 
@@ -30,24 +31,26 @@ impl EvaluationTarget {
         let mut state = repo
             .current_state()?
             .context("local CI needs a current state; capture the working tree first")?;
-        let worktree_fingerprint = repo.build_tree(repo.root())?.hash();
-        let tree_digest = if record {
+        let worktree_tree = repo.build_tree(repo.root())?;
+        let worktree_fingerprint = worktree_tree.hash();
+        let (tree_digest, comparison_tree) = if record {
             let tree = repo.require_tree(&state.tree)?;
             if !repo.compare_worktree_cached(&tree)?.is_clean() {
                 bail!(
                     "recording requires the exact captured State tree; capture the working tree or select --state"
                 );
             }
-            state.tree
+            (state.tree, tree)
         } else {
             state.tree = worktree_fingerprint;
-            worktree_fingerprint
+            (worktree_fingerprint, worktree_tree)
         };
         Ok(Self {
             workdir: repo.root().to_path_buf(),
             state,
             tree_digest,
             worktree_fingerprint,
+            comparison_tree,
             checkout: None,
         })
     }
@@ -82,12 +85,20 @@ impl EvaluationTarget {
             tree_digest: state.tree,
             state,
             worktree_fingerprint: repo.build_tree(checkout.path())?.hash(),
+            comparison_tree: tree,
             checkout: Some(checkout),
         })
     }
 
     pub(crate) fn ensure_unchanged(&self, repo: &Repository) -> Result<()> {
-        if repo.build_tree(&self.workdir)?.hash() != self.worktree_fingerprint {
+        if repo.build_tree(&self.workdir)?.hash() != self.worktree_fingerprint
+            || !objects::worktree::compare_stored_tree_entries(
+                repo.store(),
+                &self.workdir,
+                &self.comparison_tree,
+            )?
+            .is_clean()
+        {
             bail!("working tree changed while CI checks ran; refusing to sign a stale tree digest");
         }
         Ok(())

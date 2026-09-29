@@ -18,12 +18,34 @@ pub fn compare_worktree<S: ObjectStore + ?Sized>(
     ignore_patterns: &[String],
 ) -> Result<WorktreeStatus> {
     let mut status = WorktreeStatus::default();
-    compare_worktree_recursive(store, root, root, Some(tree), ignore_patterns, &mut status)?;
+    compare_worktree_recursive(
+        store,
+        root,
+        root,
+        Some(tree),
+        ignore_patterns,
+        false,
+        &mut status,
+    )?;
 
     status.modified.sort();
     status.added.sort();
     status.deleted.sort();
 
+    Ok(status)
+}
+
+/// Compare every stored entry with the evaluated checkout, including entries
+/// now hidden by ignore rules. Unstored files do not affect this comparison.
+pub fn compare_stored_tree_entries<S: ObjectStore + ?Sized>(
+    store: &S,
+    root: &Path,
+    tree: &Tree,
+) -> Result<WorktreeStatus> {
+    let mut status = WorktreeStatus::default();
+    compare_worktree_recursive(store, root, root, Some(tree), &[], true, &mut status)?;
+    status.modified.sort();
+    status.deleted.sort();
     Ok(status)
 }
 
@@ -33,6 +55,7 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
     dir: &Path,
     tree: Option<&Tree>,
     ignore_patterns: &[String],
+    stored_entries_only: bool,
     status: &mut WorktreeStatus,
 ) -> Result<()> {
     let tree_entries: HashMap<&str, &TreeEntry> = tree
@@ -52,7 +75,11 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
 
             let rel_path = path.strip_prefix(base).unwrap_or(&path);
 
-            if should_ignore(rel_path, ignore_patterns) {
+            if stored_entries_only {
+                if !tree_entries.contains_key(name) {
+                    continue;
+                }
+            } else if should_ignore(rel_path, ignore_patterns) {
                 continue;
             }
 
@@ -111,6 +138,7 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
                         &path,
                         subtree.as_ref(),
                         ignore_patterns,
+                        stored_entries_only,
                         status,
                     )?;
                 }
@@ -122,7 +150,10 @@ fn compare_worktree_recursive<S: ObjectStore + ?Sized>(
         if !seen_entries.contains(name) {
             let rel_path = dir.strip_prefix(base).unwrap_or(dir).join(name);
 
-            if entry.entry_type() == EntryType::Blob || entry.entry_type() == EntryType::Gitlink {
+            if matches!(
+                entry.entry_type(),
+                EntryType::Blob | EntryType::Gitlink | EntryType::Symlink
+            ) {
                 status.deleted.push(rel_path);
             } else if let Some(tree_hash) = entry.tree_hash()
                 && let Some(subtree) = store.get_tree(&tree_hash)?

@@ -3,6 +3,7 @@
 
 use std::process::Command;
 
+use ::wire::{ProtocolError, RemoteFailureCode};
 use anyhow::{Context, Result, anyhow, ensure};
 use api::heddle::api::{common::CallFailureCode, v1alpha2 as wire};
 use chrono::{SecondsFormat, Utc};
@@ -127,7 +128,9 @@ pub(crate) async fn run(cli: &Cli, args: &CiRunArgs) -> Result<()> {
 
     let verdicts = if args.record {
         let (client, address, server) = connect_hosted(&repo).await?;
-        let (evidence_signer, author) = active_evidence_author(&client, &server).await?;
+        let (evidence_signer, author) = active_evidence_author(&client, &server)
+            .await
+            .map_err(|error| scope_error(error, &address))?;
         let kind = if author.actor.agent_id.is_some() {
             SignerKind::ServiceAccount
         } else {
@@ -186,6 +189,26 @@ struct PendingCiRun {
     requests: Vec<Vec<u8>>,
 }
 
+impl PendingCiRun {
+    fn matches(
+        &self,
+        address: &str,
+        thread: [u8; 32],
+        revision: &str,
+        checks: &[String],
+        verdicts: &[SignedVerdict],
+    ) -> bool {
+        self.address == address
+            && self.thread == thread
+            && self.revision == revision
+            && self.checks == checks
+            && self.verdicts.len() == verdicts.len()
+            && self.verdicts.iter().zip(verdicts).all(|(saved, current)| {
+                saved.body.check.definition_digest == current.body.check.definition_digest
+            })
+    }
+}
+
 #[derive(Clone, Copy)]
 struct EvidenceIdentity<'a> {
     author: &'a CheckAuthor,
@@ -232,7 +255,10 @@ async fn record_evidence(
     identity: EvidenceIdentity<'_>,
     verdicts: &[SignedVerdict],
 ) -> Result<(Vec<SignedVerdict>, Vec<RecordedEvidence>)> {
-    let spool = client.resolve_spool_ref(address).await?;
+    let spool = client
+        .resolve_spool_ref(address)
+        .await
+        .map_err(|error| scope_error(error.into(), address))?;
     let spool_id = uuid::Uuid::parse_str(&spool.id)?;
     check_local_spool(repo, spool_id)?;
     let thread_name = super::super::thread_cmd::resolve_thread_name_or_current(
@@ -241,7 +267,10 @@ async fn record_evidence(
         "ci run",
         "heddle ci run --record",
     )?;
-    let thread = client.resolve_thread_ref(address, &thread_name).await?;
+    let thread = client
+        .resolve_thread_ref(address, &thread_name)
+        .await
+        .map_err(|error| scope_error(error.into(), address))?;
     if thread.spool.as_ref() != Some(&spool) {
         return Err(record_refusal(
             "ci_record_spool_mismatch",
@@ -282,11 +311,14 @@ async fn record_evidence(
             let pending: PendingCiRun =
                 rmp_serde::from_slice(&bytes).context("decode pending CI evidence")?;
             ensure!(
-                pending.address == address
-                    && pending.thread == thread_id
-                    && pending.revision == revision.to_string_full()
-                    && pending.checks == checks,
-                "--op-id {raw} belongs to another Spool, Thread, revision or check selection"
+                pending.matches(
+                    address,
+                    thread_id,
+                    &revision.to_string_full(),
+                    &checks,
+                    verdicts
+                ),
+                "--op-id {raw} belongs to another Spool, Thread, revision, check selection or CI definition"
             );
             pending
         } else {
@@ -479,17 +511,7 @@ fn evidence_error(error: HostedError, revision: &str, address: &str) -> anyhow::
         HostedError::Call {
             code: CallFailureCode::PermissionDenied,
             ..
-        } => {
-            let path = address.strip_prefix("spool/").unwrap_or(address);
-            record_refusal(
-                "ci_record_scope_denied",
-                format!("RecordEvidence scope denied for Spool {address}"),
-                format!(
-                    "Derive a runner credential for `spool:{path}` using your hosted server, or use your own credential."
-                ),
-                "heddle auth derive-agent --help",
-            )
-        }
+        } => scope_refusal(address),
         HostedError::Call {
             code: CallFailureCode::FailedPrecondition,
             ref message,
@@ -515,6 +537,44 @@ fn evidence_error(error: HostedError, revision: &str, address: &str) -> anyhow::
         ),
         other => other.into(),
     }
+}
+
+fn scope_error(error: anyhow::Error, address: &str) -> anyhow::Error {
+    let denied = error.downcast_ref::<ProtocolError>().is_some_and(|source| {
+        matches!(
+            source,
+            ProtocolError::AuthorizationFailed(_)
+                | ProtocolError::RemoteFailure {
+                    code: RemoteFailureCode::PermissionDenied,
+                    ..
+                }
+        )
+    }) || error.downcast_ref::<HostedError>().is_some_and(|source| {
+        matches!(
+            source,
+            HostedError::Call {
+                code: CallFailureCode::PermissionDenied,
+                ..
+            }
+        )
+    });
+    if denied {
+        scope_refusal(address)
+    } else {
+        error
+    }
+}
+
+fn scope_refusal(address: &str) -> anyhow::Error {
+    let path = address.strip_prefix("spool/").unwrap_or(address);
+    record_refusal(
+        "ci_record_scope_denied",
+        format!("CI evidence scope denied for Spool {address}"),
+        format!(
+            "Derive a runner credential for `spool:{path}` using your hosted server, or use your own credential."
+        ),
+        "heddle auth derive-agent --help",
+    )
 }
 
 fn check_local_spool(repo: &Repository, hosted: uuid::Uuid) -> Result<()> {
@@ -700,7 +760,83 @@ mod tests {
     use api::heddle::api::common::CallFailureCode;
     use hosted_client::hosted_runtime::hosted::HostedError;
 
-    use super::{check_local_spool, evidence_error};
+    use super::{PendingCiRun, check_local_spool, evidence_error, scope_error};
+
+    fn verdict(digest: &str) -> crypto::SignedVerdict {
+        let body = crypto::CiVerdictBody {
+            check: crypto::CheckDescriptor {
+                name: "unit".into(),
+                definition_digest: digest.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        crypto::SignedVerdict {
+            format_version: crypto::SIGNED_VERDICT_FORMAT_VERSION,
+            body,
+            content_hash: objects::object::ContentHash::from_bytes([0; 32]),
+            change_id: objects::object::ChangeId::from_bytes([0; 16]),
+            tree_digest: objects::object::ContentHash::from_bytes([0; 32]),
+            signer_kind: crypto::SignerKind::Device,
+            signed_at: "2026-01-01T00:00:00Z".into(),
+            algorithm: String::new(),
+            public_key: String::new(),
+            signature: String::new(),
+        }
+    }
+
+    #[test]
+    fn replay_rejects_changed_definition_with_same_revision_and_check() {
+        let thread = [1; 32];
+        let checks = vec!["unit".to_string()];
+        let pending = PendingCiRun {
+            address: "team/repo".into(),
+            thread,
+            revision: "hs-revision".into(),
+            checks: checks.clone(),
+            verdicts: vec![verdict("old-digest")],
+            requests: Vec::new(),
+        };
+        assert!(pending.matches(
+            "team/repo",
+            thread,
+            "hs-revision",
+            &checks,
+            &[verdict("old-digest")]
+        ));
+        assert!(!pending.matches(
+            "team/repo",
+            thread,
+            "hs-revision",
+            &checks,
+            &[verdict("new-digest")]
+        ));
+    }
+
+    #[test]
+    fn resource_scope_denial_is_typed_without_disclosing_resource_availability() {
+        let denied = ::wire::ProtocolError::RemoteFailure {
+            code: ::wire::RemoteFailureCode::PermissionDenied,
+            message: "scope denied".into(),
+            details: Vec::new(),
+        };
+        let error = scope_error(denied.into(), "team/repo");
+        let advice = error
+            .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
+            .expect("typed scope refusal");
+        assert_eq!(advice.kind, "ci_record_scope_denied");
+
+        let unavailable = ::wire::ProtocolError::ObjectNotFound("unavailable".into());
+        let error = scope_error(unavailable.into(), "team/repo");
+        assert!(error.downcast_ref::<::wire::ProtocolError>().is_some());
+
+        let identity_denied = failure(CallFailureCode::PermissionDenied);
+        let error = scope_error(identity_denied.into(), "team/repo");
+        let advice = error
+            .downcast_ref::<crate::cli::commands::RecoveryAdvice>()
+            .expect("typed identity scope refusal");
+        assert_eq!(advice.kind, "ci_record_scope_denied");
+    }
 
     fn failure(code: CallFailureCode) -> HostedError {
         HostedError::Call {

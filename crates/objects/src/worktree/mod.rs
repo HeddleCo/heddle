@@ -12,7 +12,7 @@ mod worktree_types;
 mod worktree_tests;
 
 pub use source_line_map::{SourceLineMapBuild, source_line_edit_map};
-pub use worktree_compare::compare_worktree;
+pub use worktree_compare::{compare_stored_tree_entries, compare_worktree};
 pub use worktree_diff::{DiffLine, diff_blobs};
 pub use worktree_ignore::{
     WorktreeIgnoreMatcher, build_matcher, build_worktree_ignore, should_ignore,
