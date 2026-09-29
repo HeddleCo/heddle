@@ -578,6 +578,7 @@ fn cmd_agent_fanout_plan(cli: &Cli, args: AgentFanoutPlanArgs) -> Result<()> {
                 lane_thread: command.lane_thread.clone(),
                 command: command.command.clone(),
                 argv: command.argv.clone(),
+                env_unset: Vec::new(),
                 cwd: None,
                 harness: None,
                 credential_file: None,
@@ -649,9 +650,11 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
 
     let attach_rule = fanout_start_attach_rule();
     let mut created_task_ids = vec![parent.task_id.clone()];
+    let mut entered_threads = Vec::new();
     let start_result = (|| -> Result<Vec<AgentFanoutLaneOutput>> {
         let mut outputs = Vec::new();
         for lane in &plan.nodes {
+            entered_threads.push(lane.thread.clone());
             let checkout_path = repo.managed_checkout_path(&lane.thread);
             let mut child =
                 AgentTaskRecord::new(String::new(), lane.title.clone(), lane.thread.clone());
@@ -691,12 +694,8 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                     hydrate: false,
                 },
             )?;
-            if repo.capability() == RepositoryCapability::GitOverlay
-                && let Err(error) = link_fanout_child_git(&repo, &checkout_path, &lane.thread)
-            {
-                super::thread_cmd::drop_thread_silent(&repo, &lane.thread, true, true)?;
-                ThreadManager::new(repo.heddle_dir()).delete(&lane.thread)?;
-                return Err(error);
+            if repo.capability() == RepositoryCapability::GitOverlay {
+                link_fanout_child_git(&repo, &checkout_path, &lane.thread)?;
             }
             let session_id = started
                 .thread
@@ -752,7 +751,20 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
     let outputs = match start_result {
         Ok(outputs) => outputs,
         Err(err) => {
-            abandon_fanout_tasks(&store, &created_task_ids);
+            if let Err(rollback_error) =
+                rollback_fanout_start(&repo, &store, &entered_threads, &created_task_ids)
+            {
+                return Err(anyhow!(RecoveryAdvice::safety_refusal(
+                    "agent_fanout_rollback_failed",
+                    format!("{err}; fanout rollback failed: {rollback_error}"),
+                    "Inspect the remaining lanes and writer leases before retrying.",
+                    "fanout creation failed and cleanup could not remove every created lane",
+                    "a retry could collide with a remaining checkout or writer lease",
+                    "cleanup was attempted for every lane, lease, and task in this batch",
+                    "heddle status",
+                    vec!["heddle status".to_string()],
+                )));
+            }
             return Err(err);
         }
     };
@@ -1145,9 +1157,14 @@ fn fanout_launch_command(
         .to_string(),
     );
     argv.push(lane.title.clone());
+    let env_unset: Vec<_> = FANOUT_CREDENTIAL_ENV_PREFIXES
+        .iter()
+        .map(|prefix| format!("{prefix}*"))
+        .collect();
     let command = format!(
-        "cd {} && HEDDLE_WRITER_CREDENTIAL_FILE={} {}",
+        "cd {} && (for key in $(env | cut -d= -f1); do case \"$key\" in {}) unset \"$key\" ;; esac; done; export HEDDLE_WRITER_CREDENTIAL_FILE={}; exec {})",
         shell_quote(&lane.path),
+        env_unset.join("|"),
         shell_quote(&credential_file),
         argv.iter()
             .map(|arg| shell_quote(arg))
@@ -1158,6 +1175,7 @@ fn fanout_launch_command(
         lane_thread: lane.thread.clone(),
         command,
         argv,
+        env_unset,
         cwd: Some(lane.path.clone()),
         harness: Some(harness.label().to_string()),
         credential_file: Some(credential_file),
@@ -1188,7 +1206,9 @@ fn run_fanout_harness(command: &AgentFanoutCommandOutput, json: bool) -> Result<
         })?);
     for (key, _) in std::env::vars_os() {
         if key.to_str().is_some_and(|key| {
-            key.starts_with("HEDDLE_WRITER_") || key.starts_with("HEDDLE_RESERVATION_")
+            FANOUT_CREDENTIAL_ENV_PREFIXES
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
         }) {
             launch.env_remove(key);
         }
@@ -1205,11 +1225,52 @@ fn run_fanout_harness(command: &AgentFanoutCommandOutput, json: bool) -> Result<
     Ok(child)
 }
 
-fn abandon_fanout_tasks(store: &AgentTaskStore, task_ids: &[String]) {
-    for task_id in task_ids {
-        let _ = store.update(task_id, |task| {
-            task.status = AgentTaskStatus::Abandoned;
-        });
+const FANOUT_CREDENTIAL_ENV_PREFIXES: &[&str] = &["HEDDLE_WRITER_", "HEDDLE_RESERVATION_"];
+
+fn rollback_fanout_start(
+    repo: &Repository,
+    store: &AgentTaskStore,
+    threads: &[String],
+    task_ids: &[String],
+) -> Result<()> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let mut errors = Vec::new();
+    for thread in threads.iter().rev() {
+        let result = (|| -> Result<()> {
+            if let Some(record) = manager.load_id_or_name(thread)? {
+                super::thread_cmd::drop_thread_silent(repo, thread, true, true)?;
+                manager.delete(&record.id)?;
+            } else {
+                repo::thread_manifest::remove_thread_manifest_dir(repo.heddle_dir(), thread)?;
+                let thread_name = ThreadName::new(thread);
+                if repo.refs().get_thread(&thread_name)?.is_some() {
+                    repo.delete_thread_recorded(&thread_name)?;
+                }
+            }
+            let registry = ActorPresenceStore::new(repo.heddle_dir());
+            for entry in registry.list()? {
+                if entry.thread == *thread {
+                    registry.delete(&entry.session_id)?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            errors.push(format!("{thread}: {error}"));
+        }
+    }
+    if let Err(error) = WriterLeaseStore::new(repo.heddle_dir()).delete_for_tasks(task_ids) {
+        errors.push(format!("writer leases: {error}"));
+    }
+    for task_id in task_ids.iter().rev() {
+        if let Err(error) = store.delete(task_id) {
+            errors.push(format!("task {task_id}: {error}"));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(errors.join("; ")))
     }
 }
 

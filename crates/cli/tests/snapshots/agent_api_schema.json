@@ -23,6 +23,12 @@
           "null"
         ]
       },
+      "env_unset": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
       "harness": {
         "type": [
           "string",
@@ -36,7 +42,8 @@
     "required": [
       "lane_thread",
       "command",
-      "argv"
+      "argv",
+      "env_unset"
     ],
     "title": "AgentFanoutCommandOutput",
     "type": "object"
@@ -226,6 +233,12 @@
               "null"
             ]
           },
+          "env_unset": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "harness": {
             "type": [
               "string",
@@ -239,7 +252,8 @@
         "required": [
           "lane_thread",
           "command",
-          "argv"
+          "argv",
+          "env_unset"
         ],
         "type": "object"
       },

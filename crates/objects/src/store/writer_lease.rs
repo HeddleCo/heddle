@@ -473,6 +473,24 @@ impl WriterLeaseStore {
         self.list_locked()
     }
 
+    /// Remove reservations belonging to task assignments rolled back before launch.
+    pub fn delete_for_tasks(&self, task_ids: &[String]) -> Result<()> {
+        let _lock = self.write_lock()?;
+        for lease in self.list_locked()? {
+            if lease
+                .task_assignment_id
+                .as_ref()
+                .is_some_and(|task_id| task_ids.contains(task_id))
+            {
+                let path = self.lease_path(&lease.lease_id)?;
+                if path.exists() {
+                    std::fs::remove_file(path)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn abandon_thread(&self, thread: &str, now: DateTime<Utc>) -> Result<()> {
         let _lock = self.write_lock()?;
         let mut checkout_guards = Vec::new();

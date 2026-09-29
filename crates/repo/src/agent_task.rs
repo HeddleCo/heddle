@@ -195,6 +195,16 @@ impl AgentTaskStore {
         self.load_record_from_path(&path, task_id)
     }
 
+    /// Remove a task created by an operation that did not complete.
+    pub fn delete(&self, task_id: &str) -> Result<()> {
+        let _lock = self.write_lock()?;
+        let path = self.task_path(task_id)?;
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
     /// List all task records, most-recently-updated first.
     pub fn list(&self) -> Result<Vec<AgentTaskRecord>> {
         if !self.tasks_dir.exists() {
