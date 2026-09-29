@@ -14,8 +14,8 @@ pub(crate) use heddle_cli_contract::cli::commands::wire::remote::{
 use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
 use heddle_git_projection::{
     git_core::{
-        RefRewriteAuthorization, ensure_commit_update_fast_forward, set_reference,
-        set_reference_authorized,
+        RefRewriteAuthorization, delete_reference_authorized, ensure_commit_update_fast_forward,
+        set_reference, set_reference_authorized,
     },
     git_notes::NOTES_REF,
 };
@@ -355,6 +355,51 @@ pub(crate) struct AuthoritativeGitPullOutcome {
 }
 
 fn execute_authoritative_git_pull(
+    repo: &Repository,
+    remote_name: &str,
+    local_branch: &str,
+    remote_branch: &str,
+    progress: &objects::Progress,
+    import_progress: Option<&mut ImportProgress>,
+) -> Result<AuthoritativeGitPullOutcome> {
+    let result = execute_authoritative_git_pull_inner(
+        repo,
+        remote_name,
+        local_branch,
+        remote_branch,
+        progress,
+        import_progress,
+    );
+    // Fetch stages notes outside the protected namespace. The ref is scratch
+    // state; remove it on both successful and failed pulls, using its observed
+    // tip as the delete precondition.
+    let cleanup = (|| -> Result<()> {
+        let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
+        let name = "refs/heddle/pull/notes/heddle";
+        if let Some(reference) = git.find_reference(name).map_err(anyhow::Error::new)?
+            && let Some(oid) = reference.peeled_oid(&git).map_err(anyhow::Error::new)?
+        {
+            delete_reference_authorized(
+                &git,
+                name,
+                Some(oid),
+                true,
+                RefRewriteAuthorization::None,
+            )?;
+        }
+        Ok(())
+    })();
+    match (result, cleanup) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(error.context(format!(
+            "also failed to remove staged pull notes: {cleanup_error}"
+        ))),
+    }
+}
+
+fn execute_authoritative_git_pull_inner(
     repo: &Repository,
     remote_name: &str,
     local_branch: &str,
@@ -1666,7 +1711,9 @@ fn cmd_git_overlay_remote(cli: &Cli, repo: &Repository, command: RemoteCommands)
             super::admit_git_overlay_remote_url(&url)?;
             let set = RemoteConfigSet::new(&name)
                 .with_url(&url)
-                .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
+                .with_fetch_refspec(
+                    heddle_git_projection::git_core::remote_tracking_fetch_refspec(&name),
+                );
             let plan = git
                 .plan_remote_set(set, ConfigEditScope::Local)?
                 .with_fsync(true);

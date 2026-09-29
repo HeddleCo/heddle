@@ -874,7 +874,7 @@ fn write_git_overlay_remote(root: &Path, name: &str, url: &str) -> Result<()> {
     let git = SleyRepository::discover(root).map_err(anyhow::Error::new)?;
     let remote = RemoteConfigSet::new(name)
         .with_url(url)
-        .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
+        .with_fetch_refspec(heddle_git_projection::git_core::remote_tracking_fetch_refspec(name));
     let plan = ConfigEditPlan::new(git.common_dir().join("config"))
         .with_operation(ConfigEdit::replace_section(
             "remote",

@@ -17,7 +17,8 @@ fn scan_sources(dir: &Path, violations: &mut Vec<String>) {
         let source = fs::read_to_string(&path).expect("read Rust source");
         let mut test_item_pending = false;
         let mut test_item_depth = 0_usize;
-        for (index, line) in source.lines().enumerate() {
+        let lines: Vec<_> = source.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
             // Test fixture writes are permitted. Resume scanning after each
             // test item, including when production items follow it.
             if test_item_depth > 0 {
@@ -51,21 +52,42 @@ fn scan_sources(dir: &Path, violations: &mut Vec<String>) {
                 "apply_ref_batch(",
                 "update_to(",
                 "refs.transaction(",
+                "store.transaction(",
                 "references.transaction(",
                 ".references().transaction(",
                 "gix::refs::transaction",
                 "sley_refs::transaction",
                 "upsert_note_bytes_for(",
+                "tx.update(",
+                "create_branch(",
+                "update_branch_checked_out_as_head(",
+                "write_notes(",
             ]
             .iter()
             .any(|needle| line.contains(needle));
             let raw_git = line.contains("\"update-ref\"");
             let raw_reference = line.contains(".reference(") && !line.contains(".reference()");
+            let dynamic_refspec = line
+                .split_once("format!(\"+")
+                .and_then(|(_, tail)| tail.split('"').next())
+                .is_some_and(|format_string| format_string.contains(':'))
+                || line.contains(".join(\":\")");
+            let empty_fetch = line.contains("fetch(")
+                && lines[index..lines.len().min(index + 5)].iter().any(|next| {
+                    next.contains("&[]") || next.contains("vec![]") || next.contains("Vec::new()")
+                });
             // Fetch refspecs are writes too. A forced transport update must
             // never target the branch or notes namespaces protected by the
             // publication guard. Staging and remote-tracking refs are safe.
             let protected_fetch = line.contains(":refs/heads/") || line.contains(":refs/notes/");
-            if protected_fetch || (!publication_module && (raw_sley || raw_git || raw_reference)) {
+            if !publication_module
+                && (protected_fetch
+                    || raw_sley
+                    || raw_git
+                    || raw_reference
+                    || dynamic_refspec
+                    || empty_fetch)
+            {
                 violations.push(format!("{}:{}: {line}", path.display(), index + 1));
             }
         }

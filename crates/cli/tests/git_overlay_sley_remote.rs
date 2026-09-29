@@ -251,6 +251,13 @@ fn pull_refuses_divergent_branch_without_replacing_local_heddle_notes() {
     assert_eq!(refusal["kind"], "git_overlay_pull_diverged");
     assert_eq!(ref_oid(&local, "refs/heads/main"), local_tip);
     assert_eq!(ref_oid(&local, "refs/notes/heddle"), notes_before);
+    assert!(
+        local
+            .find_reference("refs/heddle/pull/notes/heddle")
+            .expect("read staged notes")
+            .is_none(),
+        "failed pull must remove its staged notes ref"
+    );
 }
 
 #[test]
@@ -384,6 +391,8 @@ fn pull_streams_and_fast_forwards_with_empty_process_path() {
 
     let second = write_commit(&source, Some(first), b"two\n", b"two\n");
     publish_branch(&source, "release", None, second);
+    heddle_git_projection::git_notes::write_note(&source, first, &test_note("remote", "remote"))
+        .expect("write remote Heddle note");
 
     let output = run(&temp, &checkout, &["--output", "json", "pull"]);
     assert!(
@@ -401,6 +410,20 @@ fn pull_streams_and_fast_forwards_with_empty_process_path() {
     );
     let local = SleyRepository::discover(&checkout).expect("reopen checkout");
     assert_eq!(local.head().expect("read HEAD").oid, Some(second));
+    assert!(
+        local
+            .find_reference("refs/heddle/pull/notes/heddle")
+            .expect("read staged notes")
+            .is_none(),
+        "successful pull must remove its staged notes ref"
+    );
+    assert!(
+        local
+            .find_reference("refs/notes/heddle")
+            .expect("read served notes")
+            .is_some(),
+        "fetched Heddle notes must still be published"
+    );
     assert!(!checkout.join(".heddle/git").exists());
 }
 

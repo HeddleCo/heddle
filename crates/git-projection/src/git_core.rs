@@ -741,8 +741,9 @@ impl CheckoutWrite {
                 rollback_reference_if_unchanged(
                     &self.object_repo,
                     &self.branch_ref,
-                    git_oid,
+                    Some(git_oid),
                     self.previous_branch,
+                    RefRewriteAuthorization::RestoreFailedPublication,
                 )?;
             }
             if index_written {
@@ -1912,11 +1913,12 @@ fn read_optional_file(path: &Path) -> GitProjectionResult<Option<Vec<u8>>> {
     }
 }
 
-fn rollback_reference_if_unchanged(
+pub fn rollback_reference_if_unchanged(
     repo: &SleyRepository,
     name: &str,
-    published: ObjectId,
+    published: Option<ObjectId>,
     previous: Option<ObjectId>,
+    authorization: RefRewriteAuthorization,
 ) -> GitProjectionResult<()> {
     let current = match repo.find_reference(name).map_err(git_err)? {
         Some(reference) => reference.peeled_oid(repo).map_err(git_err)?,
@@ -1925,27 +1927,32 @@ fn rollback_reference_if_unchanged(
     if current == previous {
         return Ok(());
     }
-    if current != Some(published) {
+    if current != published {
         return Err(GitProjectionError::Git(format!(
             "refusing to roll back Git reference '{name}' because another Git operation changed it"
         )));
     }
-    let rollback = match previous {
-        Some(previous) => set_reference_authorized(
+    let rollback = match (published, previous) {
+        (Some(published), Some(previous)) => set_reference_authorized(
             repo,
             name,
             previous,
             RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(published)),
             "heddle: rollback failed write-through",
-            RefRewriteAuthorization::RestoreFailedPublication,
+            authorization,
         ),
-        None => delete_reference_authorized(
+        (None, Some(previous)) => set_reference_authorized(
             repo,
             name,
-            Some(published),
-            false,
-            RefRewriteAuthorization::RestoreFailedPublication,
+            previous,
+            RefPrecondition::MustNotExist,
+            "heddle: rollback failed write-through",
+            authorization,
         ),
+        (Some(published), None) => {
+            delete_reference_authorized(repo, name, Some(published), false, authorization)
+        }
+        (None, None) => return Ok(()),
     };
     if rollback.is_ok() {
         return Ok(());
@@ -1959,6 +1966,12 @@ fn rollback_reference_if_unchanged(
     } else {
         rollback
     }
+}
+
+/// Build the configured fetch refspec for remote-tracking branches. Keep forced
+/// refspec construction at the publication boundary for source audits.
+pub fn remote_tracking_fetch_refspec(name: &str) -> String {
+    format!("+refs/heads/*:refs/remotes/{name}/*")
 }
 
 /// `fsync` a single file by opening it read-only and calling
@@ -2160,6 +2173,12 @@ pub fn set_reference_with_identity_authorized(
     committer: Vec<u8>,
     authorization: RefRewriteAuthorization,
 ) -> GitProjectionResult<()> {
+    if authorization != RefRewriteAuthorization::None && matches!(constraint, RefPrecondition::Any)
+    {
+        return Err(GitProjectionError::Git(format!(
+            "refusing to update {name} with a rewrite authorization and no CAS precondition"
+        )));
+    }
     let refs = repo.references();
     let observed = refs.read_ref(name).map_err(git_err)?;
     if authorization == RefRewriteAuthorization::None
@@ -4431,6 +4450,28 @@ mod tests {
         assert!(message.contains(&old.to_string()));
         assert!(message.contains(&new.to_string()));
         assert!(message.contains("refusing to replace"));
+    }
+
+    #[test]
+    fn rewrite_authorization_requires_explicit_cas_precondition() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let target = test_commit(&repo, "target", &[]);
+        let result = set_reference_authorized(
+            &repo,
+            "refs/heads/main",
+            target,
+            RefPrecondition::Any,
+            "test: unauthorized any",
+            RefRewriteAuthorization::UndoRollback,
+        );
+        assert!(result.is_err(), "authorized Any must be rejected");
+        assert!(
+            repo.find_reference("refs/heads/main")
+                .expect("read main")
+                .is_none(),
+            "ref must remain absent"
+        );
     }
 
     #[test]
