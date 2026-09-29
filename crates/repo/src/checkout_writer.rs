@@ -208,6 +208,11 @@ fn belongs_to_harness(_pid: u32, _birth: &str) -> bool {
 }
 
 fn require_hook_owner(lease: &objects::store::WriterLease) -> Result<()> {
+    if !lease.matches_current_pid_namespace() {
+        return Err(credential_error(
+            "lane credential belongs to another PID namespace",
+        ));
+    }
     match (lease.pid, lease.pid_birth.as_deref()) {
         (Some(pid), Some(birth)) if belongs_to_harness(pid, birth) => Ok(()),
         _ => Err(credential_error(
@@ -625,7 +630,7 @@ impl Repository {
 
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
-    use super::belongs_to_harness_with;
+    use super::{belongs_to_harness_with, require_hook_owner};
 
     #[test]
     fn pid_one_harness_authorizes_its_descendants() {
@@ -651,5 +656,44 @@ mod tests {
             parent,
             birth
         ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn foreign_namespace_pid_one_birth_collision_cannot_authorize() {
+        use objects::store::{WriterLeaseDraft, WriterLeaseReserveOutcome, WriterLeaseStore};
+
+        let temp = tempfile::tempdir().expect("lease directory");
+        let store = WriterLeaseStore::new(temp.path());
+        let draft = WriterLeaseDraft {
+            thread: "lane".to_string(),
+            actor_session_id: None,
+            task_assignment_id: Some("task".to_string()),
+            anchor_state: None,
+            anchor_root: None,
+            path: None,
+            pid: Some(1),
+            boot_id: None,
+        };
+        let WriterLeaseReserveOutcome::Reserved(grant) = store
+            .reserve(draft, chrono::Utc::now())
+            .expect("reserve lease")
+        else {
+            panic!("new lane already has an owner");
+        };
+        let birth = objects::store::process_birth(1).expect("PID 1 birth tick");
+        assert!(super::belongs_to_harness(1, &birth));
+        let mut lease = serde_json::to_value(grant.lease).expect("serialize lease");
+        lease["pid_birth"] = serde_json::json!(birth);
+        lease["harness_session_id"] = serde_json::json!("codex:foreign-session");
+        let namespace = &mut lease["pid_namespace"];
+        if let Some(name) = namespace.as_str() {
+            *namespace = serde_json::json!(format!("{name}-foreign"));
+        } else {
+            let device = namespace["device"].as_u64().expect("namespace device");
+            namespace["device"] = serde_json::json!(device.wrapping_add(1));
+        }
+        let lease = serde_json::from_value(lease).expect("foreign lease");
+        assert!(require_hook_owner(&lease).is_err());
     }
 }

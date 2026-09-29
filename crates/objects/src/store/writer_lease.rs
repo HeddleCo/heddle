@@ -41,6 +41,12 @@ pub enum WriterLeaseStatus {
     Abandoned,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PidNamespace {
+    pub device: u64,
+    pub inode: u64,
+}
+
 impl std::fmt::Display for WriterLeaseStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -73,7 +79,7 @@ pub struct WriterLease {
     #[serde(default)]
     pub pid_birth: Option<String>,
     #[serde(default)]
-    pub pid_namespace: Option<String>,
+    pub pid_namespace: Option<PidNamespace>,
     #[serde(default)]
     pub harness_session_id: Option<String>,
     pub heartbeat_at: DateTime<Utc>,
@@ -84,6 +90,15 @@ pub struct WriterLease {
 }
 
 impl WriterLease {
+    pub fn matches_current_pid_namespace(&self) -> bool {
+        if cfg!(target_os = "linux") {
+            self.pid_namespace
+                .is_some_and(|recorded| Some(recorded) == current_pid_namespace())
+        } else {
+            true
+        }
+    }
+
     fn conflicts_with(&self, thread: &str, path: Option<&Path>) -> bool {
         self.status == WriterLeaseStatus::Active
             && match (self.path.as_deref(), path) {
@@ -98,13 +113,13 @@ impl WriterLease {
     }
 
     pub fn liveness_at(&self, now: DateTime<Utc>) -> Liveness {
-        self.liveness_at_in_namespace(now, current_pid_namespace().as_deref())
+        self.liveness_at_in_namespace(now, current_pid_namespace())
     }
 
     fn liveness_at_in_namespace(
         &self,
         now: DateTime<Utc>,
-        observed_namespace: Option<&str>,
+        observed_namespace: Option<PidNamespace>,
     ) -> Liveness {
         if self.status != WriterLeaseStatus::Active {
             return Liveness::Dead;
@@ -113,7 +128,6 @@ impl WriterLease {
         // Without comparable namespace identities, only the heartbeat can expire it.
         let same_namespace = if cfg!(target_os = "linux") {
             self.pid_namespace
-                .as_deref()
                 .is_some_and(|recorded| Some(recorded) == observed_namespace)
         } else {
             true
@@ -136,15 +150,18 @@ impl WriterLease {
 }
 
 #[cfg(target_os = "linux")]
-fn current_pid_namespace() -> Option<String> {
-    std::fs::read_link("/proc/self/ns/pid")
-        .ok()?
-        .to_str()
-        .map(str::to_owned)
+fn current_pid_namespace() -> Option<PidNamespace> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata("/proc/self/ns/pid").ok()?;
+    Some(PidNamespace {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
 }
 
 #[cfg(not(target_os = "linux"))]
-fn current_pid_namespace() -> Option<String> {
+fn current_pid_namespace() -> Option<PidNamespace> {
     None
 }
 
@@ -483,6 +500,11 @@ impl WriterLeaseStore {
         if token_hash(token) != lease.token_hash {
             return Ok(WriterLeaseAuthOutcome::TokenMismatch);
         }
+        if (lease.pid.is_some() || lease.pid_namespace.is_some())
+            && !lease.matches_current_pid_namespace()
+        {
+            return Ok(WriterLeaseAuthOutcome::TokenMismatch);
+        }
         if let Some(existing) = lease.harness_session_id.as_deref()
             && existing != session
         {
@@ -702,6 +724,21 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn pid_namespace_records_device_and_inode() {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = std::fs::metadata("/proc/self/ns/pid").expect("PID namespace metadata");
+        assert_eq!(
+            current_pid_namespace(),
+            Some(PidNamespace {
+                device: metadata.dev(),
+                inode: metadata.ino(),
+            })
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn foreign_pid_namespace_cannot_reap_fresh_bound_lease() {
         let now = Utc::now();
         let temp = TempDir::new().expect("lease store");
@@ -725,17 +762,43 @@ mod tests {
         };
         assert_eq!(lease.pid_namespace, current_pid_namespace());
         assert_eq!(
-            lease.liveness_at_in_namespace(now, lease.pid_namespace.as_deref()),
+            lease.liveness_at_in_namespace(now, lease.pid_namespace),
             Liveness::Dead,
             "a recycled PID in the same namespace must be rejected"
         );
+        let namespace = lease.pid_namespace.expect("PID namespace");
         lease.pid_namespace = None;
         assert_eq!(lease.liveness_at(now), Liveness::Alive);
-        lease.pid_namespace = Some("pid:[foreign]".to_string());
+        lease.pid_namespace = Some(PidNamespace {
+            device: namespace.device.wrapping_add(1),
+            ..namespace
+        });
         store
             .write_lease(&lease)
             .expect("simulate foreign namespace");
         assert_eq!(lease.liveness_at(now), Liveness::Alive);
+        assert!(matches!(
+            store
+                .bind_hook_session(
+                    &grant.lease.lease_id,
+                    &grant.token,
+                    "opencode:session-a",
+                    std::process::id(),
+                    "wrong-birth-tick",
+                    now,
+                )
+                .expect("foreign namespace bind"),
+            WriterLeaseAuthOutcome::TokenMismatch
+        ));
+        assert_eq!(
+            store
+                .load(&grant.lease.lease_id)
+                .expect("load")
+                .expect("lease")
+                .pid_namespace,
+            lease.pid_namespace,
+            "failed bind must preserve the recorded namespace"
+        );
         assert!(matches!(
             store.reserve(draft("lane"), now).expect("competing writer"),
             WriterLeaseReserveOutcome::LiveOwner(_)
