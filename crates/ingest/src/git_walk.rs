@@ -44,6 +44,9 @@ use std::{
 };
 
 use chrono::{DateTime, TimeZone, Utc};
+use objects::object::thread_replication::git_import_graph::{
+    GitObjectId, GitRefObjectType, GitRefTarget, ImportRefIdentity,
+};
 use sley::{
     GitObjectType, ObjectFormat, ObjectId as SleyObjectId, RefStore as SleyRefStore,
     ReferenceTarget as SleyRefTarget, Repository as SleyRepository, Signature as SleySignature,
@@ -229,6 +232,66 @@ impl std::fmt::Debug for GitSource {
 }
 
 impl GitSource {
+    /// Enumerate the full Git ref set, including HEAD, unsupported
+    /// namespaces, symbolic refs, and non-commit tags. The regular
+    /// `collect_refs` view only includes commit-pointing native refs.
+    pub fn collect_frozen_import_refs(&self) -> crate::Result<Vec<ImportRefIdentity>> {
+        let refs = self.repo.references();
+        let mut raw: Vec<(String, SleyRefTarget)> = refs
+            .list_refs()
+            .map_err(|error| IngestError::Git(format!("list Git refs: {error}")))?
+            .into_iter()
+            .map(|reference| (reference.name, reference.target))
+            .collect();
+        if let Some(target) = refs
+            .read_ref("HEAD")
+            .map_err(|error| IngestError::Git(format!("read Git HEAD: {error}")))?
+        {
+            raw.push(("HEAD".into(), target));
+        }
+        let mut out = Vec::with_capacity(raw.len());
+        for (name, target) in raw {
+            let raw_name = name.as_bytes().to_vec();
+            let (raw_target, peeled_commit) = match target {
+                SleyRefTarget::Symbolic(target) => {
+                    (GitRefTarget::Symbolic(target.into_bytes()), None)
+                }
+                SleyRefTarget::Direct(oid) => {
+                    let object_type = match self.repo.read_object(&oid) {
+                        Ok(object) => match object.object_type {
+                            GitObjectType::Commit => GitRefObjectType::Commit,
+                            GitObjectType::Tag => GitRefObjectType::Tag,
+                            GitObjectType::Tree => GitRefObjectType::Tree,
+                            GitObjectType::Blob => GitRefObjectType::Blob,
+                        },
+                        Err(_) => GitRefObjectType::Unknown,
+                    };
+                    let peeled = self
+                        .repo
+                        .peel_to_commit_oid(oid)
+                        .ok()
+                        .filter(|commit| is_commit(&self.repo, *commit))
+                        .map(git_import_oid)
+                        .transpose()?;
+                    (
+                        GitRefTarget::Direct {
+                            oid: git_import_oid(oid)?,
+                            object_type,
+                        },
+                        peeled,
+                    )
+                }
+            };
+            out.push(ImportRefIdentity {
+                raw_name,
+                raw_target,
+                peeled_commit,
+            });
+        }
+        out.sort_by(|a, b| a.raw_name.cmp(&b.raw_name));
+        Ok(out)
+    }
+
     /// Resolve a Git revision without changing refs, the index, or Heddle metadata.
     pub fn resolve_revision(&self, revision: &str) -> crate::Result<String> {
         self.repo
@@ -398,6 +461,12 @@ impl GitSource {
 
         for reference in refs {
             let full_name = reference.name;
+            // Sley currently returns names as Strings after lossy decoding.
+            // A replacement character means the original Git name cannot be
+            // emitted faithfully as a native Thread or marker.
+            if full_name.contains('\u{fffd}') {
+                continue;
+            }
             let Some((namespace, short_name)) = classify_ref_name(&full_name) else {
                 continue;
             };
@@ -475,6 +544,21 @@ impl GitSource {
             }
         }
         ChildIndex { children }
+    }
+}
+
+fn git_import_oid(oid: SleyObjectId) -> crate::Result<GitObjectId> {
+    match oid.format() {
+        ObjectFormat::Sha1 => {
+            Ok(GitObjectId::Sha1(oid.as_bytes().try_into().map_err(
+                |_| IngestError::Git("invalid SHA-1 Git OID".into()),
+            )?))
+        }
+        ObjectFormat::Sha256 => {
+            Ok(GitObjectId::Sha256(oid.as_bytes().try_into().map_err(
+                |_| IngestError::Git("invalid SHA-256 Git OID".into()),
+            )?))
+        }
     }
 }
 
@@ -931,10 +1015,7 @@ fn signature_from_raw(raw: &[u8]) -> Option<GitSignature> {
     Some(GitSignature {
         name: sig.name.as_bytes().to_vec(),
         email: sig.email.as_bytes().to_vec(),
-        time: Utc
-            .timestamp_opt(time.seconds, 0)
-            .single()
-            .unwrap_or_else(Utc::now),
+        time: Utc.timestamp_opt(time.seconds, 0).single()?,
         tz_offset,
     })
 }
@@ -958,6 +1039,9 @@ fn collect_commit_extra_headers(raw_commit: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
 mod tests {
     use std::process::Command;
 
+    use objects::object::thread_replication::git_import_graph::{
+        ImportRefDisposition, ImportSkipReason, classify_frozen_import_refs,
+    };
     use tempfile::TempDir;
 
     use super::*;
@@ -995,6 +1079,121 @@ mod tests {
             .output()
             .expect("rev-parse");
         String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    #[test]
+    fn frozen_ref_discovery_keeps_head_remote_and_raw_tag_target() {
+        let temp = TempDir::new().expect("temp directory");
+        let tip = seed_repo(temp.path());
+        let status = Command::new("git")
+            .args(["update-ref", "refs/remotes/origin/main", &tip])
+            .current_dir(temp.path())
+            .status()
+            .expect("remote ref");
+        assert!(status.success());
+        let source = GitSource::open(temp.path()).expect("source");
+        let refs = source.collect_frozen_import_refs().expect("all raw refs");
+        assert!(refs.iter().any(|reference| reference.raw_name == b"HEAD"));
+        let classified = classify_frozen_import_refs(&refs).expect("classification");
+        assert_eq!(classified.native_ref_count, 2);
+        assert!(classified.partial, "remote tracking is a partial outcome");
+        let tag = refs
+            .iter()
+            .find(|reference| reference.raw_name == b"refs/tags/v0.1")
+            .expect("annotated tag");
+        assert_ne!(tag.direct_oid(), tag.peeled_commit.as_ref());
+        assert_eq!(
+            classified.dispositions[refs
+                .iter()
+                .position(|reference| reference.raw_name == b"refs/tags/v0.1")
+                .expect("tag position")],
+            ImportRefDisposition::CommitTag
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lossy_ref_name_is_never_classified_as_native() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = TempDir::new().expect("temp directory");
+        let tip = seed_repo(temp.path());
+        let invalid = std::ffi::OsString::from_vec(b"refs/heads/invalid-\xff".to_vec());
+        let status = Command::new("git")
+            .arg("update-ref")
+            .arg(&invalid)
+            .arg(&tip)
+            .current_dir(temp.path())
+            .status()
+            .expect("write invalid ref");
+        assert!(status.success());
+        let source = GitSource::open(temp.path()).expect("source");
+        let refs = source.collect_frozen_import_refs().expect("refs");
+        let classified = classify_frozen_import_refs(&refs).expect("classification");
+        assert!(classified.skipped_refs.iter().any(|reference| {
+            String::from_utf8_lossy(&reference.raw_name).contains("invalid-")
+                && reference.reason == ImportSkipReason::NonUtf8RefName
+        }));
+        let (heads, _) = source.collect_refs_detailed().expect("heads");
+        assert!(!heads.iter().any(|head| head.full_name.contains("invalid-")));
+    }
+
+    #[test]
+    fn signature_rejects_out_of_range_timestamp() {
+        assert!(signature_from_raw(b"Test <test@example.com> 9223372036854775807 +0000").is_none());
+    }
+
+    #[test]
+    fn local_walk_fails_on_out_of_range_commit_timestamp() {
+        let temp = TempDir::new().expect("temp directory");
+        let status = Command::new("git")
+            .args(["init", "-q", "--initial-branch=main"])
+            .current_dir(temp.path())
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        let tree = Command::new("git")
+            .args(["mktree"])
+            .current_dir(temp.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("empty tree");
+        assert!(tree.status.success());
+        let tree = String::from_utf8(tree.stdout).expect("tree oid");
+        let raw = format!(
+            "tree {}\nauthor Test <test@example.com> 9223372036854775807 +0000\ncommitter Test <test@example.com> 1700000000 +0000\n\nmessage\n",
+            tree.trim()
+        );
+        let mut child = Command::new("git")
+            .args([
+                "hash-object",
+                "--literally",
+                "-w",
+                "-t",
+                "commit",
+                "--stdin",
+            ])
+            .current_dir(temp.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("commit object");
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(raw.as_bytes())
+            .expect("raw commit");
+        let output = child.wait_with_output().expect("commit oid");
+        assert!(output.status.success());
+        let sha = String::from_utf8(output.stdout)
+            .expect("commit oid")
+            .trim()
+            .to_string();
+        let source = GitSource::open(temp.path()).expect("source");
+        let result = source.commits_topo(vec![sha]);
+        assert!(result.is_err(), "{result:?}");
     }
 
     /// Follow-up C: ingest's ref discovery must not crash on annotated

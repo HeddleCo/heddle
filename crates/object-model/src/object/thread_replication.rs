@@ -2,6 +2,8 @@
 //! Portable Thread identity and immutable replication operations. Source and
 //! discussion causality have separate graphs so selective sharing is closed.
 pub mod capture_visibility;
+pub mod git_import_converter;
+pub mod git_import_graph;
 pub mod hosted_import;
 pub mod integration;
 pub mod local_integration;

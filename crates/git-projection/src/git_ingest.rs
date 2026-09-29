@@ -135,6 +135,7 @@ fn import_stats_from_ingest(stats: ingest::ImportStats) -> ImportStats {
         branches_synced: stats.refs.threads_written,
         tags_synced: stats.refs.markers_written,
         skipped_non_commit_refs: stats.refs_seen.non_commit_skipped,
+        skipped_refs: stats.skipped_refs,
         lossy_entries: stats.lossy_entries,
     }
 }

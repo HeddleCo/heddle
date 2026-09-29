@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
+use heddle_cli_contract::cli::commands::wire::bridge::SkippedRefOutput;
 // The wire payload lives in cli-contract so the schema registry registers
 // the real serialization type.
 pub use heddle_cli_contract::cli::commands::wire::remote::AdoptOutput;
@@ -16,10 +17,10 @@ use repo::{Repository, RepositoryCapability, RepositorySourceAuthority};
 use sley::Repository as SleyRepository;
 use verbs::{AdoptPlanError, AdoptPlanOptions, plan_adopt};
 
-use super::compact::{CompactOutput, CompactProjection};
 use super::{
     action_line::print_next,
     advice::RecoveryAdvice,
+    compact::{CompactOutput, CompactProjection},
     import_progress::ImportProgress,
     next_action::NextActionValidationContext,
     verification_health::{
@@ -40,6 +41,7 @@ struct AdoptImportStats {
     branches_synced: usize,
     tags_synced: usize,
     skipped_non_commit_refs: usize,
+    skipped_refs: Vec<objects::object::thread_replication::git_import_graph::SkippedImportRef>,
 }
 
 pub fn cmd_adopt(cli: &Cli, args: ImportLocalArgs) -> Result<()> {
@@ -147,6 +149,14 @@ pub fn cmd_adopt(cli: &Cli, args: ImportLocalArgs) -> Result<()> {
         branches_synced: stats.branches_synced,
         tags_synced: stats.tags_synced,
         skipped_non_commit_refs: stats.skipped_non_commit_refs,
+        skipped_refs: stats
+            .skipped_refs
+            .iter()
+            .map(|reference| SkippedRefOutput {
+                name: String::from_utf8_lossy(&reference.raw_name).into_owned(),
+                reason: reference.reason.description().to_string(),
+            })
+            .collect(),
         already_in_sync,
         recommended_action,
         recommended_action_template: trust.recommended_action_template.clone(),
@@ -233,6 +243,7 @@ fn import_ingest_for_adopt(
         branches_synced: stats.refs.threads_written,
         tags_synced: stats.refs.markers_written,
         skipped_non_commit_refs: stats.refs_seen.non_commit_skipped,
+        skipped_refs: stats.skipped_refs,
     })
 }
 
@@ -417,6 +428,14 @@ fn render_adopt(cli: &Cli, output: &AdoptOutput, json: bool) -> Result<()> {
             "{} skipped {} Git names that do not point at commits",
             style::warn_marker(),
             style::bold(&output.skipped_non_commit_refs.to_string())
+        );
+    }
+    for reference in &output.skipped_refs {
+        println!(
+            "{} skipped {}: {}",
+            style::warn_marker(),
+            reference.name,
+            reference.reason
         );
     }
     println!(

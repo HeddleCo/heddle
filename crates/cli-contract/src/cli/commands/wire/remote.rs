@@ -8,6 +8,8 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use verbs::{ActionTemplate, PullOutcome, PushOutcome, RepositoryVerificationState};
 
+use super::bridge::SkippedRefOutput;
+
 /// JSON payload for `heddle clone`. One struct for both transports: the
 /// transport-specific facts are optional fields, omitted when absent.
 #[derive(Serialize, JsonSchema)]
@@ -55,6 +57,7 @@ pub struct AdoptOutput {
     pub branches_synced: usize,
     pub tags_synced: usize,
     pub skipped_non_commit_refs: usize,
+    pub skipped_refs: Vec<SkippedRefOutput>,
     pub already_in_sync: bool,
     pub recommended_action: Option<String>,
     pub recommended_action_template: Option<ActionTemplate>,
