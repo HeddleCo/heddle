@@ -93,6 +93,12 @@ pub fn run_local_idempotency_if_requested(
     if !command_supports_op_id {
         return Err(anyhow!(RecoveryAdvice::op_id_unsupported(command_name)));
     }
+    // CI recording retains the exact signed RPC bytes before delivery. The
+    // generic local adapter would cache a transient network failure instead
+    // of allowing the same operation ID to resume that request.
+    if command_name == "ci run" {
+        return Ok(LocalIdempotencyOutcome::Continue);
+    }
 
     let local_idempotency = crate::cli::commands::command_runtime_contract(command_name)
         .is_some_and(|contract| {

@@ -482,7 +482,7 @@ async fn async_main() -> Result<()> {
 
         Commands::Start(args) => cmd_start(&cli, args.clone()),
         #[cfg(feature = "ci")]
-        Commands::Ci { command } => cli::cli::commands::cmd_ci(&cli, command),
+        Commands::Ci { command } => cli::cli::commands::cmd_ci(&cli, command).await,
 
         Commands::Sync(args) => {
             #[cfg(feature = "git-overlay")]

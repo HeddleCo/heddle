@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use objects::{
-    object::{ContentHash, State},
+    object::{ContentHash, State, Tree},
     store::ObjectStore,
 };
 use repo::{AudienceTier, CheckoutMaterialization, Repository};
@@ -14,35 +14,43 @@ pub(crate) struct EvaluationTarget {
     pub(crate) workdir: PathBuf,
     pub(crate) state: State,
     pub(crate) tree_digest: ContentHash,
-    kind: TargetKind,
+    worktree_fingerprint: ContentHash,
+    comparison_tree: Tree,
     checkout: Option<tempfile::TempDir>,
 }
 
-#[derive(Clone, Copy)]
-enum TargetKind {
-    Worktree,
-    State,
-}
-
 impl EvaluationTarget {
-    pub(crate) fn prepare(repo: &Repository, state: Option<&str>) -> Result<Self> {
+    pub(crate) fn prepare(repo: &Repository, state: Option<&str>, record: bool) -> Result<Self> {
         match state {
             Some(spec) => Self::from_state(repo, spec),
-            None => Self::from_worktree(repo),
+            None => Self::from_worktree(repo, record),
         }
     }
 
-    fn from_worktree(repo: &Repository) -> Result<Self> {
+    fn from_worktree(repo: &Repository, record: bool) -> Result<Self> {
         let mut state = repo
             .current_state()?
             .context("local CI needs a current state; capture the working tree first")?;
-        let tree_digest = repo.build_tree(repo.root())?.hash();
-        state.tree = tree_digest;
+        let worktree_tree = repo.build_tree(repo.root())?;
+        let worktree_fingerprint = worktree_tree.hash();
+        let (tree_digest, comparison_tree) = if record {
+            let tree = repo.require_tree(&state.tree)?;
+            if !repo.compare_worktree_cached(&tree)?.is_clean() {
+                bail!(
+                    "recording requires the exact captured State tree; capture the working tree or select --state"
+                );
+            }
+            (state.tree, tree)
+        } else {
+            state.tree = worktree_fingerprint;
+            (worktree_fingerprint, worktree_tree)
+        };
         Ok(Self {
             workdir: repo.root().to_path_buf(),
             state,
             tree_digest,
-            kind: TargetKind::Worktree,
+            worktree_fingerprint,
+            comparison_tree,
             checkout: None,
         })
     }
@@ -76,19 +84,22 @@ impl EvaluationTarget {
             workdir: checkout.path().to_path_buf(),
             tree_digest: state.tree,
             state,
-            kind: TargetKind::State,
+            worktree_fingerprint: repo.build_tree(checkout.path())?.hash(),
+            comparison_tree: tree,
             checkout: Some(checkout),
         })
     }
 
     pub(crate) fn ensure_unchanged(&self, repo: &Repository) -> Result<()> {
-        if matches!(self.kind, TargetKind::Worktree) {
-            let after = repo.build_tree(repo.root())?.hash();
-            if after != self.tree_digest {
-                bail!(
-                    "working tree changed while CI checks ran; refusing to sign a stale tree digest"
-                );
-            }
+        if repo.build_tree(&self.workdir)?.hash() != self.worktree_fingerprint
+            || !objects::worktree::compare_stored_tree_entries(
+                repo.store(),
+                &self.workdir,
+                &self.comparison_tree,
+            )?
+            .is_clean()
+        {
+            bail!("working tree changed while CI checks ran; refusing to sign a stale tree digest");
         }
         Ok(())
     }

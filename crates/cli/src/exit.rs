@@ -138,7 +138,10 @@ impl HeddleExitCode {
             | "reserved_materialization_path"
             | "env_store_not_found"
             | "env_store_slot_not_found" => Some(Self::DataErr),
-            "env_store_denied" | "env_store_expired" => Some(Self::NoPerm),
+            "env_store_denied" | "env_store_expired" | "ci_record_scope_denied" => {
+                Some(Self::NoPerm)
+            }
+            "ci_record_revision_unpublished" | "ci_record_spool_mismatch" => Some(Self::DataErr),
             "promote_not_owner" | "promote_account_standing" | "grant_denied" => {
                 Some(Self::NoPerm)
             }

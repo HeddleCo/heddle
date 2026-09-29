@@ -944,6 +944,7 @@ const EXTERNAL_WORKTREE_COMMAND: CommandContract = CommandContract {
 
 const CI_RUN: CommandContract = CommandContract {
     supports_json: true,
+    supports_op_id: true,
     json_kind: "json",
     ..EXTERNAL_WORKTREE_COMMAND
 };
