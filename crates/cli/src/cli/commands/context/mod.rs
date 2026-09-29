@@ -3,10 +3,12 @@
 
 mod context_mutate;
 mod context_query;
+mod for_thread;
 
 use anyhow::{Result, anyhow};
 pub use context_mutate::*;
 pub use context_query::*;
+pub use for_thread::cmd_context_for_thread;
 use objects::{
     error::HeddleError,
     object::{
@@ -54,16 +56,19 @@ pub(crate) struct AnnotationOutput {
     pub(crate) supersedes_rewrite_pct: Option<u32>,
     pub(crate) anchor_status: String,
     pub(crate) anchor_candidates: Vec<String>,
+    pub(crate) decision_status: &'static str,
+    pub(crate) divergent_revisions: Vec<RevisionOutput>,
 }
 
 impl AnnotationOutput {
     pub(crate) fn from_annotation(annotation: &Annotation) -> Self {
-        let current = annotation.current_revision().expect("validated annotation");
+        let current = &annotation.revisions[annotation.revisions.len() - 1];
         Self {
             annotation_id: annotation.annotation_id.clone(),
             status: match annotation.status {
                 AnnotationStatus::Active => "active".to_string(),
                 AnnotationStatus::Superseded => "superseded".to_string(),
+                AnnotationStatus::Deleted => "deleted".to_string(),
             },
             scope: annotation.scope.to_string(),
             kind: current.kind.to_string(),
@@ -76,6 +81,28 @@ impl AnnotationOutput {
             supersedes_rewrite_pct: annotation.supersedes_rewrite_pct,
             anchor_status: annotation_anchor_status_label(&annotation.anchor_status).to_string(),
             anchor_candidates: annotation_anchor_candidates(&annotation.anchor_status).to_vec(),
+            decision_status: if annotation.divergent_revision_ids.is_empty() {
+                "current"
+            } else {
+                "diverged: needs a decision"
+            },
+            divergent_revisions: annotation
+                .revisions
+                .iter()
+                .filter(|revision| {
+                    annotation
+                        .divergent_revision_ids
+                        .contains(&revision.revision_id)
+                })
+                .map(|revision| RevisionOutput {
+                    revision_id: revision.revision_id.clone(),
+                    kind: revision.kind.to_string(),
+                    content: revision.content.clone(),
+                    tags: revision.tags.clone(),
+                    attribution: revision.attribution.clone(),
+                    created_at: revision.created_at,
+                })
+                .collect(),
         }
     }
 }
@@ -214,11 +241,11 @@ pub(crate) fn parse_scope(input: Option<&str>) -> Result<AnnotationScope> {
     match input {
         None | Some("file") => Ok(AnnotationScope::File),
         Some(s) if s.starts_with("symbol:") => {
-            let name = s.strip_prefix("symbol:").unwrap();
+            let name = s.trim_start_matches("symbol:");
             symbol_scope(name)
         }
         Some(s) if s.starts_with("lines:") => {
-            let range = s.strip_prefix("lines:").unwrap();
+            let range = s.trim_start_matches("lines:");
             let (start, end) = range
                 .split_once('-')
                 .ok_or_else(|| anyhow::anyhow!("Line range must be 'lines:<start>-<end>'"))?;
@@ -474,7 +501,25 @@ pub(crate) fn print_context_get(
     } else {
         println!("{target_kind} {target_label}");
         for annotation in annotations {
-            let current = annotation.current_revision().unwrap();
+            let current = &annotation.revisions[annotation.revisions.len() - 1];
+            if !annotation.divergent_revision_ids.is_empty() {
+                println!(
+                    "--- {} (diverged: needs a decision) ---",
+                    annotation.annotation_id
+                );
+                for revision in annotation.revisions.iter().filter(|revision| {
+                    annotation
+                        .divergent_revision_ids
+                        .contains(&revision.revision_id)
+                }) {
+                    println!(
+                        "[{}] by {}: {}",
+                        revision.kind, revision.attribution, revision.content
+                    );
+                }
+                println!();
+                continue;
+            }
             println!(
                 "--- [{}] {} ({}) ---",
                 current.kind,
@@ -482,6 +527,7 @@ pub(crate) fn print_context_get(
                 match annotation.status {
                     AnnotationStatus::Active => "active",
                     AnnotationStatus::Superseded => "superseded",
+                    AnnotationStatus::Deleted => "deleted",
                 }
             );
             if !current.tags.is_empty() {
@@ -523,6 +569,35 @@ mod tests {
     use repo::StateAttachmentKind;
 
     use super::*;
+
+    #[test]
+    fn context_list_json_marks_divergent_current_revisions() {
+        let mut annotation = Annotation::new(
+            AnnotationScope::File,
+            AnnotationKind::Constraint,
+            "agent A rule".into(),
+            vec![],
+            "agent A".into(),
+            1,
+            None,
+            None,
+        );
+        let first = annotation.revisions[0].revision_id.clone();
+        annotation.revise(
+            AnnotationKind::Constraint,
+            "agent B rule".into(),
+            vec![],
+            "agent B".into(),
+            2,
+            None,
+            None,
+        );
+        annotation.divergent_revision_ids =
+            vec![first, annotation.revisions[1].revision_id.clone()];
+        let output = AnnotationOutput::from_annotation(&annotation);
+        assert_eq!(output.decision_status, "diverged: needs a decision");
+        assert_eq!(output.divergent_revisions.len(), 2);
+    }
 
     #[test]
     fn scope_from_flags_prefers_explicit_symbol_and_line() {

@@ -2924,10 +2924,12 @@ mod write_ops {
             thread,
         };
         const TRIALS: usize = 200;
+        let (temp, _) = fixture();
         let mut resurrected: Vec<usize> = Vec::new();
         for trial in 0..TRIALS {
-            let (_temp, mount) = open_mount();
-            let mount = Arc::new(mount);
+            // Each mount gets a fresh overlay over the same captured seed.
+            let repo = Repository::open(temp.path()).unwrap();
+            let mount = Arc::new(ContentAddressedMount::new(repo, "main").unwrap());
             // `hello.txt` is a captured 5-byte file; `apply_truncate`'s
             // NeedSeed branch will fetch the blob and widen the
             // lock-free window during the race.

@@ -735,6 +735,12 @@ fn render_materialized_advisory(output: &StatusOutput) {
 fn render_long_status(output: &StatusOutput, verbose: bool) {
     if verbose {
         render_status_header(output);
+        if !output.context_attention.is_empty() {
+            println!(
+                "Context: diverged: needs a decision ({})",
+                output.context_attention.join(", ")
+            );
+        }
         render_status_operation(output);
         render_status_thread(output, verbose);
         render_status_details(output, verbose);
@@ -751,6 +757,12 @@ fn render_long_status(output: &StatusOutput, verbose: bool) {
 fn format_compact_status(output: &StatusOutput) -> String {
     let mut lines = Vec::new();
     lines.push(compact_status_header(output));
+    if !output.context_attention.is_empty() {
+        lines.push(format!(
+            "Context: diverged: needs a decision ({})",
+            output.context_attention.join(", ")
+        ));
+    }
     if let Some(notice) = &output.identity_notice {
         lines.push(format!("Identity: {}", style::warn(notice)));
     }

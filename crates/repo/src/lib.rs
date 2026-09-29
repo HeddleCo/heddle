@@ -37,6 +37,7 @@ pub mod clone_intent;
 mod collaboration_store;
 #[cfg(feature = "tree-sitter-symbols")]
 mod context_anchor_travel;
+mod context_consumption;
 #[cfg(feature = "tree-sitter-symbols")]
 mod context_snapshot_travel;
 pub mod daemon;
@@ -187,6 +188,9 @@ pub use collaboration_store::{
     CollaborationIntegrityReport, CollaborationStore, CollaborationWriteDisposition,
     CollaborationWriteOutcome,
 };
+pub use context_consumption::{
+    CONTEXT_RECEIPT_ATTESTATION, ContextConsumptionReceipt, SuppliedAnnotation, SuppliedRevision,
+};
 pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use fsmonitor::{
     ChangeMonitorReport, LocalMonitorShutdownGuard, run_local_monitor_helper,
@@ -233,7 +237,8 @@ pub use repository::{
     TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile,
     WorktreeIndexInspection, WorktreeStateLookupProfile, WorktreeStatusDetailed,
     compute_rewrite_pct, discover_heddle_root, find_merge_base, is_heddle_repository_root,
-    is_major_rewrite, is_synthetic_root, open_git_repository_at_root, query_history_from_source,
+    is_major_rewrite, is_synthetic_root, merge_context_blobs, open_git_repository_at_root,
+    query_history_from_source,
 };
 #[cfg(feature = "git-overlay")]
 pub use repository::{

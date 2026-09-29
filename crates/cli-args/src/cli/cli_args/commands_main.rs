@@ -506,13 +506,17 @@ Scope:
 Examples:
   heddle context set --path src/auth.rs --symbol verify --kind invariant -m 'returns false on timing mismatch'
   heddle context get --path src/auth.rs --symbol verify
+  heddle context --for-thread <THREAD>              # pre-turn briefing
   heddle context history --path src/auth.rs      # same --path as set, or pass the id
   heddle context list --prefix src/auth          # everything attached under a path
   heddle context check --path src/auth.rs        # surface annotations for editor tooling
 ")]
     Context {
+        /// Show a bounded pre-turn briefing for a Thread.
+        #[arg(long, value_name = "THREAD")]
+        for_thread: Option<String>,
         #[command(subcommand)]
-        command: ContextCommands,
+        command: Option<ContextCommands>,
     },
 
     /// Manage ambient harness integrations.

@@ -188,6 +188,7 @@ pub struct StatusReport {
     pub worktree_changed_path_count: usize,
     pub thread_changed_path_count: usize,
     pub blockers: Vec<String>,
+    pub context_attention: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub identity_notice: Option<String>,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
@@ -2366,6 +2367,11 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
             .as_ref()
             .and_then(|thread| thread.base_root.clone()),
         current_state: current_state_short.clone(),
+        context_attention: current_state
+            .as_ref()
+            .map(|state| repo.context_divergences(state))
+            .transpose()?
+            .unwrap_or_default(),
         native_remote,
         path: thread_summary
             .as_ref()
@@ -2618,6 +2624,7 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         base_state: None,
         base_root: None,
         current_state: input.current_state.map(|state| state.state_id.short()),
+        context_attention: Vec::new(),
         native_remote,
         path: None,
         execution_path: None,

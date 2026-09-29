@@ -1977,7 +1977,20 @@ const CONTRACTS: &[CommandContractEntry] = &[
             95,
         ),
     ),
-    entry(&["context"], front_door(GROUP, 180)),
+    entry(
+        &["context"],
+        front_door(
+            json_discriminators(
+                documented_schemas(READ_JSON, &["context --for-thread"]),
+                &[json_discriminator(
+                    Some("context --for-thread"),
+                    "output_kind",
+                    "context_for_thread",
+                )],
+            ),
+            180,
+        ),
+    ),
     entry(
         &["context", "set"],
         json_discriminators(
@@ -4979,7 +4992,14 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
         },
         #[cfg(feature = "client")]
         Commands::Promote(_) => vec!["promote"],
-        Commands::Context { command } => match command {
+        Commands::Context {
+            for_thread: Some(_),
+            ..
+        } => vec!["context"],
+        Commands::Context {
+            command: Some(command),
+            ..
+        } => match command {
             ContextCommands::Set(_) => vec!["context", "set"],
             ContextCommands::Get(_) => vec!["context", "get"],
             ContextCommands::List(_) => vec!["context", "list"],
@@ -4997,6 +5017,7 @@ pub fn command_path(command: &Commands) -> Vec<&'static str> {
                 }
             },
         },
+        Commands::Context { .. } => vec!["context"],
         Commands::Integration { command } => match command {
             IntegrationCommands::List => vec!["integration", "list"],
             IntegrationCommands::Install(_) => vec!["integration", "install"],

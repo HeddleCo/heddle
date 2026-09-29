@@ -2,6 +2,7 @@
 //! Thread commands.
 
 use std::{
+    collections::{BTreeSet, VecDeque},
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -9,6 +10,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use objects::{
+    HeddleError,
     object::{State, StateId, ThreadName, Tree},
     store::{ObjectStore, WriterLeaseStatus, WriterLeaseStore},
     worktree::WorktreeStatus,
@@ -76,6 +78,7 @@ pub(crate) const DEFAULT_AVAILABLE_GIT_REF_LIMIT: usize = 5;
 // The thread wire payloads live in cli-contract so the schema registry
 // registers the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::thread::{
+    ConstraintsSuppliedOutput, SuppliedAnnotationOutput, SuppliedRevisionOutput,
     ThreadCaptureOutput, ThreadCaptureSummary, ThreadCurrentOutput, ThreadListImportGuidanceOutput,
     ThreadListOutput, ThreadOpOutput, ThreadShowOutput,
 };
@@ -2185,6 +2188,67 @@ pub fn cmd_thread_show(cli: &Cli, repo: &Repository, name: Option<String>) -> Re
     show_thread_summary(cli, repo, &summary)
 }
 
+fn capture_constraints_supplied(
+    repo: &Repository,
+    thread: &str,
+) -> Result<(Vec<ConstraintsSuppliedOutput>, bool)> {
+    let Some(head) = repo.refs().get_thread(&ThreadName::new(thread))? else {
+        return Ok((Vec::new(), false));
+    };
+    let mut queue = VecDeque::from([head]);
+    let mut seen = BTreeSet::new();
+    let mut supplied = Vec::new();
+    while let Some(id) = queue.pop_front() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if seen.len() > 64 {
+            return Ok((supplied, true));
+        }
+        let state = repo
+            .store()
+            .get_state(&id)?
+            .ok_or(HeddleError::StateNotFound(id))?;
+        if let Some(receipt) = repo.context_receipt(&id)?
+            && receipt.thread == thread
+        {
+            supplied.push(ConstraintsSuppliedOutput {
+                provenance: "local",
+                attestation: repo::CONTEXT_RECEIPT_ATTESTATION,
+                capture: id.to_string_full(),
+                capture_intent: state.intent.clone(),
+                actor: state
+                    .attribution
+                    .agent
+                    .as_ref()
+                    .map(|agent| format!("{}/{}", agent.provider, agent.model)),
+                briefing_hash: receipt.briefing_hash,
+                intent_versions: receipt.intent_versions,
+                annotations: receipt
+                    .annotations
+                    .into_iter()
+                    .map(|annotation| SuppliedAnnotationOutput {
+                        target: annotation.target,
+                        annotation_id: annotation.annotation_id,
+                        visibility: annotation.visibility,
+                        revisions: annotation
+                            .revisions
+                            .into_iter()
+                            .map(|revision| SuppliedRevisionOutput {
+                                revision_id: revision.revision_id,
+                                kind: revision.kind,
+                                content_hash: revision.content_hash,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            });
+        }
+        queue.extend(state.parents);
+    }
+    Ok((supplied, false))
+}
+
 pub(crate) fn show_thread_summary(
     cli: &Cli,
     repo: &Repository,
@@ -2242,6 +2306,16 @@ pub(crate) fn show_thread_summary(
         summary.target_thread.as_deref(),
         summary.parent_thread.as_deref(),
     );
+    let (constraints_supplied, constraints_supplied_truncated) =
+        capture_constraints_supplied(repo, &summary.name)?;
+    let supply_receipt_status = if constraints_supplied.is_empty() && constraints_supplied_truncated
+    {
+        "no supply receipt in inspected history"
+    } else if constraints_supplied.is_empty() {
+        "no supply receipt"
+    } else {
+        "local evidence"
+    };
     if should_output_json(cli, Some(repo.config())) {
         let output = ThreadShowOutput {
             output_kind: "thread_show",
@@ -2252,6 +2326,9 @@ pub(crate) fn show_thread_summary(
             recommended_action_template: recommended_action_template(&summary.recommended_action),
             summary,
             recovery_commands: trust.recovery_commands.clone(),
+            constraints_supplied,
+            constraints_supplied_truncated,
+            supply_receipt_status,
             trust,
         };
         write_full_command_json(
@@ -2287,6 +2364,39 @@ pub(crate) fn show_thread_summary(
             } else {
                 println!("Remote drift: {}", remote_tracking.message);
             }
+        }
+        for capture in &constraints_supplied {
+            let actor = capture.actor.as_deref().unwrap_or("agent");
+            let intent = if capture.intent_versions.is_empty() {
+                "no recorded intent"
+            } else {
+                "Thread intent"
+            };
+            let annotation_count = capture.annotations.len();
+            let label = style::human_text(capture.capture_intent.as_deref().unwrap_or("capture"));
+            println!(
+                "Constraints supplied (LOCAL evidence): {intent}, {annotation_count} annotation{} to {actor} for {label}",
+                if annotation_count == 1 { "" } else { "s" }
+            );
+            println!(
+                "  self-attested local record: proves what this repository's key signed, not independent delivery"
+            );
+            for annotation in &capture.annotations {
+                for revision in &annotation.revisions {
+                    println!(
+                        "  {} [{}] — {}",
+                        style::human_text(&annotation.target),
+                        annotation.visibility,
+                        revision.kind
+                    );
+                }
+            }
+        }
+        if constraints_supplied_truncated {
+            println!("Constraints supplied: older captures omitted");
+        }
+        if constraints_supplied.is_empty() {
+            println!("Constraints supplied: {supply_receipt_status}");
         }
         println!();
         if summary.is_current {

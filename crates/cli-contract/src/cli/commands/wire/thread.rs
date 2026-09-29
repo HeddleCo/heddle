@@ -78,6 +78,89 @@ pub struct ThreadShowOutput {
     #[serde(rename = "verification")]
     pub trust: RepositoryVerificationState,
     pub recovery_commands: Vec<String>,
+    pub constraints_supplied: Vec<ConstraintsSuppliedOutput>,
+    pub constraints_supplied_truncated: bool,
+    pub supply_receipt_status: &'static str,
+}
+
+#[derive(Clone, Serialize, JsonSchema)]
+pub struct ConstraintsSuppliedOutput {
+    pub provenance: &'static str,
+    /// The local repository key signed this claim; delivery is not independently verified.
+    pub attestation: &'static str,
+    pub capture: String,
+    pub capture_intent: Option<String>,
+    pub actor: Option<String>,
+    pub briefing_hash: String,
+    pub intent_versions: Vec<String>,
+    pub annotations: Vec<SuppliedAnnotationOutput>,
+}
+
+#[derive(Clone, Serialize, JsonSchema)]
+pub struct SuppliedAnnotationOutput {
+    pub target: String,
+    pub annotation_id: String,
+    pub visibility: String,
+    pub revisions: Vec<SuppliedRevisionOutput>,
+}
+
+#[derive(Clone, Serialize, JsonSchema)]
+pub struct SuppliedRevisionOutput {
+    pub revision_id: String,
+    pub kind: String,
+    pub content_hash: String,
+}
+
+/// JSON payload for the bounded `context --for-thread` briefing.
+#[derive(Serialize, JsonSchema)]
+#[schemars(rename = "ThreadBriefingSchema")]
+pub struct ThreadBriefingOutput {
+    pub output_kind: &'static str,
+    pub thread: String,
+    pub intent: Vec<ThreadBriefingIntentOutput>,
+    pub annotations: Vec<ThreadBriefingAnnotationOutput>,
+    pub discussions: Vec<ThreadBriefingDiscussionOutput>,
+    pub blockers: Vec<String>,
+    pub omitted_annotations: usize,
+    pub omitted_discussions: usize,
+    pub briefing_hash: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ThreadBriefingIntentOutput {
+    pub version: String,
+    pub outcome: String,
+    pub acceptance_criteria: Vec<String>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ThreadBriefingAnnotationOutput {
+    pub target: String,
+    pub scope: String,
+    pub status: &'static str,
+    pub annotation_id: String,
+    pub visibility: String,
+    pub revisions: Vec<ThreadBriefingRevisionOutput>,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ThreadBriefingRevisionOutput {
+    pub revision_id: String,
+    pub kind: String,
+    pub content: String,
+    pub tags: Vec<String>,
+    pub attribution: String,
+    pub created_at: i64,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct ThreadBriefingDiscussionOutput {
+    pub title: String,
+    pub anchor: String,
+    pub blocking: bool,
+    pub status: &'static str,
+    pub turns: Vec<String>,
+    pub omitted_turns: usize,
 }
 
 /// Explicit native Thread ownership status and transitions.

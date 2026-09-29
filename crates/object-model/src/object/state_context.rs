@@ -46,6 +46,10 @@ pub struct Annotation {
     /// remains separate: an active annotation can need anchor attention.
     #[serde(default)]
     pub anchor_status: AnnotationAnchorStatus,
+    /// Live revision tips when concurrent edits have not been resolved.
+    /// Empty means the last revision is the sole current revision.
+    #[serde(default)]
+    pub divergent_revision_ids: Vec<String>,
 }
 
 /// A single revision of a logical annotation.
@@ -72,6 +76,9 @@ pub struct AnnotationRevision {
 pub enum AnnotationStatus {
     Active,
     Superseded,
+    /// Deletion tombstone: keep the revision history so a stale replica cannot
+    /// bring this annotation back. A new annotation needs a new identity.
+    Deleted,
 }
 
 /// Snapshot-time resolution state for a file-backed context annotation.
@@ -187,6 +194,7 @@ impl Annotation {
             visibility: VisibilityTier::default(),
             resolved_from_discussion: None,
             anchor_status: AnnotationAnchorStatus::default(),
+            divergent_revision_ids: Vec::new(),
         }
     }
 
@@ -219,7 +227,8 @@ impl Annotation {
             source_hash,
             created_at_state,
         });
-        self.current_revision().expect("new revision appended")
+        self.divergent_revision_ids.clear();
+        &self.revisions[self.revisions.len() - 1]
     }
 
     pub fn mark_superseded(&mut self) {
@@ -239,7 +248,40 @@ impl Annotation {
         for revision in &self.revisions {
             revision.validate()?;
         }
+        if self.divergent_revision_ids.len() == 1
+            || self.divergent_revision_ids.len() > 64
+            || self
+                .divergent_revision_ids
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != self.divergent_revision_ids.len()
+            || self.divergent_revision_ids.iter().any(|id| {
+                !self
+                    .revisions
+                    .iter()
+                    .any(|revision| revision.revision_id == *id)
+            })
+        {
+            return Err(ContextError::InvalidEncoding(format!(
+                "invalid divergent revision frontier for {}",
+                self.annotation_id
+            )));
+        }
         Ok(())
+    }
+
+    pub fn current_revision_ids(&self) -> Vec<&str> {
+        if self.divergent_revision_ids.is_empty() {
+            self.current_revision()
+                .map(|revision| vec![revision.revision_id.as_str()])
+                .unwrap_or_default()
+        } else {
+            self.divergent_revision_ids
+                .iter()
+                .map(String::as_str)
+                .collect()
+        }
     }
 }
 

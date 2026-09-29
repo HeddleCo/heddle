@@ -281,7 +281,8 @@ mod tests {
             .command
         {
             Commands::Context {
-                command: ContextCommands::History(args),
+                for_thread: None,
+                command: Some(ContextCommands::History(args)),
             } => {
                 assert_eq!(args.annotation_id.as_deref(), Some("ann-1"));
                 assert!(args.scope.path.is_none());
@@ -293,7 +294,8 @@ mod tests {
             .command
         {
             Commands::Context {
-                command: ContextCommands::History(args),
+                for_thread: None,
+                command: Some(ContextCommands::History(args)),
             } => {
                 assert!(args.annotation_id.is_none());
                 assert_eq!(args.scope.path.as_deref(), Some("src/auth.rs"));
@@ -313,7 +315,8 @@ mod tests {
         .command
         {
             Commands::Context {
-                command: ContextCommands::Edit(args),
+                for_thread: None,
+                command: Some(ContextCommands::Edit(args)),
             } => {
                 assert!(args.annotation_id.is_none());
                 assert_eq!(args.scope.path.as_deref(), Some("src/auth.rs"));
@@ -337,7 +340,8 @@ mod tests {
         .command
         {
             Commands::Context {
-                command: ContextCommands::Set(args),
+                for_thread: None,
+                command: Some(ContextCommands::Set(args)),
             } => {
                 assert_eq!(args.resolved_path(), Some("src/auth.rs"));
                 assert_eq!(args.message.body.as_deref(), Some("keep timing constant"));
@@ -357,7 +361,8 @@ mod tests {
         .command
         {
             Commands::Context {
-                command: ContextCommands::Set(args),
+                for_thread: None,
+                command: Some(ContextCommands::Set(args)),
             } => {
                 assert_eq!(args.resolved_path(), Some("src/auth.rs"));
                 assert_eq!(
@@ -399,7 +404,8 @@ mod tests {
         .command
         {
             Commands::Context {
-                command: ContextCommands::Set(args),
+                for_thread: None,
+                command: Some(ContextCommands::Set(args)),
             } => {
                 assert_eq!(args.resolved_path(), Some("src/auth.rs"));
                 assert_eq!(args.scope.symbol.as_deref(), Some("verify"));
@@ -422,7 +428,8 @@ mod tests {
         .command
         {
             Commands::Context {
-                command: ContextCommands::Set(args),
+                for_thread: None,
+                command: Some(ContextCommands::Set(args)),
             } => {
                 assert_eq!(args.scope.line, Some(12));
                 assert!(args.scope.symbol.is_none());
@@ -446,7 +453,8 @@ mod tests {
         .command
         {
             Commands::Context {
-                command: ContextCommands::Set(args),
+                for_thread: None,
+                command: Some(ContextCommands::Set(args)),
             } => {
                 assert_eq!(args.scope.symbol.as_deref(), Some("verify"));
                 assert_eq!(args.scope.line, Some(12));

@@ -195,6 +195,9 @@ pub async fn cmd_context_list(
                 if annotations.len() == 1 { "" } else { "s" }
             );
             for annotation in annotations {
+                if !annotation.divergent_revision_ids.is_empty() {
+                    println!("    diverged: needs a decision");
+                }
                 if annotation_anchor_status_label(&annotation.anchor_status) == "resolved" {
                     continue;
                 }

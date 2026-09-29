@@ -459,6 +459,14 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
         .then(|| resolved_attribution.harness_session_id.clone())
         .flatten();
     let mut warnings = resolved_attribution.warnings;
+    let pending_context_receipt = if resolved_attribution.attribution.agent.is_some() {
+        repo.pending_context_receipt()?
+    } else {
+        None
+    };
+    if pending_context_receipt.is_some() {
+        repo.ensure_context_receipt_signer()?;
+    }
     let attribution_ms = attribution_started.elapsed().as_millis();
 
     let git_overlay = repo.capability() == RepositoryCapability::GitOverlay;
@@ -511,6 +519,13 @@ pub fn capture(ctx: &ExecutionContext, options: CaptureOptions) -> Result<Captur
     };
 
     let current_thread = current_thread(repo)?;
+    if let (Some(receipt), Some(thread)) =
+        (pending_context_receipt.as_ref(), current_thread.as_ref())
+        && receipt.thread == thread.thread
+        && save.created_new_state
+    {
+        repo.attach_context_receipt(save.state_id, receipt)?;
+    }
     let captured_thread_targets_integration = current_thread
         .as_ref()
         .and_then(|thread| thread.target_thread.as_ref())
