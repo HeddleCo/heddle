@@ -151,17 +151,17 @@ impl HostedImport {
         if self.spool.to_string() != genesis.spool {
             return Err(invalid("hosted import belongs to another Spool"));
         }
+        if self.source_ref != format!("refs/heads/{}", genesis.name) {
+            return Err(invalid(
+                "hosted import source ref differs from signed Thread name",
+            ));
+        }
         let state = self.resulting_state()?;
         let mut expected = BTreeSet::new();
         if parents.is_empty() {
             if genesis.base != synthetic_initial_base()?.id() || genesis.parent.is_some() {
                 return Err(invalid(
                     "initial hosted import requires the canonical empty seed",
-                ));
-            }
-            if self.source_ref != format!("refs/heads/{}", genesis.name) {
-                return Err(invalid(
-                    "hosted import source ref differs from signed Thread name",
                 ));
             }
             if state.parents.contains(&genesis.base) {
@@ -279,6 +279,26 @@ mod tests {
         receipt.result.state = state.encode_current_msgpack().expect("seed parent");
         operation.body = ThreadOperationBody::HostedImport(receipt.encode().expect("receipt"));
         assert!(operation.validate_parents(&genesis, &[]).is_err());
+    }
+
+    #[test]
+    fn later_hosted_import_rejects_another_branch() {
+        let (genesis, mut receipt, imported) = fixture();
+        receipt.expected_target_frontier = BTreeSet::from([imported.id().expect("ID")]);
+        let mut state = receipt.resulting_state().expect("state");
+        state.parents = vec![state.id()];
+        receipt.result.state = state.encode_current_msgpack().expect("later capture");
+        let mut operation = ThreadOperation {
+            parents: receipt.expected_target_frontier.clone(),
+            body: ThreadOperationBody::HostedImport(receipt.encode().expect("receipt")),
+            ..imported.clone()
+        };
+        operation
+            .validate_parents(&genesis, std::slice::from_ref(&imported))
+            .expect("matching branch and causal parent");
+        receipt.source_ref = "refs/heads/another".into();
+        operation.body = ThreadOperationBody::HostedImport(receipt.encode().expect("receipt"));
+        assert!(operation.validate_parents(&genesis, &[imported]).is_err());
     }
 
     #[test]

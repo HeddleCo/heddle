@@ -3954,6 +3954,8 @@ mod tests {
             ("refs/tags/v1", tag),
             ("refs/tags/light", commit),
             ("refs/remotes/origin/main", commit),
+            ("refs/pull/12/head", commit),
+            ("refs/pull/12/merge", commit),
         ] {
             set_reference(
                 &source,
