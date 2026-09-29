@@ -2214,7 +2214,7 @@ fn capture_constraints_supplied(
         {
             supplied.push(ConstraintsSuppliedOutput {
                 provenance: "local",
-                attestation: "local_self_attested",
+                attestation: repo::CONTEXT_RECEIPT_ATTESTATION,
                 capture: id.to_string_full(),
                 capture_intent: state.intent.clone(),
                 actor: state

@@ -188,7 +188,9 @@ pub use collaboration_store::{
     CollaborationIntegrityReport, CollaborationStore, CollaborationWriteDisposition,
     CollaborationWriteOutcome,
 };
-pub use context_consumption::{ContextConsumptionReceipt, SuppliedAnnotation, SuppliedRevision};
+pub use context_consumption::{
+    CONTEXT_RECEIPT_ATTESTATION, ContextConsumptionReceipt, SuppliedAnnotation, SuppliedRevision,
+};
 pub use ephemeral_thread::{CollapsedThread, collapse_expired_ephemeral_threads};
 pub use fsmonitor::{
     ChangeMonitorReport, LocalMonitorShutdownGuard, run_local_monitor_helper,

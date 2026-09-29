@@ -23,8 +23,8 @@ use objects::{
     store::ObjectStore,
 };
 use repo::{
-    AudienceTier, CollaborationStore, ContextConsumptionReceipt, Repository, SuppliedAnnotation,
-    SuppliedRevision,
+    AudienceTier, CONTEXT_RECEIPT_ATTESTATION, CollaborationStore, ContextConsumptionReceipt,
+    Repository, SuppliedAnnotation, SuppliedRevision,
 };
 
 use super::super::{
@@ -135,6 +135,7 @@ pub fn cmd_context_for_thread(cli: &Cli, thread: &str) -> Result<()> {
     briefing.briefing_hash = ContentHash::compute_typed("context-briefing", &bytes).to_string();
     let receipt = ContextConsumptionReceipt {
         format_version: 2,
+        attestation: CONTEXT_RECEIPT_ATTESTATION.into(),
         thread: thread.to_owned(),
         recipient_lane: lane,
         nonce: uuid::Uuid::now_v7().to_string(),

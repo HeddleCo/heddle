@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Repository, Result, StateAttachmentKind};
 
+pub const CONTEXT_RECEIPT_ATTESTATION: &str = "local_self_attested";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SuppliedAnnotation {
     pub target: String,
@@ -35,6 +37,7 @@ pub struct SuppliedRevision {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextConsumptionReceipt {
     pub format_version: u8,
+    pub attestation: String,
     pub thread: String,
     pub recipient_lane: String,
     pub nonce: String,
@@ -323,6 +326,7 @@ fn verify_supply(receipt: &ContextConsumptionReceipt) -> Result<()> {
 
 fn validate(receipt: &ContextConsumptionReceipt) -> Result<()> {
     if receipt.format_version != 2
+        || receipt.attestation != CONTEXT_RECEIPT_ATTESTATION
         || receipt.thread.is_empty()
         || receipt.thread.len() > 1024
         || receipt.recipient_lane.is_empty()
@@ -360,6 +364,7 @@ mod review_1863 {
         let state = repo.snapshot(Some("capture".into()), None).unwrap();
         let original = ContextConsumptionReceipt {
             format_version: 2,
+            attestation: CONTEXT_RECEIPT_ATTESTATION.into(),
             thread: "main".into(),
             recipient_lane: "main".into(),
             nonce: uuid::Uuid::now_v7().to_string(),
@@ -469,14 +474,10 @@ mod review_1863 {
 mod round3_receipts {
     use super::*;
 
-    #[test]
-    fn consumed_nonce_cannot_attach_to_another_state() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let repo = crate::init_test_repository(dir.path()).unwrap();
-        std::fs::write(dir.path().join("file"), "first").unwrap();
-        let first = repo.snapshot(Some("first".into()), None).unwrap();
-        let claim = ContextConsumptionReceipt {
+    fn claim() -> ContextConsumptionReceipt {
+        ContextConsumptionReceipt {
             format_version: 2,
+            attestation: CONTEXT_RECEIPT_ATTESTATION.into(),
             thread: "main".into(),
             recipient_lane: "main".into(),
             nonce: uuid::Uuid::now_v7().to_string(),
@@ -486,8 +487,79 @@ mod round3_receipts {
             supplier_algorithm: String::new(),
             supplier_public_key: vec![],
             supplier_signature: vec![],
+        }
+    }
+
+    #[test]
+    fn round3_review_pending_json_has_attestation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
+        repo.write_pending_context_receipt(&claim()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(repo.pending_context_receipt_path()).unwrap())
+                .unwrap();
+        assert_eq!(
+            value["attestation"], "local_self_attested",
+            "pending serialized receipt must identify its trust model"
+        );
+    }
+
+    #[test]
+    fn round3_review_transfer_receipt_has_attestation() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
+        std::fs::write(dir.path().join("file"), "seed").unwrap();
+        let state = repo.snapshot(Some("capture".into()), None).unwrap();
+        repo.write_pending_context_receipt(&claim()).unwrap();
+        let pending = repo.pending_context_receipt().unwrap().unwrap();
+        repo.attach_context_receipt(state.state_id, &pending)
+            .unwrap();
+        let attachment = repo
+            .latest_state_attachment(&state.state_id, StateAttachmentKind::ContextConsumption)
+            .unwrap()
+            .unwrap();
+        let StateAttachmentBody::ContextConsumption(hash) = attachment.body else {
+            panic!("receipt")
         };
-        repo.write_pending_context_receipt(&claim).unwrap();
+        let closure =
+            objects::transfer::enumerate_state_closure(repo.store(), state.state_id).unwrap();
+        assert!(
+            closure
+                .iter()
+                .any(|object| object.id == objects::transfer::ObjectId::Hash(hash))
+        );
+        let blob = repo.store().get_blob(&hash).unwrap().unwrap();
+        let value: serde_json::Value = serde_json::from_slice(blob.content()).unwrap();
+        assert_eq!(
+            value["receipt"]["attestation"], "local_self_attested",
+            "exported signed receipt must identify its trust model"
+        );
+    }
+
+    #[test]
+    fn attestation_is_required_and_signed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
+        repo.write_pending_context_receipt(&claim()).unwrap();
+        let signed = repo.pending_context_receipt().unwrap().unwrap();
+        let mut missing = serde_json::to_value(&signed).unwrap();
+        missing.as_object_mut().unwrap().remove("attestation");
+        assert!(serde_json::from_value::<ContextConsumptionReceipt>(missing).is_err());
+
+        let mut changed = signed.clone();
+        changed.attestation = "independently_verified".into();
+        assert!(validate(&changed).is_err());
+        assert!(verify_supply(&changed).is_err());
+        assert!(repo.write_pending_context_receipt(&changed).is_err());
+    }
+
+    #[test]
+    fn consumed_nonce_cannot_attach_to_another_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
+        std::fs::write(dir.path().join("file"), "first").unwrap();
+        let first = repo.snapshot(Some("first".into()), None).unwrap();
+        repo.write_pending_context_receipt(&claim()).unwrap();
         let pending = repo.pending_context_receipt().unwrap().unwrap();
         let saved = std::fs::read(repo.pending_context_receipt_path()).unwrap();
         repo.attach_context_receipt(first.state_id, &pending)
