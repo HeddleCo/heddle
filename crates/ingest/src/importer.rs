@@ -407,7 +407,17 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             }
         }
 
+        let remapped_shas: HashSet<&str> = remapped_commits
+            .iter()
+            .map(|(git_sha, _)| git_sha.as_str())
+            .collect();
         for commit in &commits {
+            // These mappings are removed below and their rebuilt States claim
+            // identities in topological order. Overlay descriptors may not
+            // have a readable State body yet.
+            if remapped_shas.contains(commit.sha.as_str()) {
+                continue;
+            }
             if let Some(cid) = self.map.get_commit(&commit.sha)? {
                 let state = self.store.get_state(&cid)?.ok_or_else(|| {
                     IngestError::Other(format!(
