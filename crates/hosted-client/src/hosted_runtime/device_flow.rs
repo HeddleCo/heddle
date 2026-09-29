@@ -37,6 +37,8 @@ const TEMPLATE_READ_OPERATIONS: &[&str] = &[
     "ObserveAnalysis",
     "ReadContent",
     "ReadArtifact",
+    "ObserveCheckouts",
+    "ObserveRuns",
     "ObserveAttention",
 ];
 const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
@@ -51,6 +53,12 @@ const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
     "ResolveDiscussion",
     "RecordReview",
     "CreateSpool",
+    "Capture",
+    "Refresh",
+    "Resolve",
+    "LandCheckout",
+    "ClaimCheckoutWriter",
+    "ReleaseCheckoutWriter",
     RECORD_EVIDENCE_OPERATION,
 ];
 const TEMPLATE_CI_LANDING_WRITES: &[&str] = &["LandThread", "PublishContent"];
@@ -471,20 +479,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn templates_name_real_native_operations() {
-        use api::heddle::api::common::DeploymentTarget;
-
+    fn templates_name_real_api_operations() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
         let methods: BTreeSet<&str> = api::v2::ALL_METHODS
             .iter()
-            .filter(|method| method.deployment_targets.contains(&DeploymentTarget::Weft))
             .filter_map(|method| method.path.rsplit('/').next())
             .collect();
+        assert!(!methods.contains("CiVerdictWrite"));
+        for operation in [
+            "ObserveCheckouts",
+            "ObserveRuns",
+            "Capture",
+            "Refresh",
+            "Resolve",
+            "LandCheckout",
+            "ClaimCheckoutWriter",
+            "ReleaseCheckoutWriter",
+        ] {
+            assert!(
+                AgentTemplate::Contributor
+                    .operations()
+                    .iter()
+                    .any(|op| op == operation),
+                "contributor must permit device operation {operation}"
+            );
+        }
         for template in AgentTemplate::ALL {
             for operation in template.operations() {
                 assert!(
                     methods.contains(operation.as_str()),
-                    "unknown native operation: {operation}"
+                    "unknown API operation: {operation}"
                 );
             }
         }
