@@ -10,11 +10,10 @@ fn scan_sources(dir: &Path, violations: &mut Vec<String>) {
             scan_sources(&path, violations);
             continue;
         }
-        if path.extension().is_none_or(|extension| extension != "rs")
-            || path.ends_with("git_core.rs")
-        {
+        if path.extension().is_none_or(|extension| extension != "rs") {
             continue;
         }
+        let publication_module = path.ends_with("git_core.rs");
         let source = fs::read_to_string(&path).expect("read Rust source");
         let mut test_item_pending = false;
         let mut test_item_depth = 0_usize;
@@ -48,13 +47,25 @@ fn scan_sources(dir: &Path, violations: &mut Vec<String>) {
                 ".set_target(",
                 ".set_target_id(",
                 ".edit_reference(",
+                "apply_ref_changes(",
+                "apply_ref_batch(",
+                "update_to(",
+                "refs.transaction(",
+                "references.transaction(",
+                ".references().transaction(",
+                "gix::refs::transaction",
+                "sley_refs::transaction",
                 "upsert_note_bytes_for(",
             ]
             .iter()
             .any(|needle| line.contains(needle));
             let raw_git = line.contains("\"update-ref\"");
             let raw_reference = line.contains(".reference(") && !line.contains(".reference()");
-            if raw_sley || raw_git || raw_reference {
+            // Fetch refspecs are writes too. A forced transport update must
+            // never target the branch or notes namespaces protected by the
+            // publication guard. Staging and remote-tracking refs are safe.
+            let protected_fetch = line.contains(":refs/heads/") || line.contains(":refs/notes/");
+            if protected_fetch || (!publication_module && (raw_sley || raw_git || raw_reference)) {
                 violations.push(format!("{}:{}: {line}", path.display(), index + 1));
             }
         }
