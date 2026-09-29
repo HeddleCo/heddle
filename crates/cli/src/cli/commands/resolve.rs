@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Resolve command implementation.
 
-use std::fs;
+use std::{collections::HashMap, fs};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
-    object::{Attribution, StructuredConflict},
+    object::{Attribution, ConflictSide, StateId, StructuredConflict},
     store::ObjectStore,
 };
 use oplog::{ConflictResolutionMode, OpLogBackend, OpRecord};
@@ -145,7 +145,7 @@ fn cmd_resolve_all(
     }
 
     let remaining = merge_manager.unresolved()?;
-    let continuation = continue_if_resolution_complete(repo, remaining.is_empty())?;
+    let continuation = continue_if_resolution_complete(repo, remaining.is_empty(), &resolver)?;
     let output = resolve_output(
         format!("Resolved {} conflict(s)", unresolved.len()),
         unresolved.clone(),
@@ -201,7 +201,7 @@ fn cmd_resolve_file(
     let resolutions = record_conflicts_resolved(repo, path, &conflicts, &resolver, mode)?;
 
     let remaining = merge_manager.unresolved()?;
-    let continuation = continue_if_resolution_complete(repo, remaining.is_empty())?;
+    let continuation = continue_if_resolution_complete(repo, remaining.is_empty(), &resolver)?;
     let output = resolve_output(
         format!("Resolved {}", path),
         vec![path.to_string()],
@@ -234,9 +234,10 @@ fn cmd_resolve_file(
 fn continue_if_resolution_complete(
     repo: &Repository,
     complete: bool,
+    resolver: &Attribution,
 ) -> Result<Option<super::operator_core::OperatorCommandOutput>> {
     if complete {
-        super::operator_core::continue_operator(repo).map(Some)
+        super::operator_core::continue_operator(repo, Some(resolver)).map(Some)
     } else {
         Ok(None)
     }
@@ -303,12 +304,37 @@ fn structured_conflicts_for_paths(
         verify_conflict_side(repo, &conflict.ours)?;
         verify_conflict_side(repo, &conflict.theirs)?;
     }
-    Ok(payload
+    let mut attributions = HashMap::new();
+    payload
         .conflicts
         .iter()
         .filter(|conflict| paths.contains(&conflict.path))
-        .map(Into::into)
-        .collect())
+        .map(|conflict| {
+            Ok(ConflictRegionReport::new(
+                conflict,
+                &side_attribution(repo, &conflict.base, &mut attributions)?,
+                &side_attribution(repo, &conflict.ours, &mut attributions)?,
+                &side_attribution(repo, &conflict.theirs, &mut attributions)?,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()
+}
+
+fn side_attribution(
+    repo: &Repository,
+    side: &ConflictSide,
+    attributions: &mut HashMap<StateId, Attribution>,
+) -> Result<Attribution> {
+    if let Some(attribution) = attributions.get(&side.source_state) {
+        return Ok(attribution.clone());
+    }
+    let attribution = repo
+        .store()
+        .get_state(&side.source_state)?
+        .map(|state| state.attribution)
+        .ok_or_else(|| anyhow!("conflict side State {} is missing", side.source_state))?;
+    attributions.insert(side.source_state, attribution.clone());
+    Ok(attribution)
 }
 
 fn verify_conflict_side(repo: &Repository, side: &objects::object::ConflictSide) -> Result<()> {
@@ -336,9 +362,16 @@ fn render_conflict_region(conflict: &ConflictRegionReport) {
 }
 
 fn render_conflict_side(label: &str, side: &verbs::ConflictSideReport) {
+    let actor = side
+        .producer
+        .agent
+        .as_ref()
+        .map(|agent| format!("{}/{}", agent.provider, agent.model))
+        .unwrap_or_else(|| side.producer.principal.name.clone());
     println!(
-        "    {label}: state {} blob {} lines {}..{} hunk {}",
+        "    {label}: state {} by {} (claimed) blob {} lines {}..{} hunk {}",
         side.source_state,
+        actor,
         side.blob_id.as_deref().unwrap_or("<absent>"),
         side.range.start_line,
         side.range.end_line,

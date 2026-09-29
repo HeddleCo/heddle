@@ -30620,6 +30620,35 @@
           ],
           "type": "object"
         },
+        "ClaimedProducerReport": {
+          "properties": {
+            "agent": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AgentReport"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attribution": {
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/ResolverKindReport"
+            },
+            "principal": {
+              "$ref": "#/$defs/PrincipalReport"
+            }
+          },
+          "required": [
+            "attribution",
+            "kind",
+            "principal"
+          ],
+          "type": "object"
+        },
         "ConflictRangeReport": {
           "properties": {
             "end_line": {
@@ -30729,6 +30758,9 @@
             "hunk_hash": {
               "type": "string"
             },
+            "producer": {
+              "$ref": "#/$defs/ClaimedProducerReport"
+            },
             "range": {
               "$ref": "#/$defs/ConflictRangeReport"
             },
@@ -30738,6 +30770,7 @@
           },
           "required": [
             "source_state",
+            "producer",
             "range",
             "hunk_hash"
           ],

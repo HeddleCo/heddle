@@ -727,6 +727,13 @@ export interface ChangesInfo {
 
 export type CiRunSchema = Record<string, unknown>;
 
+export interface ClaimedProducerReport {
+  agent?: AgentReport | null;
+  attribution: string;
+  kind: ResolverKindReport;
+  principal: PrincipalReport;
+}
+
 /** JSON payload for `heddle clone`. One struct for both transports: the transport-specific facts are optional fields, omitted when absent. */
 export interface CloneSchema {
   action: string;
@@ -853,6 +860,7 @@ export interface ConflictResolutionReport {
 export interface ConflictSideReport {
   blob_id?: string | null;
   hunk_hash: string;
+  producer: ClaimedProducerReport;
   range: ConflictRangeReport;
   source_state: string;
 }
