@@ -179,6 +179,8 @@ fn fanout_rebinds_existing_overlay_to_current_committed_git_head() {
 
 #[test]
 fn fresh_git_overlay_fanout_has_isolated_git_and_launch_commands() {
+    use std::io::Write;
+
     let main = TempDir::new().expect("fixture");
     let git = |cwd: &std::path::Path, args: &[&str]| {
         let output = std::process::Command::new("git")
@@ -274,6 +276,31 @@ fn fresh_git_overlay_fanout_has_isolated_git_and_launch_commands() {
         "parent capture swept child contents"
     );
     let first = std::path::Path::new(lanes[0]["path"].as_str().expect("first path"));
+    let mut hook = std::process::Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["integration", "relay", "claude-code", "PreToolUse"])
+        .current_dir(first)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .expect("start lane hook");
+    hook.stdin
+        .take()
+        .expect("hook stdin")
+        .write_all(
+            serde_json::json!({
+                "session_id": "overlay-claude-session",
+                "transcript_path": "/tmp/overlay-claude-session.jsonl",
+                "cwd": first,
+                "permission_mode": "default",
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Bash",
+                "tool_input": {"command": "true"},
+                "tool_use_id": "overlay-tool-1"
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .expect("write lane hook payload");
+    assert!(hook.wait().expect("finish lane hook").success());
     fs::write(first.join("capture.txt"), "captured\n").expect("capture edit");
     let credential: Value = serde_json::from_slice(
         &fs::read(first.join(".heddle/writer-credential.json")).expect("credential file"),

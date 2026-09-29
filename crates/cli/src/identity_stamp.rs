@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Fast-path `heddle integration stamp` — parse stdin, atomic-rename cursor.
 //!
-//! Dispatched before tokio / clap / repo open. Budget: the user cannot feel
-//! the hook. No relay, no JSONL, no session.get, no disk glob.
+//! Dispatched before tokio / clap. Ordinary identity stamps avoid opening the
+//! repository; managed lanes open it to bind their writer session.
 
 use std::{
     env, io,
@@ -12,8 +12,8 @@ use std::{
 };
 
 use verbs::{
-    IdentityCursor, cursor_patch_from_stdin, expire_identity_cursor, stamp_event_expires,
-    stamp_harness_name, stamp_identity_cursor,
+    IdentityCursor, cursor_patch_from_stdin, expire_identity_cursor, first_value_string,
+    stamp_event_expires, stamp_harness_name, stamp_identity_cursor,
 };
 
 /// Run the stamp fast path when argv is `integration stamp`. Returns exit code.
@@ -84,8 +84,70 @@ fn run_stamp(args: &StampArgs) -> io::Result<()> {
     let Some(root) = resolve_repo_root(args.repo.as_deref()) else {
         return chain_status_line(args.chain.as_deref(), &stdin);
     };
+    if nested_lane_path(&root)
+        && args.harness == "codex"
+        && let Ok(repo) = repo::Repository::open(&root)
+    {
+        let session = hook_session_id(&args.harness, &stdin_text);
+        let _ = repo.hook_checkout_writer("codex", session.as_deref(), args.expire);
+    }
+    if nested_lane_path(&root)
+        && args.harness == "opencode"
+        && let Ok(repo) = repo::Repository::open(&root)
+    {
+        let session = hook_session_id(&args.harness, &stdin_text);
+        let event = serde_json::from_str::<serde_json::Value>(stdin_text.trim())
+            .ok()
+            .and_then(|payload| {
+                payload
+                    .pointer("/event/type")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned)
+            });
+        if event.as_deref().is_some_and(|event| {
+            matches!(
+                event,
+                "session.idle" | "session.end" | "session.closed" | "session.deleted"
+            )
+        }) {
+            let _ = repo.hook_checkout_writer("opencode", session.as_deref(), true);
+        }
+    }
     let _ = apply_identity_stamp(&root, &args.harness, &stdin_text, args.expire);
     chain_status_line(args.chain.as_deref(), &stdin)
+}
+
+/// Session identity for lease ownership comes from hook stdin, independently
+/// of which fields the user has chosen to publish in the identity cursor.
+pub(crate) fn hook_session_id(harness: &str, stdin: &str) -> Option<String> {
+    let payload: serde_json::Value = serde_json::from_str(stdin.trim()).ok()?;
+    match harness {
+        "claude-code" | "claude" => {
+            first_value_string(&payload, &[&["session_id"], &["sessionId"]])
+        }
+        "codex" => first_value_string(
+            &payload,
+            &[&["session_id"], &["sessionId"], &["conversation_id"]],
+        ),
+        "opencode" => first_value_string(
+            &payload,
+            &[&["sessionID"], &["session_id"], &["session", "id"]],
+        )
+        .or_else(|| {
+            first_value_string(
+                payload.pointer("/event/properties")?,
+                &[&["sessionID"], &["session_id"]],
+            )
+        }),
+        _ => None,
+    }
+}
+
+fn nested_lane_path(root: &Path) -> bool {
+    root.ancestors().any(|ancestor| {
+        ancestor.file_name() == Some(std::ffi::OsStr::new("threads"))
+            && ancestor.parent().and_then(Path::file_name) == Some(std::ffi::OsStr::new(".heddle"))
+    })
 }
 
 fn apply_identity_stamp(

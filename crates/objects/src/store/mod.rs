@@ -38,7 +38,8 @@ pub use fs::{
 };
 pub use heddle_format::compression::{CompressionConfig, CompressionError, compress, decompress};
 pub use liveness::{
-    AGENT_LEASE_DURATION, Liveness, current_boot_id, process_alive, reservation_liveness_at,
+    AGENT_LEASE_DURATION, Liveness, current_boot_id, process_alive, process_birth,
+    reservation_liveness_at,
 };
 #[cfg(any(test, feature = "memory-backend"))]
 pub use memory::InMemoryStore;

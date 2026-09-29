@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 use std::{
-    io::Write,
-    process::{Command, Stdio},
+    io::{BufRead, BufReader, Write},
+    process::{Child, Command, Stdio},
 };
 
 use objects::{
@@ -12,7 +12,7 @@ use repo::ActorPresenceStore;
 
 use super::*;
 
-fn fanout_lane() -> (RepoFixture, std::path::PathBuf, Value) {
+fn fanout_lane_unbound() -> (RepoFixture, std::path::PathBuf, Value) {
     let main = setup_repo("base.txt", "shared base");
     let output = heddle(
         &[
@@ -33,6 +33,32 @@ fn fanout_lane() -> (RepoFixture, std::path::PathBuf, Value) {
     let lane = &fanout["lanes"][0];
     let path = std::path::PathBuf::from(lane["path"].as_str().expect("lane path"));
     (main, path, fanout)
+}
+
+fn fanout_lane() -> (RepoFixture, std::path::PathBuf, Value) {
+    let fixture = fanout_lane_unbound();
+    bind_fanout_lane(&fixture.1, "fanout-claude-session");
+    fixture
+}
+
+fn bind_fanout_lane(path: &std::path::Path, session_id: &str) {
+    let payload = serde_json::json!({
+        "session_id": session_id,
+        "hook_event_name": "PreToolUse"
+    });
+    let mut child = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["integration", "relay", "claude-code", "PreToolUse"])
+        .current_dir(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn lane hook");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success(), "bind lane to test harness");
 }
 
 #[test]
@@ -70,6 +96,9 @@ fn parent_status_reviews_ready_landed_and_blocked_lanes() {
     let landed = lane_path("lane/landed");
     let ready = lane_path("lane/ready");
     let blocked = lane_path("lane/blocked");
+    bind_fanout_lane(&landed, "landed-session");
+    bind_fanout_lane(&ready, "ready-session");
+    bind_fanout_lane(&blocked, "blocked-session");
 
     fs::write(landed.join("landed.txt"), "landed evidence").expect("landed edit");
     heddle(&["ready", "-m", "landed work"], Some(&landed)).expect("ready landed lane");
@@ -233,6 +262,7 @@ fn recorded_conflict_recovery_wins_over_staleness_in_parent_queue() {
     for (index, content) in [(0, "first"), (1, "second")] {
         let path =
             std::path::PathBuf::from(fanout["lanes"][index]["path"].as_str().expect("lane path"));
+        bind_fanout_lane(&path, &format!("conflict-lane-{index}"));
         fs::write(path.join("shared.txt"), content).expect("lane edit");
         heddle(&["ready", "-m", content], Some(&path)).expect("ready lane");
     }
@@ -401,8 +431,14 @@ fn fanout_lane_claude_stop_hook_captures_immediately() {
     fs::write(path.join("hook.txt"), "hook capture").unwrap();
     let payload = serde_json::json!({
         "session_id": "fanout-claude-session",
-        "message": "Claude Stop capture",
-        "hook_event_name": "Stop"
+        "transcript_path": "/tmp/claude-session.jsonl",
+        "cwd": path,
+        "permission_mode": "default",
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "Claude Stop capture",
+        "background_tasks": [],
+        "session_crons": []
     });
     let output = Command::new(env!("CARGO_BIN_EXE_heddle"))
         .args(["integration", "relay", "claude-code", "Stop"])
@@ -464,9 +500,8 @@ fn fanout_invalid_ready_credential_is_refused_with_typed_recovery_action() {
 }
 
 #[test]
-#[ignore = "#1853 binds lane credentials to a harness session or PID"]
 fn fanout_unrelated_session_cannot_inherit_lane_credential() {
-    let (_main, path, _) = fanout_lane();
+    let (_main, path, _) = fanout_lane_unbound();
     fs::write(path.join("foreign-session.txt"), "foreign writer").unwrap();
     let output = heddle_output_with_env(
         &["--output", "json", "capture", "-m", "foreign session"],
@@ -478,6 +513,418 @@ fn fanout_unrelated_session_cannot_inherit_lane_credential() {
         !output.status.success(),
         "unrelated session inherited lane authority"
     );
+}
+
+#[cfg(target_os = "linux")]
+struct HookHarness {
+    child: Child,
+    output: BufReader<std::process::ChildStdout>,
+}
+
+#[cfg(target_os = "linux")]
+impl HookHarness {
+    fn start_opencode(path: &std::path::Path, runner: &std::path::Path) -> Self {
+        let mut child = Command::new("bun")
+            .arg(runner)
+            .current_dir(path)
+            .env("HEDDLE_TEST_BINARY", env!("CARGO_BIN_EXE_heddle"))
+            .env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+            .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start OpenCode plugin host");
+        let output = BufReader::new(child.stdout.take().unwrap());
+        let mut harness = Self { child, output };
+        let event = harness.read();
+        assert_eq!(event["status"], 0, "OpenCode hook failed: {event}");
+        harness
+    }
+
+    fn start(path: &std::path::Path, command: &str, payload: &Value) -> Self {
+        let script = r#"
+import json, subprocess, sys
+commands, payload, lane, binary = sys.argv[1:]
+def invoke(commands, payload):
+    for command in json.loads(commands):
+        hook = subprocess.run(command, shell=True, input=payload, text=True, cwd=lane, capture_output=True)
+        if hook.returncode:
+            return hook
+    return hook
+hook = invoke(commands, payload)
+print(json.dumps({'status': hook.returncode, 'stderr': hook.stderr}), flush=True)
+for line in sys.stdin:
+    action, _, target = line.strip().partition('|')
+    if action == 'capture':
+        run = subprocess.run([binary, '--output', 'json', 'capture', '-m', 'harness capture'], cwd=target or lane, capture_output=True, text=True)
+        print(json.dumps({'status': run.returncode, 'stderr': run.stderr}), flush=True)
+    elif action == 'hook':
+        request = json.loads(target)
+        run = invoke(request['command'], json.dumps(request['payload']))
+        print(json.dumps({'status': run.returncode, 'stderr': run.stderr}), flush=True)
+"#;
+        let mut child = Command::new("python3")
+            .args([
+                "-u",
+                "-c",
+                script,
+                command,
+                &payload.to_string(),
+                path.to_str().unwrap(),
+                env!("CARGO_BIN_EXE_heddle"),
+            ])
+            .env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+            .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start fake harness process");
+        let output = BufReader::new(child.stdout.take().unwrap());
+        let mut harness = Self { child, output };
+        let event = harness.read();
+        assert_eq!(event["status"], 0, "hook failed: {event}");
+        harness
+    }
+
+    fn read(&mut self) -> Value {
+        let mut line = String::new();
+        self.output.read_line(&mut line).expect("harness response");
+        serde_json::from_str(&line).expect("harness response JSON")
+    }
+
+    fn capture(&mut self, path: &std::path::Path) -> Value {
+        writeln!(
+            self.child.stdin.as_mut().unwrap(),
+            "capture|{}",
+            path.display()
+        )
+        .unwrap();
+        self.read()
+    }
+
+    fn event(&mut self, command: &str, payload: &Value) -> Value {
+        let request = serde_json::json!({"command": command, "payload": payload});
+        writeln!(self.child.stdin.as_mut().unwrap(), "hook|{request}").unwrap();
+        self.read()
+    }
+
+    fn stop(mut self) {
+        self.child.kill().expect("stop harness");
+        self.child.wait().expect("reap harness");
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for HookHarness {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn three_installed_harness_hooks_bind_distinct_lanes_and_crash_reacquires() {
+    let main = setup_repo("base.txt", "base");
+    let output = heddle(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "fanout",
+            "start",
+            "--title",
+            "Three harnesses",
+            "--lane",
+            "lane/claude=Claude",
+            "--lane",
+            "lane/codex=Codex",
+            "--lane",
+            "lane/opencode=OpenCode",
+        ],
+        Some(main.path()),
+    )
+    .expect("fanout");
+    let fanout: Value = serde_json::from_str(&output).unwrap();
+    let paths: Vec<_> = fanout["lanes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lane| std::path::PathBuf::from(lane["path"].as_str().unwrap()))
+        .collect();
+    let home = TempDir::new().unwrap();
+    heddle(
+        &["integration", "install", "claude-code", "--absolute-path"],
+        Some(&paths[0]),
+    )
+    .unwrap();
+    let installed = heddle_output_with_env(
+        &[
+            "integration",
+            "install",
+            "codex",
+            "--scope",
+            "user",
+            "--absolute-path",
+        ],
+        Some(&paths[1]),
+        &[("HOME", home.path().to_str().unwrap())],
+    )
+    .unwrap();
+    assert!(installed.status.success(), "Codex install: {installed:?}");
+    heddle(
+        &["integration", "install", "opencode", "--absolute-path"],
+        Some(&paths[2]),
+    )
+    .unwrap();
+    let claude_config: Value =
+        serde_json::from_slice(&fs::read(paths[0].join(".claude/settings.json")).unwrap()).unwrap();
+    let claude_commands = claude_config["hooks"]["PreToolUse"][0]["hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hook| hook["command"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    let claude_command = serde_json::to_string(&claude_commands).unwrap();
+    let codex_config: toml::Value =
+        toml::from_str(&fs::read_to_string(home.path().join(".codex/config.toml")).unwrap())
+            .unwrap();
+    let codex_command = codex_config["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let codex_command = serde_json::to_string(&[codex_command]).unwrap();
+    let plugin = paths[2].join(".opencode/plugins/heddle.js");
+    let runner = home.path().join("opencode-hook.mjs");
+    fs::write(
+        &runner,
+        format!(
+            r#"import plugin from {};
+import readline from 'node:readline';
+const hooks = await plugin();
+try {{ await hooks['tool.execute.before']({{tool:'bash',sessionID:'oc-session',callID:'call-1'}}, {{args:{{command:'true'}}}}); console.log(JSON.stringify({{status:0}})); }}
+catch (error) {{ console.log(JSON.stringify({{status:1, stderr:String(error)}})); }}
+for await (const line of readline.createInterface({{input:process.stdin}})) {{
+  const [action, target] = [line.slice(0, line.indexOf('|')), line.slice(line.indexOf('|')+1)];
+  if (action === 'capture') {{
+    const run = Bun.spawnSync([process.env.HEDDLE_TEST_BINARY, '--output', 'json', 'capture', '-m', 'harness capture'], {{cwd:target}});
+    console.log(JSON.stringify({{status:run.exitCode, stderr:run.stderr.toString()}}));
+  }} else if (action === 'hook') {{
+    try {{ await hooks.event(JSON.parse(target).payload); console.log(JSON.stringify({{status:0}})); }}
+    catch (error) {{ console.log(JSON.stringify({{status:1, stderr:String(error)}})); }}
+  }}
+}}
+"#,
+            serde_json::to_string(&plugin.display().to_string()).unwrap()
+        ),
+    )
+    .unwrap();
+    let mut claude = HookHarness::start(
+        &paths[0],
+        &claude_command,
+        &serde_json::json!({
+            "session_id":"claude-session", "transcript_path":"/tmp/claude-session.jsonl",
+            "cwd": paths[0], "permission_mode":"default", "hook_event_name":"PreToolUse",
+            "tool_name":"Bash", "tool_input":{"command":"true"}, "tool_use_id":"tool-1"
+        }),
+    );
+    let mut codex = HookHarness::start(
+        &paths[1],
+        &codex_command,
+        &serde_json::json!({
+            "session_id":"codex-session", "transcript_path":null, "cwd": paths[1],
+            "hook_event_name":"PreToolUse", "model":"gpt-6-sol", "turn_id":"turn-1",
+            "permission_mode":"default", "tool_name":"Bash", "tool_input":{"command":"true"},
+            "tool_use_id":"tool-1"
+        }),
+    );
+    let mut opencode = HookHarness::start_opencode(&paths[2], &runner);
+    for (index, path) in paths.iter().enumerate() {
+        fs::write(path.join(format!("work-{index}.txt")), "change").unwrap();
+    }
+    for (harness, path) in [
+        (&mut claude, &paths[0]),
+        (&mut codex, &paths[1]),
+        (&mut opencode, &paths[2]),
+    ] {
+        let result = harness.capture(path);
+        assert_eq!(result["status"], 0, "own lane capture: {result}");
+    }
+    let copied_env = heddle_output_with_env(
+        &["--output", "json", "capture", "-m", "copied session"],
+        Some(&paths[0]),
+        &[("HEDDLE_AGENT_SESSION", "claude-session")],
+    )
+    .unwrap();
+    assert!(
+        !copied_env.status.success(),
+        "copied session env used lane credential"
+    );
+    let sibling = codex.capture(&paths[0]);
+    assert_ne!(
+        sibling["status"], 0,
+        "sibling harness used Claude credential"
+    );
+    let parent = heddle_output(
+        &["--output", "json", "ready", "--thread", "lane/claude"],
+        Some(main.path()),
+    )
+    .unwrap();
+    assert!(!parent.status.success(), "parent used child lease");
+    let codex_stop = codex_config["hooks"]["Stop"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap();
+    let wrong_session = codex.event(
+        &serde_json::to_string(&[codex_stop]).unwrap(),
+        &serde_json::json!({"session_id":"other-codex-session","hook_event_name":"Stop"}),
+    );
+    assert_ne!(
+        wrong_session["status"], 0,
+        "different hook session released Codex lease"
+    );
+    fs::write(paths[1].join("codex-stop.txt"), "Stop capture").unwrap();
+    let stop = codex.event(
+        &serde_json::to_string(&[codex_stop]).unwrap(),
+        &serde_json::json!({
+            "session_id":"codex-session", "transcript_path":null, "cwd": paths[1],
+            "hook_event_name":"Stop", "model":"gpt-6-sol", "turn_id":"turn-1",
+            "permission_mode":"default", "stop_hook_active":false,
+            "last_assistant_message":"Codex Stop capture"
+        }),
+    );
+    assert_eq!(stop["status"], 0, "Codex Stop: {stop}");
+    let log: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "log", "-n", "1"], Some(&paths[1])).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(log["states"][0]["intent"], "Codex Stop capture");
+    let idle_payload = serde_json::json!({"event":{"type":"session.idle","properties":{"sessionID":"oc-session"}}});
+    let idle = opencode.event("plugin event", &idle_payload);
+    assert_eq!(idle["status"], 0, "OpenCode idle: {idle}");
+    let repo = repo::Repository::open(main.path()).unwrap();
+    let store = WriterLeaseStore::new(repo.heddle_dir());
+    assert!(
+        store
+            .live_owner("lane/codex", Some(&paths[1]))
+            .unwrap()
+            .is_none(),
+        "Codex Stop retained lease"
+    );
+    assert!(
+        store
+            .live_owner("lane/opencode", Some(&paths[2]))
+            .unwrap()
+            .is_none(),
+        "OpenCode idle retained lease"
+    );
+    fs::write(paths[1].join("after-stop.txt"), "unbound").unwrap();
+    let unbound = heddle_output(
+        &["--output", "json", "capture", "-m", "after Stop"],
+        Some(&paths[1]),
+    )
+    .unwrap();
+    assert!(
+        !unbound.status.success(),
+        "released lane accepted an unbound writer"
+    );
+    claude.stop();
+    assert!(
+        store
+            .live_owner("lane/claude", Some(&paths[0]))
+            .unwrap()
+            .is_none(),
+        "crashed owner still live"
+    );
+    let mut replacement = HookHarness::start(
+        &paths[0],
+        &claude_command,
+        &serde_json::json!({"session_id":"new-claude-session","hook_event_name":"PreToolUse"}),
+    );
+    let rebound = store
+        .live_owner("lane/claude", Some(&paths[0]))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rebound.pid,
+        Some(replacement.child.id()),
+        "hook selected wrong harness PID"
+    );
+    let rebound_record = fs::read_to_string(
+        repo.heddle_dir()
+            .join("writer-leases")
+            .join(format!("{}.toml", rebound.lease_id)),
+    )
+    .unwrap();
+    assert!(
+        rebound_record.contains("harness_session_id = \"claude-code:new-claude-session\""),
+        "hook lost session ID: {rebound_record}"
+    );
+    let end_commands = claude_config["hooks"]["SessionEnd"][0]["hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hook| hook["command"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    let end_command = serde_json::to_string(&end_commands).unwrap();
+    let end = replacement.event(
+        &end_command,
+        &serde_json::json!({"session_id":"new-claude-session","hook_event_name":"SessionEnd"}),
+    );
+    assert_eq!(end["status"], 0, "Claude SessionEnd: {end}");
+    assert!(
+        store
+            .live_owner("lane/claude", Some(&paths[0]))
+            .unwrap()
+            .is_none(),
+        "Claude SessionEnd retained lease"
+    );
+    drop(replacement);
+    drop(codex);
+    drop(opencode);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hook_without_session_id_uses_harness_pid_and_reacquires_after_crash() {
+    let (main, path, _) = fanout_lane_unbound();
+    let command = serde_json::to_string(&[format!(
+        "{} integration relay claude-code PreToolUse",
+        env!("CARGO_BIN_EXE_heddle")
+    )])
+    .unwrap();
+    let payload = serde_json::json!({"hook_event_name":"PreToolUse"});
+    let mut first = HookHarness::start(&path, &command, &payload);
+    let repo = repo::Repository::open(main.path()).unwrap();
+    let store = WriterLeaseStore::new(repo.heddle_dir());
+    let first_lease = store.live_owner("lane/one", Some(&path)).unwrap().unwrap();
+    assert_eq!(first_lease.pid, Some(first.child.id()));
+    assert!(first_lease.task_assignment_id.is_some());
+    assert!(first_lease.actor_session_id.is_some());
+    let lease_record = fs::read_to_string(
+        repo.heddle_dir()
+            .join("writer-leases")
+            .join(format!("{}.toml", first_lease.lease_id)),
+    )
+    .unwrap();
+    assert!(
+        lease_record.contains("harness_session_id = \"claude-code:pid:"),
+        "missing PID fallback: {lease_record}"
+    );
+    fs::write(path.join("first.txt"), "first").unwrap();
+    assert_eq!(first.capture(&path)["status"], 0);
+    first.stop();
+    assert!(store.live_owner("lane/one", Some(&path)).unwrap().is_none());
+    let mut second = HookHarness::start(&path, &command, &payload);
+    let second_lease = store.live_owner("lane/one", Some(&path)).unwrap().unwrap();
+    assert_ne!(first_lease.lease_id, second_lease.lease_id);
+    assert_eq!(
+        second_lease.task_assignment_id,
+        first_lease.task_assignment_id
+    );
+    assert_eq!(second_lease.actor_session_id, first_lease.actor_session_id);
+    fs::write(path.join("second.txt"), "second").unwrap();
+    assert_eq!(second.capture(&path)["status"], 0);
 }
 
 #[test]
@@ -620,16 +1067,6 @@ fn expired_lane_credential_can_be_released_and_recovered() {
     .unwrap();
     assert!(!wrong_token.status.success());
     assert!(credential_path.exists(), "wrong token removed credential");
-    let fresh: Value = serde_json::from_str(
-        &heddle(
-            &[
-                "--output", "json", "agent", "reserve", "--thread", "lane/one",
-            ],
-            Some(&path),
-        )
-        .unwrap(),
-    )
-    .unwrap();
     fs::write(path.join("blocked.txt"), "blocked").unwrap();
     assert!(
         !heddle_output(&["capture", "-m", "stale credential"], Some(&path))
@@ -653,13 +1090,32 @@ fn expired_lane_credential_can_be_released_and_recovered() {
     )
     .expect("release expired lease");
     assert!(!credential_path.exists(), "expired credential remains");
+    let payload =
+        serde_json::json!({"session_id":"fanout-claude-session","hook_event_name":"PreToolUse"});
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["integration", "relay", "claude-code", "PreToolUse"])
+        .current_dir(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    assert!(
+        hook.wait().unwrap().success(),
+        "new hook session reacquires lane"
+    );
+    let fresh: Value = serde_json::from_slice(&fs::read(&credential_path).unwrap()).unwrap();
+    assert_ne!(fresh["lease"], lease, "hook reused expired lease");
     fs::write(path.join("recovered.txt"), "recovered").unwrap();
     heddle(
         &[
             "agent",
             "capture",
             "--lease",
-            fresh["reservation"]["lease_id"].as_str().unwrap(),
+            fresh["lease"].as_str().unwrap(),
             "--token",
             fresh["token"].as_str().unwrap(),
             "-m",
@@ -918,7 +1374,7 @@ fn assert_capture_aborts_after_release_during_hook(replace: bool) {
 }
 
 #[test]
-fn fanout_release_removes_credential_and_restores_plain_capture() {
+fn fanout_release_requires_a_new_hook_session_before_capture() {
     let (_main, path, _) = fanout_lane();
     let credential_path = path.join(".heddle/writer-credential.json");
     let credential: Value = serde_json::from_slice(&fs::read(&credential_path).unwrap()).unwrap();
@@ -938,7 +1394,28 @@ fn fanout_release_removes_credential_and_restores_plain_capture() {
     .expect("release lane");
     assert!(!credential_path.exists());
     fs::write(path.join("after-release.txt"), "new writer").unwrap();
-    heddle(&["capture", "-m", "after release"], Some(&path)).expect("capture after release");
+    assert!(
+        heddle_output(&["capture", "-m", "after release"], Some(&path))
+            .unwrap()
+            .status
+            .code()
+            == Some(74),
+        "released lane accepted an unbound writer"
+    );
+    let payload = serde_json::json!({"session_id":"next-session","hook_event_name":"PreToolUse"});
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["integration", "relay", "claude-code", "PreToolUse"])
+        .current_dir(&path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    assert!(hook.wait().unwrap().success());
+    heddle(&["capture", "-m", "after new hook"], Some(&path)).expect("new hook session captures");
 }
 
 #[test]
