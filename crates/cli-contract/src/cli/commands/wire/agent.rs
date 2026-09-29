@@ -174,6 +174,9 @@ pub struct AgentTaskOutput {
     pub title: String,
     pub body: String,
     pub status: String,
+    pub outcome: Option<String>,
+    pub blockers: Vec<String>,
+    pub next_action: Option<String>,
     pub target_thread: String,
     pub base_state: Option<String>,
     pub base_root: Option<String>,
@@ -323,6 +326,16 @@ impl From<&repo::AgentTaskRecord> for AgentTaskOutput {
             title: task.title.clone(),
             body: task.body.clone(),
             status: task.status.to_string(),
+            outcome: task.outcome.map(|outcome| {
+                match outcome {
+                    repo::AgentTaskOutcome::Ready => "ready",
+                    repo::AgentTaskOutcome::Blocked => "blocked",
+                    repo::AgentTaskOutcome::Landed => "landed",
+                }
+                .to_string()
+            }),
+            blockers: task.blockers.clone(),
+            next_action: task.next_action.clone(),
             target_thread: task.target_thread.clone(),
             base_state: task.base_state.clone(),
             base_root: task.base_root.clone(),

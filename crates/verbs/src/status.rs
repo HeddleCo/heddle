@@ -16,16 +16,18 @@ use objects::{
     HeddleError,
     error::Result,
     object::{State, ThreadName, Tree},
+    store::WriterLeaseStore,
     worktree::{WorktreeStatus, build_worktree_ignore},
 };
 use refs::Head;
 use repo::{
-    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentUsageSummary, CommitGraphIndex,
-    GitImportGuidance, GitOverlayBranchTip, GitOverlayOutOfBandCommits, GitRemoteTrackingStatus,
-    RepoConfig, Repository, RepositoryCapability, RepositoryOperationStatus, Thread,
-    ThreadFreshness, ThreadImpactCategory, ThreadManager, ThreadMode, ThreadState,
-    WorktreeCompareProfile, describe_thread_advice_with_initial, discover_heddle_root,
-    is_synthetic_root, refresh_thread_freshness,
+    ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskOutcome, AgentTaskStatus,
+    AgentTaskStore, AgentUsageSummary, CommitGraphIndex, GitImportGuidance, GitOverlayBranchTip,
+    GitOverlayOutOfBandCommits, GitRemoteTrackingStatus, RepoConfig, Repository,
+    RepositoryCapability, RepositoryOperationStatus, Thread, ThreadFreshness, ThreadImpactCategory,
+    ThreadManager, ThreadMode, ThreadState, WorktreeCompareProfile,
+    describe_thread_advice_with_initial, discover_heddle_root, is_synthetic_root,
+    refresh_thread_freshness,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -175,6 +177,8 @@ pub struct StatusReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_thread: Option<String>,
     pub child_threads: Vec<String>,
+    /// Local delegated lanes waiting for the parent's review.
+    pub review_queue: Vec<LaneReview>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     pub promotion_suggested: bool,
@@ -213,6 +217,131 @@ pub struct StatusReport {
     #[serde(skip)]
     #[schemars(skip)]
     pub profile: StatusProfile,
+}
+
+/// One local lane decision, using the same outcome, attribution, freshness,
+/// blockers, evidence and next-action vocabulary as the hosted decision view.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LaneReview {
+    pub thread: String,
+    pub path: Option<String>,
+    pub task_id: String,
+    pub title: String,
+    pub task_status: String,
+    pub outcome: String,
+    pub actor: Option<String>,
+    pub attribution: Option<String>,
+    pub lease_status: Option<String>,
+    pub freshness: String,
+    pub blockers: Vec<String>,
+    pub evidence: Vec<String>,
+    pub next_action: Option<String>,
+}
+
+fn local_review_queue(repo: &Repository, parent_thread: Option<&str>) -> Result<Vec<LaneReview>> {
+    let Some(parent_thread) = parent_thread else {
+        return Ok(Vec::new());
+    };
+    let tasks = AgentTaskStore::new(repo.heddle_dir()).list()?;
+    let parent_ids: BTreeSet<&str> = tasks
+        .iter()
+        .filter(|task| task.parent_task_id.is_none() && task.target_thread == parent_thread)
+        .map(|task| task.task_id.as_str())
+        .collect();
+    if parent_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let actors = ActorPresenceStore::new(repo.heddle_dir()).list()?;
+    let leases = WriterLeaseStore::new(repo.heddle_dir()).list()?;
+    let mut queue = Vec::new();
+    for task in tasks.iter().filter(|task| {
+        task.parent_task_id
+            .as_deref()
+            .is_some_and(|id| parent_ids.contains(id))
+    }) {
+        let mut thread = manager.find_by_thread(&task.target_thread)?;
+        if let Some(thread) = &mut thread {
+            refresh_thread_freshness(repo, thread)?;
+        }
+        let outcome = match task.outcome {
+            Some(AgentTaskOutcome::Ready) => "ready",
+            Some(AgentTaskOutcome::Blocked) => "blocked",
+            Some(AgentTaskOutcome::Landed) => "landed",
+            None if task.status == AgentTaskStatus::Abandoned => "abandoned",
+            None => "in_progress",
+        };
+        let freshness = thread
+            .as_ref()
+            .map(|thread| thread.freshness.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        let mut blockers = task.blockers.clone();
+        if outcome != "landed" && freshness == "stale" {
+            blockers.push("lane is stale against parent".to_string());
+        }
+        if thread.is_none() {
+            blockers.push("lane thread is missing".to_string());
+        } else if outcome == "blocked" && blockers.is_empty() {
+            blockers.push("lane readiness or landing is blocked".to_string());
+        }
+        let mut evidence = Vec::new();
+        if let Some(thread) = &thread {
+            if let Some(state) = &thread.current_state {
+                evidence.push(format!("state:{state}"));
+            }
+            if let Some(passed) = thread.verification_summary.tests_passed {
+                evidence.push(format!("tests_passed:{passed}"));
+            }
+        }
+        let lease = leases
+            .iter()
+            .filter(|lease| lease.task_assignment_id.as_deref() == Some(task.task_id.as_str()))
+            .max_by_key(|lease| lease.started_at);
+        let actor = actors
+            .iter()
+            .filter(|actor| actor.task_assignment_id.as_deref() == Some(task.task_id.as_str()))
+            .max_by_key(|actor| actor.started_at)
+            .map(|actor| {
+                actor
+                    .native_actor_key
+                    .clone()
+                    .or_else(|| actor.provider.clone())
+                    .unwrap_or_else(|| actor.session_id.clone())
+            })
+            .or_else(|| lease.and_then(|lease| lease.actor_session_id.clone()));
+        let next_action = match outcome {
+            "landed" | "abandoned" => None,
+            "blocked" => task.next_action.clone(),
+            _ if freshness == "stale" => {
+                Some(format!("heddle sync --thread {}", task.target_thread))
+            }
+            "ready" => Some(format!("heddle land --thread {}", task.target_thread)),
+            _ => task
+                .next_action
+                .clone()
+                .or_else(|| Some(format!("heddle ready --thread {}", task.target_thread))),
+        };
+        queue.push(LaneReview {
+            thread: task.target_thread.clone(),
+            path: thread.as_ref().and_then(|thread| {
+                (!thread.execution_path.as_os_str().is_empty())
+                    .then(|| thread.execution_path.display().to_string())
+            }),
+            task_id: task.task_id.clone(),
+            title: task.title.clone(),
+            task_status: task.status.to_string(),
+            outcome: outcome.to_string(),
+            actor: actor.clone(),
+            attribution: actor.map(|_| "claimed".to_string()),
+            lease_status: lease.map(|lease| lease.status.to_string()),
+            freshness,
+            blockers,
+            evidence,
+            next_action,
+        });
+    }
+    queue.sort_by(|a, b| a.thread.cmp(&b.thread));
+    Ok(queue)
 }
 
 #[derive(Debug, Clone, Serialize, JsonSchema)]
@@ -2421,6 +2550,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
             .as_ref()
             .map(|thread| thread.child_threads.clone())
             .unwrap_or_default(),
+        review_queue: local_review_queue(repo, track_name.as_deref())?,
         task: thread_summary
             .as_ref()
             .and_then(|thread| thread.task.clone()),
@@ -2643,6 +2773,7 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         target_thread: None,
         parent_thread: None,
         child_threads: Vec::new(),
+        review_queue: Vec::new(),
         task: None,
         promotion_suggested: false,
         impact_categories: Vec::new(),

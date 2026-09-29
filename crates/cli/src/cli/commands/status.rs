@@ -749,6 +749,7 @@ fn render_long_status(output: &StatusOutput, verbose: bool) {
         render_status_submodules(output);
         render_status_parallel(output);
         render_status_materialized(&output.materialized_threads, verbose);
+        render_review_queue(&output.review_queue);
         return;
     }
     print!("{}", format_compact_status(output));
@@ -796,6 +797,37 @@ fn format_compact_status(output: &StatusOutput) -> String {
             lines.push(format!("  submodule {} @ {short_commit}", submodule.path));
         }
     }
+    if !output.review_queue.is_empty() {
+        lines.push(String::new());
+        lines.push("Review queue".to_string());
+        for lane in &output.review_queue {
+            let actor = lane.actor.as_deref().unwrap_or("unknown actor");
+            let claim = if lane.attribution.as_deref() == Some("claimed") {
+                " (claimed)"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "  {}  {}  {}{}  {}",
+                lane.thread, lane.outcome, actor, claim, lane.freshness
+            ));
+            if !lane.blockers.is_empty() {
+                lines.push(format!("    Blocked: {}", lane.blockers.join("; ")));
+            }
+            if lane.outcome == "blocked"
+                && lane.freshness != "stale"
+                && let Some(path) = &lane.path
+            {
+                lines.push(format!("    In: {path}"));
+            }
+            if !lane.evidence.is_empty() {
+                lines.push(format!("    Evidence: {}", lane.evidence.join(", ")));
+            }
+            if let Some(next) = &lane.next_action {
+                lines.push(format!("    Next: {next}"));
+            }
+        }
+    }
     if let Some(next) = format_next(&output.recommended_action) {
         if compact_status_is_dirty(output) || output.operation.is_some() {
             lines.push(String::new());
@@ -803,6 +835,41 @@ fn format_compact_status(output: &StatusOutput) -> String {
         lines.push(next);
     }
     lines.join("\n") + "\n"
+}
+
+fn render_review_queue(queue: &[verbs::status::LaneReview]) {
+    if queue.is_empty() {
+        return;
+    }
+    println!();
+    println!("{}", style::bold("Review queue"));
+    for lane in queue {
+        let actor = lane.actor.as_deref().unwrap_or("unknown actor");
+        let claim = if lane.attribution.as_deref() == Some("claimed") {
+            " (claimed)"
+        } else {
+            ""
+        };
+        println!(
+            "  {}  {}  {}{}  {}",
+            lane.thread, lane.outcome, actor, claim, lane.freshness
+        );
+        if !lane.blockers.is_empty() {
+            println!("    Blocked: {}", lane.blockers.join("; "));
+        }
+        if lane.outcome == "blocked"
+            && lane.freshness != "stale"
+            && let Some(path) = &lane.path
+        {
+            println!("    In: {path}");
+        }
+        if !lane.evidence.is_empty() {
+            println!("    Evidence: {}", lane.evidence.join(", "));
+        }
+        if let Some(next) = &lane.next_action {
+            println!("    Next: {next}");
+        }
+    }
 }
 
 fn compact_status_header(output: &StatusOutput) -> String {

@@ -15,6 +15,14 @@ use std::path::PathBuf;
 #[test]
 fn agent_api_schema_matches_committed_snapshot() {
     let actual = cli::cli::commands::agent_api_schema();
+    assert!(
+        actual["StatusReport"]["properties"]["review_queue"].is_object(),
+        "status review queue is missing from the agent schema snapshot"
+    );
+    assert!(
+        actual["StatusReport"]["$defs"]["LaneReview"]["properties"]["next_action"].is_object(),
+        "lane review fields are missing from the agent schema snapshot"
+    );
     let discovered_items = actual.as_object().map_or(0, serde_json::Map::len);
     assert!(
         discovered_items >= 4,
