@@ -2,7 +2,6 @@
 //! Stable JSON-first agent reservation API.
 
 use std::{
-    fs,
     path::Path,
     process::{Child, Command, Stdio},
 };
@@ -611,8 +610,12 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
     )? {
         return Err(anyhow!(advice));
     }
-    ensure_worktree_clean(&repo, "agent fanout start")?;
-
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        preflight_fanout_git_overlay(&repo)?;
+        super::snapshot::bind_git_overlay_active_tip(&repo)?;
+    } else {
+        ensure_worktree_clean(&repo, "agent fanout start")?;
+    }
     if repo.head()?.is_none() {
         ensure_current_state(
             &repo,
@@ -688,8 +691,12 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                     hydrate: false,
                 },
             )?;
-            if repo.capability() == RepositoryCapability::GitOverlay {
-                link_fanout_child_git(&repo, &checkout_path, &lane.thread)?;
+            if repo.capability() == RepositoryCapability::GitOverlay
+                && let Err(error) = link_fanout_child_git(&repo, &checkout_path, &lane.thread)
+            {
+                super::thread_cmd::drop_thread_silent(&repo, &lane.thread, true, true)?;
+                ThreadManager::new(repo.heddle_dir()).delete(&lane.thread)?;
+                return Err(error);
             }
             let session_id = started
                 .thread
@@ -987,15 +994,84 @@ fn fanout_parent_thread(repo: &Repository) -> Result<String> {
     })
 }
 
+fn preflight_fanout_git_overlay(repo: &Repository) -> Result<()> {
+    let git = repo.git_overlay_sley_repository()?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::invalid_usage(
+            "agent_fanout_git_repository_missing",
+            "Git overlay has no Git repository",
+            "Repair the Git checkout before starting fanout.",
+            "heddle doctor",
+        ))
+    })?;
+    if git.head()?.oid.is_none() {
+        let command = format!(
+            "git -C {path} add -A && git -C {path} commit --allow-empty -m 'Initial commit'",
+            path = shell_quote(&repo.root().display().to_string())
+        );
+        let mut advice = RecoveryAdvice::safety_refusal(
+            "agent_fanout_unborn_git_head",
+            "Git HEAD has no commit to bind fanout lanes to",
+            format!("Create the first Git commit with `{command}`, then retry."),
+            "Git overlay has no committed HEAD",
+            "a lane without its own Git HEAD could commit into the parent repository",
+            "no lane, task, or reservation was created",
+            "heddle status",
+            vec!["heddle status".to_string()],
+        );
+        advice.extra_json_fields.insert(
+            "git_recovery_command".to_string(),
+            serde_json::Value::String(command),
+        );
+        return Err(anyhow!(advice));
+    }
+    let status = repo.git_overlay_worktree_status()?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::safety_refusal(
+            "agent_fanout_git_status_unavailable",
+            "Could not inspect Git overlay worktree status",
+            "Repair the Git checkout before starting fanout.",
+            "Git worktree status is unavailable",
+            "fanout could copy uncommitted work into its lanes",
+            "no lane, task, or reservation was created",
+            "heddle doctor",
+            vec!["heddle doctor".to_string()],
+        ))
+    })?;
+    if !status.is_clean() {
+        let command = format!(
+            "git -C {path} add -A && git -C {path} commit -m 'Prepare fanout'",
+            path = shell_quote(&repo.root().display().to_string())
+        );
+        let mut advice = RecoveryAdvice::safety_refusal(
+            "agent_fanout_dirty_git_overlay",
+            "Git overlay has uncommitted work",
+            format!("Commit the intended work with `{command}`, then retry."),
+            format!(
+                "{} staged, unstaged, or untracked path(s) differ from committed Git HEAD",
+                status.change_count()
+            ),
+            "fanout would copy uncommitted work into every lane",
+            "parent work and Git index were left unchanged; no lane, task, or reservation was created",
+            "heddle status",
+            vec!["heddle status".to_string()],
+        );
+        advice.extra_json_fields.insert(
+            "git_recovery_command".to_string(),
+            serde_json::Value::String(command),
+        );
+        return Err(anyhow!(advice));
+    }
+    Ok(())
+}
+
 fn fanout_git_link_failure_advice(thread: &str, detail: impl Into<String>) -> RecoveryAdvice {
-    let primary = format!("heddle thread show {thread}");
+    let primary = "heddle status".to_string();
     RecoveryAdvice::safety_refusal(
         "agent_fanout_git_link_failed",
         format!("Could not create Git linkage for lane '{thread}'"),
-        format!("Inspect the lane with `{primary}` before retrying."),
+        format!("Inspect the repository with `{primary}` before retrying."),
         detail.into(),
         "continuing without child Git metadata would let Git commands resolve to the parent",
-        "the lane checkout remains for inspection; partial child Git metadata may remain",
+        "the failed lane checkout and thread record were removed",
         primary.clone(),
         vec![primary],
     )
@@ -1095,28 +1171,29 @@ fn run_fanout_harness(command: &AgentFanoutCommandOutput, json: bool) -> Result<
             "missing lane credential path"
         ))
     })?;
-    let credential: serde_json::Value = serde_json::from_slice(&fs::read(path)?)?;
-    let token = credential["token"].as_str().ok_or_else(|| {
-        anyhow!(fanout_launch_failure_advice(
-            &command.lane_thread,
-            "lane credential has no token"
-        ))
-    })?;
     let (program, args) = command.argv.split_first().ok_or_else(|| {
         anyhow!(fanout_launch_failure_advice(
             &command.lane_thread,
             "empty harness command"
         ))
     })?;
-    let child = Command::new(program)
+    let mut launch = Command::new(program);
+    launch
         .args(args)
         .current_dir(command.cwd.as_deref().ok_or_else(|| {
             anyhow!(fanout_launch_failure_advice(
                 &command.lane_thread,
                 "missing lane checkout"
             ))
-        })?)
-        .env("HEDDLE_RESERVATION_TOKEN", token)
+        })?);
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(|key| {
+            key.starts_with("HEDDLE_WRITER_") || key.starts_with("HEDDLE_RESERVATION_")
+        }) {
+            launch.env_remove(key);
+        }
+    }
+    let child = launch
         .env("HEDDLE_WRITER_CREDENTIAL_FILE", path)
         .stdin(Stdio::null())
         .stdout(if json {
