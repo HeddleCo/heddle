@@ -9,8 +9,29 @@ use serde::{Deserialize, Serialize};
 use crate::{
     fs_atomic::write_file_atomic,
     lock::RepoLock,
+    object::ContentHash,
     store::{HeddleError, Liveness, Result, reservation_liveness_at},
 };
+
+/// The physical checkout lock shared by capture and lease handoff.
+pub fn checkout_writer_lock(heddle_dir: &Path, root: &Path) -> Result<RepoLock> {
+    Ok(checkout_writer_lock_for_path(
+        heddle_dir,
+        &root.canonicalize()?,
+    ))
+}
+
+fn checkout_writer_lock_for_path(heddle_dir: &Path, path: &Path) -> RepoLock {
+    let path_key = ContentHash::compute_typed(
+        "checkout-writer-path-v2",
+        path.as_os_str().as_encoded_bytes(),
+    );
+    RepoLock::at(
+        heddle_dir
+            .join("locks")
+            .join(format!("checkout-{}.lock", path_key.to_hex())),
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +151,14 @@ impl WriterLeaseStore {
         self.leases_dir.join(".lock")
     }
 
+    fn checkout_lock(&self, path: &Path) -> Result<RepoLock> {
+        let heddle_dir = self
+            .leases_dir
+            .parent()
+            .ok_or_else(|| HeddleError::Config("writer lease directory has no parent".into()))?;
+        Ok(checkout_writer_lock_for_path(heddle_dir, path))
+    }
+
     fn write_lock(&self) -> Result<crate::lock::WriteLockGuard> {
         RepoLock::at(self.lock_path()).write().map_err(|err| {
             HeddleError::Config(format!("failed to acquire writer lease lock: {err}"))
@@ -180,13 +209,35 @@ impl WriterLeaseStore {
         Ok(leases)
     }
 
-    fn reap_expired_locked(&self, now: DateTime<Utc>) -> Result<()> {
+    fn reap_expired_locked(&self, now: DateTime<Utc>, held_checkout: Option<&Path>) -> Result<()> {
         for mut lease in self.list_locked()? {
             if lease.liveness_at(now) == Liveness::Dead && lease.status == WriterLeaseStatus::Active
             {
+                // Never retire authority while a capture holds this checkout.
+                // try_write avoids reversing the checkout -> lease-store lock
+                // order used by capture and handoff.
+                let checkout_guard = if let Some(path) = lease.path.as_deref() {
+                    if held_checkout == Some(path) {
+                        None
+                    } else {
+                        let lock = self.checkout_lock(path)?;
+                        let Some(guard) = lock.try_write().map_err(|error| {
+                            HeddleError::Config(format!(
+                                "failed to acquire checkout writer lock: {error}"
+                            ))
+                        })?
+                        else {
+                            continue;
+                        };
+                        Some(guard)
+                    }
+                } else {
+                    None
+                };
                 lease.status = WriterLeaseStatus::Abandoned;
                 lease.completed_at = Some(now);
                 self.write_lease(&lease)?;
+                drop(checkout_guard);
             }
         }
         Ok(())
@@ -205,23 +256,64 @@ impl WriterLeaseStore {
         )
     }
 
+    /// The caller already holds the checkout mutation lock for `draft.path`.
+    pub fn reserve_with_checkout_lock(
+        &self,
+        draft: WriterLeaseDraft,
+        now: DateTime<Utc>,
+    ) -> Result<WriterLeaseReserveOutcome> {
+        self.reserve_prepared_inner(
+            draft,
+            generate_writer_lease_id(),
+            generate_writer_lease_token(),
+            now,
+            true,
+        )
+    }
+
     /// A command journal persists these random credentials before reservation.
     /// Retrying the exact live reservation recovers its token; a different actor,
     /// path, token or an expired/released reservation can never revive it.
     pub fn reserve_prepared(
         &self,
+        draft: WriterLeaseDraft,
+        lease_id: String,
+        token: String,
+        now: DateTime<Utc>,
+    ) -> Result<WriterLeaseReserveOutcome> {
+        self.reserve_prepared_inner(draft, lease_id, token, now, false)
+    }
+
+    fn reserve_prepared_inner(
+        &self,
         mut draft: WriterLeaseDraft,
         lease_id: String,
         token: String,
         now: DateTime<Utc>,
+        checkout_lock_held: bool,
     ) -> Result<WriterLeaseReserveOutcome> {
         validate_lease_id(&lease_id)?;
         if token.len() < 32 || token.len() > 256 {
             return Err(HeddleError::Config("invalid prepared writer token".into()));
         }
         draft.path = draft.path.map(std::fs::canonicalize).transpose()?;
+        let _checkout_guard = if !checkout_lock_held {
+            draft
+                .path
+                .as_deref()
+                .map(|path| {
+                    self.checkout_lock(path)?.write().map_err(|error| {
+                        HeddleError::Config(format!(
+                            "failed to acquire checkout writer lock: {error}"
+                        ))
+                    })
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let _lock = self.write_lock()?;
-        self.reap_expired_locked(now)?;
+        self.reap_expired_locked(now, draft.path.as_deref())?;
         if let Some(old) = self.load_path(&self.lease_path(&lease_id)?)? {
             if old.status == WriterLeaseStatus::Active
                 && old.liveness_at(now) != Liveness::Dead
@@ -271,9 +363,31 @@ impl WriterLeaseStore {
 
     /// Advisory preflight. `reserve` repeats this check under the write lock.
     pub fn live_owner(&self, thread: &str, path: Option<&Path>) -> Result<Option<WriterLease>> {
+        self.live_owner_inner(thread, path, None)
+    }
+
+    /// Advisory preflight when the caller holds this checkout's mutation lock.
+    pub fn live_owner_with_checkout_lock(
+        &self,
+        thread: &str,
+        path: &Path,
+        _checkout_guard: &crate::lock::WriteLockGuard,
+    ) -> Result<Option<WriterLease>> {
+        self.live_owner_inner(thread, Some(path), Some(path))
+    }
+
+    fn live_owner_inner(
+        &self,
+        thread: &str,
+        path: Option<&Path>,
+        held_checkout: Option<&Path>,
+    ) -> Result<Option<WriterLease>> {
         let path = path.map(std::fs::canonicalize).transpose()?;
+        let held_checkout = held_checkout.map(std::fs::canonicalize).transpose()?;
+        let _lock = self.write_lock()?;
+        self.reap_expired_locked(Utc::now(), held_checkout.as_deref())?;
         Ok(self
-            .list()?
+            .list_locked()?
             .into_iter()
             .find(|lease| lease.conflicts_with(thread, path.as_deref())))
     }
@@ -290,11 +404,6 @@ impl WriterLeaseStore {
             return Ok(WriterLeaseAuthOutcome::Missing);
         };
         if lease.status != WriterLeaseStatus::Active || lease.liveness_at(now) == Liveness::Dead {
-            if lease.status == WriterLeaseStatus::Active {
-                lease.status = WriterLeaseStatus::Abandoned;
-                lease.completed_at = Some(now);
-                self.write_lease(&lease)?;
-            }
             return Ok(WriterLeaseAuthOutcome::Inactive(lease));
         }
         if token_hash(token) != lease.token_hash {
@@ -312,16 +421,37 @@ impl WriterLeaseStore {
         status: WriterLeaseStatus,
         now: DateTime<Utc>,
     ) -> Result<WriterLeaseAuthOutcome> {
+        let current = self.load(lease_id)?;
+        let _checkout_guard = current
+            .as_ref()
+            .and_then(|lease| lease.path.as_deref())
+            .map(|path| {
+                self.checkout_lock(path)?.write().map_err(|error| {
+                    HeddleError::Config(format!("failed to acquire checkout writer lock: {error}"))
+                })
+            })
+            .transpose()?;
+        self.release_with_checkout_lock(lease_id, token, status, now)
+    }
+
+    /// The caller holds the checkout mutation lock through credential cleanup.
+    pub fn release_with_checkout_lock(
+        &self,
+        lease_id: &str,
+        token: &str,
+        status: WriterLeaseStatus,
+        now: DateTime<Utc>,
+    ) -> Result<WriterLeaseAuthOutcome> {
         let _lock = self.write_lock()?;
         let path = self.lease_path(lease_id)?;
         let Some(mut lease) = self.load_path(&path)? else {
             return Ok(WriterLeaseAuthOutcome::Missing);
         };
-        if lease.status != WriterLeaseStatus::Active {
-            return Ok(WriterLeaseAuthOutcome::Inactive(lease));
-        }
         if token_hash(token) != lease.token_hash {
             return Ok(WriterLeaseAuthOutcome::TokenMismatch);
+        }
+        if lease.status != WriterLeaseStatus::Active {
+            return Ok(WriterLeaseAuthOutcome::Inactive(lease));
         }
         lease.status = status;
         lease.completed_at = Some(now);
@@ -331,7 +461,7 @@ impl WriterLeaseStore {
 
     pub fn list(&self) -> Result<Vec<WriterLease>> {
         let _lock = self.write_lock()?;
-        self.reap_expired_locked(Utc::now())?;
+        self.reap_expired_locked(Utc::now(), None)?;
         self.list_locked()
     }
 
@@ -345,6 +475,25 @@ impl WriterLeaseStore {
 
     pub fn abandon_thread(&self, thread: &str, now: DateTime<Utc>) -> Result<()> {
         let _lock = self.write_lock()?;
+        let mut checkout_guards = Vec::new();
+        for lease in self
+            .list_locked()?
+            .into_iter()
+            .filter(|lease| lease.thread == thread && lease.status == WriterLeaseStatus::Active)
+        {
+            if let Some(path) = lease.path.as_deref() {
+                let lock = self.checkout_lock(path)?;
+                let guard = lock
+                    .try_write()
+                    .map_err(|error| {
+                        HeddleError::Config(format!(
+                            "failed to acquire checkout writer lock: {error}"
+                        ))
+                    })?
+                    .ok_or_else(|| HeddleError::Config("checkout has an active mutation".into()))?;
+                checkout_guards.push(guard);
+            }
+        }
         for mut lease in self.list_locked()? {
             if lease.thread == thread && lease.status == WriterLeaseStatus::Active {
                 lease.status = WriterLeaseStatus::Abandoned;

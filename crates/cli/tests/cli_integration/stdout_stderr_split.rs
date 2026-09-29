@@ -39,10 +39,47 @@ const SKIP: &[&str] = &[
     "support revoke",
 ];
 
+// Each invocation starts a fresh repository. Keep the complete catalog sweep
+// below nextest's per-test timeout without sharing state between commands.
+const SHARDS: usize = 8;
+
 #[test]
-fn json_mode_keeps_stdout_clean_on_every_catalog_command() {
+fn json_mode_keeps_stdout_clean_on_catalog_shard_0() {
+    check_catalog_shard(0);
+}
+#[test]
+fn json_mode_keeps_stdout_clean_on_catalog_shard_1() {
+    check_catalog_shard(1);
+}
+#[test]
+fn json_mode_keeps_stdout_clean_on_catalog_shard_2() {
+    check_catalog_shard(2);
+}
+#[test]
+fn json_mode_keeps_stdout_clean_on_catalog_shard_3() {
+    check_catalog_shard(3);
+}
+#[test]
+fn json_mode_keeps_stdout_clean_on_catalog_shard_4() {
+    check_catalog_shard(4);
+}
+#[test]
+fn json_mode_keeps_stdout_clean_on_catalog_shard_5() {
+    check_catalog_shard(5);
+}
+#[test]
+fn json_mode_keeps_stdout_clean_on_catalog_shard_6() {
+    check_catalog_shard(6);
+}
+#[test]
+fn json_mode_keeps_stdout_clean_on_catalog_shard_7() {
+    check_catalog_shard(7);
+}
+
+fn check_catalog_shard(shard: usize) {
     let catalog = cli::cli::commands::build_command_catalog();
     let mut checked = 0_usize;
+    let mut eligible = 0_usize;
     let mut violations: Vec<String> = Vec::new();
     // Copy one initialized store so each command still gets its own repo.
     let seed = TempDir::new().expect("seed repository directory");
@@ -53,6 +90,11 @@ fn json_mode_keeps_stdout_clean_on_every_catalog_command() {
             continue;
         }
         if SKIP.contains(&entry.display.as_str()) {
+            continue;
+        }
+        let belongs_to_shard = eligible % SHARDS == shard;
+        eligible += 1;
+        if !belongs_to_shard {
             continue;
         }
 
@@ -112,8 +154,8 @@ fn json_mode_keeps_stdout_clean_on_every_catalog_command() {
     }
 
     assert!(
-        checked > 20,
-        "expected to sweep at least 20 json-capable commands; got {checked}. \
+        eligible > 20 && checked > 0,
+        "expected over 20 json-capable commands and at least one in shard {shard}; got {eligible} eligible and {checked} checked. \
          Catalog may have shifted; review SKIP list."
     );
 

@@ -142,12 +142,6 @@
       },
       "title": {
         "type": "string"
-      },
-      "token": {
-        "type": [
-          "string",
-          "null"
-        ]
       }
     },
     "required": [
@@ -248,12 +242,6 @@
           },
           "title": {
             "type": "string"
-          },
-          "token": {
-            "type": [
-              "string",
-              "null"
-            ]
           }
         },
         "required": [
@@ -931,6 +919,12 @@
               "null"
             ]
           },
+          "recovery_command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "status": {
             "type": "string"
           },
@@ -1500,6 +1494,12 @@
               "null"
             ]
           },
+          "recovery_command": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "status": {
             "type": "string"
           },
@@ -2040,6 +2040,12 @@
         "type": "string"
       },
       "path": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "recovery_command": {
         "type": [
           "string",
           "null"

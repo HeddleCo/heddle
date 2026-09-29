@@ -62,8 +62,8 @@ pub use source::ObjectSource;
 #[cfg(feature = "fs")]
 pub use writer_lease::{
     WriterLease, WriterLeaseAuthOutcome, WriterLeaseDraft, WriterLeaseGrant,
-    WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore, generate_writer_lease_id,
-    generate_writer_lease_token,
+    WriterLeaseReserveOutcome, WriterLeaseStatus, WriterLeaseStore, checkout_writer_lock,
+    generate_writer_lease_id, generate_writer_lease_token,
 };
 
 /// A newly-authored tree plus its immediate parent, when capture already knows

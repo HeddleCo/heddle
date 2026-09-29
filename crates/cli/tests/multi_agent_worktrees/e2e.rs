@@ -1,8 +1,712 @@
 // SPDX-License-Identifier: Apache-2.0
-use objects::store::{WriterLeaseStatus, WriterLeaseStore};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
+
+use objects::{
+    lock::RepositoryLockExt,
+    store::{WriterLeaseStatus, WriterLeaseStore},
+};
 use repo::ActorPresenceStore;
 
 use super::*;
+
+fn fanout_lane() -> (RepoFixture, std::path::PathBuf, Value) {
+    let main = setup_repo("base.txt", "shared base");
+    let output = heddle(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "fanout",
+            "start",
+            "--title",
+            "Fanout test",
+            "--lane",
+            "lane/one=First lane",
+        ],
+        Some(main.path()),
+    )
+    .expect("start fanout");
+    let fanout: Value = serde_json::from_str(&output).expect("fanout JSON");
+    let lane = &fanout["lanes"][0];
+    let path = std::path::PathBuf::from(lane["path"].as_str().expect("lane path"));
+    (main, path, fanout)
+}
+
+#[test]
+fn fanout_lane_capture_succeeds_immediately() {
+    let (_main, path, _) = fanout_lane();
+    fs::write(path.join("capture.txt"), "capture").unwrap();
+    heddle(&["capture", "-m", "lane capture"], Some(&path)).expect("lane capture");
+}
+
+#[test]
+fn fanout_lane_agent_capture_and_ready_use_existing_lease() {
+    let (_main, path, _) = fanout_lane();
+    let credential: Value =
+        serde_json::from_slice(&fs::read(path.join(".heddle/writer-credential.json")).unwrap())
+            .unwrap();
+    let lease = credential["lease"].as_str().unwrap();
+    let token = credential["token"].as_str().unwrap();
+    fs::write(path.join("agent-capture.txt"), "agent capture").unwrap();
+    heddle(
+        &[
+            "agent",
+            "capture",
+            "--lease",
+            lease,
+            "--token",
+            token,
+            "-m",
+            "lane agent capture",
+        ],
+        Some(&path),
+    )
+    .expect("lane agent capture");
+    fs::write(path.join("agent-ready.txt"), "agent ready").unwrap();
+    heddle(
+        &[
+            "agent",
+            "ready",
+            "--lease",
+            lease,
+            "--token",
+            token,
+            "-m",
+            "lane agent ready",
+        ],
+        Some(&path),
+    )
+    .expect("lane agent ready");
+}
+
+#[test]
+fn fanout_lane_ready_captures_and_succeeds_immediately() {
+    let (_main, path, _) = fanout_lane();
+    fs::write(path.join("ready.txt"), "ready capture").unwrap();
+    heddle(&["ready", "-m", "lane ready"], Some(&path)).expect("lane ready");
+}
+
+#[test]
+fn fanout_lane_claude_stop_hook_captures_immediately() {
+    let (_main, path, _) = fanout_lane();
+    fs::write(path.join("hook.txt"), "hook capture").unwrap();
+    let payload = serde_json::json!({
+        "session_id": "fanout-claude-session",
+        "message": "Claude Stop capture",
+        "hook_event_name": "Stop"
+    });
+    let output = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["integration", "relay", "claude-code", "Stop"])
+        .current_dir(&path)
+        .env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev")
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn Stop hook");
+    let mut child = output;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().expect("Stop hook output");
+    assert!(output.status.success(), "Stop hook: {output:?}");
+    let log: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "log", "-n", "1"], Some(&path)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(log["states"][0]["intent"], "Claude Stop capture", "{log}");
+}
+
+#[test]
+fn fanout_invalid_writer_credential_is_refused_with_typed_recovery_action() {
+    let (_main, path, _) = fanout_lane();
+    let credential_path = path.join(".heddle/writer-credential.json");
+    let mut credential: Value =
+        serde_json::from_slice(&fs::read(&credential_path).unwrap()).unwrap();
+    credential["token"] = Value::from("not-the-lane-token");
+    fs::write(&credential_path, credential.to_string()).unwrap();
+    fs::write(path.join("foreign.txt"), "foreign writer").unwrap();
+    let output = heddle_output(
+        &["--output", "json", "capture", "-m", "foreign"],
+        Some(&path),
+    )
+    .unwrap();
+    assert!(!output.status.success(), "second writer should be refused");
+    let error: Value = serde_json::from_slice(&output.stderr).expect("typed error");
+    assert_eq!(error["kind"], "writer_lease_credential_invalid", "{error}");
+    assert_eq!(error["primary_command"], "heddle agent list", "{error}");
+}
+
+#[test]
+fn fanout_invalid_ready_credential_is_refused_with_typed_recovery_action() {
+    let (_main, path, _) = fanout_lane();
+    let credential_path = path.join(".heddle/writer-credential.json");
+    let mut credential: Value =
+        serde_json::from_slice(&fs::read(&credential_path).unwrap()).unwrap();
+    credential["token"] = Value::from("not-the-lane-token");
+    fs::write(&credential_path, credential.to_string()).unwrap();
+    let ready = heddle_output(&["--output", "json", "ready"], Some(&path)).unwrap();
+    assert!(!ready.status.success(), "foreign ready should be refused");
+    let error: Value = serde_json::from_slice(&ready.stderr).expect("typed ready error");
+    assert_eq!(error["kind"], "writer_lease_credential_invalid", "{error}");
+    assert_eq!(error["primary_command"], "heddle agent list", "{error}");
+}
+
+#[test]
+#[ignore = "#1853 binds lane credentials to a harness session or PID"]
+fn fanout_unrelated_session_cannot_inherit_lane_credential() {
+    let (_main, path, _) = fanout_lane();
+    fs::write(path.join("foreign-session.txt"), "foreign writer").unwrap();
+    let output = heddle_output_with_env(
+        &["--output", "json", "capture", "-m", "foreign session"],
+        Some(&path),
+        &[("HEDDLE_AGENT_SESSION", "unrelated-session")],
+    )
+    .unwrap();
+    assert!(
+        !output.status.success(),
+        "unrelated session inherited lane authority"
+    );
+}
+
+#[test]
+fn ready_thread_checks_the_selected_lane_writer() {
+    let main = setup_repo("base.txt", "shared base");
+    let output = heddle(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "fanout",
+            "start",
+            "--title",
+            "Ready scopes",
+            "--lane",
+            "lane/one=First",
+            "--lane",
+            "lane/two=Second",
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+    let fanout: Value = serde_json::from_str(&output).unwrap();
+    let output = heddle_output(
+        &["--output", "json", "ready", "--thread", "lane/one"],
+        Some(main.path()),
+    )
+    .unwrap();
+    assert!(!output.status.success(), "parent readied reserved lane");
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["kind"], "writer_lease_owned_by_other", "{error}");
+    let other = std::path::PathBuf::from(fanout["lanes"][1]["path"].as_str().unwrap());
+    let output = heddle_output(
+        &["--output", "json", "ready", "--thread", "lane/one"],
+        Some(&other),
+    )
+    .unwrap();
+    assert!(!output.status.success(), "other lane readied reserved lane");
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["kind"], "writer_lease_owned_by_other", "{error}");
+}
+
+#[test]
+fn reserve_reaps_expired_lane_without_listing_first() {
+    let (_main, path, _) = fanout_lane();
+    let credential: Value =
+        serde_json::from_slice(&fs::read(path.join(".heddle/writer-credential.json")).unwrap())
+            .unwrap();
+    let old_lease = credential["lease"].as_str().unwrap();
+    let repo = repo::Repository::open(&path).unwrap();
+    let store = WriterLeaseStore::new(repo.heddle_dir());
+    let lease_path = repo
+        .heddle_dir()
+        .join("writer-leases")
+        .join(format!("{old_lease}.toml"));
+    let old = fs::read_to_string(&lease_path).unwrap();
+    let expired = old
+        .lines()
+        .map(|line| {
+            if line.starts_with("heartbeat_at = ") {
+                "heartbeat_at = \"2000-01-01T00:00:00Z\""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&lease_path, expired).unwrap();
+
+    let output = heddle_output(
+        &[
+            "--output", "json", "agent", "reserve", "--thread", "lane/one",
+        ],
+        Some(&path),
+    )
+    .unwrap();
+    assert!(output.status.success(), "reserve: {output:?}");
+    let fresh: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_ne!(fresh["reservation"]["lease_id"], old_lease);
+    assert_eq!(
+        store.load(old_lease).unwrap().unwrap().status,
+        WriterLeaseStatus::Abandoned
+    );
+}
+
+#[test]
+fn expired_lane_credential_can_be_released_and_recovered() {
+    let (_main, path, _) = fanout_lane();
+    let credential_path = path.join(".heddle/writer-credential.json");
+    let credential: Value = serde_json::from_slice(&fs::read(&credential_path).unwrap()).unwrap();
+    let lease = credential["lease"].as_str().unwrap();
+    let token = credential["token"].as_str().unwrap();
+    let repo = repo::Repository::open(&path).unwrap();
+    let lease_path = repo
+        .heddle_dir()
+        .join("writer-leases")
+        .join(format!("{lease}.toml"));
+    let old = fs::read_to_string(&lease_path).unwrap();
+    let updated = old
+        .lines()
+        .map(|line| {
+            if line.starts_with("heartbeat_at = ") {
+                "heartbeat_at = \"2000-01-01T00:00:00Z\""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&lease_path, updated).unwrap();
+    let list = heddle(&["agent", "list"], Some(&path)).unwrap();
+    assert!(
+        list.contains("agent release") && list.contains(lease),
+        "{list}"
+    );
+    let json_list: Value =
+        serde_json::from_str(&heddle(&["--output", "json", "agent", "list"], Some(&path)).unwrap())
+            .unwrap();
+    assert!(
+        json_list["reservations"][0]["recovery_command"]
+            .as_str()
+            .is_some_and(|command| command.contains(lease)),
+        "{json_list}"
+    );
+    let wrong_token = heddle_output(
+        &[
+            "--output",
+            "json",
+            "agent",
+            "release",
+            "--lease",
+            lease,
+            "--token",
+            "wrong-token",
+            "--status",
+            "abandoned",
+        ],
+        Some(&path),
+    )
+    .unwrap();
+    assert!(!wrong_token.status.success());
+    assert!(credential_path.exists(), "wrong token removed credential");
+    let fresh: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output", "json", "agent", "reserve", "--thread", "lane/one",
+            ],
+            Some(&path),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(path.join("blocked.txt"), "blocked").unwrap();
+    assert!(
+        !heddle_output(&["capture", "-m", "stale credential"], Some(&path))
+            .unwrap()
+            .status
+            .success(),
+        "stale credential authorized fresh lease"
+    );
+    heddle(
+        &[
+            "agent",
+            "release",
+            "--lease",
+            lease,
+            "--token",
+            token,
+            "--status",
+            "abandoned",
+        ],
+        Some(&path),
+    )
+    .expect("release expired lease");
+    assert!(!credential_path.exists(), "expired credential remains");
+    fs::write(path.join("recovered.txt"), "recovered").unwrap();
+    heddle(
+        &[
+            "agent",
+            "capture",
+            "--lease",
+            fresh["reservation"]["lease_id"].as_str().unwrap(),
+            "--token",
+            fresh["token"].as_str().unwrap(),
+            "-m",
+            "recovered",
+        ],
+        Some(&path),
+    )
+    .expect("new holder capture after cleanup");
+    fs::write(path.join("plain-after-recovery.txt"), "plain capture").unwrap();
+    heddle(&["capture", "-m", "plain after recovery"], Some(&path))
+        .expect("plain capture with fresh credential");
+}
+
+#[test]
+fn capture_rechecks_authority_after_lease_handoff_during_hook() {
+    assert_capture_aborts_after_release_during_hook(true);
+}
+
+#[test]
+fn capture_cannot_claim_a_temporary_lease_after_release_during_hook() {
+    assert_capture_aborts_after_release_during_hook(false);
+}
+
+#[test]
+fn post_snapshot_hook_can_release_its_lane_writer() {
+    let (_main, path, _) = fanout_lane();
+    let credential: Value =
+        serde_json::from_slice(&fs::read(path.join(".heddle/writer-credential.json")).unwrap())
+            .unwrap();
+    let hook = format!(
+        "#!/bin/sh\nif [ -z \"$HEDDLE_HOOK_PROTOCOL\" ]; then\n timeout 4s '{}' agent release --lease '{}' --token '{}' --status complete\nfi\n",
+        env!("CARGO_BIN_EXE_heddle"),
+        credential["lease"].as_str().unwrap(),
+        credential["token"].as_str().unwrap(),
+    );
+    let mut install = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["hook", "install", "post-snapshot", "--from-stdin"])
+        .current_dir(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    install
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(hook.as_bytes())
+        .unwrap();
+    assert!(install.wait().unwrap().success());
+    fs::write(path.join("post-hook.txt"), "release in hook").unwrap();
+    let output = heddle_output(&["capture", "-m", "post hook release"], Some(&path)).unwrap();
+    assert!(
+        output.status.success(),
+        "post-snapshot release failed: {output:?}"
+    );
+    assert!(!path.join(".heddle/writer-credential.json").exists());
+}
+
+#[test]
+fn list_cannot_reap_a_writer_during_its_capture() {
+    use std::time::{Duration, Instant};
+
+    let (_main, path, _) = fanout_lane();
+    let credential: Value =
+        serde_json::from_slice(&fs::read(path.join(".heddle/writer-credential.json")).unwrap())
+            .unwrap();
+    let repo = repo::Repository::open(&path).unwrap();
+    let lease_path = repo
+        .heddle_dir()
+        .join("writer-leases")
+        .join(format!("{}.toml", credential["lease"].as_str().unwrap()));
+    let initial_lease = fs::read_to_string(&lease_path).unwrap();
+    let entered = path.join("reap-hook-entered");
+    let resume = path.join("reap-hook-resume");
+    let hook = format!(
+        "#!/bin/sh\nif [ -z \"$HEDDLE_HOOK_PROTOCOL\" ]; then\n touch '{}'\n while [ ! -f '{}' ]; do sleep 0.02; done\nfi\n",
+        entered.display(),
+        resume.display(),
+    );
+    let mut install = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["hook", "install", "pre-snapshot", "--from-stdin"])
+        .current_dir(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    install
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(hook.as_bytes())
+        .unwrap();
+    assert!(install.wait().unwrap().success());
+    fs::write(path.join("reap-race.txt"), "capture under lease").unwrap();
+    let capture = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["--output", "json", "capture", "-m", "reap race"])
+        .current_dir(&path)
+        .env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !entered.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if !entered.exists() {
+        fs::write(&resume, "resume").unwrap();
+        panic!(
+            "capture did not enter pre-snapshot hook: {:?}",
+            capture.wait_with_output()
+        );
+    }
+    let repo_lock = repo.locker().write().unwrap();
+    fs::write(&resume, "resume").unwrap();
+    let locks = repo.heddle_dir().join("locks");
+    let mut mutation_held = false;
+    while Instant::now() < deadline {
+        for entry in fs::read_dir(&locks).unwrap() {
+            let lock_path = entry.unwrap().path();
+            if lock_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("checkout-")
+                && objects::lock::RepoLock::at(lock_path)
+                    .try_write()
+                    .unwrap()
+                    .is_none()
+            {
+                mutation_held = true;
+            }
+        }
+        if mutation_held {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if !mutation_held {
+        drop(repo_lock);
+        panic!(
+            "capture did not acquire mutation lock: {:?}",
+            capture.wait_with_output()
+        );
+    }
+    while fs::read_to_string(&lease_path).unwrap() == initial_lease && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if fs::read_to_string(&lease_path).unwrap() == initial_lease {
+        drop(repo_lock);
+        panic!(
+            "capture did not authenticate: {:?}",
+            capture.wait_with_output()
+        );
+    }
+    let lease = fs::read_to_string(&lease_path).unwrap();
+    let expired = lease
+        .lines()
+        .map(|line| {
+            if line.starts_with("heartbeat_at = ") {
+                "heartbeat_at = \"2000-01-01T00:00:00Z\""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&lease_path, expired).unwrap();
+    heddle(&["agent", "list"], Some(&path)).unwrap();
+    let after_list = fs::read_to_string(&lease_path).unwrap();
+    drop(repo_lock);
+    let output = capture.wait_with_output().unwrap();
+    assert!(after_list.contains("status = \"active\""), "{after_list}");
+    assert!(output.status.success(), "capture failed: {output:?}");
+}
+
+fn assert_capture_aborts_after_release_during_hook(replace: bool) {
+    use std::time::{Duration, Instant};
+
+    let (_main, path, _) = fanout_lane();
+    let credential: Value =
+        serde_json::from_slice(&fs::read(path.join(".heddle/writer-credential.json")).unwrap())
+            .unwrap();
+    let lease = credential["lease"].as_str().unwrap();
+    let token = credential["token"].as_str().unwrap();
+    let entered = path.join("hook-entered");
+    let resume = path.join("hook-resume");
+    let hook = format!(
+        "#!/bin/sh\nif [ -z \"$HEDDLE_HOOK_PROTOCOL\" ]; then\n touch '{}'\n while [ ! -f '{}' ]; do sleep 0.02; done\nfi\n",
+        entered.display(),
+        resume.display()
+    );
+    let mut install = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["hook", "install", "pre-snapshot", "--from-stdin"])
+        .current_dir(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    install
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(hook.as_bytes())
+        .unwrap();
+    assert!(install.wait().unwrap().success());
+    fs::write(path.join("race.txt"), "mutation after handoff").unwrap();
+    let mut capture = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["--output", "json", "capture", "-m", "race"])
+        .current_dir(&path)
+        .env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
+        .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !entered.exists() && Instant::now() < deadline {
+        if capture.try_wait().unwrap().is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    if !entered.exists() {
+        fs::write(&resume, "resume").unwrap();
+        panic!(
+            "capture did not reach pre-snapshot hook: {:?}",
+            capture.wait_with_output()
+        );
+    }
+    let release = heddle(
+        &[
+            "agent", "release", "--lease", lease, "--token", token, "--status", "complete",
+        ],
+        Some(&path),
+    );
+    let reserve =
+        replace.then(|| heddle(&["agent", "reserve", "--thread", "lane/one"], Some(&path)));
+    fs::write(&resume, "resume").unwrap();
+    let result = capture.wait_with_output().unwrap();
+    release.expect("release while capture waits at hook");
+    if let Some(reserve) = reserve {
+        reserve.expect("replacement reservation while capture waits at hook");
+    }
+    assert!(
+        !result.status.success(),
+        "revoked capture committed: {result:?}"
+    );
+    let error: Value = serde_json::from_slice(&result.stderr).unwrap();
+    assert!(
+        error["kind"] == "writer_lease_credential_invalid"
+            || error["kind"] == "writer_lease_owned_by_other",
+        "{error}"
+    );
+}
+
+#[test]
+fn fanout_release_removes_credential_and_restores_plain_capture() {
+    let (_main, path, _) = fanout_lane();
+    let credential_path = path.join(".heddle/writer-credential.json");
+    let credential: Value = serde_json::from_slice(&fs::read(&credential_path).unwrap()).unwrap();
+    heddle(
+        &[
+            "agent",
+            "release",
+            "--lease",
+            credential["lease"].as_str().unwrap(),
+            "--token",
+            credential["token"].as_str().unwrap(),
+            "--status",
+            "complete",
+        ],
+        Some(&path),
+    )
+    .expect("release lane");
+    assert!(!credential_path.exists());
+    fs::write(path.join("after-release.txt"), "new writer").unwrap();
+    heddle(&["capture", "-m", "after release"], Some(&path)).expect("capture after release");
+}
+
+#[test]
+fn fanout_credential_is_private_and_token_is_absent_from_stdout() {
+    let (_main, path, fanout) = fanout_lane();
+    let credential = path.join(".heddle/writer-credential.json");
+    let contents = fs::read_to_string(&credential).expect("lane credential");
+    assert!(contents.contains("hwl_"));
+    assert!(fanout["lanes"][0].get("token").is_none(), "{fanout}");
+    let token: Value = serde_json::from_str(&contents).expect("credential JSON");
+    assert!(
+        !fanout
+            .to_string()
+            .contains(token["token"].as_str().unwrap())
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(credential).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn audit_demo_r6_start_reserve_agent_capture_succeeds() {
+    let main = setup_repo("base.txt", "shared base");
+    let checkout = TempDir::new().unwrap();
+    heddle(
+        &[
+            "start",
+            "feature/audit",
+            "--workspace",
+            "materialized",
+            "--path",
+            checkout.path().to_str().unwrap(),
+        ],
+        Some(main.path()),
+    )
+    .unwrap();
+    let reservation: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "reserve",
+                "--thread",
+                "feature/audit",
+            ],
+            Some(checkout.path()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let lease = reservation["reservation"]["lease_id"].as_str().unwrap();
+    let token = reservation["token"].as_str().unwrap();
+    fs::write(checkout.path().join("audit.txt"), "captured").unwrap();
+    heddle(
+        &[
+            "agent",
+            "capture",
+            "--lease",
+            lease,
+            "--token",
+            token,
+            "-m",
+            "audit capture",
+        ],
+        Some(checkout.path()),
+    )
+    .expect("audit agent capture");
+}
 
 #[test]
 fn thread_start_creates_presence_without_writer_authority() {
