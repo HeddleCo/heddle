@@ -572,4 +572,36 @@ mod tests {
             source
         );
     }
+    #[test]
+    fn rewritten_note_uses_actual_ordered_git_parents() {
+        let tree = empty_tree_hash();
+        let original_parent = StateId::from_bytes([0x31; 32]);
+        let mapped_parents = vec![
+            StateId::from_bytes([0x41; 32]),
+            StateId::from_bytes([0x42; 32]),
+        ];
+        let source = State::new(
+            tree,
+            vec![original_parent],
+            Attribution::human(Principal::new("Exported", "exported@example.com")),
+        )
+        .with_change_id(ChangeId::from_bytes([0x52; 16]))
+        .with_status(Status::Published);
+        let mut note = HeddleNote::from_state(&source);
+        note.parents_rewritten = true;
+        let mut commit = make_commit(
+            "34".repeat(20).as_str(),
+            vec!["12".repeat(20), "23".repeat(20)],
+            "exported merge\n",
+        );
+        commit.heddle_note = Some(note.to_json_bytes().expect("canonical note"));
+
+        let converted = state_from_commit(&commit, tree, mapped_parents.clone(), false)
+            .expect("rewritten note converts");
+        assert_eq!(converted.parents, mapped_parents);
+        assert_eq!(converted.status, Status::Published);
+        assert_eq!(converted.change_id, source.change_id);
+        assert_ne!(converted.id(), source.id());
+    }
+
 }
