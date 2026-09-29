@@ -90,6 +90,33 @@ pub struct WriterLease {
 }
 
 impl WriterLease {
+    pub fn from_draft(
+        draft: WriterLeaseDraft,
+        lease_id: String,
+        token_hash: String,
+        now: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            lease_id,
+            thread: draft.thread,
+            actor_session_id: draft.actor_session_id,
+            task_assignment_id: draft.task_assignment_id,
+            anchor_state: draft.anchor_state,
+            anchor_root: draft.anchor_root,
+            path: draft.path,
+            token_hash,
+            pid: draft.pid,
+            boot_id: draft.boot_id,
+            pid_birth: None,
+            pid_namespace: draft.pid.and_then(|_| current_pid_namespace()),
+            harness_session_id: None,
+            heartbeat_at: now,
+            started_at: now,
+            status: WriterLeaseStatus::Active,
+            completed_at: None,
+        }
+    }
+
     pub fn matches_current_pid_namespace(&self) -> bool {
         if cfg!(target_os = "linux") {
             self.pid_namespace
@@ -399,25 +426,7 @@ impl WriterLeaseStore {
         {
             return Ok(WriterLeaseReserveOutcome::LiveOwner(owner));
         }
-        let lease = WriterLease {
-            lease_id,
-            thread: draft.thread,
-            actor_session_id: draft.actor_session_id,
-            task_assignment_id: draft.task_assignment_id,
-            anchor_state: draft.anchor_state,
-            anchor_root: draft.anchor_root,
-            path: draft.path,
-            token_hash: token_hash(&token),
-            pid: draft.pid,
-            boot_id: draft.boot_id,
-            pid_birth: None,
-            pid_namespace: draft.pid.and_then(|_| current_pid_namespace()),
-            harness_session_id: None,
-            heartbeat_at: now,
-            started_at: now,
-            status: WriterLeaseStatus::Active,
-            completed_at: None,
-        };
+        let lease = WriterLease::from_draft(draft, lease_id, token_hash(&token), now);
         self.write_lease(&lease)?;
         Ok(WriterLeaseReserveOutcome::Reserved(WriterLeaseGrant {
             lease,
@@ -685,6 +694,17 @@ mod tests {
             pid: None,
             boot_id: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn constructing_a_pid_bound_lease_records_its_namespace() {
+        let now = Utc::now();
+        let mut bound = draft("lane");
+        bound.pid = Some(std::process::id());
+        let lease = WriterLease::from_draft(bound, "lease-one".into(), "hash".into(), now);
+        assert_eq!(lease.pid_namespace, current_pid_namespace());
+        assert!(lease.matches_current_pid_namespace());
     }
 
     #[cfg(target_os = "linux")]

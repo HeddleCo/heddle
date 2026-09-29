@@ -366,30 +366,27 @@ fn nonempty_optional_string(value: Option<String>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
-    use objects::store::WriterLeaseStatus;
+    use objects::store::WriterLeaseDraft;
 
     use super::*;
 
     fn lease() -> WriterLease {
         let now = Utc::now();
-        WriterLease {
-            lease_id: "lease-one".to_string(),
-            thread: "feature/a".to_string(),
-            actor_session_id: Some("agent-one".to_string()),
-            task_assignment_id: None,
-            anchor_state: Some("hd-state".to_string()),
-            anchor_root: Some("root".to_string()),
-            path: None,
-            token_hash: "hash".to_string(),
-            pid: None,
-            boot_id: None,
-            pid_birth: None,
-            harness_session_id: None,
-            heartbeat_at: now,
-            started_at: now,
-            status: WriterLeaseStatus::Active,
-            completed_at: None,
-        }
+        WriterLease::from_draft(
+            WriterLeaseDraft {
+                thread: "feature/a".to_string(),
+                actor_session_id: Some("agent-one".to_string()),
+                task_assignment_id: None,
+                anchor_state: Some("hd-state".to_string()),
+                anchor_root: Some("root".to_string()),
+                path: None,
+                pid: None,
+                boot_id: None,
+            },
+            "lease-one".to_string(),
+            "hash".to_string(),
+            now,
+        )
     }
 
     #[test]

@@ -37,13 +37,18 @@ fn fanout_lane_unbound() -> (RepoFixture, std::path::PathBuf, Value) {
 
 fn fanout_lane() -> (RepoFixture, std::path::PathBuf, Value) {
     let fixture = fanout_lane_unbound();
+    bind_fanout_lane(&fixture.1, "fanout-claude-session");
+    fixture
+}
+
+fn bind_fanout_lane(path: &std::path::Path, session_id: &str) {
     let payload = serde_json::json!({
-        "session_id": "fanout-claude-session",
+        "session_id": session_id,
         "hook_event_name": "PreToolUse"
     });
     let mut child = Command::new(env!("CARGO_BIN_EXE_heddle"))
         .args(["integration", "relay", "claude-code", "PreToolUse"])
-        .current_dir(&fixture.1)
+        .current_dir(path)
         .stdin(Stdio::piped())
         .spawn()
         .expect("spawn lane hook");
@@ -54,7 +59,6 @@ fn fanout_lane() -> (RepoFixture, std::path::PathBuf, Value) {
         .write_all(payload.to_string().as_bytes())
         .unwrap();
     assert!(child.wait().unwrap().success(), "bind lane to test harness");
-    fixture
 }
 
 #[test]
@@ -92,6 +96,9 @@ fn parent_status_reviews_ready_landed_and_blocked_lanes() {
     let landed = lane_path("lane/landed");
     let ready = lane_path("lane/ready");
     let blocked = lane_path("lane/blocked");
+    bind_fanout_lane(&landed, "landed-session");
+    bind_fanout_lane(&ready, "ready-session");
+    bind_fanout_lane(&blocked, "blocked-session");
 
     fs::write(landed.join("landed.txt"), "landed evidence").expect("landed edit");
     heddle(&["ready", "-m", "landed work"], Some(&landed)).expect("ready landed lane");
@@ -255,6 +262,7 @@ fn recorded_conflict_recovery_wins_over_staleness_in_parent_queue() {
     for (index, content) in [(0, "first"), (1, "second")] {
         let path =
             std::path::PathBuf::from(fanout["lanes"][index]["path"].as_str().expect("lane path"));
+        bind_fanout_lane(&path, &format!("conflict-lane-{index}"));
         fs::write(path.join("shared.txt"), content).expect("lane edit");
         heddle(&["ready", "-m", content], Some(&path)).expect("ready lane");
     }
