@@ -26,7 +26,7 @@ pub async fn cmd_continue(cli: &Cli) -> Result<()> {
     let current_dir = std::env::current_dir()?;
     let cwd = cli.repo.as_ref().unwrap_or(&current_dir);
     let repo = open_operator_repo_from_path(cwd)?;
-    let output = super::operator_core::continue_operator(&repo)?;
+    let output = super::operator_core::continue_operator(&repo, None)?;
     let status = output.status.clone();
     emit(cli, &repo, output, CONTINUE_OPERATOR_EMISSION)?;
     fail_if_blocked_operator_status(&status)
