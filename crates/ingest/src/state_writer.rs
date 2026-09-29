@@ -1,38 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Translate git commits into Heddle [`State`]s.
-//!
-//! The active importer owns tree/blob translation, parent-map validation,
-//! and object persistence. This module owns the narrower commit-metadata
-//! translation: identity, attribution, timestamps, raw git fidelity fields,
-//! status, and intent.
-//!
-//! # Parent ordering
-//!
-//! Git and Heddle disagree on parent semantics:
-//!
-//! - Git's first parent on a merge commit is usually the **target** branch
-//!   (the branch you were on when you ran `git merge`).
-//! - Heddle uses the same convention: `parents[0]` is the target,
-//!   `parents[1..]` are sources.
-//!
-//! So we preserve `CommitEntry::parents` order verbatim. If a parent isn't
-//! yet in the sha map, we refuse the write — callers are expected to feed
-//! commits in topological order (see
-//! [`GitSource::commits_topo`](crate::git_walk::GitSource::commits_topo)).
-//!
-//! # Attribution
-//!
-//! [`parse_attribution`] examines the commit author plus any
-//! `Co-Authored-By:` trailers in the message. A trailer whose email hints
-//! at an agent (`claude`, `codex`, `chatgpt`, etc.) upgrades the
-//! attribution to an agent-assisted one; the principal stays the human
-//! author. Session IDs aren't recoverable from a bare commit — the
-//! transcript matcher fills those in later.
+//! Local adapter for the canonical Git import State converter.
 
-use chrono::{DateTime, Utc};
 use objects::object::{
-    Agent, Attribution, ChangeId, ChangeLineage, ChangeLineageKind, ContentHash, HeddleNote,
-    Principal, State, StateId, Status,
+    Attribution, ContentHash, State, StateId,
+    thread_replication::{
+        git_import_converter::{
+            GitImportCommit, GitImportGraph, GitImportParentPolicy, GitImportSignature,
+            parse_git_attribution,
+        },
+        git_import_graph::GitObjectId,
+    },
 };
 
 use crate::{
@@ -50,8 +27,6 @@ fn state_from_commit(
     state_from_commit_with_rewrites(commit, tree, parents, git_lossy, |_| Ok(None))
 }
 
-/// Resolve an embedded parent's original StateId through the durable rewrite
-/// map. Only a known rewrite may explain a mismatch in an unmarked note.
 pub(crate) fn state_from_commit_with_rewrites(
     commit: &CommitEntry,
     tree: ContentHash,
@@ -59,353 +34,333 @@ pub(crate) fn state_from_commit_with_rewrites(
     git_lossy: bool,
     rewritten_parent: impl Fn(StateId) -> crate::Result<Option<StateId>>,
 ) -> crate::Result<State> {
-    state_from_commit_with_source_policy(
+    convert(
         commit,
         tree,
         parents,
         git_lossy,
-        SourceStateParentPolicy::Validate,
+        GitImportParentPolicy::Validate,
         rewritten_parent,
     )
 }
 
-/// Build a lazy Git-overlay descriptor. A portable export note embeds the
-/// exact source State, including its original parent IDs. Lazy binding has not
-/// walked/materialized that graph yet, so an empty descriptor parent input is
-/// not evidence that the note is invalid. Preserve the embedded State exactly;
-/// a later full import validates it against the real mapped parent graph.
+/// A lazy overlay has not materialized the Git parent graph. Preserve its
+/// embedded source State until the full import validates actual parents.
 pub(crate) fn descriptor_state_from_commit(
     commit: &CommitEntry,
     tree: ContentHash,
     git_lossy: bool,
 ) -> crate::Result<State> {
-    state_from_commit_with_source_policy(
+    convert(
         commit,
         tree,
         Vec::new(),
         git_lossy,
-        SourceStateParentPolicy::PreserveEmbedded,
+        GitImportParentPolicy::PreserveEmbedded,
         |_| Ok(None),
     )
 }
 
-#[derive(Clone, Copy)]
-enum SourceStateParentPolicy {
-    Validate,
-    PreserveEmbedded,
-}
-
-fn state_from_commit_with_source_policy(
+fn convert(
     commit: &CommitEntry,
     tree: ContentHash,
     parents: Vec<StateId>,
     git_lossy: bool,
-    source_parent_policy: SourceStateParentPolicy,
+    parent_policy: GitImportParentPolicy,
     rewritten_parent: impl Fn(StateId) -> crate::Result<Option<StateId>>,
 ) -> crate::Result<State> {
-    // A lossy string view, derived once for the parsers that need text
-    // (attribution trailers, the one-line intent). The verbatim bytes still
-    // reach `with_raw_message` below, so a non-UTF8 message is preserved even
-    // though these ASCII-footer parsers read a lossy view.
-    let message = String::from_utf8_lossy(&commit.message);
-    let note = read_heddle_note(commit)?;
-    if let Some(note) = note.as_ref()
-        && let Some(mut source_state) = note.source_state.clone()
-    {
-        let source_id = source_state.id();
-        let parent_mismatch = matches!(source_parent_policy, SourceStateParentPolicy::Validate)
-            && source_state.parents != parents;
-        let explained_rewrites = if parent_mismatch && !note.parents_rewritten {
-            if source_state.parents.len() != parents.len() {
-                false
-            } else {
-                let mut explained = true;
-                for (original, actual) in source_state.parents.iter().zip(&parents) {
-                    if original != actual && rewritten_parent(*original)? != Some(*actual) {
-                        explained = false;
-                        break;
-                    }
-                }
-                explained
-            }
-        } else {
-            false
-        };
-        if source_id.to_string_full() != note.state_id
-            || source_state.change_id.to_string_full() != note.change_id
-            || source_state.tree != tree
-            || (parent_mismatch && !note.parents_rewritten && !explained_rewrites)
-        {
-            return Err(IngestError::Git(format!(
-                "embedded Heddle state for commit {} does not match its note, tree, or parents",
-                commit.sha
-            )));
-        }
-        if parent_mismatch {
-            source_state.parents = parents;
-            source_state.state_id = source_state.id();
-        } else {
-            source_state.state_id = source_id;
-        }
-        return Ok(source_state);
-    }
-    let identity = resolve_identity(commit, note.as_ref())?;
-    let attribution = parse_attribution_with_note(&commit.author, &message, note.as_ref());
-    let status = note_status(note.as_ref());
-
-    // Heddle's hash includes the committer timestamp, so we use
-    // committed_at (not authored_at) for `created_at` — keeps re-
-    // imported repos producing identical State hashes run-to-run.
-    //
-    // The author timestamp is preserved separately on the State via
-    // `with_authored_at` so blame can show the *authored* time
-    // (matching git blame's default), while ordering/log queries
-    // continue to use `created_at` (matching git log's default).
-    // For commits where author == committer (the common case in
-    // merge-without-rebase workflows) the two are identical and the
-    // distinction is invisible; for rebased / cherry-picked /
-    // amended commits it preserves the original authoring time.
-    // #564 step 1: preserve the committer identity, both timezone offsets,
-    // the verbatim message, and any extra headers (in order, gpgsig inline at
-    // its captured position) so the commit is byte-reconstructable later
-    // (#566) without the mirror.
-    let mut state = State::new(tree, parents, attribution)
-        .with_change_id(identity)
-        .with_timestamp(committed_timestamp(&commit.committed_at))
-        .with_authored_at(committed_timestamp(&commit.authored_at))
-        .with_intent(first_line_of(&message))
-        .with_committer(Principal::new(
-            commit.committer.name.clone(),
-            commit.committer.email.clone(),
-        ))
-        .with_tz_offsets(commit.author.tz_offset, commit.committer.tz_offset)
-        .with_raw_message(commit.message.clone())
-        .with_git_lossy(git_lossy)
-        .with_extra_headers(commit.extra_headers.clone())
-        .with_status(status);
-    if let Some(confidence) = note.as_ref().and_then(|note| note.confidence) {
-        state = state.with_confidence(confidence);
-    }
-    if let Some(note) = note {
-        let source_state = StateId::parse(&note.state_id).map_err(|error| {
-            IngestError::Git(format!(
-                "invalid Heddle note state_id for commit {}: {error}",
-                commit.sha
-            ))
-        })?;
-        if state.id() != source_state {
-            let source_change = state.change_id;
-            state = state.with_lineage(vec![ChangeLineage {
-                kind: ChangeLineageKind::GitProjection,
-                source_change,
-                source_state,
-            }]);
-        }
-    }
-    Ok(state)
+    let oid = parse_git_oid(&commit.sha)?;
+    GitImportGraph::convert_commit(
+        GitImportCommit {
+            oid: &oid,
+            author: signature(&commit.author, commit.authored_at),
+            committer: signature(&commit.committer, commit.committed_at),
+            message: &commit.message,
+            extra_headers: &commit.extra_headers,
+            heddle_note: commit.heddle_note.as_deref(),
+        },
+        tree,
+        parents,
+        git_lossy,
+        parent_policy,
+        |state| {
+            rewritten_parent(state)
+                .map_err(|error| objects::error::HeddleError::InvalidObject(error.to_string()))
+        },
+    )
+    .map_err(IngestError::from)
 }
 
-/// Best-effort attribution parse. The principal is always the git author;
-/// the agent, if any, comes from a `Co-Authored-By:` trailer whose name
-/// or email resembles an AI assistant.
-pub fn parse_attribution(author: &GitSignature, message: &str) -> Attribution {
-    parse_attribution_with_note(author, message, None)
-}
-
-fn parse_attribution_with_note(
-    author: &GitSignature,
-    message: &str,
-    note: Option<&HeddleNote>,
-) -> Attribution {
-    let principal = note
-        .and_then(|note| note.attribution.as_ref())
-        .map(|attribution| {
-            Principal::new(
-                attribution.principal_name.clone(),
-                attribution.principal_email.clone(),
-            )
-        })
-        .unwrap_or_else(|| Principal::new(author.name.clone(), author.email.clone()));
-
-    if let Some(agent) = note
-        .and_then(|note| note.attribution.as_ref())
-        .and_then(|attribution| attribution.agent.as_ref())
-        .or_else(|| note.and_then(|note| note.agent.as_ref()))
-        .cloned()
-        .or_else(|| detect_agent_in_message(message))
-    {
-        Attribution::with_agent(principal, agent)
-    } else {
-        Attribution::human(principal)
+fn signature(value: &GitSignature, time: chrono::DateTime<chrono::Utc>) -> GitImportSignature {
+    GitImportSignature {
+        name: value.name.clone(),
+        email: value.email.clone(),
+        time,
+        tz_offset: value.tz_offset,
     }
 }
 
-fn read_heddle_note(commit: &CommitEntry) -> crate::Result<Option<HeddleNote>> {
-    let Some(note_bytes) = commit.heddle_note.as_ref() else {
-        return Ok(None);
-    };
-    HeddleNote::from_json_bytes(note_bytes)
-        .map(Some)
-        .map_err(|error| {
-            IngestError::Git(format!(
-                "parse Heddle note for commit {}: {error}",
-                commit.sha
-            ))
-        })
-}
-
-fn resolve_identity(commit: &CommitEntry, note: Option<&HeddleNote>) -> crate::Result<ChangeId> {
-    if let Some(note) = note {
-        return ChangeId::parse(&note.change_id).map_err(|error| {
-            IngestError::Git(format!(
-                "invalid Heddle note change_id for commit {}: {error}",
-                commit.sha
-            ))
-        });
-    }
-    let message = String::from_utf8_lossy(&commit.message);
-    if let Some(change_id) = parse_trailers(&message).get("Heddle-Change-Id") {
-        return ChangeId::parse(change_id).map_err(|error| {
-            IngestError::Git(format!(
-                "invalid Heddle-Change-Id trailer for commit {}: {error}",
-                commit.sha
-            ))
-        });
-    }
-    change_id_from_git_oid(&commit.sha)
-}
-
-fn note_status(note: Option<&HeddleNote>) -> Status {
-    match note.map(|note| note.status.as_str()) {
-        Some("published") => Status::Published,
-        _ => Status::Draft,
-    }
-}
-
-fn parse_trailers(message: &str) -> std::collections::HashMap<String, String> {
-    let mut trailers = std::collections::HashMap::new();
-    for line in message.lines().rev() {
-        if line.is_empty() {
-            break;
-        }
-        if let Some(pos) = line.find(':') {
-            let key = &line[..pos];
-            let value = line[pos + 1..].trim();
-            if key.starts_with("Heddle-") {
-                trailers.insert(key.to_string(), value.to_string());
-            }
-        } else if !line.trim().is_empty() {
-            break;
-        }
-    }
-    trailers
-}
-
-fn change_id_from_git_oid(sha: &str) -> crate::Result<ChangeId> {
-    let trimmed = sha.trim();
-    if !matches!(trimmed.len(), 40 | 64) || !trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+fn parse_git_oid(sha: &str) -> crate::Result<GitObjectId> {
+    if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(IngestError::Git(format!(
             "commit {sha} cannot seed deterministic Heddle identity: expected full hex SHA"
         )));
     }
-    let mut oid = Vec::with_capacity(trimmed.len() / 2);
-    for idx in 0..trimmed.len() / 2 {
-        let pair = &trimmed[idx * 2..idx * 2 + 2];
-        oid.push(u8::from_str_radix(pair, 16).map_err(|error| {
-            IngestError::Git(format!(
-                "commit {sha} cannot seed deterministic Heddle identity: {error}"
-            ))
-        })?);
-    }
-    let digest = ContentHash::compute_typed("git-change", &oid);
-    let mut bytes = [0; 16];
-    bytes.copy_from_slice(&digest.as_bytes()[..16]);
-    Ok(ChangeId::from_bytes(bytes))
-}
-
-/// Scan trailers for `Co-Authored-By: <name> <<email>>` lines and
-/// heuristically classify the agent. Returns the first agent-like hit;
-/// human co-authors are ignored (they're credited separately elsewhere).
-fn detect_agent_in_message(message: &str) -> Option<Agent> {
-    // Trailers live in the last paragraph of a commit message. We don't
-    // need to be precise — we're only pulling `Co-Authored-By` lines,
-    // which are distinctive enough to grep regardless of paragraph.
-    for line in message.lines().rev() {
-        let lower = line.to_ascii_lowercase();
-        if !lower.starts_with("co-authored-by:") {
-            continue;
-        }
-        let rest = &line["co-authored-by:".len()..].trim();
-        // Split `"Model Name <email>"` into (name, email). Be lenient:
-        // some tools omit the email, in which case we use the name alone.
-        let (name, email) = match (rest.rfind('<'), rest.rfind('>')) {
-            (Some(start), Some(end)) if end > start => {
-                let name = rest[..start].trim();
-                let email = rest[start + 1..end].trim();
-                (name, email)
-            }
-            _ => (rest.trim(), ""),
-        };
-        let signal = format!(
-            "{} {}",
-            name.to_ascii_lowercase(),
-            email.to_ascii_lowercase()
+    let mut bytes = Vec::with_capacity(sha.len() / 2);
+    for pair in sha.as_bytes().as_chunks::<2>().0 {
+        let digits = std::str::from_utf8(pair)
+            .map_err(|error| IngestError::Git(format!("invalid Git OID {sha}: {error}")))?;
+        bytes.push(
+            u8::from_str_radix(digits, 16)
+                .map_err(|error| IngestError::Git(format!("invalid Git OID {sha}: {error}")))?,
         );
-        if signal.contains("claude") || signal.contains("anthropic") {
-            return Some(Agent::new("anthropic", best_model_from(name, "claude")));
-        }
-        if signal.contains("codex") || signal.contains("chatgpt") || signal.contains("openai") {
-            return Some(Agent::new("openai", best_model_from(name, "codex")));
-        }
-        if signal.contains("copilot") {
-            return Some(Agent::new("github", best_model_from(name, "copilot")));
-        }
-        if signal.contains("gemini") || signal.contains("google") {
-            return Some(Agent::new("google", best_model_from(name, "gemini")));
-        }
-        // Unknown AI-flavored trailer? Fall back to a generic agent so
-        // provenance isn't lost — the `provider` is just the token we
-        // matched on, which is still more useful than dropping it.
     }
-    None
-}
-
-/// Pick a usable model string out of the trailer name. If the name looks
-/// like a real model id (contains a digit or hyphen), use it verbatim;
-/// otherwise fall back to `fallback` so downstream filtering still works.
-fn best_model_from(name: &str, fallback: &str) -> String {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
-        return fallback.to_string();
-    }
-    if trimmed.chars().any(|c| c.is_ascii_digit() || c == '-') {
-        trimmed.to_string()
-    } else {
-        fallback.to_string()
+    match bytes.len() {
+        20 => Ok(GitObjectId::Sha1(bytes.try_into().map_err(|_| {
+            IngestError::Git(format!("invalid SHA-1 Git OID {sha}"))
+        })?)),
+        32 => Ok(GitObjectId::Sha256(bytes.try_into().map_err(|_| {
+            IngestError::Git(format!("invalid SHA-256 Git OID {sha}"))
+        })?)),
+        _ => Err(IngestError::Git(format!("invalid Git OID {sha}"))),
     }
 }
 
-/// First line of the message, trimmed — used as the state's `intent`
-/// (the one-line "why" Heddle surfaces in its UI). Defaults to empty for
-/// messageless commits.
-fn first_line_of(message: &str) -> String {
-    message.lines().next().unwrap_or("").trim().to_string()
-}
-
-/// Normalize `committed_at` to UTC. `GitSignature::time` is already UTC,
-/// but we centralize the truncation here so the state-core hash function
-/// only ever sees second-precision timestamps (which is all it records).
-fn committed_timestamp(t: &DateTime<Utc>) -> DateTime<Utc> {
-    *t
+/// Parse author attribution through the same converter used by hosted import.
+pub fn parse_attribution(author: &GitSignature, message: &str) -> Attribution {
+    parse_git_attribution(&signature(author, author.time), message, None)
 }
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
-    use objects::object::ContentHash;
+    use std::{
+        collections::HashMap,
+        io::Write,
+        path::Path,
+        process::{Command, Stdio},
+    };
+
+    use chrono::{TimeZone, Utc};
+    use objects::object::{
+        ChangeId, ContentHash, HeddleNote, Principal, Status,
+        thread_replication::{
+            git_import_converter::{GitImportGraph, GitImportRawCommit},
+            git_import_graph::{
+                GitObjectFormat, ImportRefDisposition, ImportSkipReason,
+                classify_frozen_import_refs,
+            },
+        },
+    };
+    use tempfile::TempDir;
 
     use super::*;
-    use crate::git_walk::{CommitEntry, GitSignature};
+    use crate::git_walk::{CommitEntry, GitSignature, GitSource};
+
+    fn git(path: &Path, args: &[&str]) -> Vec<u8> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(path)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    #[test]
+    fn local_and_raw_conversion_match_for_branched_merged_and_tag_only_graph() {
+        let temp = TempDir::new().expect("fixture directory");
+        let path = temp.path();
+        git(path, &["init", "-q", "-b", "main"]);
+        git(path, &["config", "user.name", "Test"]);
+        git(path, &["config", "user.email", "test@example.com"]);
+        std::fs::write(path.join("root"), b"root\n").expect("root file");
+        git(path, &["add", "root"]);
+        git(path, &["commit", "-qm", "root"]);
+        git(path, &["switch", "-qc", "feature"]);
+        std::fs::write(path.join("feature"), b"feature\n").expect("feature file");
+        git(path, &["add", "feature"]);
+        git(path, &["commit", "-qm", "feature"]);
+        git(path, &["switch", "-q", "main"]);
+        std::fs::write(path.join("main"), b"main\n").expect("main file");
+        git(path, &["add", "main"]);
+        git(path, &["commit", "-qm", "main"]);
+        git(path, &["merge", "-q", "--no-ff", "feature", "-m", "merge"]);
+        git(path, &["branch", "shared"]);
+        git(path, &["tag", "light"]);
+        git(path, &["tag", "-am", "annotated", "annotated"]);
+        git(path, &["tag", "-am", "tag of tag", "outer", "annotated"]);
+        git(path, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let blob = String::from_utf8(git(path, &["hash-object", "-w", "root"])).expect("blob OID");
+        git(path, &["tag", "-am", "blob tag", "blob-tag", blob.trim()]);
+        let tree = String::from_utf8(git(path, &["rev-parse", "HEAD^{tree}"])).expect("tree OID");
+        let parent = String::from_utf8(git(path, &["rev-parse", "HEAD"])).expect("parent OID");
+        let tagged = String::from_utf8(git(
+            path,
+            &[
+                "commit-tree",
+                tree.trim(),
+                "-p",
+                parent.trim(),
+                "-m",
+                "tag only",
+            ],
+        ))
+        .expect("tag-only OID");
+        git(path, &["tag", "tag-only", tagged.trim()]);
+
+        let source = GitSource::open(path).expect("source");
+        let frozen = source.collect_frozen_import_refs().expect("frozen refs");
+        let classified = classify_frozen_import_refs(&frozen).expect("classify refs");
+        assert_eq!(
+            classified
+                .dispositions
+                .iter()
+                .filter(|value| **value == ImportRefDisposition::Branch)
+                .count(),
+            3
+        );
+        assert_eq!(
+            classified
+                .dispositions
+                .iter()
+                .filter(|value| **value == ImportRefDisposition::CommitTag)
+                .count(),
+            4
+        );
+        assert_eq!(
+            classified
+                .skipped_refs
+                .iter()
+                .find(|reference| reference.raw_name == b"refs/tags/blob-tag")
+                .map(|reference| reference.reason),
+            Some(ImportSkipReason::NonCommitTag)
+        );
+        assert_eq!(
+            classified
+                .skipped_refs
+                .iter()
+                .find(|reference| reference.raw_name == b"refs/remotes/origin/main")
+                .map(|reference| reference.reason),
+            Some(ImportSkipReason::RemoteTracking)
+        );
+        let heads = source.collect_refs().expect("native refs");
+        let commits = source
+            .commits_topo(heads.iter().map(|head| head.target_sha.clone()))
+            .expect("reachable graph");
+        assert_eq!(commits.len(), 5);
+        assert!(commits.iter().any(|commit| commit.parents.len() == 2));
+        assert!(commits.iter().any(|commit| commit.sha == tagged.trim()));
+        let mut mapped = HashMap::new();
+        for commit in commits {
+            let parents = commit
+                .parents
+                .iter()
+                .map(|sha| *mapped.get(sha).expect("parent already converted"))
+                .collect::<Vec<_>>();
+            let local = state_from_commit(&commit, empty_tree_hash(), parents.clone(), false)
+                .expect("local conversion");
+            let raw = git(path, &["cat-file", "commit", &commit.sha]);
+            let oid = parse_git_oid(&commit.sha).expect("Git OID");
+            let hosted = GitImportGraph::convert_raw_commit(
+                GitImportRawCommit {
+                    oid: &oid,
+                    object_format: GitObjectFormat::Sha1,
+                    raw_commit: &raw,
+                    heddle_note: None,
+                },
+                empty_tree_hash(),
+                parents,
+                false,
+                |_| Ok(None),
+            )
+            .expect("hosted conversion");
+            assert_eq!(local, hosted, "commit {}", commit.sha);
+            mapped.insert(commit.sha, local.id());
+        }
+    }
+
+    #[test]
+    #[ignore = "10k Git fixture and RSS measurement; run explicitly for import scaling"]
+    fn ten_thousand_commit_graph_rss() {
+        let temp = TempDir::new().expect("fixture directory");
+        let path = temp.path();
+        git(path, &["init", "-q", "-b", "main"]);
+        let mut input = Vec::new();
+        input.extend_from_slice(b"blob\nmark :1\ndata 2\nx\n");
+        for index in 0..10_000 {
+            write!(
+                input,
+                "commit refs/heads/main\nmark :{}\nauthor Test <test@example.com> {} +0000\ncommitter Test <test@example.com> {} +0000\ndata {}\ncommit {index}\n",
+                index + 2,
+                index + 1,
+                index + 1,
+                format!("commit {index}").len(),
+            )
+            .expect("fast-import input");
+            if index == 0 {
+                input.extend_from_slice(b"M 100644 :1 file\n");
+            }
+        }
+        let mut child = Command::new("git")
+            .arg("fast-import")
+            .current_dir(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("git fast-import");
+        child
+            .stdin
+            .take()
+            .expect("fast-import stdin")
+            .write_all(&input)
+            .expect("write graph");
+        let output = child.wait_with_output().expect("fast-import result");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let source = GitSource::open(path).expect("source");
+        let heads = source.collect_refs().expect("heads");
+        let commits = source
+            .commits_topo(heads.iter().map(|head| head.target_sha.clone()))
+            .expect("10k graph");
+        assert_eq!(commits.len(), 10_000);
+        let mut mapped = HashMap::new();
+        for commit in commits {
+            let parents = commit
+                .parents
+                .iter()
+                .map(|sha| *mapped.get(sha).expect("mapped parent"))
+                .collect();
+            let state = state_from_commit(&commit, empty_tree_hash(), parents, false)
+                .expect("convert commit");
+            mapped.insert(commit.sha, state.id());
+        }
+        assert_eq!(mapped.len(), 10_000);
+        #[cfg(target_os = "linux")]
+        {
+            let status = std::fs::read_to_string("/proc/self/status").expect("process status");
+            let rss_line = status
+                .lines()
+                .find(|line| line.starts_with("VmHWM:"))
+                .expect("peak RSS");
+            let rss_kib: usize = rss_line
+                .split_whitespace()
+                .nth(1)
+                .expect("RSS value")
+                .parse()
+                .expect("RSS integer");
+            eprintln!("10k graph peak RSS: {rss_kib} KiB");
+            assert!(rss_kib < 512 * 1024, "10k graph used {rss_kib} KiB");
+        }
+    }
 
     fn sig(name: &str, email: &str) -> GitSignature {
         GitSignature {
