@@ -36,6 +36,142 @@ fn fanout_lane() -> (RepoFixture, std::path::PathBuf, Value) {
 }
 
 #[test]
+fn parent_status_reviews_ready_landed_and_blocked_lanes() {
+    let main = setup_repo("base.txt", "shared base");
+    let fanout: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "fanout",
+                "start",
+                "--title",
+                "Review",
+                "--lane",
+                "lane/landed=Landed work",
+                "--lane",
+                "lane/ready=Ready work",
+                "--lane",
+                "lane/blocked=Blocked work",
+            ],
+            Some(main.path()),
+        )
+        .expect("start three lanes"),
+    )
+    .expect("fanout JSON");
+    let lane_path = |name: &str| {
+        let lane = fanout["lanes"]
+            .as_array()
+            .and_then(|lanes| lanes.iter().find(|lane| lane["thread"] == name))
+            .expect("lane in fanout");
+        std::path::PathBuf::from(lane["path"].as_str().expect("lane path"))
+    };
+    let landed = lane_path("lane/landed");
+    let ready = lane_path("lane/ready");
+    let blocked = lane_path("lane/blocked");
+
+    fs::write(landed.join("landed.txt"), "landed evidence").expect("landed edit");
+    heddle(&["ready", "-m", "landed work"], Some(&landed)).expect("ready landed lane");
+    let land: Value = serde_json::from_str(
+        &heddle(
+            &["--output", "json", "land", "--thread", "lane/landed"],
+            Some(main.path()),
+        )
+        .expect("land first lane"),
+    )
+    .expect("land JSON");
+    assert_eq!(land["status"], "landed", "{land}");
+    let after_land: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "status"], Some(main.path())).expect("status after land"),
+    )
+    .expect("status JSON after land");
+    let landed_row = after_land["review_queue"]
+        .as_array()
+        .and_then(|lanes| lanes.iter().find(|lane| lane["thread"] == "lane/landed"))
+        .expect("landed lane after land");
+    assert_eq!(
+        landed_row["outcome"], "landed",
+        "land={land}; row={landed_row}"
+    );
+
+    fs::write(ready.join("ready.txt"), "ready evidence").expect("ready edit");
+    heddle(&["ready", "-m", "ready work"], Some(&ready)).expect("ready second lane");
+
+    fs::write(blocked.join("blocked.txt"), "uncaptured work").expect("blocked edit");
+    let blocked_ready = heddle_output(&["--output", "json", "ready"], Some(&blocked))
+        .expect("blocked ready output");
+    let blocked_result: Value =
+        serde_json::from_slice(&blocked_ready.stdout).expect("blocked ready JSON");
+    assert_eq!(blocked_result["status"], "blocked", "{blocked_result}");
+
+    let status: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "status"], Some(main.path())).expect("parent status JSON"),
+    )
+    .expect("status JSON");
+    let queue = status["review_queue"].as_array().expect("review queue");
+    assert_eq!(queue.len(), 3, "{status}");
+    for (name, outcome, task_status, next) in [
+        ("lane/landed", "landed", "complete", None),
+        (
+            "lane/ready",
+            "ready",
+            "complete",
+            Some("heddle land --thread lane/ready"),
+        ),
+        (
+            "lane/blocked",
+            "blocked",
+            "blocked",
+            Some("heddle capture -m \"...\""),
+        ),
+    ] {
+        let lane = queue
+            .iter()
+            .find(|lane| lane["thread"] == name)
+            .expect("lane in queue");
+        assert_eq!(lane["outcome"], outcome, "{lane}; land={land}");
+        assert_eq!(lane["task_status"], task_status, "{lane}");
+        assert_eq!(lane["next_action"].as_str(), next, "{lane}");
+        assert!(lane["actor"].is_string(), "{lane}");
+        assert_eq!(lane["attribution"], "claimed", "{lane}");
+        assert!(lane["path"].is_string(), "{lane}");
+        assert!(lane["lease_status"].is_string(), "{lane}");
+    }
+    let blocked_row = queue
+        .iter()
+        .find(|lane| lane["thread"] == "lane/blocked")
+        .unwrap();
+    assert_eq!(blocked_row["freshness"], "current", "{blocked_row}");
+    assert!(
+        blocked_row["blockers"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "{blocked_row}"
+    );
+    let ready_row = queue
+        .iter()
+        .find(|lane| lane["thread"] == "lane/ready")
+        .unwrap();
+    assert!(
+        ready_row["evidence"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()),
+        "{ready_row}"
+    );
+    let text = heddle(&["status"], Some(main.path())).expect("parent text status");
+    assert!(text.contains("Review queue"), "{text}");
+    for name in ["lane/landed", "lane/ready", "lane/blocked"] {
+        assert!(text.contains(name), "{text}");
+    }
+    assert!(text.contains("(claimed)"), "{text}");
+    assert!(text.contains("Evidence:"), "{text}");
+    assert!(text.contains("Blocked:"), "{text}");
+    assert!(text.contains("In:"), "{text}");
+    assert!(text.contains("Next:"), "{text}");
+}
+
+#[test]
 fn fanout_lane_capture_succeeds_immediately() {
     let (_main, path, _) = fanout_lane();
     fs::write(path.join("capture.txt"), "capture").unwrap();
