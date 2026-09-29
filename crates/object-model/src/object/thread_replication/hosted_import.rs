@@ -216,6 +216,22 @@ mod tests {
         (genesis, receipt, operation)
     }
     #[test]
+    fn initial_import_accepts_real_git_parents_and_root() {
+        let (genesis, mut receipt, mut operation) = fixture();
+        for parents in [
+            vec![StateId::from_bytes([31; 32]), StateId::from_bytes([32; 32])],
+            vec![],
+        ] {
+            let mut state = receipt.resulting_state().expect("capture");
+            state.parents = parents;
+            receipt.result.state = state.encode_current_msgpack().expect("Git tip");
+            operation.body = ThreadOperationBody::HostedImport(receipt.encode().expect("receipt"));
+            operation
+                .validate_parents(&genesis, &[])
+                .expect("real Git ancestry, including root");
+        }
+    }
+    #[test]
     fn public_git_provider_round_trips_and_validates() {
         let (_, mut receipt, _) = fixture();
         receipt.provider = ImportProvider::Git {
