@@ -297,7 +297,7 @@ fn format_annotations(rel_path: &Path, annotations: &[ActiveAnnotation]) -> Stri
     out
 }
 
-fn worktree_dirty(repo: &Repository) -> Result<bool> {
+pub(crate) fn worktree_dirty(repo: &Repository) -> Result<bool> {
     let Some(head_id) = repo.head()? else {
         return Ok(true);
     };

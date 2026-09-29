@@ -383,6 +383,8 @@ mod tests {
             token_hash: "hash".to_string(),
             pid: None,
             boot_id: None,
+            pid_birth: None,
+            harness_session_id: None,
             heartbeat_at: now,
             started_at: now,
             status: WriterLeaseStatus::Active,

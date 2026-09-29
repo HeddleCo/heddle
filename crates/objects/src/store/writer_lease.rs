@@ -70,6 +70,10 @@ pub struct WriterLease {
     pub pid: Option<u32>,
     #[serde(default)]
     pub boot_id: Option<String>,
+    #[serde(default)]
+    pub pid_birth: Option<String>,
+    #[serde(default)]
+    pub harness_session_id: Option<String>,
     pub heartbeat_at: DateTime<Utc>,
     pub started_at: DateTime<Utc>,
     pub status: WriterLeaseStatus,
@@ -93,6 +97,11 @@ impl WriterLease {
 
     pub fn liveness_at(&self, now: DateTime<Utc>) -> Liveness {
         if self.status != WriterLeaseStatus::Active {
+            return Liveness::Dead;
+        }
+        if let (Some(pid), Some(birth)) = (self.pid, self.pid_birth.as_deref())
+            && super::process_birth(pid).as_deref() != Some(birth)
+        {
             return Liveness::Dead;
         }
         reservation_liveness_at(
@@ -349,6 +358,8 @@ impl WriterLeaseStore {
             token_hash: token_hash(&token),
             pid: draft.pid,
             boot_id: draft.boot_id,
+            pid_birth: None,
+            harness_session_id: None,
             heartbeat_at: now,
             started_at: now,
             status: WriterLeaseStatus::Active,
@@ -409,6 +420,47 @@ impl WriterLeaseStore {
         if token_hash(token) != lease.token_hash {
             return Ok(WriterLeaseAuthOutcome::TokenMismatch);
         }
+        lease.heartbeat_at = now;
+        self.write_lease(&lease)?;
+        Ok(WriterLeaseAuthOutcome::Authorized(lease))
+    }
+
+    /// A hook proves both possession of the lane credential and its process
+    /// ancestry. Subsequent hook calls may only renew the same live session.
+    pub fn bind_hook_session(
+        &self,
+        lease_id: &str,
+        token: &str,
+        session: &str,
+        pid: u32,
+        birth: &str,
+        now: DateTime<Utc>,
+    ) -> Result<WriterLeaseAuthOutcome> {
+        let _lock = self.write_lock()?;
+        let path = self.lease_path(lease_id)?;
+        let Some(mut lease) = self.load_path(&path)? else {
+            return Ok(WriterLeaseAuthOutcome::Missing);
+        };
+        if lease.status != WriterLeaseStatus::Active || lease.liveness_at(now) == Liveness::Dead {
+            return Ok(WriterLeaseAuthOutcome::Inactive(lease));
+        }
+        if token_hash(token) != lease.token_hash {
+            return Ok(WriterLeaseAuthOutcome::TokenMismatch);
+        }
+        if let Some(existing) = lease.harness_session_id.as_deref()
+            && existing != session
+        {
+            return Ok(WriterLeaseAuthOutcome::TokenMismatch);
+        }
+        if let Some(existing) = lease.pid_birth.as_deref()
+            && (lease.pid != Some(pid) || existing != birth)
+        {
+            return Ok(WriterLeaseAuthOutcome::TokenMismatch);
+        }
+        lease.harness_session_id = Some(session.to_owned());
+        lease.pid = Some(pid);
+        lease.pid_birth = Some(birth.to_owned());
+        lease.boot_id = super::current_boot_id();
         lease.heartbeat_at = now;
         self.write_lease(&lease)?;
         Ok(WriterLeaseAuthOutcome::Authorized(lease))
@@ -574,6 +626,41 @@ mod tests {
             pid: None,
             boot_id: None,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn recycled_pid_does_not_keep_bound_lease_alive() {
+        let now = Utc::now();
+        let temp = TempDir::new().expect("lease store");
+        let store = WriterLeaseStore::new(temp.path());
+        let grant = match store.reserve(draft("lane"), now).expect("reserve") {
+            WriterLeaseReserveOutcome::Reserved(grant) => grant,
+            WriterLeaseReserveOutcome::LiveOwner(_) => panic!("new lane has an owner"),
+        };
+        let outcome = store
+            .bind_hook_session(
+                &grant.lease.lease_id,
+                &grant.token,
+                "codex:session-a",
+                std::process::id(),
+                "wrong-birth-tick",
+                now,
+            )
+            .expect("bind");
+        assert!(matches!(outcome, WriterLeaseAuthOutcome::Authorized(_)));
+        assert_eq!(
+            store
+                .load(&grant.lease.lease_id)
+                .expect("load")
+                .expect("lease")
+                .liveness_at(now),
+            Liveness::Dead,
+        );
+        assert!(matches!(
+            store.reserve(draft("lane"), now).expect("reacquire"),
+            WriterLeaseReserveOutcome::Reserved(_)
+        ));
     }
 
     #[test]

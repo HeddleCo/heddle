@@ -9,7 +9,7 @@ use objects::{
     object::ContentHash,
     store::{
         WriterLeaseAuthOutcome, WriterLeaseDraft, WriterLeaseGrant, WriterLeaseReserveOutcome,
-        WriterLeaseStatus, WriterLeaseStore, checkout_writer_lock,
+        WriterLeaseStatus, WriterLeaseStore, checkout_writer_lock, current_boot_id, process_birth,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,127 @@ fn foreign_writer_error(lease: &str) -> Error {
     ))
 }
 
+#[cfg(target_os = "linux")]
+fn process_parent(pid: u32) -> Option<u32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "macos")]
+fn mac_process_info(pid: u32) -> Option<libc::proc_bsdinfo> {
+    let pid = i32::try_from(pid).ok()?;
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    (read == size).then(|| unsafe { info.assume_init() })
+}
+
+#[cfg(target_os = "macos")]
+fn process_parent(pid: u32) -> Option<u32> {
+    Some(mac_process_info(pid)?.pbi_ppid)
+}
+
+#[cfg(target_os = "linux")]
+fn shell_process(pid: u32) -> bool {
+    let shell = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .ok()
+        .is_some_and(|name| matches!(name.trim(), "sh" | "bash" | "dash" | "zsh" | "fish"));
+    shell
+        && std::fs::read(format!("/proc/{pid}/cmdline"))
+            .ok()
+            .is_some_and(|args| {
+                args.windows(b"integration ".len())
+                    .any(|part| part == b"integration ")
+            })
+}
+
+#[cfg(target_os = "macos")]
+fn shell_process(pid: u32) -> bool {
+    let Some(info) = mac_process_info(pid) else {
+        return false;
+    };
+    let name: Vec<u8> = info
+        .pbi_comm
+        .iter()
+        .take_while(|byte| **byte != 0)
+        .map(|byte| *byte as u8)
+        .collect();
+    matches!(
+        name.as_slice(),
+        b"sh" | b"bash" | b"dash" | b"zsh" | b"fish"
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn hook_owner() -> Result<(u32, String)> {
+    let parent = process_parent(std::process::id())
+        .ok_or_else(|| credential_error("cannot identify the harness process"))?;
+    let pid = if shell_process(parent) {
+        process_parent(parent).unwrap_or(parent)
+    } else {
+        parent
+    };
+    let birth = process_birth(pid)
+        .ok_or_else(|| credential_error("cannot identify the harness process birth"))?;
+    Ok((pid, birth))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn hook_owner() -> Result<(u32, String)> {
+    Err(credential_error(
+        "session-bound lane writers require process ancestry support",
+    ))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn belongs_to_harness(pid: u32, birth: &str) -> bool {
+    let mut current = std::process::id();
+    for _ in 0..64 {
+        if current == pid {
+            return process_birth(current).as_deref() == Some(birth);
+        }
+        let Some(parent) = process_parent(current) else {
+            return false;
+        };
+        if parent <= 1 || parent == current {
+            return false;
+        }
+        current = parent;
+    }
+    false
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn belongs_to_harness(_pid: u32, _birth: &str) -> bool {
+    false
+}
+
+fn require_hook_owner(lease: &objects::store::WriterLease) -> Result<()> {
+    match (lease.pid, lease.pid_birth.as_deref()) {
+        (Some(pid), Some(birth)) if belongs_to_harness(pid, birth) => Ok(()),
+        _ => Err(credential_error(
+            "lane credential belongs to another harness session",
+        )),
+    }
+}
+
+fn lease_needs_harness(lease: &objects::store::WriterLease) -> bool {
+    lease.task_assignment_id.is_some() || lease.harness_session_id.is_some()
+}
+
 /// Keep lease handoff and credential cleanup outside an active checkout mutation.
 pub fn lock_checkout_writer_handoff(heddle_dir: &Path, root: &Path) -> Result<WriteLockGuard> {
     checkout_writer_lock(heddle_dir, root)?
@@ -132,6 +253,130 @@ impl Drop for CheckoutWriterGuard {
     }
 }
 impl Repository {
+    fn is_managed_lane(&self, thread: &str) -> bool {
+        matches!(
+            (
+                self.managed_checkout_path(thread).canonicalize(),
+                self.root().canonicalize(),
+            ),
+            (Ok(managed), Ok(root)) if managed == root
+        )
+    }
+
+    fn requires_hook_session(&self, store: &WriterLeaseStore, thread: &str) -> Result<bool> {
+        if !self.is_managed_lane(thread) {
+            return Ok(false);
+        }
+        let root = self.root().canonicalize()?;
+        Ok(store.list_without_reaping()?.iter().any(|lease| {
+            lease.thread == thread
+                && lease.path.as_deref() == Some(root.as_path())
+                && lease_needs_harness(lease)
+        }))
+    }
+
+    /// Called by installed hooks. A hook receives the session ID on stdin;
+    /// the kernel ancestry supplies the proof that commands run in its process
+    /// tree. A new session can claim a lane only after the old lease is dead.
+    pub fn hook_checkout_writer(
+        &self,
+        harness: &str,
+        session: Option<&str>,
+        release: bool,
+    ) -> Result<()> {
+        let Some(thread) = self.current_lane()? else {
+            return Ok(());
+        };
+        let store = WriterLeaseStore::new(self.heddle_dir());
+        if !self.requires_hook_session(&store, &thread)? {
+            return Ok(());
+        }
+        let (pid, birth) = hook_owner()?;
+        let session = session
+            .filter(|id| !id.is_empty())
+            .map(|id| format!("{harness}:{id}"))
+            .unwrap_or_else(|| format!("{harness}:pid:{pid}:{birth}"));
+        let _guard = lock_checkout_writer_handoff(self.heddle_dir(), self.root())?;
+        let owner = store.live_owner_with_checkout_lock(&thread, self.root(), &_guard)?;
+        let credential = self.read_checkout_writer_credential()?;
+        if let Some(owner) = owner {
+            let Some(credential) = credential else {
+                return Err(credential_error("live lane credential is missing"));
+            };
+            if owner.lease_id != credential.lease {
+                return Err(credential_error(
+                    "lane credential does not match its live owner",
+                ));
+            }
+            let bound = store.bind_hook_session(
+                &credential.lease,
+                &credential.token,
+                &session,
+                pid,
+                &birth,
+                Utc::now(),
+            )?;
+            if !matches!(bound, WriterLeaseAuthOutcome::Authorized(_)) {
+                return Err(credential_error("lane belongs to another harness session"));
+            }
+            if release {
+                let released = store.release_with_checkout_lock(
+                    &credential.lease,
+                    &credential.token,
+                    WriterLeaseStatus::Complete,
+                    Utc::now(),
+                )?;
+                if !matches!(released, WriterLeaseAuthOutcome::Authorized(_)) {
+                    return Err(credential_error("lane release lost its writer lease"));
+                }
+                remove_checkout_writer_credential(self.root(), &credential.lease)?;
+            }
+            return Ok(());
+        }
+        if release {
+            return Ok(());
+        }
+        let root = self.root().canonicalize()?;
+        let previous = store.list_without_reaping()?.into_iter().find(|lease| {
+            lease.thread == thread
+                && lease.path.as_deref() == Some(root.as_path())
+                && lease.task_assignment_id.is_some()
+        });
+        let grant = match store.reserve_with_checkout_lock(
+            WriterLeaseDraft {
+                thread,
+                actor_session_id: previous
+                    .as_ref()
+                    .and_then(|lease| lease.actor_session_id.clone()),
+                task_assignment_id: previous
+                    .as_ref()
+                    .and_then(|lease| lease.task_assignment_id.clone()),
+                anchor_state: self.head()?.map(|state| state.to_string_full()),
+                anchor_root: previous.and_then(|lease| lease.anchor_root),
+                path: Some(self.root().to_owned()),
+                pid: Some(pid),
+                boot_id: current_boot_id(),
+            },
+            Utc::now(),
+        )? {
+            WriterLeaseReserveOutcome::Reserved(grant) => grant,
+            WriterLeaseReserveOutcome::LiveOwner(_) => {
+                return Err(credential_error("lane has another live writer"));
+            }
+        };
+        let bound = store.bind_hook_session(
+            &grant.lease.lease_id,
+            &grant.token,
+            &session,
+            pid,
+            &birth,
+            Utc::now(),
+        )?;
+        if !matches!(bound, WriterLeaseAuthOutcome::Authorized(_)) {
+            return Err(credential_error("could not bind new lane lease"));
+        }
+        write_checkout_writer_credential(self.root(), &grant.lease.lease_id, &grant.token)
+    }
     fn read_checkout_writer_credential(&self) -> Result<Option<WriterCredential>> {
         let path = self.root().join(".heddle").join(WRITER_CREDENTIAL_FILE);
         let metadata = match std::fs::symlink_metadata(&path) {
@@ -191,10 +436,16 @@ impl Repository {
             return Ok(());
         }
         match (owner, self.read_checkout_writer_credential()?) {
+            (None, None) if self.requires_hook_session(&store, thread)? => Err(credential_error(
+                "lane requires a live harness session before mutation",
+            )),
             (None, None) => Ok(()),
             (Some(owner), None) => Err(foreign_writer_error(&owner.lease_id)),
             (None, Some(_)) => Err(credential_error("lane writer lease is no longer active")),
             (Some(owner), Some(credential)) if owner.lease_id == credential.lease => {
+                if lease_needs_harness(&owner) {
+                    require_hook_owner(&owner)?;
+                }
                 match store.authenticate_and_renew(
                     &credential.lease,
                     &credential.token,
@@ -226,6 +477,9 @@ impl Repository {
                 if (owner.path.as_deref() == Some(root.as_path()) || owner.path.is_none())
                     && self.current_lane()?.as_deref() == Some(owner.thread.as_str()) =>
             {
+                if lease_needs_harness(&owner) {
+                    require_hook_owner(&owner)?;
+                }
                 write_checkout_writer_credential(self.root(), lease, token)
             }
             _ => Err(credential_error(
@@ -277,6 +531,13 @@ impl Repository {
                 _mutation_lock: mutation_lock,
             });
         }
+        if let Some(lane) = self.current_lane()?
+            && self.requires_hook_session(&store, &lane)?
+        {
+            return Err(credential_error(
+                "lane requires a live harness session before mutation",
+            ));
+        }
         let grant = match store.reserve_with_checkout_lock(
             WriterLeaseDraft {
                 thread: thread.to_hex(),
@@ -326,6 +587,11 @@ impl Repository {
         token: &str,
     ) -> Result<()> {
         let root = self.root().canonicalize()?;
+        if let Some(owner) = store.load(lease)?
+            && lease_needs_harness(&owner)
+        {
+            require_hook_owner(&owner)?;
+        }
         match store.authenticate_and_renew(lease, token, Utc::now())? {
             WriterLeaseAuthOutcome::Authorized(owner)
                 if (owner.path.as_deref() == Some(root.as_path()) || owner.path.is_none())

@@ -872,6 +872,8 @@ fn hook_without_session_id_uses_harness_pid_and_reacquires_after_crash() {
     let store = WriterLeaseStore::new(repo.heddle_dir());
     let first_lease = store.live_owner("lane/one", Some(&path)).unwrap().unwrap();
     assert_eq!(first_lease.pid, Some(first.child.id()));
+    assert!(first_lease.task_assignment_id.is_some());
+    assert!(first_lease.actor_session_id.is_some());
     let lease_record = fs::read_to_string(
         repo.heddle_dir()
             .join("writer-leases")
@@ -889,6 +891,11 @@ fn hook_without_session_id_uses_harness_pid_and_reacquires_after_crash() {
     let mut second = HookHarness::start(&path, &command, &payload);
     let second_lease = store.live_owner("lane/one", Some(&path)).unwrap().unwrap();
     assert_ne!(first_lease.lease_id, second_lease.lease_id);
+    assert_eq!(
+        second_lease.task_assignment_id,
+        first_lease.task_assignment_id
+    );
+    assert_eq!(second_lease.actor_session_id, first_lease.actor_session_id);
     fs::write(path.join("second.txt"), "second").unwrap();
     assert_eq!(second.capture(&path)["status"], 0);
 }

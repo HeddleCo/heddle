@@ -485,7 +485,33 @@ fn classify_command_path_mode(cmd: &str) -> PathMode {
 fn relay_integration(repo: &Repository, args: IntegrationRelayArgs) -> Result<()> {
     let mut payload = String::new();
     io::stdin().read_to_string(&mut payload)?;
-    harness::relay_harness_event(repo, &args.harness, &args.event, &payload)
+    let session = crate::identity_stamp::hook_session_id(&args.harness, &payload);
+    let renew = match args.harness.as_str() {
+        "claude-code" => matches!(args.event.as_str(), "PreToolUse" | "Stop" | "SubagentStop"),
+        "codex" => args.event == "Stop",
+        "opencode" => args.event == "tool.execute.before",
+        _ => false,
+    };
+    if renew {
+        repo.hook_checkout_writer(&args.harness, session.as_deref(), false)?;
+    }
+    let result = harness::relay_harness_event(repo, &args.harness, &args.event, &payload);
+    let release = match args.harness.as_str() {
+        "claude-code" => args.event == "SessionEnd",
+        "codex" => args.event == "Stop",
+        "opencode" => matches!(
+            args.event.as_str(),
+            "session.idle" | "session.end" | "session.closed" | "session.deleted"
+        ),
+        _ => false,
+    };
+    if release {
+        repo.hook_checkout_writer(&args.harness, session.as_deref(), true)?;
+    }
+    if args.harness == "codex" && args.event == "Stop" {
+        verbs::expire_identity_cursor(repo.root())?;
+    }
+    result
 }
 
 fn stamp_integration(repo: &Repository, args: IntegrationStampArgs) -> Result<()> {
@@ -743,7 +769,7 @@ fn install_codex(
     })?;
     for event in ["SessionStart", "SubagentStart", "PreToolUse", "Stop"] {
         let command = if event == "Stop" {
-            format!("{stamp} --expire")
+            format!("{heddle} integration relay codex Stop")
         } else {
             stamp.clone()
         };
@@ -948,12 +974,12 @@ fn opencode_plugin_script(exe: &str, repo: Option<&str>) -> String {
       const stamp = [{repo_args}"integration", "stamp", "opencode"];
       if (expire) stamp.push("--expire");
       Bun.spawnSync([{exe:?}, ...stamp], {{
-        stdin: JSON.stringify(input),
+        stdin: new TextEncoder().encode(JSON.stringify(input)),
       }});
       const allowed = new Set(["session.created","session.updated","session.diff","file.edited","tool.execute.before","tool.execute.after","permission.asked","permission.replied"]);
       if (allowed.has(event)) {{
         Bun.spawnSync([{exe:?}, {repo_args}"integration", "relay", "opencode", event], {{
-          stdin: JSON.stringify(input),
+          stdin: new TextEncoder().encode(JSON.stringify(input)),
         }});
       }}
     }},
@@ -1746,10 +1772,10 @@ mod tests {
         );
         assert_eq!(
             contents
-                .matches("heddle integration stamp codex --expire\"")
+                .matches("heddle integration relay codex Stop\"")
                 .count(),
             1,
-            "Codex Stop must expire, same as Claude SessionEnd, got: {contents}"
+            "Codex Stop must capture and release, got: {contents}"
         );
         assert_eq!(
             contents.matches("heddle integration stamp codex\"").count(),
@@ -1758,7 +1784,7 @@ mod tests {
         );
         assert!(
             contents.contains("[[hooks.Stop]]")
-                && contents.contains("heddle integration stamp codex --expire"),
+                && contents.contains("heddle integration relay codex Stop"),
             "Stop hook must be the expire command, got: {contents}"
         );
         assert_eq!(manifest.integrations[0].harness, "codex");

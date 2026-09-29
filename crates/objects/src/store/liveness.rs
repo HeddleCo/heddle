@@ -81,6 +81,45 @@ pub fn process_alive(pid: u32) -> bool {
     errno != libc::ESRCH
 }
 
+/// Linux process birth tick. Paired with the boot ID, it prevents a recycled
+/// PID from inheriting a writer's lease or process-tree membership.
+#[cfg(target_os = "linux")]
+pub fn process_birth(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let fields = stat.rsplit_once(") ")?.1;
+    let tick = fields.split_whitespace().nth(19)?;
+    Some(tick.to_owned())
+}
+
+#[cfg(target_os = "macos")]
+pub fn process_birth(pid: u32) -> Option<String> {
+    let pid = i32::try_from(pid).ok()?;
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let read = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if read != size {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    Some(format!(
+        "{}:{}",
+        info.pbi_start_tvsec, info.pbi_start_tvusec
+    ))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn process_birth(_pid: u32) -> Option<String> {
+    None
+}
+
 #[cfg(not(unix))]
 pub fn process_alive(_pid: u32) -> bool {
     // Windows path — we don't have a kill(0) primitive without pulling
