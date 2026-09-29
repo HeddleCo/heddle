@@ -9,7 +9,10 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
-use heddle_git_projection::git_core::{open_repo as open_git_repo, set_reference};
+use heddle_git_projection::git_core::{
+    RefRewriteAuthorization, delete_reference_authorized, open_repo as open_git_repo,
+    rollback_reference_if_unchanged, set_reference_authorized,
+};
 use objects::{
     error::{HeddleError, Result as HeddleResult},
     lock::{RepoLock, WriteLockGuard},
@@ -26,9 +29,8 @@ use repo::{
     refresh_thread_freshness,
 };
 use sley::{
-    BString as GitByteString, DeleteRef, FullName, GitObjectType, GitTime, HeadUpdateOptions,
-    IndexWriteOptions, ObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository,
-    Signature,
+    BString as GitByteString, GitObjectType, GitTime, HeadUpdateOptions, IndexWriteOptions,
+    ObjectId, RefPrecondition, ReferenceTarget, Repository as SleyRepository, Signature,
 };
 use sley_refs::ReflogEntry;
 
@@ -642,13 +644,14 @@ impl<'a> EntrySteps<'_, 'a> {
         repo: &'a Repository,
         branch: &str,
         snapshot: &GitState,
+        published_branch_oid: Option<ObjectId>,
         forward: impl FnOnce() -> Result<()>,
     ) -> HeddleResult<()> {
         let snapshot = snapshot.clone();
         let branch = branch.to_string();
         self.step_nonatomic(
             move || Ok(snapshot),
-            move |snapshot| restore_git_state(repo, &branch, &snapshot),
+            move |snapshot| restore_git_state(repo, &branch, &snapshot, published_branch_oid),
             move || forward().map_err(apply_error),
         )
     }
@@ -1136,24 +1139,26 @@ fn capture_git_state(repo: &Repository, branch: &str) -> HeddleResult<GitState> 
     })
 }
 
-/// Restore the checkout Git state captured in [`GitState`]. Runs only on
-/// the rollback path; absolute SET/DELETE ops, so re-running it (LIFO across the
-/// entry's steps) is idempotent.
-fn restore_git_state(repo: &Repository, branch: &str, state: &GitState) -> HeddleResult<()> {
+/// Restore the checkout Git state captured in [`GitState`], provided the branch
+/// still has the exact tip this step left behind. Repeated LIFO inverses are
+/// no-ops once an earlier inverse has restored the snapshot.
+fn restore_git_state(
+    repo: &Repository,
+    branch: &str,
+    state: &GitState,
+    published_branch_oid: Option<ObjectId>,
+) -> HeddleResult<()> {
     let git = git_checkout_repo(repo).map_err(apply_error)?;
     if branch != "HEAD" {
         let ref_name = format!("refs/heads/{branch}");
-        match state.checkout_branch_oid {
-            Some(oid) => set_reference(
-                &git,
-                &ref_name,
-                oid,
-                RefPrecondition::Any,
-                "heddle: rollback git checkpoint",
-            )
-            .map_err(|error| apply_error(anyhow!(error)))?,
-            None => delete_ref_if_present(&git, &ref_name).map_err(apply_error)?,
-        }
+        rollback_reference_if_unchanged(
+            &git,
+            &ref_name,
+            published_branch_oid,
+            state.checkout_branch_oid,
+            RefRewriteAuthorization::UndoRollback,
+        )
+        .map_err(|error| apply_error(anyhow!(error)))?;
     }
     if let Some(head) = &state.head_file {
         let head_path = git.git_dir().join("HEAD");
@@ -1163,13 +1168,6 @@ fn restore_git_state(repo: &Repository, branch: &str, state: &GitState) -> Heddl
     if let Some(oid) = &state.checkout_head_oid {
         let oid = parse_git_oid(oid).map_err(apply_error)?;
         reset_git_index_to_commit(&git, oid).map_err(apply_error)?;
-    }
-    Ok(())
-}
-
-fn delete_ref_if_present(git: &SleyRepository, ref_name: &str) -> Result<()> {
-    if ref_target_oid(git, ref_name)?.is_some() {
-        delete_reference_matching(git, ref_name, None)?;
     }
     Ok(())
 }
@@ -1193,34 +1191,42 @@ fn apply_git_checkpoint_undo(
                 if ref_target_oid(&git, &format!("refs/heads/{branch}")).map_err(apply_error)?
                     != Some(previous_oid)
                 {
-                    steps.git_restore_snapshot(repo, branch, &snapshot, || {
+                    steps.git_restore_snapshot(repo, branch, &snapshot, Some(new_oid), || {
                         attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
                     })?;
-                    steps.git_restore_snapshot(repo, branch, &snapshot, || {
-                        set_attached_git_head(
-                            &git_checkout_repo(repo)?,
-                            branch,
-                            previous_oid,
-                            new_oid,
-                            "heddle: undo git checkpoint",
-                        )
-                    })?;
+                    steps.git_restore_snapshot(
+                        repo,
+                        branch,
+                        &snapshot,
+                        Some(previous_oid),
+                        || {
+                            set_attached_git_head(
+                                &git_checkout_repo(repo)?,
+                                branch,
+                                previous_oid,
+                                new_oid,
+                                "heddle: undo git checkpoint",
+                                RefRewriteAuthorization::Undo,
+                            )
+                        },
+                    )?;
                 }
-                steps.git_restore_snapshot(repo, branch, &snapshot, || {
+                steps.git_restore_snapshot(repo, branch, &snapshot, Some(previous_oid), || {
                     attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
                 })?;
             }
-            steps.git_restore_snapshot(repo, branch, &snapshot, || {
+            steps.git_restore_snapshot(repo, branch, &snapshot, Some(previous_oid), || {
                 reset_git_index_to_commit(&git_checkout_repo(repo)?, previous_oid)
             })?;
         }
         None => {
             if branch != "HEAD" {
-                steps.git_restore_snapshot(repo, branch, &snapshot, || {
+                steps.git_restore_snapshot(repo, branch, &snapshot, None, || {
                     delete_reference_matching(
                         &git_checkout_repo(repo)?,
                         &format!("refs/heads/{branch}"),
                         Some(new_oid),
+                        RefRewriteAuthorization::Undo,
                     )
                 })?;
             }
@@ -1245,37 +1251,39 @@ fn apply_git_checkpoint_redo(
         match previous_git_oid {
             Some(previous) => {
                 let previous_oid = parse_git_oid(previous).map_err(apply_error)?;
-                steps.git_restore_snapshot(repo, branch, &snapshot, || {
+                steps.git_restore_snapshot(repo, branch, &snapshot, Some(previous_oid), || {
                     attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
                 })?;
-                steps.git_restore_snapshot(repo, branch, &snapshot, || {
+                steps.git_restore_snapshot(repo, branch, &snapshot, Some(new_oid), || {
                     set_attached_git_head(
                         &git_checkout_repo(repo)?,
                         branch,
                         new_oid,
                         previous_oid,
                         "heddle: redo git checkpoint",
+                        RefRewriteAuthorization::Redo,
                     )
                 })?;
             }
             None => {
-                steps.git_restore_snapshot(repo, branch, &snapshot, || {
-                    set_reference(
+                steps.git_restore_snapshot(repo, branch, &snapshot, Some(new_oid), || {
+                    set_reference_authorized(
                         &git_checkout_repo(repo)?,
                         &format!("refs/heads/{branch}"),
                         new_oid,
-                        RefPrecondition::Any,
+                        RefPrecondition::MustNotExist,
                         "heddle: redo git checkpoint",
+                        RefRewriteAuthorization::Redo,
                     )
                     .map_err(|error| anyhow!(error))
                 })?;
-                steps.git_restore_snapshot(repo, branch, &snapshot, || {
+                steps.git_restore_snapshot(repo, branch, &snapshot, Some(new_oid), || {
                     attach_git_head_to_branch(&git_checkout_repo(repo)?, branch)
                 })?;
             }
         }
     }
-    steps.git_restore_snapshot(repo, branch, &snapshot, || {
+    steps.git_restore_snapshot(repo, branch, &snapshot, Some(new_oid), || {
         reset_git_index_to_commit(&git_checkout_repo(repo)?, new_oid)
     })?;
     Ok(())
@@ -1369,6 +1377,7 @@ fn set_attached_git_head(
     target: ObjectId,
     expected: ObjectId,
     log_message: &str,
+    authorization: RefRewriteAuthorization,
 ) -> Result<()> {
     let ref_name = if branch == "HEAD" {
         "HEAD".to_string()
@@ -1381,6 +1390,7 @@ fn set_attached_git_head(
         target,
         RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(expected)),
         log_message,
+        authorization,
     )
     .map_err(|error| anyhow!("failed to update Git HEAD for branch '{branch}': {error}"))
 }
@@ -1413,6 +1423,7 @@ fn delete_reference_matching(
     repo: &SleyRepository,
     name: &str,
     expected: Option<ObjectId>,
+    authorization: RefRewriteAuthorization,
 ) -> Result<()> {
     let current = ref_target_oid(repo, name)?;
     if current.is_none() {
@@ -1430,29 +1441,8 @@ fn delete_reference_matching(
                 .unwrap_or_else(|| "missing".to_string())
         ));
     }
-    let refs = repo.references();
-    match refs
-        .read_ref(name)
-        .map_err(|error| anyhow!("failed to inspect Git reference '{name}': {error}"))?
-    {
-        Some(ReferenceTarget::Direct(oid)) => repo
-            .delete_ref(DeleteRef {
-                name: FullName::new(name)
-                    .map_err(|error| anyhow!("invalid Git reference '{name}': {error}"))?,
-                expected_old: Some(expected.unwrap_or(oid)),
-                expected: None,
-                reflog: None,
-                reflog_committer: None,
-            })
-            .map_err(|error| anyhow!("failed to delete Git reference '{name}': {error}")),
-        Some(ReferenceTarget::Symbolic(_)) => refs
-            .delete_symbolic_ref(name)
-            .map(|_| ())
-            .map_err(|error| anyhow!("failed to delete Git reference '{name}': {error}")),
-        None => Err(anyhow!(
-            "failed to delete Git reference '{name}': ref is missing"
-        )),
-    }
+    delete_reference_authorized(repo, name, expected.or(current), false, authorization)
+        .map_err(|error| anyhow!("failed to delete Git reference '{name}': {error}"))
 }
 
 fn git_signature() -> Signature {
@@ -1485,6 +1475,7 @@ fn set_reference_with_reflog(
     target: ObjectId,
     constraint: RefPrecondition,
     log_message: &str,
+    authorization: RefRewriteAuthorization,
 ) -> Result<()> {
     let refs = repo.references();
     let old_oid = match refs
@@ -1502,14 +1493,7 @@ fn set_reference_with_reflog(
             .and_then(|head| head.symbolic_target.map(|target| target.to_string()))
             .as_deref()
             == Some(name);
-    let mut tx = refs.transaction();
-    tx.update_to(
-        name.to_string(),
-        ReferenceTarget::Direct(target),
-        constraint,
-        Some(reflog.clone()),
-    );
-    tx.commit()
+    set_reference_authorized(repo, name, target, constraint, log_message, authorization)
         .map_err(|error| anyhow!("failed to update Git reference '{name}': {error}"))?;
     if should_append_head_reflog {
         refs.append_reflog("HEAD", &reflog)

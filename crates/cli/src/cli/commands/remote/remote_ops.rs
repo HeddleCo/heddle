@@ -12,6 +12,13 @@ pub(crate) use heddle_cli_contract::cli::commands::wire::remote::{
 };
 // Re-export under the historical crate-local names for sibling modules.
 use heddle_git_projection::credential::EmbeddingSafeCredentialProvider;
+use heddle_git_projection::{
+    git_core::{
+        RefRewriteAuthorization, delete_reference_authorized, ensure_commit_update_fast_forward,
+        set_reference, set_reference_authorized,
+    },
+    git_notes::NOTES_REF,
+};
 #[cfg(feature = "client")]
 use hosted_client::client::HostedClient;
 use hosted_client::client::LocalSync;
@@ -26,8 +33,9 @@ use repo::{
     CommitGraphIndex, Repository, RepositoryCapability, SyncedThreadMetadata, ThreadManager,
 };
 use sley::{
-    ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefChange, ReferenceTarget,
-    RemoteConfigRefusal, RemoteConfigRemove, RemoteConfigSet, Repository as SleyRepository,
+    ConfigEdit, ConfigEditPlan, ConfigEditScope, HeadUpdateOptions, RefPrecondition,
+    ReferenceTarget, RemoteConfigRefusal, RemoteConfigRemove, RemoteConfigSet,
+    Repository as SleyRepository,
     remote::{
         FetchOptions, PackGenerationProgress, ProgressSink as SleyProgressSink, RemotePolicy,
         TransferProgress,
@@ -352,6 +360,72 @@ fn execute_authoritative_git_pull(
     local_branch: &str,
     remote_branch: &str,
     progress: &objects::Progress,
+    import_progress: Option<&mut ImportProgress>,
+) -> Result<AuthoritativeGitPullOutcome> {
+    let result = execute_authoritative_git_pull_inner(
+        repo,
+        remote_name,
+        local_branch,
+        remote_branch,
+        progress,
+        import_progress,
+    );
+    // Fetch stages notes outside the protected namespace. The ref is scratch
+    // state; remove it on both successful and failed pulls, using its observed
+    // tip as the delete precondition.
+    let cleanup = (|| -> Result<()> {
+        let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
+        let name = "refs/heddle/pull/notes/heddle";
+        if let Some(reference) = git.find_reference(name).map_err(anyhow::Error::new)?
+            && let Some(oid) = reference.peeled_oid(&git).map_err(anyhow::Error::new)?
+        {
+            delete_reference_authorized(
+                &git,
+                name,
+                Some(oid),
+                true,
+                RefRewriteAuthorization::None,
+            )?;
+        }
+        Ok(())
+    })();
+    finish_git_pull_after_cleanup(
+        result,
+        cleanup,
+        "refs/heddle/pull/notes/heddle",
+        |warning| {
+            eprintln!("{}", style::warn(warning));
+        },
+    )
+}
+
+fn finish_git_pull_after_cleanup<T>(
+    result: Result<T>,
+    cleanup: Result<()>,
+    staging_ref: &str,
+    warn: impl FnOnce(&str),
+) -> Result<T> {
+    match (result, cleanup) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(outcome), Err(error)) => {
+            warn(&format!(
+                "warning: pull succeeded, but could not remove staging ref {staging_ref}: {error}"
+            ));
+            Ok(outcome)
+        }
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(error.context(format!(
+            "also failed to remove staged pull notes: {cleanup_error}"
+        ))),
+    }
+}
+
+fn execute_authoritative_git_pull_inner(
+    repo: &Repository,
+    remote_name: &str,
+    local_branch: &str,
+    remote_branch: &str,
+    progress: &objects::Progress,
     mut import_progress: Option<&mut ImportProgress>,
 ) -> Result<AuthoritativeGitPullOutcome> {
     let git = SleyRepository::discover(repo.root()).map_err(anyhow::Error::new)?;
@@ -365,6 +439,15 @@ fn execute_authoritative_git_pull(
         .find_reference(&local_ref)
         .map_err(anyhow::Error::new)?
         .and_then(|reference| reference.peeled_oid(&git).ok().flatten());
+    let old_notes = match git.references().read_ref(NOTES_REF)? {
+        Some(ReferenceTarget::Direct(oid)) => Some(oid),
+        Some(ReferenceTarget::Symbolic(_)) => {
+            return Err(git_pull_notes_diverged_advice(
+                &"local Heddle notes reference is symbolic",
+            ));
+        }
+        None => None,
+    };
     let old_state = repo.refs().get_thread(&ThreadName::new(local_branch))?;
 
     progress.set_phase("streaming Git objects");
@@ -374,7 +457,10 @@ fn execute_authoritative_git_pull(
         received_objects: 0,
     };
     let mut credentials = EmbeddingSafeCredentialProvider::new(&git_config);
-    let fetch_refspecs = vec![remote_ref.clone(), "+refs/notes/*:refs/notes/*".to_string()];
+    let fetch_refspecs = vec![
+        remote_ref.clone(),
+        "+refs/notes/*:refs/heddle/pull/notes/*".to_string(),
+    ];
     let outcome = git
         .fetch_with_http_client(
             remote_name,
@@ -402,6 +488,11 @@ fn execute_authoritative_git_pull(
         .find(|update| update.src == remote_ref)
         .map(|update| update.oid)
         .with_context(|| format!("Remote branch {remote_branch} was not found"))?;
+    let new_notes = outcome
+        .ref_updates
+        .iter()
+        .find(|update| update.src == NOTES_REF)
+        .map(|update| update.oid);
     if let Some(old_oid) = old_oid
         && old_oid != new_oid
         && !git
@@ -414,6 +505,12 @@ fn execute_authoritative_git_pull(
             remote_name,
             remote_branch,
         ));
+    }
+    if let (Some(old), Some(new)) = (old_notes, new_notes)
+        && old != new
+    {
+        ensure_commit_update_fast_forward(&git, NOTES_REF, old, new)
+            .map_err(|error| git_pull_notes_diverged_advice(&error))?;
     }
 
     let staging_ref = publish_git_pull_tracking_ref(&git, remote_name, remote_branch, new_oid)?;
@@ -465,19 +562,37 @@ fn execute_authoritative_git_pull(
             materialized,
         )?;
     }
+    if let Some(notes) = new_notes
+        && old_notes != Some(notes)
+    {
+        let expected = old_notes.map_or(RefPrecondition::MustNotExist, |oid| {
+            RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
+        });
+        if let Err(error) =
+            set_reference(&git, NOTES_REF, notes, expected, "heddle pull: fetch notes")
+        {
+            let rollback = changed.then(|| {
+                rollback_git_pull_branch(
+                    repo,
+                    &git,
+                    &local_ref,
+                    old_oid,
+                    new_oid,
+                    materialized,
+                    true,
+                )
+            });
+            return Err(git_pull_notes_publish_advice(
+                &error,
+                rollback.as_ref().and_then(|result| result.as_ref().err()),
+            ));
+        }
+    }
     if old_state.as_ref() != Some(&new_state)
         && let Err(error) = repo.set_thread_recorded(&ThreadName::new(local_branch), &new_state)
     {
         let rollback = changed.then(|| {
-            rollback_git_pull_branch(
-                repo,
-                &git,
-                &git_config,
-                &local_ref,
-                old_oid,
-                new_oid,
-                materialized,
-            )
+            rollback_git_pull_branch(repo, &git, &local_ref, old_oid, new_oid, materialized, true)
         });
         return Err(git_pull_metadata_publish_advice(
             local_branch,
@@ -664,10 +779,16 @@ fn publish_git_pull_tracking_ref(
 ) -> Result<String> {
     let tracking_ref = format!("refs/remotes/{remote_name}/{remote_branch}");
     let old_tracking = git.references().read_ref(&tracking_ref)?;
-    let mut tracking = RefChange::new(tracking_ref.as_str(), ReferenceTarget::Direct(new_oid))?;
-    tracking.expected = old_tracking;
-    git.apply_ref_changes(&[tracking])
-        .map_err(anyhow::Error::new)?;
+    let expected = old_tracking.map_or(RefPrecondition::MustNotExist, |target| {
+        RefPrecondition::MustExistAndMatch(target)
+    });
+    set_reference(
+        git,
+        &tracking_ref,
+        new_oid,
+        expected,
+        "heddle pull: track remote branch",
+    )?;
     Ok(tracking_ref)
 }
 
@@ -694,17 +815,34 @@ fn publish_git_pull_branch(
         .map_err(|error| git_pull_checkout_advice(local_ref, &error))?;
     }
 
-    let mut branch = RefChange::new(local_ref, ReferenceTarget::Direct(new_oid))?;
-    branch.expected = old_oid.map(ReferenceTarget::Direct);
-    let mut changes = vec![branch];
-    if materialized {
-        let mut head = RefChange::new("HEAD", ReferenceTarget::Symbolic(local_ref.to_string()))?;
-        head.expected = Some(ReferenceTarget::Direct(new_oid));
-        changes.push(head);
-    }
-    if let Err(error) = git.apply_ref_changes(&changes) {
+    let expected = old_oid.map_or(RefPrecondition::MustNotExist, |oid| {
+        RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
+    });
+    if let Err(error) = set_reference(
+        git,
+        local_ref,
+        new_oid,
+        expected,
+        "heddle pull: fast-forward",
+    ) {
         let rollback =
-            rollback_git_pull_branch(repo, git, config, local_ref, old_oid, new_oid, materialized);
+            rollback_git_pull_branch(repo, git, local_ref, old_oid, new_oid, materialized, false);
+        return Err(git_pull_publish_advice(
+            local_ref,
+            &error,
+            rollback.err().as_ref(),
+        ));
+    }
+    if materialized
+        && let Err(error) = git.set_head_symref(
+            local_ref,
+            HeadUpdateOptions::new()
+                .expect_current(ReferenceTarget::Direct(new_oid))
+                .reflog("heddle pull: attach fast-forward"),
+        )
+    {
+        let rollback =
+            rollback_git_pull_branch(repo, git, local_ref, old_oid, new_oid, materialized, true);
         return Err(git_pull_publish_advice(
             local_ref,
             &error,
@@ -717,14 +855,27 @@ fn publish_git_pull_branch(
 fn rollback_git_pull_branch(
     repo: &Repository,
     git: &SleyRepository,
-    config: &sley::GitConfig,
     local_ref: &str,
     old_oid: Option<sley::ObjectId>,
     new_oid: sley::ObjectId,
     materialized: bool,
+    published: bool,
 ) -> Result<()> {
     let old_oid = old_oid.context("the previous branch was unborn")?;
+    if published {
+        set_reference_authorized(
+            git,
+            local_ref,
+            old_oid,
+            RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(new_oid)),
+            "heddle pull: restore failed publication",
+            RefRewriteAuthorization::RestoreFailedPublication,
+        )?;
+    } else if git.references().read_ref(local_ref)? != Some(ReferenceTarget::Direct(old_oid)) {
+        anyhow::bail!("{local_ref} moved before pull could restore the checkout");
+    }
     if materialized {
+        let config = git.config_snapshot()?;
         sley_worktree::checkout_detached_filtered(
             Some(repo.root()),
             repo.root(),
@@ -733,15 +884,8 @@ fn rollback_git_pull_branch(
             &old_oid,
             b"Heddle <heddle@localhost> 0 +0000".to_vec(),
             b"heddle pull: roll back failed fast-forward".to_vec(),
-            config,
+            &config,
         )?;
-    }
-
-    let current = git.references().read_ref(local_ref)?;
-    let mut branch = RefChange::new(local_ref, ReferenceTarget::Direct(old_oid))?;
-    branch.expected = current.or(Some(ReferenceTarget::Direct(new_oid)));
-    git.apply_ref_changes(&[branch])?;
-    if materialized {
         git.set_head_symref(
             local_ref,
             HeadUpdateOptions::new()
@@ -829,6 +973,49 @@ fn git_pull_diverged_advice(
         "the local branch, Heddle thread, index, and worktree remain at their prior tip",
         "heddle status",
         vec!["heddle status".to_string(), "heddle log".to_string()],
+    )
+    .into()
+}
+
+fn git_pull_notes_diverged_advice(error: &impl std::fmt::Display) -> anyhow::Error {
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_pull_notes_diverged",
+        format!("Cannot fast-forward {NOTES_REF}: {error}"),
+        "Reconcile the local and remote Heddle notes before pulling again.",
+        format!("the fetched notes do not advance the local notes ref: {error}"),
+        "replacing local notes would discard Heddle metadata",
+        "the local branch, Heddle notes, thread, index, and worktree remain at their prior tips",
+        "heddle status",
+        vec!["heddle status".to_string(), "heddle verify".to_string()],
+    )
+    .into()
+}
+
+fn git_pull_notes_publish_advice(
+    error: &impl std::fmt::Display,
+    rollback_error: Option<&anyhow::Error>,
+) -> anyhow::Error {
+    let (hint, preserved) = match rollback_error {
+        Some(rollback) => (
+            format!(
+                "Notes publication failed and branch rollback also failed: {rollback}. Run `heddle verify`."
+            ),
+            "a concurrent Git ref update was preserved; the checkout may be detached",
+        ),
+        None => (
+            "The branch was restored. Reconcile the Heddle notes, then retry the pull.".to_string(),
+            "the local branch and Heddle notes were not advanced by this pull",
+        ),
+    };
+    RecoveryAdvice::safety_refusal(
+        "git_overlay_pull_notes_publish_failed",
+        format!("Could not publish {NOTES_REF}: {error}"),
+        hint,
+        format!("the guarded notes update failed: {error}"),
+        "continuing could leave local Heddle metadata behind the fetched branch",
+        preserved,
+        "heddle verify",
+        vec!["heddle verify".to_string(), "heddle pull".to_string()],
     )
     .into()
 }
@@ -1545,7 +1732,9 @@ fn cmd_git_overlay_remote(cli: &Cli, repo: &Repository, command: RemoteCommands)
             super::admit_git_overlay_remote_url(&url)?;
             let set = RemoteConfigSet::new(&name)
                 .with_url(&url)
-                .with_fetch_refspec(format!("+refs/heads/*:refs/remotes/{name}/*"));
+                .with_fetch_refspec(
+                    heddle_git_projection::git_core::remote_tracking_fetch_refspec(&name),
+                );
             let plan = git
                 .plan_remote_set(set, ConfigEditScope::Local)?
                 .with_fsync(true);
@@ -1834,6 +2023,24 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn successful_pull_with_failed_staging_cleanup_warns_and_succeeds() {
+        let mut warning = String::new();
+        let outcome = finish_git_pull_after_cleanup(
+            Ok("published"),
+            Err(anyhow::anyhow!("ref lock denied")),
+            "refs/heddle/pull/notes/heddle",
+            |message| warning = message.to_string(),
+        )
+        .expect("published pull must remain successful");
+        assert_eq!(outcome, "published");
+        assert!(
+            warning.contains("refs/heddle/pull/notes/heddle"),
+            "{warning}"
+        );
+        assert!(warning.contains("ref lock denied"), "{warning}");
+    }
 
     #[cfg(feature = "client")]
     fn snapshot_file(repo: &Repository, root: &Path, body: &str) -> StateId {

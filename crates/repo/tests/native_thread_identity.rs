@@ -269,6 +269,67 @@ fn cross_thread_merge_records_local_integration_not_capture() {
 }
 
 #[test]
+fn sibling_refresh_duplicate_admission_selects_a_source_operation() {
+    use objects::{
+        object::{Attribution, Principal, State, ThreadName},
+        store::ObjectStore as _,
+    };
+    use refs::Head;
+
+    let _home = IsolatedHome::new();
+    let directory = tempfile::tempdir().expect("repository");
+    let repository = Repository::init_default(directory.path()).expect("native init");
+    let base = repository.head().expect("head").expect("base");
+    let tree = repository
+        .store()
+        .get_state(&base)
+        .expect("base state")
+        .expect("state")
+        .tree;
+    let author = Attribution::human(Principal::new("Developer", "developer@example.test"));
+    let main_tip = State::new_snapshot(tree, vec![base], author.clone());
+    repository.store().put_state(&main_tip).expect("main state");
+    repository
+        .record_native_capture("main", main_tip.id())
+        .expect("record main");
+    repository
+        .set_thread_recorded(&ThreadName::new("main"), &main_tip.id())
+        .expect("advance main");
+    repository
+        .write_head_recorded(&Head::Attached {
+            thread: ThreadName::new("main"),
+        })
+        .expect("attach main");
+    for name in ["lane/one", "lane/two"] {
+        repository
+            .create_native_thread(name, main_tip.id(), Some("main"), "fanout")
+            .expect("create sibling");
+    }
+    let shared_revision = State::new_snapshot(tree, vec![main_tip.id()], author.clone());
+    repository
+        .store()
+        .put_state(&shared_revision)
+        .expect("shared revision");
+    for name in ["lane/one", "lane/two"] {
+        repository
+            .record_native_capture(name, shared_revision.id())
+            .expect("admit shared revision");
+    }
+    let merged = State::new_merge(tree, vec![main_tip.id(), shared_revision.id()], author);
+    repository.store().put_state(&merged).expect("merge state");
+    repository
+        .record_native_source("main", merged.id())
+        .expect("select an admitted source for the same revision");
+    let main = repository.native_thread("main").expect("main replica");
+    assert_eq!(
+        main.source_operation_page(merged.id(), None, 1)
+            .expect("merged source operation")
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn capture_after_fast_forward_land_is_a_capture() {
     use objects::{
         object::{Attribution, Principal, State, ThreadName, thread_replication::ThreadFacet},

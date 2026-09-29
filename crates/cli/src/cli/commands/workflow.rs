@@ -338,8 +338,8 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
             vec![switch_command, land_command],
         )));
     };
-    let remote_synced = sync_remote_before_land_if_needed(&repo, &thread.id)?;
     git_overlay_txn::preflight_land_checkpoint(&repo, &thread.thread)?;
+    let remote_synced = sync_remote_before_land_if_needed(&repo, &thread.id)?;
 
     let mut captured = false;
     if let Some(thread_repo) = thread_repo.as_ref() {
@@ -583,7 +583,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                     action: "land",
                     message: Some(&checkpoint_message),
                     retry_command: "heddle land --thread <name>",
-                    linearize_git_parent: multi_land_has_checkpointed_peer(),
+                    linearize_git_parent: true,
                 },
                 worktree_status_options(Some(repo.config())),
             );
@@ -883,7 +883,7 @@ pub async fn cmd_land(cli: &Cli, args: LandArgs) -> Result<()> {
                 action: "land",
                 message: Some(&checkpoint_message),
                 retry_command: "heddle land --thread <name>",
-                linearize_git_parent: multi_land_has_checkpointed_peer(),
+                linearize_git_parent: true,
             },
             worktree_status_options(Some(repo.config())),
         );
@@ -1219,10 +1219,21 @@ fn collapse_thread_for_land(
         first_intent,
         thread.task.as_deref(),
     );
+    let target_thread = thread.target_thread.as_deref().ok_or_else(|| {
+        anyhow!(RecoveryAdvice::missing_target_thread(
+            &thread.thread,
+            "land"
+        ))
+    })?;
+    let target_state = repo
+        .refs()
+        .get_thread(&ThreadName::new(target_thread))?
+        .ok_or_else(|| anyhow!(thread_not_found_advice(target_thread, "land")))?;
     let result = collapse_resolved_states(
         repo,
         user_config,
         &sources,
+        vec![target_state],
         intent,
         None,
         CollapsePublishedRef::Thread(ThreadName::new(&thread.thread)),
@@ -3217,15 +3228,6 @@ async fn cmd_land_many(cli: &Cli, args: LandArgs) -> Result<()> {
         stopped_at.as_deref(),
         batch.peers,
     )
-}
-
-fn multi_land_has_checkpointed_peer() -> bool {
-    MULTI_LAND_COLLECTOR.with(|collector| {
-        collector
-            .borrow()
-            .as_ref()
-            .is_some_and(|batch| batch.peers.iter().any(|peer| peer.checkpointed))
-    })
 }
 
 fn multi_land_error_peer(thread: &str, error: &anyhow::Error) -> MultiLandPeerResult {

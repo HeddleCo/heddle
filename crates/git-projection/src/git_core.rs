@@ -334,14 +334,13 @@ mod negative_refspec {
 // pass through `NegativeRefSpec::new`.
 pub use negative_refspec::NegativeRefSpec;
 
-/// The fetch refspecs Heddle uses to import a remote: every branch and every
-/// heddle note, forced. Built through [`RefSpec`] so the wire format has a
-/// single typed source of truth.
-fn heddle_fetch_refspecs() -> GitProjectionResult<[String; 2]> {
-    Ok([
-        RefSpec::forced("refs/heads/*", "refs/heads/*")?.to_git_format(),
-        RefSpec::forced("refs/notes/*", "refs/notes/*")?.to_git_format(),
-    ])
+/// Fetch branches and notes into a private namespace first. The staged refs
+/// are promoted through [`set_reference`] after the transport has finished.
+fn heddle_fetch_refspecs() -> [String; 2] {
+    [
+        "+refs/heads/*:refs/heddle/clone/heads/*".to_string(),
+        "+refs/notes/*:refs/heddle/clone/notes/*".to_string(),
+    ]
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -682,6 +681,14 @@ impl CheckoutWrite {
     }
 
     fn publish(&self, git_oid: ObjectId) -> GitProjectionResult<()> {
+        if let Some(previous) = self.previous_branch {
+            ensure_commit_update_fast_forward(
+                &self.object_repo,
+                &self.branch_ref,
+                previous,
+                git_oid,
+            )?;
+        }
         let published_head = format!("ref: {}\n", self.branch_ref).into_bytes();
         let mut head_written = false;
         let mut index_written = false;
@@ -734,8 +741,9 @@ impl CheckoutWrite {
                 rollback_reference_if_unchanged(
                     &self.object_repo,
                     &self.branch_ref,
-                    git_oid,
+                    Some(git_oid),
                     self.previous_branch,
+                    RefRewriteAuthorization::RestoreFailedPublication,
                 )?;
             }
             if index_written {
@@ -980,16 +988,27 @@ impl<'a> GitProjection<'a> {
                 Some(old) => RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(old)),
                 None => RefPrecondition::MustNotExist,
             };
-            set_reference(
+            set_reference_authorized(
                 &target_repo,
                 &write.full_name,
                 write.new,
                 constraint,
                 log_message,
+                if write.force {
+                    RefRewriteAuthorization::PlannedExportRewrite
+                } else {
+                    RefRewriteAuthorization::None
+                },
             )?;
         }
         for delete in &plan.deletes {
-            delete_reference_matching(&target_repo, &delete.full_name, delete.old)?;
+            delete_reference_authorized(
+                &target_repo,
+                &delete.full_name,
+                Some(delete.old),
+                false,
+                RefRewriteAuthorization::PlannedExportRewrite,
+            )?;
         }
         write_exported_refs(&target_repo, &plan.new_manifest)?;
         Ok(())
@@ -1072,12 +1091,18 @@ impl<'a> GitProjection<'a> {
             }
         }
 
-        self.seed_git_checkpoint_mappings_from_repo(mirror_repo)
+        let mut notes = Vec::new();
+        self.seed_git_checkpoint_mappings_from_repo(mirror_repo, &mut notes)?;
+        for (git_oid, note) in notes {
+            super::git_notes::write_note(mirror_repo, git_oid, &note)?;
+        }
+        Ok(())
     }
 
     fn seed_git_checkpoint_mappings_from_repo(
         &mut self,
         git_repo: &SleyRepository,
+        pending_notes: &mut Vec<(ObjectId, super::git_notes::HeddleNote)>,
     ) -> GitProjectionResult<()> {
         for record in self.heddle_repo.list_git_checkpoints()? {
             let state_id = StateId::parse(&record.state_id)?;
@@ -1110,7 +1135,7 @@ impl<'a> GitProjection<'a> {
                 && let Some(state) = self.heddle_repo.store().get_state(&state_id)?
             {
                 let note = super::git_notes::note_for_state(self.heddle_repo, &state, false)?;
-                super::git_notes::write_note(git_repo, git_oid, &note)?;
+                pending_notes.push((git_oid, note));
             }
         }
 
@@ -1214,7 +1239,8 @@ impl<'a> GitProjection<'a> {
         }
         let checkout = CheckoutWrite::prepare(self.heddle_repo.root(), thread)?;
         self.build_existing_mapping(Some(self.heddle_repo.root()))?;
-        self.seed_git_checkpoint_mappings_from_repo(&checkout.object_repo)?;
+        let mut pending_notes = Vec::new();
+        self.seed_git_checkpoint_mappings_from_repo(&checkout.object_repo, &mut pending_notes)?;
         self.seed_ingest_identity_mappings_from_repo(&checkout.object_repo)?;
 
         // Sequential peer lands must advance the checkout branch linearly.
@@ -1227,6 +1253,18 @@ impl<'a> GitProjection<'a> {
             && let Some(previous) = checkout.previous_branch
         {
             self.set_commit_parent_override(*state_id, vec![previous]);
+        }
+
+        if let Some(previous) = checkout.previous_branch
+            && let Some(mapped) = self.mapping.get_git(state_id)
+            && checkout.object_repo.read_object(&mapped).is_ok()
+        {
+            ensure_commit_update_fast_forward(
+                &checkout.object_repo,
+                &checkout.branch_ref,
+                previous,
+                mapped,
+            )?;
         }
 
         let identity = git_config_identity_with_global_fallback(self.heddle_repo.root())?;
@@ -1287,7 +1325,7 @@ impl<'a> GitProjection<'a> {
                             )
                     });
                 let note = git_notes::note_for_state(self.heddle_repo, &state, rewrites_parents)?;
-                git_notes::write_note(&checkout.object_repo, git_oid, &note)?;
+                pending_notes.push((git_oid, note));
             }
         }
 
@@ -1296,6 +1334,17 @@ impl<'a> GitProjection<'a> {
                 WriteThroughSkipReason::NoMappedCommit,
             ));
         };
+        if let Some(previous) = checkout.previous_branch {
+            ensure_commit_update_fast_forward(
+                &checkout.object_repo,
+                &checkout.branch_ref,
+                previous,
+                git_oid,
+            )?;
+        }
+        for (git_oid, note) in pending_notes {
+            git_notes::write_note(&checkout.object_repo, git_oid, &note)?;
+        }
         materialize_active_checkout_closure(
             self.heddle_repo,
             &self.mapping,
@@ -1467,9 +1516,11 @@ fn fetch_heddle_notes_into_repo(
     remote_name: &str,
     url: &str,
 ) -> GitProjectionResult<()> {
+    const STAGED_NOTES_REF: &str = "refs/heddle/notes-hydration";
+    delete_reference_if_present(repo, STAGED_NOTES_REF)?;
     let mut credentials = NoCredentials;
     let mut progress = SilentProgress;
-    let refspec = RefSpec::forced("refs/notes/*", "refs/notes/*")?.to_git_format();
+    let refspec = format!("+{}:{STAGED_NOTES_REF}", git_notes::NOTES_REF);
     repo.fetch_with_http_client(
         url,
         &[refspec],
@@ -1516,12 +1567,37 @@ fn fetch_heddle_notes_into_repo(
         &mut progress,
         configured_https_client(),
     )
-    .map(|_| ())
     .map_err(|err| {
         GitProjectionError::Git(git_transport_error_message(format!(
             "failed to fetch notes from {remote_name}: {err}"
         )))
-    })
+    })?;
+    publish_staged_hydrated_note(repo, STAGED_NOTES_REF)?;
+    Ok(())
+}
+
+fn publish_staged_hydrated_note(
+    repo: &SleyRepository,
+    staged_name: &str,
+) -> GitProjectionResult<()> {
+    let Some(reference) = repo.find_reference(staged_name).map_err(git_err)? else {
+        return Ok(());
+    };
+    let target = reference
+        .peeled_oid(repo)
+        .map_err(git_err)?
+        .ok_or_else(|| {
+            GitProjectionError::Git("fetched Heddle notes ref has no commit target".into())
+        })?;
+    set_reference(
+        repo,
+        git_notes::NOTES_REF,
+        target,
+        RefPrecondition::Any,
+        "heddle: hydrate notes from remote",
+    )?;
+    delete_reference_matching(repo, staged_name, target)?;
+    Ok(())
 }
 
 fn parse_remote_url_items_from_config(
@@ -1837,11 +1913,12 @@ fn read_optional_file(path: &Path) -> GitProjectionResult<Option<Vec<u8>>> {
     }
 }
 
-fn rollback_reference_if_unchanged(
+pub fn rollback_reference_if_unchanged(
     repo: &SleyRepository,
     name: &str,
-    published: ObjectId,
+    published: Option<ObjectId>,
     previous: Option<ObjectId>,
+    authorization: RefRewriteAuthorization,
 ) -> GitProjectionResult<()> {
     let current = match repo.find_reference(name).map_err(git_err)? {
         Some(reference) => reference.peeled_oid(repo).map_err(git_err)?,
@@ -1850,20 +1927,32 @@ fn rollback_reference_if_unchanged(
     if current == previous {
         return Ok(());
     }
-    if current != Some(published) {
+    if current != published {
         return Err(GitProjectionError::Git(format!(
             "refusing to roll back Git reference '{name}' because another Git operation changed it"
         )));
     }
-    let rollback = match previous {
-        Some(previous) => set_reference(
+    let rollback = match (published, previous) {
+        (Some(published), Some(previous)) => set_reference_authorized(
             repo,
             name,
             previous,
             RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(published)),
             "heddle: rollback failed write-through",
+            authorization,
         ),
-        None => delete_reference_matching(repo, name, published),
+        (None, Some(previous)) => set_reference_authorized(
+            repo,
+            name,
+            previous,
+            RefPrecondition::MustNotExist,
+            "heddle: rollback failed write-through",
+            authorization,
+        ),
+        (Some(published), None) => {
+            delete_reference_authorized(repo, name, Some(published), false, authorization)
+        }
+        (None, None) => return Ok(()),
     };
     if rollback.is_ok() {
         return Ok(());
@@ -1877,6 +1966,12 @@ fn rollback_reference_if_unchanged(
     } else {
         rollback
     }
+}
+
+/// Build the configured fetch refspec for remote-tracking branches. Keep forced
+/// refspec construction at the publication boundary for source audits.
+pub fn remote_tracking_fetch_refspec(name: &str) -> String {
+    format!("+refs/heads/*:refs/remotes/{name}/*")
 }
 
 /// `fsync` a single file by opening it read-only and calling
@@ -1926,15 +2021,11 @@ pub fn open_repo(path: &Path) -> GitProjectionResult<SleyRepository> {
     }
 }
 
-/// Delete a reference if present; missing-ref is a no-op. Used by the
-/// write-through rollback path to drop a branch that was created by a
-/// failed write-through but isn't reachable from any prior state. We
-/// scope the deletion with `RefPrecondition::MustExist` so an unrelated
-/// concurrent writer that *just* updated this ref isn't silently
-/// clobbered — if the ref vanished underneath us between our read and
-/// the delete, that's the rollback we wanted anyway.
+/// Delete an unprotected reference if present; missing-ref is a no-op. Branch
+/// and Heddle notes deletions require [`delete_reference_authorized`] with the
+/// caller's previously observed tip.
 pub fn delete_reference_if_present(repo: &SleyRepository, name: &str) -> GitProjectionResult<()> {
-    delete_reference(repo, name, None, true)
+    delete_reference(repo, name, None, true, RefRewriteAuthorization::None)
 }
 
 pub(crate) fn delete_reference_matching(
@@ -1942,7 +2033,49 @@ pub(crate) fn delete_reference_matching(
     name: &str,
     expected_old: ObjectId,
 ) -> GitProjectionResult<()> {
-    delete_reference(repo, name, Some(expected_old), false)
+    delete_reference(
+        repo,
+        name,
+        Some(expected_old),
+        false,
+        RefRewriteAuthorization::None,
+    )
+}
+
+/// A named exception to the normal fast-forward-only branch and notes rule.
+/// Callers must choose the operation that grants the rewrite.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RefRewriteAuthorization {
+    None,
+    Undo,
+    Redo,
+    UndoRollback,
+    ManagedProjectionWithdrawal,
+    RebuildServedNotes,
+    RestoreFailedPublication,
+    PlannedExportRewrite,
+}
+
+fn authorize_ref_change(
+    repo: &SleyRepository,
+    name: &str,
+    old: Option<ObjectId>,
+    new: Option<ObjectId>,
+    authorization: RefRewriteAuthorization,
+) -> GitProjectionResult<()> {
+    if !(name.starts_with("refs/heads/") || name == git_notes::NOTES_REF) {
+        return Ok(());
+    }
+    if authorization != RefRewriteAuthorization::None {
+        return Ok(());
+    }
+    match (old, new) {
+        (Some(old), Some(new)) => ensure_commit_update_fast_forward(repo, name, old, new),
+        (Some(_), None) => Err(GitProjectionError::Git(format!(
+            "refusing to delete {name} without named rewrite authorization"
+        ))),
+        _ => Ok(()),
+    }
 }
 
 fn delete_reference(
@@ -1950,23 +2083,32 @@ fn delete_reference(
     name: &str,
     expected_old: Option<ObjectId>,
     missing_ok: bool,
+    authorization: RefRewriteAuthorization,
 ) -> GitProjectionResult<()> {
+    if (name.starts_with("refs/heads/") || name == git_notes::NOTES_REF) && expected_old.is_none() {
+        return Err(GitProjectionError::Git(format!(
+            "refusing to delete {name} without the previously observed tip"
+        )));
+    }
     let refs = repo.references();
     match refs.read_ref(name).map_err(git_err)? {
         None if missing_ok => Ok(()),
         None => Err(GitProjectionError::Git(format!(
             "failed to delete Git reference '{name}': ref is missing"
         ))),
-        Some(ReferenceTarget::Direct(oid)) => repo
-            .delete_ref(DeleteRef {
+        Some(ReferenceTarget::Direct(oid)) => {
+            authorize_ref_change(repo, name, Some(oid), None, authorization)?;
+            repo.delete_ref(DeleteRef {
                 name: FullName::new(name).map_err(git_err)?,
                 expected_old: Some(expected_old.unwrap_or(oid)),
                 expected: None,
                 reflog: None,
                 reflog_committer: None,
             })
-            .map_err(git_err),
+            .map_err(git_err)
+        }
         Some(ReferenceTarget::Symbolic(_)) => {
+            authorize_ref_change(repo, name, None, None, authorization)?;
             if let Some(expected_old) = expected_old {
                 let current = repo
                     .find_reference(name)
@@ -1993,15 +2135,90 @@ pub fn set_reference(
     constraint: RefPrecondition,
     log_message: &str,
 ) -> GitProjectionResult<()> {
+    set_reference_authorized(
+        repo,
+        name,
+        target,
+        constraint,
+        log_message,
+        RefRewriteAuthorization::None,
+    )
+}
+
+pub fn set_reference_authorized(
+    repo: &SleyRepository,
+    name: &str,
+    target: ObjectId,
+    constraint: RefPrecondition,
+    log_message: &str,
+    authorization: RefRewriteAuthorization,
+) -> GitProjectionResult<()> {
+    set_reference_with_identity_authorized(
+        repo,
+        name,
+        target,
+        constraint,
+        log_message,
+        git_projection_signature(),
+        authorization,
+    )
+}
+
+pub fn set_reference_with_identity_authorized(
+    repo: &SleyRepository,
+    name: &str,
+    target: ObjectId,
+    constraint: RefPrecondition,
+    log_message: &str,
+    committer: Vec<u8>,
+    authorization: RefRewriteAuthorization,
+) -> GitProjectionResult<()> {
+    if authorization != RefRewriteAuthorization::None
+        && matches!(
+            constraint,
+            RefPrecondition::Any | RefPrecondition::MustExist
+        )
+    {
+        return Err(GitProjectionError::Git(format!(
+            "refusing to update {name} with a rewrite authorization and no CAS precondition"
+        )));
+    }
     let refs = repo.references();
-    let old_oid = match refs.read_ref(name).map_err(git_err)? {
-        Some(ReferenceTarget::Direct(oid)) => oid,
+    let observed = refs.read_ref(name).map_err(git_err)?;
+    if authorization == RefRewriteAuthorization::None
+        && (name.starts_with("refs/heads/") || name == git_notes::NOTES_REF)
+        && matches!(&observed, Some(ReferenceTarget::Symbolic(_)))
+    {
+        return Err(GitProjectionError::Git(format!(
+            "refusing to replace symbolic Git reference {name}"
+        )));
+    }
+    let old = match observed {
+        Some(ReferenceTarget::Direct(oid)) => Some(oid),
+        _ => None,
+    };
+    authorize_ref_change(repo, name, old, Some(target), authorization)?;
+    // A protected write without an explicit precondition must still use the
+    // observed tip as its CAS. Otherwise a racing writer could advance after
+    // the ancestry check and be overwritten by RefPrecondition::Any.
+    let constraint = if authorization == RefRewriteAuthorization::None
+        && (name.starts_with("refs/heads/") || name == git_notes::NOTES_REF)
+        && matches!(&constraint, RefPrecondition::Any)
+    {
+        old.map_or(RefPrecondition::MustNotExist, |oid| {
+            RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(oid))
+        })
+    } else {
+        constraint
+    };
+    let old_oid = match old {
+        Some(oid) => oid,
         _ => ObjectId::null(repo.object_format()),
     };
     let reflog = ReflogEntry {
         old_oid,
         new_oid: target,
-        committer: git_projection_signature(),
+        committer,
         message: log_message.as_bytes().to_vec(),
     };
     let mut tx = refs.transaction();
@@ -2012,6 +2229,53 @@ pub fn set_reference(
         Some(reflog),
     );
     tx.commit().map_err(git_err)?;
+    Ok(())
+}
+
+pub fn delete_reference_authorized(
+    repo: &SleyRepository,
+    name: &str,
+    expected_old: Option<ObjectId>,
+    missing_ok: bool,
+    authorization: RefRewriteAuthorization,
+) -> GitProjectionResult<()> {
+    delete_reference(repo, name, expected_old, missing_ok, authorization)
+}
+
+/// Sley's notes writer appends a notes commit and CAS-updates the ref. Keep the
+/// raw notes-ref write in this module with the other guarded ref publications.
+pub(crate) fn write_heddle_note_bytes(
+    repo: &SleyRepository,
+    commit_oid: ObjectId,
+    json: &[u8],
+) -> GitProjectionResult<()> {
+    let notes_ref = sley::notes::NotesRef::expand(git_notes::NOTES_REF);
+    let refs = repo.references();
+    let old = match refs.read_ref(git_notes::NOTES_REF).map_err(git_err)? {
+        Some(ReferenceTarget::Direct(oid)) => Some(oid),
+        _ => None,
+    };
+    // The new commit is made by sley on top of this exact old tip. Sley's
+    // expected-ref argument enforces the same precondition under the ref lock.
+    authorize_ref_change(
+        repo,
+        git_notes::NOTES_REF,
+        old,
+        old,
+        RefRewriteAuthorization::None,
+    )?;
+    sley::notes::upsert_note_bytes_for(
+        repo.git_dir(),
+        repo.object_format(),
+        &refs,
+        &notes_ref,
+        &commit_oid,
+        json,
+        "heddle: state metadata",
+        &git_notes::git_projection_notes_identity(),
+        sley::notes::notes_ref_expected(&refs, &notes_ref).map_err(git_err)?,
+    )
+    .map_err(git_err)?;
     Ok(())
 }
 
@@ -2270,7 +2534,6 @@ fn full_ref_name(update: &RefUpdate) -> String {
     GitRefName::content_full_name(update.namespace, &update.name)
 }
 
-#[cfg(test)]
 pub fn ensure_commit_update_fast_forward(
     repo: &SleyRepository,
     name: &str,
@@ -3136,7 +3399,7 @@ fn clone_url_to_bare_via_sley(
     let outcome = repo
         .fetch_with_http_client(
             url,
-            &heddle_fetch_refspecs()?,
+            &heddle_fetch_refspecs(),
             FetchOptions {
                 policy: RemotePolicy::default(),
                 // sley 0.5.0 additions — heddle uses git defaults (no CLI override).
@@ -3183,9 +3446,43 @@ fn clone_url_to_bare_via_sley(
                 "clone failed for {display_url}: {err}"
             )))
         })?;
+    publish_staged_clone_refs(&repo)?;
     Ok(outcome
         .head_symref
         .and_then(|target| target.strip_prefix("refs/heads/").map(str::to_string)))
+}
+
+fn publish_staged_clone_refs(repo: &SleyRepository) -> GitProjectionResult<()> {
+    const STAGED_HEADS: &str = "refs/heddle/clone/heads/";
+    const STAGED_NOTES: &str = "refs/heddle/clone/notes/";
+    let mut staged = Vec::new();
+    for reference in repo.references().list_refs().map_err(git_err)? {
+        let name = reference.name.as_str();
+        let destination = if let Some(branch) = name.strip_prefix(STAGED_HEADS) {
+            format!("refs/heads/{branch}")
+        } else if let Some(note) = name.strip_prefix(STAGED_NOTES) {
+            format!("refs/notes/{note}")
+        } else {
+            continue;
+        };
+        let ReferenceTarget::Direct(target) = reference.target else {
+            return Err(GitProjectionError::Git(format!(
+                "staged clone reference {name} is symbolic"
+            )));
+        };
+        staged.push((name.to_string(), destination, target));
+    }
+    for (staged_name, destination, target) in staged {
+        set_reference(
+            repo,
+            &destination,
+            target,
+            RefPrecondition::MustNotExist,
+            "heddle: publish cloned Git reference",
+        )?;
+        delete_reference_matching(repo, &staged_name, target)?;
+    }
+    Ok(())
 }
 
 /// Materialize the checkout `.git` object closure for the commit mapped to
@@ -3760,11 +4057,91 @@ mod tests {
     #[test]
     fn fetch_refspecs_cover_branches_and_notes() {
         assert_eq!(
-            heddle_fetch_refspecs().expect("fetch refspecs are valid"),
+            heddle_fetch_refspecs(),
             [
-                "+refs/heads/*:refs/heads/*".to_string(),
-                "+refs/notes/*:refs/notes/*".to_string(),
+                "+refs/heads/*:refs/heddle/clone/heads/*".to_string(),
+                "+refs/notes/*:refs/heddle/clone/notes/*".to_string(),
             ]
+        );
+    }
+
+    #[test]
+    fn staged_clone_refs_publish_branches_and_heddle_notes() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let branch = test_commit(&repo, "branch", &[]);
+        let notes = test_commit(&repo, "notes", &[]);
+        for (name, target) in [
+            ("refs/heddle/clone/heads/main", branch),
+            ("refs/heddle/clone/notes/heddle", notes),
+        ] {
+            set_reference(
+                &repo,
+                name,
+                target,
+                RefPrecondition::MustNotExist,
+                "test: stage",
+            )
+            .expect("stage ref");
+        }
+
+        publish_staged_clone_refs(&repo).expect("publish staged refs");
+        for (name, target) in [("refs/heads/main", branch), (git_notes::NOTES_REF, notes)] {
+            assert_eq!(
+                repo.find_reference(name)
+                    .expect("read published ref")
+                    .and_then(|reference| reference.peeled_oid(&repo).ok().flatten()),
+                Some(target),
+            );
+        }
+        assert!(
+            repo.find_reference("refs/heddle/clone/heads/main")
+                .expect("read staged head")
+                .is_none()
+        );
+        assert!(
+            repo.find_reference("refs/heddle/clone/notes/heddle")
+                .expect("read staged notes")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn staged_notes_hydration_preserves_diverged_local_notes() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let root = test_commit(&repo, "root", &[]);
+        let local = test_commit(&repo, "local notes", &[root]);
+        let remote = test_commit(&repo, "remote notes", &[root]);
+        let staged_name = "refs/heddle/notes-hydration";
+        set_reference(
+            &repo,
+            git_notes::NOTES_REF,
+            local,
+            RefPrecondition::MustNotExist,
+            "test: local notes",
+        )
+        .expect("seed local notes");
+        set_reference(
+            &repo,
+            staged_name,
+            remote,
+            RefPrecondition::MustNotExist,
+            "test: staged remote notes",
+        )
+        .expect("stage remote notes");
+
+        let error = publish_staged_hydrated_note(&repo, staged_name)
+            .expect_err("diverged notes hydration must be refused");
+        assert!(matches!(
+            error,
+            GitProjectionError::NonFastForwardRef { .. }
+        ));
+        assert_eq!(
+            repo.find_reference(git_notes::NOTES_REF)
+                .expect("read notes")
+                .and_then(|reference| reference.peeled_oid(&repo).ok().flatten()),
+            Some(local),
         );
     }
 
@@ -4080,6 +4457,46 @@ mod tests {
     }
 
     #[test]
+    fn rewrite_authorization_requires_explicit_cas_precondition() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let target = test_commit(&repo, "target", &[]);
+        let result = set_reference_authorized(
+            &repo,
+            "refs/heads/main",
+            target,
+            RefPrecondition::Any,
+            "test: unauthorized any",
+            RefRewriteAuthorization::UndoRollback,
+        );
+        assert!(result.is_err(), "authorized Any must be rejected");
+        let old = test_commit(&repo, "old", &[]);
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            old,
+            RefPrecondition::MustNotExist,
+            "test: seed main",
+        )
+        .expect("seed existing branch");
+        let result = set_reference_authorized(
+            &repo,
+            "refs/heads/main",
+            target,
+            RefPrecondition::MustExist,
+            "test: unauthorized must exist",
+            RefRewriteAuthorization::UndoRollback,
+        );
+        assert!(result.is_err(), "authorized MustExist must be rejected");
+        assert!(
+            repo.find_reference("refs/heads/main")
+                .expect("read main")
+                .is_some_and(|reference| reference.target == ReferenceTarget::Direct(old)),
+            "ref must retain its original tip"
+        );
+    }
+
+    #[test]
     fn fast_forward_guard_allows_descendant_update() {
         let tmp = tempfile::TempDir::new().unwrap();
         let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
@@ -4088,6 +4505,256 @@ mod tests {
 
         ensure_commit_update_fast_forward(&repo, "refs/heads/main", old, new)
             .expect("descendant update should be allowed");
+    }
+
+    #[test]
+    fn guarded_ref_publication_rejects_sibling_and_preserves_tip() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let root = test_commit(&repo, "root", &[]);
+        let old = test_commit(&repo, "old", &[root]);
+        let sibling = test_commit(&repo, "sibling", &[root]);
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            old,
+            RefPrecondition::MustNotExist,
+            "test: seed",
+        )
+        .expect("seed branch");
+
+        let error = set_reference(
+            &repo,
+            "refs/heads/main",
+            sibling,
+            RefPrecondition::MustExistAndMatch(ReferenceTarget::Direct(old)),
+            "test: publish sibling",
+        )
+        .expect_err("sibling publication must be refused");
+        assert!(matches!(
+            error,
+            GitProjectionError::NonFastForwardRef { .. }
+        ));
+        assert_eq!(
+            repo.find_reference("refs/heads/main")
+                .expect("read main")
+                .and_then(|reference| reference.peeled_oid(&repo).ok().flatten()),
+            Some(old),
+        );
+    }
+
+    #[test]
+    fn protected_delete_requires_the_previously_observed_tip() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let repo = SleyRepository::init_bare(tmp.path()).expect("init bare repo");
+        let tip = test_commit(&repo, "tip", &[]);
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            tip,
+            RefPrecondition::MustNotExist,
+            "test: seed",
+        )
+        .expect("seed branch");
+
+        let error = delete_reference_authorized(
+            &repo,
+            "refs/heads/main",
+            None,
+            false,
+            RefRewriteAuthorization::ManagedProjectionWithdrawal,
+        )
+        .expect_err("protected delete needs the planner's original tip");
+        assert!(error.to_string().contains("previously observed tip"));
+        let stale = test_commit(&repo, "stale planner tip", &[]);
+        delete_reference_authorized(
+            &repo,
+            "refs/heads/main",
+            Some(stale),
+            false,
+            RefRewriteAuthorization::ManagedProjectionWithdrawal,
+        )
+        .expect_err("CAS must reject a branch moved after the planner read it");
+        assert_eq!(
+            repo.find_reference("refs/heads/main")
+                .expect("read main")
+                .and_then(|reference| reference.peeled_oid(&repo).ok().flatten()),
+            Some(tip),
+        );
+    }
+
+    #[test]
+    fn checkpoint_non_fast_forward_leaves_branch_and_notes_refs_unchanged() {
+        use objects::object::{Attribution, Principal};
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let heddle = HeddleRepository::init_default(tmp.path()).expect("init Heddle");
+        let base = heddle
+            .head()
+            .expect("read Heddle head")
+            .expect("base state");
+        let git = SleyRepository::init(tmp.path()).expect("init Git");
+        git.write_raw_object(GitObjectType::Tree, Vec::new())
+            .expect("empty tree");
+        let root = test_commit(&git, "root", &[]);
+        let previous = test_commit(&git, "previous main", &[root]);
+        set_reference(
+            &git,
+            "refs/heads/main",
+            previous,
+            RefPrecondition::Any,
+            "test: main",
+        )
+        .expect("set main");
+        write_head_symref(git.git_dir(), "refs/heads/main").expect("attach Git HEAD");
+
+        std::fs::write(tmp.path().join("story.txt"), "sibling change\n")
+            .expect("write Heddle change");
+        let state = heddle
+            .snapshot_with_attribution(
+                Some("sibling change".to_string()),
+                None,
+                Attribution::human(Principal::new("Test", "test@example.com")),
+            )
+            .expect("capture sibling state");
+        // A checkpoint record with no portable note must not seed that note
+        // when the checkout publication is refused.
+        heddle
+            .record_git_checkpoint(&base, root.to_string(), "old checkpoint")
+            .expect("record checkpoint without note");
+        let mut bridge = GitProjection::new(&heddle);
+        bridge.mapping.insert(base, root);
+        let git_dir = git.git_dir();
+        let before_publication = [
+            "refs/heads/main",
+            "refs/notes/heddle",
+            "logs/refs/heads/main",
+            "logs/refs/notes/heddle",
+            "logs/HEAD",
+            "HEAD",
+            "index",
+        ]
+        .map(|name| read_optional_file(&git_dir.join(name)).expect("read Git before rejection"));
+
+        let error = bridge
+            .write_through_current_checkout_with_message(state.state_id, "checkpoint".to_string())
+            .expect_err("checkpoint must refuse a non-fast-forward main update");
+        assert!(
+            matches!(error, GitProjectionError::NonFastForwardRef { .. }),
+            "{error}"
+        );
+        assert_eq!(
+            git.find_reference("refs/heads/main")
+                .expect("main ref")
+                .expect("main exists")
+                .peeled_oid(&git)
+                .expect("main oid"),
+            Some(previous)
+        );
+        assert!(
+            git.find_reference(git_notes::NOTES_REF)
+                .expect("notes ref")
+                .is_none(),
+            "a refused checkpoint must not publish its Git note"
+        );
+        let after_publication = [
+            "refs/heads/main",
+            "refs/notes/heddle",
+            "logs/refs/heads/main",
+            "logs/refs/notes/heddle",
+            "logs/HEAD",
+            "HEAD",
+            "index",
+        ]
+        .map(|name| read_optional_file(&git_dir.join(name)).expect("read Git after rejection"));
+        assert_eq!(after_publication, before_publication);
+        let candidate = bridge
+            .mapping
+            .get_git(&state.state_id)
+            .expect("checkpoint candidate was exported before the final ancestry check");
+        let mut reachable = git.reachable_pack_plan();
+        for update in collect_ref_updates(&git).expect("read published refs") {
+            reachable = reachable.root(update.target);
+        }
+        let reachable = reachable.build().expect("read reachable objects");
+        assert!(
+            reachable.is_none_or(|plan| !plan.object_ids().contains(&candidate)),
+            "rejected candidate must remain unreachable from every published Git ref"
+        );
+    }
+
+    fn assert_implicit_checkout_path_refuses_non_fast_forward(path: &str) {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let heddle = HeddleRepository::init_default(tmp.path()).expect("init Heddle");
+        let base = heddle.head().expect("read head").expect("base state");
+        let git = SleyRepository::init(tmp.path()).expect("init Git");
+        git.write_raw_object(GitObjectType::Tree, Vec::new())
+            .expect("empty tree");
+        let root = test_commit(&git, "root", &[]);
+        let previous = test_commit(&git, "previous main", &[root]);
+        set_reference(
+            &git,
+            "refs/heads/main",
+            previous,
+            RefPrecondition::Any,
+            "test: main",
+        )
+        .expect("set main");
+        write_head_symref(git.git_dir(), "refs/heads/main").expect("attach Git HEAD");
+
+        let mut bridge = GitProjection::new(&heddle);
+        bridge.mapping.insert(base, root);
+        let before_ref =
+            fs::read(git.git_dir().join("refs/heads/main")).expect("read main before refusal");
+        let before_head = fs::read(git.git_dir().join("HEAD")).expect("read HEAD");
+        let before_index =
+            read_optional_file(&git.git_dir().join("index")).expect("read index before refusal");
+        let result = match path {
+            "current" => bridge.write_through_current_checkout(),
+            "switch" => bridge.write_through_thread_checkout("main"),
+            "existing" => {
+                bridge.write_thread_state_checkout_from_existing_projection("main", &base)
+            }
+            _ => unreachable!(),
+        };
+        assert!(
+            matches!(result, Err(GitProjectionError::NonFastForwardRef { .. })),
+            "{path}: {result:?}"
+        );
+        assert_eq!(
+            fs::read(git.git_dir().join("refs/heads/main")).expect("read main after refusal"),
+            before_ref,
+            "{path} changed main bytes"
+        );
+        assert_eq!(
+            fs::read(git.git_dir().join("HEAD")).expect("read HEAD"),
+            before_head
+        );
+        assert_eq!(
+            read_optional_file(&git.git_dir().join("index")).expect("read index"),
+            before_index,
+            "{path} changed index bytes"
+        );
+        assert!(
+            git.find_reference(git_notes::NOTES_REF)
+                .expect("notes ref")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn current_checkout_refuses_non_fast_forward_branch_publication() {
+        assert_implicit_checkout_path_refuses_non_fast_forward("current");
+    }
+
+    #[test]
+    fn thread_switch_refuses_non_fast_forward_branch_publication() {
+        assert_implicit_checkout_path_refuses_non_fast_forward("switch");
+    }
+
+    #[test]
+    fn existing_projection_refuses_non_fast_forward_branch_publication() {
+        assert_implicit_checkout_path_refuses_non_fast_forward("existing");
     }
 
     fn test_commit(repo: &SleyRepository, message: &str, parents: &[ObjectId]) -> ObjectId {

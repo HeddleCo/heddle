@@ -30,6 +30,8 @@ mod git_projection_commands;
 mod git_replacement_matrix;
 #[path = "cli_integration/hydrate.rs"]
 mod hydrate;
+#[path = "cli_integration/land_history_regression.rs"]
+mod land_history_regression;
 #[path = "cli_integration/native_scope_boundary.rs"]
 mod native_scope_boundary;
 #[path = "cli_integration/realworld_git.rs"]

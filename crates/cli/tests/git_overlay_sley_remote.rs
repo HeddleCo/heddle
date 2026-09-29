@@ -195,6 +195,189 @@ fn set_git_config(repo: &SleyRepository, key: &str, value: &str) {
         .expect("write local Git config");
 }
 
+#[cfg(unix)]
+fn git(cwd: &Path, args: &[&str]) -> std::process::Output {
+    Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .expect("run Git fixture command")
+}
+
+fn ref_oid(repo: &SleyRepository, name: &str) -> ObjectId {
+    repo.find_reference(name)
+        .expect("read reference")
+        .expect("reference exists")
+        .direct_target()
+        .expect("direct reference")
+}
+
+fn test_note(state: &str, status: &str) -> heddle_git_projection::git_notes::HeddleNote {
+    heddle_git_projection::git_notes::HeddleNote {
+        source_state: None,
+        parents_rewritten: false,
+        state_id: state.to_string(),
+        change_id: state.to_string(),
+        agent: None,
+        confidence: None,
+        status: status.to_string(),
+        omitted_annotations_breakdown: None,
+        signal_counts: None,
+        attribution: None,
+    }
+}
+
+#[test]
+fn pull_refuses_divergent_branch_without_replacing_local_heddle_notes() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_path = temp.path().join("source.git");
+    let checkout = temp.path().join("checkout");
+    let (source, first) = seed_source(&source_path);
+    clone_source(&temp, &source_path, &checkout);
+    let local = SleyRepository::discover(&checkout).expect("open checkout");
+    let local_tip = write_commit(&local, Some(first), b"local\n", b"local\n");
+    let remote_tip = write_commit(&source, Some(first), b"remote\n", b"remote\n");
+    publish_branch(&local, "main", Some(first), local_tip);
+    publish_branch(&source, "main", Some(first), remote_tip);
+    heddle_git_projection::git_notes::write_note(&local, first, &test_note("local", "local"))
+        .expect("write local Heddle note");
+    heddle_git_projection::git_notes::write_note(&source, first, &test_note("remote", "remote"))
+        .expect("write remote Heddle note");
+    let notes_before = ref_oid(&local, "refs/notes/heddle");
+
+    let pulled = run(&temp, &checkout, &["--output", "json", "pull", "origin"]);
+    assert_eq!(pulled.status.code(), Some(74));
+    let refusal: Value = serde_json::from_slice(&pulled.stderr).expect("typed refusal");
+    assert_eq!(refusal["kind"], "git_overlay_pull_diverged");
+    assert_eq!(ref_oid(&local, "refs/heads/main"), local_tip);
+    assert_eq!(ref_oid(&local, "refs/notes/heddle"), notes_before);
+    assert!(
+        local
+            .find_reference("refs/heddle/pull/notes/heddle")
+            .expect("read staged notes")
+            .is_none(),
+        "failed pull must remove its staged notes ref"
+    );
+}
+
+#[test]
+fn pull_refuses_divergent_heddle_notes_before_advancing_branch() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_path = temp.path().join("source.git");
+    let checkout = temp.path().join("checkout");
+    let (source, first) = seed_source(&source_path);
+    clone_source(&temp, &source_path, &checkout);
+    let local = SleyRepository::discover(&checkout).expect("open checkout");
+    let remote_tip = write_commit(&source, Some(first), b"remote\n", b"remote\n");
+    publish_branch(&source, "main", Some(first), remote_tip);
+    heddle_git_projection::git_notes::write_note(&local, first, &test_note("local", "local"))
+        .expect("write local Heddle note");
+    heddle_git_projection::git_notes::write_note(&source, first, &test_note("remote", "remote"))
+        .expect("write remote Heddle note");
+    let notes_before = ref_oid(&local, "refs/notes/heddle");
+
+    let pulled = run(&temp, &checkout, &["--output", "json", "pull", "origin"]);
+    assert_eq!(pulled.status.code(), Some(74));
+    let refusal: Value = serde_json::from_slice(&pulled.stderr).expect("typed refusal");
+    assert_eq!(refusal["kind"], "git_overlay_pull_notes_diverged");
+    assert_eq!(ref_oid(&local, "refs/heads/main"), first);
+    assert_eq!(ref_oid(&local, "refs/notes/heddle"), notes_before);
+}
+
+#[cfg(unix)]
+#[test]
+fn pull_publication_race_keeps_concurrent_branch_commit() {
+    let temp = TempDir::new().expect("tempdir");
+    let source_path = temp.path().join("source.git");
+    let checkout = temp.path().join("checkout");
+    let source = SleyRepository::init_bare(&source_path).expect("initialize source");
+    let file = source.write_blob(b"one\n").expect("write file");
+    let attributes = source
+        .write_blob(b"tracked.txt filter=race\n")
+        .expect("write attributes");
+    let mut tree = sley::TreeEditor::new();
+    tree.upsert("tracked.txt", EntryKind::Blob, file);
+    tree.upsert(".gitattributes", EntryKind::Blob, attributes);
+    let tree = source.write_tree(tree).expect("write tree");
+    let identity = b"Heddle Test <heddle@example.com> 0 +0000".to_vec();
+    let first = source
+        .write_raw_object(
+            GitObjectType::Commit,
+            CommitObject {
+                tree,
+                parents: Vec::new(),
+                author: identity.clone(),
+                committer: identity,
+                encoding: None,
+                message: b"first\n".to_vec(),
+            }
+            .write(),
+        )
+        .expect("write first commit");
+    publish_branch(&source, "main", None, first);
+    std::fs::write(source_path.join("HEAD"), b"ref: refs/heads/main\n").expect("write source HEAD");
+    clone_source(&temp, &source_path, &checkout);
+    let local = SleyRepository::discover(&checkout).expect("open checkout");
+    let foreign = write_commit(&local, Some(first), b"foreign\n", b"foreign\n");
+    let remote_blob = source.write_blob(b"remote\n").expect("write remote file");
+    let mut remote_tree = sley::TreeEditor::new();
+    remote_tree.upsert("tracked.txt", EntryKind::Blob, remote_blob);
+    remote_tree.upsert(".gitattributes", EntryKind::Blob, attributes);
+    let remote_tree = source.write_tree(remote_tree).expect("write remote tree");
+    let remote_identity = b"Heddle Test <heddle@example.com> 0 +0000".to_vec();
+    let remote_tip = source
+        .write_raw_object(
+            GitObjectType::Commit,
+            CommitObject {
+                tree: remote_tree,
+                parents: vec![first],
+                author: remote_identity.clone(),
+                committer: remote_identity,
+                encoding: None,
+                message: b"remote\n".to_vec(),
+            }
+            .write(),
+        )
+        .expect("write remote commit");
+    publish_branch(&source, "main", Some(first), remote_tip);
+
+    let fired = temp.path().join("filter-fired");
+    let filter = temp.path().join("race-smudge.sh");
+    std::fs::write(
+        &filter,
+        format!(
+            "#!/bin/sh\nif [ ! -e '{}' ]; then\n  /usr/bin/touch '{}'\n  /usr/bin/git -C '{}' update-ref refs/heads/main {} {}\nfi\n/usr/bin/cat\n",
+            fired.display(), fired.display(), checkout.display(), foreign, first
+        ),
+    )
+    .expect("write smudge filter");
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&filter, std::fs::Permissions::from_mode(0o755))
+        .expect("make filter executable");
+    set_git_config(
+        &local,
+        "filter.race.smudge",
+        filter.to_str().expect("filter path"),
+    );
+    set_git_config(&local, "filter.race.clean", "cat");
+
+    let pulled = run(&temp, &checkout, &["--output", "json", "pull", "origin"]);
+    assert_eq!(pulled.status.code(), Some(74));
+    assert!(
+        fired.exists(),
+        "checkout must trigger the concurrent writer"
+    );
+    assert_eq!(ref_oid(&local, "refs/heads/main"), foreign);
+    let ancestry = git(
+        &checkout,
+        &["merge-base", "--is-ancestor", &foreign.to_string(), "main"],
+    );
+    assert!(
+        ancestry.status.success(),
+        "concurrent commit must remain on main"
+    );
+}
+
 #[test]
 fn pull_streams_and_fast_forwards_with_empty_process_path() {
     let temp = TempDir::new().expect("tempdir");
@@ -208,6 +391,8 @@ fn pull_streams_and_fast_forwards_with_empty_process_path() {
 
     let second = write_commit(&source, Some(first), b"two\n", b"two\n");
     publish_branch(&source, "release", None, second);
+    heddle_git_projection::git_notes::write_note(&source, first, &test_note("remote", "remote"))
+        .expect("write remote Heddle note");
 
     let output = run(&temp, &checkout, &["--output", "json", "pull"]);
     assert!(
@@ -225,6 +410,20 @@ fn pull_streams_and_fast_forwards_with_empty_process_path() {
     );
     let local = SleyRepository::discover(&checkout).expect("reopen checkout");
     assert_eq!(local.head().expect("read HEAD").oid, Some(second));
+    assert!(
+        local
+            .find_reference("refs/heddle/pull/notes/heddle")
+            .expect("read staged notes")
+            .is_none(),
+        "successful pull must remove its staged notes ref"
+    );
+    assert!(
+        local
+            .find_reference("refs/notes/heddle")
+            .expect("read served notes")
+            .is_some(),
+        "fetched Heddle notes must still be published"
+    );
     assert!(!checkout.join(".heddle/git").exists());
 }
 

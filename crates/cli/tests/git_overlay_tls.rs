@@ -103,6 +103,30 @@ impl PullFixture {
 }
 
 #[test]
+fn git_overlay_https_clone_promotes_staged_branch_refs() {
+    let fixture = PullFixture::new();
+    let destination = fixture.temp.path().join("https-clone");
+    let mut command = heddle_command(&fixture.temp, fixture.temp.path());
+    command
+        .args(["clone", &fixture.server.url(), path(&destination)])
+        .env("HEDDLE_REMOTE_TLS_CA_CERT", &fixture.ca_path);
+    let cloned = command.output().expect("clone HTTPS Git source");
+    assert!(cloned.status.success(), "HTTPS clone: {}", stderr(&cloned));
+
+    let source = SleyRepository::open(&fixture.source_path).expect("source repository");
+    let expected = source
+        .find_reference("refs/heads/main")
+        .expect("source main")
+        .and_then(|reference| reference.peeled_oid(&source).ok().flatten());
+    let clone = SleyRepository::discover(&destination).expect("cloned repository");
+    let actual = clone
+        .find_reference("refs/heads/main")
+        .expect("cloned main")
+        .and_then(|reference| reference.peeled_oid(&clone).ok().flatten());
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn git_overlay_pull_honours_remote_tls_ca_cert() {
     let fixture = PullFixture::new();
     let pulled = fixture.pull(true);
