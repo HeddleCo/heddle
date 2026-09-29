@@ -19,7 +19,7 @@ use crypto::{Ed25519Signer, Signer};
 
 /// Request-time CI verdict action, narrower than general review decisions.
 pub const CI_VERDICT_WRITE_ACTION: &str = "ci-verdict:write";
-pub const CI_VERDICT_WRITE_OPERATION: &str = "CiVerdictWrite";
+pub const RECORD_EVIDENCE_OPERATION: &str = "RecordEvidence";
 
 const TEMPLATE_READ_OPERATIONS: &[&str] = &[
     "DescribeEndpoint",
@@ -37,8 +37,6 @@ const TEMPLATE_READ_OPERATIONS: &[&str] = &[
     "ObserveAnalysis",
     "ReadContent",
     "ReadArtifact",
-    "ObserveCheckouts",
-    "ObserveRuns",
     "ObserveAttention",
 ];
 const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
@@ -53,20 +51,11 @@ const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
     "ResolveDiscussion",
     "RecordReview",
     "CreateSpool",
-    "Capture",
-    "Refresh",
-    "Resolve",
-    "LandCheckout",
-    "ClaimCheckoutWriter",
-    "ReleaseCheckoutWriter",
-    CI_VERDICT_WRITE_OPERATION,
+    RECORD_EVIDENCE_OPERATION,
 ];
 const TEMPLATE_CI_LANDING_WRITES: &[&str] = &["LandThread", "PublishContent"];
-const TEMPLATE_RUNNER_WRITES: &[&str] = &[
-    "DescribeEndpoint",
-    "GetIdentity",
-    CI_VERDICT_WRITE_OPERATION,
-];
+const TEMPLATE_RUNNER_WRITES: &[&str] =
+    &["DescribeEndpoint", "GetIdentity", RECORD_EVIDENCE_OPERATION];
 
 /// Optional named restrictions. Omitting a template inherits parent authority.
 /// Explicit operations may narrow a chosen template; no preset expands a parent.
@@ -130,8 +119,8 @@ pub struct AgentAttenuation {
     /// own expiry.
     pub expires_at: DateTime<Utc>,
     /// When `Some`, the agent is restricted to the listed hosted operations.
-    /// Each entry is a bare method name (e.g. `"GetState"`, `"ListRefs"`) or
-    /// a verifier operation such as `"CiVerdictWrite"`.
+    /// Each entry is a bare method name, such as `"GetIdentity"` or
+    /// `"RecordEvidence"`.
     pub allowed_operations: Option<Vec<String>>,
     /// When `Some`, the agent is restricted to resources whose path matches
     /// one of the entries. Format: `(kind, path)` where
@@ -483,15 +472,18 @@ mod tests {
 
     #[test]
     fn templates_name_real_native_operations() {
+        use api::heddle::api::common::DeploymentTarget;
+
         let _process_env_guard = crate::test_process_env::shared_blocking();
         let methods: BTreeSet<&str> = api::v2::ALL_METHODS
             .iter()
+            .filter(|method| method.deployment_targets.contains(&DeploymentTarget::Weft))
             .filter_map(|method| method.path.rsplit('/').next())
             .collect();
         for template in AgentTemplate::ALL {
             for operation in template.operations() {
                 assert!(
-                    operation == CI_VERDICT_WRITE_OPERATION || methods.contains(operation.as_str()),
+                    methods.contains(operation.as_str()),
                     "unknown native operation: {operation}"
                 );
             }
@@ -530,7 +522,7 @@ mod tests {
             BTreeSet::from([
                 "DescribeEndpoint".to_string(),
                 "GetIdentity".to_string(),
-                CI_VERDICT_WRITE_OPERATION.to_string(),
+                "RecordEvidence".to_string(),
             ])
         );
         for forbidden in ["Push", "UpdateRef", "spool:write", "spool-write"] {

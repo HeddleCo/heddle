@@ -1613,7 +1613,7 @@ heddle auth derive-agent \
 ```
 
 The canonical weft scope is `spool:org/acme ci-verdict:write`. The Biscuit's
-request-operation fence uses weft's corresponding `CiVerdictWrite` operation;
+request-operation fence uses weft's `RecordEvidence` operation;
 it does not admit `Push`, `UpdateRef`, or ordinary spool write.
 
 ## What gets emitted in the attenuation block

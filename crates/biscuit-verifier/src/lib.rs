@@ -40,11 +40,11 @@ pub const POP_DELEGATION_DOMAIN: &[u8] = b"heddle-pop-delegation-v1\0";
 
 pub const PRESENCE_TOKEN_TTL_SECS: i64 = 5 * 60;
 
-/// Authority-block action required to submit a signed CI verdict.
+/// Authority-block action carried by scoped CI verdict credentials.
 pub const CI_VERDICT_WRITE_ACTION: &str = "ci-verdict:write";
 
-/// Request-time operation fact used by the CI-verdict authorization gate.
-pub const CI_VERDICT_WRITE_OPERATION: &str = "CiVerdictWrite";
+/// Native request operation used for CI evidence submission.
+pub const RECORD_EVIDENCE_OPERATION: &str = "RecordEvidence";
 
 /// Marker predicate carried by the exact server-signed presence block shape.
 pub(crate) const PRESENCE_ATTENUATION_FACT: &str = "weft_presence_attenuation_v1";
@@ -277,21 +277,6 @@ pub fn authorize_at_with_extra_facts(
                 .as_str(),
             )
             .internal_ctx("add resource fact")?;
-    }
-    if operation == CI_VERDICT_WRITE_OPERATION {
-        // SECURITY: both the operation and resolved resource are injected by
-        // the verifier. Trust the capability right only from the authority
-        // block so an offline-appended fact cannot self-grant verdict power.
-        // The action is intentionally outside admin → write → read, keeping a
-        // normal spool writer unable to sign CI verdicts.
-        builder = builder
-            .check(
-                format!(
-                    "check if resource(\"spool\", $path), right(\"spool\", $path, \"{CI_VERDICT_WRITE_ACTION}\") trusting authority"
-                )
-                .as_str(),
-            )
-            .internal_ctx("add CI-verdict capability check")?;
     }
     if !extra_facts.is_empty() {
         // Injected request facts are only trustworthy if the token cannot

@@ -640,7 +640,6 @@ fn resolve_agent_operations(
         if !api::v2::ALL_METHODS
             .iter()
             .any(|method| method.path.rsplit('/').next() == Some(operation.as_str()))
-            && operation != super::device_flow::CI_VERDICT_WRITE_OPERATION
         {
             bail!("unknown v2 operation {operation:?}");
         }
@@ -1839,7 +1838,7 @@ fn is_loopback_browser_host(host: &str) -> bool {
 mod tests {
     use super::*;
     use crate::hosted_runtime::{
-        auth_requests::LoginPermission, device_flow::CI_VERDICT_WRITE_OPERATION,
+        auth_requests::LoginPermission, device_flow::RECORD_EVIDENCE_OPERATION,
     };
 
     #[test]
@@ -2578,7 +2577,7 @@ mod tests {
             .expect("request operation fact")
             .fact(format!("resource(\"spool\", \"spool/{spool}\")").as_str())
             .expect("request spool fact");
-        if operation == CI_VERDICT_WRITE_OPERATION {
+        if operation == RECORD_EVIDENCE_OPERATION {
             builder = builder
                 .check(
                 format!(
@@ -2941,7 +2940,7 @@ mod tests {
                 "runner must declare the exact spool scope: {attenuation}"
             );
             assert!(
-                attenuation.contains(format!("$op == \"{CI_VERDICT_WRITE_OPERATION}\"").as_str()),
+                attenuation.contains(format!("$op == \"{RECORD_EVIDENCE_OPERATION}\"").as_str()),
                 "runner must carry weft's exact verdict request operation: {attenuation}"
             );
 
@@ -2957,9 +2956,9 @@ mod tests {
             assert_eq!(
                 operations,
                 [
-                    CI_VERDICT_WRITE_OPERATION.to_string(),
                     "DescribeEndpoint".to_string(),
                     "GetIdentity".to_string(),
+                    RECORD_EVIDENCE_OPERATION.to_string(),
                 ]
             );
             assert_eq!(
@@ -2983,7 +2982,7 @@ mod tests {
             assert!(runner_request_is_authorized(
                 &loaded.token,
                 &root,
-                CI_VERDICT_WRITE_OPERATION,
+                RECORD_EVIDENCE_OPERATION,
                 "org/acme"
             ));
             for operation in ["DescribeEndpoint", "GetIdentity"] {
@@ -2998,7 +2997,7 @@ mod tests {
                 !runner_request_is_authorized(
                     &loaded.token,
                     &root,
-                    CI_VERDICT_WRITE_OPERATION,
+                    RECORD_EVIDENCE_OPERATION,
                     "org/other"
                 ),
                 "runner verdict authority must not escape its spool scope"
