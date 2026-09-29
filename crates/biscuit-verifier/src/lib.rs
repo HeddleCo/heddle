@@ -851,7 +851,13 @@ mod tests {
                 delegation::AgentAttenuation {
                     agent_id: "scoped-agent".into(),
                     expires_at: expires,
-                    allowed_operations: Some(vec!["ReadContent".into()]),
+                    allowed_operations: Some(vec![
+                        "ReadContent".into(),
+                        "DescribeEndpoint".into(),
+                        "GetIdentity".into(),
+                        "ListSpools".into(),
+                        "ObserveWorkspace".into(),
+                    ]),
                     allowed_resources: Some(vec![("spool".into(), "org/allowed".into())]),
                 }
                 .block()
@@ -883,6 +889,33 @@ mod tests {
             facts.limits_identity_disclosure,
             "explicit ceilings retain the limited self view"
         );
+        for operation in ["DescribeEndpoint", "GetIdentity"] {
+            verify_at_with_resource(&narrowed, &[root.public()], &[], operation, None, now)
+                .expect("resource-less bootstrap and caller identity remain available");
+        }
+        verify_at_with_resource(
+            &narrowed,
+            &[root.public()],
+            &[],
+            "ReadContent",
+            Some(("spool", "org/allowed")),
+            now,
+        )
+        .expect("scoped content read remains available");
+        for (operation, resource) in [
+            ("ReadContent", Some(("spool", "org/other"))),
+            ("ReadContent", None),
+            ("ListSpools", None),
+            ("ListSpools", Some(("spool", "org/allowed"))),
+            ("ObserveWorkspace", None),
+            ("ObserveWorkspace", Some(("spool", "org/allowed"))),
+        ] {
+            assert!(
+                verify_at_with_resource(&narrowed, &[root.public()], &[], operation, resource, now)
+                    .is_err(),
+                "scope must refuse {operation} without an in-scope resource"
+            );
+        }
         let narrowed_parent = crate::signature_v1::verify_base64(&narrowed, |_| Ok(root.public()))
             .expect("narrowed parent");
         let parent_id = narrowed_parent
