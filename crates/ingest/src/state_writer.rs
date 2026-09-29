@@ -40,11 +40,24 @@ use crate::{
     git_walk::{CommitEntry, GitSignature},
 };
 
-pub(crate) fn state_from_commit(
+#[cfg(test)]
+fn state_from_commit(
     commit: &CommitEntry,
     tree: ContentHash,
     parents: Vec<StateId>,
     git_lossy: bool,
+) -> crate::Result<State> {
+    state_from_commit_with_rewrites(commit, tree, parents, git_lossy, |_| Ok(None))
+}
+
+/// Resolve an embedded parent's original StateId through the durable rewrite
+/// map. Only a known rewrite may explain a mismatch in an unmarked note.
+pub(crate) fn state_from_commit_with_rewrites(
+    commit: &CommitEntry,
+    tree: ContentHash,
+    parents: Vec<StateId>,
+    git_lossy: bool,
+    rewritten_parent: impl Fn(StateId) -> crate::Result<Option<StateId>>,
 ) -> crate::Result<State> {
     state_from_commit_with_source_policy(
         commit,
@@ -52,6 +65,7 @@ pub(crate) fn state_from_commit(
         parents,
         git_lossy,
         SourceStateParentPolicy::Validate,
+        rewritten_parent,
     )
 }
 
@@ -71,6 +85,7 @@ pub(crate) fn descriptor_state_from_commit(
         Vec::new(),
         git_lossy,
         SourceStateParentPolicy::PreserveEmbedded,
+        |_| Ok(None),
     )
 }
 
@@ -86,6 +101,7 @@ fn state_from_commit_with_source_policy(
     parents: Vec<StateId>,
     git_lossy: bool,
     source_parent_policy: SourceStateParentPolicy,
+    rewritten_parent: impl Fn(StateId) -> crate::Result<Option<StateId>>,
 ) -> crate::Result<State> {
     // A lossy string view, derived once for the parsers that need text
     // (attribution trailers, the one-line intent). The verbatim bytes still
@@ -97,19 +113,40 @@ fn state_from_commit_with_source_policy(
         && let Some(mut source_state) = note.source_state.clone()
     {
         let source_id = source_state.id();
+        let parent_mismatch = matches!(source_parent_policy, SourceStateParentPolicy::Validate)
+            && source_state.parents != parents;
+        let explained_rewrites = if parent_mismatch && !note.parents_rewritten {
+            if source_state.parents.len() != parents.len() {
+                false
+            } else {
+                let mut explained = true;
+                for (original, actual) in source_state.parents.iter().zip(&parents) {
+                    if original != actual && rewritten_parent(*original)? != Some(*actual) {
+                        explained = false;
+                        break;
+                    }
+                }
+                explained
+            }
+        } else {
+            false
+        };
         if source_id.to_string_full() != note.state_id
             || source_state.change_id.to_string_full() != note.change_id
             || source_state.tree != tree
-            || (!note.parents_rewritten
-                && matches!(source_parent_policy, SourceStateParentPolicy::Validate)
-                && source_state.parents != parents)
+            || (parent_mismatch && !note.parents_rewritten && !explained_rewrites)
         {
             return Err(IngestError::Git(format!(
                 "embedded Heddle state for commit {} does not match its note, tree, or parents",
                 commit.sha
             )));
         }
-        source_state.state_id = source_id;
+        if parent_mismatch {
+            source_state.parents = parents;
+            source_state.state_id = source_state.id();
+        } else {
+            source_state.state_id = source_id;
+        }
         return Ok(source_state);
     }
     let identity = resolve_identity(commit, note.as_ref())?;
@@ -571,5 +608,65 @@ mod tests {
                 .expect("full import validates the real parent graph"),
             source
         );
+    }
+
+    #[test]
+    fn rewritten_note_uses_actual_ordered_git_parents() {
+        let tree = empty_tree_hash();
+        let original_parent = StateId::from_bytes([0x31; 32]);
+        let mapped_parents = vec![
+            StateId::from_bytes([0x41; 32]),
+            StateId::from_bytes([0x42; 32]),
+        ];
+        let source = State::new(
+            tree,
+            vec![original_parent],
+            Attribution::human(Principal::new("Exported", "exported@example.com")),
+        )
+        .with_change_id(ChangeId::from_bytes([0x52; 16]))
+        .with_status(Status::Published);
+        let mut note = HeddleNote::from_state(&source);
+        note.parents_rewritten = true;
+        let mut commit = make_commit(
+            "34".repeat(20).as_str(),
+            vec!["12".repeat(20), "23".repeat(20)],
+            "exported merge\n",
+        );
+        commit.heddle_note = Some(note.to_json_bytes().expect("canonical note"));
+
+        let converted = state_from_commit(&commit, tree, mapped_parents.clone(), false)
+            .expect("rewritten note converts");
+        assert_eq!(converted.parents, mapped_parents);
+        assert_eq!(converted.status, Status::Published);
+        assert_eq!(converted.change_id, source.change_id);
+        assert_ne!(converted.id(), source.id());
+    }
+
+    #[test]
+    fn descendant_note_rebuilds_only_for_certified_parent_rewrites() {
+        let tree = empty_tree_hash();
+        let old_parent = StateId::from_bytes([0x51; 32]);
+        let new_parent = StateId::from_bytes([0x61; 32]);
+        let source = State::new(
+            tree,
+            vec![old_parent],
+            Attribution::human(Principal::new("Exported", "exported@example.com")),
+        )
+        .with_change_id(ChangeId::from_bytes([0x72; 16]));
+        let mut commit = make_commit("56".repeat(20).as_str(), vec!["34".repeat(20)], "child\n");
+        commit.heddle_note = Some(
+            HeddleNote::from_state(&source)
+                .to_json_bytes()
+                .expect("canonical note"),
+        );
+
+        assert!(state_from_commit(&commit, tree, vec![new_parent], false).is_err());
+        let converted =
+            state_from_commit_with_rewrites(&commit, tree, vec![new_parent], false, |id| {
+                Ok((id == old_parent).then_some(new_parent))
+            })
+            .expect("certified rewrite");
+        assert_eq!(converted.parents, vec![new_parent]);
+        assert_ne!(converted.id(), source.id());
     }
 }
