@@ -70,6 +70,49 @@ fn git_overlay_interop_import_git_imports_current_branch() {
 }
 
 #[test]
+fn git_overlay_interop_import_reports_skipped_refs_in_text_and_json() {
+    let temp = TempDir::new().unwrap();
+    init_git(temp.path());
+    let tip = commit_file(temp.path(), "story.txt", "one\n", "seed");
+    git(temp.path(), &["update-ref", "refs/custom/example", &tip]);
+    let blob = git(temp.path(), &["hash-object", "-w", "story.txt"]);
+    git(temp.path(), &["update-ref", "refs/tags/blob-tag", &blob]);
+
+    let json = heddle(
+        &["--output", "json", "bridge", "git", "import"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    let parsed: Value = serde_json::from_str(&json).unwrap();
+    let skipped = parsed["skipped_refs"]
+        .as_array()
+        .expect("named skipped refs");
+    assert!(
+        skipped.iter().any(|entry| {
+            entry["name"] == "refs/custom/example" && entry["reason"] == "unsupported ref namespace"
+        }),
+        "{json}"
+    );
+    assert!(
+        skipped.iter().any(|entry| {
+            entry["name"] == "refs/tags/blob-tag"
+                && entry["reason"] == "tag does not point to a commit"
+        }),
+        "{json}"
+    );
+
+    let text = heddle(&["bridge", "git", "import"], Some(temp.path())).unwrap();
+    assert!(
+        text.contains("refs/custom/example: unsupported ref namespace"),
+        "{text}"
+    );
+    assert!(
+        text.contains("refs/tags/blob-tag: tag does not point to a commit"),
+        "{text}"
+    );
+}
+
+#[test]
 fn git_overlay_interop_native_git_commit_stays_direct_backed_until_import() {
     let temp = TempDir::new().unwrap();
     init_git(temp.path());

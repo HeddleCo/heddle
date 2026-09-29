@@ -22,7 +22,12 @@ use std::{
 };
 
 use objects::{
-    object::{AnnotatedTag, AnnotatedTagMarker, Blob, ContentHash, HeddleNote, Tree, TreeEntry},
+    object::{
+        AnnotatedTag, AnnotatedTagMarker, Blob, ContentHash, HeddleNote, Tree, TreeEntry,
+        thread_replication::git_import_graph::{
+            ImportRefDisposition, ImportSkipReason, SkippedImportRef, classify_git_import_ref,
+        },
+    },
     store::{
         CompressionConfig, ObjectStore,
         pack::{ObjectType as PackObjectType, PackBuilder, PackObjectId, StreamingPackBuilder},
@@ -60,6 +65,8 @@ pub struct ImportStats {
     /// the walker decided to suppress (e.g. `origin/HEAD` symbolic) land
     /// in `symbolic_skipped`. These two together give an "ignored" count.
     pub refs_seen: RefDiscoveryStats,
+    /// Names and reasons for Git refs that could not become native refs.
+    pub skipped_refs: Vec<SkippedImportRef>,
     /// Commits translated (live + reflog-only).
     pub commits_imported: usize,
     /// New Heddle states written during this import. Re-runs can inspect the
@@ -292,7 +299,46 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
     /// `async` because ref emission awaits the backend's `async` marker
     /// read; for the local `RefManager` the future is immediately ready.
     pub async fn run(&mut self) -> crate::Result<ImportStats> {
-        let (heads, refs_seen) = self.git.collect_refs_detailed()?;
+        let (mut heads, refs_seen) = self.git.collect_refs_detailed()?;
+        let emitted_remote_names: HashSet<String> = heads
+            .iter()
+            .filter(|head| head.namespace == RefNamespace::RemoteBranch)
+            .map(|head| head.full_name.clone())
+            .collect();
+        let frozen_refs = self.git.collect_frozen_import_refs()?;
+        let mut supported = HashSet::new();
+        let mut skipped_refs = Vec::new();
+        for reference in frozen_refs {
+            if reference.raw_name == b"HEAD" {
+                continue;
+            }
+            let disposition = classify_git_import_ref(&reference).map_err(|error| {
+                IngestError::Git(format!(
+                    "classify Git ref {}: {error:?}",
+                    String::from_utf8_lossy(&reference.raw_name)
+                ))
+            })?;
+            match disposition {
+                ImportRefDisposition::Branch | ImportRefDisposition::CommitTag => {
+                    supported.insert(reference.raw_name);
+                }
+                ImportRefDisposition::Unsupported {
+                    reason: ImportSkipReason::RemoteTracking,
+                } if std::str::from_utf8(&reference.raw_name)
+                    .is_ok_and(|name| emitted_remote_names.contains(name)) =>
+                {
+                    supported.insert(reference.raw_name);
+                }
+                ImportRefDisposition::Unsupported { reason } => {
+                    skipped_refs.push(SkippedImportRef {
+                        raw_name: reference.raw_name,
+                        reason,
+                    })
+                }
+                ImportRefDisposition::DefaultHead | ImportRefDisposition::RequiredNotes => {}
+            }
+        }
+        heads.retain(|head| supported.contains(head.full_name.as_bytes()));
         let (heads, refs_seen) = self.scope.resolve_heads(heads, refs_seen)?;
         info!(
             local_branches = refs_seen.local_branches,
@@ -407,7 +453,17 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             }
         }
 
+        let remapped_shas: HashSet<&str> = remapped_commits
+            .iter()
+            .map(|(git_sha, _)| git_sha.as_str())
+            .collect();
         for commit in &commits {
+            // These mappings are removed below and their rebuilt States claim
+            // identities in topological order. Overlay descriptors may not
+            // have a readable State body yet.
+            if remapped_shas.contains(commit.sha.as_str()) {
+                continue;
+            }
             if let Some(cid) = self.map.get_commit(&commit.sha)? {
                 let state = self.store.get_state(&cid)?.ok_or_else(|| {
                     IngestError::Other(format!(
@@ -544,6 +600,7 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
 
         Ok(ImportStats {
             refs_seen,
+            skipped_refs,
             commits_imported: commits.len(),
             states_created: packed_stats.states,
             native_identity_changes: packed_stats.native_identity_changes,
@@ -1637,6 +1694,61 @@ mod tests {
             refs.get_thread(&ThreadName::new("feature/x"))
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn import_reports_skipped_ref_names_and_reasons() {
+        let gitdir = TempDir::new().expect("Git temp dir");
+        let heddledir = TempDir::new().expect("Heddle temp dir");
+        let tip = seed_multibranch_repo(gitdir.path());
+        git_output(
+            gitdir.path(),
+            &["update-ref", "refs/custom/keep-me-visible", &tip],
+            None,
+        );
+        git_output(
+            gitdir.path(),
+            &["update-ref", "refs/heads/heddle/reserved", &tip],
+            None,
+        );
+        let blob = git_output(
+            gitdir.path(),
+            &["hash-object", "-w", "--stdin"],
+            Some(b"key"),
+        );
+        git_output(
+            gitdir.path(),
+            &["update-ref", "refs/tags/key-blob", &blob],
+            None,
+        );
+        let git = GitSource::open(gitdir.path()).expect("Git source");
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(heddledir.path());
+        refs.init().expect("refs");
+        let mut map = ShaMap::new();
+        let stats =
+            pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).expect("import");
+        assert!(
+            stats
+                .skipped_refs
+                .iter()
+                .any(|reference| { reference.raw_name == b"refs/custom/keep-me-visible" }),
+            "{stats:?}"
+        );
+        assert!(
+            stats
+                .skipped_refs
+                .iter()
+                .any(|reference| { reference.raw_name == b"refs/tags/key-blob" }),
+            "{stats:?}"
+        );
+        assert!(
+            stats
+                .skipped_refs
+                .iter()
+                .any(|reference| { reference.raw_name == b"refs/heads/heddle/reserved" }),
+            "{stats:?}"
         );
     }
 

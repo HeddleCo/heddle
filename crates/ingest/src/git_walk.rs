@@ -461,6 +461,12 @@ impl GitSource {
 
         for reference in refs {
             let full_name = reference.name;
+            // Sley currently returns names as Strings after lossy decoding.
+            // A replacement character means the original Git name cannot be
+            // emitted faithfully as a native Thread or marker.
+            if full_name.contains('\u{fffd}') {
+                continue;
+            }
             let Some((namespace, short_name)) = classify_ref_name(&full_name) else {
                 continue;
             };
@@ -1009,10 +1015,7 @@ fn signature_from_raw(raw: &[u8]) -> Option<GitSignature> {
     Some(GitSignature {
         name: sig.name.as_bytes().to_vec(),
         email: sig.email.as_bytes().to_vec(),
-        time: Utc
-            .timestamp_opt(time.seconds, 0)
-            .single()
-            .unwrap_or_else(Utc::now),
+        time: Utc.timestamp_opt(time.seconds, 0).single()?,
         tz_offset,
     })
 }
@@ -1037,7 +1040,7 @@ mod tests {
     use std::process::Command;
 
     use objects::object::thread_replication::git_import_graph::{
-        ImportRefDisposition, classify_frozen_import_refs,
+        ImportRefDisposition, ImportSkipReason, classify_frozen_import_refs,
     };
     use tempfile::TempDir;
 
@@ -1106,6 +1109,91 @@ mod tests {
                 .expect("tag position")],
             ImportRefDisposition::CommitTag
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lossy_ref_name_is_never_classified_as_native() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp = TempDir::new().expect("temp directory");
+        let tip = seed_repo(temp.path());
+        let invalid = std::ffi::OsString::from_vec(b"refs/heads/invalid-\xff".to_vec());
+        let status = Command::new("git")
+            .arg("update-ref")
+            .arg(&invalid)
+            .arg(&tip)
+            .current_dir(temp.path())
+            .status()
+            .expect("write invalid ref");
+        assert!(status.success());
+        let source = GitSource::open(temp.path()).expect("source");
+        let refs = source.collect_frozen_import_refs().expect("refs");
+        let classified = classify_frozen_import_refs(&refs).expect("classification");
+        assert!(classified.skipped_refs.iter().any(|reference| {
+            String::from_utf8_lossy(&reference.raw_name).contains("invalid-")
+                && reference.reason == ImportSkipReason::NonUtf8RefName
+        }));
+        let (heads, _) = source.collect_refs_detailed().expect("heads");
+        assert!(!heads.iter().any(|head| head.full_name.contains("invalid-")));
+    }
+
+    #[test]
+    fn signature_rejects_out_of_range_timestamp() {
+        assert!(signature_from_raw(b"Test <test@example.com> 9223372036854775807 +0000").is_none());
+    }
+
+    #[test]
+    fn local_walk_fails_on_out_of_range_commit_timestamp() {
+        let temp = TempDir::new().expect("temp directory");
+        let status = Command::new("git")
+            .args(["init", "-q", "--initial-branch=main"])
+            .current_dir(temp.path())
+            .status()
+            .expect("git init");
+        assert!(status.success());
+        let tree = Command::new("git")
+            .args(["mktree"])
+            .current_dir(temp.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("empty tree");
+        assert!(tree.status.success());
+        let tree = String::from_utf8(tree.stdout).expect("tree oid");
+        let raw = format!(
+            "tree {}\nauthor Test <test@example.com> 9223372036854775807 +0000\ncommitter Test <test@example.com> 1700000000 +0000\n\nmessage\n",
+            tree.trim()
+        );
+        let mut child = Command::new("git")
+            .args([
+                "hash-object",
+                "--literally",
+                "-w",
+                "-t",
+                "commit",
+                "--stdin",
+            ])
+            .current_dir(temp.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("commit object");
+        use std::io::Write;
+        child
+            .stdin
+            .as_mut()
+            .expect("stdin")
+            .write_all(raw.as_bytes())
+            .expect("raw commit");
+        let output = child.wait_with_output().expect("commit oid");
+        assert!(output.status.success());
+        let sha = String::from_utf8(output.stdout)
+            .expect("commit oid")
+            .trim()
+            .to_string();
+        let source = GitSource::open(temp.path()).expect("source");
+        let result = source.commits_topo(vec![sha]);
+        assert!(result.is_err(), "{result:?}");
     }
 
     /// Follow-up C: ingest's ref discovery must not crash on annotated

@@ -4,7 +4,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::invalid;
-use crate::error::Result;
+use crate::{
+    error::Result,
+    object::{MarkerName, ThreadName},
+};
 
 pub const MAX_IMPORT_REFS: usize = 512;
 
@@ -88,6 +91,8 @@ pub enum ImportRefDisposition {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImportSkipReason {
+    NonUtf8RefName,
+    InvalidNativeName,
     RemoteTracking,
     Replace,
     Pull,
@@ -96,6 +101,23 @@ pub enum ImportSkipReason {
     SymbolicRef,
     OtherRef,
     DanglingUnsupported,
+}
+
+impl ImportSkipReason {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::NonUtf8RefName => "non-UTF-8 ref name",
+            Self::InvalidNativeName => "reserved native ref name",
+            Self::RemoteTracking => "remote-tracking ref",
+            Self::Replace => "replace ref",
+            Self::Pull => "pull ref",
+            Self::OtherNotes => "other notes ref",
+            Self::NonCommitTag => "tag does not point to a commit",
+            Self::SymbolicRef => "symbolic ref",
+            Self::OtherRef => "unsupported ref namespace",
+            Self::DanglingUnsupported => "dangling unsupported ref",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +132,13 @@ pub fn classify_git_import_ref(
     reference: &ImportRefIdentity,
 ) -> std::result::Result<ImportRefDisposition, ImportRefFailure> {
     let name = reference.raw_name.as_slice();
+    if std::str::from_utf8(name).is_err()
+        || name.windows(3).any(|bytes| bytes == "\u{fffd}".as_bytes())
+    {
+        return Ok(ImportRefDisposition::Unsupported {
+            reason: ImportSkipReason::NonUtf8RefName,
+        });
+    }
     if name == b"HEAD" {
         return match &reference.raw_target {
             GitRefTarget::Symbolic(target)
@@ -139,6 +168,13 @@ pub fn classify_git_import_ref(
         GitRefTarget::Symbolic(_) => return Err(ImportRefFailure::UnknownRequiredTarget),
     };
     if name.starts_with(b"refs/heads/") && name.len() > b"refs/heads/".len() {
+        if ThreadName::try_new(String::from_utf8_lossy(&name[b"refs/heads/".len()..]).into_owned())
+            .is_err()
+        {
+            return Ok(ImportRefDisposition::Unsupported {
+                reason: ImportSkipReason::InvalidNativeName,
+            });
+        }
         return match (
             kind,
             reference.peeled_commit.as_ref(),
@@ -152,6 +188,13 @@ pub fn classify_git_import_ref(
         };
     }
     if name.starts_with(b"refs/tags/") && name.len() > b"refs/tags/".len() {
+        if MarkerName::try_new(String::from_utf8_lossy(&name[b"refs/tags/".len()..]).into_owned())
+            .is_err()
+        {
+            return Ok(ImportRefDisposition::Unsupported {
+                reason: ImportSkipReason::InvalidNativeName,
+            });
+        }
         return match kind {
             GitRefObjectType::Commit | GitRefObjectType::Tag
                 if reference.peeled_commit.is_some() =>
@@ -404,5 +447,24 @@ mod tests {
         let mut moved = refs;
         moved[0].raw_target = GitRefTarget::Symbolic(b"refs/heads/absent".to_vec());
         assert!(classify_frozen_import_refs(&moved).is_err());
+    }
+
+    #[test]
+    fn reserved_branch_is_skipped_before_native_emission() {
+        let oid = GitObjectId::Sha1([8; 20]);
+        let reference = ImportRefIdentity {
+            raw_name: b"refs/heads/heddle/reserved".to_vec(),
+            raw_target: GitRefTarget::Direct {
+                oid: oid.clone(),
+                object_type: GitRefObjectType::Commit,
+            },
+            peeled_commit: Some(oid),
+        };
+        assert!(matches!(
+            classify_git_import_ref(&reference),
+            Ok(ImportRefDisposition::Unsupported {
+                reason: ImportSkipReason::InvalidNativeName
+            })
+        ));
     }
 }

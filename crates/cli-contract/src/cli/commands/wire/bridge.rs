@@ -39,6 +39,7 @@ pub struct ImportGitOutput {
     pub branches_synced: usize,
     pub tags_synced: usize,
     pub skipped_non_commit_refs: usize,
+    pub skipped_refs: Vec<SkippedRefOutput>,
     pub lossy_entries: Vec<LossyImportEntryOutput>,
     pub already_in_sync: bool,
     #[serde(serialize_with = "serialize_empty_action_as_null")]
@@ -50,6 +51,12 @@ pub struct ImportGitOutput {
     #[serde(rename = "verification")]
     #[schemars(skip)]
     pub trust: RepositoryVerificationState,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct SkippedRefOutput {
+    pub name: String,
+    pub reason: String,
 }
 
 #[derive(Serialize, JsonSchema)]

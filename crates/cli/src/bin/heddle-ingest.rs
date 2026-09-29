@@ -259,6 +259,13 @@ fn run_import(
             r.non_commit_skipped,
         );
     }
+    for reference in &stats.skipped_refs {
+        println!(
+            "    skipped {}: {}",
+            String::from_utf8_lossy(&reference.raw_name),
+            reference.reason.description()
+        );
+    }
     println!("commits:");
     println!("  imported: {}", stats.commits_imported);
     println!("    reflog-only: {}", stats.reflog_only_commits);

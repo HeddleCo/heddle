@@ -44,7 +44,7 @@ struct ResolvedSource {
 // registers the real serialization types.
 pub(crate) use heddle_cli_contract::cli::commands::wire::bridge::{
     ExportGitOutput, ExportedRefOutput, ImportGitOutput as GitProjectionImportOutput,
-    LossyImportEntryOutput as GitProjectionLossyImportEntryOutput,
+    LossyImportEntryOutput as GitProjectionLossyImportEntryOutput, SkippedRefOutput,
     SyncGitOutput as GitProjectionSyncOutput,
 };
 
@@ -241,6 +241,14 @@ fn render_import_git(
             "{} skipped {} non-commit-pointing refs",
             style::warn_marker(),
             style::bold(&output.skipped_non_commit_refs.to_string())
+        );
+    }
+    for reference in &output.skipped_refs {
+        println!(
+            "{} skipped {}: {}",
+            style::warn_marker(),
+            reference.name,
+            reference.reason
         );
     }
     if !output.lossy_entries.is_empty() {
@@ -492,6 +500,14 @@ fn run_git_import(
         branches_synced: stats.branches_synced,
         tags_synced: stats.tags_synced,
         skipped_non_commit_refs: stats.skipped_non_commit_refs,
+        skipped_refs: stats
+            .skipped_refs
+            .iter()
+            .map(|reference| SkippedRefOutput {
+                name: String::from_utf8_lossy(&reference.raw_name).into_owned(),
+                reason: reference.reason.description().to_string(),
+            })
+            .collect(),
         lossy_entries: git_projection_lossy_import_entries(&stats.lossy_entries),
         already_in_sync,
         recommended_action: trust.recommended_action.clone(),

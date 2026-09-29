@@ -226,6 +226,7 @@ pub struct ImportStats {
     /// until then we record them here so callers can surface what was
     /// skipped.
     pub skipped_non_commit_refs: usize,
+    pub skipped_refs: Vec<objects::object::thread_replication::git_import_graph::SkippedImportRef>,
     /// Git tree entries converted under an explicit lossy import opt-in.
     pub lossy_entries: Vec<LossyImportEntry>,
 }
