@@ -2173,7 +2173,11 @@ pub fn set_reference_with_identity_authorized(
     committer: Vec<u8>,
     authorization: RefRewriteAuthorization,
 ) -> GitProjectionResult<()> {
-    if authorization != RefRewriteAuthorization::None && matches!(constraint, RefPrecondition::Any)
+    if authorization != RefRewriteAuthorization::None
+        && matches!(
+            constraint,
+            RefPrecondition::Any | RefPrecondition::MustExist
+        )
     {
         return Err(GitProjectionError::Git(format!(
             "refusing to update {name} with a rewrite authorization and no CAS precondition"
@@ -4466,11 +4470,29 @@ mod tests {
             RefRewriteAuthorization::UndoRollback,
         );
         assert!(result.is_err(), "authorized Any must be rejected");
+        let old = test_commit(&repo, "old", &[]);
+        set_reference(
+            &repo,
+            "refs/heads/main",
+            old,
+            RefPrecondition::MustNotExist,
+            "test: seed main",
+        )
+        .expect("seed existing branch");
+        let result = set_reference_authorized(
+            &repo,
+            "refs/heads/main",
+            target,
+            RefPrecondition::MustExist,
+            "test: unauthorized must exist",
+            RefRewriteAuthorization::UndoRollback,
+        );
+        assert!(result.is_err(), "authorized MustExist must be rejected");
         assert!(
             repo.find_reference("refs/heads/main")
                 .expect("read main")
-                .is_none(),
-            "ref must remain absent"
+                .is_some_and(|reference| reference.target == ReferenceTarget::Direct(old)),
+            "ref must retain its original tip"
         );
     }
 

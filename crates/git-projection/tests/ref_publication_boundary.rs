@@ -80,13 +80,10 @@ fn scan_sources(dir: &Path, violations: &mut Vec<String>) {
             // never target the branch or notes namespaces protected by the
             // publication guard. Staging and remote-tracking refs are safe.
             let protected_fetch = line.contains(":refs/heads/") || line.contains(":refs/notes/");
-            if !publication_module
-                && (protected_fetch
-                    || raw_sley
-                    || raw_git
-                    || raw_reference
-                    || dynamic_refspec
-                    || empty_fetch)
+            if protected_fetch
+                || empty_fetch
+                || (!publication_module
+                    && (raw_sley || raw_git || raw_reference || dynamic_refspec))
             {
                 violations.push(format!("{}:{}: {line}", path.display(), index + 1));
             }
@@ -110,7 +107,7 @@ fn git_ref_writes_stay_in_guarded_publication_module() {
     }
     assert!(
         violations.is_empty(),
-        "raw Git ref writes outside git_core.rs:\n{}",
+        "unguarded Git ref writes or protected fetch destinations:\n{}",
         violations.join("\n")
     );
 }

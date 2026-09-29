@@ -389,9 +389,30 @@ fn execute_authoritative_git_pull(
         }
         Ok(())
     })();
+    finish_git_pull_after_cleanup(
+        result,
+        cleanup,
+        "refs/heddle/pull/notes/heddle",
+        |warning| {
+            eprintln!("{}", style::warn(warning));
+        },
+    )
+}
+
+fn finish_git_pull_after_cleanup<T>(
+    result: Result<T>,
+    cleanup: Result<()>,
+    staging_ref: &str,
+    warn: impl FnOnce(&str),
+) -> Result<T> {
     match (result, cleanup) {
         (Ok(outcome), Ok(())) => Ok(outcome),
-        (Ok(_), Err(error)) => Err(error),
+        (Ok(outcome), Err(error)) => {
+            warn(&format!(
+                "warning: pull succeeded, but could not remove staging ref {staging_ref}: {error}"
+            ));
+            Ok(outcome)
+        }
         (Err(error), Ok(())) => Err(error),
         (Err(error), Err(cleanup_error)) => Err(error.context(format!(
             "also failed to remove staged pull notes: {cleanup_error}"
@@ -2002,6 +2023,24 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn successful_pull_with_failed_staging_cleanup_warns_and_succeeds() {
+        let mut warning = String::new();
+        let outcome = finish_git_pull_after_cleanup(
+            Ok("published"),
+            Err(anyhow::anyhow!("ref lock denied")),
+            "refs/heddle/pull/notes/heddle",
+            |message| warning = message.to_string(),
+        )
+        .expect("published pull must remain successful");
+        assert_eq!(outcome, "published");
+        assert!(
+            warning.contains("refs/heddle/pull/notes/heddle"),
+            "{warning}"
+        );
+        assert!(warning.contains("ref lock denied"), "{warning}");
+    }
 
     #[cfg(feature = "client")]
     fn snapshot_file(repo: &Repository, root: &Path, body: &str) -> StateId {
