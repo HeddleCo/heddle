@@ -45,13 +45,13 @@ pub use commands_args::{
     AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs, AgentTaskCreateArgs,
     AgentTaskListArgs, AgentTaskShowArgs, AgentTaskStatusArg, AgentTaskUpdateArgs, CloneArgs,
     CollapseArgs, DiffArgs, DiffBaseArg, DoctorArgs, DoctorCommands, DoctorDocsArgs, ExpandArgs,
-    IMPORT_VERB, INIT_VERB, ImportLocalArgs, InitArgs, LandArgs, LogArgs, PullArgs, PushArgs,
-    ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs, ThreadAbsorbArgs,
-    ThreadCapturesArgs, ThreadCheckoutArgs, ThreadDropArgs, ThreadMoveArgs, ThreadNameArgs,
-    ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs, TimelineCommands,
-    TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs, TimelineRecordToolArgs,
-    TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs, TimelineTargetArgs, UndoArgs,
-    WatchArgs, WorkspaceModeArg,
+    FanoutHarnessArg, IMPORT_VERB, INIT_VERB, ImportLocalArgs, InitArgs, LandArgs, LogArgs,
+    PullArgs, PushArgs, ReadyArgs, ResolveArgs, RevertArgs, SnapshotArgs, SyncArgs,
+    ThreadAbsorbArgs, ThreadCapturesArgs, ThreadCheckoutArgs, ThreadDropArgs, ThreadMoveArgs,
+    ThreadNameArgs, ThreadRenameArgs, ThreadResolveArgs, ThreadShowArgs, ThreadStartArgs,
+    TimelineCommands, TimelineForkArgs, TimelineRecordFinishArgs, TimelineRecordStartArgs,
+    TimelineRecordToolArgs, TimelineRecoverArgs, TimelineResetArgs, TimelineStatusArgs,
+    TimelineTargetArgs, UndoArgs, WatchArgs, WorkspaceModeArg,
 };
 #[cfg(feature = "ci")]
 pub use commands_ci::{CiCommands, CiRunArgs};

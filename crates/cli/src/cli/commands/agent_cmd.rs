@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Stable JSON-first agent reservation API.
 
+use std::{
+    path::Path,
+    process::{Child, Command, Stdio},
+};
+
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 // The agent wire payloads live in cli-contract so the schema registry
@@ -20,14 +25,17 @@ use objects::{
 use refs::{Head, RefExpectation};
 use repo::{
     ActorPresence, ActorPresenceStatus, ActorPresenceStore, AgentTaskRecord, AgentTaskStatus,
-    AgentTaskStore, AgentUsageSummary, Repository, Thread, ThreadConfidenceSummary,
-    ThreadFreshness, ThreadId, ThreadIntegrationPolicy, ThreadManager, ThreadMode, ThreadState,
-    ThreadVerificationSummary,
+    AgentTaskStore, AgentUsageSummary, Repository, RepositoryCapability, Thread,
+    ThreadConfidenceSummary, ThreadFreshness, ThreadId, ThreadIntegrationPolicy, ThreadManager,
+    ThreadMode, ThreadState, ThreadVerificationSummary,
     checkout_writer::{
         lock_checkout_writer_handoff, remove_checkout_writer_credential,
         write_checkout_writer_credential,
     },
-    validate_task_id,
+    shell_quote, validate_task_id,
+};
+use sley::{
+    HeadUpdateOptions, IndexWriteOptions, RefChange, ReferenceTarget, Repository as SleyRepository,
 };
 use verbs::{
     AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, FanoutLaneAvailability,
@@ -40,6 +48,7 @@ use verbs::{
 use super::{
     advice::RecoveryAdvice,
     next_action::{NextActionValidationContext, write_full_command_json},
+    snapshot::ensure_current_state,
     thread::thread_name_invalid_advice,
     verification_health::{
         GitOverlayMutationPreflight, build_repository_verification_state,
@@ -48,15 +57,19 @@ use super::{
     worktree_cmd::helpers::plan_worktree_target,
     worktree_safety::ensure_worktree_clean,
 };
-use crate::cli::{
-    Cli,
-    cli_args::{
-        AgentApiListArgs, AgentFanoutCommands, AgentFanoutPlanArgs, AgentFanoutStartArgs,
-        AgentHeartbeatArgs, AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs,
-        AgentTaskCommands, AgentTaskCreateArgs, AgentTaskListArgs, AgentTaskShowArgs,
-        AgentTaskStatusArg, AgentTaskUpdateArgs, ThreadStartArgs, WorkspaceModeArg,
+use crate::{
+    cli::{
+        Cli,
+        cli_args::{
+            AgentApiListArgs, AgentFanoutCommands, AgentFanoutPlanArgs, AgentFanoutStartArgs,
+            AgentHeartbeatArgs, AgentReleaseArgs, AgentReleaseStatusArg, AgentReserveArgs,
+            AgentTaskCommands, AgentTaskCreateArgs, AgentTaskListArgs, AgentTaskShowArgs,
+            AgentTaskStatusArg, AgentTaskUpdateArgs, FanoutHarnessArg, ThreadStartArgs,
+            WorkspaceModeArg,
+        },
+        should_output_json,
     },
-    should_output_json,
+    config::UserConfig,
 };
 
 fn live_owner_conflict_advice(
@@ -565,6 +578,10 @@ fn cmd_agent_fanout_plan(cli: &Cli, args: AgentFanoutPlanArgs) -> Result<()> {
                 lane_thread: command.lane_thread.clone(),
                 command: command.command.clone(),
                 argv: command.argv.clone(),
+                env_unset: Vec::new(),
+                cwd: None,
+                harness: None,
+                credential_file: None,
             })
             .collect(),
         trust: build_repository_verification_state(&repo),
@@ -574,6 +591,19 @@ fn cmd_agent_fanout_plan(cli: &Cli, args: AgentFanoutPlanArgs) -> Result<()> {
 
 fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
     let repo = cli.open_repo()?;
+    if !args.harness.is_empty() && args.harness.len() != args.lane.len() {
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "agent_fanout_harness_count",
+            "supply one --harness for each --lane",
+            "Pair each lane with its harness in argument order.",
+            "heddle agent fanout start --title <title> --lane <thread>=<title> --harness codex",
+        )));
+    }
+    let harnesses = if args.harness.is_empty() {
+        vec![FanoutHarnessArg::Codex; args.lane.len()]
+    } else {
+        args.harness.clone()
+    };
     if let Some(advice) = git_overlay_mutation_preflight_advice(
         &repo,
         "agent fanout start",
@@ -581,8 +611,19 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
     )? {
         return Err(anyhow!(advice));
     }
-    ensure_worktree_clean(&repo, "agent fanout start")?;
-
+    if repo.capability() == RepositoryCapability::GitOverlay {
+        preflight_fanout_git_overlay(&repo)?;
+        super::snapshot::bind_git_overlay_active_tip(&repo)?;
+    } else {
+        ensure_worktree_clean(&repo, "agent fanout start")?;
+    }
+    if repo.head()?.is_none() {
+        ensure_current_state(
+            &repo,
+            &UserConfig::load_default().unwrap_or_default(),
+            Some("Bootstrap git-overlay before agent fanout".to_string()),
+        )?;
+    }
     let (base_state, base_root) = fanout_base(&repo)?;
     let parent_thread = fanout_parent_thread(&repo)?;
     let plan = plan_fanout(&FanoutPlanRequest {
@@ -609,9 +650,11 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
 
     let attach_rule = fanout_start_attach_rule();
     let mut created_task_ids = vec![parent.task_id.clone()];
+    let mut entered_threads = Vec::new();
     let start_result = (|| -> Result<Vec<AgentFanoutLaneOutput>> {
         let mut outputs = Vec::new();
         for lane in &plan.nodes {
+            entered_threads.push(lane.thread.clone());
             let checkout_path = repo.managed_checkout_path(&lane.thread);
             let mut child =
                 AgentTaskRecord::new(String::new(), lane.title.clone(), lane.thread.clone());
@@ -632,7 +675,11 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                     name: lane.thread.clone(),
                     from: Some(base_state.clone()),
                     path: Some(checkout_path.clone()),
-                    workspace: Some(WorkspaceModeArg::Auto),
+                    workspace: Some(if repo.capability() == RepositoryCapability::GitOverlay {
+                        WorkspaceModeArg::Solid
+                    } else {
+                        WorkspaceModeArg::Auto
+                    }),
                     agent_provider: None,
                     agent_model: None,
                     task: Some(lane.title.clone()),
@@ -647,6 +694,9 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                     hydrate: false,
                 },
             )?;
+            if repo.capability() == RepositoryCapability::GitOverlay {
+                link_fanout_child_git(&repo, &checkout_path, &lane.thread)?;
+            }
             let session_id = started
                 .thread
                 .as_ref()
@@ -701,13 +751,69 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
     let outputs = match start_result {
         Ok(outputs) => outputs,
         Err(err) => {
-            abandon_fanout_tasks(&store, &created_task_ids);
+            if let Err(rollback_error) =
+                rollback_fanout_start(&repo, &store, &entered_threads, &created_task_ids)
+            {
+                return Err(anyhow!(RecoveryAdvice::safety_refusal(
+                    "agent_fanout_rollback_failed",
+                    format!("{err}; fanout rollback failed: {rollback_error}"),
+                    "Inspect the remaining lanes and writer leases before retrying.",
+                    "fanout creation failed and cleanup could not remove every created lane",
+                    "a retry could collide with a remaining checkout or writer lease",
+                    "cleanup was attempted for every lane, lease, and task in this batch",
+                    "heddle status",
+                    vec!["heddle status".to_string()],
+                )));
+            }
             return Err(err);
         }
     };
 
-    let output =
+    let mut output =
         build_fanout_start_output(&repo, &plan, Some(AgentTaskOutput::from(&parent)), outputs);
+    output.commands = output
+        .lanes
+        .iter()
+        .zip(harnesses.iter().copied())
+        .map(|(lane, harness)| fanout_launch_command(lane, harness))
+        .collect();
+    if args.run {
+        let json = should_output_json(cli, Some(repo.config()));
+        let mut children = Vec::new();
+        for command in &output.commands {
+            match run_fanout_harness(command, json) {
+                Ok(child) => children.push((command.lane_thread.clone(), child)),
+                Err(error) => {
+                    for (_, mut child) in children {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        let mut failure = None;
+        for (lane, mut child) in children {
+            match child.wait() {
+                Ok(status) if !status.success() && failure.is_none() => {
+                    failure = Some(anyhow!(fanout_launch_failure_advice(
+                        &lane,
+                        format!("harness exited with {status}"),
+                    )));
+                }
+                Err(error) if failure.is_none() => {
+                    failure = Some(anyhow!(fanout_launch_failure_advice(
+                        &lane,
+                        format!("waiting for harness failed: {error}"),
+                    )));
+                }
+                _ => {}
+            }
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+    }
     render_agent_fanout_output(output, should_output_json(cli, Some(repo.config())))
 }
 
@@ -900,11 +1006,289 @@ fn fanout_parent_thread(repo: &Repository) -> Result<String> {
     })
 }
 
-fn abandon_fanout_tasks(store: &AgentTaskStore, task_ids: &[String]) {
-    for task_id in task_ids {
-        let _ = store.update(task_id, |task| {
-            task.status = AgentTaskStatus::Abandoned;
-        });
+fn preflight_fanout_git_overlay(repo: &Repository) -> Result<()> {
+    let git = repo.git_overlay_sley_repository()?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::invalid_usage(
+            "agent_fanout_git_repository_missing",
+            "Git overlay has no Git repository",
+            "Repair the Git checkout before starting fanout.",
+            "heddle doctor",
+        ))
+    })?;
+    if git.head()?.oid.is_none() {
+        let command = format!(
+            "git -C {path} add -A && git -C {path} commit --allow-empty -m 'Initial commit'",
+            path = shell_quote(&repo.root().display().to_string())
+        );
+        let mut advice = RecoveryAdvice::safety_refusal(
+            "agent_fanout_unborn_git_head",
+            "Git HEAD has no commit to bind fanout lanes to",
+            format!("Create the first Git commit with `{command}`, then retry."),
+            "Git overlay has no committed HEAD",
+            "a lane without its own Git HEAD could commit into the parent repository",
+            "no lane, task, or reservation was created",
+            "heddle status",
+            vec!["heddle status".to_string()],
+        );
+        advice.extra_json_fields.insert(
+            "git_recovery_command".to_string(),
+            serde_json::Value::String(command),
+        );
+        return Err(anyhow!(advice));
+    }
+    let status = repo.git_overlay_worktree_status()?.ok_or_else(|| {
+        anyhow!(RecoveryAdvice::safety_refusal(
+            "agent_fanout_git_status_unavailable",
+            "Could not inspect Git overlay worktree status",
+            "Repair the Git checkout before starting fanout.",
+            "Git worktree status is unavailable",
+            "fanout could copy uncommitted work into its lanes",
+            "no lane, task, or reservation was created",
+            "heddle doctor",
+            vec!["heddle doctor".to_string()],
+        ))
+    })?;
+    if !status.is_clean() {
+        let command = format!(
+            "git -C {path} add -A && git -C {path} commit -m 'Prepare fanout'",
+            path = shell_quote(&repo.root().display().to_string())
+        );
+        let mut advice = RecoveryAdvice::safety_refusal(
+            "agent_fanout_dirty_git_overlay",
+            "Git overlay has uncommitted work",
+            format!("Commit the intended work with `{command}`, then retry."),
+            format!(
+                "{} staged, unstaged, or untracked path(s) differ from committed Git HEAD",
+                status.change_count()
+            ),
+            "fanout would copy uncommitted work into every lane",
+            "parent work and Git index were left unchanged; no lane, task, or reservation was created",
+            "heddle status",
+            vec!["heddle status".to_string()],
+        );
+        advice.extra_json_fields.insert(
+            "git_recovery_command".to_string(),
+            serde_json::Value::String(command),
+        );
+        return Err(anyhow!(advice));
+    }
+    Ok(())
+}
+
+fn fanout_git_link_failure_advice(thread: &str, detail: impl Into<String>) -> RecoveryAdvice {
+    let primary = "heddle status".to_string();
+    RecoveryAdvice::safety_refusal(
+        "agent_fanout_git_link_failed",
+        format!("Could not create Git linkage for lane '{thread}'"),
+        format!("Inspect the repository with `{primary}` before retrying."),
+        detail.into(),
+        "continuing without child Git metadata would let Git commands resolve to the parent",
+        "the failed lane checkout and thread record were removed",
+        primary.clone(),
+        vec![primary],
+    )
+}
+
+fn fanout_launch_failure_advice(thread: &str, detail: impl Into<String>) -> RecoveryAdvice {
+    let primary = format!("heddle thread show {thread}");
+    RecoveryAdvice::safety_refusal(
+        "agent_fanout_launch_failed",
+        format!("Harness for lane '{thread}' did not complete"),
+        format!("Inspect the lane with `{primary}` before launching it again."),
+        detail.into(),
+        "blindly relaunching could duplicate agent work in the same checkout",
+        "the lane checkout and task remain; any harness edits remain",
+        primary.clone(),
+        vec![primary],
+    )
+}
+
+/// Give a nested lane its own Git index, HEAD and refs. Sley copies the
+/// committed base history; the Heddle-materialized checkout bytes stay put.
+fn link_fanout_child_git(parent: &Repository, child: &Path, thread: &str) -> Result<()> {
+    let source = parent.git_overlay_sley_repository()?.ok_or_else(|| {
+        anyhow!(fanout_git_link_failure_advice(
+            thread,
+            "Git overlay has no Git repository",
+        ))
+    })?;
+    let tip = source.head()?.oid.ok_or_else(|| {
+        anyhow!(fanout_git_link_failure_advice(
+            thread,
+            "Git overlay has no committed HEAD",
+        ))
+    })?;
+    let git = SleyRepository::init_with_format(child, source.object_format(), false)?;
+    git.copy_reachable_from(&source, &[tip])?;
+    let branch = format!("refs/heads/{thread}");
+    git.apply_ref_changes(&[RefChange::new(
+        branch.as_str(),
+        ReferenceTarget::Direct(tip),
+    )?])?;
+    git.set_head_symref(&branch, HeadUpdateOptions::new())?;
+    let commit = git.read_commit(&tip)?;
+    let index = git.index_from_tree(&commit.tree)?;
+    git.write_index(
+        &index,
+        IndexWriteOptions {
+            fsync: true,
+            validate_checksum: true,
+        },
+    )?;
+    Repository::ensure_git_overlay_local_excludes(child)?;
+    Ok(())
+}
+
+fn fanout_launch_command(
+    lane: &AgentFanoutLaneOutput,
+    harness: FanoutHarnessArg,
+) -> AgentFanoutCommandOutput {
+    let credential_file = Path::new(&lane.path)
+        .join(".heddle/writer-credential.json")
+        .display()
+        .to_string();
+    let mut argv = vec![harness.executable().to_string()];
+    argv.push(
+        match harness {
+            FanoutHarnessArg::ClaudeCode => "--print",
+            FanoutHarnessArg::Codex => "exec",
+            FanoutHarnessArg::Opencode => "run",
+        }
+        .to_string(),
+    );
+    argv.push(lane.title.clone());
+    let env_unset = FANOUT_IDENTITY_ENV_PATTERNS
+        .iter()
+        .map(|pattern| (*pattern).to_string())
+        .collect::<Vec<_>>();
+    let command = format!(
+        "cd {} && (for key in $(env | cut -d= -f1); do case \"$key\" in {}) unset \"$key\" ;; esac; done; export HEDDLE_WRITER_CREDENTIAL_FILE={}; exec {})",
+        shell_quote(&lane.path),
+        env_unset.join("|"),
+        shell_quote(&credential_file),
+        argv.iter()
+            .map(|arg| shell_quote(arg))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    AgentFanoutCommandOutput {
+        lane_thread: lane.thread.clone(),
+        command,
+        argv,
+        env_unset,
+        cwd: Some(lane.path.clone()),
+        harness: Some(harness.label().to_string()),
+        credential_file: Some(credential_file),
+    }
+}
+
+fn run_fanout_harness(command: &AgentFanoutCommandOutput, json: bool) -> Result<Child> {
+    let path = command.credential_file.as_deref().ok_or_else(|| {
+        anyhow!(fanout_launch_failure_advice(
+            &command.lane_thread,
+            "missing lane credential path"
+        ))
+    })?;
+    let (program, args) = command.argv.split_first().ok_or_else(|| {
+        anyhow!(fanout_launch_failure_advice(
+            &command.lane_thread,
+            "empty harness command"
+        ))
+    })?;
+    let mut launch = Command::new(program);
+    launch
+        .args(args)
+        .current_dir(command.cwd.as_deref().ok_or_else(|| {
+            anyhow!(fanout_launch_failure_advice(
+                &command.lane_thread,
+                "missing lane checkout"
+            ))
+        })?);
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(|key| {
+            FANOUT_IDENTITY_ENV_PATTERNS
+                .iter()
+                .any(|pattern| match pattern.strip_suffix('*') {
+                    Some(prefix) => key.starts_with(prefix),
+                    None => key == *pattern,
+                })
+        }) {
+            launch.env_remove(key);
+        }
+    }
+    let child = launch
+        .env("HEDDLE_WRITER_CREDENTIAL_FILE", path)
+        .stdin(Stdio::null())
+        .stdout(if json {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        })
+        .spawn()?;
+    Ok(child)
+}
+
+// One list drives the printed shell command, JSON env_unset, and --run.
+// Cover direct credentials, principal/agent attribution, and the paths Heddle
+// uses to find stored credentials and device identity.
+const FANOUT_IDENTITY_ENV_PATTERNS: &[&str] = &[
+    "HEDDLE_CREDENTIAL",
+    "HEDDLE_WRITER_*",
+    "HEDDLE_RESERVATION_*",
+    "HEDDLE_PRINCIPAL_*",
+    "HEDDLE_AGENT_*",
+    "HEDDLE_SESSION_*",
+    "HEDDLE_HOME",
+    "HEDDLE_CONFIG",
+    "XDG_CONFIG_HOME",
+    "HOME",
+    "HEDDLE_REMOTE_IROH_DESCRIPTOR_*",
+];
+
+fn rollback_fanout_start(
+    repo: &Repository,
+    store: &AgentTaskStore,
+    threads: &[String],
+    task_ids: &[String],
+) -> Result<()> {
+    let manager = ThreadManager::new(repo.heddle_dir());
+    let mut errors = Vec::new();
+    for thread in threads.iter().rev() {
+        let result = (|| -> Result<()> {
+            if let Some(record) = manager.load_id_or_name(thread)? {
+                super::thread_cmd::drop_thread_silent(repo, thread, true, true)?;
+                manager.delete(&record.id)?;
+            } else {
+                repo::thread_manifest::remove_thread_manifest_dir(repo.heddle_dir(), thread)?;
+                let thread_name = ThreadName::new(thread);
+                if repo.refs().get_thread(&thread_name)?.is_some() {
+                    repo.delete_thread_recorded(&thread_name)?;
+                }
+            }
+            let registry = ActorPresenceStore::new(repo.heddle_dir());
+            for entry in registry.list()? {
+                if entry.thread == *thread {
+                    registry.delete(&entry.session_id)?;
+                }
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            errors.push(format!("{thread}: {error}"));
+        }
+    }
+    if let Err(error) = WriterLeaseStore::new(repo.heddle_dir()).delete_for_tasks(task_ids) {
+        errors.push(format!("writer leases: {error}"));
+    }
+    for task_id in task_ids.iter().rev() {
+        if let Err(error) = store.delete(task_id) {
+            errors.push(format!("task {task_id}: {error}"));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(errors.join("; ")))
     }
 }
 
@@ -1035,8 +1419,15 @@ fn render_agent_fanout_output(output: AgentFanoutOutput, json: bool) -> Result<(
             );
         }
     }
-    if output.output_kind == "agent_fanout_plan" {
-        println!("Commands:");
+    if !output.commands.is_empty() {
+        println!(
+            "{}",
+            if output.output_kind == "agent_fanout_plan" {
+                "Commands:"
+            } else {
+                "Launch commands:"
+            }
+        );
         for command in &output.commands {
             println!("  {}", crate::cli::style::human_text(&command.command));
         }
@@ -1348,4 +1739,106 @@ pub fn agent_api_schema() -> serde_json::Value {
         "AgentFanoutLaneOutput": schemars::schema_for!(AgentFanoutLaneOutput),
         "AgentFanoutCommandOutput": schemars::schema_for!(AgentFanoutCommandOutput),
     })
+}
+
+#[cfg(test)]
+mod fanout_identity_env_tests {
+    use super::FANOUT_IDENTITY_ENV_PATTERNS;
+
+    #[test]
+    fn every_credential_or_identity_env_read_is_scrubbed_from_fanout() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let mut audited = std::collections::BTreeSet::new();
+        for entry in walkdir::WalkDir::new(workspace.join("crates")) {
+            let entry = entry.expect("workspace source entry");
+            if !entry
+                .path()
+                .components()
+                .any(|part| part.as_os_str() == "src")
+                || entry
+                    .path()
+                    .extension()
+                    .is_none_or(|extension| extension != "rs")
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(entry.path()).expect("Rust source");
+            for (index, _) in source.match_indices("env::var") {
+                let call = &source[index + "env::var".len()..];
+                let call = call.strip_prefix("_os").unwrap_or(call);
+                let Some(argument) = call.trim_start().strip_prefix('(') else {
+                    continue;
+                };
+                let argument = argument.trim_start();
+                let key = if let Some(literal) = argument.strip_prefix('"') {
+                    let Some((key, _)) = literal.split_once('"') else {
+                        continue;
+                    };
+                    key.to_string()
+                } else {
+                    let symbol = argument
+                        .chars()
+                        .take_while(|character| character.is_ascii_uppercase() || *character == '_')
+                        .collect::<String>();
+                    if symbol.is_empty() {
+                        continue;
+                    }
+                    let declaration = format!("const {symbol}: &str = \"");
+                    let Some((key, _)) = source
+                        .split_once(&declaration)
+                        .and_then(|(_, value)| value.split_once('"'))
+                    else {
+                        continue;
+                    };
+                    key.to_string()
+                };
+                let identity_read = matches!(key.as_str(), "HOME" | "XDG_CONFIG_HOME")
+                    || key.starts_with("HEDDLE_")
+                        && [
+                            "CREDENTIAL",
+                            "TOKEN",
+                            "SECRET",
+                            "IDENTITY",
+                            "PRINCIPAL",
+                            "AGENT_",
+                            "SESSION_",
+                            "HOME",
+                            "CONFIG",
+                            "DESCRIPTOR_KEY",
+                            "DESCRIPTOR_PUBLIC_KEY",
+                        ]
+                        .iter()
+                        .any(|part| key.contains(part));
+                if !identity_read {
+                    continue;
+                }
+                audited.insert(key.clone());
+                assert!(
+                    FANOUT_IDENTITY_ENV_PATTERNS.iter().any(|pattern| {
+                        pattern
+                            .strip_suffix('*')
+                            .is_some_and(|prefix| key.starts_with(prefix))
+                            || *pattern == key
+                    }),
+                    "{} reads {key}, but fanout does not scrub it",
+                    entry.path().display()
+                );
+            }
+        }
+        assert!(
+            audited.contains("HEDDLE_CREDENTIAL"),
+            "hosted credential read was not scanned"
+        );
+        assert!(
+            audited.contains("HEDDLE_PRINCIPAL_NAME"),
+            "principal read was not scanned"
+        );
+        assert!(
+            audited.contains("HOME"),
+            "home based identity read was not scanned"
+        );
+    }
 }

@@ -387,8 +387,8 @@ pub(crate) fn ensure_current_state(
         .ok_or_else(|| anyhow::anyhow!("Failed to establish initial current state"))
 }
 
-fn bind_git_overlay_active_tip(repo: &Repository) -> Result<Option<StateId>> {
-    // Git HEAD is the authority for an unbound overlay. Hold the canonical
+pub(crate) fn bind_git_overlay_active_tip(repo: &Repository) -> Result<Option<StateId>> {
+    // Git HEAD is the authority when binding a clean overlay. Hold the canonical
     // repository lock from the first authoritative read through sha-map,
     // checkpoint, and Heddle ref publication so concurrent bootstraps cannot
     // publish a stale tip or lose a checkpoint read-modify-write. The lock is
