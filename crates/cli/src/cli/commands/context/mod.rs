@@ -68,6 +68,7 @@ impl AnnotationOutput {
             status: match annotation.status {
                 AnnotationStatus::Active => "active".to_string(),
                 AnnotationStatus::Superseded => "superseded".to_string(),
+                AnnotationStatus::Deleted => "deleted".to_string(),
             },
             scope: annotation.scope.to_string(),
             kind: current.kind.to_string(),
@@ -526,6 +527,7 @@ pub(crate) fn print_context_get(
                 match annotation.status {
                     AnnotationStatus::Active => "active",
                     AnnotationStatus::Superseded => "superseded",
+                    AnnotationStatus::Deleted => "deleted",
                 }
             );
             if !current.tags.is_empty() {

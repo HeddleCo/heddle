@@ -865,21 +865,33 @@ fn pull_one_annotation(
     {
         let entry = get_or_create_entry(mirror, repo_path, &local_id);
         entry.server_id = server.annotation_id.clone();
-        entry.revision_links = new_links;
+        entry.revision_links = new_links.clone();
     }
 
     let changed = match existing_index {
         Some(index) => {
-            let annotation = &mut blob.annotations[index];
-            let differs = annotation.revisions != new_revisions
-                || annotation.status != server.status
-                || annotation.supersedes_annotation_id != server.supersedes_annotation_id
-                || annotation.supersedes_rewrite_pct != server.supersedes_rewrite_pct;
-            annotation.revisions = new_revisions;
-            annotation.divergent_revision_ids.clear();
-            annotation.status = server.status;
-            annotation.supersedes_annotation_id = server.supersedes_annotation_id.clone();
-            annotation.supersedes_rewrite_pct = server.supersedes_rewrite_pct;
+            let existing = blob.annotations[index].clone();
+            let mut incoming = server.clone();
+            incoming.annotation_id = local_id.clone();
+            incoming.revisions = new_revisions
+                .into_iter()
+                .take(server.revisions.len())
+                .collect();
+            incoming.divergent_revision_ids = server
+                .divergent_revision_ids
+                .iter()
+                .filter_map(|id| new_links.iter().find(|link| &link.server == id))
+                .map(|link| link.local.clone())
+                .collect();
+            let merged = repo::merge_context_blobs(
+                ContextBlob::new(vec![existing.clone()]),
+                ContextBlob::new(vec![incoming]),
+            )?;
+            let Some(annotation) = merged.annotations.into_iter().next() else {
+                anyhow::bail!("hosted context merge lost annotation");
+            };
+            let differs = existing != annotation;
+            blob.annotations[index] = annotation;
             differs
         }
         None => {
@@ -1348,6 +1360,48 @@ mod tests {
 
         client.close().await;
         server.await.unwrap();
+    }
+
+    #[test]
+    fn review_hosted_pull_preserves_unresolved_frontier() {
+        let _guard = crate::test_process_env::shared_blocking();
+        let (_temp, repo, base) = seed_local_context_annotation("base");
+        let state = repo
+            .store()
+            .get_state(&base.revisions[0].created_at_state.unwrap())
+            .unwrap()
+            .unwrap();
+        let target = ContextTarget::file("lib.rs").unwrap();
+        let mut local = base.clone();
+        local.revisions.push(rev("local-a", "a", "edit a", 20));
+        local.revisions.push(rev("local-b", "b", "edit b", 30));
+        local.divergent_revision_ids = vec!["local-a".into(), "local-b".into()];
+        let root = repo
+            .set_context_blob(None, &target, &ContextBlob::new(vec![local]))
+            .unwrap();
+        put_context_attachment(&repo, &state, Some(root)).unwrap();
+        let mut server = base;
+        server
+            .revisions
+            .push(rev("remote-c", "c", "independent edit c", 40));
+        let changed = pull_one_annotation(
+            &repo,
+            "test/repo",
+            &state,
+            &target,
+            &server,
+            None,
+            None,
+            &mut HostedContextMirror::default(),
+        )
+        .unwrap();
+        assert!(changed);
+        let root = context_root_for_state(&repo, &state).unwrap().unwrap();
+        let merged = repo.get_context_blob(&root, &target).unwrap().unwrap();
+        assert!(
+            !merged.annotations[0].divergent_revision_ids.is_empty(),
+            "pull silently resolves concurrent edits without a decision"
+        );
     }
 
     fn seed_local_context_annotation(content: &str) -> (TempDir, Repository, Annotation) {

@@ -76,6 +76,9 @@ pub struct AnnotationRevision {
 pub enum AnnotationStatus {
     Active,
     Superseded,
+    /// Deletion tombstone: keep the revision history so a stale replica cannot
+    /// bring this annotation back. A new annotation needs a new identity.
+    Deleted,
 }
 
 /// Snapshot-time resolution state for a file-backed context annotation.

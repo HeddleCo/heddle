@@ -21,6 +21,7 @@ mod history_perf_contract_tests;
 pub(crate) mod repo_config;
 #[path = "repository_context.rs"]
 mod repository_context;
+pub use repository_context::merge_context_blobs;
 #[path = "repository_diff.rs"]
 mod repository_diff;
 #[path = "repository_goto.rs"]

@@ -235,7 +235,8 @@ pub use repository::{
     TrustedKey, UntrackedSet, UntrackedSubtree, WarmCanonicalStoreStats, WorktreeCompareProfile,
     WorktreeIndexInspection, WorktreeStateLookupProfile, WorktreeStatusDetailed,
     compute_rewrite_pct, discover_heddle_root, find_merge_base, is_heddle_repository_root,
-    is_major_rewrite, is_synthetic_root, open_git_repository_at_root, query_history_from_source,
+    is_major_rewrite, is_synthetic_root, merge_context_blobs, open_git_repository_at_root,
+    query_history_from_source,
 };
 #[cfg(feature = "git-overlay")]
 pub use repository::{

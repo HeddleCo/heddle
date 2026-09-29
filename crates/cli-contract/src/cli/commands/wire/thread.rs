@@ -80,10 +80,12 @@ pub struct ThreadShowOutput {
     pub recovery_commands: Vec<String>,
     pub constraints_supplied: Vec<ConstraintsSuppliedOutput>,
     pub constraints_supplied_truncated: bool,
+    pub supply_receipt_status: &'static str,
 }
 
 #[derive(Clone, Serialize, JsonSchema)]
 pub struct ConstraintsSuppliedOutput {
+    pub provenance: &'static str,
     pub capture: String,
     pub capture_intent: Option<String>,
     pub actor: Option<String>,
@@ -96,6 +98,7 @@ pub struct ConstraintsSuppliedOutput {
 pub struct SuppliedAnnotationOutput {
     pub target: String,
     pub annotation_id: String,
+    pub visibility: String,
     pub revisions: Vec<SuppliedRevisionOutput>,
 }
 
@@ -103,7 +106,7 @@ pub struct SuppliedAnnotationOutput {
 pub struct SuppliedRevisionOutput {
     pub revision_id: String,
     pub kind: String,
-    pub content: String,
+    pub content_hash: String,
 }
 
 /// JSON payload for the bounded `context --for-thread` briefing.
@@ -134,6 +137,7 @@ pub struct ThreadBriefingAnnotationOutput {
     pub scope: String,
     pub status: &'static str,
     pub annotation_id: String,
+    pub visibility: String,
     pub revisions: Vec<ThreadBriefingRevisionOutput>,
 }
 

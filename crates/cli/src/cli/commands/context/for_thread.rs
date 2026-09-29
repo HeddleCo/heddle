@@ -13,15 +13,18 @@ use objects::{
     HeddleError,
     object::{
         AnnotationStatus, CollaborationAnchor, ContentHash, ContextTarget, ThreadName,
+        VisibilityTier,
         thread_replication::{
             ThreadOperationBody,
             metadata::{Control, Property, ThreadControl},
         },
+        visible,
     },
     store::ObjectStore,
 };
 use repo::{
-    CollaborationStore, ContextConsumptionReceipt, Repository, SuppliedAnnotation, SuppliedRevision,
+    AudienceTier, CollaborationStore, ContextConsumptionReceipt, Repository, SuppliedAnnotation,
+    SuppliedRevision,
 };
 
 use super::super::{
@@ -34,6 +37,15 @@ use crate::cli::{Cli, should_output_json, style};
 const MAX_ANNOTATIONS: usize = 64;
 const MAX_DISCUSSIONS: usize = 32;
 const MAX_TURNS_PER_DISCUSSION: usize = 8;
+
+fn visibility_label(tier: &VisibilityTier) -> String {
+    match tier {
+        VisibilityTier::Public | VisibilityTier::Internal => tier.as_str().to_owned(),
+        VisibilityTier::TeamScoped { team_id } => format!("team:{team_id}"),
+        VisibilityTier::Restricted { scope_label } => format!("restricted:{scope_label}"),
+        VisibilityTier::Private { scope_label } => format!("private:{scope_label}"),
+    }
+}
 
 pub fn cmd_context_for_thread(cli: &Cli, thread: &str) -> Result<()> {
     let repo = cli.open_repo()?;
@@ -48,6 +60,32 @@ pub fn cmd_context_for_thread(cli: &Cli, thread: &str) -> Result<()> {
     let summary = find_thread_summary(&repo, thread)?.ok_or_else(|| {
         HeddleError::InvalidObject(format!("Thread {thread:?} has no local summary"))
     })?;
+    let lane = repo.current_lane()?.ok_or_else(|| {
+        HeddleError::InvalidObject("a context briefing requires an attached recipient lane".into())
+    })?;
+    if lane != thread {
+        return Err(HeddleError::InvalidObject(
+            "context briefing recipient must be the current lane".into(),
+        )
+        .into());
+    }
+    // A repository-wide audience label does not grant a delegated child lane
+    // the parent's private scope. Until that lane presents its own audience
+    // credential, its briefing is limited to public content.
+    let audience = if summary.parent_thread.is_some() {
+        AudienceTier::Public
+    } else {
+        repo.local_operator_audience()?
+    };
+    if repo
+        .withholding_visibility_for_audience(&head_id, &audience)?
+        .is_some()
+    {
+        return Err(HeddleError::InvalidObject(
+            "Thread head is withheld from the recipient audience".into(),
+        )
+        .into());
+    }
     let changed_paths: BTreeSet<String> = summary.changed_paths.iter().cloned().collect();
     let base_id = summary
         .base_state
@@ -65,10 +103,11 @@ pub fn cmd_context_for_thread(cli: &Cli, thread: &str) -> Result<()> {
     };
 
     let intent = intent_items(&repo, thread)?;
-    let mut annotations = annotation_items(&repo, &head, &changed_paths)?;
+    let mut annotations = annotation_items(&repo, &head, &changed_paths, &audience)?;
     let omitted_annotations = annotations.len().saturating_sub(MAX_ANNOTATIONS);
     annotations.truncate(MAX_ANNOTATIONS);
-    let mut discussions = discussion_items(&repo, thread, &changed_paths, &touched_symbols)?;
+    let mut discussions =
+        discussion_items(&repo, thread, &changed_paths, &touched_symbols, &audience)?;
     let omitted_discussions = discussions.len().saturating_sub(MAX_DISCUSSIONS);
     discussions.truncate(MAX_DISCUSSIONS);
     let mut blockers = summary.blockers;
@@ -95,8 +134,10 @@ pub fn cmd_context_for_thread(cli: &Cli, thread: &str) -> Result<()> {
     let bytes = serde_json::to_vec(&briefing)?;
     briefing.briefing_hash = ContentHash::compute_typed("context-briefing", &bytes).to_string();
     let receipt = ContextConsumptionReceipt {
-        format_version: 1,
+        format_version: 2,
         thread: thread.to_owned(),
+        recipient_lane: lane,
+        nonce: uuid::Uuid::now_v7().to_string(),
         intent_versions: briefing
             .intent
             .iter()
@@ -108,18 +149,26 @@ pub fn cmd_context_for_thread(cli: &Cli, thread: &str) -> Result<()> {
             .map(|item| SuppliedAnnotation {
                 target: item.target.clone(),
                 annotation_id: item.annotation_id.clone(),
+                visibility: item.visibility.clone(),
                 revisions: item
                     .revisions
                     .iter()
                     .map(|revision| SuppliedRevision {
                         revision_id: revision.revision_id.clone(),
                         kind: revision.kind.clone(),
-                        content: revision.content.clone(),
+                        content_hash: ContentHash::compute_typed(
+                            "context-supplied-revision",
+                            revision.content.as_bytes(),
+                        )
+                        .to_string(),
                     })
                     .collect(),
             })
             .collect(),
         briefing_hash: briefing.briefing_hash.clone(),
+        supplier_algorithm: String::new(),
+        supplier_public_key: Vec::new(),
+        supplier_signature: Vec::new(),
     };
 
     if should_output_json(cli, Some(repo.config())) {
@@ -171,6 +220,7 @@ fn annotation_items(
     repo: &Repository,
     head: &objects::object::State,
     changed_paths: &BTreeSet<String>,
+    audience: &AudienceTier,
 ) -> Result<Vec<AnnotationItem>> {
     let Some(root) = repo.inherit_parent_context(head)? else {
         return Ok(Vec::new());
@@ -185,7 +235,10 @@ fn annotation_items(
         }
         let target = entry.target.path().unwrap_or("state context").to_owned();
         for annotation in entry.blob.annotations {
-            if annotation.status == AnnotationStatus::Superseded {
+            if annotation.status != AnnotationStatus::Active {
+                continue;
+            }
+            if !visible(&annotation.visibility, audience) {
                 continue;
             }
             let current_ids: BTreeSet<&str> =
@@ -212,6 +265,7 @@ fn annotation_items(
                     "diverged: needs a decision"
                 },
                 annotation_id: annotation.annotation_id,
+                visibility: visibility_label(&annotation.visibility),
                 revisions,
             });
         }
@@ -227,6 +281,7 @@ fn discussion_items(
     thread: &str,
     changed_paths: &BTreeSet<String>,
     touched_symbols: &BTreeSet<(String, String)>,
+    audience: &AudienceTier,
 ) -> Result<Vec<DiscussionItem>> {
     if !repo.heddle_dir().join("collaboration").exists() {
         return Ok(Vec::new());
@@ -235,6 +290,9 @@ fn discussion_items(
     let materialized = store.materialize()?;
     let mut items = Vec::new();
     for discussion in materialized.discussions.into_values() {
+        if !visible(&discussion.visibility, audience) {
+            continue;
+        }
         if discussion.resolution.is_some() && discussion.conflict_operations.is_empty() {
             continue;
         }

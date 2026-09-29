@@ -2213,6 +2213,7 @@ fn capture_constraints_supplied(
             && receipt.thread == thread
         {
             supplied.push(ConstraintsSuppliedOutput {
+                provenance: "local",
                 capture: id.to_string_full(),
                 capture_intent: state.intent.clone(),
                 actor: state
@@ -2228,13 +2229,14 @@ fn capture_constraints_supplied(
                     .map(|annotation| SuppliedAnnotationOutput {
                         target: annotation.target,
                         annotation_id: annotation.annotation_id,
+                        visibility: annotation.visibility,
                         revisions: annotation
                             .revisions
                             .into_iter()
                             .map(|revision| SuppliedRevisionOutput {
                                 revision_id: revision.revision_id,
                                 kind: revision.kind,
-                                content: revision.content,
+                                content_hash: revision.content_hash,
                             })
                             .collect(),
                     })
@@ -2305,6 +2307,14 @@ pub(crate) fn show_thread_summary(
     );
     let (constraints_supplied, constraints_supplied_truncated) =
         capture_constraints_supplied(repo, &summary.name)?;
+    let supply_receipt_status = if constraints_supplied.is_empty() && constraints_supplied_truncated
+    {
+        "no supply receipt in inspected history"
+    } else if constraints_supplied.is_empty() {
+        "no supply receipt"
+    } else {
+        "local evidence"
+    };
     if should_output_json(cli, Some(repo.config())) {
         let output = ThreadShowOutput {
             output_kind: "thread_show",
@@ -2317,6 +2327,7 @@ pub(crate) fn show_thread_summary(
             recovery_commands: trust.recovery_commands.clone(),
             constraints_supplied,
             constraints_supplied_truncated,
+            supply_receipt_status,
             trust,
         };
         write_full_command_json(
@@ -2363,22 +2374,25 @@ pub(crate) fn show_thread_summary(
             let annotation_count = capture.annotations.len();
             let label = style::human_text(capture.capture_intent.as_deref().unwrap_or("capture"));
             println!(
-                "Constraints supplied: {intent}, {annotation_count} annotation{} to {actor} for {label}",
+                "Constraints supplied (LOCAL evidence): {intent}, {annotation_count} annotation{} to {actor} for {label}",
                 if annotation_count == 1 { "" } else { "s" }
             );
             for annotation in &capture.annotations {
                 for revision in &annotation.revisions {
                     println!(
-                        "  {} — {}: {}",
+                        "  {} [{}] — {}",
                         style::human_text(&annotation.target),
-                        revision.kind,
-                        style::human_text(&revision.content)
+                        annotation.visibility,
+                        revision.kind
                     );
                 }
             }
         }
         if constraints_supplied_truncated {
             println!("Constraints supplied: older captures omitted");
+        }
+        if constraints_supplied.is_empty() {
+            println!("Constraints supplied: {supply_receipt_status}");
         }
         println!();
         if summary.is_current {

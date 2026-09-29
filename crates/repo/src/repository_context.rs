@@ -62,7 +62,11 @@ impl Repository {
         self.insert_leaf_at_path(&current_tree, &target.storage_path(), blob_hash)
     }
 
-    /// Remove context at a target (optionally filtered by scope).
+    /// Delete context at a target (optionally filtered by scope).
+    ///
+    /// The tombstone stays in the context tree. A concurrent amendment retains
+    /// its history when merged, but deletion wins the lifecycle lattice; an
+    /// explicit new annotation ID is required to restore current guidance.
     ///
     /// Returns the new context tree root, or None if the tree is now empty.
     pub fn remove_context_at_target(
@@ -73,9 +77,11 @@ impl Repository {
     ) -> Result<Option<ContentHash>> {
         if let Some(scope) = scope {
             if let Some(mut blob) = self.get_context_blob(context_root, target)? {
-                blob.annotations.retain(|a| !a.scope.matches(scope));
-                if blob.annotations.is_empty() {
-                    return self.remove_context_target(context_root, target);
+                for annotation in &mut blob.annotations {
+                    if annotation.scope.matches(scope) {
+                        annotation.status = objects::object::AnnotationStatus::Deleted;
+                        annotation.divergent_revision_ids.clear();
+                    }
                 }
                 let new_root = self.set_context_blob(Some(context_root), target, &blob)?;
                 return Ok(Some(new_root));
@@ -91,7 +97,18 @@ impl Repository {
         context_root: &ContentHash,
         target: &ContextTarget,
     ) -> Result<Option<ContentHash>> {
-        self.remove_leaf_at_path(context_root, &target.storage_path())
+        let Some(mut blob) = self.get_context_blob(context_root, target)? else {
+            return Ok(Some(*context_root));
+        };
+        for annotation in &mut blob.annotations {
+            annotation.status = objects::object::AnnotationStatus::Deleted;
+            annotation.divergent_revision_ids.clear();
+        }
+        Ok(Some(self.set_context_blob(
+            Some(context_root),
+            target,
+            &blob,
+        )?))
     }
 
     /// List all context entries in the tree, optionally filtered by file prefix.
@@ -213,45 +230,6 @@ impl Repository {
         }
 
         self.store.put_tree(&new_tree)
-    }
-
-    fn remove_leaf_at_path(&self, root: &ContentHash, path: &Path) -> Result<Option<ContentHash>> {
-        let Some(tree) = self.store.get_tree(root)? else {
-            return Ok(None);
-        };
-        let Some((name, rest)) = split_path(path) else {
-            return Ok(None);
-        };
-
-        let mut new_tree = tree.clone();
-
-        if rest.as_os_str().is_empty() {
-            new_tree.remove(name);
-        } else {
-            let Some(entry) = tree.get(name) else {
-                return Ok(Some(*root));
-            };
-            if !entry.is_tree() {
-                return Ok(Some(*root));
-            }
-            let Some(tree_hash) = entry.tree_hash() else {
-                return Ok(Some(*root));
-            };
-            match self.remove_leaf_at_path(&tree_hash, rest)? {
-                Some(sub_hash) => {
-                    new_tree.insert(TreeEntry::directory(name, sub_hash)?);
-                }
-                None => {
-                    new_tree.remove(name);
-                }
-            }
-        }
-
-        if new_tree.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(self.store.put_tree(&new_tree)?))
-        }
     }
 
     fn walk_context_tree(
@@ -384,7 +362,7 @@ impl Repository {
 
 /// Preserve every unique revision and every non-dominated live tip. Metadata
 /// that cannot be combined without losing a side refuses the merge.
-fn merge_context_blobs(left: ContextBlob, right: ContextBlob) -> Result<ContextBlob> {
+pub fn merge_context_blobs(left: ContextBlob, right: ContextBlob) -> Result<ContextBlob> {
     if left.format_version != right.format_version {
         return Err(HeddleError::InvalidObject("context format mismatch".into()));
     }
@@ -408,10 +386,23 @@ fn merge_context_blobs(left: ContextBlob, right: ContextBlob) -> Result<ContextB
 }
 
 fn merge_annotation(mut a: Annotation, b: Annotation) -> Result<Annotation> {
+    let status = match (a.status, b.status) {
+        (objects::object::AnnotationStatus::Deleted, _)
+        | (_, objects::object::AnnotationStatus::Deleted) => {
+            objects::object::AnnotationStatus::Deleted
+        }
+        (objects::object::AnnotationStatus::Superseded, _)
+        | (_, objects::object::AnnotationStatus::Superseded) => {
+            objects::object::AnnotationStatus::Superseded
+        }
+        _ => objects::object::AnnotationStatus::Active,
+    };
     let mut a_metadata = a.clone();
+    a_metadata.status = objects::object::AnnotationStatus::Active;
     a_metadata.revisions.clear();
     a_metadata.divergent_revision_ids.clear();
     let mut b_metadata = b.clone();
+    b_metadata.status = objects::object::AnnotationStatus::Active;
     b_metadata.revisions.clear();
     b_metadata.divergent_revision_ids.clear();
     if a_metadata != b_metadata {
@@ -455,6 +446,7 @@ fn merge_annotation(mut a: Annotation, b: Annotation) -> Result<Annotation> {
         }
     }
     a.revisions = revisions.into_values().collect();
+    a.status = status;
     a.revisions.sort_by(|left, right| {
         (left.created_at, &left.revision_id).cmp(&(right.created_at, &right.revision_id))
     });
@@ -468,11 +460,12 @@ fn merge_annotation(mut a: Annotation, b: Annotation) -> Result<Annotation> {
         let current = a.revisions.remove(index);
         a.revisions.push(current);
     }
-    a.divergent_revision_ids = if tips.len() > 1 {
-        tips.into_iter().collect()
-    } else {
-        Vec::new()
-    };
+    a.divergent_revision_ids =
+        if status == objects::object::AnnotationStatus::Active && tips.len() > 1 {
+            tips.into_iter().collect()
+        } else {
+            Vec::new()
+        };
     Ok(a)
 }
 
@@ -508,7 +501,9 @@ mod tests {
     #[cfg(feature = "tree-sitter-symbols")]
     use std::fs;
 
-    use objects::object::{Annotation, AnnotationKind, StateAttachment, StateAttachmentBody};
+    use objects::object::{
+        Annotation, AnnotationKind, AnnotationStatus, StateAttachment, StateAttachmentBody,
+    };
     #[cfg(feature = "tree-sitter-symbols")]
     use objects::object::{AnnotationAnchorStatus, StalenessStatus};
     use tempfile::TempDir;
@@ -573,7 +568,9 @@ mod tests {
             .unwrap();
         let remaining = repo.get_context_blob(&new_root, &target).unwrap().unwrap();
 
-        assert_eq!(remaining.annotations.len(), 1);
+        assert_eq!(remaining.annotations.len(), 2);
+        assert_eq!(remaining.annotations[0].status, AnnotationStatus::Active);
+        assert_eq!(remaining.annotations[1].status, AnnotationStatus::Deleted);
         assert_eq!(
             remaining
                 .annotations
@@ -1150,5 +1147,108 @@ mod tests {
             .unwrap(),
             StalenessStatus::FileMissing
         );
+    }
+}
+
+#[cfg(test)]
+mod review_1863 {
+    use objects::object::{AnnotationKind, AnnotationStatus};
+
+    use super::*;
+    fn base() -> Annotation {
+        Annotation::new(
+            AnnotationScope::File,
+            AnnotationKind::Constraint,
+            "base".into(),
+            vec![],
+            "review".into(),
+            10,
+            None,
+            None,
+        )
+    }
+    fn amend(a: &Annotation, text: &str, ts: i64) -> Annotation {
+        let mut a = a.clone();
+        a.revise(
+            AnnotationKind::Constraint,
+            text.into(),
+            vec![],
+            "review".into(),
+            ts,
+            None,
+            None,
+        );
+        a
+    }
+    #[test]
+    fn review_three_way_algebra_duplicate_and_resolution() {
+        let seed = base();
+        let a = amend(&seed, "a", 20);
+        let b = amend(&seed, "b", 5);
+        let c = amend(&seed, "c", 30);
+        let ab = merge_annotation(a.clone(), b.clone()).unwrap();
+        let abc = merge_annotation(ab.clone(), c.clone()).unwrap();
+        for (x, y, z) in [
+            (a.clone(), b.clone(), c.clone()),
+            (a.clone(), c.clone(), b.clone()),
+            (b.clone(), a.clone(), c.clone()),
+            (b.clone(), c.clone(), a.clone()),
+            (c.clone(), a.clone(), b.clone()),
+            (c.clone(), b.clone(), a.clone()),
+        ] {
+            assert_eq!(
+                merge_annotation(merge_annotation(x.clone(), y.clone()).unwrap(), z.clone())
+                    .unwrap(),
+                abc
+            );
+            assert_eq!(
+                merge_annotation(x, merge_annotation(y, z).unwrap()).unwrap(),
+                abc
+            );
+        }
+        assert_eq!(merge_annotation(abc.clone(), abc.clone()).unwrap(), abc);
+        assert_eq!(merge_annotation(abc.clone(), a).unwrap(), abc);
+        assert_eq!(abc.divergent_revision_ids.len(), 3);
+        let resolved = amend(&ab, "decision", 1);
+        assert_eq!(merge_annotation(resolved.clone(), ab).unwrap(), resolved);
+        let unresolved_c = merge_annotation(resolved, c).unwrap();
+        assert_eq!(unresolved_c.divergent_revision_ids.len(), 2);
+        let mut forged = b.clone();
+        forged.revisions.last_mut().unwrap().content = "conflicting duplicate".into();
+        assert!(merge_annotation(b, forged).is_err());
+    }
+    #[test]
+    fn review_superseded_and_observed_active_converge() {
+        let a = base();
+        let mut retired = amend(&a, "final version", 20);
+        retired.mark_superseded();
+        let merged = merge_annotation(retired, a)
+            .expect("superseding an observed revision must converge with its old replica");
+        assert_eq!(merged.status, AnnotationStatus::Superseded);
+        assert_eq!(merged.revisions.len(), 2);
+        assert!(merged.divergent_revision_ids.is_empty());
+    }
+    #[test]
+    fn review_delete_and_amend_not_silently_current() {
+        let a = base();
+        let (_dir, repo) = {
+            let dir = tempfile::TempDir::new().unwrap();
+            let repo = crate::init_test_repository(dir.path()).unwrap();
+            (dir, repo)
+        };
+        let target = ContextTarget::file("deleted.rs").unwrap();
+        let root = repo
+            .set_context_blob(None, &target, &ContextBlob::new(vec![a.clone()]))
+            .unwrap();
+        let deleted_root = repo.remove_context_target(&root, &target).unwrap().unwrap();
+        let deletion = repo
+            .get_context_blob(&deleted_root, &target)
+            .unwrap()
+            .unwrap();
+        let live = ContextBlob::new(vec![amend(&a, "concurrent amendment", 20)]);
+        let merged = merge_context_blobs(deletion, live).unwrap();
+        assert_eq!(format!("{:?}", merged.annotations[0].status), "Deleted");
+        assert_eq!(merged.annotations[0].revisions.len(), 2);
+        assert!(merged.annotations[0].divergent_revision_ids.is_empty());
     }
 }

@@ -16,6 +16,7 @@ pub fn annotation_status_label(status: AnnotationStatus) -> &'static str {
     match status {
         AnnotationStatus::Active => "active",
         AnnotationStatus::Superseded => "superseded",
+        AnnotationStatus::Deleted => "deleted",
     }
 }
 
@@ -48,7 +49,9 @@ pub fn annotation_passes_filters(
     tag_filter: Option<&str>,
     include_superseded: bool,
 ) -> bool {
-    if !include_superseded && annotation.status == AnnotationStatus::Superseded {
+    if annotation.status == AnnotationStatus::Deleted
+        || (!include_superseded && annotation.status == AnnotationStatus::Superseded)
+    {
         return false;
     }
     if let Some(scope) = scope_filter

@@ -96,6 +96,19 @@ fn fixture() -> TempDir {
 #[test]
 fn context_for_thread_briefs_in_text_and_json() {
     let temp = fixture();
+    let before =
+        heddle(&["thread", "show", "brief"], Some(temp.path())).expect("show before supply");
+    assert!(
+        before.contains("Constraints supplied: no supply receipt"),
+        "{before}"
+    );
+    let before_json = heddle(
+        &["--output", "json", "thread", "show", "brief"],
+        Some(temp.path()),
+    )
+    .expect("JSON before supply");
+    let before_value: Value = serde_json::from_str(&before_json).expect("show JSON");
+    assert_eq!(before_value["supply_receipt_status"], "no supply receipt");
     let text =
         heddle(&["context", "--for-thread", "brief"], Some(temp.path())).expect("text briefing");
     assert!(text.contains("Thread: brief"), "{text}");
@@ -178,16 +191,17 @@ fn next_agent_capture_records_exact_briefing_and_thread_show_displays_it() {
         receipt.annotations[0].revisions[0].revision_id,
         supplied_revision
     );
-    assert_eq!(
-        receipt.annotations[0].revisions[0].content,
-        "Keep the entry point"
-    );
+    assert!(!receipt.annotations[0].revisions[0].content_hash.is_empty());
+    assert_eq!(receipt.annotations[0].visibility, "public");
     assert_eq!(receipt.intent_versions.len(), 1);
 
     let shown = heddle(&["thread", "show", "brief"], Some(temp.path())).expect("show");
-    assert!(shown.contains("Constraints supplied:"), "{shown}");
+    assert!(
+        shown.contains("Constraints supplied (LOCAL evidence):"),
+        "{shown}"
+    );
     assert!(shown.contains("1 annotation"), "{shown}");
-    assert!(shown.contains("Keep the entry point"), "{shown}");
+    assert!(!shown.contains("Keep the entry point"), "{shown}");
     assert!(
         !shown.contains(supplied_revision),
         "human output leaked a raw revision ID: {shown}"
@@ -202,4 +216,140 @@ fn next_agent_capture_records_exact_briefing_and_thread_show_displays_it() {
         shown["constraints_supplied"][0]["annotations"][0]["revisions"][0]["revision_id"],
         supplied_revision
     );
+    assert_eq!(shown["constraints_supplied"][0]["provenance"], "local");
+    assert_eq!(shown["supply_receipt_status"], "local evidence");
+    assert!(
+        shown["constraints_supplied"][0]["annotations"][0]["revisions"][0]["content"].is_null()
+    );
+}
+
+#[test]
+fn review_private_annotation_must_not_enter_briefing() {
+    use objects::{
+        object::{ContextTarget, StateAttachment, StateAttachmentBody, VisibilityTier},
+        store::ObjectStore,
+    };
+    let temp = fixture();
+    let repo = Repository::open(temp.path()).unwrap();
+    let head_id = repo
+        .refs()
+        .get_thread(&ThreadName::new("brief"))
+        .unwrap()
+        .unwrap();
+    let head = repo.store().get_state(&head_id).unwrap().unwrap();
+    let root = repo.inherit_parent_context(&head).unwrap().unwrap();
+    let target = ContextTarget::file("main.rs").unwrap();
+    let mut blob = repo.get_context_blob(&root, &target).unwrap().unwrap();
+    blob.annotations[0].visibility = VisibilityTier::Private {
+        scope_label: "embargo-no-agent-access".into(),
+    };
+    assert!(repo::filter_for_audience(&blob.annotations, &repo::AudienceTier::Internal).is_empty());
+    let next_root = repo.set_context_blob(Some(&root), &target, &blob).unwrap();
+    repo.put_state_attachment(&StateAttachment {
+        state_id: head_id,
+        body: StateAttachmentBody::Context(next_root),
+        attribution: head.attribution,
+        created_at: chrono::Utc::now(),
+        supersedes: Some(
+            repo.latest_state_attachment(&head_id, repo::StateAttachmentKind::Context)
+                .unwrap()
+                .unwrap()
+                .id(),
+        ),
+    })
+    .unwrap();
+    let output = heddle(
+        &["--output", "json", "context", "--for-thread", "brief"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(
+        !output.contains("Keep the entry point"),
+        "Private annotation leaked in briefing: {output}"
+    );
+}
+
+#[test]
+fn signed_briefing_rejects_another_recipient_lane() {
+    let temp = fixture();
+    heddle(&["context", "--for-thread", "brief"], Some(temp.path())).expect("briefing");
+    heddle(&["thread", "create", "other"], Some(temp.path())).expect("other Thread");
+    heddle(&["thread", "switch", "other"], Some(temp.path())).expect("switch");
+    let repo = Repository::open(temp.path()).expect("repository");
+    assert!(repo.pending_context_receipt().is_err());
+}
+
+#[test]
+fn child_briefing_does_not_inherit_parent_internal_visibility() {
+    use objects::{
+        object::{ContextTarget, StateAttachment, StateAttachmentBody, VisibilityTier},
+        store::ObjectStore,
+    };
+    let temp = fixture();
+    let repo = Repository::open(temp.path()).expect("repository");
+    let head_id = repo
+        .refs()
+        .get_thread(&ThreadName::new("brief"))
+        .unwrap()
+        .unwrap();
+    let head = repo.store().get_state(&head_id).unwrap().unwrap();
+    let root = repo.inherit_parent_context(&head).unwrap().unwrap();
+    let target = ContextTarget::file("main.rs").unwrap();
+    let mut blob = repo.get_context_blob(&root, &target).unwrap().unwrap();
+    blob.annotations[0].visibility = VisibilityTier::Internal;
+    let next_root = repo.set_context_blob(Some(&root), &target, &blob).unwrap();
+    repo.put_state_attachment(&StateAttachment {
+        state_id: head_id,
+        body: StateAttachmentBody::Context(next_root),
+        attribution: head.attribution,
+        created_at: chrono::Utc::now(),
+        supersedes: Some(
+            repo.latest_state_attachment(&head_id, repo::StateAttachmentKind::Context)
+                .unwrap()
+                .unwrap()
+                .id(),
+        ),
+    })
+    .unwrap();
+
+    let parent_view = heddle(
+        &["--output", "json", "context", "--for-thread", "brief"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(parent_view.contains("Keep the entry point"));
+
+    let manager = repo::ThreadManager::new(repo.heddle_dir());
+    let mut record = manager.find_record_by_thread("brief").unwrap().unwrap();
+    record.parent_thread = Some("main".into());
+    manager.save_record(&record).unwrap();
+    let child_view = heddle(
+        &["--output", "json", "context", "--for-thread", "brief"],
+        Some(temp.path()),
+    )
+    .unwrap();
+    assert!(!child_view.contains("Keep the entry point"), "{child_view}");
+}
+
+#[test]
+fn embargoed_thread_head_is_withheld_from_recipient_lane() {
+    let temp = fixture();
+    heddle(
+        &[
+            "visibility",
+            "set",
+            "HEAD",
+            "--tier",
+            "private",
+            "--label",
+            "secret",
+        ],
+        Some(temp.path()),
+    )
+    .expect("private head");
+    std::fs::remove_file(temp.path().join(".heddle/visibility/audience_label"))
+        .expect("remove recipient grant");
+    let error = heddle(&["context", "--for-thread", "brief"], Some(temp.path()))
+        .expect_err("under-tier recipient cannot read briefing");
+    assert!(format!("{error:#}").contains("withheld"), "{error:#}");
 }
