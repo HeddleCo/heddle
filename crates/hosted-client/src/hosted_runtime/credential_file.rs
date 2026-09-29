@@ -64,7 +64,7 @@ pub struct CredentialProvenance {
     /// The `--template` preset a derived agent was built from, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
-    /// Declared resource scopes (`repo:org/name`, `namespace:org`, ...).
+    /// Declared resource scopes (`spool:org/name`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
     /// The exact operation ceiling recorded in the token's attenuation block.

@@ -128,8 +128,8 @@ heddle auth derive-agent \
   --server grpc.heddle.sh \
   --agent-id agent-doc-review \
   --ttl 7200 \
-  --scope repo:org/acme/heddle \
-  --allow GetState
+  --scope spool:org/acme/heddle \
+  --template reviewer
 ```
 
 For a human-delegated CI verdict runner, use a concrete spool scope and the
@@ -145,7 +145,7 @@ heddle auth derive-agent \
 ```
 
 The canonical weft scope is `spool:org/acme ci-verdict:write`. The Biscuit's
-request-operation fence uses weft's corresponding `CiVerdictWrite` operation;
+request-operation fence uses weft's `RecordEvidence` operation;
 it does not admit `Push`, `UpdateRef`, or ordinary spool write.
 
 ## What gets emitted in the attenuation block
@@ -154,20 +154,24 @@ Each restriction translates to a Biscuit Datalog clause that the
 verifier evaluates with the per-request facts (`time`, `operation`,
 `resource`) injected by the server. The shape is documented in
 [`.agents/agent-attenuation.md`](../.agents/agent-attenuation.md)
-and the Heddle-owned construction lives in
-[`hosted_runtime/device_flow.rs`](../crates/hosted-client/src/hosted_runtime/device_flow.rs).
+and the shared native/WASM construction lives in
+[`biscuit-verifier/src/delegation.rs`](../crates/biscuit-verifier/src/delegation.rs).
 In short:
 
 | Field | Datalog | Default when fact missing |
 |---|---|---|
 | `expires_at` | `check if time($now), $now < <ts>` | Verifier always injects `time`, so always evaluated. |
 | `allowed_operations: Some([...])` | `check if operation($op), $op == "X" \|\| ...` | Reject (fail-closed). |
-| `allowed_resources: Some([...])` | `check if resource($k, $p), ($k == "..." && ($p == "..." \|\| $p.starts_with("...")))` | Reject (fail-closed). |
+| `allowed_resources: Some([...])` | `check if resource($k, $p), ($k == "..." && ($p == "..." \|\| $p.starts_with("...")))` | Reject except resource-less discovery and caller identity. |
+
+Weft supplies `resource("spool", "spool/<path>")` for scoped requests.
+ListSpools is unfiltered, and ObserveWorkspace uses account-wide cursor inputs,
+so scoped credentials cannot call either operation.
 
 The resource matcher accepts an exact path or any descendant: an
-entry of `("repo", "org/acme")` covers `repo:org/acme`,
-`repo:org/acme/heddle`, and `repo:org/acme/docs`, but not
-`repo:org/other`.
+entry of `("spool", "spool/org/acme")` covers `spool:org/acme`,
+`spool:org/acme/heddle`, and `spool:org/acme/docs`, but not
+`spool:org/other`.
 
 ## What the verifier needs
 

@@ -40,11 +40,11 @@ pub const POP_DELEGATION_DOMAIN: &[u8] = b"heddle-pop-delegation-v1\0";
 
 pub const PRESENCE_TOKEN_TTL_SECS: i64 = 5 * 60;
 
-/// Authority-block action required to submit a signed CI verdict.
+/// Authority-block action carried by scoped CI verdict credentials.
 pub const CI_VERDICT_WRITE_ACTION: &str = "ci-verdict:write";
 
-/// Request-time operation fact used by the CI-verdict authorization gate.
-pub const CI_VERDICT_WRITE_OPERATION: &str = "CiVerdictWrite";
+/// Native request operation used for CI evidence submission.
+pub const RECORD_EVIDENCE_OPERATION: &str = "RecordEvidence";
 
 /// Marker predicate carried by the exact server-signed presence block shape.
 pub(crate) const PRESENCE_ATTENUATION_FACT: &str = "weft_presence_attenuation_v1";
@@ -277,21 +277,6 @@ pub fn authorize_at_with_extra_facts(
                 .as_str(),
             )
             .internal_ctx("add resource fact")?;
-    }
-    if operation == CI_VERDICT_WRITE_OPERATION {
-        // SECURITY: both the operation and resolved resource are injected by
-        // the verifier. Trust the capability right only from the authority
-        // block so an offline-appended fact cannot self-grant verdict power.
-        // The action is intentionally outside admin → write → read, keeping a
-        // normal spool writer unable to sign CI verdicts.
-        builder = builder
-            .check(
-                format!(
-                    "check if resource(\"spool\", $path), right(\"spool\", $path, \"{CI_VERDICT_WRITE_ACTION}\") trusting authority"
-                )
-                .as_str(),
-            )
-            .internal_ctx("add CI-verdict capability check")?;
     }
     if !extra_facts.is_empty() {
         // Injected request facts are only trustworthy if the token cannot
@@ -851,7 +836,13 @@ mod tests {
                 delegation::AgentAttenuation {
                     agent_id: "scoped-agent".into(),
                     expires_at: expires,
-                    allowed_operations: Some(vec!["ReadContent".into()]),
+                    allowed_operations: Some(vec![
+                        "ReadContent".into(),
+                        "DescribeEndpoint".into(),
+                        "GetIdentity".into(),
+                        "ListSpools".into(),
+                        "ObserveWorkspace".into(),
+                    ]),
                     allowed_resources: Some(vec![("spool".into(), "org/allowed".into())]),
                 }
                 .block()
@@ -883,6 +874,33 @@ mod tests {
             facts.limits_identity_disclosure,
             "explicit ceilings retain the limited self view"
         );
+        for operation in ["DescribeEndpoint", "GetIdentity"] {
+            verify_at_with_resource(&narrowed, &[root.public()], &[], operation, None, now)
+                .expect("resource-less bootstrap and caller identity remain available");
+        }
+        verify_at_with_resource(
+            &narrowed,
+            &[root.public()],
+            &[],
+            "ReadContent",
+            Some(("spool", "org/allowed")),
+            now,
+        )
+        .expect("scoped content read remains available");
+        for (operation, resource) in [
+            ("ReadContent", Some(("spool", "org/other"))),
+            ("ReadContent", None),
+            ("ListSpools", None),
+            ("ListSpools", Some(("spool", "org/allowed"))),
+            ("ObserveWorkspace", None),
+            ("ObserveWorkspace", Some(("spool", "org/allowed"))),
+        ] {
+            assert!(
+                verify_at_with_resource(&narrowed, &[root.public()], &[], operation, resource, now)
+                    .is_err(),
+                "scope must refuse {operation} without an in-scope resource"
+            );
+        }
         let narrowed_parent = crate::signature_v1::verify_base64(&narrowed, |_| Ok(root.public()))
             .expect("narrowed parent");
         let parent_id = narrowed_parent

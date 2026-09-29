@@ -509,7 +509,7 @@ async fn real_account_rpc_composes_private_views_and_enforces_scoped_mutations()
         &publisher,
         &signature,
         biscuit_auth::builder::BlockBuilder::new()
-            .code(format!("check if resource(\"spool\", \"{}\");", spool).as_str())
+            .code(format!("check if resource(\"spool\", \"spool/{}\");", spool).as_str())
             .expect("resource restriction"),
     )
     .expect("same-key attenuation");
@@ -521,7 +521,7 @@ async fn real_account_rpc_composes_private_views_and_enforces_scoped_mutations()
         chrono::Utc::now(),
         None,
         &[],
-        Some(("spool", &spool.to_string())),
+        Some(("spool", &format!("spool/{spool}"))),
     )
     .expect("exact scoped workspace permission");
     let connection = browser
@@ -560,6 +560,11 @@ async fn real_account_rpc_composes_private_views_and_enforces_scoped_mutations()
         .await
         .expect("scoped protocol")
         .expect("scoped snapshot");
+    assert!(batch.changes.iter().any(|change| {
+        matches!(change, workspace_event::Payload::Spool(spool)
+            if spool.actions.iter().any(|action|
+                action.method.ends_with("/ReviseSpool") && action.authorized))
+    }));
     let ids: Vec<_> = batch
         .changes
         .iter()

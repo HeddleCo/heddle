@@ -89,19 +89,12 @@ fn parse_claim_timeout(value: &str) -> Result<std::time::Duration, String> {
 /// combined, may only *narrow* it (they intersect the template's set).
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentTemplateArg {
-    /// Read + review: every read RPC plus Pull. No writes, no ref moves.
-    /// (ListStates/GetState/GetBlame/GetTree/GetBlob/GetDiff/GetCompare/
-    /// ListActions/ListContext/GetContextHistory/GetDiscussion/ListByState/
-    /// ListBySymbol/... + Pull + WhoAmI.)
+    /// Native read operations, including spool, thread, content, and review views.
     Reviewer,
-    /// Read + collaboration writes: the reviewer set plus Push, UpdateRef,
-    /// SetContext/ReviseContext/SupersedeContext, and
-    /// OpenDiscussion/AppendTurn/ResolveDiscussion. No repo/namespace admin.
-    /// This is the full safe agent ceiling — the named form of deriving with
-    /// no --template/--allow.
+    /// Reviewer operations plus thread, content, context, discussion, review,
+    /// spool creation, and CI evidence writes.
     Contributor,
-    /// Read + Pull + the Push/UpdateRef a CI lander needs to run ready/land.
-    /// No context or discussion writes.
+    /// Reviewer operations plus LandThread and PublishContent.
     #[value(name = "ci-landing")]
     CiLanding,
 }
@@ -198,19 +191,18 @@ It does not grant spool access. Add a collaborator with:
         #[arg(long = "scope")]
         scopes: Vec<String>,
 
-        /// Narrow the safe operation set (repeatable, using hosted operation names such as `Push`).
+        /// Narrow the template operation set (repeatable, using native names such as `RecordEvidence`).
         #[arg(long = "allow")]
         allowed_operations: Vec<String>,
 
-        /// Preset operation ceiling. `reviewer` = read-only + Pull;
-        /// `contributor` = reviewer + Push/UpdateRef + context/discussion
-        /// writes; `ci-landing` = reviewer + Push/UpdateRef for ready/land.
+        /// Preset operation ceiling: `reviewer` for reads, `contributor` for
+        /// native writes, or `ci-landing` for LandThread and PublishContent.
         /// A combined `--allow` may only narrow the template.
         #[arg(long, value_enum)]
         template: Option<AgentTemplateArg>,
 
         /// Derive a CI-verdict runner: `ci-verdict:write` on the required
-        /// `spool:` scope(s), without Push, UpdateRef, or other source writes.
+        /// `spool:` scope(s), without source writes.
         #[arg(long, conflicts_with_all = ["template", "allowed_operations"])]
         runner: bool,
 
@@ -636,9 +628,9 @@ mod tests {
             "--ttl",
             "900",
             "--scope",
-            "repo:acme/api",
+            "spool:acme/api",
             "--scope",
-            "namespace:acme",
+            "acme/tools",
             "--allow",
             "Push",
             "--allow",
@@ -661,7 +653,7 @@ mod tests {
         };
         assert_eq!(server, "api.heddle.test");
         assert_eq!(ttl_secs, 900);
-        assert_eq!(scopes, ["repo:acme/api", "namespace:acme"]);
+        assert_eq!(scopes, ["spool:acme/api", "acme/tools"]);
         assert_eq!(allowed_operations, ["Push", "GetState"]);
 
         assert!(

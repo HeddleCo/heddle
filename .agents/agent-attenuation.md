@@ -45,9 +45,8 @@ heddle auth derive-agent \
   --server grpc.heddle.sh \
   --agent-id review-worker \
   --ttl 3600 \
-  --scope repo:acme/heddle \
-  --allow Push \
-  --allow GetState
+  --scope spool:acme/heddle \
+  --template reviewer
 ```
 
 Without `--allow`, the command installs the curated safe set: push/pull,
@@ -80,8 +79,8 @@ storing. `--out` refuses to overwrite an existing path. Token-only `--stdout`
 export is intentionally unsupported because the resulting bearer could not
 satisfy its request-proof binding.
 
-The derived token is strictly weaker than its parent: its operation fence and
-TTL are enforced server-side. Declared resource scopes await W3 enforcement.
+The derived token is strictly weaker than its parent: its operation, resource,
+and TTL caveats are enforced server-side.
 Every child block carries one `pop_delegation(parent_revocation_id,
 child_public_key, signature)` fact. The parent signs a versioned payload over
 the preceding block's raw revocation id and the new 32-byte key. Weft verifies
@@ -99,7 +98,7 @@ convenience constructors.
 
 ```rust
 use heddle_client::auth::{
-    AgentAttenuation, attenuate_for_agent, time_bounded, read_only_repo_agent,
+    AgentAttenuation, attenuate_for_agent, time_bounded, read_only_spool_agent,
 };
 
 // `parent_signer` is the private key matching the parent token's effective
@@ -115,8 +114,8 @@ let attenuated = time_bounded(
     child_signer.public_key(),
 )?;
 
-// Read-only sub-agent on a single repo.
-let attenuated = read_only_repo_agent(
+// Read-only sub-agent on a single spool.
+let attenuated = read_only_spool_agent(
     &parent_token_b64,
     "agent-explorer",
     "org/acme/heddle",
@@ -132,12 +131,12 @@ let attenuated = attenuate_for_agent(
         agent_id: "agent-custom".to_string(),
         expires_at: chrono::Utc::now() + chrono::Duration::hours(8),
         allowed_operations: Some(vec![
-            "GetState".to_string(),
-            "GetCompare".to_string(),
+            "ResolveResources".to_string(),
+            "ReadContent".to_string(),
         ]),
         allowed_resources: Some(vec![
-            ("repo".to_string(), "org/acme/heddle".to_string()),
-            ("repo".to_string(), "org/acme/docs".to_string()),
+            ("spool".to_string(), "spool/org/acme/heddle".to_string()),
+            ("spool".to_string(), "spool/org/acme/docs".to_string()),
         ]),
         declared_scopes: Vec::new(),
     },
@@ -149,30 +148,32 @@ let attenuated = attenuate_for_agent(
 ## Restriction semantics
 
 Every restriction emits a Biscuit `check if ...` clause. The verifier runs each
-check against the world. Current servers inject `time(now)` and
-`operation($name)` per request. W3 plans to add `resource($kind, $path)`; until
-then, any `allowed_resources` check finds no binding and rejects every request.
-A check that finds no binding is a hard reject — that's the secure default.
+check against the world. Weft injects `time(now)` and `operation($name)` per
+request and `resource("spool", "spool/<path>")` for scoped operations.
+DescribeEndpoint, GetIdentity, and ObserveIdentity carry no resource and pass
+the resource caveat. Other operations without an in-scope resource fail closed.
+Scoped credentials cannot call ListSpools or ObserveWorkspace because those
+responses use account-wide data.
 
 | Restriction | Datalog form | Default behaviour when no fact present |
 |---|---|---|
 | `expires_at` | `check if time($now), $now < <ts>` | Verifier always injects `time`, so always evaluated |
 | `allowed_operations: Some([...])` | `check if operation($op), $op == "X" \|\| ...` | Reject (no operation fact → check fails closed) |
-| `allowed_resources: Some([...])` | `check if resource($k, $p), (...path matches...)` | Reject every request until W3 injects resource facts |
-| `declared_scopes` | `agent_scope($kind, $path)` facts | Inert until W3 server enforcement |
+| `allowed_resources: Some([...])` | `check if resource($k, $p), (...path matches...)` | Reject except resource-less discovery and caller identity |
+| `declared_scopes` | `agent_scope($kind, $path)` facts | Audit and sub-derivation narrowing metadata |
 | hard deny floor | one `operation($op), $op != …` check per forbidden method | Reject (the floor is always emitted) |
 
 The path-prefix matcher accepts an exact match or any nested path:
-an entry of `("repo", "org/acme")` covers `repo:org/acme`,
-`repo:org/acme/heddle`, `repo:org/acme/docs`, etc. Sibling namespaces
-(`repo:org/other`) are not covered.
+an entry of `("spool", "spool/org/acme")` covers `spool:org/acme`,
+`spool:org/acme/heddle`, `spool:org/acme/docs`, etc. Sibling namespaces
+(`spool:org/other`) are not covered.
 
 ## Cookbook
 
 ### 1. Read-only inspector for a single repo
 
 ```rust
-let attenuated = read_only_repo_agent(
+let attenuated = read_only_spool_agent(
     &parent,
     "agent-pr-review",
     "org/acme/heddle",
@@ -183,11 +184,8 @@ let attenuated = read_only_repo_agent(
 // Hand `attenuated` to the agent.
 ```
 
-The `read_only_repo_agent` constructor allowlists the read RPCs
-(`GetState`, `GetTree`, `GetBlob`, `GetCompare`, `GetDiff`,
-`ListRefs`, `ListStates`, `ListContext`) and adds a resource check for
-the repo path. The operation fence is active today; the resource-scoped recipe
-remains fail-closed until W3 injects resource facts.
+The `read_only_spool_agent` constructor allows scoped read RPCs and adds
+a resource check for the canonical spool path.
 
 ### 2. Time-bounded background agent
 
@@ -220,8 +218,8 @@ let attenuated = attenuate_for_agent(
         allowed_operations: None,
         // But only on these two repos.
         allowed_resources: Some(vec![
-            ("repo".to_string(), "org/acme/heddle".to_string()),
-            ("repo".to_string(), "org/acme/docs".to_string()),
+            ("spool".to_string(), "spool/org/acme/heddle".to_string()),
+            ("spool".to_string(), "spool/org/acme/docs".to_string()),
         ]),
         declared_scopes: Vec::new(),
     },
@@ -230,13 +228,13 @@ let attenuated = attenuate_for_agent(
 )?;
 ```
 
-This resource-scoped recipe remains fail-closed until W3 injects resource facts.
+Weft injects the canonical spool resource on each scoped request.
 
 ### 4. Sub-sub-agent (further attenuation)
 
 ```rust
 // Parent attenuates for the agent.
-let agent_token = read_only_repo_agent(
+let agent_token = read_only_spool_agent(
     &parent,
     "agent-1",
     "org/acme/heddle",
@@ -255,7 +253,7 @@ let sub_agent_token = attenuate_for_agent(
         allowed_operations: Some(vec!["GetState".to_string()]),
         // Narrower than the parent: a single repo.
         allowed_resources: Some(vec![
-            ("repo".to_string(), "org/acme/heddle".to_string()),
+            ("spool".to_string(), "spool/org/acme/heddle".to_string()),
         ]),
         declared_scopes: Vec::new(),
     },
@@ -309,10 +307,9 @@ child credential.
 - **Re-sign the chain.** The registered client public key is the
   trust anchor. Weft rejects any chain whose authority block is
   not signed by a key it registered.
-- **Enforce CLI `--scope` on today's server.** W1 carries each scope as an
-  `agent_scope` fact and prevents sub-derivation from declaring a broader
-  scope. Request-level repository enforcement begins with W3. Operation and
-  TTL caveats are enforced today.
+- **Escape CLI `--scope`.** Weft supplies the canonical spool resource for
+  each scoped request; the signed caveat rejects other paths. Sub-derivation
+  can only narrow the parent scope.
 
 ## Where the server enforces this
 

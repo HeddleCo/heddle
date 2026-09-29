@@ -66,11 +66,11 @@ impl Capability {
 
     /// Request-time operation gated directly by this capability, when one
     /// exists. Most capabilities are enforced by their hosted handler after
-    /// Biscuit verification; CI verdict submission is fail-closed in the
-    /// authorizer itself so ordinary spool write cannot satisfy it.
+    /// Biscuit verification; CI verdict submission maps to its native RPC
+    /// so delegated operation caveats can name the admitted request.
     pub const fn operation(self) -> Option<&'static str> {
         match self {
-            Capability::CiVerdictWrite => Some(heddle_biscuit_verifier::CI_VERDICT_WRITE_OPERATION),
+            Capability::CiVerdictWrite => Some(heddle_biscuit_verifier::RECORD_EVIDENCE_OPERATION),
             _ => None,
         }
     }
@@ -368,8 +368,24 @@ pub fn verify_service_child_ceiling(
     let actual = BlockBuilder::new()
         .code(&source)
         .map_err(|_| ServiceCeilingError::Invalid)?;
-    if actual.facts.len() != 1
-        || actual.facts[0].predicate.name != "pop_delegation"
+    let proof_facts = actual
+        .facts
+        .iter()
+        .filter(|fact| fact.predicate.name == "pop_delegation")
+        .count();
+    let expiry_facts = actual
+        .facts
+        .iter()
+        .filter(|fact| fact.predicate.name == "agent_expires_at")
+        .count();
+    if proof_facts != 1
+        || expiry_facts > 1
+        || actual.facts.len() != proof_facts + expiry_facts
+        || actual
+            .facts
+            .iter()
+            .filter(|fact| fact.predicate.name == "agent_expires_at")
+            .any(|fact| !expected.facts.contains(fact))
         || !actual.rules.is_empty()
         || !actual.scopes.is_empty()
         || !expected
