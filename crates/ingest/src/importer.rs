@@ -407,6 +407,18 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
             }
         }
 
+        for commit in &commits {
+            if let Some(cid) = self.map.get_commit(&commit.sha)? {
+                let state = self.store.get_state(&cid)?.ok_or_else(|| {
+                    IngestError::Other(format!(
+                        "mapped state {cid} for Git commit {} is missing",
+                        commit.sha
+                    ))
+                })?;
+                self.map.claim_change_id(&commit.sha, state.change_id)?;
+            }
+        }
+
         self.map.begin_append_batch()?;
         let write_result = (|| -> crate::Result<PackedImportStats> {
             for (git_sha, _) in &remapped_commits {
@@ -1678,6 +1690,63 @@ mod tests {
                 .expect("thread read"),
             None,
             "collision must not publish a ref"
+        );
+    }
+
+    #[test]
+    fn cached_commit_claims_change_id_after_map_upgrade() {
+        let gitdir = TempDir::new().expect("Git temp dir");
+        let heddledir = TempDir::new().expect("Heddle temp dir");
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(gitdir.path())
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .status()
+                .expect("git command");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q", "--initial-branch=main"]);
+        let trailer = format!(
+            "Heddle-Change-Id: {}",
+            objects::object::ChangeId::from_bytes([7; 16]).to_string_full()
+        );
+        std::fs::write(gitdir.path().join("file"), "one").expect("first content");
+        run(&["add", "file"]);
+        run(&["commit", "-q", "-m", "first", "-m", &trailer]);
+        let git = GitSource::open(gitdir.path()).expect("Git source");
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(heddledir.path());
+        refs.init().expect("refs");
+        let map_path = heddledir.path().join("sha-map.sqlite");
+        {
+            let mut map = ShaMap::open(&map_path).expect("map");
+            pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run())
+                .expect("first import");
+        }
+        rusqlite::Connection::open(&map_path)
+            .expect("map db")
+            .execute("DROP TABLE git_import_change_ids", [])
+            .expect("simulate old map");
+        std::fs::write(gitdir.path().join("file"), "two").expect("second content");
+        run(&["add", "file"]);
+        run(&["commit", "-q", "-m", "second", "-m", &trailer]);
+        let git = GitSource::open(gitdir.path()).expect("Git source");
+        let mut map = ShaMap::open(&map_path).expect("upgraded map");
+        let result = pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run());
+        assert!(
+            matches!(
+                result,
+                Err(IngestError::ShaMap(
+                    crate::sha_map::ShaMapError::ChangeIdCollision { .. }
+                ))
+            ),
+            "{result:?}"
         );
     }
 
