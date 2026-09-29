@@ -569,6 +569,7 @@ fn whoami_output(report: WhoamiReport) -> WhoamiOutput {
             cap_bytes: lock.cap_bytes,
             allowed_actions: lock.allowed_actions,
         }),
+        hosted_error: report.hosted_error,
         recommended_action: report.recommended_action,
     }
 }
@@ -675,6 +676,9 @@ fn write_whoami_human(
             writer,
             "Server:        unreachable (showing locally-known token facts)"
         )?;
+        if let Some(error) = &output.hosted_error {
+            writeln!(writer, "Server error:  {error}")?;
+        }
     }
     writeln!(
         writer,
@@ -1149,6 +1153,7 @@ mod tests {
             proof_key_available: true,
             identity: Some(identity()),
             billing_lock: None,
+            hosted_error: None,
             recommended_action: Some("heddle auth login".into()),
         }
     }
@@ -1211,6 +1216,22 @@ mod tests {
         assert!(human.contains("full (no operation allowlist)"));
         assert!(human.contains("EXPIRED 30s ago"));
         assert!(human.contains("Signing:       unavailable"));
+
+        unreachable.proof_key_available = true;
+        unreachable.hosted_error =
+            Some("discover hosted v2 API: Unauthenticated: invalid bearer capability".into());
+        unreachable.recommended_action = Some("heddle auth login --server api.heddle.test".into());
+        let json = serde_json::to_value(whoami_output(unreachable.clone())).expect("whoami JSON");
+        assert!(
+            json["hosted_error"]
+                .as_str()
+                .is_some_and(|value| value.contains("Unauthenticated"))
+        );
+        let mut bytes = Vec::new();
+        write_whoami_human(&mut bytes, &unreachable).expect("render server rejection");
+        let human = String::from_utf8(bytes).expect("whoami output is UTF-8");
+        assert!(human.contains("Server error:  discover hosted v2 API: Unauthenticated"));
+        assert!(!human.contains("check connectivity"));
 
         unreachable.ttl_seconds_remaining = None;
         let mut bytes = Vec::new();

@@ -15,6 +15,7 @@ pub(crate) use heddle_cli_contract::cli::commands::wire::agent::{
     AgentReservationListOutput, AgentReservationOutput, AgentTaskEnvelope, AgentTaskListOutput,
     AgentTaskOutput,
 };
+use heddle_git_projection::git_core::set_reference;
 use objects::{
     object::ThreadName,
     store::{
@@ -34,9 +35,7 @@ use repo::{
     },
     shell_quote, validate_task_id,
 };
-use sley::{
-    HeadUpdateOptions, IndexWriteOptions, RefChange, ReferenceTarget, Repository as SleyRepository,
-};
+use sley::{HeadUpdateOptions, IndexWriteOptions, RefPrecondition, Repository as SleyRepository};
 use verbs::{
     AgentCaptureOptions, AgentCaptureThreadCheck, AgentReadyOptions, FanoutLaneAvailability,
     FanoutLanePreflightBlock, FanoutNodeSpec, FanoutPlan, FanoutPlanError, FanoutPlanRequest,
@@ -1121,10 +1120,13 @@ fn link_fanout_child_git(parent: &Repository, child: &Path, thread: &str) -> Res
     let git = SleyRepository::init_with_format(child, source.object_format(), false)?;
     git.copy_reachable_from(&source, &[tip])?;
     let branch = format!("refs/heads/{thread}");
-    git.apply_ref_changes(&[RefChange::new(
-        branch.as_str(),
-        ReferenceTarget::Direct(tip),
-    )?])?;
+    set_reference(
+        &git,
+        &branch,
+        tip,
+        RefPrecondition::MustNotExist,
+        "heddle: create fanout child branch",
+    )?;
     git.set_head_symref(&branch, HeadUpdateOptions::new())?;
     let commit = git.read_commit(&tip)?;
     let index = git.index_from_tree(&commit.tree)?;
@@ -1738,6 +1740,7 @@ pub fn agent_api_schema() -> serde_json::Value {
         "AgentFanoutOutput": schemars::schema_for!(AgentFanoutOutput),
         "AgentFanoutLaneOutput": schemars::schema_for!(AgentFanoutLaneOutput),
         "AgentFanoutCommandOutput": schemars::schema_for!(AgentFanoutCommandOutput),
+        "StatusReport": (verbs::StatusReport::CONTRACT.schema)(),
     })
 }
 

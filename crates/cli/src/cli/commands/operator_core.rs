@@ -5,6 +5,7 @@ use anyhow::Result;
 pub(crate) use heddle_cli_contract::cli::commands::wire::{
     OperatorAction, OperatorCommandEnvelope, OperatorCommandOutput, VerificationClaimPolicy,
 };
+use objects::object::Attribution;
 use repo::{
     GitImportGuidance, GitRemoteTrackingStatus, OperationKind, OperationScope, Repository,
     RepositoryOperationStatus, shell_quote,
@@ -127,7 +128,10 @@ pub(crate) fn open_operator_repo_from_path(path: &Path) -> Result<Repository> {
     }
 }
 
-pub(crate) fn continue_operator(repo: &Repository) -> Result<OperatorCommandOutput> {
+pub(crate) fn continue_operator(
+    repo: &Repository,
+    resolver: Option<&Attribution>,
+) -> Result<OperatorCommandOutput> {
     if repo.merge_state_manager().is_merge_in_progress() {
         let unresolved = repo.merge_state_manager().unresolved()?;
         if !unresolved.is_empty() {
@@ -150,19 +154,20 @@ pub(crate) fn continue_operator(repo: &Repository) -> Result<OperatorCommandOutp
             });
         }
 
+        let resolver_agent = resolver.and_then(|attribution| attribution.agent.as_ref());
         create_snapshot(
             repo,
             &UserConfig::load_default()?,
             Some("Continue merge".to_string()),
             None,
             SnapshotAgentOverrides {
-                provider: None,
-                model: None,
-                session: None,
-                segment: None,
-                policy: None,
+                provider: resolver_agent.map(|agent| agent.provider.clone()),
+                model: resolver_agent.map(|agent| agent.model.clone()),
+                session: resolver_agent.and_then(|agent| agent.session_id.clone()),
+                segment: resolver_agent.and_then(|agent| agent.segment_id.clone()),
+                policy: resolver_agent.and_then(|agent| agent.policy_id.clone()),
                 no_policy: false,
-                no_agent: false,
+                no_agent: resolver.is_some_and(|attribution| attribution.agent.is_none()),
             },
         )?;
         let next_action = verbs::complete_current_thread_manual_resolution(repo)?;

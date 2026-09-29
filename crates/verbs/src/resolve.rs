@@ -57,17 +57,22 @@ pub struct ConflictRegionReport {
     pub theirs: ConflictSideReport,
 }
 
-impl From<&ConflictRegion> for ConflictRegionReport {
-    fn from(conflict: &ConflictRegion) -> Self {
+impl ConflictRegionReport {
+    pub fn new(
+        conflict: &ConflictRegion,
+        base: &Attribution,
+        ours: &Attribution,
+        theirs: &Attribution,
+    ) -> Self {
         Self {
             id: conflict.id.clone(),
             path: conflict.path.clone(),
             symbol: conflict.symbol.clone(),
             occurrence: conflict.occurrence,
             merged_range: conflict.merged_range.into(),
-            base: (&conflict.base).into(),
-            ours: (&conflict.ours).into(),
-            theirs: (&conflict.theirs).into(),
+            base: ConflictSideReport::new(&conflict.base, base),
+            ours: ConflictSideReport::new(&conflict.ours, ours),
+            theirs: ConflictSideReport::new(&conflict.theirs, theirs),
         }
     }
 }
@@ -90,18 +95,40 @@ impl From<ConflictRange> for ConflictRangeReport {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct ConflictSideReport {
     pub source_state: String,
+    pub producer: ClaimedProducerReport,
     pub blob_id: Option<String>,
     pub range: ConflictRangeReport,
     pub hunk_hash: String,
 }
 
-impl From<&ConflictSide> for ConflictSideReport {
-    fn from(side: &ConflictSide) -> Self {
+impl ConflictSideReport {
+    pub fn new(side: &ConflictSide, attribution: &Attribution) -> Self {
         Self {
             source_state: side.source_state.to_string_full(),
+            producer: attribution.into(),
             blob_id: side.blob_id.map(|id| id.to_hex()),
             range: side.range.into(),
             hunk_hash: side.hunk_hash.to_hex(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct ClaimedProducerReport {
+    pub attribution: &'static str,
+    pub kind: ResolverKindReport,
+    pub principal: PrincipalReport,
+    pub agent: Option<AgentReport>,
+}
+
+impl From<&Attribution> for ClaimedProducerReport {
+    fn from(attribution: &Attribution) -> Self {
+        let actor = ResolverAttributionReport::from(attribution);
+        Self {
+            attribution: "claimed",
+            kind: actor.kind,
+            principal: actor.principal,
+            agent: actor.agent,
         }
     }
 }

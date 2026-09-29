@@ -63,6 +63,26 @@ fn git_publication_bytes(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
     files
 }
 
+fn lane_hook(path: &Path, event: &str, session: &str) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_heddle"))
+        .args(["integration", "relay", "claude-code", event])
+        .current_dir(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start lane hook");
+    let payload = serde_json::json!({"session_id": session, "hook_event_name": event});
+    child
+        .stdin
+        .take()
+        .expect("hook stdin")
+        .write_all(payload.to_string().as_bytes())
+        .expect("send hook payload");
+    let output = child.wait_with_output().expect("finish lane hook");
+    assert!(output.status.success(), "{event} hook: {output:?}");
+}
+
 fn r7_fanout() -> (GitOverlayFixture, PathBuf, PathBuf) {
     let fixture = GitOverlayFixture::imported_main();
     let root = fixture.path();
@@ -99,25 +119,20 @@ fn r7_fanout() -> (GitOverlayFixture, PathBuf, PathBuf) {
         )
         .expect("lane credential JSON");
         assert_eq!(credential["lease"], lease);
-        let token = credential["token"].as_str().expect("lease token");
-        let released = heddle_output_env(
-            &[
-                "agent", "release", "--lease", lease, "--token", token, "--status", "complete",
-            ],
-            Some(&path),
-            &[],
-        )
-        .expect("release lane lease");
-        assert!(released.status.success(), "release: {released:?}");
+        lane_hook(&path, "SessionEnd", "r7-setup");
         paths.push(path);
     }
     std::fs::write(root.join("README.md"), "base\nparent moves\n").expect("move parent");
     fixture.json(&["--output", "json", "capture", "-m", "parent moves"]);
     fixture.json(&["--output", "json", "thread", "refresh", "lane/two"]);
+    lane_hook(&paths[1], "PreToolUse", "r7-two");
     std::fs::write(paths[1].join("src/c.rs"), "pub fn c() -> u32 { 2 }\n").expect("edit lane two");
     fixture.json_at(&paths[1], &["--output", "json", "capture", "-m", "two"]);
+    lane_hook(&paths[1], "SessionEnd", "r7-two");
+    lane_hook(&paths[0], "PreToolUse", "r7-one");
     std::fs::write(paths[0].join("src/a.rs"), "pub fn a() -> u32 { 2 }\n").expect("edit lane one");
     fixture.json_at(&paths[0], &["--output", "json", "capture", "-m", "one"]);
+    lane_hook(&paths[0], "SessionEnd", "r7-one");
     (fixture, paths.remove(0), paths.remove(0))
 }
 

@@ -213,8 +213,8 @@ heddle auth derive-agent \
   --server grpc.heddle.sh \
   --agent-id review-worker \
   --ttl 3600 \
-  --scope repo:acme/heddle \
-  --allow Push --allow GetState
+  --scope spool:acme/heddle \
+  --template reviewer
 ```
 
 - Without `--allow`, a curated safe set is installed (push/pull, repo reads,

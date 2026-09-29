@@ -313,6 +313,14 @@ mod resolve {
         );
         for side in ["base", "ours", "theirs"] {
             assert!(conflict[side]["source_state"].is_string(), "{output}");
+            assert_eq!(
+                conflict[side]["producer"]["attribution"], "claimed",
+                "{output}"
+            );
+            assert!(
+                conflict[side]["producer"]["principal"]["name"].is_string(),
+                "{output}"
+            );
             assert!(conflict[side]["blob_id"].is_string(), "{output}");
             assert!(conflict[side]["hunk_hash"].is_string(), "{output}");
             assert!(
@@ -352,6 +360,11 @@ mod resolve {
         let defs = schema["$defs"].as_object().expect("schema definitions");
         assert!(defs.contains_key("ConflictRegionReport"), "{schema}");
         assert!(defs.contains_key("ConflictResolutionReport"), "{schema}");
+        assert_eq!(
+            defs["ConflictSideReport"]["properties"]["producer"]["$ref"],
+            "#/$defs/ClaimedProducerReport",
+            "{schema}"
+        );
     }
 
     #[test]

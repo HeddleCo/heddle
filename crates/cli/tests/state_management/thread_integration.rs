@@ -229,6 +229,120 @@ fn refresh_conflict_names_path_and_persists_resolve_state() {
 }
 
 #[test]
+fn resolve_lists_claimed_side_producers_and_merge_keeps_resolver_agent() {
+    let temp = TempDir::new().unwrap();
+    setup_repo_with_file(&temp, "source.rs", "fn answer() -> u8 { 0 }\n");
+    let alpha = start_materialized_thread(temp.path(), "s5/alpha");
+    let beta = start_materialized_thread(temp.path(), "s5/beta");
+
+    let capture_lane = |path: &Path, value: u8, model: &str| -> String {
+        fs::write(
+            path.join("source.rs"),
+            format!("fn answer() -> u8 {{ {value} }}\n"),
+        )
+        .unwrap();
+        let output = cli_test_support::heddle_env(
+            &[
+                "--output",
+                "json",
+                "capture",
+                "-m",
+                "divergent answer",
+                "--agent-provider",
+                "codex",
+                "--agent-model",
+                model,
+            ],
+            Some(path),
+            &[],
+        )
+        .unwrap_or_else(|error| panic!("capture {model} failed: {error}"));
+        let captured: Value = serde_json::from_str(&output).unwrap();
+        captured["state_id"].as_str().unwrap().to_string()
+    };
+    let alpha_state = capture_lane(&alpha, 1, "s5-alpha");
+    let beta_state = capture_lane(&beta, 2, "s5-beta");
+
+    let absorbed = heddle(
+        &[
+            "--output",
+            "json",
+            "thread",
+            "absorb",
+            "s5/beta",
+            "--into",
+            "s5/alpha",
+            "-m",
+            "combine answers",
+        ],
+        Some(temp.path()),
+    )
+    .expect("absorb divergent lanes");
+    assert!(absorbed.contains("source.rs"), "{absorbed}");
+
+    let listed =
+        heddle(&["--output", "json", "resolve", "--list"], Some(&alpha)).expect("list conflict");
+    let listed: Value = serde_json::from_str(&listed).unwrap();
+    let conflict = &listed["conflicts"][0];
+    assert_eq!(
+        conflict["base"]["producer"]["attribution"], "claimed",
+        "{listed}"
+    );
+    assert_eq!(
+        conflict["base"]["producer"]["principal"]["name"], "Heddle Test",
+        "{listed}"
+    );
+    for (side, state, model) in [
+        ("ours", &alpha_state, "s5-alpha"),
+        ("theirs", &beta_state, "s5-beta"),
+    ] {
+        assert!(
+            conflict[side]["source_state"]
+                .as_str()
+                .is_some_and(|source| source.starts_with(state)),
+            "{listed}"
+        );
+        assert_eq!(
+            conflict[side]["producer"]["attribution"], "claimed",
+            "{listed}"
+        );
+        assert_eq!(
+            conflict[side]["producer"]["agent"]["provider"], "codex",
+            "{listed}"
+        );
+        assert_eq!(
+            conflict[side]["producer"]["agent"]["model"], model,
+            "{listed}"
+        );
+    }
+    let text = heddle(&["resolve", "--list"], Some(&alpha)).expect("text conflict list");
+    assert!(text.contains("codex/s5-alpha (claimed)"), "{text}");
+    assert!(text.contains("codex/s5-beta (claimed)"), "{text}");
+
+    let resolved = cli_test_support::heddle_env(
+        &["--output", "json", "resolve", "source.rs", "--ours"],
+        Some(&alpha),
+        &[
+            ("HEDDLE_PRINCIPAL_NAME", "S5 Resolver"),
+            ("HEDDLE_PRINCIPAL_EMAIL", "resolver@example.test"),
+            ("HEDDLE_AGENT_PROVIDER", "codex"),
+            ("HEDDLE_AGENT_MODEL", "s5-resolver"),
+        ],
+    )
+    .expect("third agent resolves conflict");
+    let resolved: Value = serde_json::from_str(&resolved).unwrap();
+    assert_eq!(
+        resolved["resolutions"][0]["resolver"]["agent"]["model"], "s5-resolver",
+        "{resolved}"
+    );
+    let shown = heddle(&["--output", "json", "show"], Some(&alpha)).expect("show merge state");
+    let shown: Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(shown["principal"]["name"], "S5 Resolver", "{shown}");
+    assert_eq!(shown["agent"]["provider"], "codex", "{shown}");
+    assert_eq!(shown["agent"]["model"], "s5-resolver", "{shown}");
+}
+
+#[test]
 fn aborting_refresh_conflict_restores_topic_and_keeps_target_clean() {
     let temp = TempDir::new().unwrap();
     heddle(&["init"], Some(temp.path())).unwrap();

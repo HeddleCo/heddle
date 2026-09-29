@@ -41,6 +41,15 @@ impl Fixture {
         let root = tempfile::tempdir().expect("repo root");
         let home = tempfile::tempdir().expect("heddle home");
         let repo = Repository::init_default(root.path()).expect("init repo");
+        Self::with_repository(root, home, repo, definition)
+    }
+
+    fn with_repository(
+        root: tempfile::TempDir,
+        home: tempfile::TempDir,
+        repo: Repository,
+        definition: TreadleDefinition,
+    ) -> Self {
         let (bytes, digest) = canonical_definition(&definition).expect("canonical definition");
         std::fs::write(repo.heddle_dir().join(DEFAULT_DEFINITION_FILE), bytes)
             .expect("write definition");
@@ -127,6 +136,77 @@ fn verdict_named<'a>(verdicts: &'a [SignedVerdict], name: &str) -> &'a SignedVer
 }
 
 #[test]
+fn record_requires_a_hosted_link_after_evaluating_the_exact_state() {
+    let fixture = Fixture::new(vec![sh("ok", "true")]);
+    let output = fixture.run(&["ci", "run", "--record"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("recording requires a hosted-linked repository"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn git_overlay_record_reaches_hosted_link_after_import() {
+    let root = tempfile::tempdir().expect("Git root");
+    let home = tempfile::tempdir().expect("heddle home");
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("run Git");
+        assert!(output.status.success(), "{}", stderr(&output));
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(root.path().join("README.md"), "overlay CI\n").expect("write source");
+    git(&["add", "README.md"]);
+    git(&[
+        "-c",
+        "user.name=CI Test",
+        "-c",
+        "user.email=ci@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "seed",
+    ]);
+    let repo = Repository::bootstrap_git_overlay(root.path()).expect("init Git overlay");
+    let fixture = Fixture::with_repository(
+        root,
+        home,
+        repo,
+        definition("local", "local", vec![sh("ok", "true")]),
+    );
+    let imported = fixture.run(&["import", "local"]);
+    assert!(imported.status.success(), "{}", stderr(&imported));
+    let output = fixture.run(&["ci", "run", "--record"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("recording requires a hosted-linked repository"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn record_refuses_a_tree_that_differs_from_the_captured_state() {
+    let fixture = Fixture::new(vec![sh("ok", "true")]);
+    std::fs::write(fixture.repo.root().join("changed.txt"), "not captured")
+        .expect("change working tree");
+    let output = fixture.run(&["ci", "run", "--record"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("recording requires the exact captured State tree"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn json_verdicts_are_device_signed_and_verify() {
     let mut advice = sh("advice", "echo 'test result: FAILED'; exit 1");
     advice.class = TreadleCheckClass::Advisory as i32;
@@ -197,6 +277,61 @@ fn refuses_to_sign_when_a_check_mutates_the_working_tree() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty(), "no stale verdict may be emitted");
     assert!(stderr(&output).contains("refusing to sign a stale tree digest"));
+}
+
+#[test]
+fn refuses_to_sign_when_a_named_state_check_mutates_its_checkout() {
+    let fixture = Fixture::new(vec![sh("mutating", "echo changed > dirty.txt")]);
+    let output = fixture.run(&[
+        "--output", "json", "ci", "run", "--local", "--state", "HEAD",
+    ]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "no stale verdict may be emitted");
+    assert!(stderr(&output).contains("refusing to sign a stale tree digest"));
+}
+
+#[test]
+fn record_refuses_mutation_of_captured_file_hidden_by_exclude() {
+    let fixture = Fixture::new(vec![sh("mutating", "echo changed > source.txt")]);
+    std::fs::write(fixture.repo.root().join("source.txt"), "original\n").expect("source");
+    let capture = fixture.run(&["capture", "-m", "capture source"]);
+    assert!(capture.status.success(), "{}", stderr(&capture));
+    std::fs::create_dir_all(fixture.repo.heddle_dir().join("info")).expect("info directory");
+    std::fs::write(
+        fixture.repo.heddle_dir().join("info/exclude"),
+        "source.txt\n",
+    )
+    .expect("exclude captured source");
+
+    let output = fixture.run(&["ci", "run", "--record"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("refusing to sign a stale tree digest"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn named_state_refuses_mutation_of_captured_file_hidden_by_exclude() {
+    let fixture = Fixture::new(vec![sh("mutating", "echo changed > source.txt")]);
+    std::fs::write(fixture.repo.root().join("source.txt"), "original\n").expect("source");
+    let capture = fixture.run(&["capture", "-m", "capture source"]);
+    assert!(capture.status.success(), "{}", stderr(&capture));
+    std::fs::create_dir_all(fixture.repo.heddle_dir().join("info")).expect("info directory");
+    std::fs::write(
+        fixture.repo.heddle_dir().join("info/exclude"),
+        "source.txt\n",
+    )
+    .expect("exclude captured source");
+
+    let output = fixture.run(&["ci", "run", "--local", "--state", "HEAD"]);
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("refusing to sign a stale tree digest"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

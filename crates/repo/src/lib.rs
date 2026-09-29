@@ -180,7 +180,7 @@ pub use actor_presence::{
     ContextQueryEntry, generate_actor_session_id,
 };
 pub use agent_task::{
-    AGENT_TASK_SCHEMA_VERSION, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
+    AGENT_TASK_SCHEMA_VERSION, AgentTaskOutcome, AgentTaskRecord, AgentTaskStatus, AgentTaskStore,
     generate_agent_task_id, validate_task_id,
 };
 pub use ci_runner_trust::{CiRunnerTrustEntry, CiRunnerTrustSet};

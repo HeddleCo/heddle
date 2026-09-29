@@ -10,7 +10,9 @@ pub(crate) use heddle_cli_contract::cli::commands::wire::{
     ReadyChecksSummary, ReadyOutput, ReadyReadinessSummary,
 };
 use objects::object::Tree;
-use repo::{Repository, ThreadFreshness, ThreadState};
+use repo::{
+    AgentTaskOutcome, AgentTaskStatus, AgentTaskStore, Repository, ThreadFreshness, ThreadState,
+};
 use verbs::{
     CaptureOptions, MachineContractInput, ReadyDecisionInput, classify_ready_decision,
     has_integration_target,
@@ -514,6 +516,23 @@ fn push_verification_verdict(dry: &mut DryRunPlan, trust: &RepositoryVerificatio
 }
 
 fn write_ready_output(cli: &Cli, repo: &Repository, output: &ReadyOutput) -> Result<()> {
+    if output.report.thread_state == "ready" && output.operator.status == "completed" {
+        record_lane_outcome(
+            repo,
+            &output.report.thread,
+            AgentTaskOutcome::Ready,
+            &output.operator.blockers,
+            output.operator.next_action.as_deref(),
+        )?;
+    } else if output.operator.status == "blocked" && !output.report.thread.is_empty() {
+        record_lane_outcome(
+            repo,
+            &output.report.thread,
+            AgentTaskOutcome::Blocked,
+            &output.operator.blockers,
+            output.operator.next_action.as_deref(),
+        )?;
+    }
     write_ready_output_inner(
         output,
         should_output_json(cli, Some(repo.config())),
@@ -521,6 +540,40 @@ fn write_ready_output(cli: &Cli, repo: &Repository, output: &ReadyOutput) -> Res
         cli.verbose > 0,
         NextActionValidationContext::new(&["ready"], repo.capability()),
     )
+}
+
+pub(super) fn record_lane_outcome(
+    repo: &Repository,
+    thread: &str,
+    outcome: AgentTaskOutcome,
+    blockers: &[String],
+    next_action: Option<&str>,
+) -> Result<()> {
+    let thread_name = super::thread_cmd::thread_manager(repo)
+        .load(thread)?
+        .map(|record| record.thread)
+        .unwrap_or_else(|| thread.to_string());
+    let store = AgentTaskStore::new(repo.heddle_dir());
+    for task in store.list()?.into_iter().filter(|task| {
+        task.parent_task_id.is_some()
+            && task.target_thread == thread_name
+            && task.status != AgentTaskStatus::Abandoned
+    }) {
+        let _ = store.update(&task.task_id, |task| {
+            if task.outcome == Some(AgentTaskOutcome::Landed) && outcome != AgentTaskOutcome::Landed
+            {
+                return;
+            }
+            task.outcome = Some(outcome);
+            task.blockers = blockers.to_vec();
+            task.next_action = next_action.map(ToString::to_string);
+            task.status = match outcome {
+                AgentTaskOutcome::Blocked => AgentTaskStatus::Blocked,
+                AgentTaskOutcome::Ready | AgentTaskOutcome::Landed => AgentTaskStatus::Complete,
+            };
+        })?;
+    }
+    Ok(())
 }
 
 fn write_ready_output_without_repo(cli: &Cli, output: &ReadyOutput) -> Result<()> {

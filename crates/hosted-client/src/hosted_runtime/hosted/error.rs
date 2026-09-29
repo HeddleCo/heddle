@@ -45,7 +45,7 @@ pub enum HostedError {
 
 impl HostedError {
     pub(super) fn transport(error: impl std::fmt::Display) -> Self {
-        Self::Transport(error.to_string())
+        Self::Transport(format!("{error:#}"))
     }
 
     pub(super) fn framing(error: impl std::fmt::Display) -> Self {
@@ -66,5 +66,19 @@ impl From<CallFailure> for HostedError {
             message: failure.message,
             error: failure.error.map(Box::new),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::HostedError;
+
+    #[test]
+    fn transport_preserves_discovery_failure_chain() {
+        let error = anyhow::anyhow!("Unauthenticated: invalid bearer capability")
+            .context("discover hosted v2 API");
+        let rendered = HostedError::transport(error).to_string();
+        assert!(rendered.contains("discover hosted v2 API"));
+        assert!(rendered.contains("Unauthenticated: invalid bearer capability"));
     }
 }

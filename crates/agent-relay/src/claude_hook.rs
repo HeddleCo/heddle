@@ -179,9 +179,8 @@ pub(crate) fn handle_stop_capture(
         return Ok(None);
     }
     let intent = payload
-        .get("message")
+        .get("last_assistant_message")
         .and_then(Value::as_str)
-        .or_else(|| payload.get("stop_reason").and_then(Value::as_str))
         .map(|s| s.to_string())
         .unwrap_or_else(|| intent_hint.to_string());
     let state_id = bridge.capture_snapshot(
@@ -297,7 +296,7 @@ fn format_annotations(rel_path: &Path, annotations: &[ActiveAnnotation]) -> Stri
     out
 }
 
-fn worktree_dirty(repo: &Repository) -> Result<bool> {
+pub(crate) fn worktree_dirty(repo: &Repository) -> Result<bool> {
     let Some(head_id) = repo.head()? else {
         return Ok(true);
     };
