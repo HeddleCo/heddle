@@ -215,6 +215,49 @@ fn ready_thread_checks_the_selected_lane_writer() {
 }
 
 #[test]
+fn reserve_reaps_expired_lane_without_listing_first() {
+    let (_main, path, _) = fanout_lane();
+    let credential: Value =
+        serde_json::from_slice(&fs::read(path.join(".heddle/writer-credential.json")).unwrap())
+            .unwrap();
+    let old_lease = credential["lease"].as_str().unwrap();
+    let repo = repo::Repository::open(&path).unwrap();
+    let store = WriterLeaseStore::new(repo.heddle_dir());
+    let lease_path = repo
+        .heddle_dir()
+        .join("writer-leases")
+        .join(format!("{old_lease}.toml"));
+    let old = fs::read_to_string(&lease_path).unwrap();
+    let expired = old
+        .lines()
+        .map(|line| {
+            if line.starts_with("heartbeat_at = ") {
+                "heartbeat_at = \"2000-01-01T00:00:00Z\""
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(&lease_path, expired).unwrap();
+
+    let output = heddle_output(
+        &[
+            "--output", "json", "agent", "reserve", "--thread", "lane/one",
+        ],
+        Some(&path),
+    )
+    .unwrap();
+    assert!(output.status.success(), "reserve: {output:?}");
+    let fresh: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_ne!(fresh["reservation"]["lease_id"], old_lease);
+    assert_eq!(
+        store.load(old_lease).unwrap().unwrap().status,
+        WriterLeaseStatus::Abandoned
+    );
+}
+
+#[test]
 fn expired_lane_credential_can_be_released_and_recovered() {
     let (_main, path, _) = fanout_lane();
     let credential_path = path.join(".heddle/writer-credential.json");

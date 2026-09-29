@@ -205,7 +205,7 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     let repo = cli.open_repo()?;
     let thread_name = args.thread.clone();
     let reservation_path = existing_thread_execution_path(&repo, &thread_name)?;
-    let _handoff_lock = reservation_path
+    let handoff_lock = reservation_path
         .as_deref()
         .map(|path| lock_checkout_writer_handoff(repo.heddle_dir(), path))
         .transpose()?;
@@ -251,7 +251,13 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     };
 
     let lease_store = WriterLeaseStore::new(repo.heddle_dir());
-    if let Some(owner) = lease_store.live_owner(&thread_name, reservation_path.as_deref())? {
+    let owner =
+        if let (Some(path), Some(guard)) = (reservation_path.as_deref(), handoff_lock.as_ref()) {
+            lease_store.live_owner_with_checkout_lock(&thread_name, path, guard)?
+        } else {
+            lease_store.live_owner(&thread_name, reservation_path.as_deref())?
+        };
+    if let Some(owner) = owner {
         return Err(anyhow!(live_owner_conflict_advice(
             &thread_name,
             &anchor_full,

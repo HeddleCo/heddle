@@ -363,9 +363,31 @@ impl WriterLeaseStore {
 
     /// Advisory preflight. `reserve` repeats this check under the write lock.
     pub fn live_owner(&self, thread: &str, path: Option<&Path>) -> Result<Option<WriterLease>> {
+        self.live_owner_inner(thread, path, None)
+    }
+
+    /// Advisory preflight when the caller holds this checkout's mutation lock.
+    pub fn live_owner_with_checkout_lock(
+        &self,
+        thread: &str,
+        path: &Path,
+        _checkout_guard: &crate::lock::WriteLockGuard,
+    ) -> Result<Option<WriterLease>> {
+        self.live_owner_inner(thread, Some(path), Some(path))
+    }
+
+    fn live_owner_inner(
+        &self,
+        thread: &str,
+        path: Option<&Path>,
+        held_checkout: Option<&Path>,
+    ) -> Result<Option<WriterLease>> {
         let path = path.map(std::fs::canonicalize).transpose()?;
+        let held_checkout = held_checkout.map(std::fs::canonicalize).transpose()?;
+        let _lock = self.write_lock()?;
+        self.reap_expired_locked(Utc::now(), held_checkout.as_deref())?;
         Ok(self
-            .list()?
+            .list_locked()?
             .into_iter()
             .find(|lease| lease.conflicts_with(thread, path.as_deref())))
     }
