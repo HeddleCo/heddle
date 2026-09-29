@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The exact local briefing inputs attached to the next capture.
 
-use std::fs;
+use std::{fs, io::Write};
 
 use crypto::{Ed25519Signer, Signer, public_key_bytes, verify_payload_signature};
 use objects::{
     error::HeddleError,
     fs_atomic::write_file_atomic,
-    object::{Blob, StateAttachment, StateAttachmentBody, StateId},
+    object::{Blob, ContentHash, StateAttachment, StateAttachmentBody, StateId},
     store::ObjectStore,
 };
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,9 @@ pub struct SuppliedRevision {
     pub content_hash: String,
 }
 
+/// A self-attested local record: proves what this repository's key signed,
+/// not independent delivery to the recipient. A same-user process can sign
+/// another claim with the repository key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextConsumptionReceipt {
     pub format_version: u8,
@@ -68,6 +71,31 @@ impl Repository {
     fn pending_context_receipt_path(&self) -> std::path::PathBuf {
         self.heddle_dir()
             .join(format!("context-briefing-{}.json", self.op_scope()))
+    }
+
+    fn consume_context_receipt_nonce(&self, nonce: &str, state_id: &StateId) -> Result<()> {
+        let directory = self.heddle_dir().join("context-consumed-nonces");
+        fs::create_dir_all(&directory)?;
+        let digest = ContentHash::compute_typed("context-receipt-nonce", nonce.as_bytes());
+        let path = directory.join(format!("{}.nonce", digest.to_hex()));
+        let mut marker = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(marker) => marker,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(HeddleError::InvalidObject(
+                    "context briefing nonce was already consumed".into(),
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        marker.write_all(state_id.to_string_full().as_bytes())?;
+        marker.sync_all()?;
+        #[cfg(unix)]
+        fs::File::open(directory)?.sync_all()?;
+        Ok(())
     }
 
     pub fn write_pending_context_receipt(&self, receipt: &ContextConsumptionReceipt) -> Result<()> {
@@ -185,6 +213,9 @@ impl Repository {
         let bytes = serde_json::to_vec(&signed).map_err(|error| {
             HeddleError::InvalidObject(format!("encode context receipt: {error}"))
         })?;
+        // Claim before publishing the attachment. A failed later write leaves
+        // the nonce spent, so a restored pending file cannot replay it.
+        self.consume_context_receipt_nonce(&receipt.nonce, &state_id)?;
         let hash = self.store().put_blob(&Blob::new(bytes))?;
         self.put_state_attachment(&StateAttachment {
             state_id,
@@ -430,6 +461,52 @@ mod review_1863 {
         assert_eq!(
             verified, pending,
             "capture must preserve supplier-signed claims"
+        );
+    }
+}
+
+#[cfg(test)]
+mod round3_receipts {
+    use super::*;
+
+    #[test]
+    fn consumed_nonce_cannot_attach_to_another_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let repo = crate::init_test_repository(dir.path()).unwrap();
+        std::fs::write(dir.path().join("file"), "first").unwrap();
+        let first = repo.snapshot(Some("first".into()), None).unwrap();
+        let claim = ContextConsumptionReceipt {
+            format_version: 2,
+            thread: "main".into(),
+            recipient_lane: "main".into(),
+            nonce: uuid::Uuid::now_v7().to_string(),
+            intent_versions: vec!["intent-v1".into()],
+            annotations: vec![],
+            briefing_hash: "briefing-digest".into(),
+            supplier_algorithm: String::new(),
+            supplier_public_key: vec![],
+            supplier_signature: vec![],
+        };
+        repo.write_pending_context_receipt(&claim).unwrap();
+        let pending = repo.pending_context_receipt().unwrap().unwrap();
+        let saved = std::fs::read(repo.pending_context_receipt_path()).unwrap();
+        repo.attach_context_receipt(first.state_id, &pending)
+            .unwrap();
+        std::fs::write(dir.path().join("file"), "second").unwrap();
+        let second = repo.snapshot(Some("second".into()), None).unwrap();
+        std::fs::write(repo.pending_context_receipt_path(), saved).unwrap();
+        let reopened = crate::Repository::open(dir.path()).unwrap();
+        let replay = reopened.pending_context_receipt().unwrap().unwrap();
+        assert!(
+            reopened
+                .attach_context_receipt(second.state_id, &replay)
+                .is_err()
+        );
+        assert!(
+            reopened
+                .context_receipt(&second.state_id)
+                .unwrap()
+                .is_none()
         );
     }
 }

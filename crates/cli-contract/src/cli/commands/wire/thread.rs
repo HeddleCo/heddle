@@ -86,6 +86,8 @@ pub struct ThreadShowOutput {
 #[derive(Clone, Serialize, JsonSchema)]
 pub struct ConstraintsSuppliedOutput {
     pub provenance: &'static str,
+    /// The local repository key signed this claim; delivery is not independently verified.
+    pub attestation: &'static str,
     pub capture: String,
     pub capture_intent: Option<String>,
     pub actor: Option<String>,

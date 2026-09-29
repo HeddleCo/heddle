@@ -200,6 +200,10 @@ fn next_agent_capture_records_exact_briefing_and_thread_show_displays_it() {
         shown.contains("Constraints supplied (LOCAL evidence):"),
         "{shown}"
     );
+    assert!(
+        shown.contains("self-attested local record: proves what this repository's key signed, not independent delivery"),
+        "{shown}"
+    );
     assert!(shown.contains("1 annotation"), "{shown}");
     assert!(!shown.contains("Keep the entry point"), "{shown}");
     assert!(
@@ -217,6 +221,10 @@ fn next_agent_capture_records_exact_briefing_and_thread_show_displays_it() {
         supplied_revision
     );
     assert_eq!(shown["constraints_supplied"][0]["provenance"], "local");
+    assert_eq!(
+        shown["constraints_supplied"][0]["attestation"],
+        "local_self_attested"
+    );
     assert_eq!(shown["supply_receipt_status"], "local evidence");
     assert!(
         shown["constraints_supplied"][0]["annotations"][0]["revisions"][0]["content"].is_null()

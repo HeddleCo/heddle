@@ -2214,6 +2214,7 @@ fn capture_constraints_supplied(
         {
             supplied.push(ConstraintsSuppliedOutput {
                 provenance: "local",
+                attestation: "local_self_attested",
                 capture: id.to_string_full(),
                 capture_intent: state.intent.clone(),
                 actor: state
@@ -2376,6 +2377,9 @@ pub(crate) fn show_thread_summary(
             println!(
                 "Constraints supplied (LOCAL evidence): {intent}, {annotation_count} annotation{} to {actor} for {label}",
                 if annotation_count == 1 { "" } else { "s" }
+            );
+            println!(
+                "  self-attested local record: proves what this repository's key signed, not independent delivery"
             );
             for annotation in &capture.annotations {
                 for revision in &annotation.revisions {
