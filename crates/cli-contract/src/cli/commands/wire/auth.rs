@@ -228,6 +228,9 @@ pub struct WhoamiOutput {
     /// Server-authoritative identity, present only when `reachable`.
     pub identity: Option<WhoamiIdentity>,
     pub billing_lock: Option<WhoamiBillingLock>,
+    /// Server or transport failure that prevented the identity snapshot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hosted_error: Option<String>,
     pub recommended_action: Option<String>,
 }
 

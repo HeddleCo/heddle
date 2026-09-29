@@ -68,6 +68,9 @@ fn agent_attenuation_block(restrictions: &AgentAttenuation) -> Result<BlockBuild
         .fact(format!("agent({})", biscuit_string(&restrictions.agent_id)).as_str())
         .internal_ctx("attenuate agent fact")?;
     block = block
+        .fact(format!("agent_expires_at({})", restrictions.expires_at.to_rfc3339()).as_str())
+        .internal_ctx("attenuate agent expiry fact")?;
+    block = block
         .check(
             format!(
                 "check if time($now), $now < {}",
@@ -105,7 +108,7 @@ fn agent_attenuation_block(restrictions: &AgentAttenuation) -> Result<BlockBuild
     if let Some(resources) = &restrictions.allowed_resources {
         // `check if resource($k, $p), (kind/path tuple matching)`.
         // Each entry matches via exact-equality OR path-prefix
-        // (`p == "org/acme" || p.starts_with("org/acme/")`) so a
+        // (`p == "spool/org/acme" || p.starts_with("spool/org/acme/")`) so a
         // parent-spool grant covers descendants cleanly.
         let mut clauses = Vec::new();
         for (kind, path) in resources {
@@ -122,11 +125,11 @@ fn agent_attenuation_block(restrictions: &AgentAttenuation) -> Result<BlockBuild
         } else {
             clauses.join(" || ")
         };
-        // The same self-introspection exception applies to resource ceilings:
-        // ObserveIdentity returns only the verified caller and cannot access the scoped
-        // repository named by this caveat.
+        // Discovery and caller identity have no resource. Account inventory
+        // cannot use a spool fact to bypass this ceiling: ListSpools is
+        // unfiltered, and ObserveWorkspace has account-wide cursor inputs.
         let check = format!(
-            "check if operation(\"{SELF_OBSERVATION_OPERATION}\") or resource($k, $p), {pred}"
+            "check if operation(\"DescribeEndpoint\") or operation(\"GetIdentity\") or operation(\"{SELF_OBSERVATION_OPERATION}\") or resource($k, $p), {pred}, operation($op), $op != \"ListSpools\", $op != \"ObserveWorkspace\""
         );
         block = block
             .check(check.as_str())

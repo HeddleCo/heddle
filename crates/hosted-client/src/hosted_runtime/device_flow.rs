@@ -8,7 +8,7 @@
 //! this client half is HeddleCo/heddle#1022 and must merge with it.
 //!
 //! See `.agents/agent-attenuation.md` for cookbook recipes (read-only
-//! agent, single-repo agent, time-bounded inspector, sub-sub-agent
+//! agent, single-spool agent, time-bounded inspector, sub-sub-agent
 //! chain).
 
 use anyhow::{Context, Result, bail};
@@ -62,7 +62,11 @@ const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
     CI_VERDICT_WRITE_OPERATION,
 ];
 const TEMPLATE_CI_LANDING_WRITES: &[&str] = &["LandThread", "PublishContent"];
-const TEMPLATE_RUNNER_WRITES: &[&str] = &[CI_VERDICT_WRITE_OPERATION];
+const TEMPLATE_RUNNER_WRITES: &[&str] = &[
+    "DescribeEndpoint",
+    "GetIdentity",
+    CI_VERDICT_WRITE_OPERATION,
+];
 
 /// Optional named restrictions. Omitting a template inherits parent authority.
 /// Explicit operations may narrow a chosen template; no preset expands a parent.
@@ -131,13 +135,10 @@ pub struct AgentAttenuation {
     pub allowed_operations: Option<Vec<String>>,
     /// When `Some`, the agent is restricted to resources whose path matches
     /// one of the entries. Format: `(kind, path)` where
-    /// `kind ∈ {"repo", "namespace", "spool"}`. Emits an ENFORCEABLE
-    /// `check if resource($k, $p), …` caveat against the resource fact the
-    /// server injects per request (weft#644). A `repo` or `spool` entry matches
-    /// that exact path or any subtree path; a `namespace` entry matches the
-    /// whole `<namespace>/` repo subtree. An entry rejects a request whose
-    /// target the caveat does not cover; a full-authority token (`None`) is
-    /// unaffected because facts never reject, only caveats do.
+    /// `kind` is `"spool"`, and `path` is the canonical `"spool/<name>"`
+    /// resource path Weft injects per request (weft#644). The caveat matches
+    /// that exact path or any descendant. It rejects a request whose target
+    /// it does not cover; a full-authority token (`None`) is unaffected.
     pub allowed_resources: Option<Vec<(String, String)>>,
     /// Resource scopes recorded as `agent_scope(kind, path)` facts for the
     /// audit trail and for client-side sub-derivation narrowing checks
@@ -435,16 +436,16 @@ pub fn time_bounded(
     )
 }
 
-/// Convenience: attenuate to a read-only sub-agent on a single repo
-/// for `duration_hours`. Emits both an operation allowlist (limited
-/// to common read RPCs) and a resource allowlist scoped to the
-/// repo's path. Use as a starting point — for finer-grained access,
+/// Convenience: attenuate to a read-only sub-agent on one spool
+/// for `duration_hours`. Emits a read operation allowlist and a
+/// resource allowlist scoped to the canonical spool path. Use as a
+/// starting point — for finer-grained access,
 /// build the [`AgentAttenuation`] directly.
 #[cfg(test)]
-pub fn read_only_repo_agent(
+pub fn read_only_spool_agent(
     parent_token_b64: &str,
     agent_id: impl Into<String>,
-    repo_path: impl Into<String>,
+    spool_path: impl Into<String>,
     duration_hours: i64,
     parent_signer: &Ed25519Signer,
     child_public_key: &[u8],
@@ -454,17 +455,17 @@ pub fn read_only_repo_agent(
         AgentAttenuation {
             agent_id: agent_id.into(),
             expires_at: Utc::now() + chrono::Duration::hours(duration_hours),
-            allowed_operations: Some(vec![
-                "GetState".to_string(),
-                "GetTree".to_string(),
-                "GetBlob".to_string(),
-                "GetCompare".to_string(),
-                "GetDiff".to_string(),
-                "ListRefs".to_string(),
-                "ListStates".to_string(),
-                "ListContext".to_string(),
-            ]),
-            allowed_resources: Some(vec![("repo".to_string(), repo_path.into())]),
+            allowed_operations: Some(
+                TEMPLATE_READ_OPERATIONS
+                    .iter()
+                    .filter(|op| **op != "ListSpools" && **op != "ObserveWorkspace")
+                    .map(|op| (*op).to_string())
+                    .collect(),
+            ),
+            allowed_resources: Some(vec![(
+                "spool".to_string(),
+                format!("spool/{}", spool_path.into()),
+            )]),
             declared_scopes: Vec::new(),
         },
         parent_signer,
@@ -526,7 +527,11 @@ mod tests {
 
         assert_eq!(
             runner,
-            BTreeSet::from([CI_VERDICT_WRITE_OPERATION.to_string()])
+            BTreeSet::from([
+                "DescribeEndpoint".to_string(),
+                "GetIdentity".to_string(),
+                CI_VERDICT_WRITE_OPERATION.to_string(),
+            ])
         );
         for forbidden in ["Push", "UpdateRef", "spool:write", "spool-write"] {
             assert!(
@@ -737,7 +742,7 @@ mod tests {
                 .contains("parent signer does not match")
         );
 
-        let read_only_error = read_only_repo_agent(
+        let read_only_error = read_only_spool_agent(
             &parent,
             "read-only",
             "acme/heddle",
@@ -818,11 +823,11 @@ mod tests {
     }
 
     #[test]
-    fn read_only_repo_agent_builds_with_op_and_resource_restrictions() {
+    fn read_only_spool_agent_builds_with_op_and_resource_restrictions() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
         let (parent, _kp, parent_pop) = fresh_parent_token();
         let child_pop = Ed25519Signer::generate().expect("child PoP key");
-        let attenuated = read_only_repo_agent(
+        let attenuated = read_only_spool_agent(
             &parent,
             "agent-r",
             "org/acme/heddle",
@@ -838,6 +843,10 @@ mod tests {
         let parsed = biscuit_verifier::signature_v1::parse_unverified_base64(attenuated.as_bytes())
             .expect("parse");
         assert!(parsed.block_count() >= 2, "expected attenuation block");
+        let child = parsed.print_block_source(1).expect("child block");
+        assert!(child.contains("resource($k, $p)"));
+        assert!(child.contains("$k == \"spool\""));
+        assert!(child.contains("$p == \"spool/org/acme/heddle\""));
     }
 
     #[test]

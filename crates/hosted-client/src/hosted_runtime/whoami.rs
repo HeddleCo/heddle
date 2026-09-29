@@ -43,6 +43,7 @@ pub struct WhoamiReport {
     pub proof_key_available: bool,
     pub identity: Option<WhoamiIdentity>,
     pub billing_lock: Option<WhoamiBillingLock>,
+    pub hosted_error: Option<String>,
     pub recommended_action: Option<String>,
 }
 
@@ -119,15 +120,34 @@ async fn resolve_whoami(start_path: &std::path::Path, server: &str) -> Result<Wh
             }
             output.identity = Some(observed.identity);
             output.billing_lock = billing_lock;
+            output.hosted_error = None;
             output.reachable = true;
         }
-        Err(_) => {
+        Err(error) => {
             output.reachable = false;
+            output.hosted_error = Some(format!("{error:#}"));
         }
     }
-    output.recommended_action = if !output.proof_key_available {
+    output.recommended_action = identity_recovery_action(
+        server,
+        output.proof_key_available,
+        output.reachable,
+        output.hosted_error.as_deref(),
+        account_needs_claim,
+    );
+    Ok(output)
+}
+
+fn identity_recovery_action(
+    server: &str,
+    proof_key_available: bool,
+    reachable: bool,
+    error: Option<&str>,
+    account_needs_claim: bool,
+) -> Option<String> {
+    if !proof_key_available || error.is_some_and(|error| error.contains("Unauthenticated")) {
         Some(format!("heddle auth login --server {server}"))
-    } else if !output.reachable {
+    } else if !reachable {
         Some(format!(
             "server did not answer GetIdentity; check connectivity to {server} or re-run `heddle auth login --server {server}`"
         ))
@@ -135,8 +155,7 @@ async fn resolve_whoami(start_path: &std::path::Path, server: &str) -> Result<Wh
         Some("heddle claim".to_string())
     } else {
         None
-    };
-    Ok(output)
+    }
 }
 
 /// Who the next capture is attributed to.
@@ -185,6 +204,7 @@ fn resolve_local_whoami(
             proof_key_available: false,
             identity: None,
             billing_lock: None,
+            hosted_error: None,
             recommended_action: Some(format!("heddle auth login --server {server}")),
         });
     };
@@ -235,6 +255,7 @@ fn resolve_local_whoami(
         proof_key_available,
         identity: None,
         billing_lock: None,
+        hosted_error: None,
         recommended_action,
     })
 }
@@ -709,6 +730,21 @@ mod tests {
         assert_eq!(
             output.recommended_action.as_deref(),
             Some("heddle auth login --server host.example")
+        );
+    }
+
+    #[test]
+    fn unauthenticated_discovery_failure_recommends_login() {
+        assert_eq!(
+            identity_recovery_action(
+                "api.heddle.test",
+                true,
+                false,
+                Some("discover hosted v2 API: Unauthenticated: invalid bearer capability"),
+                false,
+            )
+            .as_deref(),
+            Some("heddle auth login --server api.heddle.test")
         );
     }
 

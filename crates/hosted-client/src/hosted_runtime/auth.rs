@@ -486,8 +486,20 @@ pub(crate) fn derive_agent(
     };
 
     let agent_id = agent_id.unwrap_or_else(|| format!("agent-{}", uuid::Uuid::new_v4()));
-    let allowed_operations = resolve_agent_operations(template, requested_operations)?;
     let declared_scopes = parse_agent_scopes(scopes)?;
+    if !declared_scopes.is_empty()
+        && requested_operations
+            .iter()
+            .any(|op| op == "ListSpools" || op == "ObserveWorkspace")
+    {
+        bail!("ListSpools and ObserveWorkspace cannot be allowed on a scoped credential");
+    }
+    let mut allowed_operations = resolve_agent_operations(template, requested_operations)?;
+    if !declared_scopes.is_empty()
+        && let Some(operations) = &mut allowed_operations
+    {
+        operations.retain(|op| op != "ListSpools" && op != "ObserveWorkspace");
+    }
     validate_runner_scopes(template, &declared_scopes)?;
     validate_scope_narrowing(&parent_token.id, &declared_scopes)?;
     let child_signer = Ed25519Signer::generate()
@@ -498,13 +510,14 @@ pub(crate) fn derive_agent(
             agent_id: agent_id.clone(),
             expires_at,
             allowed_operations: allowed_operations.clone(),
-            // W3 (weft#644): the server injects a `resource("repo", <path>)`
-            // fact per request, so emit the ENFORCEABLE resource caveat. A
-            // `namespace:` scope is encoded client-side as a repo-path prefix
-            // (see `build_attenuation_block`) because the server never emits a
-            // `resource("namespace", …)` fact. `agent_scope` facts are still
-            // recorded (`declared_scopes`) for audit + narrowing checks.
-            allowed_resources: (!declared_scopes.is_empty()).then(|| declared_scopes.clone()),
+            // Weft injects the canonical `resource("spool", "spool/<path>")`.
+            // The CLI accepts and displays the shorter `spool:<path>` form.
+            allowed_resources: (!declared_scopes.is_empty()).then(|| {
+                declared_scopes
+                    .iter()
+                    .map(|(kind, path)| (kind.clone(), format!("spool/{path}")))
+                    .collect()
+            }),
             declared_scopes: declared_scopes.clone(),
         },
         &signer,
@@ -640,13 +653,11 @@ fn parse_agent_scopes(scopes: Vec<String>) -> Result<Vec<(String, String)>> {
     let mut parsed = BTreeSet::new();
     for scope in scopes {
         let (kind, path) = match scope.split_once(':') {
-            Some(("repo", path)) => ("repo", path),
-            Some(("namespace" | "ns", path)) => ("namespace", path),
             Some(("spool", path)) => ("spool", path),
-            Some((kind, _)) => bail!(
-                "unsupported scope kind {kind:?}; use repo:<path>, namespace:<path>, spool:<path>, or a bare repo path"
-            ),
-            None => ("repo", scope.as_str()),
+            Some((kind, _)) => {
+                bail!("unsupported scope kind {kind:?}; use spool:<path> or a bare spool path")
+            }
+            None => ("spool", scope.as_str()),
         };
         let path = path.trim_matches('/');
         if path.is_empty() {
@@ -739,13 +750,7 @@ fn scope_is_within(child: &(String, String), parent: &(String, String)) -> bool 
             .1
             .strip_prefix(&parent.1)
             .is_some_and(|suffix| suffix.starts_with('/'));
-    match (parent.0.as_str(), child.0.as_str()) {
-        ("repo", "repo") => path_is_within,
-        ("namespace", "namespace") => path_is_within,
-        ("namespace", "repo") => child.1 != parent.1 && path_is_within,
-        ("spool", "spool") => path_is_within,
-        _ => false,
-    }
+    parent.0 == "spool" && child.0 == "spool" && path_is_within
 }
 
 #[derive(Clone)]
@@ -2213,6 +2218,46 @@ mod tests {
             "test",
         )
         .expect("signed exact Thread scope accepted");
+        let mut wrong_expiry = heddleco_capability_verifier::service_scope::service_attenuation(
+            "thread:write",
+            "test",
+            chrono::DateTime::from_timestamp(expiry, 0).expect("expiry"),
+        )
+        .expect("canonical scope")
+        .block()
+        .expect("scope block");
+        wrong_expiry.facts.retain(|fact| {
+            fact.predicate.name != "agent" && fact.predicate.name != "agent_expires_at"
+        });
+        wrong_expiry = wrong_expiry
+            .fact(
+                format!(
+                    "agent_expires_at({})",
+                    chrono::DateTime::from_timestamp(expiry + 3600, 0)
+                        .expect("wrong expiry")
+                        .to_rfc3339()
+                )
+                .as_str(),
+            )
+            .expect("mismatched expiry fact");
+        let wrong_expiry_token =
+            biscuit_verifier::key_delegation::append(&parent, child, transfer, wrong_expiry)
+                .expect("child with mismatched expiry fact");
+        let wrong_expiry_raw = base64::engine::general_purpose::URL_SAFE
+            .decode(&wrong_expiry_token)
+            .expect("child bytes");
+        assert!(
+            verify_issued_service_biscuit(
+                &parent_raw,
+                &wrong_expiry_raw,
+                &root_key,
+                &child_key,
+                expiry,
+                "thread:write",
+                "test",
+            )
+            .is_err()
+        );
         let wrong_child = Ed25519Signer::generate().expect("different child");
         let wrong_child_error = verify_issued_service_biscuit(
             &parent_raw,
@@ -2479,7 +2524,10 @@ mod tests {
             .expect("user fact")
             .fact(r#"credential_id("root-credential")"#)
             .expect("credential fact")
-            .fact(format!("right(\"spool\", \"org/acme\", \"{CI_VERDICT_WRITE_ACTION}\")").as_str())
+            .fact(
+                format!("right(\"spool\", \"spool/org/acme\", \"{CI_VERDICT_WRITE_ACTION}\")")
+                    .as_str(),
+            )
             .expect("CI-verdict authority right")
             .fact(format!("device_pop_key(\"{}\")", hex::encode(signer.public_key())).as_str())
             .expect("device PoP fact")
@@ -2528,7 +2576,7 @@ mod tests {
             .expect("request time fact")
             .fact(format!("operation(\"{operation}\")").as_str())
             .expect("request operation fact")
-            .fact(format!("resource(\"spool\", \"{spool}\")").as_str())
+            .fact(format!("resource(\"spool\", \"spool/{spool}\")").as_str())
             .expect("request spool fact");
         if operation == CI_VERDICT_WRITE_OPERATION {
             builder = builder
@@ -2560,7 +2608,7 @@ mod tests {
                 server,
                 Some("agent-parent".to_string()),
                 3600,
-                vec!["repo:acme/heddle".to_string()],
+                vec!["acme/heddle".to_string()],
                 vec!["PublishContent".to_string()],
                 None,
                 None,
@@ -2595,7 +2643,14 @@ mod tests {
                 parsed
                     .print_block_source(1)
                     .expect("child block")
-                    .contains("agent_scope(\"repo\", \"acme/heddle\")")
+                    .contains("agent_scope(\"spool\", \"acme/heddle\")")
+            );
+            assert!(
+                parsed
+                    .print_block_source(1)
+                    .expect("child block")
+                    .contains("$p == \"spool/acme/heddle\""),
+                "the enforced caveat must match Weft's canonical resource path"
             );
             assert!(
                 parsed
@@ -2609,7 +2664,7 @@ mod tests {
                 server,
                 Some("agent-child".to_string()),
                 600,
-                vec!["repo:acme/heddle/subtree".to_string()],
+                vec!["spool:acme/heddle/subtree".to_string()],
                 vec!["PublishContent".to_string()],
                 None,
                 None,
@@ -2648,7 +2703,7 @@ mod tests {
                 server,
                 Some("agent-widening".to_string()),
                 300,
-                vec!["repo:acme".to_string()],
+                vec!["spool:acme".to_string()],
                 vec!["PublishContent".to_string()],
                 None,
                 None,
@@ -2671,8 +2726,8 @@ mod tests {
             derive_agent(
                 server,
                 Some("agent-export".to_string()),
-                3600,
-                vec!["repo:acme/heddle".to_string()],
+                900,
+                vec!["spool:acme/heddle".to_string()],
                 vec!["PublishContent".to_string()],
                 None,
                 Some(&out),
@@ -2688,6 +2743,16 @@ mod tests {
             assert_eq!(loaded.server, server);
             assert_eq!(loaded.subject, "alice");
             assert_eq!(loaded.kind, credential_file::CredentialKind::Agent);
+            let expiry = chrono::DateTime::parse_from_rfc3339(
+                loaded.expires_at.as_deref().expect("derived expiry"),
+            )
+            .expect("expiry date")
+            .with_timezone(&chrono::Utc);
+            let remaining = (expiry - chrono::Utc::now()).num_seconds();
+            assert!(
+                (880..=900).contains(&remaining),
+                "derived TTL is {remaining}s"
+            );
             assert_ne!(
                 loaded.proof_key_pem, private_key_pem,
                 "the .hcred must carry a fresh child key, never the parent device key"
@@ -2696,7 +2761,7 @@ mod tests {
             assert_eq!(provenance.agent_id.as_deref(), Some("agent-export"));
             assert_eq!(
                 provenance.scopes.as_deref(),
-                Some(["repo:acme/heddle".to_string()].as_slice())
+                Some(["spool:acme/heddle".to_string()].as_slice())
             );
             assert_eq!(
                 provenance.allowed_operations.as_deref(),
@@ -2720,7 +2785,7 @@ mod tests {
                 server,
                 Some("agent-export-again".to_string()),
                 3600,
-                vec!["repo:acme/heddle".to_string()],
+                vec!["spool:acme/heddle".to_string()],
                 vec!["PublishContent".to_string()],
                 None,
                 Some(&out),
@@ -2728,6 +2793,101 @@ mod tests {
             .err()
             .unwrap_or_else(|| panic!("an existing credential file must not be overwritten"));
             assert!(error.to_string().contains("already exists"));
+        });
+    }
+
+    #[test]
+    fn derived_expired_file_is_refused_even_when_parent_is_current() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        with_isolated_home(|| {
+            let (parent, parent_pem, _) = stored_device_parent();
+            let signer = Ed25519Signer::from_pem(&parent_pem).expect("parent proof key");
+            let child = Ed25519Signer::generate().expect("child proof key");
+            let token = attenuate_for_agent(
+                &parent.token,
+                AgentAttenuation {
+                    agent_id: "expired-child".to_string(),
+                    expires_at: chrono::Utc::now() - chrono::Duration::seconds(1),
+                    allowed_operations: None,
+                    allowed_resources: None,
+                    declared_scopes: Vec::new(),
+                },
+                &signer,
+                child.public_key(),
+            )
+            .expect("derive expired child");
+            let out = repo::identity::heddle_home_dir().join("expired.hcred");
+            credential_file::write_credential_file(
+                &out,
+                &credential_file::VerifiedCredential {
+                    mint_root_attachment: parent.mint_root_attachment,
+                    server: "api.S".to_string(),
+                    kind: credential_file::CredentialKind::Agent,
+                    subject: "alice".to_string(),
+                    token,
+                    proof_key_pem: child.to_pem().expect("child proof PEM"),
+                    expires_at: parent.expires_at,
+                    credential_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("write expired child");
+            let error = credential_file::load_credential_file(&out)
+                .expect_err("child expiry must override current parent and file metadata");
+            assert!(error.to_string().contains("expired"));
+        });
+    }
+
+    #[test]
+    fn derive_agent_accepts_only_spool_scope_kind() {
+        assert_eq!(
+            parse_agent_scopes(vec!["org/repo".to_string()]).expect("bare spool scope"),
+            vec![("spool".to_string(), "org/repo".to_string())]
+        );
+        assert_eq!(
+            parse_agent_scopes(vec!["spool:org/repo".to_string()]).expect("explicit spool scope"),
+            vec![("spool".to_string(), "org/repo".to_string())]
+        );
+        for scope in ["repo:org/repo", "namespace:org", "ns:org"] {
+            assert!(parse_agent_scopes(vec![scope.to_string()]).is_err());
+        }
+    }
+
+    #[test]
+    fn scoped_reviewer_excludes_account_wide_inventory() {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        with_isolated_home(|| {
+            let server = "api.S";
+            let (parent, _, _) = stored_device_parent();
+            credentials::store_server_credential(server, parent).expect("store parent");
+            let out = repo::identity::heddle_home_dir().join("reviewer.hcred");
+            let derived = derive_agent(
+                server,
+                Some("scoped-reviewer".to_string()),
+                900,
+                vec!["spool:org/repo".to_string()],
+                Vec::new(),
+                Some(AgentTemplate::Reviewer),
+                Some(&out),
+            )
+            .expect("derive scoped reviewer");
+            let operations = derived
+                .allowed_operations
+                .expect("reviewer operation ceiling");
+            assert!(operations.iter().any(|op| op == "ResolveResources"));
+            assert!(!operations.iter().any(|op| op == "ListSpools"));
+            assert!(!operations.iter().any(|op| op == "ObserveWorkspace"));
+            let error = derive_agent(
+                server,
+                Some("inventory".to_string()),
+                900,
+                vec!["spool:org/repo".to_string()],
+                vec!["ListSpools".to_string()],
+                None,
+                None,
+            )
+            .expect_err("explicit account inventory permission must be rejected");
+            assert!(error.to_string().contains("cannot be allowed"));
         });
     }
 
@@ -2769,7 +2929,7 @@ mod tests {
                 "runner must retain the human subject in the authority block: {authority}"
             );
             assert!(
-                authority.contains("right(\"spool\", \"org/acme\", \"ci-verdict:write\")"),
+                authority.contains("right(\"spool\", \"spool/org/acme\", \"ci-verdict:write\")"),
                 "runner must retain the human's exact CI-verdict authority right: {authority}"
             );
             assert!(
@@ -2794,7 +2954,14 @@ mod tests {
             let operations = provenance
                 .allowed_operations
                 .expect("runner operation ceiling");
-            assert_eq!(operations, [CI_VERDICT_WRITE_OPERATION.to_string()]);
+            assert_eq!(
+                operations,
+                [
+                    CI_VERDICT_WRITE_OPERATION.to_string(),
+                    "DescribeEndpoint".to_string(),
+                    "GetIdentity".to_string(),
+                ]
+            );
             assert_eq!(
                 rendered_agent_scope(
                     Some(AgentTemplate::Runner),
@@ -2819,6 +2986,14 @@ mod tests {
                 CI_VERDICT_WRITE_OPERATION,
                 "org/acme"
             ));
+            for operation in ["DescribeEndpoint", "GetIdentity"] {
+                assert!(runner_request_is_authorized(
+                    &loaded.token,
+                    &root,
+                    operation,
+                    "org/acme"
+                ));
+            }
             assert!(
                 !runner_request_is_authorized(
                     &loaded.token,

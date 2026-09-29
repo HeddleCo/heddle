@@ -636,9 +636,9 @@ mod tests {
             "--ttl",
             "900",
             "--scope",
-            "repo:acme/api",
+            "spool:acme/api",
             "--scope",
-            "namespace:acme",
+            "acme/tools",
             "--allow",
             "Push",
             "--allow",
@@ -661,7 +661,7 @@ mod tests {
         };
         assert_eq!(server, "api.heddle.test");
         assert_eq!(ttl_secs, 900);
-        assert_eq!(scopes, ["repo:acme/api", "namespace:acme"]);
+        assert_eq!(scopes, ["spool:acme/api", "acme/tools"]);
         assert_eq!(allowed_operations, ["Push", "GetState"]);
 
         assert!(
