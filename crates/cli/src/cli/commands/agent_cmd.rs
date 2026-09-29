@@ -1738,6 +1738,7 @@ pub fn agent_api_schema() -> serde_json::Value {
         "AgentFanoutOutput": schemars::schema_for!(AgentFanoutOutput),
         "AgentFanoutLaneOutput": schemars::schema_for!(AgentFanoutLaneOutput),
         "AgentFanoutCommandOutput": schemars::schema_for!(AgentFanoutCommandOutput),
+        "StatusReport": (verbs::StatusReport::CONTRACT.schema)(),
     })
 }
 

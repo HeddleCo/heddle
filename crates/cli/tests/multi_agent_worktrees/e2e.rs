@@ -172,6 +172,176 @@ fn parent_status_reviews_ready_landed_and_blocked_lanes() {
 }
 
 #[test]
+fn failed_land_keeps_missing_checkout_reason_in_parent_queue() {
+    let (main, path, _) = fanout_lane();
+    fs::write(path.join("work.txt"), "ready work").expect("lane edit");
+    heddle(&["ready", "-m", "lane work"], Some(&path)).expect("ready lane");
+    fs::remove_dir_all(&path).expect("remove checkout");
+
+    let land = heddle_output(
+        &["--output", "json", "land", "--thread", "lane/one"],
+        Some(main.path()),
+    )
+    .expect("land invocation");
+    assert!(!land.status.success(), "missing checkout must block land");
+    let error: Value = serde_json::from_slice(&land.stderr).expect("land error JSON");
+    assert_eq!(error["kind"], "thread_worktree_missing", "{error}");
+
+    let status: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "status"], Some(main.path())).expect("parent status"),
+    )
+    .expect("status JSON");
+    let lane = &status["review_queue"][0];
+    assert_eq!(lane["outcome"], "blocked", "{lane}");
+    assert_eq!(
+        lane["next_action"], "heddle thread switch lane/one",
+        "{lane}"
+    );
+    assert!(
+        lane["blockers"]
+            .as_array()
+            .is_some_and(|blockers| blockers.iter().any(|blocker| blocker
+                .as_str()
+                .is_some_and(|s| s.contains("worktree is missing")))),
+        "{lane}"
+    );
+}
+
+#[test]
+fn recorded_conflict_recovery_wins_over_staleness_in_parent_queue() {
+    let main = setup_repo("shared.txt", "base");
+    let fanout: Value = serde_json::from_str(
+        &heddle(
+            &[
+                "--output",
+                "json",
+                "agent",
+                "fanout",
+                "start",
+                "--title",
+                "Conflict",
+                "--lane",
+                "lane/first=First",
+                "--lane",
+                "lane/second=Second",
+            ],
+            Some(main.path()),
+        )
+        .expect("start lanes"),
+    )
+    .expect("fanout JSON");
+    for (index, content) in [(0, "first"), (1, "second")] {
+        let path =
+            std::path::PathBuf::from(fanout["lanes"][index]["path"].as_str().expect("lane path"));
+        fs::write(path.join("shared.txt"), content).expect("lane edit");
+        heddle(&["ready", "-m", content], Some(&path)).expect("ready lane");
+    }
+    heddle(&["land", "--thread", "lane/first"], Some(main.path())).expect("land first");
+    let land = heddle_output(
+        &["--output", "json", "land", "--thread", "lane/second"],
+        Some(main.path()),
+    )
+    .expect("land second invocation");
+    assert!(!land.status.success(), "conflict must block land");
+    let after_error: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "status"], Some(main.path()))
+            .expect("status after failed land"),
+    )
+    .expect("status JSON after failed land");
+    let failed_lane = after_error["review_queue"]
+        .as_array()
+        .and_then(|queue| queue.iter().find(|lane| lane["thread"] == "lane/second"))
+        .expect("failed lane");
+    assert_eq!(failed_lane["outcome"], "blocked", "{failed_lane}");
+    assert!(
+        failed_lane["blockers"]
+            .as_array()
+            .is_some_and(|blockers| blockers.iter().any(|blocker| blocker
+                .as_str()
+                .is_some_and(|text| text.contains("Unresolved conflicts: shared.txt")))),
+        "{failed_lane}"
+    );
+    assert!(failed_lane["next_action"].is_null(), "{failed_lane}");
+
+    // Record a scoped conflict recovery action to isolate the parent queue's
+    // precedence rule from the refresh error above.
+    let second_path = std::path::PathBuf::from(
+        fanout["lanes"][1]["path"]
+            .as_str()
+            .expect("second lane path"),
+    );
+    let recovery = format!("heddle --repo {} resolve --list", second_path.display());
+    let store = repo::AgentTaskStore::new(&main.path().join(".heddle"));
+    let task = store
+        .list()
+        .expect("lane tasks")
+        .into_iter()
+        .find(|task| task.target_thread == "lane/second")
+        .expect("second lane task");
+    store
+        .update(&task.task_id, |task| {
+            task.outcome = Some(repo::AgentTaskOutcome::Blocked);
+            task.status = repo::AgentTaskStatus::Blocked;
+            task.blockers = vec!["Unresolved conflicts: shared.txt".to_string()];
+            task.next_action = Some(recovery.clone());
+        })
+        .expect("record conflict outcome");
+
+    let status: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "status"], Some(main.path())).expect("parent status"),
+    )
+    .expect("status JSON");
+    let lane = status["review_queue"]
+        .as_array()
+        .and_then(|queue| queue.iter().find(|lane| lane["thread"] == "lane/second"))
+        .expect("second lane");
+    assert_eq!(lane["outcome"], "blocked", "{lane}");
+    assert_eq!(lane["freshness"], "stale", "{lane}");
+    assert!(
+        lane["blockers"].as_array().is_some_and(|blockers| blockers
+            .iter()
+            .any(|blocker| blocker == "lane is stale against parent")),
+        "{lane}"
+    );
+    assert_eq!(lane["next_action"], recovery, "{lane}");
+}
+
+#[test]
+fn conflicting_land_preserves_scoped_resolve_in_parent_queue() {
+    let (main, path, _) = fanout_lane();
+    fs::write(path.join("base.txt"), "lane change").expect("lane edit");
+    heddle(&["ready", "-m", "lane change"], Some(&path)).expect("ready lane");
+    fs::write(main.path().join("base.txt"), "parent change").expect("parent edit");
+    heddle(&["capture", "-m", "parent change"], Some(main.path())).expect("capture parent change");
+
+    let land = heddle_output(
+        &["--output", "json", "land", "--thread", "lane/one"],
+        Some(main.path()),
+    )
+    .expect("land invocation");
+    assert!(!land.status.success(), "conflict must block land");
+    let land_output: Value = serde_json::from_slice(&land.stdout).expect("blocked land JSON");
+    assert_eq!(land_output["status"], "blocked", "{land_output}");
+    let action = land_output["next_action"]
+        .as_str()
+        .expect("scoped conflict recovery");
+    assert!(action.contains("resolve --list"), "{land_output}");
+    assert!(
+        action.contains(path.to_str().expect("checkout path")),
+        "{land_output}"
+    );
+
+    let status: Value = serde_json::from_str(
+        &heddle(&["--output", "json", "status"], Some(main.path())).expect("parent status"),
+    )
+    .expect("status JSON");
+    let lane = &status["review_queue"][0];
+    assert_eq!(lane["outcome"], "blocked", "{lane}");
+    assert_eq!(lane["freshness"], "stale", "{lane}");
+    assert_eq!(lane["next_action"], action, "{lane}");
+}
+
+#[test]
 fn fanout_lane_capture_succeeds_immediately() {
     let (_main, path, _) = fanout_lane();
     fs::write(path.join("capture.txt"), "capture").unwrap();

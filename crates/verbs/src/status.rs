@@ -311,6 +311,7 @@ fn local_review_queue(repo: &Repository, parent_thread: Option<&str>) -> Result<
             .or_else(|| lease.and_then(|lease| lease.actor_session_id.clone()));
         let next_action = match outcome {
             "landed" | "abandoned" => None,
+            "blocked" => task.next_action.clone(),
             _ if freshness == "stale" => {
                 Some(format!("heddle sync --thread {}", task.target_thread))
             }
