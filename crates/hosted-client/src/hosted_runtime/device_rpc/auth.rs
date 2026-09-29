@@ -213,7 +213,7 @@ fn facts(
     now: chrono::DateTime<Utc>,
 ) -> Result<BiscuitFacts> {
     let operation = method.path.rsplit('/').next().context("invalid method")?;
-    let resource = format!("spool/{}", spool.capability_path);
+    let resource = super::spool_resource_path(&spool.capability_path);
     Ok(biscuit_verifier::authorize_at(
         token,
         operation,

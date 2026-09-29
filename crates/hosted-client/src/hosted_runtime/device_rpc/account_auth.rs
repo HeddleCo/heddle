@@ -63,6 +63,7 @@ impl AccountSession {
         Ok(())
     }
     pub fn facts(&self, path: Option<&str>) -> Result<BiscuitFacts> {
+        let resource = path.map(super::spool_resource_path);
         Ok(biscuit_verifier::authorize_at(
             &self.token,
             self.method
@@ -73,7 +74,7 @@ impl AccountSession {
             Utc::now(),
             None,
             &[],
-            path.map(|path| ("spool", path)),
+            resource.as_deref().map(|path| ("spool", path)),
         )?)
     }
     /// Bind only authorized paths from a bounded current catalog projection.
@@ -109,13 +110,14 @@ impl AccountSession {
     }
     pub fn permits_method(&self, method: &str, path: &str) -> bool {
         method.rsplit('/').next().is_some_and(|name| {
+            let resource = super::spool_resource_path(path);
             biscuit_verifier::authorize_at(
                 &self.token,
                 name,
                 Utc::now(),
                 None,
                 &[],
-                Some(("spool", path)),
+                Some(("spool", &resource)),
             )
             .is_ok()
         })

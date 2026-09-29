@@ -65,6 +65,10 @@ mod thread_observe;
 #[cfg(test)]
 mod thread_tests;
 
+fn spool_resource_path(path: &str) -> String {
+    format!("spool/{path}")
+}
+
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},

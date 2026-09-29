@@ -476,6 +476,28 @@ async fn scoped_contributor_can_capture_refresh_and_claim_only_its_device_spool(
     let child = thread_api::Remote::discover(transport, key, EndpointKind::Device)
         .await
         .expect("child discovery");
+    let resolve = |id| ResolveResourcesRequest {
+        selectors: vec![ResourceSelector {
+            selector: Some(resource_selector::Selector::Resource(EntityRef {
+                entity: Some(entity_ref::Entity::Spool(SpoolRef { id })),
+            })),
+        }],
+        budget: None,
+    };
+    let own = child
+        .api
+        .call::<thread_api::rpc::WorkspaceServiceResolveResources>(&resolve(spool.to_string()))
+        .await
+        .expect("scoped contributor resolves its own spool");
+    assert_eq!(own.results[0].coverage, Coverage::Complete as i32);
+    let other = child
+        .api
+        .call::<thread_api::rpc::WorkspaceServiceResolveResources>(&resolve(
+            other_spool.to_string(),
+        ))
+        .await
+        .expect("out-of-scope resolution stays private");
+    assert_eq!(other.results[0].coverage, Coverage::Unavailable as i32);
     let spool_ref = SpoolRef {
         id: spool.to_string(),
     };
