@@ -499,6 +499,186 @@ fn printed_fanout_commands_scrub_inherited_writer_credentials() {
     }
 }
 
+#[cfg(all(unix, feature = "client"))]
+#[test]
+fn fanout_children_cannot_use_parent_hosted_identity() {
+    use std::os::unix::fs::PermissionsExt;
+
+    use heddle_biscuit_verifier::signature_v1::BiscuitBuilderV1Ext as _;
+
+    const SERVER: &str = "127.0.0.1:9";
+    let parent = TempDir::new().expect("parent identity home");
+    let credential_path = parent.path().join("parent.hcred");
+    let signer = crypto::Ed25519Signer::generate().expect("proof key");
+    let expiry = chrono::Utc::now() + chrono::Duration::hours(2);
+    let token = biscuit_auth::Biscuit::builder()
+        .fact(r#"user("parent-agent")"#)
+        .expect("user fact")
+        .fact(
+            format!(
+                "device_pop_key(\"{}\")",
+                hex::encode(crypto::Signer::public_key(&signer))
+            )
+            .as_str(),
+        )
+        .expect("proof key fact")
+        .fact(format!("expires_at({})", expiry.to_rfc3339()).as_str())
+        .expect("expiry fact")
+        .check(format!("check if time($now), $now < {}", expiry.to_rfc3339()).as_str())
+        .expect("expiry check")
+        .build_v1(&biscuit_auth::KeyPair::new())
+        .expect("credential token")
+        .to_base64()
+        .expect("encode token");
+    let credential = serde_json::json!({
+        "format": "heddle-credential",
+        "version": 1,
+        "server": SERVER,
+        "kind": "device",
+        "subject": "parent-agent",
+        "token": token,
+        "proof_key_pem": signer.to_pem().expect("proof PEM"),
+        "expires_at": expiry.to_rfc3339(),
+        "credential_id": null,
+    });
+    fs::write(
+        &credential_path,
+        serde_json::to_vec(&credential).expect("credential JSON"),
+    )
+    .expect("parent credential");
+    fs::set_permissions(&credential_path, fs::Permissions::from_mode(0o600))
+        .expect("credential permissions");
+
+    let bin = TempDir::new().expect("fake harness directory");
+    for harness in ["claude", "codex", "opencode"] {
+        let fake = bin.path().join(harness);
+        fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n\"$FANOUT_HEDDLE_BIN\" --output json auth status --server {SERVER} > \"$FANOUT_AUTH_MARKER/${{0##*/}}.json\"\n"
+            ),
+        )
+        .expect("fake harness");
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).expect("executable harness");
+    }
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").expect("PATH")
+    );
+    let binary = env!("CARGO_BIN_EXE_heddle");
+    let credential_path = credential_path.to_str().expect("credential path");
+    let parent_status = std::process::Command::new(binary)
+        .args(["--output", "json", "auth", "status", "--server", SERVER])
+        .env("HEDDLE_CREDENTIAL", credential_path)
+        .env("HEDDLE_HOME", parent.path())
+        .output()
+        .expect("parent auth status");
+    assert!(
+        parent_status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&parent_status.stderr)
+    );
+    let parent_auth: Value =
+        serde_json::from_slice(&parent_status.stdout).expect("parent auth JSON");
+    assert_eq!(parent_auth["authenticated"], true);
+    assert_eq!(parent_auth["subject"], "parent-agent");
+
+    for json in [false, true] {
+        for run in [false, true] {
+            let main = git_overlay_fixture(true);
+            let markers = TempDir::new().expect("auth result directory");
+            let mut args = vec!["agent", "fanout", "start", "--title", "Coordinate"];
+            if json {
+                args.splice(0..0, ["--output", "json"]);
+            }
+            for (lane, harness) in [
+                ("feature/a=Implement A", "claude-code"),
+                ("feature/b=Implement B", "codex"),
+                ("feature/c=Implement C", "opencode"),
+            ] {
+                args.extend(["--lane", lane, "--harness", harness]);
+            }
+            if run {
+                args.push("--run");
+            }
+            let inherited = [
+                ("PATH", path.as_str()),
+                ("HEDDLE_CREDENTIAL", credential_path),
+                ("FANOUT_HEDDLE_BIN", binary),
+                (
+                    "FANOUT_AUTH_MARKER",
+                    markers.path().to_str().expect("marker path"),
+                ),
+            ];
+            let output = heddle_output_with_env(&args, Some(main.path()), &inherited)
+                .expect("fanout output");
+            assert!(
+                output.status.success(),
+                "json={json} run={run}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if !run {
+                let commands: Vec<String> = if json {
+                    let value: Value = serde_json::from_slice(&output.stdout).expect("fanout JSON");
+                    value["commands"]
+                        .as_array()
+                        .expect("commands")
+                        .iter()
+                        .map(|item| {
+                            assert!(
+                                item["env_unset"]
+                                    .as_array()
+                                    .expect("scrub list")
+                                    .iter()
+                                    .any(|entry| entry == "HEDDLE_CREDENTIAL")
+                            );
+                            item["command"]
+                                .as_str()
+                                .expect("launch command")
+                                .to_string()
+                        })
+                        .collect()
+                } else {
+                    String::from_utf8(output.stdout)
+                        .expect("text fanout")
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("  cd "))
+                        .map(|line| format!("cd {line}"))
+                        .collect()
+                };
+                assert_eq!(commands.len(), 3);
+                for command in commands {
+                    let launched = std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(command)
+                        .current_dir(main.path())
+                        .envs(inherited)
+                        .output()
+                        .expect("printed launch");
+                    assert!(
+                        launched.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&launched.stderr)
+                    );
+                }
+            }
+            for harness in ["claude", "codex", "opencode"] {
+                let child: Value = serde_json::from_slice(
+                    &fs::read(markers.path().join(format!("{harness}.json")))
+                        .expect("child auth status"),
+                )
+                .expect("child auth JSON");
+                assert_eq!(
+                    child["authenticated"], false,
+                    "json={json} run={run} harness={harness}: {child}"
+                );
+                assert_eq!(child["source"], "none");
+            }
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn git_index_failure_at_each_lane_rolls_back_entire_fanout() {

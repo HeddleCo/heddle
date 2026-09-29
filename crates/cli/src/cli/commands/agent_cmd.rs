@@ -1157,10 +1157,10 @@ fn fanout_launch_command(
         .to_string(),
     );
     argv.push(lane.title.clone());
-    let env_unset: Vec<_> = FANOUT_CREDENTIAL_ENV_PREFIXES
+    let env_unset = FANOUT_IDENTITY_ENV_PATTERNS
         .iter()
-        .map(|prefix| format!("{prefix}*"))
-        .collect();
+        .map(|pattern| (*pattern).to_string())
+        .collect::<Vec<_>>();
     let command = format!(
         "cd {} && (for key in $(env | cut -d= -f1); do case \"$key\" in {}) unset \"$key\" ;; esac; done; export HEDDLE_WRITER_CREDENTIAL_FILE={}; exec {})",
         shell_quote(&lane.path),
@@ -1206,9 +1206,12 @@ fn run_fanout_harness(command: &AgentFanoutCommandOutput, json: bool) -> Result<
         })?);
     for (key, _) in std::env::vars_os() {
         if key.to_str().is_some_and(|key| {
-            FANOUT_CREDENTIAL_ENV_PREFIXES
+            FANOUT_IDENTITY_ENV_PATTERNS
                 .iter()
-                .any(|prefix| key.starts_with(prefix))
+                .any(|pattern| match pattern.strip_suffix('*') {
+                    Some(prefix) => key.starts_with(prefix),
+                    None => key == *pattern,
+                })
         }) {
             launch.env_remove(key);
         }
@@ -1225,7 +1228,22 @@ fn run_fanout_harness(command: &AgentFanoutCommandOutput, json: bool) -> Result<
     Ok(child)
 }
 
-const FANOUT_CREDENTIAL_ENV_PREFIXES: &[&str] = &["HEDDLE_WRITER_", "HEDDLE_RESERVATION_"];
+// One list drives the printed shell command, JSON env_unset, and --run.
+// Cover direct credentials, principal/agent attribution, and the paths Heddle
+// uses to find stored credentials and device identity.
+const FANOUT_IDENTITY_ENV_PATTERNS: &[&str] = &[
+    "HEDDLE_CREDENTIAL",
+    "HEDDLE_WRITER_*",
+    "HEDDLE_RESERVATION_*",
+    "HEDDLE_PRINCIPAL_*",
+    "HEDDLE_AGENT_*",
+    "HEDDLE_SESSION_*",
+    "HEDDLE_HOME",
+    "HEDDLE_CONFIG",
+    "XDG_CONFIG_HOME",
+    "HOME",
+    "HEDDLE_REMOTE_IROH_DESCRIPTOR_*",
+];
 
 fn rollback_fanout_start(
     repo: &Repository,
@@ -1721,4 +1739,106 @@ pub fn agent_api_schema() -> serde_json::Value {
         "AgentFanoutLaneOutput": schemars::schema_for!(AgentFanoutLaneOutput),
         "AgentFanoutCommandOutput": schemars::schema_for!(AgentFanoutCommandOutput),
     })
+}
+
+#[cfg(test)]
+mod fanout_identity_env_tests {
+    use super::FANOUT_IDENTITY_ENV_PATTERNS;
+
+    #[test]
+    fn every_credential_or_identity_env_read_is_scrubbed_from_fanout() {
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let mut audited = std::collections::BTreeSet::new();
+        for entry in walkdir::WalkDir::new(workspace.join("crates")) {
+            let entry = entry.expect("workspace source entry");
+            if !entry
+                .path()
+                .components()
+                .any(|part| part.as_os_str() == "src")
+                || entry
+                    .path()
+                    .extension()
+                    .is_none_or(|extension| extension != "rs")
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(entry.path()).expect("Rust source");
+            for (index, _) in source.match_indices("env::var") {
+                let call = &source[index + "env::var".len()..];
+                let call = call.strip_prefix("_os").unwrap_or(call);
+                let Some(argument) = call.trim_start().strip_prefix('(') else {
+                    continue;
+                };
+                let argument = argument.trim_start();
+                let key = if let Some(literal) = argument.strip_prefix('"') {
+                    let Some((key, _)) = literal.split_once('"') else {
+                        continue;
+                    };
+                    key.to_string()
+                } else {
+                    let symbol = argument
+                        .chars()
+                        .take_while(|character| character.is_ascii_uppercase() || *character == '_')
+                        .collect::<String>();
+                    if symbol.is_empty() {
+                        continue;
+                    }
+                    let declaration = format!("const {symbol}: &str = \"");
+                    let Some((key, _)) = source
+                        .split_once(&declaration)
+                        .and_then(|(_, value)| value.split_once('"'))
+                    else {
+                        continue;
+                    };
+                    key.to_string()
+                };
+                let identity_read = matches!(key.as_str(), "HOME" | "XDG_CONFIG_HOME")
+                    || key.starts_with("HEDDLE_")
+                        && [
+                            "CREDENTIAL",
+                            "TOKEN",
+                            "SECRET",
+                            "IDENTITY",
+                            "PRINCIPAL",
+                            "AGENT_",
+                            "SESSION_",
+                            "HOME",
+                            "CONFIG",
+                            "DESCRIPTOR_KEY",
+                            "DESCRIPTOR_PUBLIC_KEY",
+                        ]
+                        .iter()
+                        .any(|part| key.contains(part));
+                if !identity_read {
+                    continue;
+                }
+                audited.insert(key.clone());
+                assert!(
+                    FANOUT_IDENTITY_ENV_PATTERNS.iter().any(|pattern| {
+                        pattern
+                            .strip_suffix('*')
+                            .is_some_and(|prefix| key.starts_with(prefix))
+                            || *pattern == key
+                    }),
+                    "{} reads {key}, but fanout does not scrub it",
+                    entry.path().display()
+                );
+            }
+        }
+        assert!(
+            audited.contains("HEDDLE_CREDENTIAL"),
+            "hosted credential read was not scanned"
+        );
+        assert!(
+            audited.contains("HEDDLE_PRINCIPAL_NAME"),
+            "principal read was not scanned"
+        );
+        assert!(
+            audited.contains("HOME"),
+            "home based identity read was not scanned"
+        );
+    }
 }
