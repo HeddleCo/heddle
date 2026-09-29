@@ -5,6 +5,7 @@ use std::{collections::HashMap, fs};
 
 use anyhow::{Context, Result, anyhow};
 use objects::{
+    HeddleError,
     object::{Attribution, ConflictSide, StateId, StructuredConflict},
     store::ObjectStore,
 };
@@ -332,7 +333,7 @@ fn side_attribution(
         .store()
         .get_state(&side.source_state)?
         .map(|state| state.attribution)
-        .ok_or_else(|| anyhow!("conflict side State {} is missing", side.source_state))?;
+        .ok_or(HeddleError::StateNotFound(side.source_state))?;
     attributions.insert(side.source_state, attribution.clone());
     Ok(attribution)
 }
