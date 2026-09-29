@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `heddle ci` local executor.
+//! `heddle ci` executor and hosted evidence recording.
 
 mod compile;
 mod render;
@@ -10,8 +10,8 @@ use anyhow::Result;
 use heddle_cli_args::{CiCommands, Cli};
 
 /// Dispatch a CI subcommand.
-pub fn cmd_ci(cli: &Cli, command: &CiCommands) -> Result<()> {
+pub async fn cmd_ci(cli: &Cli, command: &CiCommands) -> Result<()> {
     match command {
-        CiCommands::Run(args) => run::run_local(cli, args),
+        CiCommands::Run(args) => run::run(cli, args).await,
     }
 }

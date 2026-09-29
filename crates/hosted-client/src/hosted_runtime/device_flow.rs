@@ -62,8 +62,12 @@ const TEMPLATE_CONTRIBUTOR_WRITES: &[&str] = &[
     RECORD_EVIDENCE_OPERATION,
 ];
 const TEMPLATE_CI_LANDING_WRITES: &[&str] = &["LandThread", "PublishContent"];
-const TEMPLATE_RUNNER_WRITES: &[&str] =
-    &["DescribeEndpoint", "GetIdentity", RECORD_EVIDENCE_OPERATION];
+const TEMPLATE_RUNNER_WRITES: &[&str] = &[
+    "DescribeEndpoint",
+    "GetIdentity",
+    "ResolveResources",
+    RECORD_EVIDENCE_OPERATION,
+];
 
 /// Optional named restrictions. Omitting a template inherits parent authority.
 /// Explicit operations may narrow a chosen template; no preset expands a parent.
@@ -546,6 +550,7 @@ mod tests {
             BTreeSet::from([
                 "DescribeEndpoint".to_string(),
                 "GetIdentity".to_string(),
+                "ResolveResources".to_string(),
                 "RecordEvidence".to_string(),
             ])
         );

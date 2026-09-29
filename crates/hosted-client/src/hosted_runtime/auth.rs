@@ -2959,6 +2959,7 @@ mod tests {
                     "DescribeEndpoint".to_string(),
                     "GetIdentity".to_string(),
                     RECORD_EVIDENCE_OPERATION.to_string(),
+                    "ResolveResources".to_string(),
                 ]
             );
             assert_eq!(
@@ -2985,7 +2986,7 @@ mod tests {
                 RECORD_EVIDENCE_OPERATION,
                 "org/acme"
             ));
-            for operation in ["DescribeEndpoint", "GetIdentity"] {
+            for operation in ["DescribeEndpoint", "GetIdentity", "ResolveResources"] {
                 assert!(runner_request_is_authorized(
                     &loaded.token,
                     &root,
