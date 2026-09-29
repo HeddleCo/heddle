@@ -73,6 +73,8 @@ pub struct WriterLease {
     #[serde(default)]
     pub pid_birth: Option<String>,
     #[serde(default)]
+    pub pid_namespace: Option<String>,
+    #[serde(default)]
     pub harness_session_id: Option<String>,
     pub heartbeat_at: DateTime<Utc>,
     pub started_at: DateTime<Utc>,
@@ -96,8 +98,28 @@ impl WriterLease {
     }
 
     pub fn liveness_at(&self, now: DateTime<Utc>) -> Liveness {
+        self.liveness_at_in_namespace(now, current_pid_namespace().as_deref())
+    }
+
+    fn liveness_at_in_namespace(
+        &self,
+        now: DateTime<Utc>,
+        observed_namespace: Option<&str>,
+    ) -> Liveness {
         if self.status != WriterLeaseStatus::Active {
             return Liveness::Dead;
+        }
+        // A PID in another namespace identifies a different process here.
+        // Without comparable namespace identities, only the heartbeat can expire it.
+        let same_namespace = if cfg!(target_os = "linux") {
+            self.pid_namespace
+                .as_deref()
+                .is_some_and(|recorded| Some(recorded) == observed_namespace)
+        } else {
+            true
+        };
+        if !same_namespace {
+            return reservation_liveness_at(None, None, Some(self.heartbeat_at), now);
         }
         if let (Some(pid), Some(birth)) = (self.pid, self.pid_birth.as_deref())
             && super::process_birth(pid).as_deref() != Some(birth)
@@ -111,6 +133,19 @@ impl WriterLease {
             now,
         )
     }
+}
+
+#[cfg(target_os = "linux")]
+fn current_pid_namespace() -> Option<String> {
+    std::fs::read_link("/proc/self/ns/pid")
+        .ok()?
+        .to_str()
+        .map(str::to_owned)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_pid_namespace() -> Option<String> {
+    None
 }
 
 #[derive(Debug, Clone)]
@@ -359,6 +394,7 @@ impl WriterLeaseStore {
             pid: draft.pid,
             boot_id: draft.boot_id,
             pid_birth: None,
+            pid_namespace: draft.pid.and_then(|_| current_pid_namespace()),
             harness_session_id: None,
             heartbeat_at: now,
             started_at: now,
@@ -460,6 +496,7 @@ impl WriterLeaseStore {
         lease.harness_session_id = Some(session.to_owned());
         lease.pid = Some(pid);
         lease.pid_birth = Some(birth.to_owned());
+        lease.pid_namespace = current_pid_namespace();
         lease.boot_id = super::current_boot_id();
         lease.heartbeat_at = now;
         self.write_lease(&lease)?;
@@ -659,6 +696,54 @@ mod tests {
         );
         assert!(matches!(
             store.reserve(draft("lane"), now).expect("reacquire"),
+            WriterLeaseReserveOutcome::Reserved(_)
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn foreign_pid_namespace_cannot_reap_fresh_bound_lease() {
+        let now = Utc::now();
+        let temp = TempDir::new().expect("lease store");
+        let store = WriterLeaseStore::new(temp.path());
+        let grant = match store.reserve(draft("lane"), now).expect("reserve") {
+            WriterLeaseReserveOutcome::Reserved(grant) => grant,
+            WriterLeaseReserveOutcome::LiveOwner(_) => panic!("new lane has an owner"),
+        };
+        let outcome = store
+            .bind_hook_session(
+                &grant.lease.lease_id,
+                &grant.token,
+                "opencode:session-a",
+                std::process::id(),
+                "wrong-birth-tick",
+                now,
+            )
+            .expect("bind");
+        let WriterLeaseAuthOutcome::Authorized(mut lease) = outcome else {
+            panic!("hook should bind");
+        };
+        assert_eq!(lease.pid_namespace, current_pid_namespace());
+        assert_eq!(
+            lease.liveness_at_in_namespace(now, lease.pid_namespace.as_deref()),
+            Liveness::Dead,
+            "a recycled PID in the same namespace must be rejected"
+        );
+        lease.pid_namespace = None;
+        assert_eq!(lease.liveness_at(now), Liveness::Alive);
+        lease.pid_namespace = Some("pid:[foreign]".to_string());
+        store
+            .write_lease(&lease)
+            .expect("simulate foreign namespace");
+        assert_eq!(lease.liveness_at(now), Liveness::Alive);
+        assert!(matches!(
+            store.reserve(draft("lane"), now).expect("competing writer"),
+            WriterLeaseReserveOutcome::LiveOwner(_)
+        ));
+        assert!(matches!(
+            store
+                .reserve(draft("lane"), now + chrono::Duration::minutes(6))
+                .expect("expired writer"),
             WriterLeaseReserveOutcome::Reserved(_)
         ));
     }

@@ -966,10 +966,7 @@ fn opencode_plugin_script(exe: &str, repo: Option<&str>) -> String {
     };
     format!(
         r#"export default async function() {{
-  return {{
-    event: async (input) => {{
-      const eventObj = input?.event || input;
-      const event = eventObj?.type || eventObj?.name || input?.type || input?.name || "event";
+  const relay = (event, input) => {{
       const expire = ["session.deleted","session.closed","session.end","session.idle","SessionEnd"].includes(event);
       const stamp = [{repo_args}"integration", "stamp", "opencode"];
       if (expire) stamp.push("--expire");
@@ -982,7 +979,15 @@ fn opencode_plugin_script(exe: &str, repo: Option<&str>) -> String {
           stdin: new TextEncoder().encode(JSON.stringify(input)),
         }});
       }}
+  }};
+  return {{
+    event: async (input) => {{
+      const eventObj = input?.event || input;
+      const event = eventObj?.type || eventObj?.name || input?.type || input?.name || "event";
+      relay(event, input);
     }},
+    "tool.execute.before": async (input, output) => relay("tool.execute.before", input),
+    "tool.execute.after": async (input, output) => relay("tool.execute.after", input),
   }};
 }}
 "#,

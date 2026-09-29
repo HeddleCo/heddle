@@ -423,8 +423,14 @@ fn fanout_lane_claude_stop_hook_captures_immediately() {
     fs::write(path.join("hook.txt"), "hook capture").unwrap();
     let payload = serde_json::json!({
         "session_id": "fanout-claude-session",
-        "message": "Claude Stop capture",
-        "hook_event_name": "Stop"
+        "transcript_path": "/tmp/claude-session.jsonl",
+        "cwd": path,
+        "permission_mode": "default",
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "Claude Stop capture",
+        "background_tasks": [],
+        "session_crons": []
     });
     let output = Command::new(env!("CARGO_BIN_EXE_heddle"))
         .args(["integration", "relay", "claude-code", "Stop"])
@@ -516,7 +522,6 @@ impl HookHarness {
             .env("HEDDLE_TEST_BINARY", env!("CARGO_BIN_EXE_heddle"))
             .env("HEDDLE_PRINCIPAL_NAME", "Heddle Test")
             .env("HEDDLE_PRINCIPAL_EMAIL", "test@heddle.dev")
-            .env("HOOK_PAYLOAD", serde_json::json!({"event":{"type":"tool.execute.before","properties":{"sessionID":"oc-session"}}}).to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -690,7 +695,7 @@ fn three_installed_harness_hooks_bind_distinct_lanes_and_crash_reacquires() {
             r#"import plugin from {};
 import readline from 'node:readline';
 const hooks = await plugin();
-try {{ await hooks.event(JSON.parse(process.env.HOOK_PAYLOAD)); console.log(JSON.stringify({{status:0}})); }}
+try {{ await hooks['tool.execute.before']({{tool:'bash',sessionID:'oc-session',callID:'call-1'}}, {{args:{{command:'true'}}}}); console.log(JSON.stringify({{status:0}})); }}
 catch (error) {{ console.log(JSON.stringify({{status:1, stderr:String(error)}})); }}
 for await (const line of readline.createInterface({{input:process.stdin}})) {{
   const [action, target] = [line.slice(0, line.indexOf('|')), line.slice(line.indexOf('|')+1)];
@@ -710,12 +715,21 @@ for await (const line of readline.createInterface({{input:process.stdin}})) {{
     let mut claude = HookHarness::start(
         &paths[0],
         &claude_command,
-        &serde_json::json!({"session_id":"claude-session","hook_event_name":"PreToolUse"}),
+        &serde_json::json!({
+            "session_id":"claude-session", "transcript_path":"/tmp/claude-session.jsonl",
+            "cwd": paths[0], "permission_mode":"default", "hook_event_name":"PreToolUse",
+            "tool_name":"Bash", "tool_input":{"command":"true"}, "tool_use_id":"tool-1"
+        }),
     );
     let mut codex = HookHarness::start(
         &paths[1],
         &codex_command,
-        &serde_json::json!({"session_id":"codex-session","hook_event_name":"PreToolUse"}),
+        &serde_json::json!({
+            "session_id":"codex-session", "transcript_path":null, "cwd": paths[1],
+            "hook_event_name":"PreToolUse", "model":"gpt-6-sol", "turn_id":"turn-1",
+            "permission_mode":"default", "tool_name":"Bash", "tool_input":{"command":"true"},
+            "tool_use_id":"tool-1"
+        }),
     );
     let mut opencode = HookHarness::start_opencode(&paths[2], &runner);
     for (index, path) in paths.iter().enumerate() {
@@ -764,7 +778,12 @@ for await (const line of readline.createInterface({{input:process.stdin}})) {{
     fs::write(paths[1].join("codex-stop.txt"), "Stop capture").unwrap();
     let stop = codex.event(
         &serde_json::to_string(&[codex_stop]).unwrap(),
-        &serde_json::json!({"session_id":"codex-session","hook_event_name":"Stop","message":"Codex Stop capture"}),
+        &serde_json::json!({
+            "session_id":"codex-session", "transcript_path":null, "cwd": paths[1],
+            "hook_event_name":"Stop", "model":"gpt-6-sol", "turn_id":"turn-1",
+            "permission_mode":"default", "stop_hook_active":false,
+            "last_assistant_message":"Codex Stop capture"
+        }),
     );
     assert_eq!(stop["status"], 0, "Codex Stop: {stop}");
     let log: Value = serde_json::from_str(

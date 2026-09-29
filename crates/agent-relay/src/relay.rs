@@ -318,20 +318,22 @@ struct AttachmentResolutionInput<'a> {
 
 fn relay_codex(runtime: &mut HarnessBridgeRuntime, event: &str, payload: &Value) -> Result<()> {
     let captured_revision = if event == "Stop" && claude_hook::worktree_dirty(&runtime.repo)? {
-        Some(runtime.bridge.capture_snapshot(
-            &runtime.repo,
-            &runtime.user_config,
-            RelayCapture {
-                intent:
-                    value_string(payload, &["message"]).unwrap_or_else(|| "Codex turn".to_string()),
-                provider: Some("openai".to_string()),
-                model: value_string(payload, &["model"]),
-                session: first_value_string(
-                    payload,
-                    &[&["session_id"], &["sessionId"], &["conversation_id"]],
-                ),
-            },
-        )?)
+        Some(
+            runtime.bridge.capture_snapshot(
+                &runtime.repo,
+                &runtime.user_config,
+                RelayCapture {
+                    intent: value_string(payload, &["last_assistant_message"])
+                        .unwrap_or_else(|| "Codex turn".to_string()),
+                    provider: Some("openai".to_string()),
+                    model: value_string(payload, &["model"]),
+                    session: first_value_string(
+                        payload,
+                        &[&["session_id"], &["sessionId"], &["conversation_id"]],
+                    ),
+                },
+            )?,
+        )
     } else {
         None
     };

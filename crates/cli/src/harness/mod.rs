@@ -138,7 +138,7 @@ mod tests {
                 "id": "claude-opus-4-7",
                 "display_name": "Claude Opus 4.7",
             },
-            "message": "hook-driven capture test",
+            "last_assistant_message": "hook-driven capture test",
             "hook_event_name": "Stop",
         });
         runtime.relay("claude-code", "Stop", &payload).unwrap();

@@ -170,15 +170,31 @@ fn hook_owner() -> Result<(u32, String)> {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn belongs_to_harness(pid: u32, birth: &str) -> bool {
-    let mut current = std::process::id();
+    belongs_to_harness_with(
+        pid,
+        birth,
+        std::process::id(),
+        process_parent,
+        process_birth,
+    )
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn belongs_to_harness_with(
+    pid: u32,
+    birth: &str,
+    mut current: u32,
+    parent_of: impl Fn(u32) -> Option<u32>,
+    birth_of: impl Fn(u32) -> Option<String>,
+) -> bool {
     for _ in 0..64 {
         if current == pid {
-            return process_birth(current).as_deref() == Some(birth);
+            return birth_of(current).as_deref() == Some(birth);
         }
-        let Some(parent) = process_parent(current) else {
+        let Some(parent) = parent_of(current) else {
             return false;
         };
-        if parent <= 1 || parent == current {
+        if parent == 0 || parent == current {
             return false;
         }
         current = parent;
@@ -604,5 +620,36 @@ impl Repository {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::belongs_to_harness_with;
+
+    #[test]
+    fn pid_one_harness_authorizes_its_descendants() {
+        let parent = |pid| match pid {
+            42 => Some(7),
+            7 => Some(1),
+            1 => Some(0),
+            _ => None,
+        };
+        let birth = |pid| (pid == 1).then(|| "owner-birth".to_string());
+        assert!(belongs_to_harness_with(1, "owner-birth", 42, parent, birth));
+        assert!(!belongs_to_harness_with(
+            1,
+            "different-birth",
+            42,
+            parent,
+            birth
+        ));
+        assert!(!belongs_to_harness_with(
+            1,
+            "owner-birth",
+            99,
+            parent,
+            birth
+        ));
     }
 }
