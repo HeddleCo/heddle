@@ -34,6 +34,15 @@ pub enum AgentTaskStatus {
     Abandoned,
 }
 
+/// Latest local workflow result for a delegated lane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentTaskOutcome {
+    Ready,
+    Blocked,
+    Landed,
+}
+
 impl std::fmt::Display for AgentTaskStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -59,6 +68,15 @@ pub struct AgentTaskRecord {
     pub body: String,
     /// Current task lifecycle status.
     pub status: AgentTaskStatus,
+    /// The last ready or land result, separate from the task lifecycle.
+    #[serde(default)]
+    pub outcome: Option<AgentTaskOutcome>,
+    /// Blockers reported by the last ready or land attempt.
+    #[serde(default)]
+    pub blockers: Vec<String>,
+    /// Recovery command reported by the last ready or land attempt.
+    #[serde(default)]
+    pub next_action: Option<String>,
     /// Thread this task is delegated to.
     pub target_thread: String,
     /// Optional base state the task was delegated from.
@@ -98,6 +116,9 @@ impl AgentTaskRecord {
             title,
             body: String::new(),
             status: AgentTaskStatus::Open,
+            outcome: None,
+            blockers: Vec::new(),
+            next_action: None,
             target_thread,
             base_state: None,
             base_root: None,

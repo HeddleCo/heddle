@@ -2158,6 +2158,23 @@ fn scoped_resolve_list_command(thread: &Thread) -> String {
 }
 
 fn write_land_output(cli: &Cli, repo: &Repository, output: &LandOutput) -> Result<()> {
+    if matches!(output.operator.status.as_str(), "landed" | "already_landed") {
+        super::ready_cmd::record_lane_outcome(
+            repo,
+            &output.thread,
+            repo::AgentTaskOutcome::Landed,
+            &output.operator.blockers,
+            output.operator.next_action.as_deref(),
+        )?;
+    } else if output.operator.status == "blocked" {
+        super::ready_cmd::record_lane_outcome(
+            repo,
+            &output.thread,
+            repo::AgentTaskOutcome::Blocked,
+            &output.operator.blockers,
+            output.operator.next_action.as_deref(),
+        )?;
+    }
     if MULTI_LAND_COLLECTOR.with(|collector| collector.borrow().is_some()) {
         MULTI_LAND_COLLECTOR.with(|collector| {
             if let Some(batch) = collector.borrow_mut().as_mut() {
