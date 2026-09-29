@@ -93,7 +93,13 @@ fn r7_fanout() -> (GitOverlayFixture, PathBuf, PathBuf) {
     for lane in lanes {
         let path = PathBuf::from(lane["path"].as_str().expect("lane path"));
         let lease = lane["lease_id"].as_str().expect("lease id");
-        let token = lane["token"].as_str().expect("lease token");
+        let credential: Value = serde_json::from_slice(
+            &std::fs::read(path.join(".heddle/writer-credential.json"))
+                .expect("lane credential file"),
+        )
+        .expect("lane credential JSON");
+        assert_eq!(credential["lease"], lease);
+        let token = credential["token"].as_str().expect("lease token");
         let released = heddle_output_env(
             &[
                 "agent", "release", "--lease", lease, "--token", token, "--status", "complete",
