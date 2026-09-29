@@ -5,11 +5,11 @@ use chrono::Utc;
 use objects::{
     HeddleError, RecoveryDetails,
     fs_atomic::write_file_atomic_secret,
-    lock::{RepoLock, WriteLockGuard},
+    lock::WriteLockGuard,
     object::ContentHash,
     store::{
         WriterLeaseAuthOutcome, WriterLeaseDraft, WriterLeaseGrant, WriterLeaseReserveOutcome,
-        WriterLeaseStatus, WriterLeaseStore,
+        WriterLeaseStatus, WriterLeaseStore, checkout_writer_lock,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -83,19 +83,6 @@ fn foreign_writer_error(lease: &str) -> Error {
     ))
 }
 
-fn checkout_writer_lock(heddle_dir: &Path, root: &Path) -> Result<RepoLock> {
-    let root = root.canonicalize()?;
-    let path_key = ContentHash::compute_typed(
-        "checkout-writer-path-v2",
-        root.as_os_str().as_encoded_bytes(),
-    );
-    Ok(RepoLock::at(
-        heddle_dir
-            .join("locks")
-            .join(format!("checkout-{}.lock", path_key.to_hex())),
-    ))
-}
-
 /// Keep lease handoff and credential cleanup outside an active checkout mutation.
 pub fn lock_checkout_writer_handoff(heddle_dir: &Path, root: &Path) -> Result<WriteLockGuard> {
     checkout_writer_lock(heddle_dir, root)?
@@ -118,7 +105,7 @@ impl CheckoutWriterGuard {
     }
     fn release(&mut self) -> Result<()> {
         if let Some(grant) = self.temporary.as_ref() {
-            match self.store.release(
+            match self.store.release_with_checkout_lock(
                 &grant.lease.lease_id,
                 &grant.token,
                 WriterLeaseStatus::Complete,
@@ -290,7 +277,7 @@ impl Repository {
                 _mutation_lock: mutation_lock,
             });
         }
-        let grant = match store.reserve(
+        let grant = match store.reserve_with_checkout_lock(
             WriterLeaseDraft {
                 thread: thread.to_hex(),
                 actor_session_id: Some(actor.to_owned()),

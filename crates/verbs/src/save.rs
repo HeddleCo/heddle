@@ -1423,7 +1423,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         (false, false)
     };
     let actor = format!("cli:{}", std::process::id());
-    let _checkout_writer = match native_thread_name.as_deref() {
+    let checkout_writer = match native_thread_name.as_deref() {
         Some(name) => match repo.native_thread(name) {
             Ok(replica) => Some(repo.acquire_checkout_writer(
                 replica.thread_id(),
@@ -1618,7 +1618,7 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
     let signature_lookup_started = Instant::now();
     let signed = repo.get_state_signature(&state.id())?.is_some();
     let signature_lookup_ms = signature_lookup_started.elapsed().as_millis();
-    Ok(SaveReport {
+    let report = SaveReport {
         verb: plan.verb,
         state_id: state.state_id,
         content_hash: state.hash(),
@@ -1644,7 +1644,16 @@ pub fn execute_save(repo: &Repository, plan: SavePlan) -> Result<SaveReport> {
         previous_state_ms,
         previous_state_profile,
         signature_lookup_ms,
-    })
+    };
+    // Hooks may invoke checkout commands, including agent release. All
+    // capture writes finish before waiting for a user process.
+    if let Some(writer) = checkout_writer {
+        writer.finish()?;
+    }
+    if created_new_state && plan.run_hooks {
+        run_post_snapshot_hooks(repo, &state)?;
+    }
+    Ok(report)
 }
 
 struct CreatedState {
@@ -1696,8 +1705,6 @@ fn create_heddle_state(
     plan: &SavePlan,
     pre_snapshot_ran: bool,
 ) -> Result<CreatedState> {
-    let hook_manager = HookManager::new(repo);
-    let hook_ctx = HookContext::new(repo);
     let mut post_hook_worktree_changes = None;
 
     if pre_snapshot_ran && plan.supplied_tree.is_none() {
@@ -1746,21 +1753,6 @@ fn create_heddle_state(
     let refresh = refresh_active_thread_metadata(repo, &execution.state, &execution.tree)?;
     let thread_metadata_ms = thread_metadata_start.elapsed().as_millis();
 
-    if plan.run_hooks {
-        hook_manager.run(Hook::PostSnapshot, &hook_ctx)?;
-        let post_capture_payload = serde_json::json!({
-            "state_id": execution.state.state_id.to_string_full(),
-        });
-        if let Err(err) = hook_manager.run_with_payload(
-            Hook::PostSnapshot,
-            &hook_ctx,
-            &post_capture_payload,
-            std::time::Duration::from_secs(5),
-        ) {
-            tracing::warn!(error = %err, "post_capture hook error swallowed");
-        }
-    }
-
     Ok(CreatedState {
         state: execution.state,
         profile: std::mem::take(&mut execution.profile),
@@ -1768,6 +1760,24 @@ fn create_heddle_state(
         promotion_suggested: refresh.promotion_suggested,
         heavy_impact_paths: refresh.heavy_impact_paths,
     })
+}
+
+fn run_post_snapshot_hooks(repo: &Repository, state: &State) -> Result<()> {
+    let hook_manager = HookManager::new(repo);
+    let hook_ctx = HookContext::new(repo);
+    hook_manager.run(Hook::PostSnapshot, &hook_ctx)?;
+    let post_capture_payload = serde_json::json!({
+        "state_id": state.state_id.to_string_full(),
+    });
+    if let Err(err) = hook_manager.run_with_payload(
+        Hook::PostSnapshot,
+        &hook_ctx,
+        &post_capture_payload,
+        std::time::Duration::from_secs(5),
+    ) {
+        tracing::warn!(error = %err, "post_capture hook error swallowed");
+    }
+    Ok(())
 }
 
 fn write_git_checkpoint(

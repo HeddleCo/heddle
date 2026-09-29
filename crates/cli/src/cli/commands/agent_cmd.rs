@@ -333,7 +333,7 @@ pub fn cmd_agent_reserve(cli: &Cli, args: AgentReserveArgs) -> Result<()> {
     ensure_thread_record(&repo, &thread_name, &anchor, &args.task)?;
 
     let recorded_pid = args.hold_for_pid;
-    let outcome = lease_store.reserve(
+    let outcome = lease_store.reserve_with_checkout_lock(
         WriterLeaseDraft {
             thread: thread_name.clone(),
             actor_session_id: Some(presence.session_id),
@@ -455,7 +455,7 @@ pub fn cmd_agent_release(cli: &Cli, args: AgentReleaseArgs) -> Result<()> {
         AgentReleaseStatusArg::Complete => WriterLeaseStatus::Complete,
         AgentReleaseStatusArg::Abandoned => WriterLeaseStatus::Abandoned,
     };
-    let outcome = store.release(&args.lease, &args.token, status, Utc::now())?;
+    let outcome = store.release_with_checkout_lock(&args.lease, &args.token, status, Utc::now())?;
     let lease = match outcome {
         WriterLeaseAuthOutcome::Authorized(lease) | WriterLeaseAuthOutcome::Inactive(lease) => {
             lease
@@ -655,7 +655,7 @@ fn cmd_agent_fanout_start(cli: &Cli, args: AgentFanoutStartArgs) -> Result<()> {
                 })?;
             }
             let _handoff_lock = lock_checkout_writer_handoff(repo.heddle_dir(), &checkout_path)?;
-            let lease = WriterLeaseStore::new(repo.heddle_dir()).reserve(
+            let lease = WriterLeaseStore::new(repo.heddle_dir()).reserve_with_checkout_lock(
                 WriterLeaseDraft {
                     thread: lane.thread.clone(),
                     actor_session_id: session_id.clone(),
