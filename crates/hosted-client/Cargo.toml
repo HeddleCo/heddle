@@ -37,6 +37,7 @@ thiserror.workspace = true
 toml.workspace = true
 wire = { workspace = true, features = ["default"] }
 heddle-perf-contract.workspace = true
+heddle-git-projection.workspace = true
 iroh = { workspace = true, optional = true }
 iroh-base = { workspace = true, optional = true }
 n0-watcher = { workspace = true, optional = true }

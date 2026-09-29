@@ -23,6 +23,8 @@ use tokio::task::JoinHandle;
 
 #[derive(Clone, Debug, Default)]
 pub struct PublicationCapture {
+    pub import_requests: Vec<v2::ImportSourceRequest>,
+    pub calls: Vec<String>,
     pub revision: Option<v2::RevisionRef>,
     pub thread_genesis: Option<v2::ThreadGenesisRecord>,
     pub operations: Vec<v2::ReplicationOperations>,
@@ -157,6 +159,12 @@ async fn serve_call(
             break (prelude.method.to_string(), consumed);
         }
     };
+    fixture
+        .captured
+        .lock()
+        .expect("capture calls")
+        .calls
+        .push(method.clone());
     let streaming = method_descriptor(&method)
         .map(|descriptor| descriptor.streaming)
         .or_else(|| api::v2::method_descriptor(&method).map(|descriptor| descriptor.streaming))
@@ -172,6 +180,10 @@ async fn serve_call(
                     supported_packages: vec!["heddle.api.v1alpha2".into()],
                     implemented_methods: vec![
                         "/heddle.api.v1alpha2.WorkspaceService/ResolveResources".into(),
+                        "/heddle.api.v1alpha2.SpoolService/ObserveSpool".into(),
+                        "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership".into(),
+                        "/heddle.api.v1alpha2.IdentityService/ObserveIdentity".into(),
+                        "/heddle.api.v1alpha2.IntegrationService/ImportSource".into(),
                         "/heddle.api.v1alpha2.ThreadService/ObserveThreads".into(),
                         "/heddle.api.v1alpha2.SyncService/PublishContent".into(),
                         "/heddle.api.v1alpha2.SyncService/Fetch".into(),
@@ -230,12 +242,104 @@ async fn serve_call(
                 )
                 .await;
             }
+            "/heddle.api.v1alpha2.IntegrationService/ImportSource" => {
+                read_request_body(&mut recv, &mut request).await;
+                let body = v2::ImportSourceRequest::decode(
+                    decode_request_frame(&request).expect("import frame").body,
+                )
+                .expect("import request");
+                fixture
+                    .captured
+                    .lock()
+                    .expect("capture import")
+                    .import_requests
+                    .push(body.clone());
+                write_unary(
+                    &mut send,
+                    &v2::MutationResponse {
+                        receipt: Some(v2::MutationReceipt {
+                            client_operation_id: body.client_operation_id.clone(),
+                            endpoint: Some(v2::EndpointRef {
+                                kind: v2::EndpointKind::Weft as i32,
+                                public_key: server_key,
+                            }),
+                            outcome: Some(v2::mutation_receipt::Outcome::PendingOperation(
+                                v2::RecordRef {
+                                    spool: body.destination,
+                                    id: body.client_operation_id,
+                                },
+                            )),
+                            ..Default::default()
+                        }),
+                    },
+                )
+                .await;
+            }
             other => panic!("unexpected hosted unary method: {other}"),
         },
-        StreamingShape::ServerStreaming => {
-            assert_eq!(method, "/heddle.api.v1alpha2.ThreadService/ObserveThreads");
-            serve_observe_threads(&mut send, server_key, &fixture).await;
-        }
+        StreamingShape::ServerStreaming => match method.as_str() {
+            "/heddle.api.v1alpha2.ThreadService/ObserveThreads" => {
+                serve_observe_threads(&mut send, server_key, &fixture).await
+            }
+            "/heddle.api.v1alpha2.SpoolService/ObserveSpool" => {
+                for frame in snapshot_frames(server_key) {
+                    let payload =
+                        matches!(frame.body, Some(v2::stream_frame::Body::Data(_))).then(|| {
+                            v2::spool_event::Payload::Spool(v2::SpoolOverview {
+                                r#ref: Some(v2::SpoolRef {
+                                    id: fixture.spool.to_string(),
+                                }),
+                                version: vec![7; 32],
+                                ..Default::default()
+                            })
+                        });
+                    write_message(
+                        &mut send,
+                        &v2::SpoolEvent {
+                            frame: Some(frame),
+                            payload,
+                        },
+                    )
+                    .await;
+                }
+            }
+            "/heddle.api.v1alpha2.OwnerAuthorizationService/ObserveOwnership" => {
+                for frame in snapshot_frames(server_key) {
+                    let payload = matches!(frame.body, Some(v2::stream_frame::Body::Data(_)))
+                        .then(|| v2::ownership_event::Payload::Owner(fixture.owner.clone()));
+                    write_message(
+                        &mut send,
+                        &v2::OwnershipEvent {
+                            frame: Some(frame),
+                            payload,
+                        },
+                    )
+                    .await;
+                }
+            }
+            "/heddle.api.v1alpha2.IdentityService/ObserveIdentity" => {
+                for frame in snapshot_frames(server_key) {
+                    let payload =
+                        matches!(frame.body, Some(v2::stream_frame::Body::Data(_))).then(|| {
+                            v2::identity_event::Payload::CurrentCredential(
+                                v2::CurrentCredentialRecord {
+                                    thread_control_authority: vec![6; 32],
+                                    ..Default::default()
+                                },
+                            )
+                        });
+                    write_message(
+                        &mut send,
+                        &v2::IdentityEvent {
+                            frame: Some(frame),
+                            payload,
+                        },
+                    )
+                    .await;
+                }
+            }
+            other => panic!("unexpected hosted observation: {other}"),
+        },
         StreamingShape::Bidirectional => {
             let buffered = request.split_off(prelude_len);
             match method.as_str() {
@@ -252,6 +356,44 @@ async fn serve_call(
         }
     }
     send.finish().expect("finish hosted response");
+}
+
+fn snapshot_frames(server_key: Vec<u8>) -> Vec<v2::StreamFrame> {
+    vec![
+        v2::stream_frame::Body::Open(v2::StreamOpen {
+            source: Some(v2::EndpointRef {
+                kind: v2::EndpointKind::Weft as i32,
+                public_key: server_key,
+            }),
+            binding_digest: vec![8; 32],
+            accepted_budget: Some(v2::ReadBudget {
+                max_items: 64,
+                max_frame_bytes: 65536,
+                max_snapshot_bytes: 1048576,
+            }),
+            ..Default::default()
+        }),
+        v2::stream_frame::Body::Data(v2::StreamData {
+            kind: v2::StreamDataKind::Snapshot as i32,
+        }),
+        v2::stream_frame::Body::Checkpoint(v2::StreamCheckpoint {
+            cursor: vec![1],
+            snapshot_complete: true,
+            page: Some(v2::PageInfo {
+                exhausted: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        v2::stream_frame::Body::Complete(v2::StreamComplete { cursor: vec![1] }),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, body)| v2::StreamFrame {
+        sequence: (index + 1) as u64,
+        body: Some(body),
+    })
+    .collect()
 }
 
 async fn read_request_body(recv: &mut iroh::endpoint::RecvStream, request: &mut Vec<u8>) {
