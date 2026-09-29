@@ -254,15 +254,30 @@ mod tests {
         assert_eq!(commits.len(), 5);
         assert!(commits.iter().any(|commit| commit.parents.len() == 2));
         assert!(commits.iter().any(|commit| commit.sha == tagged.trim()));
-        let mut mapped = HashMap::new();
+        let native = TempDir::new().expect("native destination");
+        let (stats, local_map) =
+            crate::import_git_into(path, native.path()).expect("local import path");
+        assert_eq!(stats.commits_imported, 5);
+        assert_eq!(local_map.commit_count().expect("complete local map"), 5);
+        let imported_repo = repo::Repository::open(native.path()).expect("native repository");
+        let mut hosted_map = HashMap::new();
+        let mut local_ids = HashMap::new();
+        let mut hosted_states = HashMap::new();
         for commit in commits {
             let parents = commit
                 .parents
                 .iter()
-                .map(|sha| *mapped.get(sha).expect("parent already converted"))
+                .map(|sha| *hosted_map.get(sha).expect("hosted parent converted"))
                 .collect::<Vec<_>>();
-            let local = state_from_commit(&commit, empty_tree_hash(), parents.clone(), false)
-                .expect("local conversion");
+            let local_id = local_map
+                .get_commit(&commit.sha)
+                .expect("local map")
+                .expect("converted commit");
+            let local = imported_repo
+                .store()
+                .get_state(&local_id)
+                .expect("stored State")
+                .expect("published State");
             let raw = git(path, &["cat-file", "commit", &commit.sha]);
             let oid = parse_git_oid(&commit.sha).expect("Git OID");
             let hosted = GitImportGraph::convert_raw_commit(
@@ -272,15 +287,51 @@ mod tests {
                     raw_commit: &raw,
                     heddle_note: None,
                 },
-                empty_tree_hash(),
-                parents,
+                local.tree,
+                parents.clone(),
                 false,
                 |_| Ok(None),
             )
-            .expect("hosted conversion");
+            .expect("hosted executor entry point");
+            assert_eq!(
+                local.parents, parents,
+                "ordered Git parents for {}",
+                commit.sha
+            );
             assert_eq!(local, hosted, "commit {}", commit.sha);
-            mapped.insert(commit.sha, local.id());
+            local_ids.insert(commit.sha.clone(), local_id);
+            hosted_map.insert(commit.sha.clone(), hosted.id());
+            hosted_states.insert(commit.sha, hosted);
         }
+        assert_eq!(local_ids, hosted_map, "complete Git OID → StateId maps");
+        use objects::{object::ThreadName, store::ObjectStore as _};
+        for (name, git_ref) in [
+            ("main", "refs/heads/main"),
+            ("feature", "refs/heads/feature"),
+            ("shared", "refs/heads/shared"),
+        ] {
+            let sha = String::from_utf8(git(path, &["rev-parse", git_ref])).expect("tip OID");
+            let local_tip = imported_repo
+                .refs()
+                .get_thread(&ThreadName::new(name))
+                .expect("published tip")
+                .expect("Thread");
+            let hosted_tip = &hosted_states[sha.trim()];
+            assert_eq!(local_tip, hosted_tip.id());
+            let local = imported_repo
+                .store()
+                .get_state(&local_tip)
+                .expect("tip State")
+                .expect("tip");
+            assert_eq!(local, *hosted_tip);
+            if name == "main" {
+                assert_eq!(local.parents.len(), 2, "merge parent vector is preserved");
+            }
+        }
+        assert!(
+            hosted_states.contains_key(tagged.trim()),
+            "tag-only commit belongs to both maps"
+        );
     }
 
     #[test]

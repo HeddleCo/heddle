@@ -86,6 +86,7 @@ pub struct HostedImport {
     /// executor preserves Git attribution and records its source commit below.
     pub result: Capture,
     pub provider: ImportProvider,
+    pub source_ref: String,
     pub source_commit: ImportedCommit,
     pub initiating_request_proof: ContentHash,
     pub executed_at_ms: i64,
@@ -97,6 +98,9 @@ impl HostedImport {
             || self.expected_target_frontier.len() > 128
             || self.executed_at_ms < 0
             || !self.provider.is_valid()
+            || self.source_ref.len() > 4096
+            || !self.source_ref.starts_with("refs/heads/")
+            || self.source_ref.chars().any(char::is_control)
         {
             return Err(invalid("invalid or unbounded hosted import receipt"));
         }
@@ -136,6 +140,9 @@ impl HostedImport {
         }
         Ok(())
     }
+    /// Initial Git parent fidelity is enforced by weft W1′ with the shared
+    /// GitImportGraph converter, and by local import running that converter.
+    /// This receipt alone cannot authenticate a Git-parent mapping.
     pub(super) fn validate_parents(
         &self,
         genesis: &ThreadGenesis,
@@ -144,10 +151,25 @@ impl HostedImport {
         if self.spool.to_string() != genesis.spool {
             return Err(invalid("hosted import belongs to another Spool"));
         }
+        if self.source_ref != format!("refs/heads/{}", genesis.name) {
+            return Err(invalid(
+                "hosted import source ref differs from signed Thread name",
+            ));
+        }
         let state = self.resulting_state()?;
         let mut expected = BTreeSet::new();
         if parents.is_empty() {
-            expected.insert(genesis.base);
+            if genesis.base != synthetic_initial_base()?.id() || genesis.parent.is_some() {
+                return Err(invalid(
+                    "initial hosted import requires the canonical empty seed",
+                ));
+            }
+            if state.parents.contains(&genesis.base) {
+                return Err(invalid(
+                    "Git tip cannot have the synthetic seed as a parent",
+                ));
+            }
+            return Ok(());
         }
         for parent in parents {
             expected.insert(
@@ -179,7 +201,7 @@ mod tests {
             version: 1,
             spool: Uuid::from_u128(7).to_string(),
             parent: None,
-            base: StateId::from_bytes([1; 32]),
+            base: synthetic_initial_base().expect("seed").id(),
             name: "import".into(),
             intent: "import Git history".into(),
             owner: crate::object::thread_replication::GenesisOwner::Account(Uuid::from_u128(12)),
@@ -188,7 +210,7 @@ mod tests {
         };
         let state = State::new_snapshot(
             Tree::new().hash(),
-            vec![genesis.base],
+            vec![StateId::from_bytes([31; 32])],
             Attribution::human(Principal::new("Git author", "git@example.test")),
         );
         let receipt = HostedImport {
@@ -202,6 +224,7 @@ mod tests {
             provider: ImportProvider::GitHub {
                 repository_id: "123".into(),
             },
+            source_ref: "refs/heads/import".into(),
             source_commit: ImportedCommit::Sha1([6; 20]),
             initiating_request_proof: ContentHash::from_bytes([7; 32]),
             executed_at_ms: 100,
@@ -214,6 +237,86 @@ mod tests {
             body: ThreadOperationBody::HostedImport(receipt.encode().expect("receipt")),
         };
         (genesis, receipt, operation)
+    }
+    #[test]
+    fn initial_import_accepts_real_git_parents_and_root() {
+        let (genesis, mut receipt, mut operation) = fixture();
+        for parents in [
+            vec![StateId::from_bytes([31; 32]), StateId::from_bytes([32; 32])],
+            vec![],
+        ] {
+            let mut state = receipt.resulting_state().expect("capture");
+            state.parents = parents;
+            receipt.result.state = state.encode_current_msgpack().expect("Git tip");
+            operation.body = ThreadOperationBody::HostedImport(receipt.encode().expect("receipt"));
+            operation
+                .validate_parents(&genesis, &[])
+                .expect("real Git ancestry, including root");
+        }
+    }
+    #[test]
+    fn initial_import_rejects_another_branch() {
+        let (genesis, mut receipt, mut operation) = fixture();
+        receipt.source_ref = "refs/heads/another".into();
+        operation.body = ThreadOperationBody::HostedImport(receipt.encode().expect("receipt"));
+        assert!(operation.validate_parents(&genesis, &[]).is_err());
+    }
+
+    #[test]
+    fn initial_import_rejects_non_head_refs() {
+        let (_, mut receipt, _) = fixture();
+        for source_ref in ["refs/tags/import", "import"] {
+            receipt.source_ref = source_ref.into();
+            assert!(receipt.encode().is_err(), "{source_ref}");
+        }
+    }
+
+    #[test]
+    fn initial_import_rejects_seed_among_git_parents() {
+        let (genesis, mut receipt, mut operation) = fixture();
+        let mut state = receipt.resulting_state().expect("state");
+        state.parents.push(genesis.base);
+        receipt.result.state = state.encode_current_msgpack().expect("seed parent");
+        operation.body = ThreadOperationBody::HostedImport(receipt.encode().expect("receipt"));
+        assert!(operation.validate_parents(&genesis, &[]).is_err());
+    }
+
+    #[test]
+    fn later_hosted_import_rejects_another_branch() {
+        let (genesis, mut receipt, imported) = fixture();
+        receipt.expected_target_frontier = BTreeSet::from([imported.id().expect("ID")]);
+        let mut state = receipt.resulting_state().expect("state");
+        state.parents = vec![state.id()];
+        receipt.result.state = state.encode_current_msgpack().expect("later capture");
+        let mut operation = ThreadOperation {
+            parents: receipt.expected_target_frontier.clone(),
+            body: ThreadOperationBody::HostedImport(receipt.encode().expect("receipt")),
+            ..imported.clone()
+        };
+        operation
+            .validate_parents(&genesis, std::slice::from_ref(&imported))
+            .expect("matching branch and causal parent");
+        receipt.source_ref = "refs/heads/another".into();
+        operation.body = ThreadOperationBody::HostedImport(receipt.encode().expect("receipt"));
+        assert!(operation.validate_parents(&genesis, &[imported]).is_err());
+    }
+
+    #[test]
+    fn later_hosted_import_keeps_the_causal_parent_rule() {
+        let (genesis, mut receipt, imported) = fixture();
+        receipt.expected_target_frontier = BTreeSet::from([imported.id().expect("ID")]);
+        let parent = receipt.resulting_state().expect("parent").id();
+        let mut state = receipt.resulting_state().expect("state");
+        state.parents = vec![parent];
+        receipt.result.state = state.encode_current_msgpack().expect("later capture");
+        receipt
+            .validate_parents(&genesis, std::slice::from_ref(&imported))
+            .expect("causal parents");
+        state.parents.clear();
+        receipt.result.state = state
+            .encode_current_msgpack()
+            .expect("missing causal parent");
+        assert!(receipt.validate_parents(&genesis, &[imported]).is_err());
     }
     #[test]
     fn public_git_provider_round_trips_and_validates() {
@@ -280,7 +383,7 @@ mod tests {
         assert!(changed.validate_parents(&genesis, &[]).is_err());
         let mut wrong = receipt;
         let mut state = wrong.resulting_state().expect("capture");
-        state.parents.clear();
+        state.parents = vec![genesis.base];
         wrong.result.state = state.encode_current_msgpack().expect("wrong ancestry");
         changed = operation;
         changed.body = ThreadOperationBody::HostedImport(wrong.encode().expect("structural"));

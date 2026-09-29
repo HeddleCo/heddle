@@ -3661,6 +3661,59 @@ pub fn copy_reachable_objects(
     target.copy_reachable_from(source, &roots).map_err(git_err)
 }
 
+/// Discover import branches and tags through Sley without a checkout or Git process.
+/// Public HTTPS uses the same configured HTTP client as other Git operations.
+pub fn discover_git_source_refs(clone_url: &str) -> GitProjectionResult<Vec<String>> {
+    use sley::remote::{LsRemoteRequest, LsRemoteSource, ls_remote_with_http_client};
+    use sley_transport::{RemoteTransport, parse_remote_url};
+
+    let remote = parse_remote_url(clone_url).map_err(git_err)?;
+    if remote.user.is_some() || remote.password.is_some() {
+        return Err(GitProjectionError::Git(
+            "public import URL must not contain credentials".into(),
+        ));
+    }
+    let (source, format) = match remote.transport {
+        RemoteTransport::Https => (LsRemoteSource::Http(remote), ObjectFormat::Sha1),
+        RemoteTransport::Local | RemoteTransport::File => {
+            let repository = SleyRepository::discover(&remote.path).map_err(git_err)?;
+            (
+                LsRemoteSource::Local {
+                    git_dir: repository.git_dir().to_path_buf(),
+                },
+                repository.object_format(),
+            )
+        }
+        _ => {
+            return Err(GitProjectionError::Git(
+                "public source import requires HTTPS or a local repository".into(),
+            ));
+        }
+    };
+    let outcome = ls_remote_with_http_client(
+        LsRemoteRequest {
+            policy: &RemotePolicy::default(),
+            source: &source,
+            format,
+            filter: &LsRemoteFilter {
+                heads: true,
+                tags: true,
+                refs_only: true,
+            },
+            config: None,
+        },
+        &|_| true,
+        &mut NoCredentials,
+        configured_https_client(),
+    )
+    .map_err(git_err)?;
+    Ok(outcome
+        .records
+        .into_iter()
+        .map(|record| record.name)
+        .collect())
+}
+
 /// Overlay-authoritative Git refs that a push may serve.
 ///
 /// Branches and tags come from the checkout because `.git` is authoritative
@@ -3886,6 +3939,48 @@ pub fn push_authoritative_git_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn import_ref_discovery_uses_sley_and_counts_annotated_tags_once() {
+        let temp = tempfile::TempDir::new().expect("Git source");
+        let source = SleyRepository::init_bare(temp.path()).expect("bare source");
+        let commit = seed_commit(&source, "root");
+        let tag = source.write_raw_object(GitObjectType::Tag, format!(
+            "object {commit}\ntype commit\ntag v1\ntagger Test <test@example.test> 0 +0000\n\ntag\n"
+        ).into_bytes()).expect("annotated tag");
+        for (name, target) in [
+            ("refs/heads/main", commit),
+            ("refs/heads/feature/auth", commit),
+            ("refs/tags/v1", tag),
+            ("refs/tags/light", commit),
+            ("refs/remotes/origin/main", commit),
+            ("refs/pull/12/head", commit),
+            ("refs/pull/12/merge", commit),
+        ] {
+            set_reference(
+                &source,
+                name,
+                target,
+                RefPrecondition::Any,
+                "test: import source",
+            )
+            .expect("source ref");
+        }
+        let mut refs = discover_git_source_refs(temp.path().to_str().expect("path"))
+            .expect("Sley advertisement");
+        refs.sort();
+        assert_eq!(
+            refs,
+            [
+                "refs/heads/feature/auth",
+                "refs/heads/main",
+                "refs/tags/light",
+                "refs/tags/v1"
+            ]
+        );
+        assert!(discover_git_source_refs("https://user:secret@example.test/repo.git").is_err());
+        assert!(discover_git_source_refs("ssh://example.test/repo.git").is_err());
+    }
 
     #[test]
     fn parse_git_ref_local_branch() {

@@ -149,6 +149,11 @@ pub fn classify_git_import_ref(
             _ => Err(ImportRefFailure::InvalidDefaultHead),
         };
     }
+    if name.starts_with(b"refs/pull/") {
+        return Ok(ImportRefDisposition::Unsupported {
+            reason: ImportSkipReason::Pull,
+        });
+    }
     if matches!(&reference.raw_target, GitRefTarget::Symbolic(_)) {
         return Ok(ImportRefDisposition::Unsupported {
             reason: ImportSkipReason::SymbolicRef,
@@ -216,8 +221,6 @@ pub fn classify_git_import_ref(
         ImportSkipReason::RemoteTracking
     } else if name.starts_with(b"refs/replace/") {
         ImportSkipReason::Replace
-    } else if name.starts_with(b"refs/pull/") {
-        ImportSkipReason::Pull
     } else if name.starts_with(b"refs/notes/") {
         ImportSkipReason::OtherNotes
     } else {
@@ -276,7 +279,10 @@ pub fn classify_frozen_import_refs(refs: &[ImportRefIdentity]) -> Result<Classif
                 return Err(invalid("Git import has more than 512 native refs"));
             }
         }
-        if let ImportRefDisposition::Unsupported { reason } = disposition {
+        // Provider pull refs are outside the imported branch/tag surface.
+        if let ImportRefDisposition::Unsupported { reason } = disposition
+            && reason != ImportSkipReason::Pull
+        {
             skipped_refs.push(SkippedImportRef {
                 raw_name: reference.raw_name.clone(),
                 reason,
@@ -404,6 +410,36 @@ mod tests {
             classify_git_import_ref(&detached_head),
             Err(ImportRefFailure::InvalidDefaultHead)
         );
+    }
+
+    #[test]
+    fn github_provider_refs_do_not_make_import_partial() {
+        let commit = GitObjectId::Sha1([4; 20]);
+        let mut refs = vec![ImportRefIdentity {
+            raw_name: b"HEAD".to_vec(),
+            raw_target: GitRefTarget::Symbolic(b"refs/heads/main".to_vec()),
+            peeled_commit: None,
+        }];
+        for name in [
+            b"refs/heads/main".as_slice(),
+            b"refs/pull/12/head".as_slice(),
+            b"refs/pull/12/merge".as_slice(),
+            b"refs/tags/v1".as_slice(),
+        ] {
+            refs.push(ImportRefIdentity {
+                raw_name: name.to_vec(),
+                raw_target: GitRefTarget::Direct {
+                    oid: commit.clone(),
+                    object_type: GitRefObjectType::Commit,
+                },
+                peeled_commit: Some(commit.clone()),
+            });
+        }
+        let classified = classify_frozen_import_refs(&refs).expect("GitHub-shaped refs");
+        assert!(!classified.partial);
+        assert!(classified.skipped_refs.is_empty());
+        assert_eq!(classified.native_ref_count, 2);
+        assert_eq!(classified.default_branch, b"refs/heads/main");
     }
 
     #[test]

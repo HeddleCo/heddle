@@ -554,6 +554,59 @@ fn classify_error_with_verb(err: &anyhow::Error, verb_help: Option<&str>) -> Err
 fn classify_error_inner(err: &anyhow::Error) -> ErrorClassification {
     use objects::error::HeddleError;
     for cause in err.chain() {
+        #[cfg(feature = "client")]
+        if let Some(source_error) =
+            cause.downcast_ref::<hosted_client::hosted_runtime::hosted::ImportSourceRefError>()
+        {
+            use hosted_client::hosted_runtime::hosted::ImportSourceRefError;
+            let (kind, extra) = match source_error {
+                ImportSourceRefError::TooManyRefs {
+                    branches,
+                    tags,
+                    total,
+                } => (
+                    "import_source_ref_limit",
+                    serde_json::json!({ "branches": branches, "tags": tags, "total_refs": total, "max_refs": 512 }),
+                ),
+                ImportSourceRefError::NoBranches => {
+                    ("import_source_no_branches", serde_json::json!({}))
+                }
+                ImportSourceRefError::InvalidBranch { ref_name, .. } => (
+                    "import_source_invalid_branch",
+                    serde_json::json!({ "source_ref": ref_name }),
+                ),
+                ImportSourceRefError::Discovery(_) => {
+                    ("import_source_discovery_failed", serde_json::json!({}))
+                }
+            };
+            let hint = match source_error {
+                ImportSourceRefError::TooManyRefs { .. } => {
+                    "Choose a source with at most 512 branches and tags."
+                }
+                ImportSourceRefError::NoBranches => {
+                    "Choose a source with at least one refs/heads/* branch."
+                }
+                ImportSourceRefError::InvalidBranch { .. } => {
+                    "Choose source branch names that are valid Thread names."
+                }
+                ImportSourceRefError::Discovery(_) => {
+                    "Check the public source URL and network access."
+                }
+            };
+            let mut classification = ErrorClassification::known(
+                kind,
+                hint,
+                "source ref discovery or admission failed",
+                "the source cannot be submitted for hosted import",
+                "no destination requests or genesis signatures were made",
+                "heddle import url --help",
+            );
+            classification.human_error = Some(source_error.to_string());
+            if let Some(extra) = extra.as_object() {
+                classification.extra_json_fields.extend(extra.clone());
+            }
+            return classification;
+        }
         if let Some(advice) = cause.downcast_ref::<RecoveryAdvice>() {
             return ErrorClassification::from_advice(advice);
         }
