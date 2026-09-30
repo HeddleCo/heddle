@@ -467,6 +467,264 @@ async fn private_symbol_discussion_fixture_publishes_and_clones() {
     fixture.close().await;
 }
 
+/// `(annotation_id, scope)` pairs from `context get` on `path`, optionally
+/// narrowed to one symbol.
+fn context_get(
+    fixture: &Fixture,
+    checkout: &Path,
+    path: &str,
+    symbol: Option<&str>,
+) -> Vec<(String, String)> {
+    let mut args = vec!["--output", "json", "context", "get", "--path", path];
+    if let Some(symbol) = symbol {
+        args.extend(["--symbol", symbol]);
+    }
+    let output: Value =
+        serde_json::from_str(&fixture.run_at(checkout, &args)).expect("context get JSON");
+    let mut annotations: Vec<(String, String)> = output["annotations"]
+        .as_array()
+        .expect("annotations")
+        .iter()
+        .map(|annotation| {
+            (
+                annotation["annotation_id"]
+                    .as_str()
+                    .expect("id")
+                    .to_string(),
+                annotation["scope"].as_str().expect("scope").to_string(),
+            )
+        })
+        .collect();
+    annotations.sort();
+    annotations
+}
+
+/// The annotation IDs attached to `symbol` in `path`. File-wide and
+/// symbol-narrowed retrieval must agree, and every scope must still be the
+/// authored symbol selector.
+fn symbol_context_ids(fixture: &Fixture, checkout: &Path, path: &str, symbol: &str) -> Vec<String> {
+    let file_wide = context_get(fixture, checkout, path, None);
+    let by_symbol = context_get(fixture, checkout, path, Some(symbol));
+    let expected_scope = format!("symbol:{symbol}");
+    assert!(
+        file_wide.iter().all(|(_, scope)| *scope == expected_scope),
+        "file-wide retrieval replaced the symbol selector: {file_wide:?}"
+    );
+    assert_eq!(
+        by_symbol, file_wide,
+        "symbol retrieval must return the same annotations as file-wide retrieval"
+    );
+    file_wide.into_iter().map(|(id, _)| id).collect()
+}
+
+/// `context check` counts plus the `(annotation_id, reason)` of each issue.
+fn context_check(
+    fixture: &Fixture,
+    checkout: &Path,
+    path: &str,
+) -> (u64, u64, Vec<(String, String)>) {
+    let output: Value = serde_json::from_str(&fixture.run_at(
+        checkout,
+        &["--output", "json", "context", "check", "--path", path],
+    ))
+    .expect("context check JSON");
+    let mut issues: Vec<(String, String)> = output["issues"]
+        .as_array()
+        .map(|issues| {
+            issues
+                .iter()
+                .map(|issue| {
+                    (
+                        issue["annotation_id"].as_str().expect("id").to_string(),
+                        issue["reason"].as_str().expect("reason").to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    issues.sort();
+    (
+        output["fresh"].as_u64().expect("fresh"),
+        output["stale"].as_u64().expect("stale"),
+        issues,
+    )
+}
+
+fn capture_source(fixture: &Fixture, checkout: &Path, path: &str, content: &str, message: &str) {
+    std::fs::write(checkout.join(path), content).expect("edit source");
+    fixture.run_at(checkout, &["capture", "-m", message]);
+}
+
+/// heddle#1901: a symbol annotation stays a symbol annotation, with its
+/// stable ID, across push -> pull and push -> clone, and keeps travelling
+/// with its symbol afterwards. Unresolvable selectors report explicitly.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn symbol_context_survives_hosted_push_pull_and_clone() {
+    let fixture = Fixture::new().await;
+    fixture.run_at(
+        &fixture.source,
+        &["remote", "add", "origin", &fixture.remote()],
+    );
+    for (kind, body) in [
+        ("constraint", "amount is integer cents"),
+        ("invariant", "amount never goes negative"),
+        ("rationale", "amount stays pure for caching"),
+    ] {
+        fixture.run_at(
+            &fixture.source,
+            &[
+                "context",
+                "set",
+                "--path",
+                "example.py",
+                "--symbol",
+                "amount",
+                "--kind",
+                kind,
+                "--body",
+                body,
+            ],
+        );
+    }
+    let authored = symbol_context_ids(&fixture, &fixture.source, "example.py", "amount");
+    assert_eq!(authored.len(), 3, "three kinds authored");
+    assert_push_succeeded(&fixture, &fixture.source);
+
+    // push -> pull: the fixture clone predates the annotations.
+    fixture.run(&["pull", "origin"]);
+    assert_eq!(
+        symbol_context_ids(&fixture, &fixture.clone, "example.py", "amount"),
+        authored,
+        "push -> pull"
+    );
+
+    // push -> clone.
+    let clone = fixture._temp.path().join("symbol-clone");
+    fixture.run_at(
+        fixture._temp.path(),
+        &[
+            "clone",
+            &fixture.remote(),
+            clone.to_str().expect("clone path"),
+        ],
+    );
+    assert_eq!(
+        symbol_context_ids(&fixture, &clone, "example.py", "amount"),
+        authored,
+        "push -> clone"
+    );
+    assert_eq!(
+        context_check(&fixture, &clone, "example.py"),
+        (3, 0, Vec::new())
+    );
+
+    // An edit to an unrelated symbol leaves the attachment fresh.
+    capture_source(
+        &fixture,
+        &clone,
+        "example.py",
+        "def amount():\n    return 42\n\n\ndef other():\n    return 1\n",
+        "unrelated symbol",
+    );
+    assert_eq!(
+        symbol_context_ids(&fixture, &clone, "example.py", "amount"),
+        authored
+    );
+    assert_eq!(
+        context_check(&fixture, &clone, "example.py"),
+        (3, 0, Vec::new())
+    );
+
+    // A line shift moves the symbol; the selector follows it.
+    capture_source(
+        &fixture,
+        &clone,
+        "example.py",
+        "# pricing helpers\n\n\ndef other():\n    return 1\n\n\ndef amount():\n    return 42\n",
+        "line shift",
+    );
+    assert_eq!(
+        symbol_context_ids(&fixture, &clone, "example.py", "amount"),
+        authored
+    );
+    assert_eq!(
+        context_check(&fixture, &clone, "example.py"),
+        (3, 0, Vec::new())
+    );
+
+    // A file rename carries the attachment to the new path.
+    std::fs::rename(clone.join("example.py"), clone.join("pricing.py")).expect("rename file");
+    fixture.run_at(&clone, &["capture", "-m", "rename file"]);
+    assert_eq!(
+        symbol_context_ids(&fixture, &clone, "pricing.py", "amount"),
+        authored
+    );
+    assert!(context_get(&fixture, &clone, "example.py", None).is_empty());
+    assert_eq!(
+        context_check(&fixture, &clone, "pricing.py"),
+        (3, 0, Vec::new())
+    );
+
+    let explicit = |reason: &str| -> Vec<(String, String)> {
+        authored
+            .iter()
+            .map(|id| (id.clone(), reason.to_string()))
+            .collect()
+    };
+
+    // Duplicating the symbol makes the selector ambiguous, never fresh.
+    capture_source(
+        &fixture,
+        &clone,
+        "pricing.py",
+        "def other():\n    return 1\n\n\ndef amount():\n    return 42\n\n\ndef amount():\n    return 43\n",
+        "duplicate symbol",
+    );
+    assert_eq!(
+        symbol_context_ids(&fixture, &clone, "pricing.py", "amount"),
+        authored
+    );
+    assert_eq!(
+        context_check(&fixture, &clone, "pricing.py"),
+        (0, 3, explicit("symbol_ambiguous"))
+    );
+
+    // Renaming the symbol leaves the authored selector unresolved.
+    capture_source(
+        &fixture,
+        &clone,
+        "pricing.py",
+        "def other():\n    return 1\n\n\ndef total_cents():\n    return 42\n",
+        "rename symbol",
+    );
+    assert_eq!(
+        symbol_context_ids(&fixture, &clone, "pricing.py", "amount"),
+        authored
+    );
+    assert_eq!(
+        context_check(&fixture, &clone, "pricing.py"),
+        (0, 3, explicit("symbol_missing"))
+    );
+
+    // Deleting the symbol is reported the same way.
+    capture_source(
+        &fixture,
+        &clone,
+        "pricing.py",
+        "def other():\n    return 1\n",
+        "delete symbol",
+    );
+    assert_eq!(
+        symbol_context_ids(&fixture, &clone, "pricing.py", "amount"),
+        authored
+    );
+    assert_eq!(
+        context_check(&fixture, &clone, "pricing.py"),
+        (0, 3, explicit("symbol_missing"))
+    );
+    fixture.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discussion_open_reply_resolve_publish_and_clone() {
     let fixture = Fixture::new().await;

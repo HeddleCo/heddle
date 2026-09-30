@@ -19,10 +19,28 @@ pub enum StalenessStatus {
     FileMissing,
     /// Symbol referenced by annotation no longer exists in the file.
     SymbolMissing { symbol: String },
+    /// More than one definition matches the annotation's symbol selector, so
+    /// it no longer identifies one piece of source. The authored selector is
+    /// kept; `candidate_lines` are the 1-indexed inclusive matches.
+    SymbolAmbiguous {
+        symbol: String,
+        candidate_lines: Vec<(u32, u32)>,
+    },
     /// More than one file passed the rename confidence threshold.
     AmbiguousFileMove { candidate_paths: Vec<String> },
     /// No provenance data stored -- staleness cannot be determined.
     Unknown,
+}
+
+/// How a symbol selector resolved against current source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolResolution {
+    /// Exactly one definition matches; 1-indexed inclusive lines.
+    Resolved { start: u32, end: u32 },
+    /// No definition matches.
+    Missing,
+    /// More than one definition matches.
+    Ambiguous { candidate_lines: Vec<(u32, u32)> },
 }
 
 /// Check an annotation's staleness against already-loaded source bytes.
@@ -47,7 +65,7 @@ pub fn annotation_status_for_source_with_symbol_resolver(
     scope: &AnnotationScope,
     source: &[u8],
     file_path: &Path,
-    mut resolve_symbol: impl FnMut(&[u8], &Path, &str, Option<(u32, u32)>) -> Option<(u32, u32)>,
+    mut resolve_symbol: impl FnMut(&[u8], &Path, &str, Option<(u32, u32)>) -> SymbolResolution,
 ) -> StalenessStatus {
     let Some(revision) = annotation.current_revision() else {
         return StalenessStatus::Unknown;
@@ -64,10 +82,16 @@ pub fn annotation_status_for_source_with_symbol_resolver(
             name,
             resolved_lines,
         } => match resolve_symbol(source, file_path, name, *resolved_lines) {
-            Some((start, end)) => extract_line_range(source, start, end),
-            None => {
+            SymbolResolution::Resolved { start, end } => extract_line_range(source, start, end),
+            SymbolResolution::Missing => {
                 return StalenessStatus::SymbolMissing {
                     symbol: name.clone(),
+                };
+            }
+            SymbolResolution::Ambiguous { candidate_lines } => {
+                return StalenessStatus::SymbolAmbiguous {
+                    symbol: name.clone(),
+                    candidate_lines,
                 };
             }
         },
@@ -108,6 +132,9 @@ pub fn resolve_current_symbol(
     _file_path: &Path,
     _symbol: &str,
     stored: Option<(u32, u32)>,
-) -> Option<(u32, u32)> {
-    stored
+) -> SymbolResolution {
+    match stored {
+        Some((start, end)) => SymbolResolution::Resolved { start, end },
+        None => SymbolResolution::Missing,
+    }
 }

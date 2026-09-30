@@ -125,7 +125,7 @@ pub use source::AsyncObjectSource;
 pub use source::ObjectSource;
 pub use spool_id::{SpoolId, SpoolIdParseError};
 pub use staleness_core::{
-    StalenessStatus, annotation_status_for_source,
+    StalenessStatus, SymbolResolution, annotation_status_for_source,
     annotation_status_for_source_with_symbol_resolver, extract_line_range, resolve_current_symbol,
 };
 pub use state_attachment::{
