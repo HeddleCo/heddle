@@ -35,6 +35,10 @@ pub enum AuthCommand {
         permission: LoginPermission,
         /// Invite consumed only when this machine has no hosted account yet.
         invite: Option<String>,
+        /// Web approval host for browser pairing, sent as
+        /// `BeginPairingRequest.web_origin`. `None` sends empty, which means
+        /// the server's configured default web origin.
+        web_origin: Option<config::web_origin::PairingWebOrigin>,
         /// Install a verified `.hcred` credential file without a browser.
         /// The server comes from the file. Mutually exclusive with the
         /// browser flags.

@@ -170,6 +170,7 @@ pub async fn execute(
             server,
             permission,
             invite,
+            web_origin,
             credential,
         } => match credential {
             Some(credential) => {
@@ -186,6 +187,7 @@ pub async fn execute(
                     &server,
                     permission,
                     invite,
+                    web_origin.as_ref(),
                     &mut on_event,
                 )
                 .await
@@ -900,9 +902,10 @@ pub(crate) fn headless_token_metadata(token: &str) -> Result<HeadlessTokenMetada
 pub(crate) async fn login_browser(
     server: &str,
     open_browser: bool,
+    web_origin: Option<&config::web_origin::PairingWebOrigin>,
     on_event: &mut impl FnMut(AuthEvent) -> Result<()>,
 ) -> Result<AuthLoginOutcome> {
-    super::auth_pairing::login(server, open_browser, on_event).await
+    super::auth_pairing::login(server, open_browser, web_origin, on_event).await
 }
 
 /// Remove stored credentials.
@@ -3159,6 +3162,7 @@ mod tests {
                 server: None,
                 permission: LoginPermission::HeadlessOnly,
                 invite: None,
+                web_origin: None,
                 credential: Some(std::path::PathBuf::from("/definitely/not/here.hcred")),
             },
             |_| Ok(()),
