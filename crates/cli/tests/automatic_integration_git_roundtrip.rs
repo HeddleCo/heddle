@@ -7,7 +7,10 @@ use std::{
     process::{Command, Output},
 };
 
-use objects::{object::HeddleNote, store::ObjectStore};
+use objects::{
+    object::{HeddleNote, StateId},
+    store::ObjectStore,
+};
 use repo::Repository;
 use tempfile::TempDir;
 
@@ -230,6 +233,77 @@ fn roundtrip(workflow: Workflow) {
         expected
     );
     run(home.path(), &cloned, &["verify"]);
+    if workflow == Workflow::Automatic {
+        let git_repo = sley::Repository::open(&remote).expect("bare remote");
+        let oid = String::from_utf8(git(&source, &["rev-parse", "HEAD"]).stdout)
+            .expect("head OID")
+            .trim()
+            .parse()
+            .expect("parse OID");
+        let mut note = heddle_git_projection::git_notes::read_note(&git_repo, oid)
+            .expect("read integration note")
+            .expect("integration note");
+        assert!(
+            note.parents_rewritten,
+            "the portable note must explain identity loss"
+        );
+        let original = note
+            .source_state
+            .as_ref()
+            .expect("embedded integration")
+            .id();
+        // Reopen the map: descendants must have durable evidence, not just
+        // an in-memory exception for this clone's integration tip.
+        let map = ingest::ShaMap::open(cloned.join(".heddle/ingest/sha_map.sqlite"))
+            .expect("reopen durable import map");
+        let actual = map
+            .get_commit(&oid.to_hex())
+            .expect("mapped integration")
+            .expect("StateId");
+        assert_ne!(original, actual);
+        assert_eq!(
+            map.get_rewritten_state(original).expect("durable rewrite"),
+            Some(actual)
+        );
+
+        // A self-consistent forged State with an unexplained parent still
+        // fails through the same full import path.
+        note.parents_rewritten = false;
+        let state = note.source_state.as_mut().expect("embedded integration");
+        state.parents = vec![StateId::from_bytes([0x99; 32])];
+        note.state_id = state.id().to_string_full();
+        heddle_git_projection::git_notes::write_note(&git_repo, oid, &note)
+            .expect("write forged note");
+        let forged = temp.path().join("forged");
+        let rejected = heddle(
+            home.path(),
+            temp.path(),
+            &[
+                "--output",
+                "json",
+                "clone",
+                "--source",
+                "git",
+                remote.to_str().expect("remote"),
+                forged.to_str().expect("forged"),
+            ],
+        );
+        assert_eq!(rejected.status.code(), Some(74));
+        let value: serde_json::Value =
+            serde_json::from_slice(&rejected.stderr).expect("rejection JSON on stderr");
+        assert_eq!(value["kind"], "git_overlay_clone_import_failed", "{value}");
+        assert!(
+            value["error"]
+                .as_str()
+                .expect("error")
+                .contains("embedded Heddle State differs"),
+            "{value}"
+        );
+        assert!(
+            !forged.exists(),
+            "failed clone must clean up its destination"
+        );
+    }
 }
 
 #[test]

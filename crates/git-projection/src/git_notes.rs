@@ -92,23 +92,40 @@ pub fn rebuild_notes(
 /// A V4 tree keeps private per-entry salts that Git cannot reconstruct. Keep
 /// the source identity for lineage, but let Git import mint a state over the
 /// reconstructed Git tree instead of claiming the embedded state is portable.
+/// A portable child must also declare that its salted parent's identity will
+/// change; import records the child's rewrite durably for its descendants.
 pub fn note_for_state(
     repo: &HeddleRepository,
     state: &State,
-    parents_rewritten: bool,
+    mut parents_rewritten: bool,
 ) -> GitProjectionResult<HeddleNote> {
     let hosted_seed =
         objects::object::thread_replication::hosted_import::synthetic_initial_base()?.id();
     let omits_hosted_seed = state.parents.contains(&hosted_seed);
+    let tree = repo
+        .store()
+        .get_tree(&state.tree)?
+        .ok_or_else(|| GitProjectionError::Git(format!("state tree {} is missing", state.tree)))?;
+    if tree.scheme() != TreeScheme::V4Salted && !parents_rewritten && !omits_hosted_seed {
+        for parent in &state.parents {
+            // Missing parents can be shallow boundaries with no served note.
+            let Some(parent) = repo.store().get_state(parent)? else {
+                continue;
+            };
+            let parent_tree = repo.store().get_tree(&parent.tree)?.ok_or_else(|| {
+                GitProjectionError::Git(format!("state tree {} is missing", parent.tree))
+            })?;
+            if parent_tree.scheme() == TreeScheme::V4Salted {
+                parents_rewritten = true;
+                break;
+            }
+        }
+    }
     let mut note = if parents_rewritten || omits_hosted_seed {
         HeddleNote::from_projected_state(state)
     } else {
         HeddleNote::from_state(state)
     };
-    let tree = repo
-        .store()
-        .get_tree(&state.tree)?
-        .ok_or_else(|| GitProjectionError::Git(format!("state tree {} is missing", state.tree)))?;
     if tree.scheme() == TreeScheme::V4Salted || omits_hosted_seed {
         note.source_state = None;
     }
@@ -209,7 +226,7 @@ mod tests {
             false,
         )
         .expect("entry");
-        let portable = Tree::from_entries(vec![entry.clone()]).expect("portable tree");
+        let portable = Tree::from_entries(vec![entry.clone()]);
         let salted = Tree::from_entries_salted_v4(vec![entry], vec![[7; 32]]).expect("salted tree");
         repo.store()
             .put_tree(&portable)
