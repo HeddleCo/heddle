@@ -39,46 +39,112 @@ pub(super) fn retain(
     credential: &config::credentials::ServerCredential,
     root: CredentialRoot,
 ) -> Result<()> {
-    let home = repo::identity::heddle_home_dir();
-    let Some(device) = repo::identity::load_device(&repo::identity::device_identity_path())? else {
+    let Some(retention) = Retention::of(server, credential)? else {
         return Ok(());
     };
-    if !super::hosted::server_keys_match(&device.server, server) {
-        return Ok(());
-    }
-    let Some(pem) = credential.private_key_pem.as_deref() else {
+    retention.publish(server, credential, root)
+}
+
+/// Retain a credential an earlier login saved. Its root follows from how it
+/// was issued, with no fallback between the two: a paired credential chains to
+/// the approval root recorded at pairing, verified against the admitted owner
+/// authority; every other credential chains to this device's own key.
+pub(super) fn retain_stored(
+    server: &str,
+    credential: &config::credentials::ServerCredential,
+) -> Result<()> {
+    let Some(retention) = Retention::of(server, credential)? else {
         return Ok(());
     };
-    let signer = Ed25519Signer::from_pem(pem)?;
-    if hex::encode(signer.public_key()) != device.public_key {
-        return Ok(());
-    }
-    // An imported credential without independently admitted account ownership
-    // still captures as an explicit local key; importing does not enroll trust.
-    if !home.join("state/device-rpc/authority.bin").try_exists()? {
-        return Ok(());
-    }
-    let now = chrono::Utc::now().timestamp();
-    let authority = repo::device_authority::load(&home, now)?;
-    let publisher: [u8; 32] = signer
-        .public_key()
-        .try_into()
-        .context("source publisher length")?;
-    let mint_root = match root {
-        CredentialRoot::DeviceKey => publisher,
-        CredentialRoot::Paired(VerifiedMintRoot(key)) => key,
+    let root = if super::auth_pairing::is_paired(credential) {
+        let approved = super::auth_pairing::approved_root(server, credential)?;
+        CredentialRoot::Paired(
+            VerifiedMintRoot::verify(&retention.authority, &approved, retention.now)
+                .context("verify recorded pairing root belongs to the account")?,
+        )
+    } else {
+        CredentialRoot::DeviceKey
     };
-    let trusted =
-        biscuit_verifier::PublicKey::from_bytes(&mint_root, biscuit_auth::Algorithm::Ed25519)?;
-    let token = biscuit_verifier::parse_token(&credential.token, &[trusted])?;
-    repo::identity::source_author::publish(&home, &authority, &mint_root, &publisher, &token, now)?;
-    repo::identity::retain_device_bearer(
-        server,
-        &publisher,
-        &credential.token,
-        &credential.subject,
-    )?;
-    Ok(())
+    retention.publish(server, credential, root)
+}
+
+/// This device's enrolled key and admitted owner authority, present only when
+/// `credential` is this device's own credential for `server`.
+struct Retention {
+    home: std::path::PathBuf,
+    authority: repo::device_authority::DeviceAuthority,
+    publisher: [u8; 32],
+    now: i64,
+}
+
+impl Retention {
+    fn of(
+        server: &str,
+        credential: &config::credentials::ServerCredential,
+    ) -> Result<Option<Self>> {
+        let home = repo::identity::heddle_home_dir();
+        let Some(device) = repo::identity::load_device(&repo::identity::device_identity_path())?
+        else {
+            return Ok(None);
+        };
+        if !super::hosted::server_keys_match(&device.server, server) {
+            return Ok(None);
+        }
+        let Some(pem) = credential.private_key_pem.as_deref() else {
+            return Ok(None);
+        };
+        let signer = Ed25519Signer::from_pem(pem)?;
+        if hex::encode(signer.public_key()) != device.public_key {
+            return Ok(None);
+        }
+        // An imported credential without independently admitted account ownership
+        // still captures as an explicit local key; importing does not enroll trust.
+        if !home.join("state/device-rpc/authority.bin").try_exists()? {
+            return Ok(None);
+        }
+        let now = chrono::Utc::now().timestamp();
+        let authority = repo::device_authority::load(&home, now)?;
+        let publisher: [u8; 32] = signer
+            .public_key()
+            .try_into()
+            .context("source publisher length")?;
+        Ok(Some(Self {
+            home,
+            authority,
+            publisher,
+            now,
+        }))
+    }
+
+    fn publish(
+        self,
+        server: &str,
+        credential: &config::credentials::ServerCredential,
+        root: CredentialRoot,
+    ) -> Result<()> {
+        let mint_root = match root {
+            CredentialRoot::DeviceKey => self.publisher,
+            CredentialRoot::Paired(VerifiedMintRoot(key)) => key,
+        };
+        let trusted =
+            biscuit_verifier::PublicKey::from_bytes(&mint_root, biscuit_auth::Algorithm::Ed25519)?;
+        let token = biscuit_verifier::parse_token(&credential.token, &[trusted])?;
+        repo::identity::source_author::publish(
+            &self.home,
+            &self.authority,
+            &mint_root,
+            &self.publisher,
+            &token,
+            self.now,
+        )?;
+        repo::identity::retain_device_bearer(
+            server,
+            &self.publisher,
+            &credential.token,
+            &credential.subject,
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

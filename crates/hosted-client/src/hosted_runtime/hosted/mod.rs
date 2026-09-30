@@ -118,7 +118,13 @@ pub(crate) struct RenewableAuthorityCredential {
 }
 
 impl RenewableAuthorityCredential {
-    pub(super) fn from_stored(credential: &config::credentials::ServerCredential) -> Option<Self> {
+    pub(crate) fn from_stored(credential: &config::credentials::ServerCredential) -> Option<Self> {
+        // A paired credential is the approver's authority attenuated to this
+        // device. Reminting it locally would replace it with an independent
+        // root this device was never granted, so it renews only by pairing.
+        if crate::hosted_runtime::auth_pairing::is_paired(credential) {
+            return None;
+        }
         let credential_id = credential.credential_id.clone()?;
         let signer = Ed25519Signer::from_pem(credential.private_key_pem.as_ref()?).ok()?;
         let biscuit =
@@ -431,66 +437,16 @@ impl HostedClient {
     pub(super) async fn auto_rotate_if_needed(
         &mut self,
         renewable: Option<&RenewableAuthorityCredential>,
-    ) {
-        let (Some(renewable), Some(server_key)) = (renewable, self.server_key.clone()) else {
-            return;
+    ) -> anyhow::Result<()> {
+        let Some(server_key) = self.server_key.clone() else {
+            return Ok(());
         };
-        let credential = match config::credentials::resolve_credential_for_server(&server_key) {
-            Ok(Some(credential)) => credential,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!("credential rotation: failed to load credential: {error}");
-                return;
-            }
-        };
-        if !renewable.matches_active_client(&credential, self.context.bearer_capability())
-            || !config::credentials::token_needs_rotation(&credential)
+        if let Some(token) =
+            rotate_stored_authority(&server_key, renewable, self.context.bearer_capability())?
         {
-            return;
+            self.context.set_bearer_capability(token.into_bytes());
         }
-        let (Some(public_key_id), Some(private_key_pem)) = (
-            credential.credential_id.clone(),
-            credential.private_key_pem.clone(),
-        ) else {
-            tracing::debug!("credential rotation: stored authority has no renewal key");
-            return;
-        };
-        let session_id =
-            crate::hosted_runtime::root_mint::authority_session_fact(&credential.token).ok();
-        let root = match crate::hosted_runtime::root_mint::remint_stored_root(
-            &private_key_pem,
-            &credential.subject,
-            Some(public_key_id.as_str()),
-            session_id.as_deref(),
-        ) {
-            Ok(root) => root,
-            Err(error) => {
-                tracing::warn!("credential rotation: local remint failed: {error}");
-                return;
-            }
-        };
-        let updated = config::credentials::ServerCredential {
-            mint_root_attachment: credential.mint_root_attachment,
-            token: root.token.clone(),
-            subject: root.subject,
-            device_id: credential.device_id,
-            credential_id: Some(public_key_id),
-            private_key_pem: Some(private_key_pem),
-            expires_at: Some(root.expires_at.to_rfc3339()),
-        };
-        if let Err(error) = crate::hosted_runtime::source_author::retain(
-            &server_key,
-            &updated,
-            crate::hosted_runtime::source_author::CredentialRoot::DeviceKey,
-        ) {
-            tracing::warn!(
-                "credential rotation: failed to retain original device authority: {error}"
-            );
-        }
-        if let Err(error) = config::credentials::store_server_credential(&server_key, updated) {
-            tracing::warn!("credential rotation: failed to persist credential: {error}");
-        }
-        self.context.set_bearer_capability(root.token.into_bytes());
+        Ok(())
     }
 
     pub async fn call_unary<Request, Response>(
@@ -643,4 +599,81 @@ impl HostedClient {
     {
         call::bidirectional(self.connection.clone(), method, context).await
     }
+}
+
+/// Renew the stored locally minted authority when it is the active bearer and
+/// near expiry. Returns the renewed bearer for the caller's live connection.
+///
+/// Failing to load or remint leaves the current credential, still valid and
+/// still retained, in place. Failing to retain the renewed credential is an
+/// error: this device's own admitted owner authority refused a credential its
+/// key just minted, and storing it anyway would leave the retained uploader
+/// bearer to expire silently behind a working RPC credential.
+pub(crate) fn rotate_stored_authority(
+    server_key: &str,
+    renewable: Option<&RenewableAuthorityCredential>,
+    active_bearer: &[u8],
+) -> anyhow::Result<Option<String>> {
+    use anyhow::Context as _;
+    let Some(renewable) = renewable else {
+        return Ok(None);
+    };
+    let credential = match config::credentials::resolve_credential_for_server(server_key) {
+        Ok(Some(credential)) => credential,
+        Ok(None) => return Ok(None),
+        Err(error) => {
+            tracing::warn!("credential rotation: failed to load credential: {error}");
+            return Ok(None);
+        }
+    };
+    if !renewable.matches_active_client(&credential, active_bearer)
+        || !config::credentials::token_needs_rotation(&credential)
+    {
+        return Ok(None);
+    }
+    let (Some(public_key_id), Some(private_key_pem)) = (
+        credential.credential_id.clone(),
+        credential.private_key_pem.clone(),
+    ) else {
+        tracing::debug!("credential rotation: stored authority has no renewal key");
+        return Ok(None);
+    };
+    let session_id =
+        crate::hosted_runtime::root_mint::authority_session_fact(&credential.token).ok();
+    let root = match crate::hosted_runtime::root_mint::remint_stored_root(
+        &private_key_pem,
+        &credential.subject,
+        Some(public_key_id.as_str()),
+        session_id.as_deref(),
+    ) {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!("credential rotation: local remint failed: {error}");
+            return Ok(None);
+        }
+    };
+    let updated = config::credentials::ServerCredential {
+        mint_root_attachment: credential.mint_root_attachment,
+        token: root.token.clone(),
+        subject: root.subject,
+        device_id: credential.device_id,
+        credential_id: Some(public_key_id),
+        private_key_pem: Some(private_key_pem),
+        expires_at: Some(root.expires_at.to_rfc3339()),
+    };
+    // The renewed token was minted by this device's own key, so it chains to
+    // that key; paired credentials never reach here (see `from_stored`).
+    crate::hosted_runtime::source_author::retain(
+        server_key,
+        &updated,
+        crate::hosted_runtime::source_author::CredentialRoot::DeviceKey,
+    )
+    .context(
+        "credential rotation: the renewed credential was not admitted as this device's authority; \
+         run `heddle auth logout` and `heddle auth login`",
+    )?;
+    if let Err(error) = config::credentials::store_server_credential(server_key, updated) {
+        tracing::warn!("credential rotation: failed to persist credential: {error}");
+    }
+    Ok(Some(root.token))
 }

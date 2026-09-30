@@ -259,7 +259,10 @@ fn assert_rejected(keys: &Keys, result: anyhow::Result<AuthLoginOutcome>, expect
             .is_none(),
         "rejected pairing must not store a credential"
     );
-    assert_eq!(source_author(keys), SourceAuthor::LocalKey);
+    assert!(
+        source_author(keys) == SourceAuthor::LocalKey,
+        "no source author retained"
+    );
 }
 
 #[test]
@@ -293,7 +296,10 @@ fn pairing_stores_credential_rooted_at_the_approvers_verified_mint_root() {
     let stored = config::credentials::get_server_credential(SERVER)
         .expect("read credentials")
         .expect("paired credential saved");
-    assert_eq!(decode(&stored.token), credential);
+    assert!(
+        decode(&stored.token) == credential,
+        "the exact approved credential is stored"
+    );
     assert_eq!(stored.credential_id.as_deref(), Some("paired:1921"));
     let SourceAuthor::Account { actor, .. } = source_author(&keys) else {
         panic!("paired device must retain its account source author")
@@ -455,7 +461,10 @@ fn retaining_under_an_approver_root_still_binds_the_credential_to_this_device() 
         Err(error) => format!("{error:#}"),
     };
     assert!(error.contains("another signing key"), "{error}");
-    assert_eq!(source_author(&keys), SourceAuthor::LocalKey);
+    assert!(
+        source_author(&keys) == SourceAuthor::LocalKey,
+        "no source author retained"
+    );
 
     // The same verified root cannot vouch for a token minted elsewhere.
     let foreign = decode(&attenuate(
@@ -473,7 +482,10 @@ fn retaining_under_an_approver_root_still_binds_the_credential_to_this_device() 
         .is_err(),
         "a token rooted elsewhere does not verify under the approved root"
     );
-    assert_eq!(source_author(&keys), SourceAuthor::LocalKey);
+    assert!(
+        source_author(&keys) == SourceAuthor::LocalKey,
+        "no source author retained"
+    );
 
     // A paired credential is never its own device-key root.
     let paired = paired_credential(&keys, now);
@@ -498,4 +510,284 @@ fn retaining_under_an_approver_root_still_binds_the_credential_to_this_device() 
         source_author(&keys),
         SourceAuthor::Account { actor, .. } if actor.principal_id == account()
     ));
+}
+
+/// Complete a pairing with `credential` rooted at the owner-attached mint root.
+fn pair(keys: &Keys, credential: Vec<u8>, now: i64) -> config::credentials::ServerCredential {
+    let owner = owner_state(keys);
+    let attachment = mint_root_attachment(keys, &owner, now);
+    run(
+        keys,
+        pairing(
+            keys,
+            credential,
+            keys.mint_root.public().to_bytes().to_vec(),
+            Some(attachment),
+            owner,
+            now,
+        ),
+    )
+    .unwrap_or_else(|error| panic!("browser-approved pairing must complete: {error:#}"));
+    config::credentials::get_server_credential(SERVER)
+        .expect("read credentials")
+        .expect("paired credential saved")
+}
+
+async fn login_again() -> anyhow::Result<AuthLoginOutcome> {
+    crate::hosted_runtime::auth_login::login(
+        &crate::hosted_runtime::auth_requests::AuthOptions::default(),
+        SERVER,
+        crate::hosted_runtime::auth_requests::LoginPermission::HeadlessOnly,
+        None,
+        &mut |_| Ok(()),
+    )
+    .await
+}
+
+fn retained_bearer() -> Option<String> {
+    repo::identity::load_device(&repo::identity::device_identity_path())
+        .expect("load device")
+        .and_then(|device| device.credential_token)
+}
+
+#[tokio::test]
+async fn logging_in_again_after_pairing_reuses_the_paired_credential() {
+    let _process_env_guard = crate::test_process_env::exclusive().await;
+    let _home = IsolatedHome::new();
+    let keys = keys();
+    let now = Utc::now().timestamp();
+    let stored = pair(&keys, paired_credential(&keys, now), now);
+    let outcome = login_again()
+        .await
+        .unwrap_or_else(|error| panic!("second login must reuse the paired credential: {error:#}"));
+    // Reuse keeps the stored credential rather than saving a new one.
+    assert!(matches!(
+        outcome,
+        AuthLoginOutcome::Authenticated {
+            credential_saved: false,
+            ..
+        }
+    ));
+    let after = config::credentials::get_server_credential(SERVER)
+        .expect("read credentials")
+        .expect("paired credential kept");
+    assert!(after.token == stored.token, "paired credential kept");
+    assert!(
+        retained_bearer().as_deref() == Some(stored.token.as_str()),
+        "retained uploader bearer kept"
+    );
+    assert!(matches!(
+        source_author(&keys),
+        SourceAuthor::Account { actor, .. } if actor.principal_id == account()
+    ));
+}
+
+/// A paired credential the approver minted as a single authority block bound
+/// straight to this device's key. `finish()` accepts this shape as well.
+fn single_block_paired_credential(keys: &Keys, now: i64) -> Vec<u8> {
+    let expiry = DateTime::from_timestamp(now + 3600, 0).expect("expiry");
+    let account = account();
+    biscuit_auth::Biscuit::builder()
+        .code(
+            format!(
+                "user(\"{account}\"); subject_kind(\"user\"); subject_user_uuid(\"{account}\"); \
+                 session(\"parent-session\"); credential_id(\"paired:1921\"); \
+                 device_pop_key(\"{}\"); expires_at({}); check if time($now), $now < {};",
+                hex::encode(keys.subject.public_key()),
+                expiry.to_rfc3339(),
+                expiry.to_rfc3339(),
+            )
+            .as_str(),
+        )
+        .expect("paired facts")
+        .build_v1(&keys.mint_root)
+        .expect("paired credential")
+        .to_vec()
+        .expect("credential bytes")
+}
+
+#[test]
+fn rotation_keeps_a_paired_credential_and_its_retained_bearer() {
+    let keys = keys();
+    let now = Utc::now().timestamp();
+    for (case, credential) in [
+        ("attenuated approver session", paired_credential(&keys, now)),
+        (
+            "single-block approver credential",
+            single_block_paired_credential(&keys, now),
+        ),
+    ] {
+        let _process_env_guard = crate::test_process_env::exclusive_blocking();
+        let _home = IsolatedHome::new();
+        let stored = pair(&keys, credential, now);
+        assert!(
+            config::credentials::token_needs_rotation(&stored),
+            "{case}: a short-lived paired credential is due for rotation"
+        );
+        let renewable =
+            crate::hosted_runtime::hosted::RenewableAuthorityCredential::from_stored(&stored);
+        let renewed = crate::hosted_runtime::hosted::rotate_stored_authority(
+            SERVER,
+            renewable.as_ref(),
+            stored.token.as_bytes(),
+        )
+        .unwrap_or_else(|error| panic!("{case}: rotation must not fail: {error:#}"));
+        let after = config::credentials::get_server_credential(SERVER)
+            .expect("read credentials")
+            .expect("paired credential kept");
+        // Compare without printing credentials on failure.
+        assert!(
+            after.token == stored.token,
+            "{case}: stored credential kept"
+        );
+        assert!(
+            retained_bearer().as_deref() == Some(stored.token.as_str()),
+            "{case}: retained uploader bearer kept"
+        );
+        assert!(
+            renewed.is_none(),
+            "{case}: this device cannot remint the approver's authority"
+        );
+    }
+}
+
+/// Replace the recorded approval with one this device co-signed for `root`
+/// over a credential with digest `digest_of`.
+fn record_approval(keys: &Keys, root: Vec<u8>, digest_of: &[u8], now: i64) {
+    let binding = api::RootAttachmentBinding {
+        format_version: 2,
+        account_id: account().to_string(),
+        root_public_key: root,
+        subject_public_key: keys.subject.public_key().to_vec(),
+        device: Some(api::EndpointRef {
+            public_key: keys.endpoint.public_key().to_vec(),
+            kind: api::EndpointKind::Device as i32,
+        }),
+        not_before_unix_seconds: now,
+        expires_at_unix_seconds: now + 300,
+        credential_digest: blake3::hash(digest_of).as_bytes().to_vec(),
+        pairing_challenge: vec![4; 32],
+    };
+    let attachment =
+        thread_api::root_attachment::sign_binding(&keys.subject, &keys.endpoint, binding)
+            .expect("attachment");
+    objects::fs_atomic::write_file_atomic_secret(
+        &super::approval_path(SERVER),
+        &prost::Message::encode_to_vec(&attachment),
+    )
+    .expect("rewrite recorded approval");
+}
+
+/// Corrupts the recorded approval given the stored token bytes.
+type Tamper = fn(&Keys, &[u8], i64);
+
+#[tokio::test]
+async fn logging_in_again_rejects_a_paired_credential_without_a_verified_recorded_root() {
+    let keys = keys();
+    let now = Utc::now().timestamp();
+    let cases: [(&str, &str, Tamper); 3] = [
+        (
+            "recorded root the owner never attached",
+            "verify recorded pairing root belongs to the account",
+            |keys, token, now| {
+                record_approval(keys, keypair(41).public().to_bytes().to_vec(), token, now)
+            },
+        ),
+        (
+            "recorded approval for another credential",
+            "names a different credential",
+            |keys, _, now| {
+                record_approval(
+                    keys,
+                    keys.mint_root.public().to_bytes().to_vec(),
+                    b"another credential",
+                    now,
+                )
+            },
+        ),
+        ("no recorded approval", "no recorded approval", |_, _, _| {
+            std::fs::remove_file(super::approval_path(SERVER)).expect("remove approval")
+        }),
+    ];
+    for (case, expected, tamper) in cases {
+        let _process_env_guard = crate::test_process_env::exclusive().await;
+        let _home = IsolatedHome::new();
+        let stored = pair(&keys, paired_credential(&keys, now), now);
+        tamper(&keys, &decode(&stored.token), now);
+        let error = match login_again().await {
+            Ok(_) => panic!("{case}: login must not retain the paired credential"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            error.contains(expected),
+            "{case}: expected `{expected}`, got: {error}"
+        );
+        assert!(
+            !error.contains("biscuit signature/parse failed"),
+            "{case}: never retried under this device's own key"
+        );
+    }
+}
+
+#[test]
+fn rotation_fails_loudly_when_the_renewed_credential_cannot_be_retained() {
+    let _process_env_guard = crate::test_process_env::exclusive_blocking();
+    let _home = IsolatedHome::new();
+    let keys = keys();
+    let now = Utc::now().timestamp();
+    // An independent-root device whose key the admitted owner authority does
+    // not vouch for: the owner key is another key and no mint root is attached.
+    let device = Ed25519Signer::from_seed(&[37; 32]).expect("device");
+    let authority = repo::device_authority::DeviceAuthority {
+        owner: owner_state(&keys),
+        mint_roots: Vec::new(),
+        revoked_ids: Vec::new(),
+        revoked_mint_roots: Vec::new(),
+        revoked_publishers: Vec::new(),
+    };
+    repo::device_authority::publish(&repo::identity::heddle_home_dir(), &authority, now)
+        .expect("publish owner authority");
+    let pem = device.to_pem().expect("device PEM");
+    repo::identity::link_device_key(device.public_key(), &pem, SERVER).expect("link device");
+    let root = crate::hosted_runtime::root_mint::mint_independent_root(
+        crate::hosted_runtime::root_mint::IndependentRootMint {
+            seed: &device.to_seed(),
+            subject: "owner@example.test",
+            ttl: crate::hosted_runtime::root_mint::ACCOUNT_ROOT_TTL,
+            credential_id: Some("device-credential"),
+            session_id: None,
+            expires_at: None,
+        },
+    )
+    .expect("device root");
+    let stored = config::credentials::ServerCredential {
+        mint_root_attachment: None,
+        token: root.token,
+        subject: root.subject,
+        device_id: None,
+        credential_id: Some("device-credential".into()),
+        private_key_pem: Some(pem),
+        // Inside the rotation window.
+        expires_at: DateTime::from_timestamp(now + 3600, 0).map(|expiry| expiry.to_rfc3339()),
+    };
+    config::credentials::store_server_credential(SERVER, stored.clone()).expect("store");
+    let renewable =
+        crate::hosted_runtime::hosted::RenewableAuthorityCredential::from_stored(&stored);
+    assert!(renewable.is_some(), "a locally minted root is renewable");
+    let error = match crate::hosted_runtime::hosted::rotate_stored_authority(
+        SERVER,
+        renewable.as_ref(),
+        stored.token.as_bytes(),
+    ) {
+        Ok(_) => panic!("rotation must surface a renewed credential it cannot retain"),
+        Err(error) => format!("{error:#}"),
+    };
+    assert!(error.contains("credential rotation"), "{error}");
+    let after = config::credentials::get_server_credential(SERVER)
+        .expect("read credentials")
+        .expect("credential kept");
+    assert!(
+        after.token == stored.token,
+        "an unretained renewal is not stored"
+    );
 }
