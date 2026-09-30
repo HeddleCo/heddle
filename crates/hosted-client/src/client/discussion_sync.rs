@@ -719,6 +719,8 @@ async fn pull_discussions_filtered(
         let _guard = lock_mirror_write(repo.heddle_dir())?;
         let mut mirror = load_mirror(repo.heddle_dir())?;
         let mut changed = HashSet::new();
+        let mut observed = HashSet::new();
+        let mut observed_resolutions = HashSet::new();
         for record in signed {
             let verified = thread_api::collaboration::verify(&record)
                 .map_err(|error| anyhow!(error.to_string()))?;
@@ -747,6 +749,13 @@ async fn pull_discussions_filtered(
                 .write_operation_bytes(&bytes)
                 .context("store native signed discussion operation")?;
             changed.insert(decoded.operation.discussion_id);
+            observed.insert(decoded.operation_id);
+            if matches!(
+                decoded.operation.body,
+                CollaborationOperationBodyV1::Resolve { .. }
+            ) {
+                observed_resolutions.insert(decoded.operation_id);
+            }
             let local_operation_id = decoded.operation_id.to_string_full();
             let repository = mirror.repos.entry(repo_path.to_string()).or_default();
             if !repository
@@ -759,6 +768,59 @@ async fn pull_discussions_filtered(
                     signed_record: record.encode_to_vec(),
                     expected_version: None,
                 });
+            }
+        }
+        // Retaining signed bytes alone makes our own fetched turns look pending
+        // to push. Link only observed operations, leaving local work publishable.
+        for discussion_id in &changed {
+            let discussion = store
+                .materialize_discussion(discussion_id)
+                .context("materialize observed discussion")?
+                .ok_or_else(|| anyhow!("observed discussion {discussion_id} is incomplete"))?;
+            let local_id = discussion_id.to_string();
+            let repository = mirror.repos.entry(repo_path.to_string()).or_default();
+            let index = match repository
+                .discussions
+                .iter()
+                .position(|entry| entry.local_id == local_id)
+            {
+                Some(index) => index,
+                None => {
+                    repository.discussions.push(MirrorEntry {
+                        local_id: local_id.clone(),
+                        server_id: local_id,
+                        links: Vec::new(),
+                        resolved_into_annotation_operation_id: None,
+                        pulled_resolution_key: None,
+                        published_resolution_operation_id: None,
+                    });
+                    repository.discussions.len() - 1
+                }
+            };
+            let entry = &mut repository.discussions[index];
+            for (ordinal, turn) in collect_local_turns(&store, &discussion, None)?
+                .into_iter()
+                .filter(|turn| observed.contains(&turn.operation_id))
+                .enumerate()
+            {
+                if !entry
+                    .links
+                    .iter()
+                    .any(|link| link.local_turn_id == turn.turn_id)
+                {
+                    entry.links.push(TurnLink {
+                        local_turn_id: turn.turn_id,
+                        server_ordinal: ordinal,
+                        server_turn_id: None,
+                    });
+                }
+            }
+            if let Some(resolution) = discussion
+                .heads
+                .iter()
+                .find(|head| observed_resolutions.contains(head))
+            {
+                entry.published_resolution_operation_id = Some(resolution.to_string_full());
             }
         }
         save_mirror(repo.heddle_dir(), &mirror)?;
