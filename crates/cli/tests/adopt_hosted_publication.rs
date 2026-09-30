@@ -111,12 +111,7 @@ async fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
             Some("main"),
             None,
             hosted_client::hosted_runtime::hosted::PullMaterialization::Full,
-            |_| {
-                let repo = repo::Repository::init(&clone).map_err(wire::ProtocolError::from)?;
-                repo.install_native_spool_id(spool)
-                    .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
-                Ok(repo)
-            },
+            |_| repo::Repository::init(&clone).map_err(wire::ProtocolError::from),
         )
         .await
         .expect("clone published adopted source");

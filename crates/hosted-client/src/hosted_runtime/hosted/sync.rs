@@ -403,7 +403,7 @@ mod native_exchange_tests {
                 Some("main"),
                 None,
                 PullMaterialization::Full,
-                |_| Repository::init_default(clone.path()).map_err(ProtocolError::from),
+                |_| Repository::init(clone.path()).map_err(ProtocolError::from),
             )
             .await
             .unwrap();
@@ -412,6 +412,21 @@ mod native_exchange_tests {
         assert!(pulled.checkpoint.is_empty());
         assert!(cloned_repo.store().has_state(&state).unwrap());
         assert_eq!(cloned_repo.root(), clone.path());
+        assert_eq!(
+            cloned_repo.native_spool_id().unwrap(),
+            repo.native_spool_id().unwrap()
+        );
+        assert_eq!(
+            cloned_repo
+                .native_thread("main")
+                .unwrap()
+                .signed_genesis()
+                .unwrap(),
+            repo.native_thread("main")
+                .unwrap()
+                .signed_genesis()
+                .unwrap()
+        );
 
         client.close().await;
         server.await.unwrap();
@@ -432,7 +447,7 @@ mod native_exchange_tests {
                 PullMaterialization::Lazy,
                 |_| {
                     initialized_in_callback.store(true, std::sync::atomic::Ordering::SeqCst);
-                    Repository::init_default(clone.path()).map_err(ProtocolError::from)
+                    Repository::init(clone.path()).map_err(ProtocolError::from)
                 },
             )
             .await
@@ -562,7 +577,7 @@ mod native_exchange_tests {
                 Some("main"),
                 None,
                 PullMaterialization::Full,
-                |_| Repository::init_default(clone.path()).map_err(ProtocolError::from),
+                |_| Repository::init(clone.path()).map_err(ProtocolError::from),
             )
             .await
             .unwrap();
