@@ -62,6 +62,14 @@ pub async fn cmd_ready(cli: &Cli, args: ReadyArgs) -> Result<()> {
     }
 
     let repo = Repository::open(start)?;
+    if let Some(operation) = repo.operation_status()?
+        && operation.scope == repo::OperationScope::Heddle
+        && operation.kind == repo::OperationKind::Merge
+    {
+        return Err(anyhow::anyhow!(RecoveryAdvice::merge_in_progress(
+            &operation.next_action
+        )));
+    }
     if args.dry_run.enabled() {
         return emit_ready_dry_run(cli, &repo, &args);
     }

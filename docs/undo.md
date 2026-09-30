@@ -11,9 +11,9 @@ it refuses without changing files only when the recovery state is absent or
 when recovery would overwrite a differing local change at the same path.
 
 Undo operations that materialize an earlier tree are explicitly destructive.
-Run `heddle undo --preview` (or `heddle undo --hard --preview`) to inspect them
-and `heddle undo --hard` to permit the worktree rewind. `--preview` is a
-read-only alias of `--dry-run` and can be combined with `--hard`. Plain
+Run `heddle undo --dry-run` (or `heddle undo --hard --dry-run`) to inspect them
+and `heddle undo --hard` to permit the worktree rewind. `--dry-run` is
+read-only and can be combined with `--hard`. Plain
 `heddle undo` refuses before changing repository state or files when the
 selected inverse would rewrite the worktree.
 
@@ -86,7 +86,7 @@ contracts below are enforced by integration tests in
 
 - **Explicit destructive opt-in.** If the selected inverse would materialize
   an earlier tree, plain `heddle undo` refuses before mutation and points to
-  `--preview` and `--hard`. `heddle undo --hard --preview` previews that
+  `--dry-run` and `--hard`. `heddle undo --hard --dry-run` previews that
   rewind without applying it. `heddle undo --hard` still refuses if the worktree
   is dirty and surfaces the exact paths that would otherwise be lost. Capture
   the changes with `heddle capture -m "..."` (or move them) and retry.
@@ -119,13 +119,13 @@ contracts below are enforced by integration tests in
   thread ref; silently proceeding would orphan the worktree directory
   with a broken `.heddle/HEAD`. Run `heddle thread drop <name>
   --delete-thread` first, then re-run `heddle undo`. Same refusal fires
-  for `heddle undo --preview` so preview output is honest about what the
+  for `heddle undo --dry-run` so preview output is honest about what the
   real command would do.
 - **Idempotent re-run.** Once a batch is marked undone, the next `heddle
   undo` picks the next still-active batch (or refuses if none remain). Re-
   running `heddle undo` is never destructive.
-- **`--dry-run` is non-mutating.** `heddle undo --dry-run` (alias of
-  `--preview`) prints the batches it would undo without touching the
+- **`--dry-run` is non-mutating.** `heddle undo --dry-run`
+  prints the batches it would undo without touching the
   worktree, ref refs, or oplog state.
 
 ## Flags
@@ -135,7 +135,7 @@ contracts below are enforced by integration tests in
 | `-n, --steps <N>`          | Roll back the last `N` batches (default 1).                 |
 | `--list`                   | Print the recent batches without undoing.                   |
 | `--depth <N>`              | How many batches `--list` shows (default 20).               |
-| `--preview` / `--dry-run`  | Print what would change without applying.                   |
+| `--dry-run`               | Print what would change without applying.                   |
 | `--hard`                   | Permit an undo that rewinds worktree files.                  |
 | `--redo`                   | Re-apply operations that a prior `undo` rewound.            |
 | `--recover`                | Restore the last undo's saved state as worktree changes without moving HEAD. |
