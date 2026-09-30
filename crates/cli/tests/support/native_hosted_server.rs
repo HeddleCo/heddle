@@ -1442,7 +1442,7 @@ async fn serve_publication(
                 _ => None,
             }
         };
-        let failure = failure.or_else(|| {
+        let failure = failure.or({
             if operation_count > PUBLICATION_OPERATIONS {
                 Some("publication operation budget exceeded")
             } else if original_bytes > PUBLICATION_METADATA_BYTES {
