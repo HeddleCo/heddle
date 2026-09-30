@@ -2059,15 +2059,12 @@ mod tests {
             (4096, 10_000, 16 * 1024 * 1024)
         );
         client.close().await;
-        // Preflight never dials the fixture, so its accept loop has no client
-        // connection to close it. Stop and await this intentionally idle task.
+        // Stop and await the fixture even if closing the client's connection
+        // already stopped its accept loop.
         server.abort();
-        assert!(
-            server
-                .await
-                .expect_err("idle server cancelled")
-                .is_cancelled()
-        );
+        if let Err(error) = server.await {
+            assert!(error.is_cancelled(), "fixture failed: {error}");
+        }
     }
 
     static HOME: std::sync::Mutex<()> = std::sync::Mutex::new(());
