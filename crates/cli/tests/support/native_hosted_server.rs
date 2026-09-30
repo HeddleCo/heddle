@@ -48,6 +48,8 @@ pub struct PublicationCapture {
     pub appends: Vec<v2::AppendDiscussionRequest>,
     pub resolutions: Vec<v2::ResolveDiscussionRequest>,
     pub discussion_operations: Vec<v2::SignedRecord>,
+    /// Every signed discussion operation received, including rejected deliveries.
+    pub received_discussion_operations: Vec<v2::SignedRecord>,
     /// Every discussion command ID the server admitted, replays included.
     pub delivered_command_ids: Vec<String>,
     /// Inject a publication failure to verify push's partial-result contract.
@@ -819,6 +821,7 @@ async fn admit_discussion(
     // under the same ID conflicts.
     let failure = {
         let mut capture = fixture.captured.lock().expect("discussion admission");
+        capture.received_discussion_operations.push(signed.clone());
         if command_id != envelope.operation.idempotency_key.as_str() {
             Some((
                 CallFailureCode::InvalidArgument,
@@ -1490,6 +1493,8 @@ async fn serve_publication(
                     accepted.resolutions = std::mem::take(&mut capture.resolutions);
                     accepted.discussion_operations =
                         std::mem::take(&mut capture.discussion_operations);
+                    accepted.received_discussion_operations =
+                        std::mem::take(&mut capture.received_discussion_operations);
                     accepted.delivered_command_ids =
                         std::mem::take(&mut capture.delivered_command_ids);
                     accepted.reject_discussions = capture.reject_discussions;
