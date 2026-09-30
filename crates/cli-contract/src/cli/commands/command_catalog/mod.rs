@@ -4593,6 +4593,24 @@ fn dynamic_recommended_action_template(action: &str) -> Option<ActionTemplate> {
                 true,
             ))
         }
+        // A server with no default web host for the pairing approval page
+        // (weft#2427): the server is concrete; the caller names the web host.
+        [heddle, auth, login, server_flag, server, host_flag, host]
+            if heddle == "heddle"
+                && auth == "auth"
+                && login == "login"
+                && server_flag == "--server"
+                && !is_placeholder_arg(server)
+                && host_flag == "--host"
+                && is_placeholder_arg(host) =>
+        {
+            Some(action_template_from_owned(
+                action.to_string(),
+                argv.clone(),
+                vec![placeholder_input_name(host)],
+                true,
+            ))
+        }
         _ => None,
     }
 }

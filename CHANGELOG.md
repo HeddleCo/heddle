@@ -18,8 +18,22 @@ GitHub App, etc.) lives in the closed `HeddleCo/weft` and
 - Capability-verifier and its npm/WASM package now follow the workspace version.
   The workspace is 0.27.2: the dependency-version guard requires a bump for the
   updated verifier requirements. All publishable crates must inherit the version.
+- Pin `heddle-api` 0.31.0-alpha.11 (linked spools, attention snooze,
+  `BeginPairingRequest.web_origin`). The workspace moves to 0.28.0: the
+  dependency-version guard requires a bump for the new pin.
 
 ### Added
+
+- **`heddle auth login --host <WEB_HOST>`.** Names the host of the web page
+  where you approve a browser pairing, separately from `--server` (the API
+  server). A bare host or an `https://` origin is normalised to
+  `https://<lowercase host>`; `http`, a port, a path, userinfo, a query or
+  fragment, a wildcard, and non-DNS hosts are rejected locally. The value is
+  sent as `BeginPairingRequest.web_origin`; omitting it sends empty (the
+  server default). It conflicts with `--credential` and `--invite`, which never
+  pair. When the server has no default web host, login fails with
+  `auth_login_web_host_required` and recommends
+  `heddle auth login --server <server> --host <web-host>` (heddle#1930).
 
 - **`heddle whoami` lists grant-reachable spools.** After a reachable
   hosted login, `whoami` calls unary `SpoolService/ListSpools` and prints

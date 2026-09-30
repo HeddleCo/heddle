@@ -723,6 +723,7 @@ fn auth_command(command: AuthCommands, interactive: bool) -> AuthCommand {
         AuthCommands::Login {
             server,
             open_browser,
+            host,
             invite,
             credential,
         } => AuthCommand::Login {
@@ -733,6 +734,7 @@ fn auth_command(command: AuthCommands, interactive: bool) -> AuthCommand {
                 LoginPermission::HeadlessOnly
             },
             invite,
+            web_origin: host,
             credential,
         },
         AuthCommands::Logout { server } => AuthCommand::Logout { server },
@@ -1295,6 +1297,7 @@ mod tests {
             AuthCommands::Login {
                 server: Some("api.heddle.test".into()),
                 open_browser: false,
+                host: None,
                 invite: Some("invite-code".into()),
                 credential: None,
             },
@@ -1304,11 +1307,13 @@ mod tests {
                 server,
                 permission,
                 invite,
+                web_origin,
                 credential,
             } => {
                 assert_eq!(server.as_deref(), Some("api.heddle.test"));
                 assert_eq!(permission, LoginPermission::HeadlessOnly);
                 assert_eq!(invite.as_deref(), Some("invite-code"));
+                assert!(web_origin.is_none());
                 assert!(credential.is_none());
             }
             other => panic!("expected login, got {other:?}"),
@@ -1327,6 +1332,7 @@ mod tests {
                 AuthCommands::Login {
                     server: None,
                     open_browser,
+                    host: None,
                     invite: None,
                     credential: None,
                 },
@@ -1335,6 +1341,27 @@ mod tests {
                 AuthCommand::Login { permission, .. } => assert_eq!(permission, expected),
                 other => panic!("expected login, got {other:?}"),
             }
+        }
+        let host =
+            config::web_origin::PairingWebOrigin::parse("preview.example.dev").expect("web host");
+        match auth_command(
+            AuthCommands::Login {
+                server: None,
+                open_browser: true,
+                host: Some(host.clone()),
+                invite: None,
+                credential: None,
+            },
+            false,
+        ) {
+            AuthCommand::Login { web_origin, .. } => {
+                assert_eq!(
+                    web_origin,
+                    Some(host),
+                    "--host becomes the pairing web_origin"
+                );
+            }
+            other => panic!("expected login, got {other:?}"),
         }
         assert!(matches!(
             auth_command(AuthCommands::Logout { server: None }, false),
