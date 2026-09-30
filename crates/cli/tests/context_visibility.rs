@@ -129,6 +129,8 @@ fn conversion_rejects_widening_and_rescoping_before_writing() {
         let id = open(temp.path(), source);
         let output = heddle_output(
             &[
+                "--output",
+                "json",
                 "discuss",
                 "resolve",
                 &id,
@@ -178,6 +180,118 @@ fn conversion_honours_narrower_visibility() {
         VisibilityTier::Private {
             scope_label: "preview-evaluation".into()
         }
+    );
+}
+
+#[test]
+fn restricted_discussion_conversion_inherits_the_same_label() {
+    let temp = fixture();
+    let id = open(temp.path(), "restricted:preview-evaluation");
+    resolve(temp.path(), &id, &[]);
+    assert_eq!(
+        annotations(temp.path())[0].visibility,
+        VisibilityTier::Restricted {
+            scope_label: "preview-evaluation".into()
+        }
+    );
+}
+
+#[test]
+fn repeated_conversion_keeps_a_narrowed_annotation_and_rejects_further_narrowing_without_an_edit() {
+    let temp = fixture();
+    let id = open(temp.path(), "public");
+    let initial = resolve(
+        temp.path(),
+        &id,
+        &["--visibility", "restricted:preview-evaluation"],
+    );
+    let repeated = resolve(temp.path(), &id, &[]);
+    assert_eq!(
+        initial["discussion"]["resolution"]["annotation_id"],
+        repeated["discussion"]["resolution"]["annotation_id"]
+    );
+    let output = heddle_output(
+        &[
+            "--output",
+            "json",
+            "discuss",
+            "resolve",
+            &id,
+            "--mode",
+            "into-annotation",
+            "--body",
+            "decision",
+            "--visibility",
+            "private:preview-evaluation",
+        ],
+        Some(temp.path()),
+    )
+    .expect("command");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("discuss_annotation_visibility_conflict")
+    );
+    assert_eq!(annotations(temp.path()).len(), 1);
+    assert_eq!(
+        annotations(temp.path())[0].visibility,
+        VisibilityTier::Restricted {
+            scope_label: "preview-evaluation".into()
+        }
+    );
+}
+
+#[test]
+fn private_converted_annotation_survives_push_and_fresh_clone() {
+    let temp = fixture();
+    let id = open(temp.path(), "private:preview-evaluation");
+    resolve(temp.path(), &id, &[]);
+    let authored = annotations(temp.path())[0].clone();
+    // A new source state exercises context inheritance and capture-time travel.
+    std::fs::write(temp.path().join("other.rs"), "fn other() {}\n").expect("new source");
+    heddle(
+        &["capture", "-m", "advance with confidential decision"],
+        Some(temp.path()),
+    )
+    .expect("capture");
+    assert_eq!(annotations(temp.path())[0].visibility, authored.visibility);
+    let transport = TempDir::new().expect("native remote");
+    let remote = transport.path().join("remote");
+    std::fs::create_dir(&remote).expect("remote directory");
+    json(&remote, &["init"]);
+    let remote_path = remote.to_str().expect("remote path");
+    json(temp.path(), &["remote", "add", "round-trip", remote_path]);
+    json(temp.path(), &["push", "round-trip"]);
+    let clone = transport.path().join("fresh-clone");
+    let clone_home = TempDir::new().expect("fresh clone home");
+    let env = [(
+        "HEDDLE_HOME",
+        clone_home.path().to_str().expect("home path"),
+    )];
+    heddle_env(
+        &[
+            "--output",
+            "json",
+            "clone",
+            remote_path,
+            clone.to_str().expect("clone path"),
+        ],
+        Some(transport.path()),
+        &env,
+    )
+    .expect("fresh native clone");
+    let replicated = annotations(&clone);
+    assert_eq!(replicated.len(), 1);
+    assert_eq!(replicated[0], authored);
+    let out = heddle_env(
+        &["--output", "json", "context", "get", "--path", "main.rs"],
+        Some(&clone),
+        &env,
+    )
+    .expect("cloned context");
+    let get: Value = serde_json::from_str(&out).expect("JSON");
+    assert_eq!(
+        get["annotations"][0]["visibility"],
+        "private:preview-evaluation"
     );
 }
 

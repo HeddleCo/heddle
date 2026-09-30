@@ -312,6 +312,14 @@ fn run_resolve(
     store: &CollaborationStore,
     args: &DiscussResolveArgs,
 ) -> Result<()> {
+    if args.visibility.is_some() && !matches!(args.mode, ResolveModeArg::IntoAnnotation) {
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "discuss_annotation_visibility_mode",
+            "--visibility requires --mode into-annotation",
+            "Visibility may only narrow the annotation created from a discussion.",
+            "heddle discuss resolve <id> --mode into-annotation --body \"...\"",
+        )));
+    }
     let resolution = match args.mode {
         ResolveModeArg::ByEdit => CollaborationResolution::AddressedByState {
             state_id: resolve_state(repo, args.revision.state.as_deref())?,
@@ -355,6 +363,19 @@ fn resolve_into_context_annotation(
                 &discussion_id.to_string()
             ))
         })?;
+    let visibility = parse_visibility(args.visibility.as_deref(), discussion.visibility.clone())?;
+    if !visibility.is_no_more_visible_than(&discussion.visibility) {
+        return Err(anyhow!(RecoveryAdvice::invalid_usage(
+            "discuss_annotation_visibility_widening",
+            format!(
+                "annotation visibility {} would broaden discussion visibility {}",
+                visibility_token(&visibility),
+                visibility_token(&discussion.visibility)
+            ),
+            "Omit --visibility to inherit the discussion audience, or select a subset of that audience.",
+            "heddle discuss resolve <id> --mode into-annotation --body \"...\"",
+        )));
+    }
     let annotation_kind = args
         .kind
         .as_deref()
@@ -369,11 +390,19 @@ fn resolve_into_context_annotation(
             repo,
             &discussion_id.to_string(),
         )? {
+            if !existing.visibility.is_no_more_visible_than(&visibility) {
+                return Err(anyhow!(RecoveryAdvice::invalid_usage(
+                    "discuss_annotation_visibility_conflict",
+                    "the existing converted annotation does not satisfy the requested visibility",
+                    "Inspect the existing annotation before resolving this discussion again.",
+                    "heddle context history <annotation-id>",
+                )));
+            }
             existing.annotation_id
         } else if let Some(CollaborationResolution::Annotation { annotation_id }) =
             &discussion.resolution
         {
-            annotation_id.clone()
+            return Err(anyhow!(RecoveryAdvice::annotation_not_found(annotation_id)));
         } else {
             let (target, scope) = context_target_from_anchor(&discussion.anchor)?;
             let written = super::context::append_context_annotation(
@@ -384,6 +413,7 @@ fn resolve_into_context_annotation(
                 content,
                 tags,
                 Some(discussion_id.to_string()),
+                visibility,
             )?;
             emit_locality_notice_once(repo, AnnotationSurface::Context);
             written.annotation.annotation_id

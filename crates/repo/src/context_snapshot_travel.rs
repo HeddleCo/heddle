@@ -168,6 +168,7 @@ mod tests {
             1_700_000_000,
             None,
             None,
+            objects::object::VisibilityTier::Public,
         );
         annotation.anchor_status = AnnotationAnchorStatus::Ambiguous {
             candidate_paths: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],

@@ -214,6 +214,7 @@ impl<'a> ReasoningEmitter<'a> {
                     Utc::now().timestamp(),
                     None, // source_hash: we don't resolve bytes at ingest time
                     Some(state_id),
+                    objects::object::VisibilityTier::Public,
                 );
                 blob.annotations.push(annotation);
                 self.stats.annotations_written += 1;

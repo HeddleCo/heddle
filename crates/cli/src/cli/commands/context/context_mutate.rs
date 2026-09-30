@@ -5,7 +5,9 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use objects::{
     lock::RepositoryLockExt,
-    object::{Annotation, AnnotationKind, AnnotationScope, ContextBlob, ContextTarget},
+    object::{
+        Annotation, AnnotationKind, AnnotationScope, ContextBlob, ContextTarget, VisibilityTier,
+    },
 };
 use repo::compute_rewrite_pct;
 use serde::Serialize;
@@ -88,6 +90,7 @@ pub(crate) fn append_context_annotation(
     content: String,
     tags: Vec<String>,
     resolved_from_discussion: Option<String>,
+    visibility: VisibilityTier,
 ) -> Result<WrittenContextAnnotation> {
     target.validate_scope(&scope)?;
     let head_state = resolve_state(repo, None)?;
@@ -108,6 +111,7 @@ pub(crate) fn append_context_annotation(
         Utc::now().timestamp(),
         source_hash,
         Some(head_state.state_id),
+        visibility,
     );
     annotation.resolved_from_discussion = resolved_from_discussion;
 
@@ -175,8 +179,16 @@ pub async fn cmd_context_set(cli: &Cli, args: &ContextSetArgs) -> Result<()> {
     let content = read_annotation_content(args.message.body.clone(), args.message.file.clone())?;
 
     let _lock = repo.locker().write().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let written =
-        append_context_annotation(&repo, target, scope, kind, content, args.tag.clone(), None)?;
+    let written = append_context_annotation(
+        &repo,
+        target,
+        scope,
+        kind,
+        content,
+        args.tag.clone(),
+        None,
+        VisibilityTier::Public,
+    )?;
     let (_, label) = target_label(&written.target);
 
     if should_output_json(cli, None) {
@@ -242,7 +254,11 @@ pub async fn cmd_context_edit(
         .annotations
         .get_mut(index)
         .ok_or_else(|| anyhow::anyhow!("Annotation index out of range"))?;
-    let current = annotation.current_revision().cloned().unwrap();
+    let current = annotation.current_revision().cloned().ok_or_else(|| {
+        anyhow!(objects::object::ContextError::MissingRevisions(
+            annotation_id.clone()
+        ))
+    })?;
     let next_kind = match kind.as_deref() {
         Some(kind) => parse_kind(Some(kind))?,
         None => current.kind,
@@ -302,7 +318,14 @@ pub async fn cmd_context_supersede(cli: &Cli, args: &ContextSupersedeArgs) -> Re
         .find_annotation(&context_root, &annotation_id)?
         .ok_or_else(|| anyhow::anyhow!(RecoveryAdvice::annotation_not_found(&annotation_id)))?;
     let original_annotation = original_blob.annotations[index].clone();
-    let original_revision = original_annotation.current_revision().cloned().unwrap();
+    let original_revision = original_annotation
+        .current_revision()
+        .cloned()
+        .ok_or_else(|| {
+            anyhow!(objects::object::ContextError::MissingRevisions(
+                annotation_id.clone()
+            ))
+        })?;
 
     let (file, state_target, _) =
         split_path_and_revision(args.scope.path.as_deref(), args.revision.state.as_deref());
@@ -336,6 +359,7 @@ pub async fn cmd_context_supersede(cli: &Cli, args: &ContextSupersedeArgs) -> Re
         Utc::now().timestamp(),
         source_hash,
         Some(head_state.state_id),
+        original_annotation.visibility.clone(),
     );
     replacement.supersedes_annotation_id = Some(annotation_id.clone());
     replacement.supersedes_rewrite_pct = Some(rewrite_pct);
