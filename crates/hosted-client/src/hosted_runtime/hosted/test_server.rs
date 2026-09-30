@@ -1956,6 +1956,38 @@ async fn write_thread_list_observation(
     .unwrap();
 }
 
+/// Weft admits a discussion command only when its wire ID is exactly the
+/// idempotency key the signed operation authenticates (heddle#1900). Reject
+/// before recording anything, as weft does.
+async fn reject_foreign_command_id(
+    send: &mut iroh::endpoint::SendStream,
+    command_id: &str,
+    signed: &Option<v2::SignedRecord>,
+) -> bool {
+    let authenticated = signed
+        .as_ref()
+        .and_then(|signed| thread_api::collaboration::verify(signed).ok())
+        .and_then(|operation| match operation.body {
+            objects::object::thread_replication::ThreadOperationBody::Discussion(bytes) => {
+                objects::object::CollaborationOperationEnvelope::decode(&bytes).ok()
+            }
+            _ => None,
+        })
+        .map(|decoded| decoded.operation.idempotency_key.as_str().to_string());
+    if authenticated.as_deref() == Some(command_id) {
+        return false;
+    }
+    let failure = CallFailure {
+        code: CallFailureCode::InvalidArgument as i32,
+        message: "command ID differs from signed operation".to_string(),
+        error: None,
+    };
+    send.write_chunk(Bytes::from(encode_failure_response(&failure).unwrap()))
+        .await
+        .unwrap();
+    true
+}
+
 fn remember_signed_operation(
     operations: &Arc<Mutex<HashMap<String, Vec<v2::SignedRecord>>>>,
     discussion_id: &str,
@@ -1992,6 +2024,9 @@ async fn serve_open_discussion(
         .ok()
         .and_then(|frame| v2::OpenDiscussionRequest::decode(frame.body).ok())
         .unwrap_or_default();
+    if reject_foreign_command_id(send, &body.client_operation_id, &body.signed_operation).await {
+        return;
+    }
     if let Some(discussion) = discussion_from_open(&body) {
         remember_signed_operation(&operations, &discussion.id, body.signed_operation.clone());
         live.lock()
@@ -2014,6 +2049,9 @@ async fn serve_append_turn(
         .ok()
         .and_then(|frame| v2::AppendDiscussionRequest::decode(frame.body).ok())
         .unwrap_or_default();
+    if reject_foreign_command_id(send, &body.client_operation_id, &body.signed_operation).await {
+        return;
+    }
     if let Some(id) = body
         .discussion
         .as_ref()
@@ -2047,6 +2085,9 @@ async fn serve_resolve_discussion(
         .ok()
         .and_then(|frame| v2::ResolveDiscussionRequest::decode(frame.body).ok())
         .unwrap_or_default();
+    if reject_foreign_command_id(send, &body.client_operation_id, &body.signed_operation).await {
+        return;
+    }
     if let Some(id) = body
         .discussion
         .as_ref()

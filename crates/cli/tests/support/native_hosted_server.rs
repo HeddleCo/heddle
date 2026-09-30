@@ -36,6 +36,16 @@ pub struct PublicationCapture {
     pub evidence: Vec<v2::RecordEvidenceRequest>,
     pub contexts: Vec<v2::PutContextRequest>,
     pub discussions: Vec<v2::OpenDiscussionRequest>,
+    pub appends: Vec<v2::AppendDiscussionRequest>,
+    pub resolutions: Vec<v2::ResolveDiscussionRequest>,
+    pub discussion_operations: Vec<v2::SignedRecord>,
+    /// Every discussion command ID the server admitted, replays included.
+    pub delivered_command_ids: Vec<String>,
+    /// Inject a publication failure to verify push's partial-result contract.
+    pub reject_discussions: bool,
+    /// Apply the next discussion command, then lose its receipt, so the
+    /// client must redeliver an operation the server already holds.
+    pub lose_next_discussion_receipt: bool,
 }
 
 #[derive(Clone)]
@@ -241,6 +251,8 @@ async fn serve_call(
                         "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration".into(),
                         "/heddle.api.v1alpha2.CollaborationService/OpenDiscussion".into(),
                         "/heddle.api.v1alpha2.CollaborationService/PutContext".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/AppendTurn".into(),
+                        "/heddle.api.v1alpha2.CollaborationService/ResolveDiscussion".into(),
                     ],
                     default_read_budget: Some(v2::ReadBudget {
                         max_items: 64,
@@ -447,40 +459,47 @@ async fn serve_call(
                         .body,
                 )
                 .expect("discussion request");
-                let operation = thread_api::collaboration::verify(
+                admit_discussion(
+                    &mut send,
+                    &fixture,
+                    &body.client_operation_id,
                     body.signed_operation.as_ref().expect("signed discussion"),
+                    server_key,
+                    |capture| capture.discussions.push(body.clone()),
                 )
-                .expect("verify discussion");
-                let objects::object::thread_replication::ThreadOperationBody::Discussion(bytes) =
-                    operation.body
-                else {
-                    panic!("discussion original")
-                };
-                let envelope = objects::object::CollaborationOperationEnvelope::decode(&bytes)
-                    .expect("original discussion command");
-                fixture
-                    .captured
-                    .lock()
-                    .expect("capture discussion")
-                    .discussions
-                    .push(body.clone());
-                // Match weft's command admission. #1900 remains visible here;
-                // source success must not conceal a mismatched signed command.
-                assert_ne!(
-                    body.client_operation_id,
-                    envelope.operation.idempotency_key.as_str(),
-                    "remove the #1900 expectation when that separate bug is fixed"
-                );
-                let failure =
-                    api::framing::encode_failure_response(&api::heddle::api::common::CallFailure {
-                        code: api::heddle::api::common::CallFailureCode::InvalidArgument as i32,
-                        message: "command ID differs from signed operation".into(),
-                        ..Default::default()
-                    })
-                    .expect("command failure");
-                send.write_all(&failure)
-                    .await
-                    .expect("discussion rejection");
+                .await;
+            }
+            "/heddle.api.v1alpha2.CollaborationService/AppendTurn" => {
+                read_request_body(&mut recv, &mut request).await;
+                let body = v2::AppendDiscussionRequest::decode(
+                    decode_request_frame(&request).expect("append frame").body,
+                )
+                .expect("append request");
+                admit_discussion(
+                    &mut send,
+                    &fixture,
+                    &body.client_operation_id,
+                    body.signed_operation.as_ref().expect("signed append"),
+                    server_key,
+                    |capture| capture.appends.push(body.clone()),
+                )
+                .await;
+            }
+            "/heddle.api.v1alpha2.CollaborationService/ResolveDiscussion" => {
+                read_request_body(&mut recv, &mut request).await;
+                let body = v2::ResolveDiscussionRequest::decode(
+                    decode_request_frame(&request).expect("resolve frame").body,
+                )
+                .expect("resolve request");
+                admit_discussion(
+                    &mut send,
+                    &fixture,
+                    &body.client_operation_id,
+                    body.signed_operation.as_ref().expect("signed resolve"),
+                    server_key,
+                    |capture| capture.resolutions.push(body.clone()),
+                )
+                .await;
             }
             "/heddle.api.v1alpha2.CollaborationService/PutContext" => {
                 read_request_body(&mut recv, &mut request).await;
@@ -621,20 +640,41 @@ async fn serve_call(
                 }
             }
             "/heddle.api.v1alpha2.CollaborationService/ObserveCollaboration" => {
-                for (index, mut frame) in snapshot_frames(server_key)
-                    .into_iter()
-                    .filter(|frame| !matches!(frame.body, Some(v2::stream_frame::Body::Data(_))))
-                    .enumerate()
-                {
-                    frame.sequence = (index + 1) as u64;
-                    write_message(
-                        &mut send,
-                        &v2::CollaborationEvent {
-                            frame: Some(frame),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
+                read_request_body(&mut recv, &mut request).await;
+                let body = v2::ObserveCollaborationRequest::decode(
+                    decode_request_frame(&request)
+                        .expect("observe collaboration frame")
+                        .body,
+                )
+                .expect("observe collaboration request");
+                let payloads = collaboration_payloads(&fixture, &body);
+                let mut sequence = 1;
+                for mut frame in snapshot_frames(server_key) {
+                    if matches!(frame.body, Some(v2::stream_frame::Body::Data(_))) {
+                        for payload in &payloads {
+                            frame.sequence = sequence;
+                            sequence += 1;
+                            write_message(
+                                &mut send,
+                                &v2::CollaborationEvent {
+                                    frame: Some(frame.clone()),
+                                    payload: Some(payload.clone()),
+                                },
+                            )
+                            .await;
+                        }
+                    } else {
+                        frame.sequence = sequence;
+                        sequence += 1;
+                        write_message(
+                            &mut send,
+                            &v2::CollaborationEvent {
+                                frame: Some(frame),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    }
                 }
             }
             other => panic!("unexpected hosted observation: {other}"),
@@ -655,6 +695,230 @@ async fn serve_call(
         }
     }
     send.finish().expect("finish hosted response");
+}
+
+/// Verify exactly the command identity authenticated by the native original,
+/// before recording any collaboration mutation. Replays retain one original.
+async fn admit_discussion(
+    send: &mut iroh::endpoint::SendStream,
+    fixture: &Fixture,
+    command_id: &str,
+    signed: &v2::SignedRecord,
+    server_key: Vec<u8>,
+    capture_request: impl FnOnce(&mut PublicationCapture),
+) {
+    let operation = thread_api::collaboration::verify(signed).expect("verify discussion");
+    let objects::object::thread_replication::ThreadOperationBody::Discussion(bytes) =
+        operation.body
+    else {
+        panic!("discussion original")
+    };
+    let envelope = objects::object::CollaborationOperationEnvelope::decode(&bytes)
+        .expect("original discussion command");
+    use api::heddle::api::common::CallFailureCode;
+    // Weft's order: the command ID must be the signed key before anything is
+    // recorded; then an identical redelivery replays and a different command
+    // under the same ID conflicts.
+    let failure = {
+        let mut capture = fixture.captured.lock().expect("discussion admission");
+        if command_id != envelope.operation.idempotency_key.as_str() {
+            Some((
+                CallFailureCode::InvalidArgument,
+                "command ID differs from signed operation",
+            ))
+        } else if capture.reject_discussions {
+            Some((
+                CallFailureCode::InvalidArgument,
+                "injected discussion rejection",
+            ))
+        } else if let Some(previous) = capture.discussion_operations.iter().find(|previous| {
+            let original = decode_discussion(previous);
+            original.operation.idempotency_key == envelope.operation.idempotency_key
+        }) {
+            if previous == signed {
+                capture.delivered_command_ids.push(command_id.into());
+                None
+            } else {
+                Some((
+                    CallFailureCode::FailedPrecondition,
+                    "operation ID names another command",
+                ))
+            }
+        } else {
+            capture_request(&mut capture);
+            capture.discussion_operations.push(signed.clone());
+            capture.delivered_command_ids.push(command_id.into());
+            if std::mem::take(&mut capture.lose_next_discussion_receipt) {
+                Some((CallFailureCode::Unavailable, "receipt lost after apply"))
+            } else {
+                None
+            }
+        }
+    };
+    if let Some((code, message)) = failure {
+        send.write_all(
+            &api::framing::encode_failure_response(&api::heddle::api::common::CallFailure {
+                code: code as i32,
+                message: message.into(),
+                ..Default::default()
+            })
+            .expect("command failure"),
+        )
+        .await
+        .expect("discussion rejection");
+        return;
+    }
+    write_unary(
+        send,
+        &v2::MutationResponse {
+            receipt: Some(v2::MutationReceipt {
+                client_operation_id: command_id.into(),
+                endpoint: Some(v2::EndpointRef {
+                    kind: v2::EndpointKind::Weft as i32,
+                    public_key: server_key,
+                }),
+                outcome: Some(v2::mutation_receipt::Outcome::Applied(
+                    v2::Applied::default(),
+                )),
+                ..Default::default()
+            }),
+        },
+    )
+    .await;
+}
+
+fn decode_discussion(signed: &v2::SignedRecord) -> objects::object::DecodedCollaborationOperation {
+    let operation = thread_api::collaboration::verify(signed).expect("verify original");
+    let objects::object::thread_replication::ThreadOperationBody::Discussion(bytes) =
+        operation.body
+    else {
+        panic!("discussion original")
+    };
+    objects::object::CollaborationOperationEnvelope::decode(&bytes).expect("decode original")
+}
+
+fn collaboration_payloads(
+    fixture: &Fixture,
+    request: &v2::ObserveCollaborationRequest,
+) -> Vec<v2::collaboration_event::Payload> {
+    use objects::object::{
+        CollaborationOperationBodyV1 as Body, materialize_repository_collaboration,
+    };
+    use v2::collaboration_event::Payload;
+    let capture = fixture.captured.lock().expect("collaboration snapshot");
+    let originals: Vec<_> = capture
+        .discussion_operations
+        .iter()
+        .map(decode_discussion)
+        .collect();
+    let materialized = materialize_repository_collaboration(originals.clone())
+        .expect("materialize hosted discussions");
+    let mut payloads = Vec::new();
+    for (id, discussion) in materialized.discussions {
+        if !request.discussions.is_empty()
+            && !request.discussions.iter().any(|r| r.id == id.to_string())
+        {
+            continue;
+        }
+        if request.annotations.is_some() || !request.contexts.is_empty() {
+            continue;
+        }
+        let scope = originals
+            .iter()
+            .find(|o| o.operation.discussion_id == id)
+            .expect("discussion original")
+            .operation
+            .metadata
+            .as_ref()
+            .expect("discussion metadata")
+            .scope
+            .clone();
+        let reference = v2::RecordRef {
+            spool: Some(v2::SpoolRef {
+                id: fixture.spool.to_string(),
+            }),
+            id: id.to_string(),
+        };
+        let operations: Vec<_> = capture
+            .discussion_operations
+            .iter()
+            .zip(&originals)
+            .filter(|(_, o)| o.operation.discussion_id == id)
+            .collect();
+        let heads: Vec<_> = operations
+            .iter()
+            .filter(|(_, o)| discussion.heads.contains(&o.operation_id))
+            .map(|(s, _)| {
+                thread_api::collaboration::verify(s)
+                    .expect("head")
+                    .id()
+                    .expect("head id")
+                    .as_bytes()
+                    .to_vec()
+            })
+            .collect();
+        let (audience, label) =
+            thread_api::collaboration::audience(&discussion.visibility).expect("audience");
+        payloads.push(Payload::Discussion(v2::DiscussionRecord {
+            r#ref: Some(reference.clone()),
+            version: heads.concat(),
+            anchor: Some(
+                thread_api::collaboration::anchor_ref(&discussion.anchor, &scope).expect("anchor"),
+            ),
+            title: discussion.title,
+            blocking: discussion.blocking,
+            turn_count: discussion.turns.len() as u64,
+            status: if discussion.resolution.is_some() {
+                v2::discussion_record::Status::Resolved as i32
+            } else {
+                v2::discussion_record::Status::Open as i32
+            },
+            causal_heads: heads,
+            audience: audience as i32,
+            audience_label: label,
+            ..Default::default()
+        }));
+        for (signed, decoded) in &operations {
+            let record = &decoded.operation;
+            if let Body::Open { turn, .. } | Body::AppendTurn { turn } = &record.body {
+                let outer = thread_api::collaboration::verify(signed).expect("turn");
+                payloads.push(Payload::Turn(v2::DiscussionTurn {
+                    r#ref: Some(v2::RecordRef {
+                        id: decoded.operation_id.to_string_full(),
+                        spool: reference.spool.clone(),
+                    }),
+                    discussion: Some(reference.clone()),
+                    body: turn.body.clone(),
+                    principal_id: record
+                        .metadata
+                        .as_ref()
+                        .expect("turn metadata")
+                        .actor
+                        .principal_id
+                        .to_string(),
+                    created_at: Some(prost_types::Timestamp {
+                        seconds: record.occurred_at_ms.div_euclid(1000),
+                        nanos: (record.occurred_at_ms.rem_euclid(1000) * 1_000_000) as i32,
+                    }),
+                    causal_id: outer.id().expect("turn id").as_bytes().to_vec(),
+                    ..Default::default()
+                }));
+            }
+            if request.include_operations {
+                payloads.push(Payload::Operation((*signed).clone()));
+            }
+        }
+    }
+    if request.discussions.is_empty() {
+        for context in &capture.contexts {
+            if request.include_operations {
+                payloads.push(Payload::Operation(
+                    context.signed_operation.clone().expect("context original"),
+                ));
+            }
+        }
+    }
+    payloads
 }
 
 fn snapshot_frames(server_key: Vec<u8>) -> Vec<v2::StreamFrame> {
@@ -932,6 +1196,14 @@ async fn serve_publication(
                     accepted.evidence = std::mem::take(&mut capture.evidence);
                     accepted.contexts = std::mem::take(&mut capture.contexts);
                     accepted.discussions = std::mem::take(&mut capture.discussions);
+                    accepted.appends = std::mem::take(&mut capture.appends);
+                    accepted.resolutions = std::mem::take(&mut capture.resolutions);
+                    accepted.discussion_operations =
+                        std::mem::take(&mut capture.discussion_operations);
+                    accepted.delivered_command_ids =
+                        std::mem::take(&mut capture.delivered_command_ids);
+                    accepted.reject_discussions = capture.reject_discussions;
+                    accepted.lose_next_discussion_receipt = capture.lose_next_discussion_receipt;
                     *capture = accepted;
                 }
                 write_message(
