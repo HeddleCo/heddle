@@ -4,7 +4,12 @@ WebAssembly binding for the canonical Rust owner-authorization verifier in
 `heddleco-capability-verifier`. Tapestry and other browser consumers execute
 the same verifier implementation as native Heddle and Weft callers.
 
-Build from the repository root with `npm run build`. The package exports the
+Its version follows the Heddle workspace version. Build and prepack copy the
+resolved Cargo version from wasm-pack into this package manifest. If prepack
+updates a stale version, it stops packaging so npm cannot use cached metadata;
+rerun the pack command with the synchronized manifest.
+
+Build from `crates/capability-verifier` with `npm run build`. The package exports the
 standard `wasm-bindgen` initializer plus:
 
 - `verifierVersion()`;
@@ -29,4 +34,4 @@ boolean. The caller verifies original credential provenance and the uploader's
 transport proof independently.
 
 The publish root is this `npm/` directory. `npm run pack:binding` from the
-repository root builds it and shows the exact npm tarball payload.
+crate directory builds it and shows the exact npm tarball payload.
