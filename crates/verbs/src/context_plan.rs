@@ -231,6 +231,7 @@ mod tests {
             0,
             None,
             None,
+            objects::object::VisibilityTier::Public,
         );
         annotation.status = status;
         annotation

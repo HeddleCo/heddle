@@ -99,6 +99,8 @@ pub enum Commands {
 
     /// Show what needs attention and the next safe Heddle action.
     #[command(after_help = "\
+Clean describes the worktree and local checks. Push checks hosted identity and write authority.
+
 Examples:
   heddle status               # current thread, dirty paths, recommended next step
   heddle status --short       # one-line summary for shell prompts

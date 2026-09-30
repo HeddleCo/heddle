@@ -30,6 +30,8 @@ mod native_provider;
 mod native_sync;
 #[cfg(test)]
 mod native_transport_tests;
+#[cfg(all(test, unix))]
+mod netd_trust_tests;
 pub(crate) mod operation_id;
 mod provider_transport;
 mod resolver;
@@ -228,10 +230,11 @@ impl HostedClient {
             .get_or_try_init(|| async {
                 // Session connect seeds this from weft_client::HostedClient
                 // (Remote::discover). Tests that inject a raw Iroh connection
-                // still discover here.
+                // still discover here. Netd routes prove Weft's authenticated
+                // key from Ensure; their Iroh peer is only the local adapter.
                 let remote = thread_api::Remote::discover(
                     transport()?,
-                    *self.connection.connection.remote_id().as_bytes(),
+                    self.connection.discover_endpoint_key(),
                     api::heddle::api::v1alpha2::EndpointKind::Weft,
                 )
                 .await?;
@@ -288,10 +291,13 @@ impl HostedClient {
     ) -> Result<Self> {
         #[cfg(unix)]
         if let Some(server) = config.server_key.as_deref() {
-            match Self::connect_via_netd(server, config).await {
+            // The caller already verified `descriptor`; netd is only used
+            // when it holds a session to that exact Weft identity. Otherwise
+            // netd is bypassed and the verified descriptor is dialed directly.
+            match Self::connect_via_netd(server, config, Some(descriptor)).await {
                 Ok(client) => return Ok(client),
                 Err(error) => {
-                    tracing::debug!(%error, "netd hosted bridge unavailable; connecting locally");
+                    tracing::debug!(%error, "netd hosted bridge unusable; connecting locally");
                 }
             }
         }
@@ -301,10 +307,14 @@ impl HostedClient {
     /// Connect through netd's warm Weft session, then run v2 discovery over
     /// the local Iroh-to-UDS adapter before returning the client.
     #[cfg(unix)]
-    pub(crate) async fn connect_via_netd(server: &str, config: &ClientConfig) -> Result<Self> {
+    pub(crate) async fn connect_via_netd(
+        server: &str,
+        config: &ClientConfig,
+        descriptor: Option<&VerifiedEndpointDescriptor>,
+    ) -> Result<Self> {
         let context = CallContextFactory::from_client_config(config)?;
         let client = Self {
-            connection: HostedConnection::connect_via_netd(server, config).await?,
+            connection: HostedConnection::connect_via_netd(server, config, descriptor).await?,
             context,
             on_human_signature: None,
             warnings: Arc::new(NoopWarnings),

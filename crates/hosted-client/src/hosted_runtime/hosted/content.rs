@@ -135,7 +135,9 @@ fn native_annotation(
         revisions: vec![native_revision(operation_id, context)?],
         supersedes_annotation_id: context.supersedes.map(|id| id.to_string()),
         supersedes_rewrite_pct: None,
-        visibility: objects::object::VisibilityTier::default(),
+        // This contract cannot carry an audience. The context publisher refuses
+        // non-public source annotations before constructing signed operations.
+        visibility: objects::object::VisibilityTier::Public,
         resolved_from_discussion: None,
         anchor_status: objects::object::AnnotationAnchorStatus::default(),
         divergent_revision_ids: Vec::new(),

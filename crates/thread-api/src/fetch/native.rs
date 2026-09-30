@@ -85,6 +85,11 @@ impl StagedSource {
                 trust.authorize(&operation).map_err(preparation)?;
             }
         }
+        // A verified hosted download belongs to this Spool, just as an
+        // owned-device download does. Never let a later local write mint one.
+        repository
+            .install_native_spool_id(spool)
+            .map_err(preparation)?;
         repository
             .verify_and_pin_owner_observation(
                 genesis,

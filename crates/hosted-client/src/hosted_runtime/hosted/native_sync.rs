@@ -370,6 +370,15 @@ impl HostedClient {
             .find(|overview| overview.name == name)
             && let Some(reference) = overview.r#ref
         {
+            let hosted_spool = reference
+                .spool
+                .as_ref()
+                .ok_or_else(|| ProtocolError::InvalidState("spool required".into()))?;
+            if native.genesis().map_err(replica_err)?.spool != hosted_spool.id {
+                return Err(ProtocolError::InvalidState(
+                    "local Thread spool differs from hosted spool".into(),
+                ));
+            }
             let hosted_id = overview_thread_id_from_ref(&reference)?;
             if hosted_id == native.thread_id() {
                 let creator_authority = native_start_creator_authority(&native, || async {
@@ -817,6 +826,12 @@ impl HostedClient {
                     .await?,
             );
         }
+        // Fetch retained the original signed genesis and admitted source.
+        // Bind the advertised name to that replica before any local authoring.
+        ThreadReplica::open(repo.heddle_dir(), overview_thread_id_from_ref(&reference)?)
+            .map_err(replica_err)?
+            .bind_local_name(remote_thread)
+            .map_err(replica_err)?;
         if ambiguous {
             return Err(multiple_heads_error(&overview));
         }

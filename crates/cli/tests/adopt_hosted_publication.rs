@@ -31,14 +31,39 @@ fn commit_file(path: &Path, body: &str, message: &str) {
     git(path, &["commit", "-m", message]);
 }
 
+/// Installs `home` as this process's `HEDDLE_HOME` until dropped.
+///
+/// Publication and clone run in-process, so they resolve that variable from
+/// this process rather than from a child command. The previous value is
+/// restored so a later test in the same process keeps the runner's home.
+struct ProcessHeddleHome {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl ProcessHeddleHome {
+    fn install(home: &Path) -> Self {
+        let previous = std::env::var_os("HEDDLE_HOME");
+        unsafe { std::env::set_var("HEDDLE_HOME", home) };
+        Self { previous }
+    }
+}
+
+impl Drop for ProcessHeddleHome {
+    fn drop(&mut self) {
+        match &self.previous {
+            Some(value) => unsafe { std::env::set_var("HEDDLE_HOME", value) },
+            None => unsafe { std::env::remove_var("HEDDLE_HOME") },
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
     let temp = TempDir::new().expect("test directory");
     let source_home = temp.path().join("source-home");
     std::fs::create_dir(&source_home).expect("source HEDDLE_HOME");
-    let clone_home = std::path::PathBuf::from(
-        std::env::var_os("HEDDLE_HOME").expect("test command must set a fresh HEDDLE_HOME"),
-    );
+    let clone_home = TempDir::new().expect("clone HEDDLE_HOME");
+    let _clone_home_env = ProcessHeddleHome::install(clone_home.path());
     let work = temp.path().join("work");
     std::fs::create_dir(&work).expect("Git worktree");
     git(&work, &["init", "-b", "main"]);
@@ -101,9 +126,9 @@ async fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
         assert!(!publication.index_data.is_empty());
     }
 
-    // The outer test command supplies the clone process's fresh HEDDLE_HOME;
-    // adoption above explicitly used the disjoint source home.
-    assert_ne!(source_home, clone_home);
+    // The in-process clone uses the fresh HEDDLE_HOME created above.
+    // Adoption passed the disjoint source home to its own command.
+    assert_ne!(source_home, clone_home.path());
     let clone = temp.path().join("clone");
     let (pulled, cloned) = hosted
         .clone_pull_with_depth_and_materialization(
@@ -111,12 +136,7 @@ async fn adopted_history_round_trips_through_hosted_publication_and_fetch() {
             Some("main"),
             None,
             hosted_client::hosted_runtime::hosted::PullMaterialization::Full,
-            |_| {
-                let repo = repo::Repository::init(&clone).map_err(wire::ProtocolError::from)?;
-                repo.install_native_spool_id(spool)
-                    .map_err(|error| wire::ProtocolError::InvalidState(error.to_string()))?;
-                Ok(repo)
-            },
+            |_| repo::Repository::init(&clone).map_err(wire::ProtocolError::from),
         )
         .await
         .expect("clone published adopted source");

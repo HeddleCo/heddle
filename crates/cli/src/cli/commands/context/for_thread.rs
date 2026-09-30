@@ -38,7 +38,7 @@ const MAX_ANNOTATIONS: usize = 64;
 const MAX_DISCUSSIONS: usize = 32;
 const MAX_TURNS_PER_DISCUSSION: usize = 8;
 
-fn visibility_label(tier: &VisibilityTier) -> String {
+pub(super) fn visibility_label(tier: &VisibilityTier) -> String {
     match tier {
         VisibilityTier::Public | VisibilityTier::Internal => tier.as_str().to_owned(),
         VisibilityTier::TeamScoped { team_id } => format!("team:{team_id}"),
@@ -368,6 +368,12 @@ fn print_briefing(briefing: &ThreadBriefing) {
             annotation.scope,
             annotation.status
         );
+        if annotation.visibility != "public" {
+            println!(
+                "    visibility: {}",
+                style::human_text(&annotation.visibility)
+            );
+        }
         for revision in &annotation.revisions {
             println!(
                 "    {}: {}",

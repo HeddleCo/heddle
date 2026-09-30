@@ -28,6 +28,9 @@ pub enum ImportSourceRefError {
     NoBranches,
     #[error("source ref {ref_name:?} is not a valid Thread name: {reason}")]
     InvalidBranch { ref_name: String, reason: String },
+    /// Discovery stopped reading an advertisement too large to admit.
+    #[error(transparent)]
+    AdvertisementOverBudget(heddle_git_projection::source_ref_budget::RefAdvertisementOverBudget),
     #[error("discover source refs: {0}")]
     Discovery(String),
 }
@@ -80,7 +83,12 @@ impl ImportSourceRefs {
         })
         .await
         .map_err(|error| ImportSourceRefError::Discovery(error.to_string()))?
-        .map_err(|error| ImportSourceRefError::Discovery(error.to_string()))?;
+        .map_err(|error| match error {
+            heddle_git_projection::GitProjectionError::SourceAdvertisementOverBudget(over) => {
+                ImportSourceRefError::AdvertisementOverBudget(over)
+            }
+            error => ImportSourceRefError::Discovery(error.to_string()),
+        })?;
         Self::from_names(names)
     }
 }

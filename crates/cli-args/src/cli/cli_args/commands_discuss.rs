@@ -81,6 +81,9 @@ pub struct DiscussResolveArgs {
     /// For `into-annotation`: constraint, invariant, or rationale (defaults to rationale).
     #[arg(long, value_parser = ["constraint", "invariant", "rationale"])]
     pub kind: Option<String>,
+    /// For `into-annotation`: inherit discussion visibility, or explicitly narrow it.
+    #[arg(long, value_name = "VISIBILITY")]
+    pub visibility: Option<String>,
     /// For `into-annotation`: annotation tag (can be repeated).
     #[arg(long)]
     pub tag: Vec<String>,

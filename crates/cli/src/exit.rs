@@ -101,6 +101,7 @@ impl HeddleExitCode {
             "remote_not_configured"
             | "remote_not_found"
             | "hosted_spool_not_found"
+            | "no_hosted_upstream"
             | "repository_not_found"
             | "hosted_tls_trust"
             | "auth_login_invite_required" => Some(Self::Config),
@@ -127,6 +128,7 @@ impl HeddleExitCode {
             | "state_not_found"
             | "conflict_not_found"
             | "no_merge_in_progress"
+            | "merge_in_progress"
             | "operation_not_in_progress"
             | "json_unsupported"
             | "json_compact_unsupported"
@@ -540,6 +542,7 @@ mod tests {
             ("remote_not_configured", HeddleExitCode::Config),
             ("remote_not_found", HeddleExitCode::Config),
             ("hosted_spool_not_found", HeddleExitCode::Config),
+            ("no_hosted_upstream", HeddleExitCode::Config),
             ("repository_not_found", HeddleExitCode::Config),
             ("hosted_tls_trust", HeddleExitCode::Config),
             ("clone_invalid_remote_url", HeddleExitCode::DataErr),
@@ -550,6 +553,7 @@ mod tests {
             ("state_corrupted", HeddleExitCode::DataErr),
             ("state_not_found", HeddleExitCode::DataErr),
             ("no_merge_in_progress", HeddleExitCode::DataErr),
+            ("merge_in_progress", HeddleExitCode::DataErr),
             ("operation_not_in_progress", HeddleExitCode::DataErr),
             ("conflict_not_found", HeddleExitCode::DataErr),
             ("json_unsupported", HeddleExitCode::DataErr),

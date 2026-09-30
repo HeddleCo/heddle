@@ -24,6 +24,42 @@ pub struct RecoveryAdvice {
 }
 
 impl RecoveryAdvice {
+    pub fn merge_in_progress(next_action: &str) -> Self {
+        Self::safety_refusal(
+            "merge_in_progress",
+            "Finish the unresolved merge before running ready",
+            format!(
+                "Inspect conflicts with `heddle resolve --list`, edit the conflicted files and mark each path resolved with `heddle resolve <path>`, then run `{next_action}`."
+            ),
+            "a Heddle merge is still in progress",
+            "readiness could capture an unfinished merge or evaluate partially merged work",
+            "merge state, repository refs, and worktree files were left unchanged",
+            next_action,
+            vec![
+                next_action.to_string(),
+                "heddle resolve --list".to_string(),
+                "heddle abort".to_string(),
+            ],
+        )
+    }
+
+    pub fn no_hosted_upstream() -> Self {
+        Self::safety_refusal(
+            "no_hosted_upstream",
+            "Thread review requires a repository linked to a Heddle hosted upstream",
+            "Add a hosted remote with `heddle remote add <name> <url>` using the hosted Spool URL, select it with `heddle remote set-default <name>`, then publish with `heddle push` and retry review.",
+            "no hosted upstream is configured for this repository",
+            "Thread review needs published revisions on a hosted upstream",
+            "repository state, refs, remote configuration, and worktree files were left unchanged",
+            "heddle remote add <name> <url>",
+            vec![
+                "heddle remote add <name> <url>".to_string(),
+                "heddle remote set-default <name>".to_string(),
+                "heddle push".to_string(),
+            ],
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn safety_refusal(
         kind: &'static str,

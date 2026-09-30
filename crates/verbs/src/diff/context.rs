@@ -158,6 +158,7 @@ mod tests {
             1_700_000_000,
             None,
             Some(state.state_id),
+            objects::object::VisibilityTier::Public,
         )]);
         let root = repo
             .set_context_blob(None, &target, &blob)

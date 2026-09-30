@@ -20,6 +20,35 @@ pub(super) async fn resolve_and_verify_endpoint_descriptor(
     server: &str,
     config: &ClientConfig,
 ) -> Result<VerifiedEndpointDescriptor> {
+    resolve_endpoint(server, config, None).await
+}
+
+/// Whether `config` carries descriptor or TLS trust policy beyond the
+/// defaults netd bootstraps with.
+#[cfg(unix)]
+pub(super) fn configures_endpoint_trust(config: &ClientConfig) -> bool {
+    config.descriptor_key_id.is_some()
+        || config.descriptor_public_key.is_some()
+        || config.tls_ca_certificate_pem.is_some()
+        || config.tls_domain_name.is_some()
+}
+
+/// Netd may already hold any live endpoint in the root-attested set, including
+/// one outside the caller's preferred region. Verify that exact identity.
+#[cfg(unix)]
+pub(super) async fn resolve_and_verify_netd_endpoint(
+    server: &str,
+    config: &ClientConfig,
+    endpoint_id: iroh::EndpointId,
+) -> Result<VerifiedEndpointDescriptor> {
+    resolve_endpoint(server, config, Some(endpoint_id)).await
+}
+
+async fn resolve_endpoint(
+    server: &str,
+    config: &ClientConfig,
+    endpoint_id: Option<iroh::EndpointId>,
+) -> Result<VerifiedEndpointDescriptor> {
     let canonical_server = canonical_server_authority(server)
         .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?;
     match (
@@ -27,18 +56,21 @@ pub(super) async fn resolve_and_verify_endpoint_descriptor(
         config.descriptor_public_key.as_ref(),
     ) {
         (Some(_key_id), Some(public_key)) => {
-            verify_live_set_against_root(&canonical_server, public_key, config).await
+            verify_live_set_against_root(&canonical_server, public_key, config, endpoint_id).await
         }
         (Some(_), None) | (None, Some(_)) => Err(HostedError::DescriptorTrust(
             "ambiguous security posture: both descriptor trust fields are required".to_string(),
         )),
-        (None, None) => resolve_automatic_descriptor_trust(&canonical_server, config).await,
+        (None, None) => {
+            resolve_automatic_descriptor_trust(&canonical_server, config, endpoint_id).await
+        }
     }
 }
 
 async fn resolve_automatic_descriptor_trust(
     canonical_server: &str,
     config: &ClientConfig,
+    endpoint_id: Option<iroh::EndpointId>,
 ) -> Result<VerifiedEndpointDescriptor> {
     if let Some(pin) = load_automatic_pin(canonical_server)
         .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?
@@ -48,7 +80,7 @@ async fn resolve_automatic_descriptor_trust(
             .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?;
         // The pin is the root. A served set cannot rotate it; unattested
         // entries fail closed without touching the store.
-        return verify_live_set_against_root(canonical_server, &root, config).await;
+        return verify_live_set_against_root(canonical_server, &root, config, endpoint_id).await;
     }
 
     let document =
@@ -69,7 +101,8 @@ async fn resolve_automatic_descriptor_trust(
     }
     let public_key = validate_descriptor_pair(&document.key_id, &document.public_key)
         .map_err(|error| HostedError::InvalidDescriptor(error.to_string()))?;
-    let verified = verify_live_set_against_root(canonical_server, &public_key, config).await?;
+    let verified =
+        verify_live_set_against_root(canonical_server, &public_key, config, endpoint_id).await?;
     let outcome = insert_verified_pin(canonical_server, &document.key_id, &public_key)
         .map_err(|error| HostedError::DescriptorTrust(error.to_string()))?;
     if outcome == PinInsertOutcome::Created {
@@ -87,11 +120,24 @@ async fn verify_live_set_against_root(
     canonical_server: &str,
     root_public_key: &[u8; 32],
     config: &ClientConfig,
+    endpoint_id: Option<iroh::EndpointId>,
 ) -> Result<VerifiedEndpointDescriptor> {
     let set = fetch_ephemeral_descriptor_set(&descriptor_url(canonical_server), config).await?;
     let now = now_unix_millis()?;
     let (trusted, rejects) = trusted_live_entries(&set, root_public_key, now);
     fail_if_none_trusted(&trusted, &rejects)?;
+    if let Some(endpoint_id) = endpoint_id {
+        let selected = trusted
+            .iter()
+            .find(|entry| &entry.ephemeral_public_key == endpoint_id.as_bytes())
+            .ok_or_else(|| {
+                HostedError::DescriptorTrust(
+                    "netd Weft identity is not in the caller's root-attested live endpoint set"
+                        .to_string(),
+                )
+            })?;
+        return VerifiedEndpointDescriptor::from_verified_endpoint(selected, now);
+    }
     let env_region = std::env::var("HEDDLE_PREFERRED_REGION")
         .ok()
         .filter(|value| !value.is_empty());
