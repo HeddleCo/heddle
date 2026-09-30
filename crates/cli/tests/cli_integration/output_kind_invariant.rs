@@ -283,6 +283,7 @@ fn output_kind_override(display: &str) -> Option<&'static str> {
         }
         "start" => Some("thread_start"),
         "thread checkout" => Some("thread_promote"),
+        // Fidelity reports are additive; URL and status retain the operation discriminator.
         "import url" | "import status" => Some("import_operation"),
         // The garbage-collection wrapper emits its inner tool's kind.
         "maintenance gc" => Some("gc"),

@@ -3,31 +3,36 @@
 
 use anyhow::{Context, Result, anyhow};
 use api::heddle::api::v1alpha2 as contract;
-use heddle_cli_contract::cli::commands::wire::remote::{ImportOperationOutput, ImportRetryOutput};
+use heddle_cli_contract::cli::commands::wire::remote::{
+    ImportOperationOutput, ImportReportOutput, ImportRetryOutput, SkippedImportRefOutput,
+};
 use hosted_client::hosted_runtime::{
     auth::resolve_server,
-    hosted::{HostedAuthMode, HostedClient, HostedSession},
+    hosted::{HostedAuthMode, HostedClient, HostedSession, ImportSourceRefs},
 };
-use objects::{Progress, object::ThreadName};
+use objects::Progress;
 
 use super::provision_hosted_source_destination;
 use crate::{
     cli::{
-        Cli, CliContext, ImportOperationArgs, ImportUrlArgs, output_is_compact,
-        progress_render::{TerminalSink, finish_line, format_transfer_bytes},
+        Cli, CliContext, ImportOperationArgs, ImportUrlArgs,
+        commands::{
+            compact::{CompactOutput, CompactProjection},
+            next_action::{NextActionValidationContext, write_command_json},
+        },
+        output_is_compact,
+        progress_render::{TerminalSink, clear_line, format_transfer_bytes},
         should_output_json, style,
     },
     config::UserConfig,
     remote::RemoteTarget,
 };
 
-use crate::cli::commands::{
-    compact::{CompactOutput, CompactProjection},
-    next_action::{NextActionValidationContext, write_command_json},
-};
-
 pub async fn cmd_import_url(cli: &Cli, args: ImportUrlArgs) -> Result<()> {
     let (server, destination) = import_destination(&args.to, args.server.as_deref())?;
+    let refs = ImportSourceRefs::discover(&args.url)
+        .await
+        .context("validate hosted import source refs")?;
     let config = UserConfig::load_default()?;
     let session = HostedSession::build(
         &config,
@@ -35,7 +40,7 @@ pub async fn cmd_import_url(cli: &Cli, args: ImportUrlArgs) -> Result<()> {
         HostedAuthMode::CredentialFallback,
     )?;
     let mut client = session.connect(&server).await?;
-    let result = import_connected(cli, &mut client, &server, &destination, &args).await;
+    let result = import_connected(cli, &mut client, &server, &destination, &args, &refs).await;
     client.close().await;
     result
 }
@@ -46,112 +51,72 @@ async fn import_connected(
     server: &str,
     destination: &str,
     args: &ImportUrlArgs,
+    refs: &ImportSourceRefs,
 ) -> Result<()> {
     let (destination, created) = provision_hosted_source_destination(client, destination)
         .await
         .context("provision hosted import destination")?;
-    let thread_name = args.thread.as_deref().unwrap_or("main").trim();
-    if thread_name.is_empty() {
-        return Err(anyhow!(
-            "hosted source import thread name must not be empty"
-        ));
-    }
-    let thread_name =
-        ThreadName::try_new(thread_name).context("validate hosted source import thread name")?;
     let started = client
-        .import_source(
-            &destination,
-            &args.url,
-            thread_name.as_str(),
-            cli.operation_id_wire(),
-        )
+        .import_source(&destination, &args.url, refs, cli.operation_id_wire())
         .await
         .context("submit hosted source import")?;
-    let thread = thread_name.into_string();
     let json = should_output_json(cli, None);
-    let progress = {
-        if !json {
-            println!(
-                "{} {} hosted spool {}",
-                style::ok_marker(),
-                if created { "created" } else { "using" },
-                style::bold(&destination)
-            );
-        }
+    let progress = if json {
+        Progress::null()
+    } else {
+        println!(
+            "{} {} hosted spool {}",
+            style::ok_marker(),
+            if created { "created" } else { "using" },
+            style::bold(&destination)
+        );
         Progress::with_sink(Box::new(TerminalSink::new()))
     };
 
     let terminal = client
         .observe_import_source(&started, |record| {
-            progress.set_phase(format_progress(record));
+            if !is_terminal(record.state) {
+                progress.set_phase(format_progress(record));
+            }
             Ok(())
         })
         .await
         .context("observe hosted source import")?;
 
-    match contract::operation_record::State::try_from(terminal.state) {
-        Ok(contract::operation_record::State::Completed) => {
-            finish_line(&progress, "[done] imported Git history on weft");
-            if json {
-                let output =
-                    operation_output(&terminal, Some(&args.url), &destination, Some(&thread));
-                write_command_json(
-                    &output,
-                    output_is_compact(cli),
-                    NextActionValidationContext::without_repo(&["import", "url"]),
-                )?;
-            } else {
-                println!(
-                    "{} imported {} into {} on {}",
-                    style::ok_marker(),
-                    style::bold(&args.url),
-                    style::bold(&destination),
-                    style::dim(server)
-                );
-                println!("{}", style::field("thread", &thread));
-                super::super::action_line::print_next(&format!(
-                    "heddle clone https://{server}/{destination} <dir>"
-                ));
-            }
-            Ok(())
+    let output = operation_output(&terminal, Some(&args.url), &destination);
+    clear_line(&progress);
+    if json {
+        write_command_json(
+            &output,
+            output_is_compact(cli),
+            NextActionValidationContext::without_repo(&["import", "url"]),
+        )?;
+    } else {
+        println!("{}", output.summary);
+        if output.success {
+            super::super::action_line::print_next(&format!(
+                "heddle clone https://{server}/{destination} <dir>"
+            ));
         }
-        Ok(contract::operation_record::State::Failed) => {
-            let failure = format_failure(terminal.failure.as_ref());
-            let output = operation_output(&terminal, Some(&args.url), &destination, Some(&thread));
-            if json {
-                write_command_json(
-                    &output,
-                    output_is_compact(cli),
-                    NextActionValidationContext::without_repo(&["import", "url"]),
-                )?;
-            } else {
-                eprintln!(
-                    "{} hosted source import failed: {failure}",
-                    style::warn_marker()
-                );
-                super::super::action_line::print_next(&format!(
-                    "heddle import retry {} --to {}",
-                    output.operation_id, destination
-                ));
-            }
-            Err(crate::exit::OutcomeExit::new(crate::exit::HeddleExitCode::Protocol).into())
-        }
-        Ok(contract::operation_record::State::Canceled) => {
-            let output = operation_output(&terminal, Some(&args.url), &destination, Some(&thread));
-            if json {
-                write_command_json(
-                    &output,
-                    output_is_compact(cli),
-                    NextActionValidationContext::without_repo(&["import", "url"]),
-                )?;
-            } else {
-                eprintln!("{} hosted source import was canceled", style::warn_marker());
-            }
-            Err(crate::exit::OutcomeExit::new(crate::exit::HeddleExitCode::Protocol).into())
-        }
-        _ => Err(anyhow!(
-            "hosted source import ended in a nonterminal operation state"
-        )),
+    }
+    import_outcome(&terminal)
+}
+
+fn import_outcome(record: &contract::OperationRecord) -> Result<()> {
+    if operation_state(record.state) == "completed"
+        && matches!(
+            record.import_report.as_ref().and_then(|report| {
+                contract::import_report::Fidelity::try_from(report.fidelity).ok()
+            }),
+            Some(
+                contract::import_report::Fidelity::Faithful
+                    | contract::import_report::Fidelity::Partial
+            )
+        )
+    {
+        Ok(())
+    } else {
+        Err(crate::exit::OutcomeExit::new(crate::exit::HeddleExitCode::Protocol).into())
     }
 }
 
@@ -168,7 +133,7 @@ pub async fn cmd_import_status(cli: &Cli, args: ImportOperationArgs) -> Result<(
     let compact = output_is_compact(cli);
     let result = client
         .observe_import_operation(&destination, &args.operation, true, |record| {
-            let output = operation_output(record, None, &destination, None);
+            let output = operation_output(record, None, &destination);
             if json {
                 write_command_json(
                     &output,
@@ -186,7 +151,7 @@ pub async fn cmd_import_status(cli: &Cli, args: ImportOperationArgs) -> Result<(
         .await
         .context("observe hosted source import");
     client.close().await;
-    result.map(|_| ())
+    result.and_then(|record| import_outcome(&record))
 }
 
 pub async fn cmd_import_retry(cli: &Cli, args: ImportOperationArgs) -> Result<()> {
@@ -266,7 +231,6 @@ fn operation_output(
     record: &contract::OperationRecord,
     source: Option<&str>,
     destination: &str,
-    thread: Option<&str>,
 ) -> ImportOperationOutput {
     let state = operation_state(record.state);
     ImportOperationOutput {
@@ -278,7 +242,6 @@ fn operation_output(
         },
         source: source.map(str::to_string),
         destination: destination.to_string(),
-        thread: thread.map(str::to_string),
         operation_id: record
             .r#ref
             .as_ref()
@@ -290,6 +253,25 @@ fn operation_output(
         total_units: record.total_units,
         unit: record.unit.clone(),
         terminal: is_terminal(record.state),
+        success: import_outcome(record).is_ok(),
+        summary: format_progress(record),
+        import_report: record
+            .import_report
+            .as_ref()
+            .map(|report| ImportReportOutput {
+                fidelity: report_fidelity(report.fidelity),
+                commits: report.commits,
+                branches: report.branches,
+                tags: report.tags,
+                skipped_refs: report
+                    .skipped_refs
+                    .iter()
+                    .map(|reference| SkippedImportRefOutput {
+                        name: reference.name.clone(),
+                        reason: reference.reason.clone(),
+                    })
+                    .collect(),
+            }),
         results: record.results.iter().map(format_entity_ref).collect(),
         failure: record
             .failure
@@ -301,7 +283,27 @@ fn operation_output(
 impl CompactProjection for ImportOperationOutput {
     fn compact(&self) -> CompactOutput {
         let mut output = CompactOutput::new(self.output_kind);
-        output.status = Some(self.state.clone());
+        output.status = Some(if self.terminal && !self.success {
+            "failed".into()
+        } else if let Some(report) = self.import_report.as_ref() {
+            report.fidelity.into()
+        } else {
+            self.state.clone()
+        });
+        if self.terminal {
+            output.blockers = if self.success {
+                Vec::new()
+            } else {
+                vec![self.summary.clone()]
+            };
+            if let Some(report) = self.import_report.as_ref() {
+                output.blockers.extend(
+                    report.skipped_refs.iter().map(|reference| {
+                        format!("skipped {}: {}", reference.name, reference.reason)
+                    }),
+                );
+            }
+        }
         output.operation_id = Some(self.operation_id.clone());
         output
     }
@@ -340,6 +342,9 @@ fn is_terminal(value: i32) -> bool {
 
 fn format_progress(record: &contract::OperationRecord) -> String {
     let state = operation_state(record.state);
+    if is_terminal(record.state) {
+        return format_import_report(record);
+    }
     let unit = record.unit.trim();
     match record.total_units {
         Some(total) if total > 0 => {
@@ -364,6 +369,54 @@ fn format_progress(record: &contract::OperationRecord) -> String {
         }
         _ => format!("[{state}] importing Git history"),
     }
+}
+
+fn report_fidelity(value: i32) -> &'static str {
+    match contract::import_report::Fidelity::try_from(value) {
+        Ok(contract::import_report::Fidelity::Faithful) => "faithful",
+        Ok(contract::import_report::Fidelity::Partial) => "partial",
+        Ok(contract::import_report::Fidelity::Failed) => "failed",
+        _ => "unspecified",
+    }
+}
+
+fn format_import_report(record: &contract::OperationRecord) -> String {
+    let state = operation_state(record.state);
+    let Some(report) = record.import_report.as_ref() else {
+        let wording = if state == "failed" {
+            "Git import failed; no fidelity report"
+        } else if state == "canceled" {
+            "Git import canceled; no fidelity report"
+        } else {
+            "Git import has no fidelity report; success is unverified"
+        };
+        let mut text = format!("[{state}] {wording}");
+        if let Some(failure) = record.failure.as_ref() {
+            text.push_str(&format!("\n  {}", format_failure(Some(failure))));
+        }
+        return text;
+    };
+    let fidelity = report_fidelity(report.fidelity);
+    let wording = match (state, fidelity) {
+        ("completed", "faithful") => "imported Git history",
+        ("completed", "partial") => "partial Git import",
+        (_, "failed") | ("failed" | "canceled", _) => "Git import failed",
+        _ => "Git import fidelity is unverified",
+    };
+    let mut text = format!(
+        "[{state}] {wording} (fidelity: {fidelity}): {} commits, {} branches, {} tags",
+        report.commits, report.branches, report.tags
+    );
+    for reference in &report.skipped_refs {
+        text.push_str(&format!(
+            "\n  skipped {}: {}",
+            reference.name, reference.reason
+        ));
+    }
+    if let Some(failure) = record.failure.as_ref() {
+        text.push_str(&format!("\n  {}", format_failure(Some(failure))));
+    }
+    text
 }
 
 fn format_failure(failure: Option<&api::heddle::api::common::CallFailure>) -> String {
@@ -401,6 +454,101 @@ fn format_entity_ref(reference: &contract::EntityRef) -> String {
 mod tests {
     use super::*;
 
+    fn assert_terminal_report(
+        fidelity: contract::import_report::Fidelity,
+        wording: &str,
+        success: bool,
+    ) {
+        let record = contract::OperationRecord {
+            state: contract::operation_record::State::Completed as i32,
+            import_report: Some(contract::ImportReport {
+                fidelity: fidelity as i32,
+                commits: 5,
+                branches: 3,
+                tags: 2,
+                skipped_refs: if fidelity == contract::import_report::Fidelity::Partial {
+                    vec![
+                        contract::SkippedImportRef {
+                            name: "refs/tags/blob".into(),
+                            reason: "non-commit tag".into(),
+                        },
+                        contract::SkippedImportRef {
+                            name: "refs/pull/12/head".into(),
+                            reason: "provider ref".into(),
+                        },
+                    ]
+                } else {
+                    vec![]
+                },
+            }),
+            ..Default::default()
+        };
+        let output = operation_output(&record, None, "dest");
+        assert_eq!(output.success, success);
+        assert!(output.summary.contains(wording), "{}", output.summary);
+        assert!(output.summary.contains("5 commits, 3 branches, 2 tags"));
+        if fidelity != contract::import_report::Fidelity::Faithful {
+            assert!(!output.summary.contains("imported Git history"));
+        }
+        let json = serde_json::to_value(&output).expect("JSON output");
+        assert_eq!(json["output_kind"], "import_operation");
+        assert_eq!(json["success"], success);
+        assert_eq!(json["import_report"]["commits"], 5);
+        if fidelity == contract::import_report::Fidelity::Partial {
+            for reference in &record.import_report.as_ref().expect("report").skipped_refs {
+                assert!(output.summary.contains(&reference.name));
+                assert!(output.summary.contains(&reference.reason));
+            }
+            assert_eq!(
+                json["import_report"]["skipped_refs"]
+                    .as_array()
+                    .expect("skipped refs")
+                    .len(),
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn faithful_report_is_the_only_imported_git_history_claim() {
+        assert_terminal_report(
+            contract::import_report::Fidelity::Faithful,
+            "imported Git history",
+            true,
+        );
+    }
+
+    #[test]
+    fn partial_report_lists_every_skipped_ref_and_reason() {
+        assert_terminal_report(
+            contract::import_report::Fidelity::Partial,
+            "partial Git import",
+            true,
+        );
+    }
+
+    #[test]
+    fn failed_report_on_completed_operation_is_not_success() {
+        assert_terminal_report(
+            contract::import_report::Fidelity::Failed,
+            "Git import failed",
+            false,
+        );
+    }
+
+    #[test]
+    fn completed_operation_without_report_is_not_success() {
+        let record = contract::OperationRecord {
+            state: contract::operation_record::State::Completed as i32,
+            ..Default::default()
+        };
+        let output = operation_output(&record, None, "dest");
+        assert!(!output.success);
+        assert!(output.summary.contains("no fidelity report"));
+        assert!(!output.summary.contains("imported Git history"));
+        assert!(import_outcome(&record).is_err());
+    }
+
     #[test]
     fn running_progress_includes_live_units_and_percentage() {
         let record = contract::OperationRecord {
@@ -433,7 +581,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let output = operation_output(&record, Some("source"), "dest", Some("thread"));
+        let output = operation_output(&record, Some("source"), "dest");
         assert!(output.terminal);
         assert_eq!(output.event, "terminal");
         assert_eq!(output.operation_id, "durable-operation");

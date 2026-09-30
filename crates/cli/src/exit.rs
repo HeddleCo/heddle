@@ -223,6 +223,17 @@ impl HeddleExitCode {
             {
                 return Self::Config;
             }
+            #[cfg(feature = "client")]
+            if let Some(source_error) =
+                cause.downcast_ref::<hosted_client::hosted_runtime::hosted::ImportSourceRefError>()
+            {
+                return match source_error {
+                    hosted_client::hosted_runtime::hosted::ImportSourceRefError::Discovery(_) => {
+                        Self::IoErr
+                    }
+                    _ => Self::Protocol,
+                };
+            }
             if let Some(protocol) = cause.downcast_ref::<wire::ProtocolError>() {
                 if let Some(typed) =
                     crate::hosted_failure::HostedFailureDetail::from_protocol_error(protocol)

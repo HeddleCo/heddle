@@ -3,7 +3,9 @@
 
 use api::heddle::api::v1alpha2 as contract;
 use crypto::Signer as _;
-use objects::object::thread_replication::{GenesisOwner, ThreadGenesis, hosted_import};
+use objects::object::thread_replication::{
+    GenesisOwner, ThreadGenesis, git_import_graph::MAX_IMPORT_REFS, hosted_import,
+};
 use thread_api::{creation::ThreadCreation, rpc};
 use uuid::Uuid;
 use wire::ProtocolError;
@@ -13,12 +15,82 @@ use super::{HostedClient, operation_id::ClientOperationId};
 const IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/ImportSource";
 const RETRY_IMPORT_SOURCE: &str = "/heddle.api.v1alpha2.IntegrationService/RetryImportSource";
 
+/// Source admission failures carry exact branch and tag counts.
+#[derive(Debug, thiserror::Error)]
+pub enum ImportSourceRefError {
+    #[error("source has {branches} branches and {tags} tags ({total} refs); maximum is 512")]
+    TooManyRefs {
+        branches: usize,
+        tags: usize,
+        total: usize,
+    },
+    #[error("source has no refs/heads/* branches")]
+    NoBranches,
+    #[error("source ref {ref_name:?} is not a valid Thread name: {reason}")]
+    InvalidBranch { ref_name: String, reason: String },
+    #[error("discover source refs: {0}")]
+    Discovery(String),
+}
+
+/// Validated source refs, admitted before any destination request or signature.
+#[derive(Clone, Debug)]
+pub struct ImportSourceRefs {
+    branches: Vec<String>,
+}
+
+impl ImportSourceRefs {
+    fn from_names(names: impl IntoIterator<Item = String>) -> Result<Self, ImportSourceRefError> {
+        let names = names.into_iter().collect::<std::collections::BTreeSet<_>>();
+        let branches = names
+            .iter()
+            .filter(|name| name.starts_with("refs/heads/"))
+            .cloned()
+            .collect::<Vec<_>>();
+        let tags = names
+            .iter()
+            .filter(|name| name.starts_with("refs/tags/"))
+            .count();
+        let total = branches.len() + tags;
+        if total > MAX_IMPORT_REFS {
+            return Err(ImportSourceRefError::TooManyRefs {
+                branches: branches.len(),
+                tags,
+                total,
+            });
+        }
+        if branches.is_empty() {
+            return Err(ImportSourceRefError::NoBranches);
+        }
+        for ref_name in &branches {
+            verbs::validate_thread_name(&ref_name["refs/heads/".len()..]).map_err(|error| {
+                ImportSourceRefError::InvalidBranch {
+                    ref_name: ref_name.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
+        }
+        Ok(Self { branches })
+    }
+
+    /// Enumerate branches and tags without peeled-tag duplicates or HEAD.
+    pub async fn discover(clone_url: &str) -> Result<Self, ImportSourceRefError> {
+        let clone_url = clone_url.to_string();
+        let names = tokio::task::spawn_blocking(move || {
+            heddle_git_projection::discover_git_source_refs(&clone_url)
+        })
+        .await
+        .map_err(|error| ImportSourceRefError::Discovery(error.to_string()))?
+        .map_err(|error| ImportSourceRefError::Discovery(error.to_string()))?;
+        Self::from_names(names)
+    }
+}
+
 /// Stable identities minted for one accepted hosted source import.
 #[derive(Clone, Debug)]
 pub struct ImportSourceStart {
     pub client_operation_id: String,
     pub destination: contract::SpoolRef,
-    pub thread: contract::ThreadRef,
+    pub threads: Vec<contract::ThreadRef>,
     pub operation: contract::RecordRef,
 }
 
@@ -34,12 +106,12 @@ impl HostedClient {
     /// Ask weft to fetch a public Git repository and import it asynchronously.
     ///
     /// The destination Spool already exists. The request carries the canonical
-    /// empty State so the same admission can create its first native Thread.
+    /// empty State so the same admission can create one native Thread per branch.
     pub async fn import_source(
         &mut self,
         destination_path: &str,
         clone_url: &str,
-        thread_name: &str,
+        refs: &ImportSourceRefs,
         caller_operation_id: impl Into<String>,
     ) -> Result<ImportSourceStart, ProtocolError> {
         let operation_id = ClientOperationId::caller_or_fresh(IMPORT_SOURCE, caller_operation_id);
@@ -51,36 +123,46 @@ impl HostedClient {
         let initial_base = hosted_import::synthetic_initial_base()
             .map_err(|error| ProtocolError::InvalidState(error.to_string()))?;
 
-        let creation = {
-            let signer = self.claim_proof_signer().ok_or_else(|| {
-                ProtocolError::AuthenticationFailed(
-                    "hosted source import requires a proof-bound credential".into(),
+        let mut threads = Vec::with_capacity(refs.branches.len());
+        let mut branches = Vec::with_capacity(refs.branches.len());
+        for ref_name in &refs.branches {
+            let thread_name = &ref_name["refs/heads/".len()..];
+            let creation = {
+                let signer = self.claim_proof_signer().ok_or_else(|| {
+                    ProtocolError::AuthenticationFailed(
+                        "hosted source import requires a proof-bound credential".into(),
+                    )
+                })?;
+                let creator = signer.public_key().try_into().map_err(|_| {
+                    ProtocolError::InvalidState("invalid hosted creator signing key".into())
+                })?;
+                let genesis = ThreadGenesis {
+                    version: 1,
+                    spool: destination.id.clone(),
+                    parent: None,
+                    base: initial_base.id(),
+                    name: thread_name.to_string(),
+                    intent: String::new(),
+                    creator,
+                    owner: GenesisOwner::Account(owner),
+                    nonce: Vec::new(),
+                };
+                ThreadCreation::sign_with_authority(
+                    operation_id.to_wire(),
+                    &genesis,
+                    signer,
+                    creator_authority.clone(),
                 )
-            })?;
-            let creator = signer.public_key().try_into().map_err(|_| {
-                ProtocolError::InvalidState("invalid hosted creator signing key".into())
-            })?;
-            let genesis = ThreadGenesis {
-                version: 1,
-                spool: destination.id.clone(),
-                parent: None,
-                base: initial_base.id(),
-                name: thread_name.to_string(),
-                intent: String::new(),
-                creator,
-                owner: GenesisOwner::Account(owner),
-                nonce: Vec::new(),
+                .map_err(|error| ProtocolError::InvalidState(error.to_string()))?
             };
-            ThreadCreation::sign_with_authority(
-                operation_id.to_wire(),
-                &genesis,
-                signer,
-                creator_authority,
-            )
-            .map_err(|error| ProtocolError::InvalidState(error.to_string()))?
-        };
-        let thread = creation.reference().clone();
-        let creation_request = creation.request();
+            threads.push(creation.reference().clone());
+            let creation_request = creation.request();
+            branches.push(contract::ImportBranchGenesis {
+                ref_name: ref_name.clone(),
+                thread_genesis: creation_request.thread_genesis.clone(),
+                creator_authority: creation_request.creator_authority.clone(),
+            });
+        }
         let request = contract::ImportSourceRequest {
             client_operation_id: operation_id.to_wire(),
             destination: Some(destination.clone()),
@@ -88,13 +170,12 @@ impl HostedClient {
                 connection: None,
                 provider_repository_id: clone_url.to_string(),
                 clone_url: clone_url.to_string(),
-                name: thread_name.to_string(),
+                name: String::new(),
                 private: false,
                 installation_id: String::new(),
             }),
             expected_destination_version: overview.version,
-            thread_genesis: creation_request.thread_genesis.clone(),
-            creator_authority: creation_request.creator_authority.clone(),
+            branches,
             initial_base_state: initial_base
                 .encode_current_msgpack()
                 .map_err(|error| ProtocolError::InvalidState(error.to_string()))?,
@@ -114,7 +195,7 @@ impl HostedClient {
         Ok(ImportSourceStart {
             client_operation_id: operation_id.to_wire(),
             destination,
-            thread,
+            threads,
             operation: pending_operation,
         })
     }
@@ -355,6 +436,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn source_refs_reject_empty_and_invalid_branch_names_and_bound_all_tags() {
+        assert!(matches!(
+            ImportSourceRefs::from_names(["refs/tags/v1".into()]),
+            Err(ImportSourceRefError::NoBranches)
+        ));
+        for ref_name in [
+            "refs/heads/-flag",
+            "refs/heads/heddle/frontier/main/hc-1",
+            "refs/heads/bad name",
+        ] {
+            assert!(
+                matches!(ImportSourceRefs::from_names([ref_name.into()]), Err(ImportSourceRefError::InvalidBranch { ref_name: rejected, .. }) if rejected == ref_name)
+            );
+        }
+        let names = std::iter::once("refs/heads/main".into())
+            .chain((0..512).map(|index| format!("refs/tags/{index}")));
+        assert!(matches!(
+            ImportSourceRefs::from_names(names),
+            Err(ImportSourceRefError::TooManyRefs {
+                branches: 1,
+                tags: 512,
+                total: 513
+            })
+        ));
+        assert!(
+            ImportSourceRefs::from_names(
+                std::iter::once("refs/heads/main".into())
+                    .chain((0..511).map(|index| format!("refs/tags/{index}")))
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn public_source_shape_uses_the_url_as_its_provider_identity() {
         let _process_env_guard = crate::test_process_env::shared_blocking();
         let url = "https://github.com/octocat/Hello-World.git";
@@ -448,7 +563,12 @@ mod tests {
         let source_url = "https://github.com/octocat/Hello-World.git";
         let operation_id = Uuid::now_v7().to_string();
         let started = client
-            .import_source("acme", source_url, "main", operation_id.clone())
+            .import_source(
+                "acme",
+                source_url,
+                &ImportSourceRefs::from_names(["refs/heads/main".into()]).expect("refs"),
+                operation_id.clone(),
+            )
             .await
             .expect("ImportSource reaches the hosted transport");
         let mut updates = Vec::new();
@@ -496,8 +616,11 @@ mod tests {
         assert_eq!(source.clone_url, source_url);
         assert!(!source.private);
         assert!(source.installation_id.is_empty());
-        assert!(!request.creator_authority.is_empty());
-        let signed = request.thread_genesis.as_ref().expect("signed genesis");
+        assert!(!request.branches[0].creator_authority.is_empty());
+        let signed = request.branches[0]
+            .thread_genesis
+            .as_ref()
+            .expect("signed genesis");
         let genesis = ThreadGenesis::decode(&signed.canonical_record).expect("canonical genesis");
         let base = objects::object::State::decode_current_msgpack(&request.initial_base_state)
             .expect("canonical initial base");
@@ -505,11 +628,11 @@ mod tests {
         assert_eq!(genesis.spool, started.destination.id);
         assert_eq!(genesis.name, "main");
         assert_eq!(
-            started.thread,
+            started.threads[0],
             ThreadCreation::from_signed_with_authority(
                 request.client_operation_id.clone(),
                 signed.clone(),
-                request.creator_authority.clone(),
+                request.branches[0].creator_authority.clone(),
             )
             .expect("valid signed genesis")
             .reference()

@@ -329,13 +329,17 @@ impl<'a, R: RefBackend, S: ObjectStore, O: OpLogBackend> Importer<'a, R, S, O> {
                 {
                     supported.insert(reference.raw_name);
                 }
+                ImportRefDisposition::DefaultHead
+                | ImportRefDisposition::RequiredNotes
+                | ImportRefDisposition::Unsupported {
+                    reason: ImportSkipReason::Pull,
+                } => {}
                 ImportRefDisposition::Unsupported { reason } => {
                     skipped_refs.push(SkippedImportRef {
                         raw_name: reference.raw_name,
                         reason,
                     })
                 }
-                ImportRefDisposition::DefaultHead | ImportRefDisposition::RequiredNotes => {}
             }
         }
         heads.retain(|head| supported.contains(head.full_name.as_bytes()));
@@ -1695,6 +1699,35 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn import_ignores_github_provider_refs_without_skips() {
+        let gitdir = TempDir::new().expect("Git temp dir");
+        let heddledir = TempDir::new().expect("Heddle temp dir");
+        let tip = seed_multibranch_repo(gitdir.path());
+        for name in ["refs/pull/12/head", "refs/pull/12/merge"] {
+            git_output(gitdir.path(), &["update-ref", name, &tip], None);
+        }
+        let git = GitSource::open(gitdir.path()).expect("Git source");
+        let frozen = git.collect_frozen_import_refs().expect("frozen refs");
+        let classified =
+            objects::object::thread_replication::git_import_graph::classify_frozen_import_refs(
+                &frozen,
+            )
+            .expect("classify GitHub-shaped refs");
+        assert!(!classified.partial);
+        assert!(classified.skipped_refs.is_empty());
+        let store = InMemoryStore::new();
+        let refs = RefManager::new(heddledir.path());
+        refs.init().expect("refs");
+        let mut map = ShaMap::new();
+        let stats =
+            pollster::block_on(Importer::new(&git, &store, &refs, &mut map).run()).expect("import");
+        assert!(stats.skipped_refs.is_empty(), "{stats:?}");
+        assert_eq!(stats.refs.threads_written, 2);
+        assert_eq!(stats.refs.markers_written, 1);
+        assert_eq!(stats.refs.skipped_unmapped, 0);
     }
 
     #[test]

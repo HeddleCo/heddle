@@ -92,7 +92,9 @@ pub use error::HostedError;
 pub use evidence::active_evidence_author;
 pub use human::{HumanSignatureCallback, HumanSignatureRequest, WebAuthnAssertion};
 pub use hydration::register_hosted_factory;
-pub use import_source::{ImportOperationStart, ImportSourceStart};
+pub use import_source::{
+    ImportOperationStart, ImportSourceRefError, ImportSourceRefs, ImportSourceStart,
+};
 use iroh::{Endpoint, EndpointAddr};
 use objects::{NoopWarnings, Warning, WarningSink};
 use prost::Message;

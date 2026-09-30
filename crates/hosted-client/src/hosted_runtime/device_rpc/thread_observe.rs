@@ -706,6 +706,11 @@ impl DeviceRpc {
                     events.extend(rows);
                     ("evidence", Coverage::Complete, page)
                 }
+                ThreadSection::ResolvedAlternatives => (
+                    "resolved_alternatives",
+                    Coverage::Unavailable,
+                    PageInfo::default(),
+                ),
                 ThreadSection::Unspecified => bail!("Thread section required"),
             };
             all_exhausted &= page.exhausted || coverage == Coverage::Unavailable;
