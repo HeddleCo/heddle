@@ -214,6 +214,10 @@ pub struct StatusReport {
     pub submodules: Vec<SubmoduleInfo>,
     #[serde(default)]
     pub materialized_threads: Vec<MaterializedThreadInfo>,
+    /// Concurrent source heads on the current Thread, until a pick or merge
+    /// resolves them. Absent while the Thread has one head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alternative_heads: Option<crate::source_heads::SourceHeadsReport>,
     #[serde(skip)]
     #[schemars(skip)]
     pub profile: StatusProfile,
@@ -2396,6 +2400,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
             },
         });
         apply_pending_land_recovery(repo, &mut report)?;
+        apply_alternative_source_heads(repo, &mut report)?;
         return Ok(report);
     }
     let submodules = collect_status_submodules(repo, current_state.as_ref())?;
@@ -2551,6 +2556,7 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
             .map(|thread| thread.child_threads.clone())
             .unwrap_or_default(),
         review_queue: local_review_queue(repo, track_name.as_deref())?,
+        alternative_heads: None,
         task: thread_summary
             .as_ref()
             .and_then(|thread| thread.task.clone()),
@@ -2634,7 +2640,35 @@ pub fn status(ctx: &ExecutionContext, opts: StatusOptions) -> Result<StatusRepor
         worktree_profile,
     };
     apply_pending_land_recovery(repo, &mut output)?;
+    apply_alternative_source_heads(repo, &mut output)?;
     Ok(output)
+}
+
+/// Fold concurrent source heads on the current Thread into status. The
+/// heads stay listed until a pick or merge resolves them; a clone or pull
+/// that checked out one of them never hides the rest.
+fn apply_alternative_source_heads(repo: &Repository, report: &mut StatusReport) -> Result<()> {
+    let Some(thread) = report.thread.as_deref() else {
+        return Ok(());
+    };
+    let Some(heads) = crate::source_heads::source_heads_report(repo, thread, None)? else {
+        return Ok(());
+    };
+    report.blockers.push(heads.blocker());
+    let action = crate::source_heads::SOURCE_HEADS_ACTION.to_string();
+    if !report.recovery_commands.contains(&action) {
+        report.recovery_commands.insert(0, action.clone());
+    }
+    report.recovery_action_templates = action_templates(&report.recovery_commands);
+    report.coordination_status = CoordinationStatus::Blocked;
+    // An operation in progress (a conflicted `resolve --merge`) and
+    // uncaptured edits both come first: resolving heads needs neither.
+    if report.operation.is_none() && report.worktree_changed_path_count == 0 {
+        report.recommended_action = action.clone();
+        report.recommended_action_template = action_template(&action);
+    }
+    report.alternative_heads = Some(heads);
+    Ok(())
 }
 
 const INCOMPLETE_LAND_MARKER: &str = "incomplete-land.json";
@@ -2774,6 +2808,7 @@ fn build_short_path_report(input: ShortPathInputs<'_>) -> StatusReport {
         parent_thread: None,
         child_threads: Vec::new(),
         review_queue: Vec::new(),
+        alternative_heads: None,
         task: None,
         promotion_suggested: false,
         impact_categories: Vec::new(),

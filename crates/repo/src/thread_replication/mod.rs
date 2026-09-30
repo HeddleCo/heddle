@@ -25,6 +25,7 @@ mod peers;
 mod policy_sync;
 pub mod projection;
 pub mod source_authority;
+pub mod source_heads;
 mod source_index;
 mod source_possession;
 pub mod source_publication;

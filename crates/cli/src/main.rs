@@ -30,7 +30,7 @@ use cli::cli::{
 use cli::{
     cli::{
         Cli, Commands, ContextCommands, DaemonCommands, DiffArgs, IntegrationCommands, LogArgs,
-        MaintenanceCommands, NetdCommands, ResolveArgs, RevertArgs, ThreadCommands, UndoArgs,
+        MaintenanceCommands, NetdCommands, RevertArgs, ThreadCommands, UndoArgs,
         commands::{
             LogCommandOptions, SnapshotAgentOverrides, build_command_catalog, cmd_abort, cmd_adopt,
             cmd_agent, cmd_blame, cmd_capture_split, cmd_clone, cmd_complete, cmd_completions,
@@ -666,14 +666,7 @@ async fn async_main() -> Result<()> {
 
         Commands::Complete { subject } => cmd_complete(&cli, *subject),
 
-        Commands::Resolve(ResolveArgs {
-            path,
-            all,
-            list,
-            ours,
-            theirs,
-            force,
-        }) => cmd_resolve(&cli, path.clone(), *all, *list, *ours, *theirs, *force),
+        Commands::Resolve(args) => cmd_resolve(&cli, args.clone()),
 
         Commands::Push(args) => {
             cmd_push(
@@ -1280,7 +1273,7 @@ fn schema_verb_from_raw_path(path: &[String], raw: &[String]) -> String {
 fn invocation_is_observe_only(command: &Commands) -> bool {
     match command {
         Commands::Undo(args) => args.list || args.dry_run.enabled(),
-        Commands::Resolve(args) => args.list,
+        Commands::Resolve(args) => args.list || args.heads,
         Commands::Maintenance {
             command: MaintenanceCommands::Fsck(args),
         } => matches!(
@@ -1364,6 +1357,9 @@ mod tests {
             (&["heddle", "undo", "--redo", "--dry-run"], true),
             (&["heddle", "undo", "--redo"], false),
             (&["heddle", "resolve", "--list"], true),
+            (&["heddle", "resolve", "--heads"], true),
+            (&["heddle", "resolve", "--pick", "hs-0"], false),
+            (&["heddle", "resolve", "--merge", "hs-0"], false),
             (&["heddle", "resolve", "--all"], false),
             (
                 &[

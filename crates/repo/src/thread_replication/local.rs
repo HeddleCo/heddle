@@ -697,7 +697,7 @@ enum AttachedSourceKind {
     },
 }
 
-fn is_missing_native_identity(error: &Error) -> bool {
+pub(super) fn is_missing_native_identity(error: &Error) -> bool {
     matches!(error, Error::Invalid(message) if message.contains("has no native identity"))
 }
 
