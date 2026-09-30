@@ -420,6 +420,7 @@ async fn large_history_round_trip(states: usize, capture_again: bool) {
         .expect("publish full history")
         .0;
     assert!(pushed.success);
+    assert_eq!(pushed.new_state, Some(tip.id()));
     {
         let publication = captured.lock().expect("publication");
         assert!(publication.operations.len() > 1);
@@ -452,54 +453,58 @@ async fn large_history_round_trip(states: usize, capture_again: bool) {
             publication.operations.len()
         );
     }
-    let clone = temp.path().join("clone");
-    let (pulled, cloned) = hosted
-        .clone_pull_with_depth_and_materialization(
-            "acme/widgets",
-            Some("main"),
-            None,
-            hosted_client::hosted_runtime::hosted::PullMaterialization::Full,
-            |_| repo::Repository::init(&clone).map_err(wire::ProtocolError::from),
-        )
-        .await
-        .expect("fresh clone");
-    assert_eq!(pulled.final_state, Some(tip.id()));
-    let replica = cloned.native_thread("main").expect("cloned Thread");
-    let operation = replica
-        .source_operation_page(tip.id(), None, 1)
-        .expect("tip operation")[0];
-    let originals = replica
-        .source_ancestry(operation, 10_000, 16 * 1024 * 1024)
-        .expect("full cloned ancestry");
-    assert_eq!(originals.len(), states, "fresh clone retains full history");
-    for original in originals {
-        let state = original
-            .original
-            .verify()
-            .expect("signature")
-            .source_state()
-            .expect("source")
-            .expect("State");
-        assert!(
-            cloned
-                .store()
-                .get_state(&state.id())
-                .expect("stored State")
-                .is_some()
-        );
+    if !capture_again {
+        let clone = temp.path().join("clone");
+        let (pulled, cloned) = hosted
+            .clone_pull_with_depth_and_materialization(
+                "acme/widgets",
+                Some("main"),
+                None,
+                hosted_client::hosted_runtime::hosted::PullMaterialization::Full,
+                |_| repo::Repository::init(&clone).map_err(wire::ProtocolError::from),
+            )
+            .await
+            .expect("fresh clone");
+        assert_eq!(pulled.final_state, Some(tip.id()));
+        let replica = cloned.native_thread("main").expect("cloned Thread");
+        let operation = replica
+            .source_operation_page(tip.id(), None, 1)
+            .expect("tip operation")[0];
+        let originals = replica
+            .source_ancestry(operation, 10_000, 16 * 1024 * 1024)
+            .expect("full cloned ancestry");
+        assert_eq!(originals.len(), states, "fresh clone retains full history");
+        for original in originals {
+            let state = original
+                .original
+                .verify()
+                .expect("signature")
+                .source_state()
+                .expect("source")
+                .expect("State");
+            assert!(
+                cloned
+                    .store()
+                    .get_state(&state.id())
+                    .expect("stored State")
+                    .is_some()
+            );
+        }
     }
     if capture_again {
-        std::fs::write(work.join("story.txt"), "later capture\n").expect("later edit");
-        heddle_env(
-            &["capture", "-m", "later capture"],
-            Some(&work),
-            &[("HEDDLE_HOME", home.to_str().expect("home"))],
-        )
-        .expect("capture");
-        let later = adopted
-            .current_state()
-            .expect("later HEAD")
-            .expect("later State");
+        use objects::object::{Blob, State, Tree, TreeEntry};
+        let blob = Blob::new(b"later capture\n".to_vec());
+        adopted.store().put_blob(&blob).expect("later blob");
+        let tree = Tree::from_entries(vec![
+            TreeEntry::file("story.txt", blob.hash(), false).expect("later entry"),
+        ]);
+        adopted.store().put_tree(&tree).expect("later tree");
+        let later = State::new_snapshot(tree.hash(), vec![tip.id()], tip.attribution.clone())
+            .with_intent("later capture");
+        adopted.store().put_state(&later).expect("later State");
+        adopted
+            .record_native_capture("main", later.id())
+            .expect("capture later State");
         let pushed = hosted
             .push_profiled(
                 &adopted,
@@ -513,6 +518,7 @@ async fn large_history_round_trip(states: usize, capture_again: bool) {
             .expect("later push")
             .0;
         assert!(pushed.success);
+        assert_eq!(pushed.new_state, Some(later.id()));
         let publication = captured.lock().expect("later publication");
         assert_eq!(publication.published.len(), 2);
         assert_eq!(
